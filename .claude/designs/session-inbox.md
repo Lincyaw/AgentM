@@ -1,6 +1,6 @@
 # Session Inbox — One Entry Point for Everything That Reaches the Loop
 
-Status: **accepted (design resolved 2026-05-28); implementation starting (step 1)**
+Status: **accepted (2026-05-28); steps 1-4 implemented — SessionInbox spine, sub_agent findings routed through the inbox, background_exec, monitor; step 5 (long-lived-host driver + interrupt-and-resume) lands with the gateway**
 Owner: kernel + orchestration
 
 Reaches into: `core/abi/loop.py` (the `decide_turn_action`/`Inject` drain seam),

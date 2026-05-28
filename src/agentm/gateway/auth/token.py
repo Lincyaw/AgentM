@@ -5,8 +5,7 @@ Reads ``hello.body.token`` (passed into ``authenticate`` by the server
 allow-list. An empty allow-list rejects every connection, mirroring
 the ``UnixPeerCredAuthenticator(set())`` "circuit breaker" shape.
 
-Tokens are matched verbatim; rotation/expiry is out of scope (see
-``.claude/plans/2026-05-12-gateway-websocket-transport.md``).
+Tokens are matched verbatim; rotation/expiry is out of scope.
 """
 
 from __future__ import annotations

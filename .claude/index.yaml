@@ -1,5 +1,5 @@
 # AgentM Concept Index
-# Maintenance rules: see CLAUDE.md "Design Documentation System"
+# Maintenance rules: see CLAUDE.md "Design docs (.claude/)"
 
 concepts:
   # === ACTIVE ===
@@ -9,579 +9,168 @@ concepts:
     description: "First-principles pluggable architecture. Unreplaceable-substrate axiom: the only thing that cannot be a replaceable extension is the act of loading replacements itself; anything else — including defaults — lives as an atom that the substrate loads. Three-layer package boundary collapses harness back into core: agentm.core (substrate: abi + runtime + lib; AgentSession/EventBus/SessionManager/Loader live here) / agentm.extensions (atoms, including default policy impls like operations_local, llm_<provider>, session_state_memory) / agentm.cli (+ embedded SDK / future HTTP/RPC presenters). agentm.harness and agentm.llm as separate packages are dissolved; providers become atoms. Five pluggability axes as Protocol ports in core.abi: StreamFn (LLM), Tool+Operations (env; Operations registered by an atom via api.register_operations, not constitution-only), SessionManager/SessionStore (state), ResourceLoader (project context), EventBus+ExtensionAPI plus RetryPolicy (policy). Substrate provides register_* hooks and asserts at freeze time that required services exist; it never instantiates a default itself. The Jupyter-import contract is restated as 'zero side effects at import', not 'runtime classes excluded from core'."
     design: "designs/pluggable-architecture.md"
     related_concepts: [agent_loop, extension_as_scenario, operations_ports, observability, self_modifiable_architecture, evolution_substrate, git_backed_versioning, textual_tui, runtime_context_atom]
-    plans: [plans/2026-05-09-issue-80-abi-prep.md]
-    tasks: ["tasks/2026-05-09-issue-85-session-refactor.md", "tasks/2026-05-09-issue-87-builtin-atoms-extension-api.md", "tasks/2026-05-09-issue-89-file-tool-io-seams.md", "tasks/2026-05-09-issue-93-llm-stream-common.md", "tasks/2026-05-09-issue-94-provider-registry.md", "tasks/2026-05-09-issue-92-retry-policy.md", "tasks/2026-05-09-issue-96-cli-provider-session-seams.md", "tasks/2026-05-09-issue-95-wire-policy-leaks.md", "tasks/2026-05-09-issue-98-textual-tui-registries.md", "tasks/2026-05-09-issue-119-core-kernel-residuals.md"]
 
   agent_loop:
     description: "Per-turn termination protocol for AgentLoop.run, expressed as sum types. ToolOutcome (ToolContinue|ToolTerminate) is what tools return; TerminationCause is a sealed hierarchy describing WHO ended the loop and WHY (ModelEndTurn, ToolTerminated{tool_name,reason}, MaxTurnsExhausted, SignalAborted, ProviderTruncated{kind}, ProviderProtocolViolation{detail}, BudgetExhausted), with a class-var `final` that controls override semantics. LoopAction (Step|Stop(cause)|Inject(messages)) is what the kernel does next. Single decide_turn_action event fires every turn (including kernel-imposed terminations, for symmetric observability) carrying a TurnObservation snapshot; extensions return LoopAction|None to override. Resolution lattice: final causes shadow everything; otherwise Inject>Stop>Step with Inject messages concatenated in registration order. Replaces the old multi-flag (assistant.stop_reason + tool_calls presence + BeforeAgentEndEvent.stop_reason + cancel/append dict) protocol that silently masked provider/parser disagreements and buried multi-handler resolution rules in folklore comments. Hard-cut migration in PR #58 (no shims): tools wanting to terminate return ToolTerminate; before_agent_end handlers move to decide_turn_action returning Inject(messages=[...])."
     design: "designs/agent-loop.md"
-    related_concepts: [pluggable_architecture, sub_agent_lifecycle, observability, extension_as_scenario, session_inbox]
-    plans: [plans/2026-05-09-issue-80-abi-prep.md]
-    tasks: ["tasks/2026-05-09-issue-86-atom-rework-infra.md", "tasks/2026-05-09-issue-119-core-kernel-residuals.md"]
+    related_concepts: [pluggable_architecture, sub_agent_lifecycle, observability, extension_as_scenario, session_inbox, handler_priority]
+
+  handler_priority:
+    description: "Per-channel dispatch-order declaration on the event bus, decoupling handler order from atom install/registration order (previously coupled to filename via alphabetical auto-discovery). BusPriority symbolic tiers (core/abi/events.py) — PRE=100 (security gates / validation / sanitizers that must run before normal handlers), NORMAL=500 (default; business-logic atoms), POST=900 (audit / tracing / observability; sees final state). Lower number runs earlier. One knob covers both mutation channels (earlier handler sees state first) and replacement channels (last non-None return wins, e.g. decide_turn_action resolution lattice). Exposed via api.on(channel, handler, priority=...) / EventBus.on; raw integers between tiers are legal but discouraged — symbolic constants are the supported door. Backward compatible: existing atoms land in NORMAL. No dependency graph (no depends_on/before/after), no cross-channel priority, no handler-level disable. atom_reloader preserves tier ordering across reload."
+    design: "designs/handler-priority.md"
+    related_concepts: [agent_loop, pluggable_architecture, self_modifiable_architecture, observability]
 
   session_inbox:
     description: "ACCEPTED (design resolved 2026-05-28; implementation starting step 1). One first-class SessionInbox as the single entry point for EVERY message that enters the agent loop — user input, background-task completion, ticker status, monitor/wakeup fires, subagent findings, cross-agent messages. Motivated by four requested affordances (per-tool-call foreground/background, auto-background after ~60s, ticker status report, agent-defined monitor/scheduled-wakeup — mirroring Claude Code's Bash run_in_background / BashOutput / Monitor / ScheduleWakeup) that all reduce to ONE question: how does an out-of-band event become a message inside the loop. The only clean seam today is decide_turn_action → Inject (abi/loop.py:599-620). Two orthogonal concepts must not be conflated: (A) background WORK = a tool/subagent running as an asyncio.Task while the agent keeps taking turns (sub_agent already proves this — dispatch spawns create_task + immediate ticket at sub_agent.py:737, polls via check_tasks/wait_subagent, injects via inject_instruction, aborts via signal, and a decide_turn_action floor refuses termination with unread findings at :834); (B) out-of-band SIGNAL injection = how that event lands as a message. Everything funnels through the inbox. InboxItem carries a mechanism-level `source` routing enum (user/background/ticker/monitor/subagent — objective plumbing, not a subjective classification, so it does not violate the no-preset-enums rule) deciding whether it lands as UserMessage / synthetic tool_result / system-reminder note, plus an optional dedup_key. CORE MODEL = one entry + one driver, kept orthogonal: ENTRY (how a message gets in) is always inbox.push; DRIVING (who runs the loop, how a caller learns 'this round finished') is always a single driver (no re-entrant AgentLoop.run). prompt() does NOT bypass the inbox or grab its own driver — it is sugar = push(source=user) + await the next agent_end + return messages, so CLI/SDK `messages = await session.prompt(...)` still works. One-shot CLI = start driver → push → await agent_end → close → exit; long-lived host may use prompt OR inbox.push + bus subscription (same mechanism, two usages, NOT two APIs). A runtime-owned (not atom) decide_turn_action handler drains at each turn boundary, renders per source, returns Inject — NO change to kernel AgentLoop. The drain rule GENERALIZES sub_agent's floor: at a turn boundary, inbox non-empty ⇒ drain+Inject+keep running instead of Stop ('unread findings' = special case 'finding landed in inbox'); final=True causes (budget/signal/max_turns) still hard-win. Completion boundary: prompt awaits real Stop+agent_end (inbox empty AND ModelEndTurn); floor re-runs emit no agent_end so prompt never returns early; well-defined under low-concurrency CLI, fuzzy under multi-source host where callers use push+subscribe. The earlier 'optional kernel Park' is ABSORBED by the driver's wait_nonempty (kernel loop stays pure 'one round to idle then return'; staying-alive lives in the driver's outer while). Routing user input through the inbox collapses prompt()/tick() (kills near-duplicate session.py:242-406), unifies idle-wakeup, and gives PENDING user input while the agent runs. send_user_message becomes a thin inbox.push(source=user) wrapper (ABI-compatible); pending_user_messages deleted. Inbox items are append-only new messages (prefix-cache friendly); ephemeral reminders still ride the last-message tail and do NOT go through the inbox. Producers are pure single-file atoms: background_exec (wraps api.tools; auto-backgrounds via asyncio.wait(timeout=60) leaving the task running and returning a ticket as the immediate tool_result, real result arrives later as an inbox item; check_background/wait_background/cancel_background) and monitor (schedule_wakeup/create_monitor/list_monitors/cancel_monitor). sub_agent's registry+completion-injection extracted into core.lib (§11 forbids atom→atom import) so both background_exec (unit=coroutine) and sub_agent (unit=child session) sit on it; sub_agent's bespoke floor DELETED in favour of the generalized inbox rule; subagents get loop/monitor for free since a child is a full session loading the same atoms (recursion); inject_instruction IS SendMessage. One-shot `agentm \"<prompt>\"` (cli.py:530 asyncio.run-then-exit) is the WRONG home for tickers/monitors. RESOLVED DECISIONS: (1) default cooperative turn-boundary pending; interrupt key = abort turn via signal (abi/loop.py:440,667) + preserve context + resume with new input via inbox; (2) ticker = milestone-driven (completion/error/new-output/silence-warning) + sparse heartbeat fallback, dedup_key REPLACES same-key undrained item (never stacks); (3) one entry + one driver + prompt-as-sugar, no dual API, no separate Park, floor generalized; (4) FIFO no priority (drain-all injected as one arrival-ordered batch); (5) undrained-window persistence MVP none (transient signals regenerate on restart; items hit session log only once drained via message_persisted; TODO). IMPLEMENTATION ORDER: 1 spine (SessionInbox + runtime drain handler + single driver + prompt/tick collapse + send_user_message wrapper + delete pending_user_messages; does NOT touch sub_agent, floors coexist via Inject concatenation abi/loop.py:317); 2 extract sub_agent registry→core.lib + route findings through inbox + delete floor; 3 background_exec; 4 monitor; 5 long-lived host driver + interrupt-and-resume."
     design: "designs/session-inbox.md"
-    related_concepts: [agent_loop, sub_agent_lifecycle, sub_agent, nested_session_task, extension_as_scenario, pluggable_architecture, client_server_architecture]
-    plans: []
-    tasks: []
+    related_concepts: [agent_loop, sub_agent_lifecycle, nested_session_task, extension_as_scenario, pluggable_architecture, single_process_gateway]
 
   self_modifiable_architecture:
     description: "Boundary refinement of pluggable_architecture: core/extensions split is drawn by 'what an agent can safely self-modify' rather than mechanism vs policy. Constitution layer is uniform on the modifiability axis (none of core/ is agent-modifiable) but split on the visibility axis into core/abi/ (types & Protocols, atom + llm import), core/lib/ (pure-function utilities, atom imports as stdlib), and core/_internal/ (stateful subsystems — skills, prompt_templates, catalog/, compaction engine — atoms reach exclusively via ExtensionAPI services: api.get_operations / api.skills / api.catalog / api.compaction (prompt registry now via api.get_service('prompt_templates')). The earlier operations_impl module was promoted to the operations_local atom (extensions/builtin/operations_local.py) — Stage 1 of pluggable_architecture §10; direct import forbidden by validator). Autonomy layer holds atoms + scenarios + skills + prompts (tier-1 free / tier-2 reviewable). Discovery layer = fs scan + reload + assert_active. Adds versioned ExtensionAPI (api_version with grace window), transactional reload (validator → snapshot → install → rollback on failure), and a new ExtensionAPI surface (reload_atom, freeze_current, list_atoms, is_constitution_path). Tier-2 atoms (permission, cost_budget, tool_filter, llm_compaction) require propose_change approval to reload. Compaction prompts are the canonical mechanism→policy split: prompt strings moved out of core into the llm_compaction atom, engine in core/_internal/compaction/ takes prompt as a required parameter. Establishes that change is safe and atomic; evolution-substrate.md establishes that change is evidence-driven; per_task_evolution_loop establishes WHO drives the change (a tuner meta-scenario optimizing for a specific task class)."
     design: "designs/self-modifiable-architecture.md"
     related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract, observability, evolution_substrate, git_backed_versioning, per_task_evolution_loop]
-    plans: [plans/2026-05-09-issue-80-abi-prep.md]
-    tasks: ["tasks/2026-05-09-issue-79-atom-reloader-hardening.md", "tasks/2026-05-09-issue-86-atom-rework-infra.md", "tasks/2026-05-09-issue-89-file-tool-io-seams.md", "tasks/2026-05-09-issue-101-tool-catalog-split.md", "tasks/2026-05-09-issue-120-harness-reload-dedup.md"]
 
   evolution_substrate:
     description: "Constitution-owned data layer that binds every (atom, scenario) version to all observation data generated under it, so rollback / composition / optimization become evidence-driven, not error-driven. Adds .agentm/catalog/{atoms,scenarios}/<hash>/ with frozen source + manifest.yaml + metrics.jsonl + runs/ + decisions.jsonl. Active-set fingerprint in every observability session.start header binds traces to the exact loaded version set. Indexer (constitution-layer, idempotent, rebuildable from raw observability) aggregates per-(atom_hash, scenario, task_type) statistics. tool_catalog atom (tier-1 read API) exposes list_versions / get_manifest / runs_for / get_source_at / list_history / rollback_resource. Hard problems addressed: statistical power (CI + inconclusive enforcement), confounding (experiment-mode lock), Goodhart (universal guard metrics + regressed flag), replayability (LLM response cache, Phase 3), catalog corruption (constitution-layer write-protect on .agentm/catalog/**). Phased: MVP = fingerprint + freeze + browse; Phase 2 = compare + decisions; Phase 3 = replay cache + experiment lock. NOTE: per per_task_evolution_loop (2026-05-02), §6 compare/find_best are demoted to optional — the tuner agent in that loop does its own LLM-native analysis on raw observability JSONL; catalog metrics.jsonl stays as cross-scenario browsing index, not on the decision path."
     design: "designs/evolution-substrate.md"
     related_concepts: [self_modifiable_architecture, observability, pluggable_architecture, extension_as_scenario, git_backed_versioning, per_task_evolution_loop]
-    plans: []
-    tasks: []
 
   per_task_evolution_loop:
     description: "Operational shape of self-modification: optimization target is a task class, not a user. A production agent runs the task; a separate tuner agent (a meta-scenario at scenarios/<name>/tuner/) reads observability JSONL traces filtered by (task_class, fingerprint), proposes mutations to atoms / prompts / scenario composition, validates them against a pinned eval set, and activates winners that beat the baseline on the scenario's primary metric without guard regression. Three load-bearing reframes: (1) JSONL is the source of truth — tuner reads raw .agentm/observability/<trace>.jsonl directly; catalog metrics.jsonl is demoted to optional cross-scenario browsing index, NOT decision input; (2) no predefined stats API — compare/find_best from evolution-substrate.md §6 are downgraded to optional because the tuner is itself an LLM agent that does LLM-native trace analysis (which counts as success is policy in the tuner's system prompt, not a stats library; analysis quality scales with model capability automatically); (3) confounding killed by an eval set, not by sample size — production user inputs vary, so any compare on production traces conflates atom effect with task difficulty; a pinned scenarios/<name>/eval/ task suite gives a fixed input distribution. New autonomy-layer pieces: scenarios/<name>/eval/ directory (task YAMLs + grader.md/grader.py); scenarios/<name>/tuner/ meta-scenario (manifest.yaml + prompt.md); three new tier-1 atoms tool_query_traces (filter trace_id by task_class+fingerprint, lightweight summaries; agent reads bodies on demand via existing read tool), tool_eval_run (run eval suite under a proposed fingerprint without permanently mutating worktree — sub-session source overrides OR shadow worktree, Plan-stage decision), tool_propose_change (signature requires eval_run_baseline + eval_run_proposed + decision in {activate, rollback, exploratory}; activate gate is four-floor: economic threshold (≥+5%) AND statistical 2σ noise floor AND guard envelope (±10%) AND holdout non-regression — all four independent; exploratory channel waives only the first two. Tier-2 atoms still pending_human_approval; thin policy wrapper over reload_atom. ChangeSpec generalizes target beyond atom_source — Phase 2 unlocks system_prompt/manifest_extensions/manifest_field/scenario_compose). Activations land in .agentm/decisions/<scenario>/activations.jsonl (constitution-write-protected; renamed from decisions.jsonl to make room for Phase 2 candidates/ pool directory). task_class field on session.fingerprint becomes populated (was schema-defined but unfilled). Phase 2 reshapes around GEPA (Agrawal et al. 2026, arxiv 2507.19457): MAP-Elites Pareto candidate pool replaces single-incumbent hill climbing; tool_reflect atom separates diagnosis from mutation reading μ_f.feedback_text natural-language signal; System Aware Merge crossover combines non-dominated parents; per-module credit assignment via μ_f.module_feedback drives round-robin selection; rollout budget tracking via .agentm/decisions/<scenario>/budget.json; the four-floor gate's role narrows from inclusion-gate to deployment-gate. Production agent does not know it is being optimized — tuner is async sibling, not parent. Reuses all existing constitution mechanism: reload_atom, ResourceWriter, observability sink, transactional rollback. Acceptance scenarios P1-P10 cover missing eval/, null task_class, evidence-missing rejection, ResourceWriter constitution rejection, post-activate production regression watching, tuner concurrency on shared atoms, eval budget exhaustion, tier-2 deferral, trace round-trip filtering, and git-backed activation history. Phase 2 IMPLEMENTED (2026-05-09): all 10 Layer B tasks shipped — Pareto candidate pool (B-1) with split inclusion/deployment gates, generalized ChangeSpec validators (B-3), rollout budget (B-6), tool_reflect diagnosis atom (B-2), per-module credit assignment (B-5), System Aware Merge (B-4) with parent_ids: list[str] schema, structural stop_after_no_improvement counter persisted via activations.jsonl (B-9), production-traffic auto-rollback via tool_guard_watch passive observer (B-7), opt-in cross-task transfer (B-8), baseline_fingerprint concurrent-tuner-race fix (B-10). Five new fail-stop test classes added: pareto inclusion correctness, stop-counter persistence, merge gate noise floor, stale-baseline rejection, auto-rollback evidence floor. No agentm.core.* modifications; §11 contract clean."
     design: "designs/per-task-evolution-loop.md"
     related_concepts: [evolution_substrate, self_modifiable_architecture, observability, extension_as_scenario, git_backed_versioning]
-    plans: []
-    tasks: ["tasks/2026-05-09-issue-101-tool-catalog-split.md"]
 
   git_backed_versioning:
     description: "Replaces bespoke per-atom version store with git as the version layer. Catalog keeps only what git does not provide — metrics.jsonl + runs/<trace_id> attribution. Source content, lineage (parent commits), authorship, timestamp, and rationale (commit message) all flow through git plumbing. New harness service ResourceWriter (constitution layer) is the single chokepoint for all managed writes: classifies path as constitution / managed / unmanaged from core-manifest.yaml's managed.globs section, rejects constitution writes, git-commits managed writes before mutation, passes through unmanaged writes uncommitted. tool_edit / tool_write / reload_atom retrofit to write through ResourceWriter; the freeze→tempfile→os.replace→rollback dance in atom_reloader collapses into writer.write + git restore on failure. Browse API becomes git-log/git-cat-file wrappers; version IDs become full git SHAs replacing compute_atom_hash content hashes. Rollback is ResourceWriter.restore(path, target_sha) routed through the same writer. On absent .git/ the writer auto-inits .agentm/repo/ as a shadow worktree; advisory mode if git binary missing. Skills, prompts, scenarios, and .claude/ docs all gain versioning for free. ~300 LoC deleted from freeze.py + _layout.py; parent_hash dead-code problem disappears (git provides it); direct-edit bypass closed."
     design: "designs/git-backed-versioning.md"
     related_concepts: [self_modifiable_architecture, evolution_substrate, pluggable_architecture, per_task_evolution_loop]
-    plans: [plans/2026-05-09-issue-80-abi-prep.md]
-    tasks: ["tasks/2026-05-09-issue-85-session-refactor.md", "tasks/2026-05-09-issue-89-file-tool-io-seams.md", "tasks/2026-05-09-issue-101-tool-catalog-split.md"]
 
   textual_tui:
     description: "Replaces the minimal rich.live interactive mode (modes/interactive.py, ~150 lines) with a Textual-based TUI: scrollable ConversationLog of TurnContainers (ThinkingBlock + AssistantTextBlock + Collapsible ToolCallBlock), multi-line PromptInput TextArea with slash command palette, persistent StatusLine showing model/turn/tokens/cost/phase. Maps each public bus event to one widget mutation (stream_delta → text/tool block; tool_call/tool_result → fill + status glyph; llm_request_start/end → status phase + token totals; child_session_start/end → nested SubagentBlock; extension_install error → toast). 20 Hz batched stream flush via set_interval; no per-token repaint. Key bindings: Esc soft-cancels in-flight prompt (never exits), Ctrl+C interrupts then quits, Ctrl+L clear visual log (not session), Ctrl+R command palette, Shift+Enter newline. Slash commands open a CommandPalette modal listing ExtensionAPI-registered commands plus TUI-built-ins (/quit, /clear, /help, /copy-last); unknown slashes pass through as raw text. Theming via CSS file textual_app.tcss with dark/light themes. Migration: keep modes/interactive.py as 'simple' fallback; new mode at modes/textual_app.py selected via CLI --tui textual; default flips after stabilization. Mode-layer contract from pluggable-architecture.md §5 unchanged: run(config) owns session lifecycle, subscribes to public bus channels only. Permission-prompt UX deferred (no permission_request event yet); gracefully degrades to red tool-result errors."
     design: "designs/textual-tui.md"
     related_concepts: [pluggable_architecture, observability]
-    plans: []
-    tasks: ["tasks/2026-05-09-issue-98-textual-tui-registries.md", "tasks/2026-05-09-issue-99-presenter-seams.md", "tasks/2026-05-09-issue-121-tui-registries.md"]
 
   observability:
     description: "Per-session OTel-flavored JSONL diagnostic stream complementary to trajectory. Single principle: every signal goes through the bus. EventBus exposes EventBusObserver + emit_sync (sync handlers only, async skipped). New bus events: ApiRegisterEvent / ApiSendUserMessageEvent (harness, emit_sync from ExtensionAPI), LlmRequestStartEvent / LlmRequestEndEvent (kernel, around stream_fn drain in AgentLoop with try/except for error path), ExtensionInstallEvent (harness, around load_extension). observability builtin is a pure subscriber + Observer installed via ExtensionAPI.add_observer; no EventBus or ExtensionAPI monkey-patching. Records: session.start/ready/end, extension.install, api.register, api.send_user_message, llm.request.start/end, event.dispatch, handler.invoke, turn.summary. Writes to <cwd>/.agentm/observability/<trace_id>.jsonl, flushed per record. evolution_substrate extends session.start with active-set fingerprint binding the trace to exact (core, scenario, atom_versions) tuple."
     design: "designs/observability.md"
     related_concepts: [pluggable_architecture, extension_as_scenario, evolution_substrate, self_modifiable_architecture, textual_tui, per_task_evolution_loop, single_event_log]
-    plans: []
-    tasks: []
 
   single_event_log:
     description: "LANDED 2026-05-24. Collapses the two parallel JSONL streams (SessionManager trajectory file under ~/.agentm/sessions/ and observability event file under <cwd>/.agentm/observability/) into one per-session OTLP/JSON ndjson event log at <cwd>/.agentm/observability/<session_id>.jsonl. One ResourceSpans / ResourceLogs element per line, produced via opentelemetry-sdk Tracer/LoggerProvider plumbing (canonical encoder from opentelemetry-exporter-otlp, MessageToDict'd into proto-JSON shape) so collector pipelines (filelog + otlpjson decoder) consume the file directly. Span vocabulary: invoke_agent / chat / execute_tool with gen_ai.* semconv attributes. Log vocabulary: agentm.session.{header,start,ready,fingerprint,end}, agentm.message.appended, agentm.turn.summary, agentm.agent.end, agentm.{extension,atom}.{install,reload,unload}, agentm.api.{register,send_user_message}, agentm.diagnostic, agentm.event.dispatch + agentm.handler.invoke. SessionManager._append_record no longer writes its own file; it dispatches MessageAppendedEvent through the EventBus, and the observability atom emits one agentm.message.appended log record (body = SessionEntry dict verbatim) via api.get_session_telemetry().logger. continue_recent walks scopeLogs filtering on eventName to rebuild the in-memory trajectory. All writes go through SDK BatchProcessor wrapped in PR-A's BlockingBatch* subclasses (block on overflow, not drop); the _SessionTelemetryHolder installs a SessionShutdownEvent handler at BusPriority.POST so observability emits agentm.session.end before the drain. Dispatch_id lives on the Event ABI as a real field (PR-E, `531378b`): Event is `@dataclass(slots=True)` with `dispatch_id: str = field(default_factory=lambda: uuid.uuid4().hex, kw_only=True)`; the EventBus reassigns the field on every emit; observability reads `event.dispatch_id` and stamps it onto agentm.event.dispatch + agentm.handler.invoke records so consumers recover the fanout join. before_send_to_llm stops carrying the full messages payload — canonical trajectory lives in agentm.message.appended records — making the chars+sha256_prefix redaction layer redundant for that channel (still serves LlmRequestStart/End when redact_prompts=True). Landed across PR-A (file exporters, be78860), Commit 1 (dispatch_id, 9bae7dc), Commit 2a (ExtensionAPI.get_session_telemetry service facade, ad6c5cb), Commit 2b (atomic writer + readers cutover, 1f9caa3), Commit 3 (this doc sync). Followups: PR-E landed (Event ABI dataclass with dispatch_id field, `531378b`), PR-G landed (TraceReader API in core.runtime.trace_reader, re-exported via agentm.core.abi — every reader site now depends on it; tests/unit/core/test_trace_reader.py locks the surface), PR-H landed 2026-05-24 (one TracerProvider + LoggerProvider per process carrying only service.name=agentm + service.version on the resource; agentm.session.id moved from resource attribute to per-span / per-log attribute, stamped by the observability atom and the SessionManager direct-write path; per-session BlockingBatchSpanProcessor / BlockingBatchLogRecordProcessor attached to the shared providers with a session_id_filter that drops cross-session records before they enter the queue; session shutdown drains and removes those processors via the SDK's internal multi-processor tuple; global providers torn down once via atexit; tests/unit/core/test_otel_export.py locks the contract — two sessions share a provider, shutdown of one leaves the other intact, scenario/session attrs no longer appear in the resource block), PR-F landed 2026-05-24 (declarative Event→OTel mapping: each concrete Event subclass declares its own to_otel(telemetry) translator and the observability atom collapses to a thin dispatcher that subscribes one uniform `event.to_otel(telemetry)` handler per typed channel; lifecycle pairing for Start/End span families goes through SessionTelemetry.open_span / pop_span / close_open_spans helpers keyed by (span_kind, correlator); SessionTelemetry gains obs_* fields stamped by the observability atom at install time so per-event translators have session-scoped metadata without reaching ExtensionAPI; observability still owns the bus-observer side — agentm.event.dispatch / agentm.handler.invoke / agentm.handler.mutated — plus the atom-hash bookkeeping for agentm.session.fingerprint and agentm.atom.reload; on-disk wire format unchanged, locked down by test_observability_semconv.py; coverage enforced by tests/unit/core/test_event_to_otel.py — every concrete Event subclass either overrides to_otel or appears in the explicit intentional no-op set, so new Event classes cannot silently drop off the wire)."
     design: "designs/single-event-log.md"
     related_concepts: [observability, pluggable_architecture, agent_loop, evolution_substrate]
-    plans: []
-    tasks: []
 
   extension_as_scenario:
     description: "Pluggability model: a scenario is a *composition* of atomic extensions, expressed as data (YAML), not code. Atoms (one Python module, one responsibility) live in extensions/builtin/; scenario recipes live in extensions/scenarios/*.yaml; opt-in contrib packages may group multiple tier-2 single-file atoms under contrib/extensions/<package>/ and mount them explicitly. load_scenario(name) flattens and requires-sorts YAML to list[(module, config)] for AgentSession.create. Same mechanism for built-in and third-party scenarios — no privileged path. Legacy harness/scenarios/tools tree is deleted in Phase 2.5 single sweep. self_modifiable_architecture extends ExtensionManifest with api_version, affects, tier fields; evolution_substrate makes scenarios catalogable and queryable like atoms. RCA now uses a shared contrib rcabench_contract atom rather than duplicated scenario-local vendor loading."
     design: "designs/extension-as-scenario.md"
     related_concepts: [pluggable_architecture, operations_ports, single_file_extension_contract, self_modifiable_architecture, evolution_substrate, runtime_context_atom]
-    plans: []
-    tasks: ["tasks/2026-05-09-issue-102-rca-cleanup.md"]
 
   single_file_extension_contract:
     description: "§11 hard rule: one new built-in extension = one new .py file under extensions/builtin/<name>.py with module-level MANIFEST: ExtensionManifest plus install(api, config). Auto-discovery (extensions.discover) and a mechanical validator (extensions.validate, 8 checks keyed to design §11.4) gate the catalog. Designed so future agent self-edits have a tiny, verifiable surface — atom-to-atom imports forbidden, harness.session import forbidden, allow-listed imports only, private ExtensionAPI reflection/attribute overwrites/mutable globals/dynamic agentm.* imports/concrete harness-service downcasts and undeclared peer-name string literals rejected. Phase 2.0c scaffolding landed; A/B/C/D1 atoms must conform. self_modifiable_architecture grows the manifest with api_version (integer ABI + grace window), affects (declared metric surface for catalog), tier (1 free / 2 reviewable). Validator gains api_version compatibility check and constitution-path rejection. Contrib package atoms keep the same per-atom contract while package-internal helpers handle shared parsing/rendering."
     design: "designs/extension-as-scenario.md#11-single-file-self-contained-extension-contract"
     related_concepts: [extension_as_scenario, pluggable_architecture, self_modifiable_architecture, evolution_substrate]
-    plans: ["plans/2026-04-30-phase2-parallel-extensions.md"]
-    tasks: ["tasks/2026-04-30-phase2-group-0c.md"]
 
   runtime_context_atom:
     description: "Builtin atom at src/agentm/extensions/builtin/runtime_context.py that prepends a <runtime_context> block (workspace cwd from api.cwd + host platform/python from stdlib platform) to the system prompt via BeforeAgentStartEvent, plus a one-paragraph instruction telling the agent to answer cwd questions from this path rather than guessing. Generic — usable by any scenario by listing the module in extensions YAML; zero config (config_schema={} so a bare entry validates). §11-compliant single file; allowed imports stdlib + agentm.extensions + agentm.core.abi.events + agentm.core.abi.extension. Distinct from the system_prompt atom: system_prompt takes a static config string, runtime_context resolves at install-time from the live ExtensionAPI/host so scenario authors do not hand-build the workspace fact. Replaces the channel-side runtime_identity.py + extra_extensions injection from contrib/channels/, which violated layering by composing prompt content in the channel/gateway layer; the cwd-hallucination bug it addresses (agent answering with operator's $HOME instead of session cwd) is generic to every scenario, not Feishu-specific. Channel-format hints (chat surface prefers short paragraphs, no tables) stay in scenario system_prompt text where they are persona, not runtime fact."
     design: "designs/runtime-context-atom.md"
     related_concepts: [extension_as_scenario, pluggable_architecture, single_file_extension_contract]
-    plans: []
-    tasks: []
 
   operations_ports:
     description: "FileOperations / BashOperations Protocols in src/agentm/core/abi/operations.py. Default LocalFileOperations / LocalBashOperations live as an atom in src/agentm/extensions/builtin/operations_local.py (Stage 1 of pluggable_architecture §10 landed 2026-05-11; the earlier core/_internal/operations_impl.py module has been deleted). The environment boundary is hybrid after issue #89: read-only file atom (tool_read) consumes FileOperations through ExtensionAPI operations, write atoms (tool_write, tool_edit) consume ResourceWriter as the single mutation chokepoint, and tool_bash consumes BashOperations (which subsumes ls/find/grep — those dedicated atoms were removed in favour of shell composition). Operations is registered like any other axis: an early atom in the default scenario calls api.register_operations(file=..., bash=...); the substrate enforces 'registered at most once before freeze' and 'must be registered by freeze time, else fail loud'. It is no longer a constitution-only axis."
     design: "designs/extension-as-scenario.md#10b6"
     related_concepts: [pluggable_architecture, extension_as_scenario]
-    plans: [plans/2026-05-09-issue-80-abi-prep.md]
-    tasks: [tasks/2026-05-09-issue-85-session-refactor.md]
 
   skills:
     description: "Filesystem-discovered SKILL.md files (YAML frontmatter + body) advertised in the system prompt as a compact <available_skills> XML index; LLM loads any specific skill on demand via the `read` tool. Implements progressive disclosure. Includes core/_internal/skills.py (loader + validator + diagnostics), core/lib/frontmatter.py (in-house parser, promoted from resource_loader._split_frontmatter), and extensions/builtin/skill_loader.py atom that injects the index via before_agent_start."
     design: "designs/skills.md"
     related_concepts: [prompt_templates, pluggable_architecture, extension_as_scenario, search_tools]
-    plans: ["plans/2026-05-01-pi-mono-migration.md"]
-    tasks: []
 
   prompt_templates:
     description: "Filesystem-discovered markdown templates with YAML frontmatter. /<name> args expansion with bash-style placeholders ($1, $@, $ARGUMENTS, ${@:N:L}). Loader, substituter, and the in-memory named-prompt registry all live in extensions/builtin/prompt_templates.py — the atom publishes itself under api.set_service('prompt_templates', ...) and consumers (compaction_prompts, llm_compaction) reach it via api.get_service('prompt_templates'). The atom claims the PROMPT_REGISTRY floor role so the session factory auto-mounts it whenever compaction_prompts/llm_compaction are loaded. Code-registered slash commands win over templates on name collision via the slash_commands atom and typed CommandDispatcher service facade; non-matching /-prefixed text falls through verbatim."
     design: "designs/prompt-templates.md"
     related_concepts: [skills, extension_as_scenario, pluggable_architecture]
-    plans: ["plans/2026-05-01-pi-mono-migration.md"]
-    tasks: []
 
   search_tools:
     description: "[HISTORICAL — tool_grep/tool_find/tool_ls atoms were removed in favour of shell composition via tool_bash. Default scenario now ships only tool_read + tool_bash for navigation/search. designs/search-tools.md is kept for context on the .gitignore-aware truncation helpers, which still live in core/lib/text_truncate.py + core/lib/path_utils.py.]"
     design: "designs/search-tools.md"
     related_concepts: [edit_diff, tool_event_narrowing, extension_as_scenario, operations_ports, pluggable_architecture]
-    plans: []
-    tasks: [tasks/2026-05-09-issue-89-file-tool-io-seams.md]
 
   edit_diff:
     description: "Pure-function module core/lib/edit_diff.py owning the edit-application algorithm: line-ending detection/restoration, UTF-8 BOM handling, NFKC + smart-quote/dash/space fuzzy normalization, and multi-edit application pipeline (Edit{old,new} sequences). Consumed by the upgraded tool_edit atom in Tier 2."
     design: "designs/edit-diff.md"
     related_concepts: [search_tools, tool_event_narrowing, extension_as_scenario, operations_ports]
-    plans: ["plans/2026-05-01-pi-mono-migration.md"]
-    tasks: []
 
   tool_event_narrowing:
     description: "Per-tool typed event subclasses (BashToolCallEvent, ReadToolCallEvent, GrepToolCallEvent, ...) + isinstance-based TypeGuard helpers (is_bash_tool_call, ...) replacing the single ToolCallEvent with stringly-typed tool_name. Recommends Python match-statement dispatch as the idiomatic style. Custom user tools fall through to the base ToolCallEvent. Coordinated single-PR migration across all atoms that branch on tool_name."
     design: "designs/tool-event-narrowing.md"
     related_concepts: [search_tools, edit_diff, pluggable_architecture, extension_as_scenario]
-    plans: ["plans/2026-05-01-pi-mono-migration.md"]
-    tasks: []
 
   sub_agent_lifecycle:
     description: "Async sub-agent dispatch lifecycle: parent's kernel loop must not declare agent_end while a child has unread findings. After PR #58 the floor is implemented on the agent_loop redesign — sub_agent subscribes to decide_turn_action and, on a voluntary Stop(ModelEndTurn|ToolTerminated) when there are unread/running children, returns Inject(messages=[notification]) so the loop stays alive. Completed-but-unread children's final_text plus still-running children are concatenated into one synthesized user-role notification (<subagent_result task_id=... purpose=...>...</subagent_result> + <subagent_pending task_id=... purpose=... />). The parent then chooses: write final report, wait_subagent(id) to block on one, check_tasks to block until any one progresses, or abort_task. Single read flag per task is the source of truth (never reset; consumed by check_tasks / wait_subagent / decide_turn_action). Three usage patterns share one mechanism — fire-and-forget (passive collection at exit), explicit wait (synchronous wait_subagent), steered fan-out (loop check_tasks reading as ready). Rejects synchronous dispatch (would lose parallel fan-out absent kernel-level parallel tool execution) and dead-letter / re-delivery (consumed-but-unattended findings are on the agent, same as ignored user messages). max_turns / signal / budget still strictly enforced — those causes have final=True so any Inject is ignored. cost_budget and other extensions can layer on the same hook. Child extension inheritance supports config-by-name: when an available inherited extension names a parent atom without config, sub_agent copies the loaded parent atom's resolved config by manifest name."
     design: "designs/sub-agent-lifecycle.md"
     related_concepts: [agent_loop, pluggable_architecture, extension_as_scenario, single_file_extension_contract, artifact_system, agent_team, nested_session_task, session_inbox]
-    plans: []
-    tasks: ["tasks/2026-05-09-issue-102-rca-cleanup.md"]
 
   artifact_system:
     description: "Append-only typed artifact store for sub-agent findings — replaces lossy 'final_text blob' handoff with reference-based handoff. New extensions/builtin/artifact_store.py registers four tools (artifact_write, artifact_read, artifact_list, artifact_grep) backed by sqlite at <cwd>/.agentm/artifacts/<root_session_id>.db. Session-tree-scoped: every descendant of a root session shares one db; cross-root sharing deferred to evolution_substrate / git_backed_versioning. Data model: Artifact{artifact_id, parent_id, kind, title, body, created_by: ProvenanceRef{session_id, task_id, persona, timestamp}, tags, parent_artifact_ids}. Append-only by design — no artifact_edit / artifact_delete; revisions create new artifacts referencing predecessors. Integrates with sub_agent_lifecycle's notification block: workers return <summary>...</summary> + <artifacts><ref id=... kind=... title=.../></artifacts> instead of full final_text dump, so orchestrator context grows logarithmically rather than linearly with worker count. Personas declare expected artifact_kinds in frontmatter as documentation. Maps to MAST failure-mode taxonomy: defends context-loss-at-handoff, cascade context poisoning, supervisor context bloat, summarization drift, inconsistent shared state. Out of scope: binary artifacts, ACL beyond session-tree, transactional updates, reference-counted GC (uses time-based retention)."
     design: "designs/artifact-system.md"
     related_concepts: [sub_agent_lifecycle, agent_team, evolution_substrate, pluggable_architecture, single_file_extension_contract]
-    plans: []
-    tasks: []
 
   agent_team:
     description: "Composition pattern for multi-agent scenarios — explicitly NOT a Team SDK type, NOT a runtime mode switch. Built on four orthogonal pillars: (A) lifecycle floor from sub_agent_lifecycle, (B) shared memory tier from artifact_system, (C) brief contract via persona frontmatter input_schema (required/optional field-name list; sub_agent dispatch validates the prompt for <field>...</field> markers and rejects on missing required fields with structured error), (D) budget awareness via per-dispatch budget arg + scenario manifest team_profile (task_complexity: simple|comparison|deep_research → derived defaults for max_workers and per-worker max_tool_calls). Each pillar maps to specific named failure modes from the multi-agent literature (MAST taxonomy, Anthropic research-system lessons): context loss, cascade poisoning, supervisor context bloat, scope misinterpretation, token over/under-spend, etc. Core insight 'there is no mode switch': dispatch_agent + artifact_* + wait_subagent are always-loaded capabilities; LLM decides per-task whether to fan out, cache to artifacts, etc. — same shape as Claude Code's Agent tool. Runtime extension loading (api.reload_atom from self_modifiable_architecture) is orthogonal — for acquiring NEW capabilities mid-flight, not for switching team mode. Rejected: first-class Team type, peer-to-peer dispatch (orchestrator-only convention), built-in voting/arbitration (LLM does it), output schema enforcement (deferred), adaptive budget escalation. Persona frontmatter gains: input_schema, artifact_kinds, budget_defaults. Manifest gains: team_profile.task_complexity. All additions opt-in; existing scenarios continue to work."
     design: "designs/agent-team.md"
     related_concepts: [sub_agent_lifecycle, artifact_system, self_modifiable_architecture, extension_as_scenario, pluggable_architecture, single_file_extension_contract]
-    plans: []
-    tasks: []
-
-  # === HISTORICAL ===
-  # Pre-v2 architecture. Code deleted in Phase 2.5 (2026-04-30).
-  # Designs preserved under designs/historical/ for archival reference only.
-
-  sdk_consistency:
-    status: historical
-    description: "[HISTORICAL — superseded by extension_as_scenario; code deleted in Phase 2.5] SDK semantic consistency refactoring: unified Tool type (@tool decorator, no StructuredTool), Scenario protocol (setup() -> ScenarioWiring), single ScenarioRegistry (replaces 4 global registries), dead code removal, langchain boundary convergence (HumanMessage/StructuredTool removed from SDK internals)."
-    design: "designs/historical/sdk-consistency.md"
-    related_concepts: [agent_harness, system_architecture, scenario_protocol, middleware_system]
-    plans: ["plans/2026-03-15-library-antipattern-fixes.md"]
-    tasks: []
-
-  agent_harness:
-    status: historical
-    description: "[HISTORICAL — superseded by pluggable_architecture + extension_as_scenario; code deleted in Phase 2.5] Core SDK: AgentLoop Protocol, AgentRuntime (lifecycle management), SimpleAgentLoop (ReAct cycle), Middleware protocol (3 hooks: on_llm_start, on_llm_end, on_tool_call), bidirectional agent communication via inbox queues, CheckpointStore protocol. Pure Python, no LangGraph."
-    design: "designs/historical/agent-harness.md"
-    related_concepts: [sdk_consistency, system_architecture, orchestrator, sub_agent, execution_runner, middleware_system, scenario_protocol, loop_resilience]
-    plans: []
-    tasks: []
-
-  testing_strategy:
-    status: historical
-    description: "Four-layer testing architecture: deterministic invariants, snapshot-based pipeline integration (Mock LLM), LLM-as-Judge decision eval, and E2E scenario eval. Checkpoint-driven snapshot injection for mid-flow behavioral testing."
-    design: "designs/historical/testing-strategy.md"
-    related_concepts: [orchestrator, sub_agent, configuration_system, recovery_system, memory_system, execution_runner]
-    plans: []
-    tasks: []
-    tests:
-      - file: "tests/unit/test_config_validation.py"
-        layer: "L1 — Deterministic Invariants"
-      - file: "tests/unit/test_interface_consistency.py"
-        layer: "L1 — Deterministic Invariants"
-      - file: "tests/unit/test_tool_signatures.py"
-        layer: "L1 — Deterministic Invariants"
-      - file: "tests/snapshot/test_tool_pipeline.py"
-        layer: "L2 — Snapshot Pipeline"
-      - file: "tests/snapshot/test_error_recovery.py"
-        layer: "L2 — Snapshot Pipeline"
-      - file: "tests/unit/test_generic_sdk.py"
-        layer: "L1 — Deterministic Invariants"
-
-  system_architecture:
-    status: historical
-    description: "Pure Python multi-agent orchestration system. SimpleAgentLoop-based ReAct cycle, AgentRuntime for worker management, WorkerLoopFactory for config-driven worker creation, build_agent_system() single canonical builder, Scenario protocol for domain logic, Middleware protocol (3 hooks) for cross-cutting concerns. Config-driven design, trajectory recording, monitoring, and failure recovery."
-    design: "designs/historical/system-design-overview.md"
-    related_concepts: [agent_harness, orchestrator, sub_agent, configuration_system, trajectory_system, recovery_system, memory_system, frontend_architecture, execution_runner, scenario_protocol, middleware_system, storage_backend, trajectory_analysis]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-08-stub-implementation.md"]
-    tasks:
-      - "tasks/2026-03-08-design-audit-findings.md"
-      - "tasks/2026-03-08-impl-builder.md"
-      - "tasks/2026-03-08-impl-config-loader.md"
-      - "tasks/2026-03-08-impl-config-validator-phase-manager.md"
-      - "tasks/2026-03-08-impl-orchestrator-agent.md"
-      - "tasks/2026-03-08-impl-orchestrator-tools.md"
-      - "tasks/2026-03-08-impl-prompt-tool-registry.md"
-      - "tasks/2026-03-08-impl-task-manager.md"
-      - "tasks/2026-03-08-snapshot-tests.md"
-
-  orchestrator:
-    status: historical
-    description: "SimpleAgentLoop-based orchestrator with DynamicContextMiddleware for state injection. Dispatches workers via AgentRuntime. Monitors/injects/aborts via dispatch_agent/check_tasks/inject_instruction/abort_task tools. RCA scenario uses HypothesisStore for hypothesis reasoning."
-    design: "designs/historical/orchestrator.md"
-    related_concepts: [system_architecture, sub_agent, trajectory_system, memory_system, execution_runner]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
-    tasks: []
-
-  sub_agent:
-    status: historical
-    description: "Worker agents built by WorkerLoopFactory as SimpleAgentLoop instances. Config-driven tools/prompts, middleware stack (budget, compression, dedup, trajectory). Data-only constraint in RCA mode. Launched as asyncio.Tasks by AgentRuntime."
-    design: "designs/historical/sub-agent.md"
-    related_concepts: [system_architecture, orchestrator, configuration_system, execution_runner, service_profile]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
-    tasks:
-      - "tasks/2026-03-08-impl-hooks-sub-agent.md"
-
-  generic_state_wrapper:
-    status: historical
-    description: "[HISTORICAL — superseded by extension_as_scenario (scenario = YAML composition of atoms); code deleted in Phase 2.5] Scenario Protocol architecture: Scenario protocol (setup() -> ScenarioWiring), SetupContext (platform resources), ScenarioRegistry (register/discover), build_agent_system() 4-phase pipeline integration. 3 built-in scenarios: RCA (hypothesis_driven), trajectory_analysis, general_purpose."
-    design: "designs/historical/generic-state-wrapper.md"
-    related_concepts: [agent_harness, orchestrator, configuration_system, memory_system, scenario_protocol, middleware_system, builder]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md", "plans/2026-03-09-compression-recall-memory.md"]
-    tasks: []
-    tests:
-      - file: "tests/unit/test_generic_sdk.py"
-        layer: "L1 — Deterministic Invariants"
-
-  memory_system:
-    status: historical
-    description: "Two-layer memory: intra-task (context compression via CompressionMiddleware, see orchestrator.md) and cross-task (trajectory_analysis scenario with trajectory-analysis skills writing to vault, see trajectory-analysis.md)"
-    design: "designs/historical/orchestrator.md"
-    related_concepts: [orchestrator, trajectory_system, memory_vault, trajectory_analysis]
-    related_designs: ["designs/historical/trajectory-analysis.md"]
-    plans: ["plans/2026-03-09-compression-recall-memory.md"]
-    tasks: []
-
-  trajectory_analysis:
-    status: historical
-    description: "Skill-driven trajectory analysis scenario. Agent Skills spec (SKILL.md + references/ + examples/) in vault under skill/trajectory-analysis/. Three-tier progressive disclosure: catalog → SKILL.md → references/. Model-driven or config-driven skill activation. Uses generic state via Scenario protocol, two phases (analyze → synthesize)."
-    design: "designs/historical/trajectory-analysis.md"
-    related_concepts: [system_architecture, memory_system, memory_vault, scenario_protocol, configuration_system]
-    plans: ["plans/2026-03-24-trajectory-analysis.md"]
-    tasks:
-      - "tasks/2026-03-24-ta-state-strategy.md"
-      - "tasks/2026-03-24-ta-schemas-registry.md"
-      - "tasks/2026-03-24-ta-config.md"
-      - "tasks/2026-03-24-ta-vault-skills.md"
-      - "tasks/2026-03-24-ta-integration.md"
-      - "tasks/2026-03-24-ta-tests.md"
-
-  configuration_system:
-    status: historical
-    description: "Config system: system.yaml (global), tools/*.yaml (reusable tool defs), scenarios/<name>/ (scenario.yaml + prompts/*.j2). Pydantic schema validation + cross-reference validation at startup. Environment variable substitution"
-    design: "designs/historical/system-design-overview.md"
-    related_concepts: [system_architecture, sub_agent, orchestrator]
-    plans: ["plans/2026-03-08-tdd-skeleton-and-tests.md"]
-    tasks: []
-    tests:
-      - file: "tests/unit/test_config_validation.py"
-        covers:
-          - "Mandatory field rejection — SystemConfig, AgentConfig, OrchestratorConfig, ScenarioConfig (§ Configuration — startup validation)"
-          - "ScenarioConfig composition — accepts complete valid scenario (§ Configuration — scenario.yaml)"
-
-  trajectory_system:
-    status: historical
-    description: "Hierarchical trace capture via TrajectoryCollector (JSONL event recording). Independent checkpoint chains per agent, linked by task_id. Export to RL training format. LLM input recording via TrajectoryMiddleware (on_llm_start, on_tool_call, on_llm_end hooks)."
-    design: "designs/historical/orchestrator.md"
-    related_concepts: [system_architecture, orchestrator, recovery_system, memory_system, execution_runner, trajectory, debug_console, middleware_system]
-    plans: []
-    tasks: []
-
-  recovery_system:
-    status: historical
-    description: "Four-layer error handling: Worker self-heal, API retry (ChatOpenAI max_retries + SimpleAgentLoop._invoke_with_retry() logic), Orchestrator decision (with error summary + last steps), manual system recovery via checkpoint resume. Debug replay via checkpoint fork."
-    design: "designs/historical/system-design-overview.md"
-    related_concepts: [system_architecture, trajectory_system, orchestrator, sub_agent, execution_runner]
-    plans: []
-    tasks: []
-    tests:
-      - file: "tests/snapshot/test_error_recovery.py"
-        covers:
-          - "Inject/abort workflows (§ Recovery Layer 3)"
-
-  execution_runner:
-    status: historical
-    description: "AgentRuntime: manages async worker execution. Provides dispatch_agent/check_tasks/inject_instruction/abort_task tools. Spawns workers as AgentHandle instances, bidirectional communication via inbox queues. Streams events to frontend WebSocket."
-    design: "designs/historical/orchestrator.md"
-    related_concepts: [orchestrator, sub_agent, frontend_architecture, trajectory_system, trajectory, debug_console]
-    plans: []
-    tasks: []
-    tests:
-      - file: "tests/snapshot/test_tool_pipeline.py"
-        covers:
-          - "dispatch_agent creates worker task (§ Orchestrator Tools)"
-          - "check_tasks returns completed/failed results (§ Orchestrator Tools)"
-      - file: "tests/snapshot/test_error_recovery.py"
-        covers:
-          - "inject_instruction rejected for non-running tasks (§ Instruction Injection)"
-          - "abort_task cancels running worker (§ AgentRuntime)"
-
-  frontend_architecture:
-    status: historical
-    description: "Read-only observation dashboard: Agent Topology (d3.js), Execution Monitor (timeline+detail), Conversation View (scenario plugin), Debug Panel (checkpoint browser). Single HTML file, React + WebSocket + d3.js. Scenario plugin architecture for extensibility. Backend streams events via AgentRuntime."
-    design: "designs/historical/frontend-architecture.md"
-    related_concepts: [system_architecture, trajectory_system, orchestrator, execution_runner, configuration_system, debug_console]
-    plans: []
-    tasks: []
-
-  trajectory:
-    status: historical
-    description: "TrajectoryCollector: structured event capture to JSONL with async/sync recording, fan-out listeners, thread safety, and context manager lifecycle"
-    design: "designs/historical/trajectory.md"
-    related_concepts: [system_architecture, orchestrator, execution_runner, debug_console]
-    plans: []
-    tasks: []
-
-  debug_console:
-    status: historical
-    description: "Rich-based real-time terminal UI with three panels (Agent Status, Tool Timeline, Hypothesis Board). Consumes events via TrajectoryCollector listener"
-    design: "designs/historical/debug-console.md"
-    related_concepts: [trajectory, frontend_architecture, execution_runner]
-    plans: []
-    tasks: []
-
-  builder:
-    status: historical
-    description: "build_agent_system() — single canonical 4-phase builder (platform resources -> worker infra -> orch tools -> orch loop). Scenario-driven, no legacy wrappers. Factory closure DI for tools, trajectory wiring."
-    related_concepts: [system_architecture, orchestrator, sub_agent, trajectory, configuration_system, scenario_protocol, middleware_system, storage_backend]
-    plans: ["plans/2026-03-09-compression-recall-memory.md"]
-    tasks: []
-
-  scenario_protocol:
-    status: historical
-    description: "[HISTORICAL — replaced by scenario YAML recipes in extensions/scenarios/; code deleted in Phase 2.5] Scenario Protocol: pluggable domain logic. setup(ctx) -> ScenarioWiring (orchestrator_tools, worker_tools, format_context, answer_schemas, output_schema, hooks, should_terminate, middleware). ScenarioRegistry maps names to instances. Concrete: RCAScenario (hypothesis_driven), TrajectoryAnalysisScenario, GeneralPurposeScenario."
-    design: "designs/historical/sdk-consistency.md"
-    related_concepts: [agent_harness, builder, orchestrator]
-    plans: []
-    tasks: []
-
-  middleware_system:
-    status: historical
-    description: "[HISTORICAL — replaced by EventBus + atomic extensions; code deleted in Phase 2.5] Middleware protocol with 3 hooks: on_llm_start, on_llm_end, on_tool_call. Chain pattern for composing multiple middlewares. Concrete implementations: DynamicContextMiddleware, LoopDetectionMiddleware, CompressionMiddleware, BudgetMiddleware, DedupMiddleware, SkillMiddleware, TrajectoryMiddleware, PermissionMiddleware, MemoryMiddleware, plus loop-resilience additions (ToolResultBudgetMiddleware, SystemReminderMiddleware, MicroCompactMiddleware, CostBudgetMiddleware). All middleware code is in harness/middleware.py."
-    related_concepts: [agent_harness, builder, sub_agent, tool_dedup, loop_resilience]
-    plans: []
-    tasks:
-      - "tasks/2026-03-08-impl-compression.md"
-      - "tasks/2026-03-08-impl-notebook.md"
-    tests:
-      - file: "tests/unit/test_generic_sdk.py"
-        covers:
-          - "Base middleware passthrough"
-          - "compose_middleware chaining"
-          - "Class hierarchy verification"
-
-  storage_backend:
-    status: historical
-    description: "DELETED: StorageBackend Protocol, FilesystemBackend, and CompositeBackend were removed. The framework now uses direct filesystem operations and vault-based storage."
-    related_concepts: [memory_vault]
-    plans: []
-    tasks: []
-    tests: []
-
-  memory_vault:
-    status: historical
-    description: "Markdown + YAML frontmatter persistent knowledge vault with SQLite-backed three-layer index (structural, link graph, FTS5 + sqlite-vec). Replaces JSON-based KnowledgeStore. [[wikilink]] bidirectional linking, atomic write flow, vault_edit with 4 incremental edit primitives (replace_string, set_frontmatter, replace_section, append_section), rebuildable index."
-    design: "designs/historical/memory-vault.md"
-    related_concepts: [memory_system, agent_harness, storage_backend, configuration_system]
-    plans: ["plans/2026-03-16-memory-vault.md"]
-    tasks:
-      - "tasks/2026-03-16-vault-parser.md"
-      - "tasks/2026-03-16-vault-schema.md"
-      - "tasks/2026-03-16-vault-store.md"
-      - "tasks/2026-03-16-vault-search.md"
-      - "tasks/2026-03-16-vault-graph.md"
-      - "tasks/2026-03-16-vault-tools.md"
-      - "tasks/2026-03-16-vault-migration.md"
-      - "tasks/2026-03-16-vault-integration.md"
-
-  tool_dedup:
-    status: historical
-    description: "Two-layer tool call deduplication: on_llm_start hook (soft limit, reminder injection) + tool wrapper (hard limit, short rejection). DedupTracker with OrderedDict FIFO eviction. Excludes think tool. Per-agent-invocation cache. All code in middleware/dedup.py"
-    design: "designs/historical/tool-dedup.md"
-    related_concepts: [sub_agent, configuration_system, middleware_system]
-    plans: []
-    tasks: []
-    tests:
-      - file: "tests/unit/test_dedup.py"
-        layer: "L1 — Deterministic Invariants"
-      - file: "tests/unit/test_generic_sdk.py"
-        layer: "L1 — Deterministic Invariants"
-
-  service_profile:
-    status: historical
-    description: "Thread-safe, run-scoped shared service knowledge store (ServiceProfileStore). Orchestrator and workers both read/write via update_service_profile/query_service_profile tools. Merge semantics: topology union, observations append, anomaly upgrade only. Injected into workers via extra_tools, into orchestrator via format_context partial binding."
-    design: "designs/historical/sub-agent.md"
-    related_concepts: [orchestrator, sub_agent, execution_runner]
-    plans: []
-    tasks: []
-    tests:
-      - file: "tests/unit/test_service_profile.py"
-        layer: "L1 — Deterministic Invariants"
-        covers:
-          - "ServiceProfileStore CRUD (update/get/get_all)"
-          - "Merge logic: topology union, observations append, anomaly upgrade"
-          - "Thread safety: concurrent updates preserve all data"
-          - "Query filters: anomalous_only, related_to"
-          - "LLM formatting: anomalous/healthy grouping"
-          - "Immutability: frozen dataclasses"
-
-  tool_filter:
-    status: historical
-    description: "Three-layer tool filtering: global disallowed (SDK safety, prevents worker recursion), agent-level disallowed_tools, whitelist. resolve_tools() pure function in harness/tool_filter.py. Wildcard ['*'] semantics. Fail-fast on unknown whitelist names."
-    design: "designs/historical/tool-filter.md"
-    related_concepts: [sub_agent, agent_harness, sdk_consistency, tool_dedup, agent_definition]
-    plans: []
-    tasks: []
-
-  permission_mode:
-    status: historical
-    description: "Four-mode permission system (DEFAULT, READONLY, SUPERVISED, UNRESTRICTED) enforced via PermissionMiddleware on_tool_call hook. Three-layer defense: prompt reinforcement + tool filtering + middleware interception. Tool.readonly annotation, PermissionPolicy with per-tool overrides, audit trail for SUPERVISED mode."
-    design: "designs/historical/permission-mode.md"
-    related_concepts: [agent_harness, middleware_system, scenario_protocol, sub_agent, sdk_consistency, tool_filter]
-    plans: []
-    tasks: []
-
-  agent_memory:
-    status: historical
-    description: "[HISTORICAL — dropped from Phase 2 catalog; covered by RCA's tool_hypothesis_store + SessionManager.payload; code deleted in Phase 2.5] Per-agent persistent memory with three scopes (AGENT, SCENARIO, PROJECT). MemoryMiddleware injects memory prompt via on_llm_start. Dedicated tools (memory_read/write/edit/delete) with auto-maintained MEMORY.md index. Reuses vault parser module. Flat markdown storage, no SQLite."
-    design: "designs/historical/agent-memory.md"
-    related_concepts: [memory_vault, agent_harness, middleware_system, sub_agent, configuration_system]
-    plans: []
-    tasks: []
-
-  agent_definition:
-    status: historical
-    description: "Declarative AgentDefinition frozen dataclass replacing AgentConfig. Loaded from Markdown frontmatter (.md) or YAML. One file = one agent. Supports tools/disallowed_tools, task_type dispatch routing, Jinja2 system prompt. Source layering with full-replacement semantics."
-    design: "designs/historical/agent-definition.md"
-    related_concepts: [sub_agent, configuration_system, builder, tool_filter, permission_mode, agent_memory]
-    plans: []
-    tasks: []
-
-  prompt_patterns:
-    status: historical
-    description: "Catalog of 12 prompt design patterns for AgentM templates: role anchor, critical boundary markers, numbered sections, decision tables, good/bad contrast, anti-rationalization checklists, deterrence statements, purpose statements, forced output format, context isolation, three-layer permissions, per-turn reminders."
-    design: "designs/historical/prompt-patterns.md"
-    related_concepts: [orchestrator, sub_agent, configuration_system, middleware_system, scenario_protocol, loop_resilience]
-    plans: []
-    tasks: []
-
-  loop_resilience:
-    status: historical
-    description: "Five mechanisms for robust agent loops: tool result budget (truncation of oversized results), tool concurrency partitioning (safe parallel vs serial execution), critical system reminder (periodic constraint re-injection), micro-compact (lightweight rule-based context cleanup), cost budget (USD/token hard stop). All implemented as middleware or minimal loop changes."
-    design: "designs/historical/loop-resilience.md"
-    related_concepts: [agent_harness, middleware_system, sub_agent, permission_mode, prompt_patterns, configuration_system, recovery_system]
-    plans: []
-    tasks: []
-
-  trajectory_judger:
-    status: historical
-    description: "Judge trajectory quality by classifying agent behavior patterns. Single-pass scenario with structured output schema for classification results."
-    design: "designs/historical/trajectory-judger.md"
-    related_concepts: [trajectory, trajectory_analysis, scenario_protocol]
-    plans: []
-    tasks: []
-
-  investigation_sanitizer:
-    status: historical
-    description: "Automated investigation quality checks (linter/sanitizer) for the RCA orchestrator. Two-layer design: CodeSanitizer (deterministic store/sequence checks) + CriticSanitizer (LLM-based semantic judgment). Detects exploration gaps (E1-E4), confirmation failures (C1-C4), judgment errors (J1-J4), process violations (P1-P3). Injects findings into orchestrator message stream. Hard-gates finalize on critical violations."
-    design: "designs/historical/investigation-sanitizer.md"
-    related_concepts: [orchestrator, middleware_system, scenario_protocol, loop_resilience, trajectory_judger, service_profile]
-    plans: []
-    tasks: []
 
   shared_presenter_rendering:
     description: "Shared headless rendering contract for presenter surfaces: core/lib/render.py owns AssistantMessage text extraction, tool result text extraction, raw token UsageReport/FinalReport summaries, and tool result format selection from metadata or registered renderer hints. Cost remains a policy service (`cost_query`) registered by cost_budget and consumed opportunistically by CLI/TUI; missing service yields token-only output. Presenters map headless output to their own UI widgets without importing atom-private pricing or string-matching builtin tool identities."
     design: "designs/pluggable-architecture.md"
     related_concepts: [pluggable_architecture, self_modifiable_architecture, tool_event_narrowing]
-    plans: []
-    tasks: ["tasks/2026-05-09-issue-97-shared-rendering.md"]
 
   llmharness_cognitive_audit:
     description: "Two-phase cognitive-audit pipeline for the llmharness contrib extension (Lincyaw/AgentM issue #134), redesigned to v3 (2026-05-10). Static-analysis lens: trajectory is source code, extractor is lex+parse+type-check, the graph is the IR (closer to a PDG than a CFG), the auditor is the verifier. Phase 1 extractor LLM builds the graph by witness-required tool calls — register_event registers one event per ReAct cycle; add_edge constructs data/ref edges with literal cited_entities (data) or cited_quote (ref) verified at tool-call time after case+whitespace normalization; submit_extraction terminates the loop. Edges are first-class records, not embedded Event.refs. Witness retry budget = 2 per (src, dst, kind) tuple; on exhaustion the edge is dropped into extractor_partial without fail-stopping the firing. Phase 2 auditor consumes the validated graph plus advisory findings from scenario-registered checks (api.get_service('llmharness.audit_registry').register_check(...) — atom-only, never SDK-fixed); switches from full-payload to summary-only at audit_summary_threshold=30 events with on-demand drill-down via get_event_detail. The trust-asymmetry axiom (thought = testimony, tool_call/tool_result = evidence) is stated explicitly in both prompts. Verdict shape (surface_reminder + reminder_text + continuation_notes + matched_event_ids + cited_cards) is preserved from V2 — replacement is upstream of the auditor only. Public surface (Event sans refs / Edge / EdgeKind / Finding / api.audit registry) is breaking — rca-autorl backwards-compat explicitly waived."
     design: "designs/llmharness-cognitive-audit.md"
     related_concepts: [extension_as_scenario, pluggable_architecture, observability, single_file_extension_contract, audit_check_registry, per_task_evolution_loop, harness_runner]
-    plans: ["plans/2026-05-10-llmharness-issue-134-redirection.md", "plans/2026-05-10-llmharness-issue-134-v3.md"]
-    tasks: []
 
   harness_runner:
     status: proposed
     description: "Single driver for the llmharness cognitive-audit pipeline; collapses the duplicated implementations (`_drain_extractor`/`_drain_auditor` in adapters/agentm.py, `replay_extractor_record`/`replay_auditor_record` in replay/runner.py, plus the now-deleted `run_offline_auditor_over_control` in replay/strict_ab.py) of 'fold the op log + window the trajectory + compose the payload + invoke the child + persist the result'. Parametrised by two Protocols (ChildRunner for live `api.spawn_child_session` vs offline `run_phase_standalone`; OpSink for live `api.session.append_entry(AUDIT_GRAPH_OP, ...)` vs offline `InMemorySink` / `NoopSink`) and one in-memory state holder (CumulativeAuditState — folds GraphOp log on demand, threads recent_graph/recent_edges/next_event_id across firings; hydrate_from_session_log for live restart, fresh() for offline). Single public entry point HarnessRunner.on_trajectory_progress(messages, turn_count) owns cadence (extractor_interval, audit_interval) and returns a StepResult with both extractor_record and auditor_record populated even when the sidecar writer is None. Unlocks the user-facing fork-tree pipeline (`replay/fork_tree.py::run_fork_tree_experiment`, P6): a producer-consumer self-feeding work queue where consuming one ForkTask (a backbone rollout + `stop_on_first_surface=False` offline replay) emits a ForkNode and produces one child task per auditor surface — the parallel-universe tree (intervene vs continue) rather than the old single greedy chain. `replay_pipeline_over_trajectory(seed_cumulative=..., start_turn=...)` threads each parent node's CumulativeAuditState (`SurfaceFiring.cumulative_snapshot`, an independent deep copy taken at the surface) into its children; `write_fork_tree_replay` materialises one root-keyed `<root_sid>.chained.jsonl` with a `__fork_tree_header__` and per-record `extras{node_id, parent_node_id}`. Old linear chain = `surfaces[:1]` policy; star = `max_depth=1`. Three diff-testable acceptance invariants: (1) live ≡ offline equivalence on a fixed trajectory + same model — same sidecar byte-for-byte modulo ts_ns/uuid/LLM-nondet, proving windowing+payload composition exists in exactly one place; (2) single-firing replay is a degenerate case of fire_extractor_once with hydrate_from_replay_record; (3) sidecar is an artefact not a seed — runner never reads ReplayRecord. Migration: P1 live adapter rerouted through runner (wrappers preserve behaviour); P2 land replay_pipeline_over_trajectory + chain_replay reimplemented with cumulative threading; P3 collapse run_offline_auditor_over_control + replay_{extractor,auditor}_record become thin wrappers; P4 (superseded) wired baseline_fork to rca:baseline → rca:baseline; P5 (2026-05-24) replaced strict-A/B `baseline_fork` with N-segment `chained_fork` — `replay/strict_ab.py` deleted, `_HARNESS_VARIANT_TO_CONTROL` deleted, agentm_rca constructor narrowed to `chained_fork: bool` + `max_interventions: int`; P6 (2026-05-25) generalised the linear chain into the producer-consumer fork tree (`chained_fork.py` → `fork_tree.py`), added `OfflineRunResult.surfaces` / `SurfaceFiring` / `CumulativeAuditState.snapshot()`, fixed the cadence to step per agent turn not per message, and made the sidecar root-keyed + tree-shaped (`__fork_tree_header__`); `--ak chained_fork=true` retained (→ `max_depth`). Non-goals: cross-case state sharing, ReplayRecord schema changes, auditor verdict semantics (in-case parallelism is now structurally supported via the work queue's `max_workers`, default 1)."
     design: "designs/harness-runner.md"
     related_concepts: [llmharness_cognitive_audit, audit_check_registry, pluggable_architecture, sub_agent_lifecycle, observability, single_file_extension_contract, nested_session_task]
-    plans: []
-    tasks: []
 
   nested_session_task:
     status: implemented
     description: "Unifies the duplicated 'spawn a nested AgentSession, send one prompt, drive to completion, scrape its result' copies INSIDE llmharness onto one convenience helper layered over the api.spawn_child_session ABI seam. Initial hypothesis (three copies sharable across the sub_agent/llmharness package boundary) was half wrong: copies 2+3 (llmharness LiveChildRunner.run_{extractor,auditor} live + tools.engine.run_phase_standalone embedded) ARE the same single-shot shape and were genuinely duplicated; copy 1 (sub_agent._ChildTaskManager._run_child) only looked similar — it is an interactive, multi-turn, injectable driver over a PRE-spawned session with its own finalize/abort/artifact bookkeeping and a different (dict-tolerant, return_response-aware, newline-joined) collect contract, NOT a single-shot spawn-collect. Forcing it onto the shared helper would push injection-loop policy into the helper (rejected). So the real duplication was WITHIN llmharness. HOME decision: §11 forbids cross-contrib imports, so a helper shared by two PACKAGES must live in core; but the sole consumer is llmharness, so the two-package trigger never fires and 'keep core small / compose existing ABI in contrib' governs — run_child_task is composed entirely from public core.abi (spawn_child_session/AgentSessionConfig/messages), adding no core capability, so both child_collect + child_task live in llmharness (contrib), NOT core. (They were briefly placed in agentm.extensions on the sub_agent-will-consume assumption, then relocated when that was falsified.) Layering: api.spawn_child_session (core ABI, the real pluggability seam) < run_child_task (llmharness convenience, single-shot, terminal_tool knob: None->free-text, set->tool-arg) < ChildRunner Protocol (llmharness live/offline swap — LiveChildRunner over spawn_child_session, StandaloneChildRunner over create_agent_session; earns its keep, two impls + multiple consumers) < child_collect pure scrapers (flatten_assistant_blocks/terminal_tool_arguments/final_assistant_text/serialize_block — single replay-sidecar block-shape definition). run_child_task is a convenience layer, NOT a new pluggability axis (the axis is spawn_child_session itself); promote to a registered service (api.set_service/get_service, zero cross-package import) only if a real second in-session consumer with a swap need appears. sub_agent stays its own interactive driver over spawn_child_session — declined unification, not deferred. Core change: none (seam + create_agent_session already existed)."
     design: "designs/nested-session-task.md"
     related_concepts: [sub_agent_lifecycle, harness_runner, llmharness_cognitive_audit, pluggable_architecture, agent_loop, single_file_extension_contract]
-    plans: []
-    tasks: []
 
   audit_check_registry:
     description: "ExtensionAPI service that lets scenarios plug graph-health checks into the llmharness Phase-2 auditor. Registry lives at contrib/extensions/llmharness/src/llmharness/audit/registry.py (mechanism only — Check Protocol + CheckContext + AuditCheckRegistry). Concrete checks ship as one-file §11 atoms under llmharness/extensions/ (check_repeated_actions, check_open_branches, check_premature_conclusion as worked examples). Atoms call api.get_service('llmharness.audit_registry').register_check(check) from install(api, config). Idempotent on (name, id(check)); raising checks captured non-fatally; zero-checks → empty findings, no error. Fed into the auditor prompt as advisory findings; never gates the firing. Canonical example of 'scenario-registered behaviour through ExtensionAPI', the SDK-vs-scenario separation rule's preferred shape."
     design: "designs/llmharness-cognitive-audit.md"
     related_concepts: [llmharness_cognitive_audit, extension_as_scenario, pluggable_architecture, single_file_extension_contract]
-    plans: ["plans/2026-05-10-llmharness-issue-134-v3.md"]
-    tasks: []
 
   llm_native_judges:
     status: proposed
     description: "Architectural refactor of hypothesis_driven_rca's gate decision logic away from structural rules (regex on free-text verdict fields, mechanical observation→prediction→hypothesis chain-walks, literal worker_session_id equality, structural 'at least one negative prediction checked' rule) toward pluggable LLM judgment ports. First principle: structural enforcement is the wrong primitive for semantic judgments — the gate's job is to be the only writer, but its decision logic should be LLM judgment, not regex/structural rules. Three true invariants remain non-LLM: (1) typed graph state (data shape), (2) single-writer property (enforcement), (3) two-column WorkerReturn contract (interface). Everything else — what counts as satisfied / covered / independent / genuinely-falsified / explains — becomes Judge protocol calls. New Judge port: api.set_service('rca.judge.<kind>', impl); each judge is a §11 atom with config.mode: 'llm' | 'stub' (llm uses LLM tool_use for structured output, stub returns scripted verdicts for tests). Phase 2 ships 4 judges (judge.satisfied / judge.coverage / judge.independence / judge.falsified_genuinely) which together remove every regex/structural-rule branch in Phase 1's falsification gate. Downgrade-application semantics flip: gate returns UpdateResult.downgraded(suggested=..., applied_id=None) and the refine is NOT auto-applied — orchestrator decides next steps based on judge.reason. Failure modes: LLM failure / malformed structured output → retry-once → verdict='unclear' (first-class verdict, no structural fallback). Per-session LRU cache keyed by sha256(canonical_json(context)). N-small-judges over one-big-judge for: independent eval (per-judge data localizes the weak link), independent swap (§11 atom contract pays off), independent caching (higher hit rates on focused contexts). Future judges (Phase 3+) collapse §9/§10 features from hypothesis-driven-rca into the same Protocol: judge.find_contradiction (devil's advocate), judge.propose_alternatives (isolated hypothesis generator), judge.what_can_be_dropped (state-triggered compaction), judge.next_to_verify (information-gain scheduler replacement). Bias telemetry stops being separate machinery — every judge call writes inputs+verdict to observability JSONL, and telemetry is just queries over that stream. Acceptance: zero regex/string-matching in gate source (test_gate_no_regex.py greps the file); all 50 Phase 1 fail-stop tests pass with stub judges mounted (behavior preservation); each judge has both stub and llm modes tested; 10-case eval run against contrib/scenarios/rca/eval/ produces honest results report at contrib/scenarios/rca_hfsm/eval/phase2_results.md. Pass rate is NOT in the acceptance gate — Phase 2 ships the refactor + measurement; tuning is downstream."
     design: "designs/llm-native-judges.md"
     related_concepts: [hypothesis_driven_rca, pluggable_architecture, extension_as_scenario, single_file_extension_contract, per_task_evolution_loop, observability]
-    plans: ["plans/2026-05-13-rca-hfsm-phase2-llm-native-judges.md"]
-    tasks: []
 
   hypothesis_driven_rca:
     status: phase_1_landed
     description: "Methodologically disciplined RCA scenario built on the scientific hypothesis-verify cycle, sibling (not replacement) to contrib/scenarios/rca/. Three structural commitments that lift it above prompt-level guidance: (1) hypothesis lifecycle is a DAG of update operators (propose / confirm / refute / refine / split / merge / supersede / suspend), not confirm-or-refute binary — verifications produce graph mutations, not terminal verdicts; (2) Popperian falsification enforced at gate time, not asked for in prompts — confirm requires ≥1 satisfied negative prediction AND ≥1 independent positive check AND coverage of every unexplained symptom; refute requires either a triggered negative prediction or a failed steelman attempt; failing preconditions downgrade to refine instead of hard-erroring; (3) semantic structure (FSM: INTAKE/OBSERVE/HYPOTHESIZE/VERIFY/JUDGE/FINALIZE/BLOCKED) is orthogonal to context structure (sessions) — the scenario picks L1+L2+L3 layered context: L1 persistent HypothesisGraph + ObservationLog + SymptomSet survives all sessions; L2 orchestrator session contains only L1 derived views + recent hypothesis events (grows linear in cognitive operations, not tool calls); L3 worker sessions are ephemeral per-verification, briefed from L1, transcript discarded on return. Worker→Orchestrator contract is two-column: observations[] (facts, enter graph) vs interpretation (advisory, audit-only) — orchestrator re-derives the update from observations alone, structurally preventing 'worker uses rhetoric to replace evidence' bias. ObservationLog doubles as memoization keyed by tool_signature (idempotent tools only) so independent workers don't re-query. Anti-bias mechanisms tiered by cost: cheap and always-on = two-column return + falsification-framed briefs + blinded hypothesis identity + negative-prediction-required + information-gain verification scheduler + isolated hypothesis_generator session that doesn't see existing HypothesisGraph; heavyweight and gated to critical mutations (would trigger FINALIZE or close last open branch) = twin verifier with non-overlapping brief slices, devil's-advocate persona, tool-heterogeneous workers. Single-writer property: only rca_falsification_gate atom can mutate the graph (write API not exposed on the public store service). State-triggered compaction at JUDGE transitions provides semantically-justified compression rather than token-count truncation. New atoms (all single-file §11): rca_hgraph_store (session-state axis), rca_evidence_tools (tool-environment axis), rca_fsm_policy / rca_brief_builder / rca_falsification_gate / rca_bias_audit (policy axis). Reuses duckdb_sql, worker_skills, skill_loader, rcabench_contract, sub_agent from existing rca scenario; shares its eval/ suite for direct A/B comparison. No core changes, no new ExtensionAPI surface. Phased: Phase 1 = graph + gate + two-column contract + FSM + layered context (no compaction); Phase 2 = state-triggered compaction + independent corroboration + bias telemetry; Phase 3 = cross-trace skill learning + multi-incident memory + concurrent verification (parked until data demands them). Implementation target: contrib/scenarios/rca_hfsm/ (provisional name). Acceptance: 10 fail-stop scenarios covering negative-prediction requirement, confirm/refute gate downgrades, observation/interpretation separation, memoization, single-writer property, FINALIZE coverage, L2 sub-linear growth, independent-worker brief disjointness, hypothesis-generator blinding."
     design: "designs/hypothesis-driven-rca.md"
     related_concepts: [pluggable_architecture, extension_as_scenario, sub_agent_lifecycle, observability, llmharness_cognitive_audit, per_task_evolution_loop, single_file_extension_contract, agent_team, artifact_system]
-    plans: ["plans/2026-05-13-rca-hfsm-phase1.md"]
-    tasks: []
-
-  gateway_channels:
-    status: historical
-    superseded_by: single_process_gateway
-    description: "channels v0 (in-process). HISTORICAL — deprecated in Phase 4 (2026-05-11) by client_server_architecture; both v0 and v1 fully retired by single_process_gateway (v2, 2026-05-28). Original v0 shape: long-running daemon (contrib/channels/) that mediates between chat platforms (Feishu today; Slack/Telegram/WeChat tomorrow) and per-(channel, chat_id) AgentSessions. Two-queue MessageBus decouples channels from gateway: channels publish InboundMessage, gateway publishes OutboundMessage, ChannelManager dispatches. Typed wire format — OutboundKind enum (MESSAGE / TURN_COMPLETE) avoids magic-metadata-string dispatch; typed Button dataclass avoids list[list[str]] + label string-matching. Cross-loop safety centralized in MessageBus._publish (lark_oapi WS client dispatches on a foreign asyncio loop in a background thread — naive queue.put silently drops; bridge via call_soon_threadsafe). BaseChannel ABC contract is small (start/stop/send + opt-in send_delta) with _handle_message helper enforcing allow_from. ApprovalBridge is the channel-agnostic HITL gate: hooks ToolCallEvent, posts typed Buttons, identity-checks sender_id, owns private encoding of button value. Gateway routes by session_key (defaults to channel:chat_id; channels can override for thread scoping). Per-inbound asyncio.create_task so a route blocked on an approval future cannot stall button-click routing. v0 in-process channels still load (StubChannel exempt) but emit DeprecationWarning; the `channels:` yaml block additionally prints an agentm-gateway stderr warning at startup. Deleted entirely (not merely deprecated) in v2 rewrite."
-    design: "designs/historical/gateway-channels.md"
-    related_concepts: [pluggable_architecture, command_routing, extension_as_scenario, client_server_architecture, single_process_gateway]
-    plans: ["plans/2026-05-11-gateway-command-layer.md"]
-    tasks: []
-
-  client_server_architecture:
-    status: historical
-    superseded_by: single_process_gateway
-    replaces: [gateway_channels]
-    description: "Peer-mesh chat substrate (channels v1 + agent mesh + durable delivery). HISTORICAL — superseded by single_process_gateway (v2, 2026-05-28). v1 introduced the daemon/worker process split: gateway becomes a routing bus with declared peer_kinds (chat_client, agent_worker, control), wire is length-prefixed JSON, envelope {v,id,kind,ts,body,to?,correlation_id?,hops?,root_session_key?}, addressing via chat://channel/chat_id / session://session_id / peer://peer_id / kind://peer_kind, durable outbox per peer (SQLite WAL, pipelined push, exponential backoff, dead-letter), at-most-once inbound via ack-on-process ledger, catch-up batching via delivery_batch on reconnect, OutboxStore/InboxLog Protocols for pluggable backends, distributed agent workers (sessions live in workers, gateway routes by scenario/model capability), agent-to-agent via tool_peer_send atom (fire-and-forget durable, wait_for_reply RPC-style with hops loop guard), approvals forwarded to root_session_key chat. The v1 abstractions are dropped in v2 because the codebase's actual use case (single user / small team / single host) does not exercise the isolation, distribution, or zero-SDK-coupling properties they bought; instead v2 collapses to a single gateway process holding all sessions in memory, with chat clients as separate processes solely for vendor SDK isolation. Outbox/Inbox Protocols and the wire protocol carry over to v2 essentially unchanged — those are the parts that earned their rent."
-    design: "designs/historical/client-server-architecture.md"
-    related_concepts: [gateway_channels, command_routing, pluggable_architecture, single_process_gateway]
-    plans: ["plans/2026-05-11-gateway-client-server.md"]
-    tasks: []
 
   single_process_gateway:
-    replaces: [client_server_architecture, gateway_channels]
-    description: "channels v2. Single-process gateway: one agentm gateway daemon holds all sessions in memory and serves all chat-client peers. Wire protocol exists only for chat-client vendor SDK isolation (lark_oapi, Textual). No separate worker process — earlier daemon/worker split carried v1 abstractions whose isolation/distribution properties were not actually needed at this codebase's scale. Daemon imports agentm.core directly. Sessions live as dict[session_key, AgentSession] in daemon memory; persistence via ChatSessionMap (session_key → session_id) for crash recovery only. session_key is chat-client-computed (channel:chat_id default, optionally thread_id/sender_id), opaque to gateway. wire_driver atom (~80 LoC, §11 contract) is the only new code: translates session events to outbound envelopes via api.set_service / api.get_service / @api.on. peer_send is removed (not ported): no users, and its same-process wait_for_reply semantics are a redundant sibling of sub_agent; cross-peer/a2a messaging is out of scope until a concrete need appears. sub_agent works unchanged (child sessions in same dict). Three pluggability Protocols: OutboxStore, InboxLog, Authenticator — all with default impls, no hidden optional-method surfaces. Seven wire kinds (down from 11): hello/welcome, inbound/outbound, ack, ping/pong, error. Envelope is minimal: v, id, kind, ts, session_key, scenario, body; routing primitives (to/correlation_id/hops/root_session_key/session_id) all deleted because there's no cross-process routing. No worker pool, no spawn-on-demand, no inactivity timeout, no --resume normal path, no --inproc-worker mode. Approval: same-process Future map in ApprovalManager; identity check against original requester's sender_id; chat-client renders card. Commands: /help, /status synthesised locally; /new shuts down session keeping ChatSessionMap (next message resumes from transcript); /end shuts down + clears map (fresh session); /skill:X and /<markdown> expanded server-side and fall through to session; /atom:install/uninstall mutates session atom registry directly. CLI: agentm gateway subcommand alongside existing agentm prompt and agentm trace; agentm-feishu and agentm-terminal stay as separate binaries (vendor SDK isolation only); agentm-worker deleted. Single-jump rewrite — no compat with v0 or v1; v1 hello → error{unsupported_wire_version}. Fail-stop test set is ~40 tests covering wire round-trip, outbox/inbox semantics, Router three-case dispatch, SessionManager get_or_create + resume, CommandRouter handler classes, ApprovalManager identity check + timeout, wire_driver atom translation, auth, wire version negotiation."
+    description: "channels v2. Single-process gateway: one agentm gateway daemon holds all sessions in memory and serves all chat-client peers. Wire protocol exists only for chat-client vendor SDK isolation (lark_oapi, Textual). No separate worker process — earlier daemon/worker split carried v1 abstractions whose isolation/distribution properties were not actually needed at this codebase's scale. Daemon imports agentm.core directly. Sessions live as dict[session_key, AgentSession] in daemon memory; persistence via ChatSessionMap (session_key → session_id) for crash recovery only. session_key is chat-client-computed (channel:chat_id default, optionally thread_id/sender_id), opaque to gateway. wire_driver atom (~150 LoC, §11 contract) is the only new code: translates session events to outbound envelopes via api.set_service / api.get_service / @api.on. peer_send is removed (not ported): no users, and its same-process wait_for_reply semantics are a redundant sibling of sub_agent; cross-peer/a2a messaging is out of scope until a concrete need appears. sub_agent works unchanged (child sessions in same dict). Three pluggability Protocols: OutboxStore, InboxLog, Authenticator — all with default impls, no hidden optional-method surfaces. Seven wire kinds (down from 11): hello/welcome, inbound/outbound, ack, ping/pong, error. Envelope is minimal: v, id, kind, ts, session_key, scenario, body; routing primitives (to/correlation_id/hops/root_session_key/session_id) all deleted because there's no cross-process routing. No worker pool, no spawn-on-demand, no inactivity timeout, no --resume normal path, no --inproc-worker mode. Approval: same-process Future map in ApprovalManager; identity check against original requester's sender_id; chat-client renders card. Commands: /help, /status synthesised locally; /new shuts down session keeping ChatSessionMap (next message resumes from transcript); /end shuts down + clears map (fresh session); /skill:X and /<markdown> expanded server-side and fall through to session; /atom:install/uninstall mutates session atom registry directly. CLI: agentm gateway subcommand alongside existing agentm prompt and agentm trace; agentm-feishu and agentm-terminal stay as separate binaries (vendor SDK isolation only); agentm-worker deleted. Single-jump rewrite — no compat with v0 or v1; v1 hello → error{unsupported_wire_version}. Fail-stop test set is ~40 tests covering wire round-trip, outbox/inbox semantics, Router three-case dispatch, SessionManager get_or_create + resume, CommandRouter handler classes, ApprovalManager identity check + timeout, wire_driver atom translation, auth, wire version negotiation."
     design: "designs/single-process-gateway.md"
     related_concepts: [pluggable_architecture, command_routing, single_file_extension_contract, sub_agent_lifecycle, session_inbox]
-    plans: ["plans/2026-05-28-single-process-gateway.md"]
-    tasks: []
 
   command_routing:
     description: "Slash command layer for the gateway. User-typed messages starting with '/' are intercepted before reaching the LLM — control commands mutate gateway/session state, prompt commands expand a template and fall through to session.prompt(). Unknown commands are rejected (never forwarded to model). Four handler kinds under one CommandHandler Protocol: BuiltinControl (Python in commands/builtins/), MarkdownPrompt (cwd/.agentm/commands/*.md with frontmatter+$ARGUMENTS), SkillCommand (auto-generated from skill directories; expands SKILL.md as one-turn injection), AtomCommand (PR #2; MANIFEST opt-in via mountable_via_command + gateway whitelist; mounts/unmounts atoms against a per-session runtime scenario overlay copied from contrib/scenarios/<name>/manifest.yaml into <state_dir>/scenarios/<session_key>/ so kernel mutations never touch source files). Namespacing: /name for builtin/markdown, /skill:name and /atom:name for the others — provenance visible in /help. Discovery is data-driven for non-builtin kinds (filesystem walk, MANIFEST lookup). Parallels Claude Code's slash-command + skill + plugin design but keeps AgentM's atom concept explicit and auditable (every mount produces a catalog event via self_modifiable_architecture's existing reload primitive)."
     design: "designs/command-routing.md"
-    related_concepts: [gateway_channels, pluggable_architecture, self_modifiable_architecture, single_file_extension_contract]
-    plans: ["plans/2026-05-11-gateway-command-layer.md"]
-    tasks: []
+    related_concepts: [single_process_gateway, pluggable_architecture, self_modifiable_architecture, single_file_extension_contract]
 
   mcp_integration:
     status: draft
     description: "MCP (Model Context Protocol) client bridge as a package-form contrib atom at contrib/extensions/mcp_bridge/. Talks the MCP wire via the official `mcp` Python SDK (stdio + streamable-HTTP transports; SSE / prompts / resources / sampling deferred). Lives on the Tool Environment pluggability axis — no new ABI. `install(api, config)` is async: connects every configured server, calls tools/list ONCE per server (install-time snapshot), wraps each remote tool as an MCPTool registered via api.register_tool with name mcp__<server>__<tool>, publishes an MCPSessionManager via api.set_service('mcp', manager) for follow-up atoms to reuse, and subscribes SessionShutdownEvent for transport teardown. Snapshot semantics chosen over runtime discovery — aligns with AgentM's freeze/atom-hash model; any connect or schema failure raises so partial tool sets never reach the catalog; `notifications/tools/list_changed` is intentionally ignored (logged then discarded; users restart the session to pick up new tools). MCPTool.execute races call_tool against both the cancellation signal and a configurable timeout (`timeout_seconds`, default 30s) so a hung server cannot stall the loop. ${VAR} interpolation in server config reads from os.environ for header/env secrets. Permission integration is deny-by-default — scenarios must explicitly allow mcp__* prefixes (not auto-registered by the bridge). Test seam is module-level (set_test_session_factory) so the public config schema stays clean. Ships with contrib/scenarios/mcp_demo/ as a smoke-test composition over general_purpose. NOT enrolled in the default scenario."
     design: "designs/mcp-integration.md"
     related_concepts: [pluggable_architecture, extension_as_scenario, single_file_extension_contract]
-    plans: []
-    tasks: []

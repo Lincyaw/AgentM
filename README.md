@@ -177,13 +177,16 @@ agentm --help                   # full flag list (--scenario, --extension,
                                 # --resume, --continue, --tools, ...)
 
 ls contrib/scenarios/           # shipped scenarios: general_purpose,
-                                # agent_env, format_fix, mcp_demo,
-                                # rca, rca_hfsm
+                                # agent_env, chatbot, format_fix,
+                                # mcp_demo, rca, rca_hfsm, auditor,
+                                # verifier
 ```
 
-Other subcommands ship from sibling packages: `agentm gateway`,
-`agentm terminal`, `agentm worker`, `agentm feishu`. Run
-`agentm <sub> --help` for their flags.
+Beyond the one-shot prompt, `agentm` has two subcommands: `agentm gateway`
+(single-process gateway holding all chat sessions in memory) and `agentm trace`
+(query the OTLP/JSON session log). The chat-client peers ship as **separate
+binaries** for vendor-SDK isolation only — `agentm-terminal` and
+`agentm-feishu`. Run `agentm <sub> --help` or `<binary> --help` for flags.
 
 ## Five pluggability axes
 

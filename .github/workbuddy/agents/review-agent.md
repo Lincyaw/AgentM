@@ -132,9 +132,6 @@ uv run pytest --tb=short
       `validate_index.py` reports 0 violations.
 - [ ] If a design concept in `.claude/index.yaml` is touched: design
       doc updated, related concepts walked, `index.yaml` updated.
-- [ ] If implementation work happened: a new entry appended under
-      `.claude/plans/` or `.claude/tasks/` (append-only — existing
-      entries untouched).
 
 ## 7. Verdict
 

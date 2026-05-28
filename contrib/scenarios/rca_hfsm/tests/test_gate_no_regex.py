@@ -21,8 +21,7 @@ The same checks run against ``updates.py`` to catch any rule that leaked
 back into the shared pure-data module (the C2 refactor stripped that
 module down to data types + light shape preconditions).
 
-See ``.claude/designs/llm-native-judges.md`` §8 and
-``.claude/plans/2026-05-13-rca-hfsm-phase2-llm-native-judges.md`` C2.
+See ``.claude/designs/llm-native-judges.md`` §8.
 """
 
 from __future__ import annotations

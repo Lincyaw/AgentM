@@ -8,9 +8,7 @@ Protocols.
 
 See ``.claude/designs/single-process-gateway.md`` §2.6 for the
 delivery semantics this surface supports (at-least-once outbound,
-at-most-once-with-ack inbound, dead-letter on retry exhaustion). The
-detailed reliability rationale lives in the historical v1 design,
-``.claude/designs/historical/client-server-architecture.md`` §4.5.
+at-most-once-with-ack inbound, dead-letter on retry exhaustion).
 
 Mechanism only — retry/backoff policy lives in
 :mod:`agentm.gateway.outbox.policy` so callers (the server) decide
