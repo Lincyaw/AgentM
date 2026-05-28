@@ -161,6 +161,16 @@ For sweeping changes, mirror that scope locally.
 - `decisions.md` — long-horizon autonomous decisions (L2+).
 - `.claude/{plans,tasks}/` — append-only design history.
 
+## Autonomy level: high
+
+(Per `/autoharness:long-horizon`. Decide through L4 autonomously, log in
+`decisions.md`, flag L4 entries with `[flagged]` for post-hoc review.
+Self-merge small / low-risk PRs (docs, single-atom cleanups, polish) once
+CI is green and any boundary review is clean. Escalate to the user only
+for: large/architectural PRs (hand off for review before merge),
+strategic drift (north-star changes, scope creep), access/credentials,
+or genuinely ambiguous requirements that research cannot resolve.)
+
 ## Conventions
 
 - **Language**: code, comments, commits, design docs in English;
