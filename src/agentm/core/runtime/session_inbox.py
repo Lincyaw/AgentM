@@ -111,14 +111,17 @@ class SessionInbox:
 def render_item(item: InboxItem) -> AgentMessage:
     """Render an :class:`InboxItem` into an :class:`AgentMessage`.
 
-    Handles ``source="user"`` → :class:`UserMessage` (step 1) and
+    Handles ``source="user"`` → :class:`UserMessage` (step 1),
     ``source="background"`` → a ``<system-reminder>``-wrapped
     :class:`UserMessage` (step 3: auto-backgrounding completion / ticker
-    status). Both land as new ``user`` messages so the prefix stays stable and
-    the KV/prefix cache survives (no synthetic ``tool_result``, which would
-    need a live ``tool_call_id`` the inbox does not carry at drain time).
-    Other sources are reserved for later steps (monitor / subagent) and raise
-    until then so a mis-routed item fails loudly rather than landing wrong.
+    status), and ``source="monitor"`` → the same ``<system-reminder>``-wrapped
+    :class:`UserMessage` shape (step 4: agent-defined wakeups + channel
+    subscriptions). All three land as new ``user`` messages so the prefix
+    stays stable and the KV/prefix cache survives (no synthetic
+    ``tool_result``, which would need a live ``tool_call_id`` the inbox does
+    not carry at drain time). Other sources are reserved for later steps
+    (subagent) and raise until then so a mis-routed item fails loudly rather
+    than landing wrong.
     """
 
     if item.source == "user":
@@ -129,7 +132,7 @@ def render_item(item: InboxItem) -> AgentMessage:
             content = list(item.payload)
         return UserMessage(role="user", content=content, timestamp=time.time())
 
-    if item.source == "background":
+    if item.source in ("background", "monitor"):
         text = item.payload if isinstance(item.payload, str) else str(item.payload)
         wrapped = f"<system-reminder>\n{text}\n</system-reminder>"
         return UserMessage(
@@ -140,7 +143,7 @@ def render_item(item: InboxItem) -> AgentMessage:
 
     raise NotImplementedError(
         f"SessionInbox.render_item: source {item.source!r} is not handled "
-        f"(only 'user' / 'background'); later steps add monitor/subagent "
+        f"(only 'user' / 'background' / 'monitor'); later steps add subagent "
         f"rendering."
     )
 

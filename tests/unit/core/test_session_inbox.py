@@ -101,10 +101,21 @@ def test_render_background_item_to_system_reminder() -> None:
     assert "task 7 finished" in msg.content[0].text
 
 
+def test_render_monitor_item_to_system_reminder() -> None:
+    # Step 4: monitor wakeups / channel fires use the same
+    # <system-reminder>-wrapped UserMessage shape as background — same
+    # cache-stability reasons.
+    msg = render_item(InboxItem(source="monitor", payload="wakeup fired"))
+    assert msg.role == "user"
+    assert msg.content[0].type == "text"
+    assert "<system-reminder>" in msg.content[0].text
+    assert "wakeup fired" in msg.content[0].text
+
+
 def test_render_unknown_source_raises() -> None:
-    # Sources not yet wired (monitor/subagent) must still fail loudly.
+    # Sources not yet wired (subagent) must still fail loudly.
     with pytest.raises(NotImplementedError):
-        render_item(InboxItem(source="monitor", payload="x"))
+        render_item(InboxItem(source="subagent", payload="x"))
 
 
 @pytest.mark.asyncio
