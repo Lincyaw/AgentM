@@ -65,10 +65,8 @@ members = [
     "contrib/extensions/mcp_bridge",
     "contrib/scenarios/rca",
     "contrib/scenarios/rca_hfsm",
-    "contrib/channels",
-    "contrib/channels-clients/terminal",
-    "contrib/channels-clients/feishu",
-    "contrib/channels-clients/worker",
+    "contrib/gateway-peers/terminal",
+    "contrib/gateway-peers/feishu",
 ]
 
 # Resolve the agent-env plugin to the in-workspace member (editable) for dev;
@@ -89,7 +87,7 @@ markers = [
 # Nested workspace projects own their own tests/ trees and pyproject. The
 # top-level pytest must not recurse into them — both define a ``tests``
 # package and the import paths collide.
-addopts = "-m 'not ui' --ignore=contrib/extensions/agentenv --ignore=contrib/extensions/llmharness --ignore=contrib/extensions/mcp_bridge --ignore=contrib/scenarios/rca --ignore=contrib/scenarios/rca_hfsm --ignore=contrib/channels --ignore=contrib/channels-clients"
+addopts = "-m 'not ui' --ignore=contrib/extensions/agentenv --ignore=contrib/extensions/llmharness --ignore=contrib/extensions/mcp_bridge --ignore=contrib/scenarios/rca --ignore=contrib/scenarios/rca_hfsm --ignore=contrib/gateway-peers"
 
 [tool.mypy]
 python_version = "3.12"
