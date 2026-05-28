@@ -200,6 +200,20 @@ class AgentSession:
         # the running event loop (the async factory awaits ``create``), so
         # ``create_task`` is safe here. The driver runs forever until
         # ``shutdown`` flips ``_closed`` and kicks the inbox.
+        #
+        # Footgun guard: anyone bypassing the ``AgentSession.create`` factory
+        # to construct synchronously will hit ``RuntimeError: no running
+        # event loop`` from ``create_task`` below. Surface that contract
+        # explicitly so the failure says WHY rather than dumping a stdlib
+        # backtrace at the caller.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "AgentSession must be constructed inside a running asyncio "
+                "event loop (use ``AgentSession.create``; the persistent "
+                "driver task cannot be scheduled without a loop)"
+            ) from exc
         self._driver_task: asyncio.Task[None] = asyncio.create_task(
             self._driver(), name=f"agentm-session-driver-{session_id}"
         )
@@ -235,7 +249,7 @@ class AgentSession:
 
     def _drain_inbox_and_persist(
         self, *, messages: list[AgentMessage]
-    ) -> int:
+    ) -> None:
         """Drain the inbox into the live turn message list and persist.
 
         Called from the ``context`` handler at the top of each kernel turn
@@ -243,17 +257,45 @@ class AgentSession:
         turn's live list. For each drained item we render it, persist it
         via the session manager (so a mid-run kill still leaves every
         message on disk — same contract as loop.py:609), and append it to
-        ``messages`` so the LLM sees it on this very turn. Returns the
-        count purely as a diagnostic.
+        ``messages`` so the LLM sees it on this very turn.
         """
 
-        count = 0
         for item in self._inbox.drain():
             rendered = render_item(item)
             self._session_manager.append_message(rendered)
             messages.append(rendered)
-            count += 1
-        return count
+
+    def _drain_inbox_on_early_return(self, reason: str) -> None:
+        """Drain (discard) the inbox after a pre-context-event early return.
+
+        The kernel's ``context`` event only fires from inside ``_loop.run``;
+        any path that leaves ``_run_one_round`` BEFORE the loop is entered
+        (a sticky veto from ``before_agent_start``, an exception during
+        context build or ``before_agent_start`` itself, etc.) leaves the
+        originating push queued — ``_nonempty`` stays set, ``wait_nonempty``
+        returns immediately on the next driver iteration, and the driver
+        tight-loops on the same failure (burning CPU even though the
+        prompt waiter already saw an ``agent_end``). Every such site
+        MUST call this helper after emitting ``agent_end`` / failing the
+        waiter so the next iteration parks until a fresh push arrives.
+
+        Discard semantics match the existing exception path: the user's
+        prompt waiter has already been resolved (cleanly via ``agent_end``
+        or with the exception via ``_fail_end_waiters``), so silently
+        re-running the vetoed/failed work on the queued message would be
+        wrong. If the user wants to try again they re-push.
+        """
+
+        drained = self._inbox.drain()
+        if drained:
+            logger.warning(
+                "agentm session driver: discarded %d undrained inbox "
+                "item(s) after a pre-context-event early return (%s; "
+                "sources=%r) to avoid driver spin",
+                len(drained),
+                reason,
+                [item.source for item in drained],
+            )
 
     def _on_message_persisted(self, event: MessagePersistedEvent) -> None:
         leaf = self._session_manager.get_leaf_id()
@@ -490,6 +532,13 @@ class AgentSession:
                 for injected_msg in action.messages:
                     self._session_manager.append_message(injected_msg)
                 waiter = self._subscribe_end_waiter()
+                # Asymmetry NB: ``kick()`` here wakes the driver even though
+                # the inbox is empty — the injected messages went into the
+                # session log directly above, not via inbox push. ``kick`` is
+                # purely the wake-up signal in this path, not a "drain me"
+                # prompt. See ``SessionInbox.kick`` docstring. (The other
+                # tick callsite, ``self._inbox.is_empty() == False`` branch
+                # above, kicks for genuine inbox content.)
                 self._inbox.kick()
                 launched_run = True
                 await waiter
@@ -588,30 +637,16 @@ class AgentSession:
                 # never going to see ``agent_end`` (the run died before
                 # emitting it).
                 self._fail_end_waiters(exc)
-                # Pre-first-turn failures (build_session_context /
-                # before_agent_start / agent_start) raise BEFORE the kernel
-                # emits its first ``context`` event, so the inbox never got
-                # drained — its ``_nonempty`` flag stays set, ``wait_nonempty``
-                # would return immediately on the next iteration, and the
-                # driver would tight-loop on a persistent failure (e.g. a
-                # before_agent_start handler that always raises). Drain
-                # (discarding) here so the next iteration parks on
-                # ``wait_nonempty`` until a fresh push arrives. The discard
-                # is acceptable for MVP: the failure already logged via
-                # ``logger.exception`` above, and the originating push's
-                # waiter (if any) was rejected with ``exc`` via
-                # ``_fail_end_waiters``. Post-first-turn failures (stream
-                # raises mid-turn) have already drained the inbox via the
-                # ``context`` handler, so the drain here is a no-op for them.
-                drained = self._inbox.drain()
-                if drained:
-                    logger.warning(
-                        "agentm session driver: discarded %d undrained "
-                        "inbox item(s) after a pre-first-turn round failure "
-                        "(sources=%r) to avoid driver spin",
-                        len(drained),
-                        [item.source for item in drained],
-                    )
+                # Pre-context-event failure: drain the originating push so
+                # the driver parks instead of tight-looping on the same
+                # failure. Post-first-turn failures (stream raises mid-turn)
+                # have already drained the inbox via the kernel ``context``
+                # handler, so this call is a no-op for them. See the helper
+                # docstring; sibling site is the veto branch in
+                # ``_run_one_round``.
+                self._drain_inbox_on_early_return(
+                    f"pre-first-turn exception: {type(exc).__name__}"
+                )
             # An ``interrupt()`` that fired during the round leaves the
             # signal set; clear it so the next round starts clean. We do
             # NOT clear at the top of ``_run_one_round`` because the kernel
@@ -668,6 +703,13 @@ class AgentSession:
                 await self._bus.emit(
                     AgentEndEvent.CHANNEL,
                     AgentEndEvent(messages=messages, cause=veto_cause),
+                )
+                # Pre-context-event early return: drain the originating
+                # push so the driver parks instead of tight-looping on the
+                # still-queued item (sibling of the exception-path drain
+                # in ``_driver``; both call ``_drain_inbox_on_early_return``).
+                self._drain_inbox_on_early_return(
+                    f"before_agent_start veto: {type(veto_cause).__name__}"
                 )
                 return messages
             replacement_system = collect_system_replacement(before_returns)
@@ -793,9 +835,16 @@ class AgentSession:
                 pass
         except asyncio.CancelledError:
             pass
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Log the exception class explicitly so an embedding host can
+            # tell "clean shutdown" from "driver crashed during shutdown"
+            # from the log line alone (``logger.exception`` still attaches
+            # the traceback). A future ``shutdown(strict=True)`` could
+            # re-raise after the bus is drained for hosts that want to
+            # propagate the failure; tracked as a follow-up.
             logger.exception(
-                "agentm session driver: shutdown await raised; continuing"
+                "agentm session driver: shutdown await raised (%s); continuing",
+                type(exc).__name__,
             )
 
         # Any prompt/tick still parked on a waiter will never see its

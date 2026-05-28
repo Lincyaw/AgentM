@@ -33,11 +33,13 @@ import pytest
 from agentm.core.abi import (
     AgentEndEvent,
     AssistantMessage,
+    BudgetExhausted,
     MessageEnd,
     Model,
     NoPendingInput,
     TextContent,
 )
+from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ProviderConfig
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
@@ -823,6 +825,97 @@ async def test_driver_parks_after_pre_first_turn_failure_no_spin(
             # (shutdown reads session.session_manager.get_messages but
             # not build, so technically optional; restore for safety).
             session.session_manager.build_session_context = original_build  # type: ignore[method-assign]
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_driver_parks_after_sticky_veto_no_spin(tmp_path: Path) -> None:
+    """External-review follow-up to step-5 Major-3 (sibling pattern): a
+    sticky ``before_agent_start`` veto with a non-empty inbox MUST NOT
+    tight-loop the driver.
+
+    Reproducer: ``_run_one_round`` collects a veto from
+    ``before_agent_start``, emits ``agent_end``, and returns BEFORE the
+    kernel's first ``context`` event fires — so the originating push is
+    still queued in the inbox, ``_nonempty`` stays set, ``wait_nonempty``
+    returns immediately on the next driver iteration, and the driver
+    re-runs the same veto at CPU speed. The user's ``prompt`` already
+    resolved via the first ``agent_end``, so this is invisible until you
+    notice the burning CPU.
+
+    The fix calls ``_drain_inbox_on_early_return`` on the veto path
+    (mirroring the ``_driver`` except branch) so the next iteration parks
+    on ``wait_nonempty`` until a fresh push.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._driver_parks_veto_{id(tmp_path)}"
+
+    veto_calls = [0]
+    stream_calls = [0]
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del messages, model, tools, system, signal, thinking
+        # Should never fire: the veto returns before ``_loop.run``.
+        stream_calls[0] += 1
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text="unreachable")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    def _sticky_veto(_event: Any) -> dict[str, Any]:
+        veto_calls[0] += 1
+        return {
+            "block": True,
+            "cause": BudgetExhausted(detail="sticky-veto test"),
+        }
+
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        # Subscribe at default priority — runs alongside any production
+        # before_agent_start handlers; ``collect_start_veto`` picks any
+        # ``block=True`` return regardless of order.
+        session._bus.on(BeforeAgentStartEvent.CHANNEL, _sticky_veto)
+
+        # First prompt resolves cleanly via the veto's ``agent_end``.
+        await _aio.wait_for(session.prompt("kick"), timeout=2.0)
+        # ``loop.run`` was never entered (veto fired pre-run).
+        assert stream_calls[0] == 0
+
+        count_after_first = veto_calls[0]
+        assert count_after_first == 1, (
+            f"originating push should drive exactly one veto attempt; "
+            f"got {count_after_first}"
+        )
+
+        # Let many event-loop ticks pass. Before the fix the driver
+        # would tight-loop on the still-queued user message and the veto
+        # handler call count would climb without bound.
+        for _ in range(100):
+            await _aio.sleep(0)
+        await _aio.sleep(0.1)
+
+        assert veto_calls[0] == count_after_first, (
+            f"driver tight-looped on sticky veto: before_agent_start "
+            f"called {veto_calls[0]} times after the originating push "
+            f"(expected exactly {count_after_first})"
+        )
+        # Stream still never reached.
+        assert stream_calls[0] == 0
     finally:
         await session.shutdown()
         sys.modules.pop(module_name, None)

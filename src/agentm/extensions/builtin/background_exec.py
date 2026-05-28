@@ -432,8 +432,9 @@ class _BgManager:
         # Terminal-from-background simplification (step 3): a backgrounded tool
         # that ultimately returns ToolTerminate is injected as an ordinary
         # completion — the terminate intent does NOT stop the loop here.
-        # TODO(step 5): once the persistent driver exists, route a backgrounded
-        # ToolTerminate so it can actually end the loop.
+        # TODO(#177): route a backgrounded ToolTerminate through loop
+        # termination (likely via a new InboxItem.terminal flag or a dedicated
+        # source so the driver/floor respects the terminate intent).
         state.status = _COMPLETED
         self._finalize(state)
 

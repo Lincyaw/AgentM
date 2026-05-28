@@ -262,6 +262,7 @@ class _MonitorManager:
         MVP supports bus-channel form only. The (deferred) condition-polling
         branch returns a tool-error result rather than silently doing nothing,
         so the agent gets explicit feedback that the form is not yet supported.
+        Tracked as #178; re-introduce ``_KIND_CONDITION`` when it lands.
         """
 
         condition = args.get("condition")
