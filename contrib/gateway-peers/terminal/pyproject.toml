@@ -39,3 +39,6 @@ agentm = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = ["ui: tests for the Textual TUI rendering layer (opt-in)"]
+# TUI render tests are opt-in (run with `-m ui`), matching the repo root.
+addopts = "-m 'not ui'"
