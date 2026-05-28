@@ -96,35 +96,58 @@ def test_render_user_item_to_user_message() -> None:
 def test_render_background_item_to_system_reminder() -> None:
     # Step 3: background completion / ticker → a <system-reminder>-wrapped
     # user message (append-only, cache-stable; no synthetic tool_result).
+    # The source attribute on the wrapper lets the agent distinguish bg from
+    # monitor / subagent textually (#176 post-merge polish).
     msg = render_item(InboxItem(source="background", payload="task 7 finished"))
     assert msg.role == "user"
     assert msg.content[0].type == "text"
-    assert "<system-reminder>" in msg.content[0].text
+    assert '<system-reminder source="background">' in msg.content[0].text
     assert "task 7 finished" in msg.content[0].text
 
 
 def test_render_monitor_item_to_system_reminder() -> None:
-    # Step 4: monitor wakeups / channel fires use the same
-    # <system-reminder>-wrapped UserMessage shape as background — same
-    # cache-stability reasons.
+    # Step 4: monitor wakeups / channel fires use the same wrapper shape as
+    # background but with a different source attribute.
     msg = render_item(InboxItem(source="monitor", payload="wakeup fired"))
     assert msg.role == "user"
     assert msg.content[0].type == "text"
-    assert "<system-reminder>" in msg.content[0].text
+    assert '<system-reminder source="monitor">' in msg.content[0].text
     assert "wakeup fired" in msg.content[0].text
 
 
 def test_render_subagent_item_to_system_reminder() -> None:
-    # Step 5b: sub_agent findings posted via api.post_inbox(source="subagent")
-    # use the same <system-reminder>-wrapped UserMessage shape as background /
-    # monitor — same cache-stability reasons.
+    # Step 5b: sub_agent findings posted via api.post_inbox(source="subagent").
     msg = render_item(
         InboxItem(source="subagent", payload="<subagent_result task_id=t1 />")
     )
     assert msg.role == "user"
     assert msg.content[0].type == "text"
-    assert "<system-reminder>" in msg.content[0].text
+    assert '<system-reminder source="subagent">' in msg.content[0].text
     assert "<subagent_result" in msg.content[0].text
+
+
+def test_render_source_tag_is_per_source_distinct() -> None:
+    """Fail-stop: the ``source="..."`` attribute on the wrapper MUST distinguish
+    background / monitor / subagent — that is the whole reason the attribute
+    exists. A silent regression to a single un-attributed wrapper (or to the
+    same attribute across all three) would re-introduce the producer-ambiguity
+    that #176 post-merge E2E surfaced — the agent could no longer route a
+    reminder textually back to its producer.
+    """
+
+    tags = {
+        source: render_item(InboxItem(source=source, payload="x")).content[0].text
+        for source in ("background", "monitor", "subagent")
+    }
+    # Each render carries its own source tag verbatim.
+    for source, text in tags.items():
+        assert f'<system-reminder source="{source}">' in text, (
+            f"{source}: tag missing or wrong — got {text!r}"
+        )
+    # And the three are mutually distinguishable (no shared prefix substring
+    # that would let the agent confuse them).
+    rendered_tags = {text.split("\n", 1)[0] for text in tags.values()}
+    assert len(rendered_tags) == 3, f"sources collapsed to {rendered_tags!r}"
 
 
 def test_render_unknown_source_raises() -> None:

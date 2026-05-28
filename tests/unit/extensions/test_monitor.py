@@ -474,15 +474,16 @@ async def test_install_propagates_event_summary_max_chars() -> None:
 
 
 def test_render_item_monitor_source_renders() -> None:
-    """``source="monitor"`` lands as a <system-reminder>-wrapped user message
-    (cache-stable, same shape as ``background``)."""
+    """``source="monitor"`` lands as a ``<system-reminder source="monitor">``-
+    wrapped user message (cache-stable, same shape as ``background`` /
+    ``subagent`` but distinguished by the wrapper's source attribute)."""
 
     msg = render_item(
         InboxItem(source="monitor", payload="wakeup fired", dedup_key="k")
     )
     assert msg.role == "user"
     assert msg.content[0].type == "text"
-    assert "<system-reminder>" in msg.content[0].text
+    assert '<system-reminder source="monitor">' in msg.content[0].text
     assert "wakeup fired" in msg.content[0].text
 
 
