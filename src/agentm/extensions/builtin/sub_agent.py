@@ -35,6 +35,11 @@ from agentm.core.abi import (
 )
 from agentm.core.lib import to_jsonable
 from agentm.core.lib.artifact_files import list_artifacts_for_task
+from agentm.core.lib.background_tasks import (
+    BackgroundTask,
+    BackgroundTaskRegistry,
+    SlotLimitReached,
+)
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 from agentm.core.abi.events import (
@@ -106,13 +111,17 @@ MANIFEST = ExtensionManifest(
 )
 
 
-@dataclass(slots=True)
-class _ChildTask:
-    task_id: str
+@dataclass(slots=True, kw_only=True)
+class _ChildTask(BackgroundTask):
+    """A dispatched child session, carried as a :class:`BackgroundTask`.
+
+    The generic asyncio bits (``task_id`` / ``task`` / ``abort_signal`` /
+    ``status`` / ``read``) live on the base and are managed by the registry;
+    everything below is child-session-specific and managed by this atom.
+    """
+
     purpose: str
     session: Any
-    task: asyncio.Task[list[Any] | None]
-    abort_signal: asyncio.Event
     status: _Status = _RUNNING
     pending_instructions: list[str] = field(default_factory=list)
     final_messages: list[Any] | None = None
@@ -120,7 +129,6 @@ class _ChildTask:
     artifact_ids: list[str] = field(default_factory=list)
     artifact_refs: list[dict[str, str]] = field(default_factory=list)
     error: str | None = None
-    read: bool = False
     applied_budget: dict[str, int] = field(default_factory=dict)
 
 
@@ -485,17 +493,17 @@ class _ChildTaskManager:
         self._api = api
         self._inherit_extensions = inherit_extensions
         self._available_inherited = available_inherited
-        self._max_workers = max_workers
         self._system_prompt_module = system_prompt_module
-        self._registry: dict[str, _ChildTask] = {}
-        self._registry_lock = asyncio.Lock()
-        self._reserved_slots = 0
+        self._max_workers = max_workers
+        self._registry: BackgroundTaskRegistry[_ChildTask] = BackgroundTaskRegistry(
+            max_workers=max_workers
+        )
         self._parent_session_id = "unknown"
         self._root_session_id = "unknown"
         self._running_only_cancels = 0
 
     async def _reset_running_only_cancels(self) -> None:
-        async with self._registry_lock:
+        async with self._registry.lock:
             self._running_only_cancels = 0
 
     async def _abort_running_states(
@@ -509,7 +517,7 @@ class _ChildTaskManager:
             [state.task for state in running],
             timeout=_SHUTDOWN_GRACE_SECONDS,
         )
-        async with self._registry_lock:
+        async with self._registry.lock:
             terminal: list[_ChildTask] = []
             for state in running:
                 if _is_terminal(state.status):
@@ -527,7 +535,7 @@ class _ChildTaskManager:
         return None
 
     async def _drain_instructions(self, state: _ChildTask) -> str | None:
-        async with self._registry_lock:
+        async with self._registry.lock:
             if not state.pending_instructions:
                 return None
             batched = "\n\n".join(state.pending_instructions)
@@ -682,21 +690,18 @@ class _ChildTaskManager:
                 )
             )
 
-        async with self._registry_lock:
-            running_children = sum(
-                1 for child in self._registry.values() if child.status == _RUNNING
+        try:
+            await self._registry.reserve_slot()
+        except SlotLimitReached:
+            return _tool_result(
+                {
+                    "error": (
+                        f"max_workers limit reached ({self._max_workers}); "
+                        "refusing to dispatch another child"
+                    )
+                },
+                is_error=True,
             )
-            if running_children + self._reserved_slots >= self._max_workers:
-                return _tool_result(
-                    {
-                        "error": (
-                            f"max_workers limit reached ({self._max_workers}); "
-                            "refusing to dispatch another child"
-                        )
-                    },
-                    is_error=True,
-                )
-            self._reserved_slots += 1
 
         # provider=None → spawn_child_session auto-wires the
         # inherit_provider builtin so the child re-uses the parent's
@@ -714,8 +719,7 @@ class _ChildTaskManager:
         try:
             child = await self._api.spawn_child_session(**child_config)
         except Exception as exc:  # noqa: BLE001
-            async with self._registry_lock:
-                self._reserved_slots -= 1
+            await self._registry.release_slot()
             return _tool_result(
                 {
                     "error": (
@@ -737,9 +741,7 @@ class _ChildTaskManager:
         state.task = asyncio.create_task(
             self._run_child(state=state, initial_prompt=prompt)
         )
-        async with self._registry_lock:
-            self._reserved_slots -= 1
-            self._registry[task_id] = state
+        await self._registry.register(state)
         return _tool_result(
             {
                 "task_id": task_id,
@@ -751,16 +753,9 @@ class _ChildTaskManager:
 
     async def check_tasks(self, _args: dict[str, Any]) -> ToolResult:
         await self._reset_running_only_cancels()
-        async with self._registry_lock:
-            running = [
-                child.task
-                for child in self._registry.values()
-                if child.status == _RUNNING
-            ]
-        if running:
-            await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
-        async with self._registry_lock:
-            tasks = list(self._registry.values())
+        await self._registry.poll_first_completed()
+        async with self._registry.lock:
+            tasks = self._registry.values()
             for state in tasks:
                 if _is_terminal(state.status):
                     state.read = True
@@ -769,16 +764,13 @@ class _ChildTaskManager:
     async def wait_subagent(self, args: dict[str, Any]) -> ToolResult:
         await self._reset_running_only_cancels()
         task_id = str(args.get("task_id", ""))
-        async with self._registry_lock:
-            state = self._registry.get(task_id)
-            if state is None:
+        async with self._registry.lock:
+            if self._registry.get(task_id) is None:
                 return _tool_result(
                     {"error": f"unknown task_id: {task_id}"}, is_error=True
                 )
-            task = state.task
-        if state.status == _RUNNING:
-            await task
-        async with self._registry_lock:
+        await self._registry.wait_one(task_id)
+        async with self._registry.lock:
             state = self._registry.get(task_id)
             assert state is not None
             if _is_terminal(state.status):
@@ -790,7 +782,7 @@ class _ChildTaskManager:
         await self._reset_running_only_cancels()
         task_id = str(args.get("task_id", ""))
         message = str(args.get("message", ""))
-        async with self._registry_lock:
+        async with self._registry.lock:
             state = self._registry.get(task_id)
             if state is None:
                 return _tool_result(
@@ -812,7 +804,11 @@ class _ChildTaskManager:
     async def abort(self, args: dict[str, Any]) -> ToolResult:
         await self._reset_running_only_cancels()
         task_id = str(args.get("task_id", ""))
-        async with self._registry_lock:
+        # The two distinct error messages (unknown vs already-terminal) are
+        # part of this tool's observable contract, so resolve the handle here
+        # rather than via the registry's status-collapsing ``cancel``; the
+        # abort itself is still ``abort_signal.set()`` under the registry lock.
+        async with self._registry.lock:
             state = self._registry.get(task_id)
             if state is None:
                 return _tool_result(
@@ -866,15 +862,14 @@ class _ChildTaskManager:
             else ""
         )
         should_auto_abort = False
-        async with self._registry_lock:
+        async with self._registry.lock:
+            states = self._registry.values()
             pending = [
                 state
-                for state in self._registry.values()
+                for state in states
                 if _is_terminal(state.status) and not state.read
             ]
-            running = [
-                state for state in self._registry.values() if state.status == _RUNNING
-            ]
+            running = [state for state in states if state.status == _RUNNING]
             if pending:
                 for state in pending:
                     state.read = True
@@ -908,8 +903,8 @@ class _ChildTaskManager:
         self._root_session_id = event.root_session_id
 
     async def on_session_shutdown(self, _event: SessionShutdownEvent) -> None:
-        async with self._registry_lock:
-            children = list(self._registry.values())
+        async with self._registry.lock:
+            children = self._registry.values()
         pending = [child for child in children if child.status == _RUNNING]
         if not pending:
             return

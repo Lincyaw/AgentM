@@ -22,6 +22,7 @@ by step 1, whose only driver is ``prompt``/``tick``'s run-to-idle.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -122,19 +123,13 @@ def render_item(item: InboxItem) -> AgentMessage:
             content = [TextContent(type="text", text=item.payload)]
         else:
             content = list(item.payload)
-        return UserMessage(role="user", content=content, timestamp=_now())
+        return UserMessage(role="user", content=content, timestamp=time.time())
 
     raise NotImplementedError(
         f"SessionInbox.render_item: source {item.source!r} is not handled in "
         f"step 1 (only 'user'); later steps add background/ticker/monitor/"
         f"subagent rendering."
     )
-
-
-def _now() -> float:
-    from agentm.core.runtime.session_helpers import now
-
-    return now()
 
 
 __all__ = ["InboxItem", "InboxSource", "SessionInbox", "render_item"]
