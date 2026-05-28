@@ -89,7 +89,9 @@ class _LifecycleProvider:
                         ts=2.0,
                     )
                 )
-            assert "<subagent_result" not in snapshot
+            # Step 5b: the finding arrives via the session inbox at the next
+            # turn boundary (a <system-reminder>-wrapped user message); the
+            # OLD floor-injected <subagent_result> branch is gone.
             return self._iter(_text_msg("done", ts=3.0))
 
         if self.mode == "wait_subagent":
@@ -116,7 +118,8 @@ class _LifecycleProvider:
                         ts=2.0,
                     )
                 )
-            assert "<subagent_result" not in snapshot
+            # Step 5b: same as the check_tasks mode — the finding now lands
+            # via the inbox-drain path, not the floor inject.
             return self._iter(_text_msg("done", ts=3.0))
 
         if self.mode == "auto_abort":
@@ -279,9 +282,16 @@ def _extensions(
 
 
 @pytest.mark.asyncio
-async def test_check_tasks_marks_results_read_so_decide_turn_action_does_not_redeliver(
+async def test_subagent_finding_arrives_via_inbox_after_next_turn_boundary(
     tmp_path: Path,
 ) -> None:
+    """Step 5b: a completed child's finding rides through
+    ``api.post_inbox(source="subagent")`` and lands as a
+    ``<system-reminder>``-wrapped user message on the next turn — replacing
+    the old ``decide_turn_action`` completed-unread inject branch. The
+    finding text (a ``<subagent_result>`` block) MUST appear in user
+    content; the previous "completed-unread is suppressed by ``check_tasks``"
+    assertion no longer holds (the inbox path is authoritative)."""
     provider = _LifecycleProvider("check_tasks")
     provider_module = _install_provider_module(
         "tests.integration._fake_subagent_lifecycle_check_tasks_provider", provider
@@ -301,14 +311,19 @@ async def test_check_tasks_marks_results_read_so_decide_turn_action_does_not_red
     messages = await session.prompt("start")
 
     assert provider.parent_calls == 3
-    assert "<subagent_result" not in provider.parent_snapshots[-1]
-    assert all(
-        "<subagent_result" not in block.text
+    # The inbox-drained finding lands as a system-reminder-wrapped user
+    # message containing the <subagent_result> block.
+    user_texts = [
+        block.text
         for message in messages
         if getattr(message, "role", None) == "user"
         for block in getattr(message, "content", [])
         if getattr(block, "type", None) == "text"
-    )
+    ]
+    assert any(
+        "<subagent_result" in text and "<system-reminder>" in text
+        for text in user_texts
+    ), f"expected an inbox-drained subagent finding; got user_texts={user_texts!r}"
 
     await session.shutdown()
 

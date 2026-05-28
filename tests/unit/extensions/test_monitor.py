@@ -412,8 +412,9 @@ def test_render_item_monitor_source_renders() -> None:
 
 
 def test_render_item_unhandled_source_still_raises() -> None:
-    """Sources not yet wired (subagent) still fail loudly — step 4 only opens
-    ``monitor``, not the whole catalog."""
+    """Sources outside the catalog (user/background/monitor/subagent)
+    still fail loudly — step 5 wired ``subagent``, but an unknown source
+    must NOT silently land as a user message."""
 
     with pytest.raises(NotImplementedError):
-        render_item(InboxItem(source="subagent", payload="x"))
+        render_item(InboxItem(source="totally-unknown-source", payload="x"))

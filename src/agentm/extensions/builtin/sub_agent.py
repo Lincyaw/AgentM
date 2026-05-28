@@ -48,7 +48,12 @@ from agentm.core.abi.events import (
     SessionReadyEvent,
     SessionShutdownEvent,
 )
-from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
+from agentm.core.abi.extension import (
+    ExtensionAPI,
+    ExtensionLoadError,
+    ExtensionStaleError,
+    ProviderConfig,
+)
 
 _RUNNING: Literal["running"] = "running"
 _COMPLETED: Literal["completed"] = "completed"
@@ -569,6 +574,23 @@ class _ChildTaskManager:
             if str(meta.get("artifact_id", ""))
         ]
         state.error = error
+        # Step 5b: post the per-child finding through the session inbox so
+        # the parent's context-drain injects it the same way background_exec
+        # completions land. ``read`` is flipped here to prevent the (now
+        # narrowed) decide_turn_action floor from also surfacing the same
+        # finding via Inject — the inbox path is authoritative.
+        state.read = True
+        try:
+            self._api.post_inbox(
+                source="subagent",
+                payload=_format_subagent_result(state),
+                dedup_key=f"subagent-finding-{state.task_id}",
+            )
+        except ExtensionStaleError:
+            # Atom reloaded between dispatch and finalize: the inbox we hold
+            # is stale; nothing to deliver into. Same step-3 Major-3
+            # discipline background_exec / monitor use.
+            pass
         if error is None:
             await state.session.shutdown()
         else:
@@ -830,20 +852,28 @@ class _ChildTaskManager:
     async def decide_turn_action(
         self, event: DecideTurnActionEvent
     ) -> LoopAction | None:
-        """Floor: refuse to terminate while children have unread findings.
+        """Floor (narrowed in step 5b): keep parent alive while children run.
 
-        Triggered on every turn, but only acts when the kernel default is a
-        *voluntary* termination (``ModelEndTurn`` or ``ToolTerminated``). For
-        kernel-imposed terminations (``MaxTurnsExhausted``, ``SignalAborted``,
-        ``BudgetExhausted``) the cause is ``final`` and any override would be
+        Step 5b removed the completed-unread inject branch — completed
+        findings now ride through the session inbox via
+        ``_finalize_state.post_inbox(source="subagent")`` and land via the
+        runtime context-drain. The still-running branch survives because
+        without it a parent that voluntarily ``Stop(ModelEndTurn)``s while
+        children are detached would let those workers be stranded — the
+        exact failure ``sub-agent-lifecycle.md`` was written to enforce.
+
+        Only acts when the kernel default is a *voluntary* termination
+        (``ModelEndTurn`` / ``ToolTerminated``). For kernel-imposed
+        terminations (``MaxTurnsExhausted`` / ``SignalAborted`` /
+        ``BudgetExhausted``) ``cause.final`` is True and any override is
         ignored anyway, so we return ``None``.
 
         Auto-abort path: the second consecutive running-only cancel triggers
-        abort signals on every running child, then injects the resulting
-        notification. The next turn's model will see the abort message and
-        normally end immediately — costing one extra LLM call vs. the
-        previous in-place ``event.messages.append`` mutation, but keeping the
-        decision boundary clean.
+        abort signals on every running child. Their final findings will be
+        posted by ``_finalize_state`` and surfaced via the inbox; the
+        keep-alive floor itself injects a one-shot ``<subagent_pending>``
+        notice for the still-running set so the model can react this turn
+        without waiting for the inbox-drained finding next turn.
         """
 
         default = event.observation.default_action
@@ -864,38 +894,39 @@ class _ChildTaskManager:
         should_auto_abort = False
         async with self._registry.lock:
             states = self._registry.values()
-            pending = [
-                state
-                for state in states
-                if _is_terminal(state.status) and not state.read
-            ]
             running = [state for state in states if state.status == _RUNNING]
-            if pending:
-                for state in pending:
-                    state.read = True
-                self._running_only_cancels = 0
-            elif not running:
+            if not running:
                 self._running_only_cancels = 0
             elif last_text:
                 self._running_only_cancels = 0
 
-            if isinstance(default.cause, ModelEndTurn) and not pending and running:
+            if isinstance(default.cause, ModelEndTurn) and running:
                 if self._running_only_cancels >= 1:
                     should_auto_abort = True
                     self._running_only_cancels = 0
                 else:
                     self._running_only_cancels += 1
 
-        if not pending and not running:
+        if not running and not should_auto_abort:
+            # No still-running children to keep alive for; nothing to inject.
+            # Completed findings (if any) ride the inbox path and the
+            # runtime keep-alive floor turns this Stop into another Step
+            # whenever inbox is non-empty.
             return None
 
         if should_auto_abort:
             aborted = await self._abort_running_states(running)
             if not aborted:
                 return None
+            # Aborted children's findings will be posted via _finalize_state
+            # → inbox. Inject the aborted-set notice so the model gets to
+            # react in the next turn without waiting for the inbox drain.
             return Inject(messages=[_notification_message(pending=aborted, running=[])])
 
-        message = _notification_message(pending=pending, running=running)
+        # Still-running children: keep the parent alive by injecting a
+        # <subagent_pending> notice so the model can choose to wait or
+        # dispatch follow-up work rather than terminate the loop.
+        message = _notification_message(pending=[], running=running)
         return Inject(messages=[message])
 
     async def on_session_ready(self, event: SessionReadyEvent) -> None:

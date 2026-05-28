@@ -99,13 +99,26 @@ class SessionInbox:
         return not self._items
 
     async def wait_nonempty(self) -> None:
-        """Block until the inbox holds at least one item.
+        """Block until the inbox holds at least one item (or :meth:`kick`).
 
-        Returns immediately if already non-empty. Backs a future persistent
-        driver (step 5); unused by step 1.
+        Returns immediately if already non-empty / kicked.
         """
 
         await self._nonempty.wait()
+
+    def kick(self) -> None:
+        """Wake :meth:`wait_nonempty` without enqueuing an item.
+
+        Used by :meth:`AgentSession.tick` when a synthetic
+        ``decide_turn_action`` handler injects messages directly into the
+        session log (so the next ``loop.run`` will see them via
+        ``build_session_context``): the driver still needs to be woken even
+        though no inbox item carries the content. The kick is one-shot —
+        ``drain`` clears the event, so the driver returns to blocking on its
+        next iteration without a stale "kicked" flag.
+        """
+
+        self._nonempty.set()
 
 
 def render_item(item: InboxItem) -> AgentMessage:
@@ -114,14 +127,16 @@ def render_item(item: InboxItem) -> AgentMessage:
     Handles ``source="user"`` → :class:`UserMessage` (step 1),
     ``source="background"`` → a ``<system-reminder>``-wrapped
     :class:`UserMessage` (step 3: auto-backgrounding completion / ticker
-    status), and ``source="monitor"`` → the same ``<system-reminder>``-wrapped
+    status), ``source="monitor"`` → the same ``<system-reminder>``-wrapped
     :class:`UserMessage` shape (step 4: agent-defined wakeups + channel
-    subscriptions). All three land as new ``user`` messages so the prefix
-    stays stable and the KV/prefix cache survives (no synthetic
-    ``tool_result``, which would need a live ``tool_call_id`` the inbox does
-    not carry at drain time). Other sources are reserved for later steps
-    (subagent) and raise until then so a mis-routed item fails loudly rather
-    than landing wrong.
+    subscriptions), and ``source="subagent"`` → the same shape (step 5:
+    child-task findings posted by ``sub_agent._finalize_state`` once it
+    rides the inbox instead of its bespoke completed-unread floor). All four
+    land as new ``user`` messages so the prefix stays stable and the
+    KV/prefix cache survives (no synthetic ``tool_result``, which would need
+    a live ``tool_call_id`` the inbox does not carry at drain time). Any
+    other source raises so a mis-routed item fails loudly rather than
+    landing wrong.
     """
 
     if item.source == "user":
@@ -132,7 +147,7 @@ def render_item(item: InboxItem) -> AgentMessage:
             content = list(item.payload)
         return UserMessage(role="user", content=content, timestamp=time.time())
 
-    if item.source in ("background", "monitor"):
+    if item.source in ("background", "monitor", "subagent"):
         text = item.payload if isinstance(item.payload, str) else str(item.payload)
         wrapped = f"<system-reminder>\n{text}\n</system-reminder>"
         return UserMessage(
@@ -143,8 +158,7 @@ def render_item(item: InboxItem) -> AgentMessage:
 
     raise NotImplementedError(
         f"SessionInbox.render_item: source {item.source!r} is not handled "
-        f"(only 'user' / 'background' / 'monitor'); later steps add subagent "
-        f"rendering."
+        f"(only 'user' / 'background' / 'monitor' / 'subagent')."
     )
 
 

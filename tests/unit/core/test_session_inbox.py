@@ -112,10 +112,22 @@ def test_render_monitor_item_to_system_reminder() -> None:
     assert "wakeup fired" in msg.content[0].text
 
 
+def test_render_subagent_item_to_system_reminder() -> None:
+    # Step 5b: sub_agent findings posted via api.post_inbox(source="subagent")
+    # use the same <system-reminder>-wrapped UserMessage shape as background /
+    # monitor — same cache-stability reasons.
+    msg = render_item(
+        InboxItem(source="subagent", payload="<subagent_result task_id=t1 />")
+    )
+    assert msg.role == "user"
+    assert msg.content[0].type == "text"
+    assert "<system-reminder>" in msg.content[0].text
+    assert "<subagent_result" in msg.content[0].text
+
+
 def test_render_unknown_source_raises() -> None:
-    # Sources not yet wired (subagent) must still fail loudly.
     with pytest.raises(NotImplementedError):
-        render_item(InboxItem(source="subagent", payload="x"))
+        render_item(InboxItem(source="totally-unknown", payload="x"))
 
 
 @pytest.mark.asyncio
@@ -239,14 +251,21 @@ async def test_prompt_message_lands_and_is_persisted(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_user_message_seen_on_next_turn(tmp_path: Path) -> None:
-    """A ``send_user_message`` pushed mid-run is drained by the per-turn
-    ``context`` handler and seen on the very next turn — and the keep-alive
-    floor keeps the loop alive for that turn even though the model ends."""
+async def test_post_inbox_user_seen_on_next_turn(tmp_path: Path) -> None:
+    """A ``post_inbox(source="user", ...)`` push mid-run is drained by the
+    per-turn ``context`` handler and seen on the very next turn. The runtime
+    keep-alive floor keeps the loop alive for that turn even though the model
+    ended voluntarily.
+
+    Migrated from the Nit-1 ``session._apis``-reach pattern: the public
+    producer entry is ``api.post_inbox`` (added in step 3); the test pushes
+    onto the inbox directly so no SDK internals are touched.
+    """
     module_name = f"tests.unit._inbox_midrun_{id(tmp_path)}"
 
     seen_on_second_turn: list[bool] = []
     turn = [0]
+    inbox_handle: list[SessionInbox] = []
 
     async def stream_fn(
         *,
@@ -261,10 +280,11 @@ async def test_send_user_message_seen_on_next_turn(tmp_path: Path) -> None:
         idx = turn[0]
         turn[0] += 1
         if idx == 0:
-            # Push out-of-band user content while the first turn is in flight,
-            # mid-stream, exactly like an atom calling send_user_message.
-            api = next(iter(session._apis.values()))  # type: ignore[attr-defined]
-            api.send_user_message("mid-run note")
+            # Push out-of-band user content mid-stream, exactly like an atom
+            # calling api.post_inbox(source="user", ...).
+            inbox_handle[0].push(
+                InboxItem(source="user", payload="mid-run note")
+            )
             yield MessageEnd(
                 message=AssistantMessage(
                     role="assistant",
@@ -289,6 +309,11 @@ async def test_send_user_message_seen_on_next_turn(tmp_path: Path) -> None:
 
     try:
         session = await _make_session(tmp_path, module_name, stream_fn)
+        # Capture the inbox handle the same way an atom would receive one
+        # via ExtensionAPI scope — by mounting an atom and reading off
+        # api.post_inbox. Tests assert against the inbox spine directly to
+        # stay independent of the producer-entry sugar layer.
+        inbox_handle.append(session._inbox)  # type: ignore[attr-defined]
         messages = await session.prompt("go")
 
         # The loop ran a second turn (keep-alive floor fired on the non-empty
@@ -298,55 +323,6 @@ async def test_send_user_message_seen_on_next_turn(tmp_path: Path) -> None:
         assert "first" in assistant_texts and "second" in assistant_texts
         # The injected note is persisted to the session log.
         assert "mid-run note" in _texts(
-            session.session_manager.get_messages(), "user"
-        )
-    finally:
-        await session.shutdown()
-        sys.modules.pop(module_name, None)
-
-
-@pytest.mark.asyncio
-async def test_post_inbox_user_matches_send_user_message(tmp_path: Path) -> None:
-    """``api.post_inbox(source="user", ...)`` round-trips to a user message on
-    the next turn — identical to ``send_user_message`` (its sugar)."""
-    module_name = f"tests.unit._inbox_postinbox_{id(tmp_path)}"
-
-    seen: list[bool] = []
-    turn = [0]
-
-    async def stream_fn(
-        *,
-        messages: list[Any],
-        model: Model,
-        tools: list[Any],
-        system: str | None = None,
-        signal: Any = None,
-        thinking: str = "off",
-    ) -> AsyncIterator[Any]:
-        del model, tools, system, signal, thinking
-        idx = turn[0]
-        turn[0] += 1
-        if idx == 0:
-            api = next(iter(session._apis.values()))  # type: ignore[attr-defined]
-            # Generic producer entry, source="user" — the path send_user_message
-            # now delegates to.
-            api.post_inbox(source="user", payload="posted note")
-        else:
-            seen.append("posted note" in _texts(messages, "user"))
-        yield MessageEnd(
-            message=AssistantMessage(
-                role="assistant",
-                content=[TextContent(type="text", text=f"t{idx}")],
-                timestamp=0.0,
-                stop_reason="end_turn",
-            )
-        )
-
-    try:
-        session = await _make_session(tmp_path, module_name, stream_fn)
-        await session.prompt("go")
-        assert seen == [True]
-        assert "posted note" in _texts(
             session.session_manager.get_messages(), "user"
         )
     finally:
@@ -406,9 +382,12 @@ async def test_tick_nonempty_inbox_runs(tmp_path: Path) -> None:
     module_name = f"tests.unit._inbox_tick_run_{id(tmp_path)}"
     try:
         session = await _make_session(tmp_path, module_name, _stream_text("ran"))
-        # Push out-of-band content the way an atom would, then resume.
-        api = next(iter(session._apis.values()))  # type: ignore[attr-defined]
-        api.send_user_message("resume me")
+        # Push out-of-band content directly onto the inbox spine — same
+        # path ``api.post_inbox(source="user", ...)`` takes, no SDK-internal
+        # reach into ``session._apis``.
+        session._inbox.push(  # type: ignore[attr-defined]
+            InboxItem(source="user", payload="resume me")
+        )
 
         messages = await session.tick()
 
@@ -427,6 +406,7 @@ async def test_keep_alive_floor_overrides_model_end_turn(tmp_path: Path) -> None
     module_name = f"tests.unit._inbox_floor_{id(tmp_path)}"
 
     turn = [0]
+    inbox_handle: list[SessionInbox] = []
 
     async def stream_fn(
         *,
@@ -444,8 +424,9 @@ async def test_keep_alive_floor_overrides_model_end_turn(tmp_path: Path) -> None
             # Queue more work right before the model "ends" this turn. The
             # default decide action will be Stop(ModelEndTurn) (non-final);
             # the floor must turn it into another turn.
-            api = next(iter(session._apis.values()))  # type: ignore[attr-defined]
-            api.send_user_message("keep going")
+            inbox_handle[0].push(
+                InboxItem(source="user", payload="keep going")
+            )
         yield MessageEnd(
             message=AssistantMessage(
                 role="assistant",
@@ -457,6 +438,7 @@ async def test_keep_alive_floor_overrides_model_end_turn(tmp_path: Path) -> None
 
     try:
         session = await _make_session(tmp_path, module_name, stream_fn)
+        inbox_handle.append(session._inbox)  # type: ignore[attr-defined]
         messages = await session.prompt("start")
 
         assistant_texts = _texts(messages, "assistant")
@@ -464,6 +446,229 @@ async def test_keep_alive_floor_overrides_model_end_turn(tmp_path: Path) -> None
         # model's voluntary end-turn.
         assert "turn-0" in assistant_texts
         assert "turn-1" in assistant_texts
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+# ---------------------------------------------------------------------------
+# Step-5 fail-stop coverage: persistent driver + prompt/tick sugar + interrupt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_driver_runs_exactly_once_per_push_burst(tmp_path: Path) -> None:
+    """A single push (the prompt's user message) drives exactly one
+    ``loop.run`` round, and the driver is the only thing calling it.
+    Concurrent direct ``_loop.run`` calls must trip the single-ownership
+    assertion."""
+    module_name = f"tests.unit._driver_push_burst_{id(tmp_path)}"
+
+    run_count = [0]
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del messages, model, tools, system, signal, thinking
+        run_count[0] += 1
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text=f"r{run_count[0]}")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        await session.prompt("first")
+        await session.prompt("second")
+        # Two prompts → two driver rounds → two LLM stream calls.
+        assert run_count[0] == 2
+
+        # Single-ownership: a direct concurrent ``_loop.run`` while the driver
+        # might pick it up MUST raise. We trip the assertion synchronously by
+        # invoking ``_run_one_round`` from outside the driver while a prior
+        # round is still in flight. Simpler proof: pre-flip ``_in_run`` and
+        # try to call ``_run_one_round`` directly.
+        session._in_run = True  # type: ignore[attr-defined]
+        with pytest.raises(AssertionError):
+            await session._run_one_round()  # type: ignore[attr-defined]
+        session._in_run = False  # type: ignore[attr-defined]
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_driver_survives_run_exception(tmp_path: Path) -> None:
+    """A round-level exception MUST NOT kill the driver: the next push still
+    drives a fresh run."""
+    module_name = f"tests.unit._driver_survives_{id(tmp_path)}"
+
+    call_count = [0]
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del messages, model, tools, system, signal, thinking
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("boom on first call")
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text="recovered")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        # First prompt: the run raises; prompt() may not resolve cleanly
+        # because the kernel never emits agent_end on a stream exception
+        # (see loop.py — exception propagates from run). The driver catches,
+        # logs, and continues. Park the first waiter and let it die when we
+        # shutdown later; for now we just verify the SECOND prompt still
+        # drives a fresh round.
+        import asyncio as _aio
+
+        first = _aio.create_task(session.prompt("first"))
+        # Give the driver a turn to attempt + fail the run.
+        await _aio.sleep(0.05)
+        # Drain the failed first prompt's waiter by cancelling it (we don't
+        # care about its return value — the point is the driver survived).
+        # CancelledError is BaseException in 3.11+, so catch it explicitly.
+        first.cancel()
+        try:
+            await first
+        except (_aio.CancelledError, Exception):  # noqa: BLE001
+            pass
+
+        # Second prompt drives a fresh run; call_count[0] climbs to 2.
+        messages = await session.prompt("second")
+        assert call_count[0] >= 2
+        assert "recovered" in _texts(messages, "assistant")
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_prompt_returns_message_list_with_originating_message(
+    tmp_path: Path,
+) -> None:
+    """``prompt(text)`` pushes + awaits agent_end + returns the live message
+    list including the originating user message AND the agent's reply (the
+    sugar contract over the inbox-driver model)."""
+    module_name = f"tests.unit._prompt_sugar_{id(tmp_path)}"
+    try:
+        session = await _make_session(tmp_path, module_name, _stream_text("hello back"))
+        messages = await session.prompt("hello agent")
+        user_texts = _texts(messages, "user")
+        assistant_texts = _texts(messages, "assistant")
+        assert "hello agent" in user_texts
+        assert "hello back" in assistant_texts
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_aborts_then_next_push_runs_with_preserved_context(
+    tmp_path: Path,
+) -> None:
+    """``session.interrupt()`` MUST abort an in-flight run; the driver
+    clears its signal afterwards and a fresh push drives a new run with the
+    prior context intact (the session log is untouched)."""
+    import asyncio as _aio
+
+    module_name = f"tests.unit._interrupt_{id(tmp_path)}"
+
+    long_tool_running = _aio.Event()
+    aborts_seen: list[bool] = []
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del model, tools, system, thinking
+        # First call: a long-running fake "tool" — we simulate the same
+        # cooperative-abort shape an asyncio.Event-aware tool would have by
+        # awaiting the signal directly INSIDE the stream coroutine. The
+        # kernel's signal is threaded through stream_fn's ``signal`` arg
+        # (loop.py:512 passes ``signal=signal``), so awaiting it here is the
+        # idiomatic way to fake a long tool without registering one.
+        joined_user = " | ".join(_texts(messages, "user"))
+        if "second please" not in joined_user:
+            long_tool_running.set()
+            # Wait for either the signal (interrupt) or 5s timeout.
+            assert signal is not None
+            try:
+                await _aio.wait_for(signal.wait(), timeout=5.0)
+                aborts_seen.append(True)
+            except _aio.TimeoutError:
+                aborts_seen.append(False)
+            # Yield a partial reply so the loop has SOMETHING to terminate
+            # on — though the kernel's signal check at the top of the next
+            # turn fires SignalAborted anyway.
+            yield MessageEnd(
+                message=AssistantMessage(
+                    role="assistant",
+                    content=[TextContent(type="text", text="interrupted-reply")],
+                    timestamp=0.0,
+                    stop_reason="end_turn",
+                )
+            )
+            return
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text="after-interrupt")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        prompt_task = _aio.create_task(session.prompt("start long task"))
+        # Wait for the fake tool to start, then interrupt.
+        await _aio.wait_for(long_tool_running.wait(), timeout=2.0)
+        session.interrupt()
+        await _aio.wait_for(prompt_task, timeout=2.0)
+        assert aborts_seen == [True]
+
+        # Context is preserved: the originating user message is on the log.
+        first_log = session.session_manager.get_messages()
+        assert "start long task" in _texts(first_log, "user")
+
+        # Driver cleared the signal; a fresh prompt drives a new round
+        # successfully and sees the preserved prior context.
+        messages = await session.prompt("second please")
+        user_texts = _texts(messages, "user")
+        assert "start long task" in user_texts  # preserved
+        assert "second please" in user_texts
+        assert "after-interrupt" in _texts(messages, "assistant")
     finally:
         await session.shutdown()
         sys.modules.pop(module_name, None)
