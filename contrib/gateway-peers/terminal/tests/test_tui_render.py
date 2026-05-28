@@ -85,3 +85,26 @@ async def test_submit_echoes_user_turn_and_sends_inbound() -> None:
 
         assert any(b.get("content") == "hi there" for b in client.sent)
         assert len(app.query(UserTurn)) == 1
+
+
+async def test_esc_interrupts_an_in_flight_turn() -> None:
+    client = _FakeClient()
+    app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
+    async with app.run_test(size=(100, 30)) as pilot:
+        inp = app.query_one("#prompt-input")
+        inp.text = "long task"  # type: ignore[attr-defined]
+        inp.action_submit()  # type: ignore[attr-defined]
+        await pilot.pause(0.1)
+        # A turn is now in flight; Esc must send an out-of-band interrupt.
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert any(b.get("control") == "interrupt" for b in client.sent)
+
+        # Once the loop ends (agent_end), Esc no longer interrupts.
+        client.push(_frame("agent_end", cause="SignalAborted"))
+        await pilot.pause(0.1)
+        before = len([b for b in client.sent if b.get("control") == "interrupt"])
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        after = len([b for b in client.sent if b.get("control") == "interrupt"])
+        assert after == before  # idle Esc does not send another interrupt
