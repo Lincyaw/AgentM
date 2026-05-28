@@ -381,6 +381,17 @@ def _parse_extensions(
     return sort_extensions_by_requires(extensions, source=source)
 
 
+# Atoms the session factory auto-mounts as floor atoms regardless of whether a
+# scenario lists them (see ``session_factory.ensure_floor_atom``). An atom may
+# ``requires`` one of these without the scenario manifest redundantly listing
+# it — requires-validation runs here on the manifest list, before the factory
+# injects the floor atoms, so a required floor atom would otherwise read as
+# "not loaded". Names match the role fulfillers' ``MANIFEST.name``.
+_FLOOR_ATOM_NAMES: frozenset[str] = frozenset(
+    {"prompt_templates", "compaction_prompts", "slash_commands", "system_prompt"}
+)
+
+
 def sort_extensions_by_requires(
     extensions: list[tuple[str, dict[str, Any]]],
     *,
@@ -413,7 +424,7 @@ def sort_extensions_by_requires(
 
     for name, manifest in manifests.items():
         for dep in manifest.requires:
-            if dep not in entries_by_name:
+            if dep not in entries_by_name and dep not in _FLOOR_ATOM_NAMES:
                 raise ScenarioLoadError(
                     source,
                     ValueError(
@@ -436,7 +447,10 @@ def sort_extensions_by_requires(
             )
         temporary.add(name)
         for dep in manifests[name].requires:
-            visit(dep)
+            # Floor-atom deps (and any dep not in this list) are mounted and
+            # ordered separately by the factory — skip them here.
+            if dep in manifests:
+                visit(dep)
         temporary.remove(name)
         permanent.add(name)
         entry = entries_by_name[name]
