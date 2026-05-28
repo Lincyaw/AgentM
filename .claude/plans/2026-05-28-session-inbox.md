@@ -175,6 +175,58 @@ gateway/worker/feishu, TUI) get the driver model immediately.
   directly on the integration branch rather than spawn a fresh worktree for
   mechanical edits.
 
+- **Step 5 DONE (2026-05-28). FEATURE COMPLETE.** Merged FF to `feat/session-inbox`
+  as `821f4b23` (worker — driver + prompt-as-sugar + sub_agent floor narrowed +
+  interrupt + Nit1 migration) + `c52a0d69` (review-fix worker — three majors).
+  Review of `821f4b23`: 0 blocker / **3 major** (signal leak across run boundaries
+  via idle-time `interrupt()`; auto_abort double-delivers each aborted finding via
+  both `Inject` and inbox; driver tight-loops on pre-first-turn exceptions because
+  the inbox is never drained before the failure) + 4 nits. The brief recommended
+  a top-of-`_run_one_round` clear for Major 1; the fix worker discovered this
+  silently swallows `_spawn_signal_forwarder`-set aborts (concretely broke the
+  sub_agent parent-aborts-child flow, `parent_calls 4→3` — reproduced with `git
+  stash`) and pivoted to an alternative: `interrupt()` no-op when `_in_run` is
+  False (idle interrupts have nothing to interrupt), `tick()`'s no-run finally
+  clears `_signal` (forwarder may have set it during the synthetic decide), and
+  the driver's bottom-of-loop clear is preserved for mid-run interrupts. Major 2
+  picked option (a) — auto_abort returns `None`, the runtime keep-alive floor sees
+  the non-empty inbox and turns the parent's voluntary `Stop` into `Step()`, next
+  turn's context-drain delivers each `<subagent_result>` exactly once. Major 3 —
+  driver's `except Exception` branch drains the inbox (discarding items with a
+  `logger.warning`) so a persistent pre-first-turn failure waits for the next push
+  instead of spinning. All 4 nits folded: dead `messages=None` branch + docstring
+  removed; vestigial `state.read=True` dropped + comment fixed; public read-only
+  `session.inbox` property added (tests migrated off `session._inbox`);
+  `interrupt()` docstring rewritten to pin the idle-no-op semantic. Final: 125
+  targeted + 177 (full unit+integration) passed; ruff clean; mypy clean (modulo
+  the pre-existing `loader.py:165` unrelated to this work).
+
+### Feature summary (chain on `feat/session-inbox`)
+
+```
+c52a0d69 step-5 review fixes (signal leak, double-deliver, driver spin)
+821f4b23 step-5: persistent driver + interrupt + sub_agent floor narrowed
+889bf5e0 plan: step-4 done; step-5 refinement
+d6ecb8fc monitor: terminal-status overwrite fix (step-4 review)
+5f5bb631 step-4: monitor atom (schedule_wakeup + create_monitor)
+32a3c9a9 plan: step-2/3 done; step-4 absorbs step-3 lessons
+685998be step-3 fix: refusal branch must terminate inner task
+52f5c9c6 step-3 fix: shutdown drain, per-task abort, stale-guard, slot invariant
+9491700b step-3: background_exec atom (auto-bg + ticker)
+e2ba11fc design: step-3 decisions (post_inbox ABI, wrap scope, ticker)
+5bd02259 step-2: extract generic background-task registry to core.lib
+d731e0f3 plan: step-1 done; refine step-2 to pure refactor
+41bd3beb step-1: SessionInbox spine + unified message entry
+322af8bd design: session-inbox concept, step-1 plan, index graph
+```
+
+Out of scope (follow-up): one-shot `agentm "<prompt>"` CLI keeping its event loop
+alive long enough for late completions (`cli.py:530` `asyncio.run`-then-exit);
+condition-polling form of `create_monitor` (MVP defers to bus-channel only);
+terminate-from-background (a backgrounded tool's `ToolTerminate` is currently
+delivered as an ordinary completion; a follow-up needs to route it through the
+loop's termination path so it can stop the agent).
+
 - **Step 3 DONE (2026-05-28).** Merged FF to `feat/session-inbox` as `685998be`.
   Initial commit `9491700b` → review found 0 blocker / **4 major** (shutdown leak,
   cancel over-cancels under host signal, unhandled producer exceptions, slot
