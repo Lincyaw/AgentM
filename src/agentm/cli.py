@@ -740,14 +740,13 @@ def run_cmd(
             "ERROR: prompt is required for a fresh session.\n"
             "       Pass --resume <sid> (or --continue) to advance an existing\n"
             "       session whose first message is supplied by an extension.\n"
-            "       The in-process Textual TUI (--interactive) was removed —\n"
-            "       use the channels gateway instead:\n"
-            "         agentm-gateway --bind unix:///tmp/agentm/gw.sock\n"
-            "         agentm-worker  --connect unix:///tmp/agentm/gw.sock\n"
+            "       For multi-turn / chat use, run the single-process gateway\n"
+            "       and connect a chat client:\n"
+            "         agentm gateway --bind unix:///tmp/agentm/gw.sock\n"
             "         agentm-terminal --connect unix:///tmp/agentm/gw.sock --format textual\n"
             "       Cross-host (WebSocket + token):\n"
-            "         agentm-gateway --bind ws://0.0.0.0:7777/agentm --bind-token-file /etc/agentm/tokens\n"
-            "         agentm-worker  --connect ws://gw.example.com:7777/agentm --token \"$AGENTM_TOKEN\"",
+            "         agentm gateway --bind ws://0.0.0.0:7777/agentm --bind-token-file /etc/agentm/tokens\n"
+            "         agentm-terminal --connect ws://gw.example.com:7777/agentm --token \"$AGENTM_TOKEN\"",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
@@ -919,19 +918,36 @@ def _trace_subcommand() -> None:
 _trace_subcommand.__agentm_owns_argv__ = True  # type: ignore[attr-defined]
 
 
+def _gateway_subcommand() -> None:
+    """Hand-off to the ``agentm gateway`` typer app (see ``gateway.cli``).
+
+    Single-process gateway: holds all chat sessions in memory and serves
+    chat-client peers over the v2 wire protocol. Owns its own argv like
+    ``trace`` so its options parse against the gateway app, not this shim.
+    """
+
+    from agentm.gateway.cli import main as gateway_main
+
+    gateway_main()
+
+
+_gateway_subcommand.__agentm_owns_argv__ = True  # type: ignore[attr-defined]
+
+
 _BUILTIN_SUBCOMMANDS: dict[str, Any] = {
     "list-extensions": list_extensions_cmd,
     "trace": _trace_subcommand,
+    "gateway": _gateway_subcommand,
 }
 
 
 def _discover_external_subcommands() -> dict[str, Any]:
     """Scan ``importlib.metadata`` entry points for additional subcommands.
 
-    Each contrib package registers itself via::
+    A contrib package registers itself via::
 
         [project.entry-points."agentm.subcommands"]
-        gateway = "agentm_channels.cli:main"
+        myverb = "my_pkg.cli:main"
 
     Returns ``name → EntryPoint``; the EP is lazily ``.load()``-ed only
     when the user actually invokes the subcommand, so ``agentm --help``

@@ -399,6 +399,18 @@ class AgentSession:
     def cwd(self) -> str:
         return self._cwd
 
+    @property
+    def extension_api(self) -> Any:
+        """Read-only handle to the session's primary ``ExtensionAPI``.
+
+        Exposed so an embedding host can reach the API without touching the
+        private ``_extension_api`` attribute (the single-process gateway's
+        ``CommandContext`` uses it to mount/unmount atoms for
+        ``/atom:install``). Returns ``None`` for a session built with no
+        extensions.
+        """
+        return self._extension_api
+
     def get_service(self, name: str) -> Any | None:
         return self._services.get(name)
 
@@ -407,10 +419,11 @@ class AgentSession:
 
         Mirrors :meth:`ExtensionAPI.set_service` but is callable from the
         embedding process (the runtime host), not just from inside an
-        atom. Used by ``agentm-worker`` to inject a ``peer_messaging``
-        handle so the optional ``tool_peer_send`` atom can call out to
-        the gateway. Refuses to clobber an existing entry — keep service
-        ownership unambiguous (matches the atom-side contract).
+        atom. The single-process gateway's ``SessionManager`` uses it to
+        inject the ``wire_outbound`` sink, ``session_key``, ``turn_context``
+        and ``approval_manager`` services the ``wire_driver`` atom reads.
+        Refuses to clobber an existing entry — keep service ownership
+        unambiguous (matches the atom-side contract).
         """
         if name in self._services:
             raise KeyError(f"service {name!r} is already registered")
