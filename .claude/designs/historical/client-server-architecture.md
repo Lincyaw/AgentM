@@ -1,13 +1,20 @@
 # Design: Gateway / Client Process Split (channels v1)
 
-**Status**: PROPOSED
+**Status**: HISTORICAL (superseded by channels v2)
 **Created**: 2026-05-11
-**Supersedes**: `gateway-channels.md` (which now describes v0 — the
-in-process design shipped in PR #137).
+**Supersedes**: [`gateway-channels.md`](gateway-channels.md) (channels v0).
+**Superseded by**: [`../single-process-gateway.md`](../single-process-gateway.md)
+(channels v2 — single-process gateway, no separate worker process). The
+v1 daemon/worker split documented here is retained for historical
+reference; the abstractions it introduced (`agent_worker` peer kind,
+SessionDriver/multiplexer worker, cross-process peer_send,
+`root_session_key` approval rewriting) are deleted from the codebase in
+the v2 rewrite.
 
-This is a **design-only** document. Implementation lands in subsequent
-PRs guided by `plans/2026-05-11-gateway-client-server.md`. Decisions
-reached during design review are recorded in §10.
+This is a **design-only** document. Original implementation guidance
+referenced `plans/2026-05-11-gateway-client-server.md` (which still
+exists as historical record). Decisions recorded in §10 are now also
+historical.
 
 ## 0. Design discipline
 
