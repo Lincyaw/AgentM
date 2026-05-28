@@ -1,5 +1,31 @@
 requirements:
 
+  - id: REQ-177-full-compress-compaction
+    title: Full-compress context compaction with turn-addressed recall
+    description: >
+      Context compaction summarizes every turn since the previous compaction
+      into a single user message that replaces prior context (no verbatim
+      tail), chained incrementally onto the previous summary and tagged with
+      [Turn N] markers. Turn numbering is shared via core.lib.enumerate_turns
+      so the read_history tool returns verbatim content of any cited turn from
+      the live session branch. should_compact disables itself when
+      reserve_tokens >= context_window instead of firing every turn.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/lib/turns.py
+      - path: src/agentm/core/abi/compaction.py
+      - path: src/agentm/extensions/builtin/llm_compaction.py
+      - path: src/agentm/extensions/builtin/compaction_prompts.py
+      - path: src/agentm/extensions/builtin/read_history.py
+    tests:
+      - path: tests/unit/extensions/test_compaction_full_compress.py
+      - path: tests/unit/core/test_compaction_descenario.py
+    docs:
+      - path: .claude/designs/compaction.md
+    depends_on: []
+
   - id: REQ-095-provider-wire-policy-leaks
     title: Provider wire policy knobs stay explicit at the core ABI boundary
     description: >
@@ -140,8 +166,8 @@ requirements:
   - id: REQ-087-builtin-atoms-extension-api
     title: Builtin atoms consume ExtensionAPI C-1 capabilities
     description: >
-      The observability, sub_agent, artifact_store, micro_compact, and
-      llm_compaction atoms must consume the additive C-1 ExtensionAPI/core.lib
+      The observability, sub_agent, artifact_store, and llm_compaction
+      atoms must consume the additive C-1 ExtensionAPI/core.lib
       surfaces instead of private bus mutation, harness config construction,
       writer type checks, module-level service registries, hard-coded builtin
       module paths, or local JSON serialization ladders. The sub_agent atom
@@ -158,7 +184,6 @@ requirements:
       - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/sub_agent.py
       - path: src/agentm/extensions/builtin/artifact_store.py
-      - path: src/agentm/extensions/builtin/micro_compact.py
       - path: src/agentm/extensions/builtin/llm_compaction.py
       - path: contrib/scenarios/rca/src/agentm_rca/tools/hypothesis_tools.py
     tests:

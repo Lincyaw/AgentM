@@ -14,11 +14,10 @@ from dataclasses import dataclass
 class CompactionSettings:
     enabled: bool = True
     reserve_tokens: int = 16_384
-    keep_recent_tokens: int = 20_000
     tool_result_max_chars: int = 2_000
-    """Per-tool-result truncation cap used by ``serialize_conversation``
-    when rendering tool outputs into the summary prompt. Larger values
-    preserve more verbatim tool detail at the cost of summary tokens."""
+    """Per-tool-result truncation cap used when rendering tool outputs into
+    the summary prompt. Larger values preserve more verbatim tool detail at
+    the cost of summary tokens."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +29,10 @@ class CompactionDetails:
 @dataclass(frozen=True, slots=True)
 class CompactionResult:
     summary: str
-    first_kept_entry_id: str
+    covered_through_turn: int
+    """The highest turn index folded into this summary. The next compaction
+    starts from ``covered_through_turn + 1`` so already-summarized turns are
+    not re-summarized (incremental chaining)."""
     tokens_before: int
     details: CompactionDetails
 
@@ -48,14 +50,13 @@ class CompactionPrompts:
     """Prompt bodies threaded into the compaction engine by callers.
 
     Atoms resolve these via ``api.get_service("prompt_templates").get_prompt(...)`` and
-    pass an instance into ``api.compaction.compact``. Empty strings are
-    legal — they represent the graceful-degradation path used when the
+    pass an instance into the compaction engine. Empty strings are legal —
+    they represent the graceful-degradation path used when the
     ``compaction_prompts`` atom is not installed.
     """
 
     summarization_system: str
     update_summarization: str
-    turn_prefix_summarization: str
 
 
 __all__ = [

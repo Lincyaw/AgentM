@@ -3,8 +3,8 @@
 Owns two pieces the kernel deliberately does not:
 
 1. The English prompt bodies the LLM-driven compaction engine uses
-   (system persona, fresh summarization, incremental update, split-turn
-   prefix summarization, branch-summary instructions and preamble).
+   (system persona, fresh summarization, incremental update, branch-summary
+   instructions and preamble).
    Registered into the in-memory prompt registry resolved via
    ``api.get_service("prompt_templates").register_prompt``. Engine callers
    (``llm_compaction``, branch summarization) retrieve them via
@@ -13,9 +13,8 @@ Owns two pieces the kernel deliberately does not:
 2. The default :class:`EntryMaterializer` implementations for the three
    kernel-defined session-entry types: ``message``, ``branch_summary``,
    ``compaction``. Registered into
-   ``agentm.core.abi.session.ENTRY_MATERIALIZERS`` so both the compaction
-   engine's ``get_message_from_entry`` and the harness's
-   ``build_session_context`` resolve materialization through the registry
+   ``agentm.core.abi.session.ENTRY_MATERIALIZERS`` so the harness's
+   ``build_session_context`` resolves materialization through the registry
    rather than branching on ``entry.type`` string literals.
 
 The prompt registry is published by the ``prompt_templates`` atom under the
@@ -60,7 +59,6 @@ from agentm.core.abi.extension import ExtensionAPI
 PROMPT_SUMMARIZATION_SYSTEM = "compaction.summarization_system"
 PROMPT_SUMMARIZATION = "compaction.summarization"
 PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
-PROMPT_TURN_PREFIX_SUMMARIZATION = "compaction.turn_prefix_summarization"
 PROMPT_BRANCH_SUMMARY = "compaction.branch_summary"
 PROMPT_BRANCH_SUMMARY_PREAMBLE = "compaction.branch_summary_preamble"
 
@@ -106,7 +104,9 @@ Use this EXACT format:
 - [Any data, examples, or references needed to continue]
 - [Or "(none)" if not applicable]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages."""
+Keep each section concise. Preserve exact file paths, function names, and error messages.
+
+The conversation above is grouped into turns marked [Turn N]. When you reference specific work, cite its originating turn (e.g. "implemented the parser [Turn 14]"). Full detail of any turn can be recovered later with the read_history tool, so prefer concise turn-tagged pointers over copying long verbatim content."""
 
 _UPDATE_SUMMARIZATION = """The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
@@ -145,22 +145,9 @@ Use this EXACT format:
 ## Critical Context
 - [Preserve important context, add new if needed]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages."""
+Keep each section concise. Preserve exact file paths, function names, and error messages.
 
-_TURN_PREFIX_SUMMARIZATION = """This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
-
-Summarize the prefix to provide context for the retained suffix:
-
-## Original Request
-[What did the user ask for in this turn?]
-
-## Early Progress
-- [Key decisions and work done in the prefix]
-
-## Context for Suffix
-- [Information needed to understand the retained recent work]
-
-Be concise. Focus on what's needed to understand the kept suffix."""
+PRESERVE any existing [Turn N] citations from the previous summary, and tag newly summarized work with its turn marker the same way. The read_history tool can recover full detail of any cited turn."""
 
 _BRANCH_SUMMARY = """Create a structured summary of this conversation branch for context when returning later.
 
@@ -229,16 +216,17 @@ class _BranchSummaryEntryMaterializer:
 @dataclass(frozen=True, slots=True)
 class _CompactionEntryMaterializer:
     def to_message(self, entry: SessionEntry) -> AgentMessage | None:
+        # Materialized as a ``user`` message: under full-compress the summary
+        # can be the trailing message in the rebuilt context, and a provider
+        # completion request must not end on an assistant turn.
         payload = entry.payload if isinstance(entry.payload, dict) else {}
         summary = payload.get("summary")
         if not isinstance(summary, str) or not summary:
             return None
-        content: list[AssistantContent] = [TextContent(type="text", text=summary)]
-        return AssistantMessage(
-            role="assistant",
-            content=content,
+        return UserMessage(
+            role="user",
+            content=[TextContent(type="text", text=summary)],
             timestamp=entry.timestamp,
-            stop_reason="end_turn",
         )
 
 
@@ -261,7 +249,6 @@ MANIFEST = ExtensionManifest(
             "summarization_system": {"type": "string"},
             "summarization": {"type": "string"},
             "update_summarization": {"type": "string"},
-            "turn_prefix_summarization": {"type": "string"},
             "branch_summary": {"type": "string"},
             "branch_summary_preamble": {"type": "string"},
         },
@@ -278,9 +265,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         PROMPT_SUMMARIZATION: _override(config, "summarization", _SUMMARIZATION),
         PROMPT_UPDATE_SUMMARIZATION: _override(
             config, "update_summarization", _UPDATE_SUMMARIZATION
-        ),
-        PROMPT_TURN_PREFIX_SUMMARIZATION: _override(
-            config, "turn_prefix_summarization", _TURN_PREFIX_SUMMARIZATION
         ),
         PROMPT_BRANCH_SUMMARY: _override(config, "branch_summary", _BRANCH_SUMMARY),
         PROMPT_BRANCH_SUMMARY_PREAMBLE: _override(

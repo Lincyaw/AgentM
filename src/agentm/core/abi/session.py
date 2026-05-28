@@ -134,10 +134,10 @@ class SessionTree(Protocol):
 class EntryMaterializer(Protocol):
     """Convert a ``SessionEntry`` into an ``AgentMessage`` (or ``None``).
 
-    Atoms register one materializer per ``entry.type`` they own. Both
-    ``compaction.get_message_from_entry`` and the runtime's
-    ``build_session_context`` consult the global ``ENTRY_MATERIALIZERS``
-    registry so the kernel does not branch on string-literal entry types.
+    Atoms register one materializer per ``entry.type`` they own. The
+    runtime's ``build_session_context`` consults the global
+    ``ENTRY_MATERIALIZERS`` registry so the kernel does not branch on
+    string-literal entry types.
     """
 
     def to_message(self, entry: SessionEntry) -> AgentMessage | None: ...

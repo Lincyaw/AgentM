@@ -151,7 +151,7 @@ The binding mechanism between observation and version. Every observability trace
       "tool_bash":        "tool_bash@7890",
       "tool_edit":        "tool_edit@1234",
       "system_prompt":    "system_prompt@5678",
-      "micro_compact":    "micro_compact@9abc",
+      "llm_compaction":   "llm_compaction@9abc",
       "observability":    "observability@def0"
       // ... every loaded atom, including those not directly invoked
     }
@@ -168,7 +168,7 @@ Producer is the `observability` extension — when it sees `SessionReadyEvent`, 
 
 ### 4.1 Why every loaded atom, not just invoked
 
-Causal honesty. A tool the agent never *calls* in this session can still affect outcomes — `micro_compact` runs autonomously, `permission` blocks operations, `cost_budget` halts mid-task. Pinning the full set lets the indexer attribute task-level metrics correctly.
+Causal honesty. A tool the agent never *calls* in this session can still affect outcomes — `llm_compaction` runs autonomously, `permission` blocks operations, `cost_budget` halts mid-task. Pinning the full set lets the indexer attribute task-level metrics correctly.
 
 ### 4.2 Mid-session reload
 
@@ -309,7 +309,7 @@ This forces the agent to seek more evidence before deciding, instead of overfitt
 
 ### 7.2 Confounding variables
 
-**Problem**: agent edits `tool_read` and `micro_compact` simultaneously; metrics move; cause is unattributable.
+**Problem**: agent edits `tool_read` and `llm_compaction` simultaneously; metrics move; cause is unattributable.
 
 **Countermeasure**:
 - A constitution-layer flag in `core-manifest.yaml`: `experiment_mode_atom: <name> | null`.
