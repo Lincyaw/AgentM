@@ -76,3 +76,32 @@ to step 5 (host). `wait_nonempty` is implemented now but unused by step 1.
 4. `monitor` atom: `schedule_wakeup` / `create_monitor` / `list_monitors` / `cancel_monitor`.
 5. Long-lived host driver loop + interrupt-and-resume (abort turn via `signal`,
    preserve context, resume with new inbox input); validate on one channel first.
+
+## Progress
+
+- **Step 1 DONE (2026-05-28).** Merged to `feat/session-inbox`: docs `322af8bd`,
+  inbox cherry-picked `41bd3beb` (clean; deliberately excludes the 2 unrelated
+  llmharness commits that sat between the worktree base 165c0383 and the cherry).
+  code-reviewer verdict APPROVE-WITH-NITS (0 blocker / 0 major). Re-verified on the
+  new base 3c79fb98: ruff + mypy clean, `tests/unit` 104 passed, inbox+sub_agent 10
+  passed. Nits deferred: Nit2 (`_now` function-local import) → fold into step 2;
+  Nit1 (tests reach `session._apis` for `send_user_message`) → step 5 once a public
+  push handle lands.
+
+## Step-order refinement (decided 2026-05-28)
+
+Deleting `sub_agent`'s `decide_turn_action` floor and routing findings through the
+inbox is **moved from step 2 to step 5**. Reason: the floor does two jobs —
+(a) inject completed-but-unread findings, (b) keep the parent alive while children are
+*still running*. The inbox + generalized keep-alive replaces (a), but (b) has no
+replacement until the **persistent driver (step 5)** exists — in steps 2–4 `prompt`
+is push+run-until-idle, so a parent that voluntarily Stops while children run would
+let them be aborted (the exact failure sub-agent-lifecycle.md was written to prevent).
+
+Therefore:
+- **Step 2 (revised) = PURE REFACTOR.** Extract a generic background-task registry
+  into `core.lib`; re-seat `sub_agent` on it with **no behaviour change** (floor
+  untouched, findings still delivered via the floor, inbox not involved). Guarded by
+  the existing sub_agent lifecycle/budget tests. Fold step-1 Nit2 here.
+- **Step 5 (expanded)** = persistent driver + interrupt-resume + delete the sub_agent
+  floor + route findings via `inbox(source="subagent")` + Nit1 public push handle.
