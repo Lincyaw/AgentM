@@ -40,7 +40,7 @@ class StatusModel:
 class Catalog:
     """Running snapshot of what the runtime exposes, fed from session_ready /
     api_register / extension_install / cost_budget_exceeded frames. Backs the
-    command palette and the /tools /extensions /budget info modals."""
+    command palette and the status bar."""
 
     tools: list[str] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
@@ -55,17 +55,6 @@ class Catalog:
     def add_command(self, name: str) -> None:
         if name and name not in self.commands:
             self.commands.append(name)
-
-    def tools_text(self) -> str:
-        return "\n".join(self.tools) if self.tools else "(no tools registered yet)"
-
-    def extensions_text(self) -> str:
-        if not self.extensions:
-            return "(no extension activity observed yet)"
-        return "\n".join(f"{mod}  —  {st}" for mod, st in sorted(self.extensions.items()))
-
-    def budget_text(self) -> str:
-        return self.budget or "Budget OK (no cost_budget_exceeded seen)."
 
 
 __all__ = ["Catalog", "StatusModel"]
