@@ -645,7 +645,7 @@ async def _arun(
         atom_commands_enabled=bool(atoms_allow),
         atom_allow=atoms_allow or [],
     )
-    approval_policy = (
+    approval_policy: tuple[frozenset[str], frozenset[str], float] = (
         frozenset(require_approval or ()),
         frozenset(),
         300.0,

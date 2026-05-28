@@ -256,7 +256,8 @@ class FeishuAdapter:
         if not chat_id:
             log.warning("outbound dropped: empty chat_id (env id=%s)", env.id)
             return
-        meta = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        raw_meta = body.get("metadata")
+        meta = raw_meta if isinstance(raw_meta, dict) else {}
         meta_kind = str(meta.get("kind") or "assistant_text")
         # The agent has produced output — clear the ACK reaction(s) for
         # this chat (v2 has no turn_complete; assistant_text is the cue).

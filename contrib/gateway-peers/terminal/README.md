@@ -2,12 +2,12 @@
 
 Terminal (stdin/stdout) client process for the AgentM channels gateway.
 
-Connects to an `agentm-gateway --bind unix://…` over the v1 wire
+Connects to an `agentm gateway --bind unix://…` over the v2 wire
 protocol and renders outbound messages on stdout. Replaces the legacy
 in-process `TerminalChannel` driver.
 
 ```sh
-agentm-gateway --bind unix:///tmp/gw.sock &
+agentm gateway --bind unix:///tmp/gw.sock &
 agentm-terminal --connect unix:///tmp/gw.sock
 ```
 

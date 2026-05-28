@@ -2,13 +2,13 @@
 
 Feishu / Lark client process for the AgentM channels gateway.
 
-Connects to an `agentm-gateway --bind unix://…` over the v1 wire
+Connects to an `agentm gateway --bind unix://…` over the v2 wire
 protocol and bridges inbound Feishu messages / card-button clicks into
 the gateway, then renders gateway outbounds as Feishu interactive
 cards. Replaces the legacy in-process `FeishuChannel` driver.
 
 ```sh
-agentm-gateway --bind unix:///tmp/gw.sock &
+agentm gateway --bind unix:///tmp/gw.sock &
 agentm-feishu \
   --connect unix:///tmp/gw.sock \
   --app-id cli_xxxx \

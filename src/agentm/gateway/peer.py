@@ -7,6 +7,7 @@ Tiny module — mechanism only, no policy. Only one peer kind exists in v2
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 
@@ -51,7 +52,7 @@ class PeerRegistry:
     def __contains__(self, peer_id: object) -> bool:
         return isinstance(peer_id, str) and peer_id in self._peers
 
-    def __iter__(self) -> "object":
+    def __iter__(self) -> "Iterator[PeerSession]":
         return iter(list(self._peers.values()))
 
     def __len__(self) -> int:

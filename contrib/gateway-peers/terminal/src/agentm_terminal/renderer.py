@@ -70,7 +70,8 @@ class Renderer:
         * ``buttons`` — optional list of ``{"label","value","style"}``.
         * ``metadata.kind`` — render-style discriminator.
         """
-        meta = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        raw_meta = body.get("metadata")
+        meta = raw_meta if isinstance(raw_meta, dict) else {}
         meta_kind = str(meta.get("kind") or "assistant_text")
         if self._format == "json":
             self._render_json(meta_kind, body)

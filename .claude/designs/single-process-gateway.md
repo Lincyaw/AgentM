@@ -1,6 +1,6 @@
 # Design: Single-Process Gateway (channels v2)
 
-**Status**: PROPOSED
+**Status**: ACCEPTED
 **Created**: 2026-05-28
 **Supersedes**: [`historical/client-server-architecture.md`](historical/client-server-architecture.md) (channels v1) and [`historical/gateway-channels.md`](historical/gateway-channels.md) (channels v0). Both now live in `designs/historical/`.
 
