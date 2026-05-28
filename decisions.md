@@ -246,3 +246,31 @@ for the gate + judges. Phase 1 oversight, not Phase 2 regression.
   (`/tmp/llmharness-record-compat.patch`) for its original author. Net
   Phase-1 diff excludes record.py. Verified: llmharness replay suite
   still 22 passed with the revert.
+
+## 2026-05-28 — compaction overhaul
+
+- **Deleted `micro_compact`; `llm_compaction` is the sole engine, now mounted
+  in `general_purpose` + `chatbot`** (L3: north-star + user direction). The
+  default scenarios previously mounted no compaction engine at all, so no
+  auto-compaction ran. micro_compact was a no-LLM toy (§7 example); its only
+  unique capability was a zero-LLM fallback we don't need.
+- **[flagged] Compaction model switched to "full compress"** (L4: design
+  decision with the user). Drop the keep-recent-tail + cut-point + split-turn
+  machinery; summarize every turn since the last compaction into ONE `user`
+  message, chained incrementally. Rationale: the tail is what creates all the
+  cut-point complexity; the user chose to trade recent verbatim fidelity for a
+  much smaller engine, with `read_history` recovering detail on demand. Spec in
+  `.claude/designs/compaction.md`. Caught + fixed a latent `should_compact` bug
+  (fired every turn when `reserve_tokens >= context_window`) exposed once the
+  engine became active in auto-discovered test sessions.
+- **New `read_history` tool over `get_branch()` (not `agentm trace`)** (L3:
+  research). In-session recall must read the live SessionManager (no flush lag,
+  carries no observability dependency); turn numbering shared with the engine
+  via `core.lib.enumerate_turns`.
+- **DEFERRED follow-up: consolidate `query_traces` onto `agentm trace`** (L2).
+  They overlap at the cross-file trace-selection layer, but `agentm trace
+  index` lacks `task_class`, so it is not a drop-in. Consolidation = add
+  task_class to `agentm trace index` → rewrite rca/format_fix tuner prompts to
+  use `agentm trace index | jq` → delete the `tool_query_traces` atom + its
+  integration test. Kept OUT of this PR (touches CLI + two tuner scenarios +
+  an integration test; orthogonal to compaction).

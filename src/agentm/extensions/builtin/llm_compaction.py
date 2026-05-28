@@ -1,20 +1,27 @@
 """Builtin LLM-driven compaction extension.
 
-Per issue #76 the compaction kernel owns no English prompt text; this atom
-resolves the active bodies via ``api.get_service("prompt_templates").get_prompt`` (populated
-by the ``compaction_prompts`` atom) and threads them into the engine. When
-the prompts atom is not installed, this atom falls back to neutral empty
-strings and emits a diagnostic so users see the configuration drift.
+Model: **full compress**. When the durable session branch crosses the
+token threshold, every turn since the previous compaction is summarized into
+a single ``user`` message that replaces the whole prior context — there is no
+verbatim recent tail. Compression is **incremental / chained**: each pass
+folds the new turns into the previous summary (an ``update`` rewrite, not a
+raw append) so the running checkpoint stays bounded and internally
+consistent.
 
-The compaction engine (cut-point selection, conversation serialization,
-summary generation) is inlined below. The dataclasses describing the
-public ABI live in :mod:`agentm.core.abi.compaction`; the runtime logic is
-private to this atom.
+The summary tags each chunk with a ``[Turn N]`` marker. The original turns
+are never deleted from the session tree (``get_branch`` keeps them), so the
+agent can recover exact detail for any turn via the ``read_history`` tool.
+Turn numbering is shared with that tool through ``core.lib.enumerate_turns``.
+
+Per issue #76 the compaction kernel owns no English prompt text; this atom
+resolves the active bodies via ``api.get_service("prompt_templates").get_prompt``
+(populated by the ``compaction_prompts`` atom) and threads them into the
+engine. When the prompts atom is not installed, this atom falls back to
+neutral empty strings and emits a diagnostic so users see the drift.
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,13 +47,7 @@ from agentm.core.abi.compaction import (
     ContextUsageEstimate,
 )
 from agentm.core.abi.events import DiagnosticEvent
-from agentm.core.abi.session import (
-    ENTRY_MATERIALIZERS,
-    ENTRY_TYPE_BRANCH_SUMMARY,
-    ENTRY_TYPE_COMPACTION,
-    ENTRY_TYPE_MESSAGE,
-    SessionEntry,
-)
+from agentm.core.abi.session import ENTRY_TYPE_COMPACTION, SessionEntry
 from agentm.core.abi.termination import Aborted, ProviderError
 from agentm.core.abi.tool import (
     FILE_OP_EDIT,
@@ -54,6 +55,7 @@ from agentm.core.abi.tool import (
     FILE_OP_READ,
     FILE_OP_WRITE,
 )
+from agentm.core.lib import Turn, enumerate_turns
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import AfterCompactEvent, BeforeCompactEvent
 from agentm.core.abi.extension import ExtensionAPI, ProviderConfig
@@ -65,19 +67,18 @@ from agentm.core.abi.extension import ExtensionAPI, ProviderConfig
 _PROMPT_SUMMARIZATION_SYSTEM = "compaction.summarization_system"
 _PROMPT_SUMMARIZATION = "compaction.summarization"
 _PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
-_PROMPT_TURN_PREFIX_SUMMARIZATION = "compaction.turn_prefix_summarization"
 
 
 MANIFEST = ExtensionManifest(
     name="llm_compaction",
-    description="LLM-driven semantic compaction for long session branches.",
+    description="LLM-driven full-compress compaction for long session branches.",
     registers=("event:before_send_to_llm", "event:before_compact", "event:after_compact"),
     config_schema={
         "type": "object",
         "properties": {
             "enabled": {"type": "boolean", "default": True},
             "reserve_tokens": {"type": "integer", "minimum": 1, "default": 16_384},
-            "keep_recent_tokens": {"type": "integer", "minimum": 1, "default": 20_000},
+            "tool_result_max_chars": {"type": "integer", "minimum": 1, "default": 2_000},
             "custom_instructions": {"type": "string"},
         },
         "additionalProperties": False,
@@ -87,13 +88,10 @@ MANIFEST = ExtensionManifest(
 )
 
 
-# === Compaction engine (inlined; previously core/_internal/compaction) =====
+# === Compaction engine =====================================================
 #
-# Per issue #76, the engine keeps **zero** literal English prompt text and
-# **zero** string-literal entry-type dispatch. Prompts are passed in as
-# parameters by the caller (resolved via ``api.get_service("prompt_templates")``);
-# entry materialization consults the ``ENTRY_MATERIALIZERS`` registry on
-# ``agentm.core.abi.session``.
+# Per issue #76 the engine keeps **zero** literal English prompt text: prompts
+# are passed in as parameters by the caller (resolved via the prompt registry).
 
 DEFAULT_TOOL_RESULT_MAX_CHARS = 2_000
 
@@ -192,7 +190,7 @@ def _truncate_for_summary(text: str, max_chars: int) -> str:
     )
 
 
-def serialize_conversation(
+def serialize_messages(
     messages: list[AgentMessage],
     *,
     tool_result_max_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
@@ -248,6 +246,20 @@ def serialize_conversation(
     return "\n\n".join(parts)
 
 
+def serialize_turns(
+    turns: list[Turn],
+    *,
+    tool_result_max_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
+) -> str:
+    """Render turns with ``[Turn N]`` headers so the summarizer can cite them."""
+
+    blocks: list[str] = []
+    for turn in turns:
+        body = serialize_messages(turn.messages, tool_result_max_chars=tool_result_max_chars)
+        blocks.append(f"[Turn {turn.index}]\n{body}")
+    return "\n\n".join(blocks)
+
+
 Summarizer = Callable[[str, str, int], Awaitable[str]]
 
 
@@ -260,23 +272,13 @@ DEFAULT_COMPACTION_SETTINGS = CompactionSettings()
 EMPTY_COMPACTION_PROMPTS = CompactionPrompts(
     summarization_system="",
     update_summarization="",
-    turn_prefix_summarization="",
 )
-
-
-@dataclass(frozen=True, slots=True)
-class CutPointResult:
-    first_kept_entry_index: int
-    turn_start_index: int
-    is_split_turn: bool
 
 
 @dataclass(slots=True)
 class CompactionPreparation:
-    first_kept_entry_id: str
-    messages_to_summarize: list[AgentMessage]
-    turn_prefix_messages: list[AgentMessage]
-    is_split_turn: bool
+    turns_to_summarize: list[Turn]
+    covered_through_turn: int
     tokens_before: int
     previous_summary: str | None
     file_ops: FileOperations = field(default_factory=create_file_ops)
@@ -376,209 +378,71 @@ def should_compact(
 ) -> bool:
     if not settings.enabled or context_window <= 0:
         return False
-    return context_tokens > context_window - settings.reserve_tokens
+    threshold = context_window - settings.reserve_tokens
+    if threshold <= 0:
+        # ``reserve_tokens`` >= the whole window: there is no usable headroom
+        # to reserve, so the threshold would be non-positive and fire on every
+        # turn. Treat this as a misconfiguration (or a tiny test model) and
+        # disable auto-compaction rather than thrash. Lower ``reserve_tokens``
+        # to compact on small-window models.
+        return False
+    return context_tokens > threshold
 
 
-def get_message_from_entry(entry: SessionEntry) -> AgentMessage | None:
-    """Materialize a session entry into an ``AgentMessage`` via the registry.
-
-    The ``ENTRY_MATERIALIZERS`` registry is populated by atoms at install
-    time. When no materializer is registered for ``entry.type``, this
-    function returns ``None`` (graceful degradation — the missing atom
-    diagnostic is the harness's job; the pure engine layer stays
-    side-effect free).
-    """
-
-    materializer = ENTRY_MATERIALIZERS.get(entry.type)
-    if materializer is None:
-        return None
-    return materializer.to_message(entry)
-
-
-def get_message_from_entry_for_compaction(entry: SessionEntry) -> AgentMessage | None:
-    """Same as ``get_message_from_entry`` but skips ``compaction`` entries.
-
-    The compaction engine emits the synthesized summary itself; pre-existing
-    compaction entries on the path are intentionally elided so the new
-    summary is built only over un-summarized history.
-    """
-
-    if entry.type == ENTRY_TYPE_COMPACTION:
-        return None
-    return get_message_from_entry(entry)
-
-
-def _find_valid_cut_points(
-    entries: list[SessionEntry], start_index: int, end_index: int
-) -> list[int]:
-    cut_points: list[int] = []
-    for index in range(start_index, end_index):
-        entry = entries[index]
-        if entry.type == ENTRY_TYPE_BRANCH_SUMMARY:
-            cut_points.append(index)
-            continue
-        if entry.type != ENTRY_TYPE_MESSAGE:
-            continue
-        if isinstance(entry.payload, ToolResultMessage):
-            continue
-        cut_points.append(index)
-    return cut_points
-
-
-def _find_turn_start_index(
-    entries: list[SessionEntry], entry_index: int, start_index: int
-) -> int:
-    for index in range(entry_index, start_index - 1, -1):
-        entry = entries[index]
-        if entry.type == ENTRY_TYPE_BRANCH_SUMMARY:
-            return index
-        if entry.type != ENTRY_TYPE_MESSAGE:
-            continue
-        if isinstance(entry.payload, UserMessage):
-            return index
-    return -1
-
-
-def find_cut_point(
-    entries: list[SessionEntry],
-    start_index: int,
-    end_index: int,
-    keep_recent_tokens: int,
-) -> CutPointResult:
-    cut_points = _find_valid_cut_points(entries, start_index, end_index)
-    if not cut_points:
-        return CutPointResult(
-            first_kept_entry_index=start_index,
-            turn_start_index=-1,
-            is_split_turn=False,
-        )
-
-    accumulated = 0
-    cut_index = cut_points[0]
-    for index in range(end_index - 1, start_index - 1, -1):
-        entry = entries[index]
-        if entry.type != ENTRY_TYPE_MESSAGE:
-            continue
-        if not isinstance(entry.payload, (UserMessage, AssistantMessage, ToolResultMessage)):
-            continue
-        accumulated += estimate_tokens(entry.payload)
-        if accumulated >= keep_recent_tokens:
-            for cut_point in cut_points:
-                if cut_point >= index:
-                    cut_index = cut_point
-                    break
-            break
-
-    while cut_index > start_index:
-        prev_entry = entries[cut_index - 1]
-        if prev_entry.type == ENTRY_TYPE_COMPACTION:
-            break
-        if prev_entry.type == ENTRY_TYPE_MESSAGE:
-            break
-        cut_index -= 1
-
-    cut_entry = entries[cut_index]
-    is_user_message = cut_entry.type == ENTRY_TYPE_MESSAGE and isinstance(cut_entry.payload, UserMessage)
-    turn_start_index = -1 if is_user_message else _find_turn_start_index(entries, cut_index, start_index)
-    return CutPointResult(
-        first_kept_entry_index=cut_index,
-        turn_start_index=turn_start_index,
-        is_split_turn=(not is_user_message and turn_start_index != -1),
-    )
+def _find_previous_compaction(branch: list[SessionEntry]) -> SessionEntry | None:
+    for entry in reversed(branch):
+        if entry.type == ENTRY_TYPE_COMPACTION:
+            return entry
+    return None
 
 
 def prepare_compaction(
-    path_entries: list[SessionEntry],
+    branch: list[SessionEntry],
     settings: CompactionSettings,
     current_messages: list[AgentMessage] | None = None,
     tools: ToolRegistry | None = None,
 ) -> CompactionPreparation | None:
-    if not path_entries:
-        return None
-    if path_entries[-1].type == ENTRY_TYPE_COMPACTION:
+    """Collect the turns to fold into the running summary.
+
+    Full-compress: every turn after the previous compaction's
+    ``covered_through_turn`` is summarized; nothing is kept verbatim. Returns
+    ``None`` when there is no new material to compress.
+    """
+
+    all_turns = enumerate_turns(branch)
+    if not all_turns:
         return None
 
-    prev_compaction_index = -1
-    for index in range(len(path_entries) - 1, -1, -1):
-        if path_entries[index].type == ENTRY_TYPE_COMPACTION:
-            prev_compaction_index = index
-            break
-
+    previous = _find_previous_compaction(branch)
     previous_summary: str | None = None
-    boundary_start = 0
-    if prev_compaction_index >= 0:
-        prev_payload = path_entries[prev_compaction_index].payload
-        if isinstance(prev_payload, dict):
-            raw_summary = prev_payload.get("summary")
-            if isinstance(raw_summary, str) and raw_summary:
-                previous_summary = raw_summary
-            first_kept = prev_payload.get("first_kept_entry_id") or prev_payload.get(
-                "firstKeptEntryId"
-            )
-            if isinstance(first_kept, str):
-                boundary_start = next(
-                    (
-                        idx
-                        for idx, entry in enumerate(path_entries)
-                        if entry.id == first_kept
-                    ),
-                    prev_compaction_index + 1,
-                )
-            else:
-                boundary_start = prev_compaction_index + 1
-
-    tokens_before = estimate_context_tokens(current_messages or []).tokens
-    cut_point = find_cut_point(
-        path_entries,
-        boundary_start,
-        len(path_entries),
-        settings.keep_recent_tokens,
-    )
-    first_kept_entry = path_entries[cut_point.first_kept_entry_index]
-    history_end = (
-        cut_point.turn_start_index
-        if cut_point.is_split_turn
-        else cut_point.first_kept_entry_index
-    )
-
-    messages_to_summarize: list[AgentMessage] = []
-    for index in range(boundary_start, history_end):
-        message = get_message_from_entry_for_compaction(path_entries[index])
-        if message is not None:
-            messages_to_summarize.append(message)
-
-    turn_prefix_messages: list[AgentMessage] = []
-    if cut_point.is_split_turn:
-        for index in range(cut_point.turn_start_index, cut_point.first_kept_entry_index):
-            message = get_message_from_entry_for_compaction(path_entries[index])
-            if message is not None:
-                turn_prefix_messages.append(message)
-
+    covered_before = 0
     file_ops = create_file_ops()
-    if prev_compaction_index >= 0:
-        prev_payload = path_entries[prev_compaction_index].payload
-        if isinstance(prev_payload, dict):
-            read_files = prev_payload.get("read_files") or prev_payload.get("readFiles")
-            modified_files = prev_payload.get("modified_files") or prev_payload.get(
-                "modifiedFiles"
-            )
-            if isinstance(read_files, list):
-                file_ops.read.update(path for path in read_files if isinstance(path, str))
-            if isinstance(modified_files, list):
-                paths = [path for path in modified_files if isinstance(path, str)]
-                file_ops.edited.update(paths)
+    if previous is not None and isinstance(previous.payload, dict):
+        raw_summary = previous.payload.get("summary")
+        if isinstance(raw_summary, str) and raw_summary:
+            previous_summary = raw_summary
+        raw_covered = previous.payload.get("covered_through_turn")
+        if isinstance(raw_covered, int):
+            covered_before = raw_covered
+        read_files = previous.payload.get("read_files")
+        modified_files = previous.payload.get("modified_files")
+        if isinstance(read_files, list):
+            file_ops.read.update(p for p in read_files if isinstance(p, str))
+        if isinstance(modified_files, list):
+            file_ops.edited.update(p for p in modified_files if isinstance(p, str))
 
-    for message in messages_to_summarize:
-        extract_file_ops_from_message(message, file_ops, tools)
-    for message in turn_prefix_messages:
-        extract_file_ops_from_message(message, file_ops, tools)
+    new_turns = [turn for turn in all_turns if turn.index > covered_before]
+    if not new_turns:
+        return None
+
+    for turn in new_turns:
+        for message in turn.messages:
+            extract_file_ops_from_message(message, file_ops, tools)
 
     return CompactionPreparation(
-        first_kept_entry_id=first_kept_entry.id,
-        messages_to_summarize=messages_to_summarize,
-        turn_prefix_messages=turn_prefix_messages,
-        is_split_turn=cut_point.is_split_turn,
-        tokens_before=tokens_before,
+        turns_to_summarize=new_turns,
+        covered_through_turn=all_turns[-1].index,
+        tokens_before=estimate_context_tokens(current_messages or []).tokens,
         previous_summary=previous_summary,
         file_ops=file_ops,
         settings=settings,
@@ -586,7 +450,7 @@ def prepare_compaction(
 
 
 async def generate_summary(
-    current_messages: list[AgentMessage],
+    turns: list[Turn],
     summarizer: Summarizer,
     reserve_tokens: int,
     summarization_prompt: str,
@@ -594,7 +458,7 @@ async def generate_summary(
     custom_instructions: str | None = None,
     previous_summary: str | None = None,
     *,
-    tool_result_max_chars: int | None = None,
+    tool_result_max_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
 ) -> str:
     base_prompt = (
         prompts.update_summarization
@@ -604,12 +468,7 @@ async def generate_summary(
     if custom_instructions:
         base_prompt = f"{base_prompt}\n\nAdditional focus: {custom_instructions}"
 
-    if tool_result_max_chars is None:
-        conversation_text = serialize_conversation(current_messages)
-    else:
-        conversation_text = serialize_conversation(
-            current_messages, tool_result_max_chars=tool_result_max_chars
-        )
+    conversation_text = serialize_turns(turns, tool_result_max_chars=tool_result_max_chars)
     prompt_text = f"<conversation>\n{conversation_text}\n</conversation>\n\n"
     if previous_summary:
         prompt_text += (
@@ -620,28 +479,6 @@ async def generate_summary(
     return await summarizer(prompts.summarization_system, prompt_text, max_tokens)
 
 
-async def _generate_turn_prefix_summary(
-    messages: list[AgentMessage],
-    summarizer: Summarizer,
-    reserve_tokens: int,
-    prompts: CompactionPrompts,
-    *,
-    tool_result_max_chars: int | None = None,
-) -> str:
-    if tool_result_max_chars is None:
-        conversation_text = serialize_conversation(messages)
-    else:
-        conversation_text = serialize_conversation(
-            messages, tool_result_max_chars=tool_result_max_chars
-        )
-    prompt_text = (
-        f"<conversation>\n{conversation_text}\n</conversation>\n\n"
-        f"{prompts.turn_prefix_summarization}"
-    )
-    max_tokens = max(256, int(0.5 * reserve_tokens))
-    return await summarizer(prompts.summarization_system, prompt_text, max_tokens)
-
-
 async def compact(
     preparation: CompactionPreparation,
     summarizer: Summarizer,
@@ -649,75 +486,38 @@ async def compact(
     custom_instructions: str | None = None,
     prompts: CompactionPrompts | None = None,
 ) -> CompactionResult:
-    """Run the compaction pass and return a :class:`CompactionResult`.
+    """Run a full-compress pass and return a :class:`CompactionResult`.
 
-    ``summarization_prompt`` is the body used for fresh summarizations.
-    ``prompts`` carries the system prompt + the update / turn-prefix bodies
-    used in the incremental and split-turn paths. When ``prompts`` is
-    ``None`` (the prompts atom was not installed) the engine falls back to
-    :data:`EMPTY_COMPACTION_PROMPTS` so the call still succeeds — callers
+    ``summarization_prompt`` is the body used for the first summarization;
+    ``prompts.update_summarization`` is used once a previous summary exists
+    (incremental chaining). When ``prompts`` is ``None`` the engine falls back
+    to :data:`EMPTY_COMPACTION_PROMPTS` so the call still succeeds — callers
     should emit a diagnostic in that case.
     """
 
     resolved_prompts = prompts if prompts is not None else EMPTY_COMPACTION_PROMPTS
-    tool_result_max_chars = preparation.settings.tool_result_max_chars
-    if preparation.is_split_turn and preparation.turn_prefix_messages:
-        history_task = (
-            generate_summary(
-                preparation.messages_to_summarize,
-                summarizer,
-                preparation.settings.reserve_tokens,
-                summarization_prompt,
-                resolved_prompts,
-                custom_instructions,
-                preparation.previous_summary,
-                tool_result_max_chars=tool_result_max_chars,
-            )
-            if preparation.messages_to_summarize
-            else _immediate("No prior history.")
-        )
-        turn_task = _generate_turn_prefix_summary(
-            preparation.turn_prefix_messages,
-            summarizer,
-            preparation.settings.reserve_tokens,
-            resolved_prompts,
-            tool_result_max_chars=tool_result_max_chars,
-        )
-        history_summary, turn_prefix_summary = await asyncio.gather(
-            history_task,
-            turn_task,
-        )
-        summary = (
-            f"{history_summary}\n\n---\n\n"
-            f"**Turn Context (split turn):**\n\n{turn_prefix_summary}"
-        )
-    else:
-        summary = await generate_summary(
-            preparation.messages_to_summarize,
-            summarizer,
-            preparation.settings.reserve_tokens,
-            summarization_prompt,
-            resolved_prompts,
-            custom_instructions,
-            preparation.previous_summary,
-            tool_result_max_chars=tool_result_max_chars,
-        )
+    summary = await generate_summary(
+        preparation.turns_to_summarize,
+        summarizer,
+        preparation.settings.reserve_tokens,
+        summarization_prompt,
+        resolved_prompts,
+        custom_instructions,
+        preparation.previous_summary,
+        tool_result_max_chars=preparation.settings.tool_result_max_chars,
+    )
 
     read_files, modified_files = compute_file_lists(preparation.file_ops)
     summary += format_file_operations(read_files, modified_files)
     return CompactionResult(
         summary=summary,
-        first_kept_entry_id=preparation.first_kept_entry_id,
+        covered_through_turn=preparation.covered_through_turn,
         tokens_before=preparation.tokens_before,
         details=CompactionDetails(
             read_files=read_files,
             modified_files=modified_files,
         ),
     )
-
-
-async def _immediate(value: str) -> str:
-    return value
 
 
 # === Atom install ==========================================================
@@ -727,7 +527,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     settings = CompactionSettings(
         enabled=bool(config.get("enabled", True)),
         reserve_tokens=int(config.get("reserve_tokens", 16_384)),
-        keep_recent_tokens=int(config.get("keep_recent_tokens", 20_000)),
+        tool_result_max_chars=int(config.get("tool_result_max_chars", 2_000)),
     )
     custom_instructions = config.get("custom_instructions")
     if not isinstance(custom_instructions, str):
@@ -741,9 +541,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         session_messages = api.session.get_messages()
         usage_estimate = estimate_context_tokens(session_messages)
-        if not should_compact(
-            usage_estimate.tokens, model.context_window, settings
-        ):
+        if not should_compact(usage_estimate.tokens, model.context_window, settings):
             return
 
         branch = api.session.get_branch()
@@ -751,8 +549,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             branch, settings, current_messages=session_messages, tools=list(api.tools)
         )
         if preparation is None:
-            return
-        if not preparation.messages_to_summarize and not preparation.turn_prefix_messages:
             return
 
         prompts, summarization_body = await _resolve_prompts(api)
@@ -768,13 +564,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             prompts=prompts,
         )
 
+        # The entry records only ``covered_through_turn`` (the chaining
+        # cursor): full-compress keeps no verbatim tail, so it omits the
+        # kernel's optional ``first_kept_entry_id`` seam and lets
+        # ``build_session_context`` rebuild the context as ``[user(summary)]``
+        # plus anything appended after this entry.
         details = {
             "reason": "llm_auto_overflow",
             "reserve_tokens": settings.reserve_tokens,
-            "keep_recent_tokens": settings.keep_recent_tokens,
+            "covered_through_turn": result.covered_through_turn,
             "estimated_tokens_before": usage_estimate.tokens,
             "summary": result.summary,
-            "first_kept_entry_id": result.first_kept_entry_id,
             "read_files": result.details.read_files,
             "modified_files": result.details.modified_files,
         }
@@ -812,12 +612,11 @@ async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
 
     registry = api.get_service("prompt_templates")
     if registry is None:
-        system = summarization = update = turn_prefix = None
+        system = summarization = update = None
     else:
         system = registry.get_prompt(_PROMPT_SUMMARIZATION_SYSTEM)
         summarization = registry.get_prompt(_PROMPT_SUMMARIZATION)
         update = registry.get_prompt(_PROMPT_UPDATE_SUMMARIZATION)
-        turn_prefix = registry.get_prompt(_PROMPT_TURN_PREFIX_SUMMARIZATION)
 
     missing = [
         name
@@ -825,7 +624,6 @@ async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
             (_PROMPT_SUMMARIZATION_SYSTEM, system),
             (_PROMPT_SUMMARIZATION, summarization),
             (_PROMPT_UPDATE_SUMMARIZATION, update),
-            (_PROMPT_TURN_PREFIX_SUMMARIZATION, turn_prefix),
         )
         if not body
     ]
@@ -848,7 +646,6 @@ async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
         CompactionPrompts(
             summarization_system=system or "",
             update_summarization=update or "",
-            turn_prefix_summarization=turn_prefix or "",
         ),
         summarization or "",
     )

@@ -299,7 +299,7 @@ Atoms whose worst-case bug is "agent does worse on its task". Validator runs, re
 | `tool_hypothesis_store`, `tool_submit_plan`, `tool_trajectory_loader` | Domain tools, same logic |
 | `system_prompt`, `prompt_templates`, `skill_loader` | Prompt drift is observable |
 | `observability`, `trajectory` | Pure subscribers; cannot affect agent behavior |
-| `micro_compact`, `tool_result_budget`, `turn_reminder`, `dedup`, `sub_agent` | Behavior tweaks; bounded blast radius |
+| `llm_compaction`, `tool_result_budget`, `turn_reminder`, `dedup`, `sub_agent` | Behavior tweaks; bounded blast radius |
 | `file_mutation_queue` | Local I/O scheduling |
 
 ### 7.2 Tier 2 — reviewable
