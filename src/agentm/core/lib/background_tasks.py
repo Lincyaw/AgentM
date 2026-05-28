@@ -72,13 +72,27 @@ class BackgroundTaskRegistry(Generic[T]):
     the owner calls :meth:`release_slot` to undo the reservation. This mirrors
     sub_agent's original ``_reserved_slots`` bookkeeping exactly, so a child
     that is mid-spawn still counts against ``max_workers``.
+
+    Pass ``max_workers=None`` for the unbounded contract: slot accounting is
+    skipped entirely, :meth:`reserve_slot` / :meth:`release_slot` short-circuit,
+    and :meth:`register` inserts without touching the (unused) counter. Owners
+    that already have the work running before they register — and therefore
+    have nothing to fail-fast on — use this mode (``background_exec``).
     """
 
-    def __init__(self, *, max_workers: int) -> None:
+    def __init__(self, *, max_workers: int | None) -> None:
         self._max_workers = max_workers
         self._tasks: dict[str, T] = {}
         self._lock = asyncio.Lock()
         self._reserved_slots = 0
+
+    @property
+    def is_unbounded(self) -> bool:
+        """True when constructed with ``max_workers=None`` — slot accounting
+        is a no-op. Exposed so owners can branch on it without reaching into
+        ``_max_workers``."""
+
+        return self._max_workers is None
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -105,9 +119,13 @@ class BackgroundTaskRegistry(Generic[T]):
 
         Counts handles whose status is :data:`RUNNING` plus outstanding
         reservations, so concurrent dispatches cannot oversubscribe between
-        reserve and register.
+        reserve and register. In the unbounded contract
+        (``max_workers is None``) this is a no-op — there is no capacity to
+        check against.
         """
 
+        if self._max_workers is None:
+            return
         async with self._lock:
             running = sum(1 for t in self._tasks.values() if t.status == RUNNING)
             if running + self._reserved_slots >= self._max_workers:
@@ -118,8 +136,11 @@ class BackgroundTaskRegistry(Generic[T]):
 
     async def release_slot(self) -> None:
         """Release a reservation taken by :meth:`reserve_slot` without
-        registering a handle (the unit failed to spawn)."""
+        registering a handle (the unit failed to spawn). No-op in the unbounded
+        contract (``max_workers is None``)."""
 
+        if self._max_workers is None:
+            return
         async with self._lock:
             self._reserved_slots -= 1
 
@@ -127,17 +148,16 @@ class BackgroundTaskRegistry(Generic[T]):
         """Insert ``task`` and release the reservation that preceded it in one
         critical section (a reserved slot becomes a live running slot).
 
-        Owners that follow the documented ``reserve_slot → create task →
-        register`` flow (sub_agent) net to zero here. Owners whose work is
-        already running when they register — and therefore have nothing to
-        fail-fast on, so never reserve (background_exec) — would otherwise drive
-        the counter negative; the ``max(0, ...)`` clamp keeps the invariant
-        ``_reserved_slots >= 0`` for both flows, and the reserve→register net
-        is unchanged because reserve always increments before this decrements.
+        Bounded owners (``max_workers=N``) follow the documented
+        ``reserve_slot → create task → register`` flow (sub_agent), so the
+        decrement here cancels out the reservation. Unbounded owners
+        (``max_workers=None`` — background_exec) never reserve in the first
+        place and skip the counter entirely.
         """
 
         async with self._lock:
-            self._reserved_slots = max(0, self._reserved_slots - 1)
+            if self._max_workers is not None:
+                self._reserved_slots -= 1
             self._tasks[task.task_id] = task
 
     async def poll_first_completed(self) -> None:

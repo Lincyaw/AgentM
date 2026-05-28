@@ -52,7 +52,7 @@ from agentm.core.abi import (
     ToolTerminate,
 )
 from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.lib import to_jsonable
+from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, to_jsonable
 from agentm.core.lib.background_tasks import (
     BackgroundTask,
     BackgroundTaskRegistry,
@@ -73,10 +73,6 @@ _COMPANION_TOOLS = frozenset({"check_background", "wait_background", "cancel_bac
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_HEARTBEAT = 120.0
 _DEFAULT_SILENCE_WARNING = 300.0
-
-# Grace window the shutdown handler gives still-running background tasks to
-# finish on their own before it sets their abort signal (mirrors sub_agent).
-_SHUTDOWN_GRACE_SECONDS = 5.0
 
 
 MANIFEST = ExtensionManifest(
@@ -100,8 +96,8 @@ MANIFEST = ExtensionManifest(
                 "minimum": 0,
                 "default": _DEFAULT_TIMEOUT,
                 "description": (
-                    "Seconds a foreground call may run before it is moved to "
-                    "the background (default 60)."
+                    f"Seconds a foreground call may run before it is moved to "
+                    f"the background (default {_DEFAULT_TIMEOUT:g})."
                 ),
             },
             "heartbeat_interval": {
@@ -109,8 +105,8 @@ MANIFEST = ExtensionManifest(
                 "minimum": 0,
                 "default": _DEFAULT_HEARTBEAT,
                 "description": (
-                    "Sparse heartbeat: post a 'still running' status every N "
-                    "seconds of no other milestone (default 120)."
+                    f"Sparse heartbeat: post a 'still running' status every N "
+                    f"seconds of no other milestone (default {_DEFAULT_HEARTBEAT:g})."
                 ),
             },
             "silence_warning": {
@@ -118,8 +114,8 @@ MANIFEST = ExtensionManifest(
                 "minimum": 0,
                 "default": _DEFAULT_SILENCE_WARNING,
                 "description": (
-                    "Emit a silence-too-long warning once a backgrounded task "
-                    "produces no result for N seconds (default 300)."
+                    f"Emit a silence-too-long warning once a backgrounded task "
+                    f"produces no result for N seconds (default {_DEFAULT_SILENCE_WARNING:g})."
                 ),
             },
             "denylist": {
@@ -127,6 +123,16 @@ MANIFEST = ExtensionManifest(
                 "items": {"type": "string"},
                 "default": [],
                 "description": "Tool names that must never be wrapped/backgrounded.",
+            },
+            "shutdown_grace_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "default": DEFAULT_SHUTDOWN_GRACE_SECONDS,
+                "description": (
+                    "Seconds the session_shutdown drain waits for still-"
+                    "running background tasks to finish cooperatively before "
+                    f"cancelling them (default {DEFAULT_SHUTDOWN_GRACE_SECONDS:g})."
+                ),
             },
         },
         "additionalProperties": True,
@@ -309,19 +315,21 @@ class _BgManager:
         heartbeat_interval: float,
         silence_warning: float,
         denylist: set[str],
+        shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
     ) -> None:
         self._api = api
         self.timeout = timeout
         self._heartbeat = heartbeat_interval
         self._silence_warning = silence_warning
         self._denylist = denylist
+        self._shutdown_grace_seconds = shutdown_grace_seconds
         # No max_workers cap for backgrounded tool calls (each is a single
-        # coroutine, not a whole child session); use a large ceiling so the
-        # running-count guard never trips. This atom registers handles WITHOUT
-        # reserving a slot first (the work is already running when we register),
-        # which the registry tolerates by clamping its reservation counter.
+        # coroutine, not a whole child session): the registry's documented
+        # unbounded contract (``max_workers=None``) skips slot accounting
+        # entirely, so this atom can register handles without ever paying for
+        # a reserve_slot → release_slot round-trip.
         self._registry: BackgroundTaskRegistry[_BgTask] = BackgroundTaskRegistry(
-            max_workers=1_000_000
+            max_workers=None
         )
         # Guards the shutdown handler against a background() racing in after the
         # bus has been cleared: once set, background() refuses to register.
@@ -372,7 +380,7 @@ class _BgManager:
             if forwarder is not None:
                 forwarder.cancel()
             _done, still_running = await asyncio.wait(
-                {task}, timeout=_SHUTDOWN_GRACE_SECONDS
+                {task}, timeout=self._shutdown_grace_seconds
             )
             if still_running:
                 task.cancel()
@@ -614,7 +622,7 @@ class _BgManager:
             return
         watches = [state.task for state in running]
         _done, still_running = await asyncio.wait(
-            watches, timeout=_SHUTDOWN_GRACE_SECONDS
+            watches, timeout=self._shutdown_grace_seconds
         )
         if still_running:
             for state in running:
@@ -630,6 +638,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         heartbeat_interval=float(config.get("heartbeat_interval", _DEFAULT_HEARTBEAT)),
         silence_warning=float(config.get("silence_warning", _DEFAULT_SILENCE_WARNING)),
         denylist={str(name) for name in config.get("denylist", [])},
+        shutdown_grace_seconds=float(
+            config.get("shutdown_grace_seconds", DEFAULT_SHUTDOWN_GRACE_SECONDS)
+        ),
     )
 
     def on_agent_start(_: AgentStartEvent) -> None:

@@ -134,30 +134,54 @@ def test_registry_only_counts_running_for_slots() -> None:
 
 
 @pytest.mark.asyncio
-async def test_register_without_reservation_never_drives_counter_negative() -> None:
-    """The reservation counter holds ``>= 0`` for both owner flows.
+async def test_unbounded_registry_skips_slot_accounting() -> None:
+    """``max_workers=None`` is the documented unbounded contract.
 
-    ``background_exec`` registers handles whose work is ALREADY running, so it
-    never reserves first. Without the clamp, each such ``register`` would
-    decrement ``_reserved_slots`` below zero; here it must stay pinned at zero.
-    The sub_agent ``reserve_slot → register`` net must remain unchanged (a
-    reservation taken before a register cancels out exactly).
+    Slot accounting is a no-op: ``reserve_slot`` / ``release_slot`` /
+    ``register`` never touch the counter and ``SlotLimitReached`` is
+    impossible. This is how ``background_exec`` registers handles whose work
+    is ALREADY running without paying for the reserve→register round-trip.
+    Pinning the no-op contract here means the previous "drive the counter
+    negative then clamp it to zero" hack (PR #176) cannot creep back.
     """
 
     registry: BackgroundTaskRegistry[BackgroundTask] = BackgroundTaskRegistry(
-        max_workers=1_000_000
+        max_workers=None
     )
+    assert registry.is_unbounded is True
 
-    # No-reservation registers (background_exec flow): counter stays at 0.
-    for i in range(3):
+    # Arbitrary many no-reservation registers: counter is unused (still 0).
+    for i in range(100):
         await registry.register(_make_task(f"bg{i}"))
-        assert registry._reserved_slots >= 0
     assert registry._reserved_slots == 0
 
-    # Mixed in a reserve→register pair (sub_agent flow): still nets to 0.
+    # reserve/release are no-ops in the unbounded contract (no SlotLimitReached
+    # is ever possible; the counter stays at zero either way).
     await registry.reserve_slot()
-    assert registry._reserved_slots == 1
-    await registry.register(_make_task("reserved"))
+    await registry.release_slot()
+    assert registry._reserved_slots == 0
+
+    for handle in registry.values():
+        handle.task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_bounded_registry_still_refuses_at_n_plus_one() -> None:
+    """Bounded ``max_workers=N`` keeps raising ``SlotLimitReached`` at N+1
+    after the A2 refactor (counter no longer auto-clamps to zero).
+    """
+
+    registry: BackgroundTaskRegistry[BackgroundTask] = BackgroundTaskRegistry(
+        max_workers=2
+    )
+    await registry.reserve_slot()
+    await registry.reserve_slot()
+    with pytest.raises(SlotLimitReached):
+        await registry.reserve_slot()
+
+    # Sub_agent's reserve→register flow nets to zero exactly (no clamp).
+    await registry.register(_make_task("a"))
+    await registry.register(_make_task("b"))
     assert registry._reserved_slots == 0
 
     for handle in registry.values():

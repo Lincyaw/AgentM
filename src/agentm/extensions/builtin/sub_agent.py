@@ -33,7 +33,7 @@ from agentm.core.abi import (
     ToolTerminated,
     UserMessage,
 )
-from agentm.core.lib import to_jsonable
+from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, to_jsonable
 from agentm.core.lib.artifact_files import list_artifacts_for_task
 from agentm.core.lib.background_tasks import (
     BackgroundTask,
@@ -60,7 +60,6 @@ _COMPLETED: Literal["completed"] = "completed"
 _ABORTED: Literal["aborted"] = "aborted"
 _ERROR: Literal["error"] = "error"
 _Status = Literal["running", "completed", "aborted", "error"]
-_SHUTDOWN_GRACE_SECONDS = 5.0
 
 MANIFEST = ExtensionManifest(
     name="sub_agent",
@@ -108,6 +107,16 @@ MANIFEST = ExtensionManifest(
                 ),
             },
             "max_workers": {"type": "integer", "minimum": 1, "default": 4},
+            "shutdown_grace_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "default": DEFAULT_SHUTDOWN_GRACE_SECONDS,
+                "description": (
+                    "Seconds the session_shutdown drain waits for still-"
+                    "running child sessions to finish cooperatively before "
+                    f"aborting them (default {DEFAULT_SHUTDOWN_GRACE_SECONDS:g})."
+                ),
+            },
         },
         "additionalProperties": True,
     },
@@ -494,12 +503,14 @@ class _ChildTaskManager:
         available_inherited: dict[str, Any],
         max_workers: int,
         system_prompt_module: str,
+        shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
     ) -> None:
         self._api = api
         self._inherit_extensions = inherit_extensions
         self._available_inherited = available_inherited
         self._system_prompt_module = system_prompt_module
         self._max_workers = max_workers
+        self._shutdown_grace_seconds = shutdown_grace_seconds
         self._registry: BackgroundTaskRegistry[_ChildTask] = BackgroundTaskRegistry(
             max_workers=max_workers
         )
@@ -520,7 +531,7 @@ class _ChildTaskManager:
             await self.abort({"task_id": state.task_id})
         await asyncio.wait(
             [state.task for state in running],
-            timeout=_SHUTDOWN_GRACE_SECONDS,
+            timeout=self._shutdown_grace_seconds,
         )
         async with self._registry.lock:
             terminal: list[_ChildTask] = []
@@ -954,7 +965,7 @@ class _ChildTaskManager:
             return
         done, still_running = await asyncio.wait(
             [child.task for child in pending],
-            timeout=_SHUTDOWN_GRACE_SECONDS,
+            timeout=self._shutdown_grace_seconds,
         )
         _ = done
         if still_running:
@@ -993,6 +1004,9 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         available_inherited=available_inherited,
         max_workers=int(config.get("max_workers", 4)),
         system_prompt_module=system_prompt.module_path,
+        shutdown_grace_seconds=float(
+            config.get("shutdown_grace_seconds", DEFAULT_SHUTDOWN_GRACE_SECONDS)
+        ),
     )
 
     api.on(SessionReadyEvent.CHANNEL, manager.on_session_ready)

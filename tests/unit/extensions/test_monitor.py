@@ -145,11 +145,13 @@ async def test_channel_fires_dedup_replace_no_stacking() -> None:
 
     api = _FakeApi()
     mgr = _manager(api)
-    res = await mgr.create_monitor({"watch": "agent_end"})
+    # ``tool_call`` is a legitimate agent-observable channel (not in the
+    # kernel-control denylist that A1 added).
+    res = await mgr.create_monitor({"watch": "tool_call"})
     monitor_id = _payload(res)["monitor_id"]
 
-    api.fire("agent_end", {"event": 1})
-    api.fire("agent_end", {"event": 2})
+    api.fire("tool_call", {"event": 1})
+    api.fire("tool_call", {"event": 2})
 
     drained = api.inbox.drain()
     assert len(drained) == 1
@@ -280,8 +282,10 @@ async def test_session_shutdown_cancels_all_and_clears_subscriptions() -> None:
 
     w1 = await mgr.schedule_wakeup({"delay": 60.0})
     w2 = await mgr.schedule_wakeup({"delay": 60.0})
+    # Both ``tool_call`` and ``plan_submitted`` are agent-observable channels
+    # (not in A1's kernel-control denylist).
     c1 = await mgr.create_monitor({"watch": "tool_call"})
-    c2 = await mgr.create_monitor({"watch": "agent_end"})
+    c2 = await mgr.create_monitor({"watch": "plan_submitted"})
     wake_ids = [_payload(w1)["monitor_id"], _payload(w2)["monitor_id"]]
     chan_ids = [_payload(c1)["monitor_id"], _payload(c2)["monitor_id"]]
 
@@ -296,7 +300,7 @@ async def test_session_shutdown_cancels_all_and_clears_subscriptions() -> None:
         state = mgr._monitors[mid]
         assert state.status == "cancelled"
     assert api._handlers.get("tool_call", []) == []
-    assert api._handlers.get("agent_end", []) == []
+    assert api._handlers.get("plan_submitted", []) == []
     assert mgr._shutting_down is True
 
     # Post-shutdown new monitors are refused (not stranded on a cleared bus).
@@ -371,6 +375,46 @@ async def test_list_monitors_reports_live_and_terminal_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_monitor_refuses_kernel_control_channels() -> None:
+    """A1 fail-stop: subscribing to a kernel-control channel must be refused
+    at ``create_monitor`` so the agent cannot wedge the loop into an
+    inescapable spin via ``watch="context"`` and friends.
+
+    The canonical bug: a monitor on ``context`` posts to the inbox on every
+    fire; the inbox-non-empty floor keeps the loop alive; the next turn fires
+    ``context`` again. Without the denylist this is an unbreakable infinite
+    loop. The refusal must NOT leave a subscription on the bus.
+    """
+
+    api = _FakeApi()
+    mgr = _manager(api)
+
+    # Pick a representative across the categories the denylist covers.
+    for channel in (
+        "context",
+        "decide_turn_action",
+        "agent_start",
+        "agent_end",
+        "before_send_to_llm",
+        "message_persisted",
+        "session_ready",
+        "session_shutdown",
+        "extension_install",
+        "api_register",
+    ):
+        res = await mgr.create_monitor({"watch": channel})
+        assert res.is_error, f"expected refusal for {channel!r}"
+        err = _payload(res)["error"]
+        assert channel in err, f"error message must name the channel: {err}"
+        # No subscription leaked onto the bus.
+        assert api._handlers.get(channel, []) == [], (
+            f"refused channel {channel!r} must not leave a handler"
+        )
+        # No monitor entry was registered.
+        assert not mgr._monitors
+
+
+@pytest.mark.asyncio
 async def test_create_monitor_condition_form_refused() -> None:
     """Condition-polling is deferred; the agent gets a tool-error result, not
     a silent no-op."""
@@ -396,6 +440,65 @@ def test_install_registers_tools_and_shutdown_handler() -> None:
         "cancel_monitor",
     }
     assert "session_shutdown" in api._handlers
+
+
+@pytest.mark.asyncio
+async def test_install_propagates_shutdown_grace_config() -> None:
+    """A3 fail-stop: a config override (``shutdown_grace_seconds=0.05``)
+    propagates from ``install`` to the manager and bounds the actual drain.
+
+    Drives a still-pending wakeup (60s sleep) through the shutdown handler.
+    The drain awaits the wakeup task under the configured grace; with the
+    default 5.0 this test would block ~5s. The override ensures it finishes
+    well under a second (the wakeup task gets cancelled, so the gather is
+    immediate).
+    """
+
+    api = _FakeApi()
+    monitor.install(
+        cast(ExtensionAPI, api),
+        {"shutdown_grace_seconds": 0.05},
+    )
+    # The manager isn't exposed by install(); reach it through the captured
+    # shutdown handler closure (the install pattern wraps it in api.on()).
+    shutdown_handlers = api._handlers["session_shutdown"]
+    assert len(shutdown_handlers) == 1
+    handler = shutdown_handlers[0]
+    bound_manager = handler.__self__  # type: ignore[attr-defined]
+    assert bound_manager._shutdown_grace_seconds == 0.05
+
+    # Push a wakeup, then shut down — drain must complete promptly.
+    await bound_manager.schedule_wakeup({"delay": 60.0})
+    start = asyncio.get_event_loop().time()
+    await asyncio.wait_for(
+        bound_manager.on_session_shutdown(SessionShutdownEvent(cwd=".")),
+        timeout=2.0,  # generous; if grace is honoured this returns near-instantly
+    )
+    elapsed = asyncio.get_event_loop().time() - start
+    assert elapsed < 1.0, f"shutdown drain took {elapsed:.3f}s — grace not honoured"
+
+
+@pytest.mark.asyncio
+async def test_install_propagates_event_summary_max_chars() -> None:
+    """B5 fail-stop: ``event_summary_max_chars`` config knob propagates from
+    ``install`` to the manager (no module-level constant override needed)."""
+
+    api = _FakeApi()
+    monitor.install(
+        cast(ExtensionAPI, api),
+        {"event_summary_max_chars": 10},
+    )
+    handler = api._handlers["session_shutdown"][0]
+    bound_manager = handler.__self__  # type: ignore[attr-defined]
+    assert bound_manager._event_summary_max_chars == 10
+
+    await bound_manager.create_monitor({"watch": "tool_call"})
+    api.fire("tool_call", {"event": "x" * 100})
+    drained = api.inbox.drain()
+    assert len(drained) == 1
+    summary = drained[0].payload["event_summary"]
+    # Bounded to the configured cap (10 chars max, including the "..." tail).
+    assert len(summary) <= 10
 
 
 def test_render_item_monitor_source_renders() -> None:

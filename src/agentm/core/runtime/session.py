@@ -61,6 +61,7 @@ from agentm.core.abi.events import (
 )
 from agentm.core.abi.events import ContextEvent
 from agentm.core.abi.loop import resolve_loop_action
+from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS
 from agentm.core.runtime.resource_loader import ResourceLoader
 from agentm.core.runtime.session_helpers import (
     collect_start_veto,
@@ -77,11 +78,12 @@ from agentm.core.runtime.session_manager import SessionManager
 logger = logging.getLogger(__name__)
 
 # Grace window for ``AgentSession.shutdown`` to await the persistent driver
-# task before forcing cancellation. Matches the cooperative-shutdown shape
-# the ``background_exec`` / ``sub_agent`` atoms use for their own task
-# registries: ask cooperatively (``_closed`` + ``interrupt``), wait briefly,
-# cancel if the task doesn't observe.
-_DRIVER_SHUTDOWN_GRACE_SECONDS = 5.0
+# task before forcing cancellation. Pulled from the shared substrate default
+# so atoms (``background_exec`` / ``sub_agent`` / ``monitor``) and the
+# session driver use the same number — see ``core.lib.shutdown``. This is
+# the substrate-private callsite and intentionally has no config knob; atoms
+# expose ``shutdown_grace_seconds`` themselves.
+_DRIVER_SHUTDOWN_GRACE_SECONDS = DEFAULT_SHUTDOWN_GRACE_SECONDS
 
 
 # --- Config -----------------------------------------------------------------

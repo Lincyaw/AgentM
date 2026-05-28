@@ -90,6 +90,7 @@ def _manager(api: _FakeApi, *, timeout: float = 60.0, **kw: Any) -> _BgManager:
         heartbeat_interval=kw.get("heartbeat_interval", 120.0),
         silence_warning=kw.get("silence_warning", 300.0),
         denylist=kw.get("denylist", set()),
+        shutdown_grace_seconds=kw.get("shutdown_grace_seconds", 5.0),
     )
 
 
@@ -348,6 +349,53 @@ def test_install_registers_companion_tools() -> None:
 
 
 @pytest.mark.asyncio
+async def test_install_propagates_shutdown_grace_config() -> None:
+    """A3 fail-stop: a config override (``shutdown_grace_seconds=0.05``)
+    propagates from ``install`` to the manager and bounds the actual drain
+    so a stuck inner tool cannot block shutdown past the configured window.
+    """
+
+    api = _FakeApi()
+    background_exec.install(
+        cast(ExtensionAPI, api),
+        {"shutdown_grace_seconds": 0.05},
+    )
+    # Pull the manager off the bound shutdown handler so the test does not
+    # reach into install internals.
+    shutdown_handlers = api._handlers["session_shutdown"]
+    assert len(shutdown_handlers) == 1
+    bound_manager = shutdown_handlers[0].__self__  # type: ignore[attr-defined]
+    assert bound_manager._shutdown_grace_seconds == 0.05
+
+    # Drive a cooperative inner (honours the abort) through the overrun path
+    # so the shutdown handler exercises the bounded ``asyncio.wait`` and then
+    # the abort + gather sequence.
+    started = asyncio.Event()
+
+    async def cooperative(_a: dict[str, Any], sig: asyncio.Event | None) -> ToolResult:
+        assert sig is not None
+        started.set()
+        await sig.wait()  # cooperative shutdown: returns when aborted
+        return ToolResult(content=[TextContent(type="text", text="stopped")])
+
+    wrapped = _BgTool(_FakeTool("cooperative", cooperative), bound_manager)
+    # Tiny overrun timeout so the call promptly moves to background.
+    bound_manager.timeout = 0.01
+    await wrapped.execute({})
+    await started.wait()
+
+    start = asyncio.get_event_loop().time()
+    await asyncio.wait_for(
+        bound_manager.on_session_shutdown(SessionShutdownEvent(cwd=".")),
+        timeout=2.0,
+    )
+    elapsed = asyncio.get_event_loop().time() - start
+    # 0.05s grace + cooperative shutdown overhead — would have been ~5s
+    # with the previous hard-coded constant.
+    assert elapsed < 1.0, f"shutdown drain took {elapsed:.3f}s — grace not honoured"
+
+
+@pytest.mark.asyncio
 async def test_cancel_with_host_signal_does_not_touch_shared_signal() -> None:
     """MAJOR 2 regression: under a host-supplied kernel ``signal``,
     ``cancel_background`` must cancel ONLY the per-task work — never set the
@@ -422,14 +470,10 @@ async def test_host_signal_still_aborts_backgrounded_task() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_shutdown_drains_running_tasks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_session_shutdown_drains_running_tasks() -> None:
     """MAJOR 1: the shutdown handler cancels tickers/forwarders, aborts running
     tasks within the grace window, and gathers them so nothing leaks pending."""
 
-    # Tiny grace window so the test does not wait the real 5s.
-    monkeypatch.setattr(background_exec, "_SHUTDOWN_GRACE_SECONDS", 0.05)
     started = asyncio.Event()
 
     async def long_running(_a: dict[str, Any], sig: asyncio.Event | None) -> ToolResult:
@@ -439,7 +483,11 @@ async def test_session_shutdown_drains_running_tasks(
         return ToolResult(content=[TextContent(type="text", text="stopped")])
 
     api = _FakeApi()
-    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    # Tiny grace window so the test does not wait the real 5s — passed via the
+    # config knob the atom exposes (was a hidden module constant in PR #176).
+    mgr = _manager(
+        api, timeout=0.01, heartbeat_interval=1000.0, shutdown_grace_seconds=0.05
+    )
     wrapped = _BgTool(_FakeTool("long_running", long_running), mgr)
 
     ticket = await wrapped.execute({})
@@ -490,9 +538,7 @@ async def test_background_refused_after_shutdown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_background_refused_after_shutdown_terminates_noncooperative_inner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_background_refused_after_shutdown_terminates_noncooperative_inner() -> None:
     """MAJOR (refusal-branch leak): when ``background()`` is reached AFTER
     ``on_session_shutdown`` has drained the registry, the never-registered inner
     task must still be driven to a terminal state. A NON-cooperative inner tool
@@ -500,11 +546,11 @@ async def test_background_refused_after_shutdown_terminates_noncooperative_inner
     Major-1 "Task was destroyed but it is pending" leak. The refusal branch must
     cancel it within the bounded grace and gather it before returning."""
 
-    # Tiny grace so the cancel path is taken quickly (inner never honours abort).
-    monkeypatch.setattr(background_exec, "_SHUTDOWN_GRACE_SECONDS", 0.05)
-
     api = _FakeApi()
-    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    # Tiny grace so the cancel path is taken quickly (inner never honours abort).
+    mgr = _manager(
+        api, timeout=0.01, heartbeat_interval=1000.0, shutdown_grace_seconds=0.05
+    )
     await mgr.on_session_shutdown(SessionShutdownEvent(cwd="."))
     assert mgr._shutting_down is True
 

@@ -54,7 +54,7 @@ from agentm.core.abi.extension import (
     ExtensionStaleError,
     Unsubscribe,
 )
-from agentm.core.lib import to_jsonable
+from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, to_jsonable
 from agentm.extensions import ExtensionManifest
 
 _PENDING: Literal["pending"] = "pending"
@@ -70,13 +70,62 @@ _KIND_CHANNEL: Literal["channel"] = "channel"
 # only as a forward-compatible literal for the defense branch.
 _Kind = Literal["wakeup", "channel", "condition"]
 
-# Grace window the shutdown handler gives still-pending wakeup tasks to be
-# cancelled and gathered, mirroring background_exec's bounded drain.
-_SHUTDOWN_GRACE_SECONDS = 5.0
+# Default for the silenced channel-fire event summary cap. The atom exposes a
+# ``event_summary_max_chars`` config knob so a scenario can widen it without
+# touching the atom.
+_DEFAULT_EVENT_SUMMARY_MAX = 200
 
-# Short repr cap for the channel-fire event summary embedded in the inbox
-# payload; keeps the rendered <system-reminder> tail bounded.
-_EVENT_SUMMARY_MAX = 200
+# Channels the agent MUST NOT subscribe to via ``create_monitor`` — every fire
+# would post to the session inbox, the inbox-non-empty floor would keep the
+# loop alive, and the next turn's ``context`` drain would re-fire the same
+# channels, producing an unbreakable spin (the canonical example is
+# ``watch="context"``: every monitor fire triggers another context event).
+#
+# Hand-curated rather than derived from ``Event.__subclasses__()``: introspection
+# would also include legitimately-watchable kernel events (``tool_call``,
+# ``tool_result``, ``plan_submitted``, ``cost_budget_exceeded``, ...) that the
+# brief explicitly leaves open to the agent. Grep ``CHANNEL: ClassVar[Literal[``
+# in ``core.abi.events`` when reviewing — every channel listed here exists
+# there; channels NOT listed here are open to monitor.
+_KERNEL_CONTROL_CHANNELS: frozenset[str] = frozenset(
+    {
+        # Per-turn control channels — fire from inside the kernel loop and
+        # any monitor on them creates an inbox/loop spin.
+        "context",
+        "decide_turn_action",
+        "before_send_to_llm",
+        "before_agent_start",
+        "agent_start",
+        "agent_end",
+        "turn_start",
+        "turn_end",
+        "stream_delta",
+        "llm_request_start",
+        "llm_request_end",
+        # Persistence + compaction — fire as part of the kernel's message
+        # pipeline; treating them as agent-observable would mix substrate
+        # plumbing into the agent's reasoning surface.
+        "message_persisted",
+        "entry_appended",
+        "before_compact",
+        "after_compact",
+        # Session lifecycle — substrate-owned; the agent has its own way to
+        # observe these (e.g. the dispatch tools) without a monitor.
+        "session_ready",
+        "session_shutdown",
+        "child_session_start",
+        "child_session_end",
+        "child_session_extending",
+        # Extension / API meta-events — observability concerns, not agent
+        # reasoning targets. ``api_register`` fires synchronously during
+        # ``install`` and a monitor would race the install path itself.
+        "extension_install",
+        "extension_reload",
+        "extension_unload",
+        "api_register",
+        "api_send_user_message",
+    }
+)
 
 
 MANIFEST = ExtensionManifest(
@@ -95,8 +144,28 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema={
         "type": "object",
-        "properties": {},
-        "additionalProperties": True,
+        "properties": {
+            "shutdown_grace_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "default": DEFAULT_SHUTDOWN_GRACE_SECONDS,
+                "description": (
+                    "Seconds the session_shutdown drain waits for still-"
+                    "pending wakeup tasks to be cancelled and gathered "
+                    f"(default {DEFAULT_SHUTDOWN_GRACE_SECONDS:g})."
+                ),
+            },
+            "event_summary_max_chars": {
+                "type": "integer",
+                "minimum": 1,
+                "default": _DEFAULT_EVENT_SUMMARY_MAX,
+                "description": (
+                    "Maximum length of the channel-fire event_summary "
+                    f"embedded in the inbox payload (default {_DEFAULT_EVENT_SUMMARY_MAX})."
+                ),
+            },
+        },
+        "additionalProperties": False,
     },
     requires=(),
 )
@@ -131,17 +200,18 @@ def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResu
     )
 
 
-def _event_summary(event: Any) -> str:
+def _event_summary(event: Any, *, max_chars: int) -> str:
     """Short, bounded repr of a bus event for the inbox payload.
 
     Kept tiny on purpose — the inbox item is a poke ("channel X fired"), not a
     transport for the event itself. The agent inspects the live state through
-    other tools if it needs detail.
+    other tools if it needs detail. ``max_chars`` is set per-manager from the
+    atom config (``event_summary_max_chars``).
     """
 
     text = repr(event)
-    if len(text) > _EVENT_SUMMARY_MAX:
-        text = text[: _EVENT_SUMMARY_MAX - 3] + "..."
+    if len(text) > max_chars:
+        text = text[: max(0, max_chars - 3)] + "..."
     return text
 
 
@@ -169,9 +239,17 @@ class _MonitorManager:
     discipline is structurally identical, not just intentionally similar).
     """
 
-    def __init__(self, *, api: ExtensionAPI) -> None:
+    def __init__(
+        self,
+        *,
+        api: ExtensionAPI,
+        shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
+        event_summary_max_chars: int = _DEFAULT_EVENT_SUMMARY_MAX,
+    ) -> None:
         self._api = api
         self._monitors: dict[str, _Monitor] = {}
+        self._shutdown_grace_seconds = shutdown_grace_seconds
+        self._event_summary_max_chars = event_summary_max_chars
         # Set in on_session_shutdown so any in-flight wakeup that wakes mid-
         # shutdown sees it and exits without trying to register / push.
         self._shutting_down = False
@@ -283,6 +361,23 @@ class _MonitorManager:
                 {"error": "watch must be a non-empty bus channel name (str)"},
                 is_error=True,
             )
+        if watch in _KERNEL_CONTROL_CHANNELS:
+            # Subscribing to a kernel control channel via create_monitor would
+            # create an inescapable loop: every fire posts to the inbox, the
+            # inbox-non-empty floor keeps the loop alive, the next turn fires
+            # the channel again. Refuse explicitly so the agent gets a tool-
+            # error rather than spinning the session. See
+            # ``_KERNEL_CONTROL_CHANNELS`` for the rationale per channel.
+            return _tool_result(
+                {
+                    "error": (
+                        f"channel {watch!r} is a kernel-internal control "
+                        "channel and cannot be monitored (subscribing would "
+                        "create an inbox / loop spin)"
+                    )
+                },
+                is_error=True,
+            )
         if self._shutting_down:
             return _tool_result(
                 {"error": "session is shutting down; monitor refused"},
@@ -312,7 +407,9 @@ class _MonitorManager:
                 "monitor_id": state.monitor_id,
                 "channel": watch,
                 "note": state.note,
-                "event_summary": _event_summary(event),
+                "event_summary": _event_summary(
+                    event, max_chars=self._event_summary_max_chars
+                ),
             }
             try:
                 self._api.post_inbox(
@@ -406,15 +503,22 @@ class _MonitorManager:
                     pass
         if not wakeup_tasks:
             return
-        await asyncio.wait(wakeup_tasks, timeout=_SHUTDOWN_GRACE_SECONDS)
+        await asyncio.wait(wakeup_tasks, timeout=self._shutdown_grace_seconds)
         # Gather so any CancelledError / late exception is retrieved cleanly
         # (no "Task exception was never retrieved" past shutdown).
         await asyncio.gather(*wakeup_tasks, return_exceptions=True)
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    del config  # accepted but unused; reserved for future knobs
-    manager = _MonitorManager(api=api)
+    manager = _MonitorManager(
+        api=api,
+        shutdown_grace_seconds=float(
+            config.get("shutdown_grace_seconds", DEFAULT_SHUTDOWN_GRACE_SECONDS)
+        ),
+        event_summary_max_chars=int(
+            config.get("event_summary_max_chars", _DEFAULT_EVENT_SUMMARY_MAX)
+        ),
+    )
     api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
     api.register_tool(
         FunctionTool(
