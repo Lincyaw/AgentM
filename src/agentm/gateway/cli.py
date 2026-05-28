@@ -348,13 +348,33 @@ class _GatewayRuntime:
             logger.exception("router failed for inbound id=%s", env.id)
             return
         body = decision.body
+        if decision.action is RouterAction.RESOLVE_APPROVAL:
+            # Resolve inline: it must not sit behind a session.prompt that
+            # is itself awaiting THIS approval's future (that would
+            # deadlock the read loop). resolve() is synchronous and fast.
+            self._resolve_approval(body)
+            return
+        # Commands and prompts run as detached tasks so a prompt blocked on
+        # an approval future never stalls the WireServer read loop — the
+        # button click that resolves the future must still be routed
+        # (mirrors the per-inbound task-spawn the v1 gateway used).
+        asyncio.create_task(
+            self._dispatch_command_or_prompt(session_key, env.scenario, decision.action, body),
+            name=f"gw-inbound-{session_key}",
+        )
+
+    async def _dispatch_command_or_prompt(
+        self,
+        session_key: str,
+        scenario: str | None,
+        action: RouterAction,
+        body: InboundBody,
+    ) -> None:
         try:
-            if decision.action is RouterAction.RESOLVE_APPROVAL:
-                self._resolve_approval(body)
-            elif decision.action is RouterAction.RUN_COMMAND:
+            if action is RouterAction.RUN_COMMAND:
                 await self._run_command(session_key, body)
             else:
-                await self._prompt_session(session_key, env.scenario, body)
+                await self._prompt_session(session_key, scenario, body)
         except Exception as exc:
             logger.exception("error handling inbound from %s", session_key)
             await self._send_error(session_key, body, exc)
