@@ -51,6 +51,8 @@ class AgentMTui(App[int]):
         self._consumer: asyncio.Task[None] | None = None
         self._history: list[str] = []
         self._ctrlc_ts = 0.0
+        # True from prompt-submit until the loop's agent_end; gates Esc-interrupt.
+        self._in_flight = False
 
     def compose(self) -> ComposeResult:
         yield StatusBar(id="status-bar")
@@ -97,6 +99,11 @@ class AgentMTui(App[int]):
         self.status.phase = phase
         self.show_status()
 
+    def mark_idle(self) -> None:
+        """The loop ended (agent_end). Clear the in-flight gate + go idle."""
+        self._in_flight = False
+        self.set_phase("idle")
+
     def show_status(self) -> None:
         self.query_one("#status-bar", StatusBar).show(self.status)
 
@@ -117,6 +124,20 @@ class AgentMTui(App[int]):
             }
         )
 
+    async def send_interrupt(self) -> None:
+        """Out-of-band interrupt: preempt the in-flight prompt. ``control``
+        keeps it off the conversational path (gateway routes it to
+        AgentSession.interrupt(), not a new turn)."""
+        await self._send(
+            {
+                "channel": "terminal",
+                "sender_id": self._sender_id,
+                "chat_id": self._chat_id,
+                "content": "",
+                "control": "interrupt",
+            }
+        )
+
     # --- input ----------------------------------------------------------
 
     @on(PromptInput.Submitted)
@@ -132,6 +153,7 @@ class AgentMTui(App[int]):
         self._history.append(text)
         await self.mount_widget(UserTurn(text))
         self.scroll_end()
+        self._in_flight = True
         await self._send(
             {
                 "channel": "terminal",
@@ -166,7 +188,11 @@ class AgentMTui(App[int]):
         await self.transcript.remove_children()
         self._router = Router(self)  # drop active turn + tool/child registries
 
-    def action_cancel(self) -> None:
+    async def action_cancel(self) -> None:
+        if self._in_flight:
+            await self.send_interrupt()
+            self.toast("interrupting…")
+            return
         inp = self.query_one("#prompt-input", PromptInput)
         if inp.text.strip():
             inp.text = ""

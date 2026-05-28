@@ -1,7 +1,9 @@
 """Router — the pure dispatch decision (§3.2).
 
-Given an inbound :class:`Envelope`, decide one of three actions:
+Given an inbound :class:`Envelope`, decide one of four actions:
 
+* ``INTERRUPT`` — the inbound carries ``control="interrupt"`` (preempt the
+  in-flight prompt; not a conversational turn).
 * ``RESOLVE_APPROVAL`` — the inbound carries a ``button_value`` (an
   approval-card click).
 * ``RUN_COMMAND`` — the inbound's content is a slash command.
@@ -23,6 +25,7 @@ from .wire import Envelope, InboundBody
 class RouterAction(Enum):
     """What the gateway should do with an inbound."""
 
+    INTERRUPT = "interrupt"
     RESOLVE_APPROVAL = "resolve_approval"
     RUN_COMMAND = "run_command"
     PROMPT_SESSION = "prompt_session"
@@ -54,6 +57,8 @@ def dispatch(env: Envelope) -> RouterDecision:
     if env.kind != "inbound":
         raise ProtocolError(f"router only handles inbound; got {env.kind!r}")
     body = InboundBody.from_dict(env.body if isinstance(env.body, dict) else {})
+    if body.control == "interrupt":
+        return RouterDecision(RouterAction.INTERRUPT, body)
     if body.button_value:
         return RouterDecision(RouterAction.RESOLVE_APPROVAL, body)
     if is_slash_command(body.content):

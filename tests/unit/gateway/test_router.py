@@ -13,7 +13,11 @@ from agentm.gateway.router import ProtocolError, RouterAction, dispatch
 from agentm.gateway.wire import WIRE_VERSION, Envelope
 
 
-def _inbound(content: str = "", button_value: str | None = None) -> Envelope:
+def _inbound(
+    content: str = "",
+    button_value: str | None = None,
+    control: str | None = None,
+) -> Envelope:
     body: dict[str, object] = {
         "channel": "terminal",
         "chat_id": "t1",
@@ -22,6 +26,8 @@ def _inbound(content: str = "", button_value: str | None = None) -> Envelope:
     }
     if button_value is not None:
         body["button_value"] = button_value
+    if control is not None:
+        body["control"] = control
     return Envelope(
         v=WIRE_VERSION,
         id="i1",
@@ -57,6 +63,20 @@ def test_button_value_wins_over_slash_content() -> None:
     # still resolve the approval, not run a command.
     decision = dispatch(_inbound(content="/whatever", button_value="appr-x:deny"))
     assert decision.action is RouterAction.RESOLVE_APPROVAL
+
+
+def test_control_interrupt_routes_to_interrupt() -> None:
+    decision = dispatch(_inbound(control="interrupt"))
+    assert decision.action is RouterAction.INTERRUPT
+
+
+def test_interrupt_wins_over_button_and_command() -> None:
+    # An interrupt is out-of-band: it preempts the in-flight prompt even if
+    # the frame also looks like a command or carries a stale button_value.
+    decision = dispatch(
+        _inbound(content="/help", button_value="x", control="interrupt")
+    )
+    assert decision.action is RouterAction.INTERRUPT
 
 
 def test_non_inbound_kind_raises() -> None:
