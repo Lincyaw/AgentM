@@ -15,7 +15,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
-from textual.widgets import Collapsible, Static, TextArea
+from textual.widgets import Collapsible, OptionList, Static, TextArea
 
 from .state import StatusModel
 from .theme import (
@@ -225,12 +225,40 @@ class Toast(Static):
         self.set_timer(self._ttl, self.remove)
 
 
+class CommandSuggestions(OptionList):
+    """Inline slash-command autocomplete shown directly below the prompt while
+    the user is typing a ``/command``. Non-focusable on purpose: the prompt
+    keeps focus and drives navigation (Up/Down) + completion (Tab); this widget
+    is a pure view. Hidden whenever there are no matches."""
+
+    can_focus = False
+
+    def populate(self, matches: list[str]) -> None:
+        self.clear_options()
+        if matches:
+            self.add_options(matches)
+            self.highlighted = 0
+        self.display = bool(matches)
+
+    def move(self, delta: int) -> None:
+        if self.option_count == 0:
+            return
+        cur = 0 if self.highlighted is None else self.highlighted
+        self.highlighted = (cur + delta) % self.option_count
+
+    def current(self) -> str | None:
+        if self.highlighted is None or self.option_count == 0:
+            return None
+        return str(self.get_option_at_index(self.highlighted).prompt)
+
+
 class PromptInput(TextArea):
     """Bottom input. Enter submits; Shift+Enter (or Ctrl+J) inserts a newline."""
 
     BINDINGS = [
         Binding("enter", "submit", "send", show=False, priority=True),
         Binding("ctrl+j", "newline", "newline", show=False, priority=True),
+        Binding("tab", "complete", "complete", show=False, priority=True),
         Binding("up", "history_prev", show=False),
         Binding("down", "history_next", show=False),
     ]
@@ -243,15 +271,26 @@ class PromptInput(TextArea):
             self.text = text
 
     class HistoryNav(Message):
-        """Posted when Up/Down should browse input history (delta -1 older / +1 newer)."""
+        """Posted when Up/Down should browse history (-1 older / +1 newer), OR
+        move the command-suggestion highlight when the popup is open. The app
+        decides which based on whether suggestions are visible."""
 
         def __init__(self, delta: int) -> None:
             super().__init__()
             self.delta = delta
 
+    class Complete(Message):
+        """Posted on Tab — the app completes the highlighted suggestion."""
+
     def action_submit(self) -> None:
         # Bubble up; the App owns the send (it holds the wire client).
         self.post_message(self.Submitted(self.text))
+
+    def action_complete(self) -> None:
+        # Tab: ask the app to complete the highlighted command suggestion. If
+        # no suggestions are open the app ignores it (Tab is otherwise unused
+        # in this single-line prompt).
+        self.post_message(self.Complete())
 
     def action_newline(self) -> None:
         self.insert("\n")
@@ -313,6 +352,7 @@ __all__ = [
     "ApprovalBlock",
     "AssistantText",
     "AssistantTurn",
+    "CommandSuggestions",
     "PromptInput",
     "StatusBar",
     "SubagentBlock",

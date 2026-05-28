@@ -143,8 +143,8 @@ async def test_esc_interrupts_an_in_flight_turn() -> None:
         assert after == before  # idle Esc does not send another interrupt
 
 
-async def test_command_palette_lists_local_and_gateway_commands() -> None:
-    from agentm_terminal.frontends.tui.modals import CommandPalette
+async def test_typing_slash_shows_inline_suggestions_from_registry() -> None:
+    from agentm_terminal.frontends.tui.widgets import CommandSuggestions
 
     client = _FakeClient()
     app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
@@ -158,15 +158,45 @@ async def test_command_palette_lists_local_and_gateway_commands() -> None:
             )
         )
         await pilot.pause(0.1)
-        assert app.catalog.tools == ["bash", "read"]
         assert "/new" in app.catalog.commands and "/status" in app.catalog.commands
 
-        await pilot.press("ctrl+r")
+        inp = app.query_one("#prompt-input")
+        sug = app.query_one("#suggestions", CommandSuggestions)
+        assert sug.display is False  # hidden until a slash is typed
+        inp.text = "/"  # type: ignore[attr-defined]
+        await pilot.pause(0.05)
+        # Inline panel (not a modal) lists /clear (client-local) + registered.
+        shown = [
+            str(sug.get_option_at_index(i).prompt) for i in range(sug.option_count)
+        ]
+        assert sug.display is True
+        assert {"/clear", "/new", "/status"} <= set(shown)
+
+        # Prefix filtering as you type.
+        inp.text = "/st"  # type: ignore[attr-defined]
+        await pilot.pause(0.05)
+        shown = [
+            str(sug.get_option_at_index(i).prompt) for i in range(sug.option_count)
+        ]
+        assert shown == ["/status"]
+
+
+async def test_tab_completes_highlighted_suggestion() -> None:
+    client = _FakeClient()
+    app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
+    async with app.run_test(size=(100, 30)) as pilot:
+        client.push(_frame("session_ready", command_names=["status"], model="m"))
         await pilot.pause(0.1)
-        assert isinstance(app.screen, CommandPalette)
-        # The one client-local command (/clear) + the gateway commands surfaced
-        # from session_ready. No hardcoded /help, /tools, etc. any more.
-        assert "/clear" in app.screen._all and "/new" in app.screen._all
+        inp = app.query_one("#prompt-input")
+        inp.text = "/st"  # type: ignore[attr-defined]
+        await pilot.pause(0.05)
+        await pilot.press("tab")
+        await pilot.pause(0.05)
+        assert inp.text == "/status "  # type: ignore[attr-defined]  # completed + space
+        # Completing past the command hides the popup.
+        from agentm_terminal.frontends.tui.widgets import CommandSuggestions
+
+        assert app.query_one("#suggestions", CommandSuggestions).display is False
 
 
 async def test_non_clear_slash_is_forwarded_to_gateway() -> None:
@@ -224,19 +254,17 @@ async def test_clear_wipes_transcript_and_cold_resets_gateway() -> None:
         assert any(b.get("content") == "/end" for b in client.sent)  # session reset
 
 
-async def test_slash_is_typed_literally_not_a_popup() -> None:
-    from agentm_terminal.frontends.tui.modals import CommandPalette
-
+async def test_slash_stays_in_box_no_modal_screen() -> None:
+    # The slash is typed literally (the box keeps "/"); suggestions render
+    # inline, never as a separate modal screen pushed over the transcript.
     client = _FakeClient()
     app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
     async with app.run_test(size=(100, 30)) as pilot:
         inp = app.query_one("#prompt-input")
-        inp.text = "/"  # type: ignore[attr-defined]  # simulate typing a slash
-        await pilot.pause(0.1)
-        # No auto-popup: the slash stays in the box so the user can type the
-        # command inline (e.g. /clear) and submit it.
-        assert not isinstance(app.screen, CommandPalette)
+        inp.text = "/"  # type: ignore[attr-defined]
+        await pilot.pause(0.05)
         assert inp.text == "/"  # type: ignore[attr-defined]
+        assert app.screen is app.screen_stack[0]  # no modal pushed
 
 
 async def test_tool_block_title_shows_arg_summary() -> None:

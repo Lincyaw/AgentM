@@ -14,16 +14,15 @@ import time
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.dom import DOMNode
-from textual.widgets import Collapsible, Footer
+from textual.widgets import Collapsible, Footer, OptionList, TextArea
 
 from ...client import TerminalClient
-from .modals import CommandPalette
 from .router import Router
 from .state import Catalog, StatusModel
 from .theme import CSS_PATH, Phase, resolve_theme
-from .widgets import PromptInput, StatusBar, Toast, UserTurn
+from .widgets import CommandSuggestions, PromptInput, StatusBar, Toast, UserTurn
 
 # The only slash command the TUI handles itself: /clear wipes the rendered
 # transcript (inherently client-side) AND cold-resets the gateway session.
@@ -40,7 +39,6 @@ class AgentMTui(App[int]):
         Binding("ctrl+c", "interrupt_or_quit", "interrupt", priority=True, show=True),
         Binding("ctrl+d", "quit_app", "quit", priority=True, show=True),
         Binding("ctrl+l", "clear_log", "clear", show=True),
-        Binding("ctrl+r", "command_palette", "commands", show=True),
         Binding("ctrl+y", "copy_last", "copy", show=True),
         Binding("ctrl+e", "toggle_tool", "expand", show=True),
         Binding("escape", "cancel", "cancel", show=False),
@@ -73,7 +71,12 @@ class AgentMTui(App[int]):
     def compose(self) -> ComposeResult:
         yield StatusBar(id="status-bar")
         yield VerticalScroll(id="transcript")
-        yield PromptInput(id="prompt-input", show_line_numbers=False)
+        # The input and its autocomplete share one bottom-docked column so the
+        # suggestions render *below* the input (normal top-to-bottom flow),
+        # inline — not a floating modal. Footer still pins to the very bottom.
+        with Vertical(id="input-dock"):
+            yield PromptInput(id="prompt-input", show_line_numbers=False)
+            yield CommandSuggestions(id="suggestions")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -82,6 +85,7 @@ class AgentMTui(App[int]):
         except Exception:  # noqa: BLE001 — invalid theme name; keep the default
             pass
         self.show_status()
+        self.query_one("#suggestions", CommandSuggestions).display = False
         self.query_one("#prompt-input", PromptInput).focus()
         self._consumer = asyncio.create_task(self._consume(), name="tui-consume")
         self.set_interval(0.05, self._flush_active)
@@ -214,8 +218,62 @@ class AgentMTui(App[int]):
         except Exception:  # noqa: BLE001
             self.toast("failed to send to gateway", variant="warn")
 
+    # --- command autocomplete ------------------------------------------
+
+    @property
+    def suggestions(self) -> CommandSuggestions:
+        return self.query_one("#suggestions", CommandSuggestions)
+
+    def _command_candidates(self) -> list[str]:
+        # Dynamic source: /clear (the one client-local command) + everything an
+        # atom/gateway registered, surfaced via the catalog. Nothing hardcoded.
+        return sorted({*_LOCAL_COMMANDS, *self.catalog.commands})
+
+    @on(TextArea.Changed, "#prompt-input")
+    def _refresh_suggestions(self, event: TextArea.Changed) -> None:
+        text = event.text_area.text
+        typing_command = (
+            text.startswith("/")
+            and not text.startswith("//")
+            and " " not in text
+            and "\n" not in text
+        )
+        matches = (
+            [c for c in self._command_candidates() if c.startswith(text)]
+            if typing_command
+            else []
+        )
+        self.suggestions.populate(matches)
+
+    @on(PromptInput.Complete)
+    def _on_complete(self, _msg: PromptInput.Complete) -> None:
+        self._apply_completion()
+
+    @on(OptionList.OptionSelected, "#suggestions")
+    def _on_suggestion_clicked(self, event: OptionList.OptionSelected) -> None:
+        self._apply_completion(str(event.option.prompt))
+
+    def _apply_completion(self, command: str | None = None) -> None:
+        sug = self.suggestions
+        if not sug.display:
+            return
+        chosen = command or sug.current()
+        if chosen is None:
+            return
+        inp = self.query_one("#prompt-input", PromptInput)
+        # Trailing space so the user can type args; it also drops the input out
+        # of "typing a command" state, which hides the popup via Changed.
+        inp.text = f"{chosen} "
+        inp.move_cursor(inp.document.end)
+        inp.focus()
+
     @on(PromptInput.HistoryNav)
     def _on_history_nav(self, msg: PromptInput.HistoryNav) -> None:
+        # When the suggestion popup is open, Up/Down move its highlight instead
+        # of browsing input history.
+        if self.suggestions.display:
+            self.suggestions.move(msg.delta)
+            return
         if not self._history:
             return
         inp = self.query_one("#prompt-input", PromptInput)
@@ -275,31 +333,10 @@ class AgentMTui(App[int]):
             }
         )
 
-    def action_command_palette(self) -> None:
-        commands = list(_LOCAL_COMMANDS) + [
-            c for c in self.catalog.commands if c not in _LOCAL_COMMANDS
-        ]
-        self.push_screen(CommandPalette(commands), self._on_palette_pick)
-
-    async def _on_palette_pick(self, command: str | None) -> None:
-        if not command:
-            return
-        if await self._run_slash(command):
-            return
-        # A gateway/extension command picked from the palette: echo + send.
-        await self.mount_widget(UserTurn(command))
-        self.scroll_end()
-        self._in_flight = True
-        await self._send(
-            {
-                "channel": "terminal",
-                "sender_id": self._sender_id,
-                "chat_id": self._chat_id,
-                "content": command,
-            }
-        )
-
     async def action_cancel(self) -> None:
+        if self.suggestions.display:
+            self.suggestions.populate([])  # Esc closes the popup first
+            return
         if self._in_flight:
             await self.send_interrupt()
             self.toast("interrupting…")
