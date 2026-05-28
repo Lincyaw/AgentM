@@ -429,6 +429,42 @@ class AgentSession:
             raise KeyError(f"service {name!r} is already registered")
         self._services[name] = obj
 
+    def install_atom(self, name: str, config: dict[str, Any] | None = None) -> None:
+        """Mount a builtin atom into this *already-created* session.
+
+        Callable from the embedding host (not just from inside an atom). The
+        single-process gateway's ``SessionManager`` uses it to mount
+        ``wire_driver`` *after* it has injected the ``wire_outbound`` /
+        ``session_key`` / ``turn_context`` / ``approval_manager`` services
+        the atom reads — so the install cannot happen at create time.
+
+        Loads ``agentm.extensions.builtin.<name>`` and runs its
+        ``install(api, config)`` against this session's live extension scope,
+        which shares the session bus and service registry. Only sync-install
+        atoms are supported on this synchronous host path (``wire_driver``
+        is sync); an awaitable install raises rather than being silently
+        dropped.
+        """
+        import inspect
+
+        from agentm.core.runtime.extension import load_extension
+
+        if self._extension_api is None:
+            raise RuntimeError(
+                f"cannot install_atom({name!r}): session has no extension scope"
+            )
+        module_path = f"agentm.extensions.builtin.{name}"
+        result = load_extension(module_path, self._extension_api, config or {})
+        if inspect.isawaitable(result):
+            # Avoid leaking an un-awaited coroutine; the host call site (the
+            # gateway SessionManager) invokes this synchronously.
+            if hasattr(result, "close"):
+                result.close()
+            raise RuntimeError(
+                f"install_atom({name!r}) requires an async install, which the "
+                "synchronous host path does not support"
+            )
+
     @property
     def tool_renderers(self) -> dict[str, Any]:
         return {

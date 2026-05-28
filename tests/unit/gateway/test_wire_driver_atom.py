@@ -196,9 +196,12 @@ async def test_diagnostic_error_emits_outbound() -> None:
             "turn_context": {"channel": "terminal", "chat_id": "t1", "thread_id": None},
         }
     )
-    await api.handlers[DiagnosticEvent.CHANNEL][0](
-        DiagnosticEvent(level="error", source="loop", message="boom")
-    )
+    # diagnostic is a SYNC handler (it can be emit_sync-dispatched, where an
+    # async handler is silently skipped); it schedules the sink on the loop.
+    handler = api.handlers[DiagnosticEvent.CHANNEL][0]
+    assert not asyncio.iscoroutinefunction(handler)
+    handler(DiagnosticEvent(level="error", source="loop", message="boom"))
+    await asyncio.sleep(0)
     assert out[0]["metadata"]["kind"] == "diagnostic_error"
     assert out[0]["content"] == "boom"
 
