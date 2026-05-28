@@ -74,6 +74,39 @@ async def test_streamed_turn_and_tool_block_render() -> None:
         assert TOOL_OK in str(blocks[0].title)
 
 
+async def test_short_turn_does_not_fill_viewport() -> None:
+    # Regression: AssistantTurn/SystemTurn extend Textual's Vertical, which
+    # defaults to height:1fr — a single short turn would stretch to fill the
+    # whole transcript. The .turn { height: auto } rule keeps it content-sized.
+    client = _FakeClient()
+    app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
+    async with app.run_test(size=(100, 30)) as pilot:
+        client.push(_frame("turn_start", turn_id=1, turn_index=0))
+        client.push(_frame("stream_text", content="Hi", turn_id=1))
+        client.push(_frame("assistant_text", content="Hi"))
+        await pilot.pause(0.2)
+        turn = app.query_one(AssistantTurn)
+        # Attribution label + one text line, not the full viewport height.
+        assert turn.size.height <= 4
+
+
+async def test_idle_flush_is_a_noop_between_deltas() -> None:
+    # Regression: the 20Hz flush timer must not repaint when nothing arrived.
+    # flush() returns False on an idle tick so the app skips scroll_end (an
+    # unconditional scroll forces a layout/repaint every tick during a slow
+    # thinking phase).
+    client = _FakeClient()
+    app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
+    async with app.run_test(size=(100, 30)) as pilot:
+        client.push(_frame("turn_start", turn_id=1))
+        client.push(_frame("stream_thinking", content="pondering", turn_id=1))
+        await pilot.pause(0.15)
+        turn = app.query_one(AssistantTurn)
+        assert await turn.flush() is False  # delta already applied; idle now
+        turn.append_thinking(" more")
+        assert await turn.flush() is True  # new delta -> one repaint
+
+
 async def test_submit_echoes_user_turn_and_sends_inbound() -> None:
     client = _FakeClient()
     app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
@@ -131,26 +164,22 @@ async def test_command_palette_lists_local_and_gateway_commands() -> None:
         await pilot.press("ctrl+r")
         await pilot.pause(0.1)
         assert isinstance(app.screen, CommandPalette)
-        # built-ins + the gateway commands surfaced from session_ready.
-        assert "/help" in app.screen._all and "/new" in app.screen._all
+        # The one client-local command (/clear) + the gateway commands surfaced
+        # from session_ready. No hardcoded /help, /tools, etc. any more.
+        assert "/clear" in app.screen._all and "/new" in app.screen._all
 
 
-async def test_tools_slash_opens_info_modal() -> None:
-    from agentm_terminal.frontends.tui.modals import InfoModal
-
+async def test_non_clear_slash_is_forwarded_to_gateway() -> None:
+    # Only /clear is handled locally now; everything else (registered atom /
+    # gateway commands) is forwarded verbatim to the gateway command router.
     client = _FakeClient()
     app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
     async with app.run_test(size=(100, 30)) as pilot:
-        client.push(_frame("session_ready", tool_names=["bash"], model="m"))
-        await pilot.pause(0.1)
         inp = app.query_one("#prompt-input")
-        inp.text = "/tools"  # type: ignore[attr-defined]
+        inp.text = "/status"  # type: ignore[attr-defined]
         inp.action_submit()  # type: ignore[attr-defined]
         await pilot.pause(0.1)
-        assert isinstance(app.screen, InfoModal)
-        assert "bash" in app.screen._body
-        # A local slash command is NOT forwarded to the gateway.
-        assert all(b.get("content") != "/tools" for b in client.sent)
+        assert any(b.get("content") == "/status" for b in client.sent)
 
 
 async def test_input_history_up_down_cycles_prior_inputs() -> None:
@@ -177,7 +206,25 @@ async def test_input_history_up_down_cycles_prior_inputs() -> None:
         assert inp.text == ""  # type: ignore[attr-defined]
 
 
-async def test_slash_on_empty_line_opens_palette() -> None:
+async def test_clear_wipes_transcript_and_cold_resets_gateway() -> None:
+    # /clear must clear records AND reset the session: wiping the UI alone
+    # leaves the model's context intact on the gateway. It forwards /end.
+    client = _FakeClient()
+    app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
+    async with app.run_test(size=(100, 30)) as pilot:
+        inp = app.query_one("#prompt-input")
+        inp.text = "hello"  # type: ignore[attr-defined]
+        inp.action_submit()  # type: ignore[attr-defined]
+        await pilot.pause(0.1)
+        assert len(app.transcript.children) == 1
+        inp.text = "/clear"  # type: ignore[attr-defined]
+        inp.action_submit()  # type: ignore[attr-defined]
+        await pilot.pause(0.1)
+        assert len(app.transcript.children) == 0  # transcript wiped
+        assert any(b.get("content") == "/end" for b in client.sent)  # session reset
+
+
+async def test_slash_is_typed_literally_not_a_popup() -> None:
     from agentm_terminal.frontends.tui.modals import CommandPalette
 
     client = _FakeClient()
@@ -186,8 +233,10 @@ async def test_slash_on_empty_line_opens_palette() -> None:
         inp = app.query_one("#prompt-input")
         inp.text = "/"  # type: ignore[attr-defined]  # simulate typing a slash
         await pilot.pause(0.1)
-        assert isinstance(app.screen, CommandPalette)
-        assert inp.text == ""  # type: ignore[attr-defined]  # the slash was consumed
+        # No auto-popup: the slash stays in the box so the user can type the
+        # command inline (e.g. /clear) and submit it.
+        assert not isinstance(app.screen, CommandPalette)
+        assert inp.text == "/"  # type: ignore[attr-defined]
 
 
 async def test_tool_block_title_shows_arg_summary() -> None:

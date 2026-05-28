@@ -28,25 +28,24 @@ Screen {
     margin: 0 1;
 }
 
-/* --- attribution gutters (single source: border-left, no Rich panels) --- */
+/* --- message turns: restrained header + spacing, no left gutter --- */
 
 .turn {
+    /* height:auto so a turn sizes to its content. Without this the Vertical
+       subclasses inherit Textual's default height:1fr and a single turn
+       stretches to fill the whole transcript. */
+    height: auto;
     margin: 1 0 0 0;
-    padding: 0 0 0 1;
-}
-.turn--user {
-    border-left: thick $primary;
-}
-.turn--assistant {
-    border-left: thick $accent;
-}
-.turn--system {
-    border-left: thick $warning;
 }
 
+/* Role headers carry the attribution; colour distinguishes the speaker. The
+   user header is muted so the assistant's reply stays the visual focus. */
 .attrib {
     color: $accent;
     text-style: bold;
+}
+.attrib--user {
+    color: $text-muted;
 }
 .attrib--system {
     color: $warning;
@@ -58,22 +57,23 @@ Screen {
     text-style: italic;
 }
 
+/* Tool / sub-agent actions nest under a turn: indentation is the cue, no bar.
+   The collapsible arrow + ⟳/✓/✗ glyph carry the state (failures auto-expand). */
 ToolBlock {
-    border-left: thick $warning;
+    height: auto;
     margin: 1 0 0 2;
-    padding: 0 0 0 1;
 }
 ToolBlock > .tool-body {
     color: $text-muted;
 }
 
 SubagentBlock {
-    border-left: thick $accent;
+    height: auto;
     margin: 1 0 0 2;
-    padding: 0 0 0 1;
 }
 
 ApprovalBlock {
+    height: auto;
     border: round $warning;
     padding: 0 1;
     margin: 1 0;
@@ -103,12 +103,12 @@ Toast.-selfmod {
     background: $warning 20%;
 }
 
-/* --- modal screens (help / info snapshots / command palette) --- */
+/* --- command palette modal --- */
 
-HelpScreen, InfoModal, CommandPalette {
+CommandPalette {
     align: center middle;
 }
-#help-body, #info-body, #palette {
+#palette {
     width: 70%;
     max-width: 100;
     height: auto;
@@ -117,11 +117,13 @@ HelpScreen, InfoModal, CommandPalette {
     border: round $accent;
     padding: 1 2;
 }
-.modal-title {
-    color: $accent;
-    text-style: bold;
-}
 #palette-list {
     height: auto;
     max-height: 20;
+}
+
+/* Belt-and-suspenders: every transcript block sizes to its content. (Textual
+   CSS has no `flex`; height:auto is the knob that prevents 1fr stretching.) */
+AssistantText, .turn, ToolBlock, SubagentBlock {
+    height: auto;
 }

@@ -16,25 +16,22 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.dom import DOMNode
-from textual.widgets import Collapsible, Footer, TextArea
+from textual.widgets import Collapsible, Footer
 
 from ...client import TerminalClient
-from .modals import CommandPalette, HelpScreen, InfoModal
+from .modals import CommandPalette
 from .router import Router
 from .state import Catalog, StatusModel
 from .theme import CSS_PATH, Phase, resolve_theme
 from .widgets import PromptInput, StatusBar, Toast, UserTurn
 
-# Slash commands the TUI owns (handled locally, never sent to the gateway).
-_LOCAL_COMMANDS = (
-    "/help",
-    "/clear",
-    "/copy-last",
-    "/tools",
-    "/extensions",
-    "/budget",
-    "/quit",
-)
+# The only slash command the TUI handles itself: /clear wipes the rendered
+# transcript (inherently client-side) AND cold-resets the gateway session.
+# Everything else is a pluggable command registered by an atom/gateway builtin
+# and surfaced via the session's command list — the TUI never hardcodes those.
+# Pure client conveniences (clear screen, copy, quit) are keybindings, not
+# slash commands.
+_LOCAL_COMMANDS = ("/clear",)
 
 
 class AgentMTui(App[int]):
@@ -44,6 +41,7 @@ class AgentMTui(App[int]):
         Binding("ctrl+d", "quit_app", "quit", priority=True, show=True),
         Binding("ctrl+l", "clear_log", "clear", show=True),
         Binding("ctrl+r", "command_palette", "commands", show=True),
+        Binding("ctrl+y", "copy_last", "copy", show=True),
         Binding("ctrl+e", "toggle_tool", "expand", show=True),
         Binding("escape", "cancel", "cancel", show=False),
     ]
@@ -100,8 +98,10 @@ class AgentMTui(App[int]):
 
     async def _flush_active(self) -> None:
         turn = self._router.active
-        if turn is not None:
-            await turn.flush()
+        if turn is not None and await turn.flush():
+            # Only scroll when flush actually applied new content — an
+            # unconditional scroll_end every tick forces a repaint at the
+            # timer rate even during an idle/slow-thinking stretch.
             self.scroll_end()
 
     # --- router callbacks (the app is the router's view handle) --------
@@ -191,29 +191,16 @@ class AgentMTui(App[int]):
 
     async def _run_slash(self, text: str) -> bool:
         """Handle a TUI-local slash command. Returns True if handled here,
-        False if it should be forwarded to the gateway."""
+        False if it should be forwarded to the gateway. Only /clear is local
+        (it must wipe the client-rendered transcript); all other slash commands
+        are pluggable and forwarded to the gateway/atom command router."""
         name = text.split(maxsplit=1)[0]
-        if name in ("/quit", "/exit", "/q"):
-            self.exit(0)
-        elif name == "/clear":
-            await self.action_clear_log()
-        elif name == "/help":
-            await self.push_screen(HelpScreen())
-        elif name == "/copy-last":
-            self._copy_last()
-        elif name == "/tools":
-            await self.push_screen(InfoModal("tools", self.catalog.tools_text()))
-        elif name == "/extensions":
-            await self.push_screen(
-                InfoModal("extensions", self.catalog.extensions_text())
-            )
-        elif name == "/budget":
-            await self.push_screen(InfoModal("budget", self.catalog.budget_text()))
-        else:
-            return False
-        return True
+        if name == "/clear":
+            await self._clear_and_reset()
+            return True
+        return False
 
-    def _copy_last(self) -> None:
+    def action_copy_last(self) -> None:
         if not self._last_text:
             self.toast("nothing to copy yet")
             return
@@ -243,14 +230,6 @@ class AgentMTui(App[int]):
             self._hist_idx = len(self._history)
             inp.text = ""
 
-    @on(TextArea.Changed, "#prompt-input")
-    def _on_input_changed(self, event: TextArea.Changed) -> None:
-        # Typing `/` on an otherwise-empty line opens the command palette
-        # (Claude-Code style) rather than inserting a literal slash.
-        if event.text_area.text == "/":
-            event.text_area.text = ""
-            self.action_command_palette()
-
     # --- bindings -------------------------------------------------------
 
     def action_interrupt_or_quit(self) -> None:
@@ -276,8 +255,25 @@ class AgentMTui(App[int]):
             node = node.parent
 
     async def action_clear_log(self) -> None:
+        # Screen-only clear (Ctrl+L): wipe the transcript but keep the gateway
+        # session, so the model still has context. `/clear` uses the heavier
+        # _clear_and_reset to also drop that context.
         await self.transcript.remove_children()
         self._router = Router(self)  # drop active turn + tool/child registries
+
+    async def _clear_and_reset(self) -> None:
+        """`/clear`: wipe the transcript AND cold-reset the gateway session so
+        the model's context is cleared and the next message opens a fresh
+        session. Forwards the gateway's ``/end`` (shut down + forget mapping)."""
+        await self.action_clear_log()
+        await self._send(
+            {
+                "channel": "terminal",
+                "sender_id": self._sender_id,
+                "chat_id": self._chat_id,
+                "content": "/end",
+            }
+        )
 
     def action_command_palette(self) -> None:
         commands = list(_LOCAL_COMMANDS) + [
