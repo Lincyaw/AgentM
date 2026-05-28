@@ -490,6 +490,51 @@ async def test_background_refused_after_shutdown() -> None:
 
 
 @pytest.mark.asyncio
+async def test_background_refused_after_shutdown_terminates_noncooperative_inner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAJOR (refusal-branch leak): when ``background()`` is reached AFTER
+    ``on_session_shutdown`` has drained the registry, the never-registered inner
+    task must still be driven to a terminal state. A NON-cooperative inner tool
+    (ignores the abort signal) would otherwise be detached and untracked → the
+    Major-1 "Task was destroyed but it is pending" leak. The refusal branch must
+    cancel it within the bounded grace and gather it before returning."""
+
+    # Tiny grace so the cancel path is taken quickly (inner never honours abort).
+    monkeypatch.setattr(background_exec, "_SHUTDOWN_GRACE_SECONDS", 0.05)
+
+    api = _FakeApi()
+    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    await mgr.on_session_shutdown(SessionShutdownEvent(cwd="."))
+    assert mgr._shutting_down is True
+
+    # Non-cooperative inner: ignores the abort signal entirely, sleeps long.
+    async def noncooperative(_a: dict[str, Any], _s: asyncio.Event | None) -> ToolResult:
+        await asyncio.sleep(100.0)
+        return ToolResult(content=[TextContent(type="text", text="never")])
+
+    abort = asyncio.Event()
+    inner: asyncio.Task[Any] = asyncio.create_task(noncooperative({}, abort))
+
+    ticket = await mgr.background(
+        tool_name="noncooperative",
+        task=inner,
+        abort_signal=abort,
+        forwarder=None,
+    )
+
+    # Refusal ticket returned, registry still empty (never registered)...
+    assert isinstance(ticket, ToolResult)
+    assert ticket.is_error
+    assert "shutting down" in _payload(ticket)["error"]
+    async with mgr._registry.lock:
+        assert mgr._registry.values() == []
+    # ...and crucially the non-cooperative inner task reached a terminal state
+    # (cancelled within the grace window) — no pending task survives the refusal.
+    assert inner.done()
+
+
+@pytest.mark.asyncio
 async def test_post_inbox_stale_does_not_crash_watcher() -> None:
     """MAJOR 3: if the atom was reloaded mid-flight, ``post_inbox`` raises
     ``ExtensionStaleError``; the detached watcher must stop gracefully rather

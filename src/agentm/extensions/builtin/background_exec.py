@@ -361,11 +361,22 @@ class _BgManager:
 
         if self._shutting_down:
             # The session is tearing down; do not strand new detached tasks on
-            # a bus that is about to be cleared. Abort the inner work and any
-            # signal forwarder, then surface the refusal as an error result.
+            # a bus that is about to be cleared. ``on_session_shutdown`` has
+            # already run and drained the registry, so nothing else will await
+            # this never-registered inner task — we MUST bring it to a terminal
+            # state here, or a non-cooperative inner tool leaks ("Task was
+            # destroyed but it is pending"). Same bounded-grace-then-cancel
+            # shape as the shutdown drain: ask cooperatively, give it the grace
+            # window, then cancel and gather so nothing outlives the refusal.
             abort_signal.set()
             if forwarder is not None:
                 forwarder.cancel()
+            _done, still_running = await asyncio.wait(
+                {task}, timeout=_SHUTDOWN_GRACE_SECONDS
+            )
+            if still_running:
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             return _tool_result(
                 {"error": "session is shutting down; background task refused"},
                 is_error=True,
@@ -451,6 +462,13 @@ class _BgManager:
         into, so we stop gracefully rather than crash the detached task.
         """
 
+        # ``read`` is read/written here WITHOUT the registry lock, while
+        # ``check_background`` flips it under the lock — intentionally. The
+        # ``bg-complete-{task_id}`` dedup_key below is what makes the unlocked
+        # partner safe: a racing double-post collapses on that key, so the worst
+        # outcome is a harmless redundant post, never a duplicate inbox item. Do
+        # NOT "fix" this into a lock here — taking the registry lock from a
+        # finalize path that can run under that same lock risks a deadlock.
         if state.read:
             return
         state.read = True
