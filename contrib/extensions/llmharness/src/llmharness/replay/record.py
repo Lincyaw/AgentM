@@ -131,17 +131,11 @@ class ReplayRecord:
         raw_blocks: list[dict[str, Any]] = (
             [b for b in raw if isinstance(b, dict)] if isinstance(raw, list) else []
         )
-        # Backward-compat: pre-rename sidecars carry a single ``root_session_id``
-        # (the on-disk filename stem) instead of the ``session_id`` / ``trace_id``
-        # pair. Map it onto both so old runs still replay; ``trace_id`` is only
-        # used for grouping, not by the per-firing replay path.
-        sid = d.get("session_id") or d.get("root_session_id")
-        tid = d.get("trace_id") or d.get("root_session_id")
         return cls(
             phase=d["phase"],
             turn_index=int(d["turn_index"]),
-            session_id=str(sid),
-            trace_id=str(tid),
+            session_id=str(d["session_id"]),
+            trace_id=str(d["trace_id"]),
             ts_ns=int(d.get("ts_ns") or 0),
             compose_kwargs=dict(d.get("compose_kwargs") or {}),
             payload=dict(d.get("payload") or {}),
