@@ -1,345 +1,354 @@
-# Design: Textual TUI
+# Design: Terminal TUI (wire-client live frontend)
 
-**Status**: implemented (sole interactive frontend; `rich.live` simple TUI deleted 2026-05-02; layout rebuilt outside-in 2026-05-02)
+**Status**: designing (rewrite for channels-v2; supersedes the in-process
+`modes/textual_app.py` design deleted with the channels-v2 migration)
 **Created**: 2026-05-01
-**Last Updated**: 2026-05-09
-**Builds on**: [pluggable-architecture.md](pluggable-architecture.md), [observability.md](observability.md)
+**Last Updated**: 2026-05-28
+**Builds on**: [single-process-gateway.md](single-process-gateway.md),
+[observability.md](observability.md), [pluggable-architecture.md](pluggable-architecture.md)
 
 ---
 
 ## 1. Overview
 
-The interactive frontend is a Textual-based TUI serving **two roles
-simultaneously**:
+`agentm-terminal` is the interactive terminal frontend. After the channels-v2
+rewrite it is a **wire client** of the single-process gateway, not an in-process
+presenter: the `AgentSession` lives inside the `agentm gateway` daemon; the TUI
+is a separate process that connects over the wire (`unix://` locally, `ws://` /
+`wss://` remote) and renders what the gateway pushes.
 
-1. **Conversation surface** — streamed assistant text, inline tool
-   calls with collapse-by-default, slash-command picker, keyboard-first
-   navigation. The visible prompt-and-reply loop.
-2. **Control + observability surface for AgentM's runtime** — every
-   pluggable subsystem (extension lifecycle, tool registry, cost
-   budget, hot reloads, extension-injected user messages) emits bus
-   events; the TUI subscribes and renders each one as either a header
-   counter, a toast, or an `/<name>` modal. This is the user's window
-   into what the framework is doing on their behalf — particularly
-   self-modification, which is the framework's headline behavior and
-   would otherwise be invisible.
+It serves **two roles at once** — the dual role the original TUI design defined:
 
-It superseded the original `rich.live`-based `modes/interactive.py`
-(deleted 2026-05-02) and is the only interactive mode reachable via
-`agentm -i`.
+1. **Conversation surface** — streamed assistant text, thinking, inline tool-call
+   blocks (collapse-by-default), sub-agent blocks, approval prompts, a multi-line
+   input with a slash-command palette, keyboard-first navigation.
+2. **Control + observability surface for AgentM's runtime** — the framework's
+   headline behavior is *self-modification*, and the runtime fires a rich event
+   taxonomy (extension install/reload/unload, atom registration, injected user
+   messages, managed-resource writes, compaction, budget). The TUI renders each as
+   a header counter, a toast, or an `/<name>` modal — the user's window into what
+   the framework is doing on their behalf.
 
-The mode layer's contract from `pluggable-architecture.md` §5 stays
-unchanged: `run(config: AgentSessionConfig) -> int` owns the session
-lifecycle and subscribes to public bus channels only —
-`stream_delta`, `tool_call`, `tool_result`, `child_session_start/end`,
-`llm_request_*`, plus the new control/observability set
-(`extension_install`, `extension_reload`, `api_register`,
-`api_send_user_message`, `cost_budget_exceeded`). Textual replaces
-rich-live as the rendering engine; nothing else moves.
+The decisive architectural fact is the **process boundary**: the TUI cannot
+subscribe to the session bus (it is in another process). It renders only what the
+gateway serializes onto the wire. So "replicate the rich interactive experience"
+is fundamentally *"re-expose the bus event stream over the wire, then render it."*
 
 ## 2. Motivation
 
-The current `interactive.py` is a proof of concept:
+The channels-v2 rewrite collapsed the old in-process Textual app (which subscribed
+to `AgentSession.bus` directly) into a thin wire client. In doing so the live
+experience was lost: the `wire_driver` atom (the bus→wire bridge) only forwards the
+final assistant text on `turn_end`, plus approvals and diagnostics. Streaming
+tokens, thinking, tool-call lifecycle, cost/usage, sub-agent activity, and every
+control/observability event still fire on the in-process bus but **never cross the
+process boundary**.
 
-- **Single panel.** All assistant text + tool output share one `rich.live` panel; thinking blocks render in a sibling panel each turn but reset between turns. No history scroll-back beyond the terminal scrollback.
-- **No multiline input.** `console.input("> ")` is single-line, no Enter-to-newline / Shift-Enter-to-submit, no slash completion, no history.
-- **No collapse / expand.** Every `tool_call` and `tool_result` shows `_truncate(repr(args), 80)` — fine for `ls`, useless for `read` returning 200 lines.
-- **No status awareness.** Model name shown once at startup; nothing surfaces token count, cost, current turn, or in-flight requests.
-- **No interrupt control.** Ctrl-C cancels; there's no Esc-to-interrupt without exit, no "stop this tool" affordance.
-- **No permission UX.** When `permission` atom rejects a tool call, the user sees a tool-result error string, not a prompt asking them to allow.
+The goal is to restore (and modernize, modeled on Claude Code's interaction) the
+full surface — which requires work in three layers, not just the TUI:
+`wire_driver` (translate bus → wire) → gateway sink (deliver) → TUI (render).
 
-Textual addresses all six because that's what it is for: an actual TUI app framework with widget composition, focus management, key bindings, and reactive state. Migrating from `rich.live` is the natural next step once the streaming-bus plumbing has been validated (which the current minimal mode did).
+## 3. Architecture — three layers across the process boundary
 
-## 3. Design Details
+```
+ gateway process                                   terminal process
+┌───────────────────────────────┐                ┌──────────────────────────┐
+│ AgentSession.bus               │                │ WireClient.on_outbound   │
+│   stream_delta, tool_call,     │  wire frames   │   → router (metadata.kind │
+│   tool_result, extension_*,    │  (outbound     │      → widget mutation)  │
+│   api_register, resource_write │   envelopes)   │ → Textual widget tree    │
+│        │                       │  ───────────►  │                          │
+│   wire_driver (projector) ─────┼─ _emit_outbound│                          │
+│        │                       │   ├ ephemeral → direct peer write         │
+│   SqliteOutbox  ◄──────────────┼───┴ durable   → outbox.enqueue           │
+└───────────────────────────────┘                └──────────────────────────┘
+```
 
-### 3.1 Layout
+- **Layer 1 (server):** `wire_driver` projects bus events into `outbound` bodies;
+  the gateway sink routes each by delivery class.
+- **Layer 2 (wire):** the existing `outbound` envelope kind carries everything,
+  discriminated by `metadata.kind`. No new envelope kind (the wire keeps its
+  fixed kind set; adding one needs a spec amendment — see single-process-gateway §2.3).
+- **Layer 3 (client):** a dispatch table maps `metadata.kind` → one widget mutation.
 
-Outside-in dock layout per Textual's
-[design-a-layout](https://textual.textualize.io/how-to/design-a-layout/)
-guide. Top header docks first, footer + input bar dock from the bottom,
-the conversation log fills the remaining `1fr`:
+## 4. Wire streaming protocol (the contract)
+
+### 4.1 Projector table
+
+`wire_driver` is rebuilt around a **declarative projector table**
+`_PROJECTORS: dict[channel, Callable[[Event], dict | None]]`. Each entry maps a bus
+channel to a function producing a JSON-safe `outbound` body (or `None` to skip a
+particular event). This mirrors the per-event `to_otel` projection pattern already
+in `core/abi/events.py`: the *set of surfaced events and their wire shape lives in
+one reviewable place*, and adding/dropping an event is a one-line change. The table
+**omitting** a channel is the explicit allow-list decision.
+
+Every projected body carries `metadata.kind` (the discriminator), the routing
+address (`channel` / `chat_id` / `thread_id`), and `_session_key` (echoed back so a
+multi-surface client attributes the frame). Streaming bodies also carry `turn_id`
+so the client keys mutations to the right turn.
+
+### 4.2 metadata.kind taxonomy
+
+**(a) Conversation — ephemeral** (drive the transcript live):
+
+| metadata.kind | source channel / payload type | body fields |
+|---|---|---|
+| `turn_start` | `turn_start` | turn_id, turn_index |
+| `stream_text` | `stream_delta`·`TextDelta` | turn_id, text |
+| `stream_thinking` | `stream_delta`·`ThinkingDelta` | turn_id, text |
+| `tool_call` | `tool_call` | tool_call_id, name, args |
+| `tool_result` | `tool_result` / `tool_error` | tool_call_id, ok, duration_ms, preview |
+| `usage` | `llm_request_end` (+usage/cost source) | turn_id, tokens_in/out, cost, model, ctx_window |
+| `child_start` / `child_end` | `child_session_start/end` | child_id, purpose, error? |
+
+**(b) Control / observability — ephemeral** (toasts, header counters, modal snapshots):
+
+`extension_install` (phase + trigger), `extension_reload` (`is_self_modify`,
+old/new hash), `extension_unload`, `api_register` (kind=tool|command → counters +
+`/tools`), `api_send_user_message` (injected UserTurn), `resource_write`,
+`plan_submitted`, `after_compact`, `cost_budget_exceeded` (budget latch + `/budget`),
+`session_ready` (initial tools/commands/model snapshot), `command_dispatched`,
+`agent_end` (TerminationCause → why the turn stopped).
+
+**(c) Durable** (must survive a disconnected peer — the reliability floor):
+
+`assistant_text` (`turn_end` — the source-of-truth assistant reply, already
+forwarded today), `approval_request` / `approval_resolved`, `diagnostic_error`.
+
+**(d) NOT surfaced** (kernel-internal / persistence / veto / rewrite hooks — no UI
+meaning): `before_send_to_llm`, `context`, `decide_turn_action`,
+`before_agent_start`, `message_persisted`, `message_appended`,
+`session_header_emitted`, `entry_appended`, `before_install_atom`,
+`before_unload_atom`, `child_session_extending`, `resolve_subagent`,
+`resources_discover`, `before_compact`, `session_shutdown`.
+
+### 4.3 Delivery classes (the load-bearing split)
+
+The gateway sink (`_GatewayRuntime._emit_outbound`) routes by delivery class:
+
+- **Ephemeral (a + b):** encode the envelope and **write it directly to each routed
+  peer's `transport_writer`**, best-effort — dropped if the peer is currently
+  disconnected. Bypasses the SQLite outbox.
+- **Durable (c):** `outbox.enqueue` as today — at-least-once, survives reconnect.
+
+This split is load-bearing: a turn streams ~50 `stream_text` deltas/second; routing
+those through the durable outbox would create thousands of SQLite rows per turn and
+replay them on reconnect. Ephemeral frames are *live decoration*; the durable
+`assistant_text` is the authoritative record a reconnecting client can rely on.
+
+The discriminator is a small set of durable `metadata.kind`s (default = ephemeral),
+or an `_ephemeral` flag the atom pops from the body. `wire_driver` stays oblivious
+to transport; it only tags delivery class.
+
+## 5. Interaction model (the replica target)
+
+### 5.1 Layout (outside-in dock)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ StatusHeader: AgentM ▎model · turn N · in 12.3k · out 3.4k · $0.041 ·│  ← dock: top, h: 1
-│              ● idle                                                  │
+│ StatusBar: model · ctx 12.3k/200k · in/out · $0.041 · ◐ thinking      │ dock top, h:1
+│            N tools · M atoms · $⚠ (budget latch)                       │
 ├──────────────────────────────────────────────────────────────────────┤
-│ ConversationLog                                                  ▲  │  ← 1fr scrollable
-│   UserTurn     — user message (blue gutter)                      │  │
-│   AssistantTurn — "● assistant" label + streaming text +         │  │
-│                   inline tool blocks (yellow gutter, single)     │  │
-│   SubagentBlock — nested cyan-gutter Vertical                    │  │
-│                                                                  ▼  │
+│ Transcript (1fr scroll)                                            ▲   │
+│   UserTurn          — user input (primary gutter)                  │   │
+│   AssistantTurn[turn_id]                                           │   │
+│     ThinkingBlock   — dim, collapsible                             │   │
+│     AssistantText   — streamed markdown                            │   │
+│     ToolBlock       — name ⟳/✓/✗ 142ms, collapsible args+result    │   │
+│     SubagentBlock   — nested child transcript (accent gutter)      │   │
+│     ApprovalBlock   — Allow / Allow-always / Deny                  ▼   │
 ├──────────────────────────────────────────────────────────────────────┤
-│ InputBar (PromptInput TextArea, rounded border, autosize 3..8)       │  ← dock: bottom, h: auto
+│ PromptInput (multi-line, rounded, autosize)                            │ dock bottom, h:auto
 ├──────────────────────────────────────────────────────────────────────┤
-│ Footer: ⌃C Interrupt · ⌃D Quit · ⌃L Clear · ⌃R Commands · ⌃E Toggle  │  ← dock: bottom, h: 1
+│ Footer: ⌃C interrupt · ⌃D quit · ⌃L clear · ⌃R commands · ⌃E expand   │ dock bottom, h:1
 └──────────────────────────────────────────────────────────────────────┘
+              Toast(s): transient overlay for control/observability events
 ```
 
-The previous layout — Vertical stack with a one-line `italic dim`
-status row at the bottom — was unreadable: status got buried, fixed
-elements weren't anchored, and the conversation log could shift when
-emptied. Promoting status to a top dock-bar with `$primary` background,
-adding the standard `Footer` for binding hints, and using
-`border-left` gutters for message attribution (no Rich `Panel`) gives
-each region a single-source-of-truth visual treatment.
-
-No left/right sidebar in MVP. Claude Code's "skills picker", "history
-browser", etc. are deliberately deferred — they belong in a later
-iteration once the core interaction works.
-
-### 3.2 Widget tree
+### 5.2 Widget tree
 
 ```
-AgentMApp(textual.App)
-├── StatusHeader(Static)               # dock: top, h: 1, reactive
-├── ConversationLog(VerticalScroll)    # 1fr middle
-│   ├── UserTurn(Static)               # markdown body, blue border-left gutter
-│   ├── TurnContainer(Vertical)        # assistant turn
-│   │   ├── Static("● assistant")      # attribution label
-│   │   ├── ThinkingBlock(Collapsible) # auto-collapsed when streaming ends
-│   │   ├── AssistantTextBlock(Static) # streaming target (Markdown)
-│   │   ├── ToolCallBlock(Collapsible) # yellow gutter, no double border
-│   │   │   ├── title: "tool_name  ✓ 142ms"
-│   │   │   └── body: args (yellow) + result (green/red)
-│   │   └── SubagentBlock(Vertical)    # cyan gutter, native widgets
-│   └── ...
-├── InputBar(Container)                # dock: bottom, h: auto
-│   └── PromptInput(TextArea)          # rounded border, multi-line, slash completion
-├── Footer()                           # dock: bottom, h: 1, BINDINGS hints
-├── CommandPaletteScreen(ModalScreen)  # Ctrl+R or "/" at empty input
-└── HelpScreen(ModalScreen)            # /help
+AgentMTui(App[int])
+├── StatusBar(Static)              # dock top; reactive model/tokens/cost/phase/counters
+├── Transcript(VerticalScroll)     # 1fr
+│   ├── UserTurn(Static)           # primary gutter; system→you variant for injected
+│   ├── AssistantTurn(Vertical)    # keyed by turn_id
+│   │   ├── ThinkingBlock(Collapsible)
+│   │   ├── AssistantText(Static[Markdown])
+│   │   ├── ToolBlock(Collapsible) # generic; Edit/Write→diff, Bash→cmd+out, Read→path
+│   │   └── SubagentBlock(Vertical)
+│   └── ApprovalBlock(Vertical)
+├── PromptInput(TextArea)          # dock bottom
+├── Footer()                       # dock bottom, BINDINGS hints
+├── Toast(Static)                  # transient overlay
+├── CommandPalette(ModalScreen)    # `/` or ⌃R
+├── HelpScreen(ModalScreen)        # /help
+└── InfoModal(ModalScreen)         # /extensions /tools /budget
 ```
 
-Key Textual idioms used:
+### 5.3 Design language
 
-- `dock: top/bottom` for fixed regions; `1fr` for the flex middle
-  (Textual's "outside-in" layout pattern).
-- `Footer` widget auto-renders any `BINDINGS` entries with `show=True`,
-  so users see `⌃C ⌃D ⌃L ⌃R ⌃E` without opening `/help`.
-- App-level theme switching via `self.theme = "textual-dark"` /
-  `"textual-light"` (Textual built-in registered themes) with invalid
-  theme failures surfaced as warning diagnostics before falling back.
-- `Collapsible` for tool blocks (one keystroke to expand). Default
-  state: collapsed if result < 20 lines, expanded if it's a code/diff
-  write.
-- `reactive` for status state (`model`, `turn`, `tokens_in`,
-  `tokens_out`, `cost_usd`, `phase: "idle"|"thinking"|"streaming"|"tool"|"subagent"`).
-- `worker` for the `session.prompt(text)` coroutine so the UI stays
-  responsive while the model streams.
-- `border-left: thick $variable` (CSS, single source) instead of
-  `rich.Panel(border_style=...)` plus `border-left` (which produced
-  doubled borders in the previous design).
+- **Attribution by gutter:** `border-left: thick $variable` per role
+  (user / assistant / thinking / tool / subagent / system-injected). Single source
+  in CSS — no Rich `Panel` borders (which double up).
+- **Glyphs:** phase glyphs (`● idle`, `◐ thinking`, `◑ streaming`, `⚙ tool`,
+  `⌥ subagent`); tool status (`⟳` running, `✓` ok, `✗` error).
+- **Theme:** Textual built-in `textual-dark` / `textual-light` + CSS variables
+  (`$primary`, `$accent`, `$warning`, `$error`, `$text-muted`). No hardcoded hex.
+  `--theme dark|light` maps to the built-in names.
+- **Markdown** for assistant text and markdownish tool output; plain otherwise.
 
-### 3.3 Event-bus → widget mapping
+### 5.4 Router: metadata.kind → widget mutation
 
-The bus events are the contract. Each event maps to exactly one widget mutation:
+A single `router.py` dispatch table is the only place wire shapes meet widgets:
 
-| Event | Source | UI effect |
-|---|---|---|
-| `stream_delta(TextDelta)` | `AgentLoop` | Dispatch table entry appends to active `AssistantTextBlock`. Refresh panel. |
-| `stream_delta(ThinkingDelta)` | `AgentLoop` | Dispatch table entry appends to active `ThinkingBlock`. Block is auto-collapsed when streaming ends. |
-| `stream_delta(ToolCallStart)` | `AgentLoop` | Dispatch table entry inserts a placeholder `ToolCallBlock` with name, no args yet. |
-| `tool_call(name, args)` | `OperationsImpl` | Fill the placeholder's args; mark phase=`tool` in status. |
-| `tool_result(result, duration_ms)` | `OperationsImpl` | Set the block's result body + header status glyph (`✓`/`✗`). Auto-collapse if short and successful. |
-| `llm_request_start(model, ...)` | `AgentLoop` | Status phase=`thinking`. StatusHeader updates `model_name` and the phase glyph. |
-| `llm_request_end(usage)` | `AgentLoop` | Status phase=`idle` if no tool ran. Update `tokens_in`/`tokens_out`/`cost_usd`. |
-| `child_session_start(purpose)` | `sub_agent` | Insert a `SubagentBlock` (nested ConversationLog), phase=`subagent`. |
-| `child_session_end(error?)` | `sub_agent` | Close the SubagentBlock; if error, render in red. |
-| `extension_install(phase=*)` | harness | Tracked into the `/extensions` modal snapshot. `phase=error` also emits an error toast. Header counters update with `loaded` / `failed` totals. |
-| `api_register(kind=command\|tool)` | `ExtensionAPI` | Captured into the `slash_commands` and `tools` snapshots. Header `N tools` counter updates. Late registrations (post-create reload) are routed through the live `handle_api_register`. |
-| `extension_reload(is_self_modify, ok/error)` | `atom_reloader` | Toast. `is_self_modify=true` → `★ self-modify` warning toast (the framework's headline behavior is made visible). Human reloads stay informational. `error` → error toast. |
-| `cost_budget_exceeded(used, limit, currency)` | `cost_budget` atom | Latch `_budget_state`; header shows `$… ⚠`; error toast names the cap and warns the next prompt will halt with `stop_reason='budget'`. `/budget` modal then shows current state. |
-| `api_send_user_message(extension, content)` | `ExtensionAPI` (any extension calling `api.send_user_message`) | Render a synthetic `UserTurn` with `injected_from=<extension>` — yellow gutter and a `system → you` label so the user can tell it apart from a turn they typed. |
-| `permission_request(tool, args)` | `permission` atom (future event) | Open inline `PermissionPrompt` modal — NOT a system modal — with Allow / Allow once / Deny buttons. |
+| metadata.kind | mutation |
+|---|---|
+| `turn_start` | create `AssistantTurn` keyed by turn_id; phase=thinking |
+| `stream_text` | append to active turn's `AssistantText` (20 Hz buffered flush) |
+| `stream_thinking` | append to active turn's `ThinkingBlock`; auto-collapse on next phase |
+| `tool_call` | insert a `ToolBlock` (name + args), status ⟳; phase=tool |
+| `tool_result` | fill result + status ✓/✗ + duration; auto-collapse if short+ok |
+| `usage` | update StatusBar tokens/cost/ctx |
+| `child_start`/`child_end` | open/close a `SubagentBlock`; phase=subagent |
+| `assistant_text` | finalize the turn's text (authoritative; replaces stream buffer) |
+| `approval_*` | inline `ApprovalBlock` / resolve it |
+| `extension_*`, `resource_write`, `after_compact`, `plan_submitted` | toast (self-modify louder) |
+| `api_register`, `session_ready` | StatusBar counters + `/tools` `/extensions` snapshot |
+| `api_send_user_message` | synthetic `UserTurn` (system→you gutter) |
+| `cost_budget_exceeded` | budget latch in StatusBar + `/budget` snapshot |
+| `diagnostic_*` | toast (warning/error) |
 
-The `permission_request` event does not exist yet; the design assumes it's added as part of this work or in a parallel task. If absent at implementation time, the TUI gracefully degrades — permission denials show as red tool results without an interactive prompt.
-
-### 3.4 Slash commands and the command palette
-
-When the user types `/` at column 0 of an empty input line, open the `CommandPalette` modal. It lists one `BuiltinCommandRegistry`: TUI-owned commands and commands observed from `ExtensionAPI.register_command` via `ApiRegisterEvent(kind="command")`. Filter on each keystroke; Enter selects; Esc cancels.
-
-Commands prefixed with `/` and not in the registry pass through as raw text (so users can type `/something` literally if they want to). Registered extension commands use the same registry lookup path as built-ins; their handler delegates to `session.prompt("/<name> ...")` so the harness `slash_commands` atom remains the SDK-level dispatcher.
-
-Built-in commands the TUI itself owns (not from extensions):
-
-- `/quit`, `/exit`, `/q` — quit the app
-- `/clear` — clear `ConversationLog` (does NOT reset session state; only the visible history)
-- `/help` — overlay listing key bindings + registered slash commands
-- `/copy-last` — yank last assistant text block to system clipboard (via `pyperclip` or fall back to OSC 52)
-- `/extensions` — open `InfoModal` showing the snapshot of every
-  `ExtensionInstallEvent` seen in this session (status glyph
-  ⏳/✓/✗ + module path + last error). Snapshot-on-open: close and
-  reopen to refresh.
-- `/tools` — open `InfoModal` listing every tool the agent currently
-  has registered (name, source extension, description). The snapshot
-  is built from `ApiRegisterEvent(kind="tool")` — both create-time
-  registrations (accumulated by `run()` before `AgentSession.create`)
-  and runtime reloads.
-- `/budget` — open `InfoModal` showing the current `cost_budget`
-  state. If `cost_budget_exceeded` has not fired, displays a "Budget
-  OK" hint; once exceeded, shows used/limit/currency and the
-  next-prompt halt warning.
-
-### 3.5 Key bindings
+### 5.5 Controls
 
 | Key | Action |
 |---|---|
-| `Enter` | Submit prompt (when input is non-empty) |
-| `Shift+Enter` | Insert newline in input |
-| `Esc` | If a prompt is in flight: send a "soft cancel" — emits a `user_interrupt` event the kernel can act on (cancels current `session.prompt` task); if input has draft text: clear it; otherwise: emit a `Nothing to cancel.` toast (an explicit acknowledgement instead of the previous silent no-op, which made users wonder if the app had stalled) |
-| `Ctrl+C` | If prompt in flight: cancel; if pressed again within 1.5s: quit. If no prompt in flight: quit when log is empty; otherwise toast `Press Ctrl+C again within 1.5s to quit` and quit on the second press inside that window |
-| `Ctrl+D` | Quit unconditionally |
-| `Ctrl+L` | `/clear` |
-| `Ctrl+R` | Open command palette |
-| `Tab` | Move focus between regions (`PromptInput.tab_behavior = "focus"` makes Tab leave the input naturally; the prior App-level Tab binding was a no-op while the input had focus and is therefore removed) |
-| `PageUp`/`PageDown` | Scroll log |
-| `Up`/`Down` (when input is empty) | Cycle through prior user inputs |
-| `Up`/`Down` (when typing) | Caret movement within the textarea |
-| `Ctrl+E` (on focused ToolCallBlock) | Expand/collapse |
+| Enter | submit (non-empty) |
+| Shift+Enter | newline |
+| `/` (col 0, empty) | command palette |
+| Esc | interrupt in-flight turn (soft cancel); else clear draft; else toast "nothing to cancel" |
+| Ctrl+C | cancel in-flight; double-tap within 1.5s → quit |
+| Ctrl+D | quit |
+| Ctrl+L | clear transcript (visual only; session preserved) |
+| Ctrl+R | command palette |
+| Ctrl+E | expand/collapse focused ToolBlock |
+| Up/Down (empty input) | input history |
+| PgUp/PgDn | scroll transcript |
 
-`BINDINGS` entries with `show=True` appear in the docked `Footer`, so
-the user discovers `⌃C` / `⌃D` / `⌃L` / `⌃R` / `⌃E` without opening
-`/help`.
+**Interrupt** requires a gateway affordance: an inbound carrying a control marker
+that cancels the detached `session.prompt` task (in the gateway's `handle_inbound`).
+Until that lands, Esc degrades to a local no-op toast.
 
-### 3.6 Streaming render strategy
+### 5.6 Streaming render strategy
 
-Textual's reactive system can repaint per-frame, but that's overkill for token streams arriving at ~50/s. Instead:
+Buffer `stream_text` / `stream_thinking` per active turn; a `set_interval(0.05, …)`
+worker flushes the buffer into the active `AssistantText` (20 Hz, the same cadence
+the old mode used — no per-token repaint). On `assistant_text` (turn_end), force a
+final flush and replace the buffered text with the authoritative content.
 
-- Buffer `TextDelta` chunks in a `bytearray` per-turn.
-- A `set_interval(0.05, ...)` worker flushes the buffer into the active `AssistantTextBlock`'s renderable, calling `block.update(buffered_text)` which Textual's diff engine handles efficiently.
-- 20Hz refresh is the same cadence as the current `rich.live` mode. No subjective lag.
-- On `llm_request_end`, force one final flush before the worker is cancelled.
+## 6. Component decomposition (package shape)
 
-Rendering the assistant text uses `rich.markdown.Markdown` (Textual passes Rich renderables straight through). Code blocks get syntax highlighting; tool blocks render their result body the same way if it looks like markdown, plain text otherwise (use a heuristic: contains `` ``` ``, `# `, or `- ` ⇒ markdown).
+Clean rewrite of `contrib/gateway-peers/terminal/src/agentm_terminal/`:
 
-### 3.7 Theming
-
-Textual ≥6 ships a built-in theme system. Activate one by setting
-`self.theme = "textual-dark"` (or `"textual-light"`) — colors flow
-through CSS variables (`$primary`, `$surface`, `$boost`, `$text`,
-`$accent`, `$warning`, `$error`, `$text-muted`) and the framework
-handles every render path including the `Footer`. The CLI flag
-`--theme` accepts the short aliases `dark` / `light` which are mapped
-to those built-in theme names. The previous design hardcoded hex
-colors inside `.theme-dark { background: #0f1115 }` blocks; that
-fought the framework on every redraw and made it impossible for users
-to register a third theme without rewriting CSS.
-
-Semantic role → CSS variable:
-
-- assistant attribution label: `$accent` bold
-- user-message gutter: `$primary`
-- thinking: `$text-muted` italic
-- tool name / pending: `$warning`
-- tool success: green `✓` glyph (Rich-side, in body)
-- tool failure: `$error`
-- subagent indent: `$accent`
-- status header: `$primary 60%` background, `$text` foreground
-
-CSS defaults to `src/agentm/modes/textual_app.tcss`; callers may inject an
-alternate Textual CSS path for tests or embedding.
-
-### 3.8 Migration path (historical)
-
-Originally landed alongside the legacy `rich.live` mode at
-`modes/interactive.py`, selectable via `--tui {simple,textual}`. As of
-2026-05-02 the simple mode is deleted and the Textual app is the sole
-interactive frontend reachable via `agentm -i`. The `--tui` flag has
-been removed.
-
-## 4. Interface Definition
-
-```python
-# agentm/modes/textual_app.py
-
-from textual.app import App
-from textual.binding import Binding
-
-from agentm.core.abi.session_config import AgentSessionConfig
-
-class AgentMApp(App[int]):
-    """Textual TUI for AgentM. Returns process exit code on exit."""
-
-    DEFAULT_CSS_PATH = Path(__file__).with_name("textual_app.tcss")
-    CSS_PATH = str(DEFAULT_CSS_PATH)
-    BINDINGS = [
-        Binding("ctrl+c", "interrupt_or_quit", show=True, priority=True),
-        Binding("ctrl+d", "force_quit", show=True, priority=True),
-        Binding("ctrl+l", "clear_log", show=True),
-        Binding("ctrl+r", "open_palette_binding", show=True),
-        # ... see §3.5
-    ]
-
-    def __init__(self, config: AgentSessionConfig, *, theme: str = "dark") -> None: ...
-
-async def run(config: AgentSessionConfig, *, theme: str = "dark") -> int:
-    """Owns the session lifecycle for one ``agentm -i`` invocation."""
+```
+cli.py              # typer entry: connect/auth/transport resolution, frontend select
+client.py           # WireClient <-> asyncio queues glue (send_inbound, outbound stream)
+frontends/
+  plain.py          # text/json renderer for non-TTY (scripts/agents) — reorg of renderer.py
+  tui/
+    app.py          # AgentMTui(App): compose + BINDINGS + lifecycle
+    router.py       # metadata.kind -> widget mutation (§5.4)
+    state.py        # reactive status + turn registry (keyed by turn_id)
+    theme.py        # glyphs, gutter roles, CSS path
+    app.tcss        # docks, gutters, theme variables
+    widgets/        # transcript turns tools subagent approval status input toast
+    modals/         # palette help info
 ```
 
-CLI: a single `-i` / `--interactive` flag opens the Textual TUI; there
-is no longer a frontend selector.
+Frontend selection reuses the existing TTY autodetect: TUI on a TTY, `text` when
+piped, `json` for agent drivers (`--format` overrides). Transport selection reuses
+`gateway.client_cli.resolve_connect` (unix / ws / wss already handled).
 
-Dependencies: `textual>=0.85` is a hard requirement. Optional: `pyperclip` for `/copy-last` (graceful fallback to OSC 52 escape if absent).
+## 7. Interface definition
 
-## 5. Related Concepts
+```python
+# agentm_terminal/client.py
+class TerminalClient:
+    """Owns the WireClient; exposes an async outbound stream + send_inbound."""
+    async def connect(self) -> None: ...
+    async def send_inbound(self, body: dict) -> None: ...
+    def outbound(self) -> AsyncIterator[dict]: ...   # yields outbound bodies
+    async def close(self) -> None: ...
 
-- [pluggable-architecture.md](pluggable-architecture.md) — modes/ layer contract; the new mode obeys §5 unchanged.
-- [observability.md](observability.md) — the bus-events list this design renders is a strict subset of what observability already records. No new observability surface.
+# agentm_terminal/frontends/tui/app.py
+class AgentMTui(App[int]):
+    def __init__(self, client: TerminalClient, *, sender_id: str, chat_id: str,
+                 theme: str = "dark") -> None: ...
 
-## 6. Constraints and Decisions
+async def run_tui(client: TerminalClient, *, sender_id, chat_id, theme="dark") -> int: ...
+```
+
+Local default stays `unix://` (`DEFAULT_SOCKET_URL` and the gateway bind default are
+unchanged). WS is a first-class explicit-opt-in transport the TUI fully supports.
+
+## 8. Related concepts
+
+- [single-process-gateway.md](single-process-gateway.md) — the wire protocol,
+  `wire_driver` service contract, outbox delivery semantics, peer routing.
+- [observability.md](observability.md) — the bus events this design surfaces are a
+  subset of what observability records; the projector mirrors the `to_otel` pattern.
+- [pluggable-architecture.md](pluggable-architecture.md) — `wire_driver` is a §11
+  single-file atom; the TUI is a presenter peer, not core.
+
+## 9. Constraints and decisions
 
 | Decision | Rationale | Alternative |
 |---|---|---|
-| Textual, not raw curses or prompt_toolkit | Textual provides composition + reactive + Collapsible widgets out of the box; CSS-style theming; works over SSH | prompt_toolkit (lower-level, more code); urwid (legacy, slower iteration) |
-| ~~Keep simple mode as fallback~~ (reverted 2026-05-02) | Initially the rich-live mode stayed for environments where Textual misbehaves. In practice no such environment surfaced and maintaining two frontends doubled the test surface. Simple mode deleted. | — |
-| Outside-in dock layout (top header, bottom footer + input, 1fr middle) | Per Textual's official layout guide. Anchors fixed regions so the conversation log can never push them out of position; Footer auto-renders BINDINGS so users discover keys without /help. | Vertical-stack-with-implicit-flex (the previous approach). Rejected: status row could shift on empty/clear; readability suffered |
-| Single-source-of-truth gutters via CSS `border-left` | Previous design rendered user/subagent with `rich.Panel(border_style=...)` AND CSS `border-left` simultaneously, producing doubled borders. Now Rich Panel is gone; gutters live only in CSS. | Keep both. Rejected: double-rendered borders look broken |
-| Built-in `textual-dark` / `textual-light` themes (not custom hex), with injected theme names diagnosed on failure | The previous `.theme-dark { background: #0f1115 }` overrides fought the framework's theming system on every redraw. Invalid theme strings are presenter errors, so they emit `DiagnosticEvent(level="warning")` before falling back. | Hardcoded hex per theme class or silent fallback. Rejected: brittle and hides presenter misconfiguration |
-| Injectable CSS path and keymap | Embedders and tests need to replace terminal presentation assets without mutating class attributes or reaching into Textual internals. | Fixed `CSS_PATH` / `BINDINGS`. Rejected: no seam for presenters under test |
-| No left sidebar in MVP | Single-pane is enough to validate the framework migration; sidebar is feature creep | Build full Claude-Code-style multi-pane. Rejected: too much surface for one issue |
-| Streaming flushes at 20 Hz, not per-token | Token rate is ~50/s; per-token repaint is wasteful | Per-token. Rejected: CPU + screen flicker without visible benefit |
-| Esc cancels in-flight prompt; on idle emits explicit toast | Bare-Esc-to-exit is a documented foot-gun, but the previous silent no-op on idle made the app look stalled. The toast acknowledges the keypress. | Esc exits / Esc silent. Both rejected as user-confusing |
-| Ctrl+C double-tap-within-1.5s escalates to quit | Previously Ctrl+C while a prompt was running could only cancel — never quit — and forced the user to remember Ctrl+D. The 1.5s window matches shell convention. | Ctrl+C never quits while prompt runs. Rejected: muscle-memory friction |
-| Commands not in registry pass through as text | User might want to type `/something` literally | Strict mode: reject unknown slashes. Rejected: surprises users |
-| Defer permission-prompt UX gracefully | The atom doesn't yet emit the event we'd hook | Make it a hard requirement. Rejected: couples this issue to permission rework |
-| Subscribe to bus events twice — once before `AgentSession.create` (snapshot dict), once after (live mutation) | Extension load fires `api_register` and `extension_install` *during* create, before the AgentMApp instance exists. A snapshot dict accumulates those into `__init__`; live handlers cover post-create reloads. | Subscribe only after create. Rejected: `/extensions` and `/tools` would be empty until the agent triggered a reload, which is the opposite of when the user wants to see them. |
-| Generic `InfoModal` instead of bespoke modal classes | All three control modals (`/extensions`, `/tools`, `/budget`) just need title + Rich renderable. Builders return Rich tables; the modal stays one class. | Three subclasses. Rejected: ~60 lines of duplication |
-| Self-modification reloads use a stronger toast severity than human reloads | `trigger ∈ {agent, propose_change_approved}` is the framework's signature behavior; making it noisier than a human-triggered reload aligns visual weight with stakes. | Same severity for all reloads. Rejected: trains user to ignore self-modification |
+| Stream over the existing `outbound` kind via `metadata.kind` | Keeps the fixed wire-kind set (spec-amendment to add a kind) | New per-event envelope kinds — rejected, churns the wire spec |
+| Ephemeral vs durable delivery split | ~50 deltas/s would flood the durable outbox; live decoration must not be replayed on reconnect | All-durable (rejected: row explosion) / all-ephemeral (rejected: loses the reliable reply record) |
+| Declarative projector table in `wire_driver` | One reviewable allow-list; one-line to add/drop an event; mirrors `to_otel` | Bespoke per-event hooks — rejected: scatters the contract |
+| Dual role (chat + control/observability) | Self-modification is the headline behavior and is otherwise invisible | Chat-only TUI — rejected: hides what the framework does |
+| Authoritative `assistant_text` replaces the stream buffer | Ephemeral deltas may be lossy; the durable turn_end text is the source of truth | Trust the stream buffer — rejected: a dropped delta corrupts the transcript |
+| Clean rewrite of the terminal package | Existing `ui/textual.py` is a minimal placeholder; not worth preserving | Extend in place — rejected by user |
+| Local default `unix://`, WS explicit opt-in | Zero-config peer-cred locally; WS first-class for remote | WS-default everywhere — rejected: forces token/anon auth on local |
+| 20 Hz batched stream flush | Token rate ~50/s; per-token repaint wastes CPU and flickers | Per-token — rejected |
+| Interrupt needs a gateway cancel affordance; degrade gracefully if absent | Cancel must reach the detached prompt task across the process boundary | Make it a hard prerequisite — rejected: decouples TUI landing from the gateway add |
 
-## 7. Acceptance Scenarios
+## 10. Acceptance scenarios
 
 | # | Scenario | Expected |
-|---|----------|----------|
-| T1 | Launch `agentm -i`; type "hello" + Enter | Single user turn appears; assistant streams a response; status header updates from `● idle` → `◐ thinking` → `◑ streaming` → `● idle` |
-| T2 | Mid-stream press Esc | Stream stops; partial assistant text remains; status returns to `idle`; input bar regains focus |
-| T3 | Assistant calls `read` tool returning 200 lines | Tool block appears collapsed with title `read  ✓ 12ms` (yellow gutter, single border); one keystroke (Ctrl+E with block focused) expands to show full args + result |
-| T4 | Type `/` at start of empty input | Command palette opens; lists `/quit`, `/clear`, `/help` plus extension-registered commands; type filters; Enter inserts |
-| T5 | Sub-agent dispatched | A `SubagentBlock` appears nested under the parent assistant turn, indented + cyan; child stream renders inside it |
-| T6 | Press Shift+Enter in input | Newline inserted; input expands vertically; submission only fires on bare Enter |
-| T7 | `Ctrl+L` | ConversationLog clears; session messages preserved (next prompt continues the conversation) |
-| T8 | Rendering 500 turns | No visible lag on scroll; memory stays bounded (Textual's virtual scrolling handles this) |
-| T9 | `agentm -i` dispatches to the Textual runner | `_run_interactive` builds a session config and invokes `modes.textual_app.run` (regression guard for the legacy `--tui` flag removal) |
-| T10 | Run in a terminal without 24-bit color | Theme falls back to 16-color; layout remains usable |
+|---|---|---|
+| T1 | Type a prompt | UserTurn appears; assistant streams; StatusBar idle→thinking→streaming→idle |
+| T2 | Assistant calls a tool returning 200 lines | ToolBlock collapsed `name ✓ 12ms`; ⌃E expands |
+| T3 | Mid-stream Esc | stream stops; partial text kept; phase→idle; input refocused |
+| T4 | Agent self-modifies (reload, trigger=agent) | `★ self-modify` toast (louder than a human reload) |
+| T5 | Sub-agent dispatched | nested SubagentBlock renders the child's stream |
+| T6 | Extension injects a user message | synthetic UserTurn marked `system → you` |
+| T7 | Peer disconnects mid-turn, reconnects | ephemeral deltas dropped; durable `assistant_text` delivered on reconnect |
+| T8 | `/tools` after startup | InfoModal lists registered tools (from `api_register` / `session_ready`) |
+| T9 | Piped: `printf '/help\n' \| agentm-terminal` | `json` frames on stdout unchanged (non-TTY) |
+| T10 | Connect over `ws://` with token | identical behavior to `unix://` |
 
-## 8. Open Questions
+## 11. Open questions
 
-1. **Where do tool diffs render?** `tool_edit` results are diffs; Textual has no native diff widget. Options: (a) render unified-diff text with `rich.syntax.Syntax(language="diff")`, (b) build a custom `DiffWidget` showing side-by-side hunks, (c) defer until later. Recommend (a) for MVP; (b) is its own design.
+1. **`usage` data source.** `llm_request_end` carries duration/chunk_count but not
+   token totals; usage likely rides on `MessageEnd.message` / provider usage. Confirm
+   the field at implementation before wiring the `usage` projector.
+2. **Interrupt wire shape.** Reuse the inbound path with a control marker, or add a
+   dedicated control frame? Lean on an inbound marker to avoid a new wire kind.
+3. **Tool-specific renderers.** MVP ships a generic ToolBlock + diff/bash/read
+   specializations; the full per-tool catalog is a follow-up.
+4. **History persistence.** In-memory MVP; file-backed (`~/.local/state/agentm/history`)
+   later if requested.
 
-2. **Does `/clear` truly preserve session state?** Today `interactive.py` doesn't expose any reset mechanism. If the user expects "clear means restart conversation", we need a separate `/reset` verb that calls `session.reset_messages()`. Decide: `/clear` = visual only, `/reset` = also reset session. Document both.
+## 12. Implementation phases
 
-3. **Permission-prompt event surface.** The TUI design assumes a `permission_request` event will be added so the prompt can be rendered inline. If we want the TUI to also work as a no-op fallback (current behavior, just-deny-and-show-error), no harness change is needed. Decide whether to land the event surface alongside this work or keep it as a follow-up; the TUI must function either way.
-
-4. **History persistence.** Up/Down on empty input cycles prior user inputs (§3.5). In-memory only? Or a file `~/.local/state/agentm/history`? Match shell history behavior (file-backed) is friendlier but adds a state-file dependency. Recommend: in-memory MVP; file-backed in a follow-up when someone complains.
-
-5. **Multi-turn copy of "the response".** `/copy-last` copies the last assistant text block. What about copying a specific tool result, or all of a turn? Defer; one verb is enough for MVP.
-
-### 3.8 Presenter Dispatch Tables and Turn Identity
-
-The presenter keeps wiring declarative:
-
-- Live event subscriptions are `_EVENT_SUBSCRIPTIONS: (channel, method_name)[]` and registered with one loop in `run()`; adding a public event no longer requires a repeated `bus.on(...)` block.
-- Stream deltas are rendered through `_DELTA_HANDLERS` and `_CHILD_DELTA_HANDLERS`, keyed by delta type. New provider delta classes can be registered without editing the main `handle_stream_delta` body.
-- Status phases are typed as `Phase = Literal["idle", "thinking", "streaming", "tool", "subagent"]`. `StatusHeader` reads glyphs from a `Theme` protocol; `DEFAULT_THEME` preserves the existing glyphs.
-- `AgentLoop` emits `turn_id`, monotone for the lifetime of the loop, alongside prompt-local `turn_index`. The TUI keys root `TurnContainer`s by `turn_id`; the old prompt-epoch workaround is deleted.
+- **Phase 0** — this design doc + `index.yaml` concept refresh (docs, self-mergeable).
+- **Phase 1** — `wire_driver` projector + gateway ephemeral delivery routing +
+  `OutboundMetaKind` extension (server; boundary review).
+- **Phase 2** — TUI foundation: package rewrite, design language, base widgets,
+  router wired to the durable kinds; WS verified; `renderer.py` → `frontends/plain.py`.
+- **Phase 3** — live conversation rendering (category-a frames) + Esc-interrupt.
+- **Phase 4** — control/observability rendering (category-b frames) + command palette,
+  history, info modals, polish.
