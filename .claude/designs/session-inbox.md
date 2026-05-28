@@ -200,6 +200,31 @@ minutes of no activity) bounds the worst case. Every ticker item carries a `dedu
 `push` **replaces** the same-key undrained item rather than stacking, so a stuck-in-a-
 long-turn agent never finds a pile of stale status lines.
 
+**Step-3 design decisions (2026-05-28).**
+- **ABI `ExtensionAPI.post_inbox(*, source, payload, dedup_key=None)`** is the generic
+  producer entry. `send_user_message` becomes `post_inbox(source="user", …)`;
+  background_exec / monitor / the step-5 sub_agent rewrite all post through it.
+  (ExtensionAPI gains a method only because a real producer now needs it.)
+- **Wrapping scope.** background_exec is opt-in (a scenario lists it). At install it
+  wraps every tool in `api.tools` with a transparent auto-bg shim:
+  `asyncio.wait({task}, timeout)` (config, default 60s). Fast tools finish within the
+  timeout and return normally — **no behaviour change; existing tool tests must stay
+  green** — only an overrun returns the ticket. Optional `denylist` config (default
+  empty) excludes tools that must never background.
+- **Terminal tools (simplified for step 3).** A foreground completion (<timeout)
+  returning `ToolTerminate` works unchanged. A *backgrounded* tool that ultimately
+  returns `ToolTerminate` is, in step 3, injected as an ordinary completion (the
+  terminate intent does not stop the loop yet); terminate-from-background is handled
+  once the step-5 driver exists. A TODO, not a silent drop.
+- **Completion + idle boundary.** Completion and ticker items
+  `post_inbox(source="background")`; while the agent is actively taking turns the
+  step-1 `context` drain injects them. **Idle auto-wakeup is step 5** (the persistent
+  driver) — in step 3 the agent stays informed by being active or by calling
+  `wait_background`. `cancel_background` is the first caller of
+  `BackgroundTaskRegistry.cancel`.
+- **render_item** gains `source="background"` (synthetic tool_result / system-reminder
+  note); other sources stay NotImplemented.
+
 ### `monitor` — agent-defined subscriptions and wakeups
 
 Tools `schedule_wakeup(delay)` (one-shot timer → inbox push), `create_monitor(watch=…)`

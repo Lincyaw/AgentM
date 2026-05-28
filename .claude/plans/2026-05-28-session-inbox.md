@@ -73,6 +73,14 @@ to step 5 (host). `wait_nonempty` is implemented now but unused by step 1.
    through the inbox (`source="subagent"`); delete `sub_agent`'s bespoke floor.
 3. `background_exec` atom: auto-backgrounding (`asyncio.wait(timeout=60)`) + ticker
    (milestone-driven + sparse heartbeat, `dedup_key` replace) + `check/wait/cancel_background`.
+   See the design doc's "Step-3 design decisions": ABI add
+   `ExtensionAPI.post_inbox(source, payload, dedup_key)` (`send_user_message` →
+   `post_inbox(source="user")`); opt-in atom wraps all `api.tools` transparently
+   (overrun → ticket registered in core.lib registry); completion + ticker
+   `post_inbox(source="background")` injected by the step-1 context drain while active
+   (idle auto-wakeup = step 5); `cancel_background` is the first `registry.cancel`
+   caller; `render_item` gains `source="background"`; terminal-from-background
+   simplified (deferred to step 5); **existing tool tests must stay green**.
 4. `monitor` atom: `schedule_wakeup` / `create_monitor` / `list_monitors` / `cancel_monitor`.
 5. Long-lived host driver loop + interrupt-and-resume (abort turn via `signal`,
    preserve context, resume with new inbox input); validate on one channel first.
