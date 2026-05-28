@@ -144,7 +144,7 @@ class Router:
         self._app.scroll_end()
 
     async def _agent_end(self, body: dict, meta: dict) -> None:
-        self._app.set_phase("idle")
+        self._app.mark_idle()
 
     # --- approvals ------------------------------------------------------
 

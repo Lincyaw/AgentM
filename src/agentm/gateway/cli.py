@@ -428,6 +428,14 @@ class _GatewayRuntime:
         # back to it instead of broadcasting to every connected client.
         if body.channel:
             self._peer_channels[peer.peer_id] = body.channel
+        if decision.action is RouterAction.INTERRUPT:
+            # Preempt the in-flight prompt inline (NOT as a detached task):
+            # it must not queue behind the very prompt it is cancelling.
+            # AgentSession.interrupt() sets the kernel abort signal -> the
+            # loop ends with SignalAborted (context preserved); a no-op when
+            # nothing is running.
+            self._interrupt_session(session_key)
+            return
         if decision.action is RouterAction.RESOLVE_APPROVAL:
             # Resolve inline: it must not sit behind a session.prompt that
             # is itself awaiting THIS approval's future (that would
@@ -460,6 +468,11 @@ class _GatewayRuntime:
         except Exception as exc:
             logger.exception("error handling inbound from %s", session_key)
             await self._send_error(session_key, body, exc)
+
+    def _interrupt_session(self, session_key: str) -> None:
+        sess = self._sessions.get(session_key)
+        if sess is not None:
+            sess.interrupt()
 
     def _resolve_approval(self, body: InboundBody) -> None:
         if body.button_value:

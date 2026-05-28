@@ -130,11 +130,17 @@ class InboundBody:
     sender_id: str = ""
     sender_name: str = ""
     button_value: str | None = None
+    # Out-of-band control verb that is NOT a conversational turn. Currently
+    # ``"interrupt"`` — preempt the in-flight prompt (the gateway routes it to
+    # AgentSession.interrupt() inline, never as a new turn). Distinct from
+    # ``content`` so an interrupt can't be mistaken for a user message.
+    control: str | None = None
     raw: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, body: dict[str, Any]) -> InboundBody:
         button = body.get("button_value")
+        control = body.get("control")
         raw = body.get("raw")
         return cls(
             channel=str(body.get("channel") or ""),
@@ -148,6 +154,7 @@ class InboundBody:
             sender_id=str(body.get("sender_id") or ""),
             sender_name=str(body.get("sender_name") or ""),
             button_value=str(button) if button is not None else None,
+            control=str(control) if control is not None else None,
             raw=raw if isinstance(raw, dict) else None,
         )
 
@@ -165,6 +172,8 @@ class InboundBody:
             out["sender_name"] = self.sender_name
         if self.button_value is not None:
             out["button_value"] = self.button_value
+        if self.control is not None:
+            out["control"] = self.control
         if self.raw is not None:
             out["raw"] = self.raw
         return out
