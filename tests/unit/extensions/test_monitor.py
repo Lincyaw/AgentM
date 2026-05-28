@@ -203,27 +203,52 @@ async def test_cancel_channel_unsubscribes_so_later_fires_post_nothing() -> None
 
 
 @pytest.mark.asyncio
-async def test_cancel_does_not_touch_shared_session_signal() -> None:
-    """MAJOR (step-3 lesson #2): ``cancel_monitor`` must NEVER touch the shared
-    session signal. Each monitor owns its OWN handle (its asyncio.Task /
-    Unsubscribe); cancelling one cannot abort a live turn or anything else
-    bound to the shared kernel signal."""
+async def test_cancel_after_fired_keeps_fired_status() -> None:
+    """MAJOR fix (step-4 review): ``_FIRED`` is terminal; ``cancel_monitor``
+    MUST NOT overwrite a successfully-fired wakeup with ``_CANCELLED``
+    (the bookkeeping would lie to the agent). Returns the actual current
+    status and ``list_monitors`` still reports ``fired``.
+    """
 
     api = _FakeApi()
     mgr = _manager(api)
-    shared_signal = asyncio.Event()  # the kernel/session signal
 
-    wake_res = await mgr.schedule_wakeup({"delay": 60.0})
-    chan_res = await mgr.create_monitor({"watch": "agent_end"})
-    wake_id = _payload(wake_res)["monitor_id"]
-    chan_id = _payload(chan_res)["monitor_id"]
+    res = await mgr.schedule_wakeup({"delay": 0.02})
+    monitor_id = _payload(res)["monitor_id"]
+    await asyncio.sleep(0.1)  # let the wakeup fire
 
-    # Cancel both kinds.
-    await mgr.cancel_monitor({"monitor_id": wake_id})
-    await mgr.cancel_monitor({"monitor_id": chan_id})
+    listing = _payload(await mgr.list_monitors({}))
+    fired = next(m for m in listing["monitors"] if m["monitor_id"] == monitor_id)
+    assert fired["status"] == "fired"
 
-    # The shared kernel signal was NOT tripped by either cancel path.
-    assert not shared_signal.is_set()
+    cancel = await mgr.cancel_monitor({"monitor_id": monitor_id})
+    assert _payload(cancel)["status"] == "fired"
+    assert not cancel.is_error
+
+    listing_after = _payload(await mgr.list_monitors({}))
+    entry = next(m for m in listing_after["monitors"] if m["monitor_id"] == monitor_id)
+    assert entry["status"] == "fired"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_does_not_overwrite_fired_status() -> None:
+    """MAJOR fix (step-4 review): ``on_session_shutdown`` MUST NOT flip a
+    ``_FIRED`` wakeup to ``_CANCELLED``. Already-terminal monitors stay
+    terminal across shutdown.
+    """
+
+    api = _FakeApi()
+    mgr = _manager(api)
+
+    res = await mgr.schedule_wakeup({"delay": 0.02})
+    monitor_id = _payload(res)["monitor_id"]
+    await asyncio.sleep(0.1)  # let it fire
+
+    await mgr.on_session_shutdown(SessionShutdownEvent(cwd="."))
+
+    listing = _payload(await mgr.list_monitors({}))
+    entry = next(m for m in listing["monitors"] if m["monitor_id"] == monitor_id)
+    assert entry["status"] == "fired"
 
 
 @pytest.mark.asyncio

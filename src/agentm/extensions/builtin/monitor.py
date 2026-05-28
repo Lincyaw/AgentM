@@ -20,8 +20,9 @@ What it exposes (all four are tools the agent calls):
   the channel handler. Idempotent (unknown id → tool-error result).
 
 **MVP scope (per plan).** ``create_monitor`` supports bus-channel subscriptions
-only — condition-polling is deferred (raises ``NotImplementedError`` if
-requested, surfaced as a tool-error result so the agent sees the refusal).
+only — condition-polling is deferred and the ``condition`` argument returns a
+tool-error ``ToolResult`` so the agent sees the refusal explicitly (no
+``NotImplementedError`` is raised through the tool surface).
 
 Architecture: a single :class:`_MonitorManager` owns the per-session in-memory
 state (the registry of live monitors, the asyncio tasks, the channel
@@ -39,7 +40,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from agentm.core.abi import (
@@ -64,7 +65,9 @@ _Status = Literal["pending", "fired", "active", "cancelled"]
 
 _KIND_WAKEUP: Literal["wakeup"] = "wakeup"
 _KIND_CHANNEL: Literal["channel"] = "channel"
-_KIND_CONDITION: Literal["condition"] = "condition"
+# ``_KIND_CONDITION`` constant deliberately not declared until the
+# condition-polling form lands (see plan); the type alias keeps "condition"
+# only as a forward-compatible literal for the defense branch.
 _Kind = Literal["wakeup", "channel", "condition"]
 
 # Grace window the shutdown handler gives still-pending wakeup tasks to be
@@ -118,7 +121,6 @@ class _Monitor:
     delay: float | None = None  # wakeup only
     task: asyncio.Task[Any] | None = None  # wakeup's asyncio.sleep task
     unsubscribe: Unsubscribe | None = None  # channel's bus unsubscribe
-    extras: dict[str, Any] = field(default_factory=dict)
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
@@ -351,10 +353,13 @@ class _MonitorManager:
             return _tool_result(
                 {"error": f"unknown monitor_id: {monitor_id}"}, is_error=True
             )
-        if state.status == _CANCELLED:
-            # Idempotent — already cancelled.
+        if state.status in (_CANCELLED, _FIRED):
+            # Both ``_CANCELLED`` and ``_FIRED`` are terminal; cancelling
+            # after a successful fire must NOT overwrite ``_FIRED`` (the
+            # bookkeeping would then lie to the agent). Return the actual
+            # current status — idempotent in both directions.
             return _tool_result(
-                {"monitor_id": monitor_id, "status": _CANCELLED}
+                {"monitor_id": monitor_id, "status": state.status}
             )
         state.status = _CANCELLED
         if state.kind == _KIND_WAKEUP and state.task is not None:
@@ -384,7 +389,9 @@ class _MonitorManager:
         self._shutting_down = True
         wakeup_tasks: list[asyncio.Task[Any]] = []
         for state in list(self._monitors.values()):
-            if state.status == _CANCELLED:
+            if state.status in (_CANCELLED, _FIRED):
+                # Already terminal — ``_FIRED`` stays ``_FIRED`` across
+                # shutdown; do not rewrite the bookkeeping.
                 continue
             state.status = _CANCELLED
             if state.kind == _KIND_WAKEUP and state.task is not None:
