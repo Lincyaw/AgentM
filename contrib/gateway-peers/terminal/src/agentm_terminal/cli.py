@@ -1,25 +1,12 @@
-"""``agentm-terminal`` — stdin/stdout client for the channels gateway.
+"""``agentm-terminal`` — interactive terminal chat-client peer for the gateway.
 
-Connects to an ``agentm-gateway --bind unix://…`` over the v1 wire
-protocol, reads user input from stdin, and renders gateway outbound
-messages on stdout.
+Connects to an ``agentm gateway`` over the v2 wire protocol (``unix://`` local,
+``ws://``/``wss://`` remote) and renders the session's event stream. On a TTY it
+opens the rich Textual TUI (``frontends.tui``); piped, it falls back to the
+``json`` line protocol; ``--format text|json|tui`` overrides.
 
-CLI design follows ``autoharness:cli-design``:
-
-* All logs go to stderr. Stdout carries business data only.
-* Exit codes are stable and standardized (see ``EXIT_*`` constants).
-* Errors are reported as
-  ``agentm-terminal: error: <type>: <root cause>. <suggested fix>.``
-* Format auto-detection: ``--format`` defaults to ``text`` when stdout
-  is a TTY, ``json`` otherwise.
-
-Example::
-
-    # Interactive:
-    agentm-terminal --connect unix:///tmp/gw.sock
-
-    # Piped (auto json mode):
-    printf '/help\\n' | agentm-terminal --connect unix:///tmp/gw.sock
+CLI design follows ``autoharness:cli-design``: logs to stderr, stdout carries
+business data only, stable exit codes, structured error lines.
 """
 
 from __future__ import annotations
@@ -29,31 +16,21 @@ import logging
 import os
 import signal
 import sys
-import time
 import uuid
 from typing import Annotated, Any
 
 import typer
 
 from agentm.gateway import DEFAULT_SOCKET_URL, autoload_dotenv
-from agentm.gateway.client import AuthError, WireClient
+from agentm.gateway.client import AuthError
 from agentm.gateway.client_cli import ConnectError, ConnectOptions, resolve_connect
-from agentm.gateway.wire import (
-    KIND_ERROR,
-    KIND_OUTBOUND,
-    KIND_PING,
-    KIND_PONG,
-    Envelope,
-)
 
 from . import __version__
-from .renderer import Renderer
+from .client import TerminalClient
 
-# Pull ``.env`` into ``os.environ`` before typer parses argv. Idempotent.
 autoload_dotenv()
 
-# -- Exit codes (cli-design rule group 3) ------------------------------
-
+# -- exit codes (cli-design rule group 3) ------------------------------
 EXIT_OK = 0
 EXIT_GENERIC = 1
 EXIT_USAGE = 2
@@ -62,15 +39,12 @@ EXIT_SIGINT = 6
 EXIT_CONNECT = 7
 
 PROG = "agentm-terminal"
+_FORMATS = ("text", "json", "tui")
 
 log = logging.getLogger("agentm_terminal")
 
 
 def _err(kind: str, root: str, fix: str) -> None:
-    """Print a structured error line to stderr.
-
-    Format: ``agentm-terminal: error: <type>: <root cause>. <fix>.``
-    """
     sys.stderr.write(f"{PROG}: error: {kind}: {root}. {fix}.\n")
     sys.stderr.flush()
 
@@ -80,8 +54,6 @@ def _version_callback(value: bool) -> None:
         typer.echo(f"{PROG} {__version__}")
         raise typer.Exit(code=EXIT_OK)
 
-
-# -- typer app ---------------------------------------------------------
 
 app = typer.Typer(
     name=PROG,
@@ -94,21 +66,19 @@ app = typer.Typer(
 def _resolve_format(arg: str | None) -> str:
     if arg is not None:
         return arg
-    return "text" if sys.stdout.isatty() else "json"
+    # Default: the rich TUI on a TTY (Claude-Code-like), json when piped.
+    return "tui" if sys.stdout.isatty() else "json"
 
 
 def _resolve_color(no_color_flag: bool, fmt: str) -> bool:
     if fmt == "json":
         return False
-    if no_color_flag:
-        return False
-    if os.environ.get("NO_COLOR"):
+    if no_color_flag or os.environ.get("NO_COLOR"):
         return False
     return sys.stdout.isatty()
 
 
-def _resolve_connect(url: str, tls_ca: str | None):
-    """Wrap :func:`resolve_connect` with CLI-shaped error reporting."""
+def _resolve_connect(url: str, tls_ca: str | None) -> Any:
     try:
         return resolve_connect(url, tls_ca=tls_ca)
     except ConnectError as exc:
@@ -125,10 +95,9 @@ def cli(
             envvar="AGENTM_SOCKET",
             metavar="URL",
             help=(
-                "Gateway URL. Supported schemes: unix:///abs/path/to/sock, "
-                "ws://host:port/path, wss://host:port/path. Default: shared "
-                "with `agentm-gateway` ($XDG_RUNTIME_DIR/agentm-gw.sock if "
-                "set, else /tmp/agentm-gw-<uid>.sock). Env: AGENTM_SOCKET."
+                "Gateway URL: unix:///abs/path (local, peer-cred), "
+                "ws://host:port/path or wss://host:port/path (remote, token). "
+                "Default: the shared local socket. Env: AGENTM_SOCKET."
             ),
         ),
     ] = DEFAULT_SOCKET_URL,
@@ -138,33 +107,19 @@ def cli(
             "--token",
             envvar="AGENTM_TOKEN",
             help=(
-                "Bearer token sent in the hello envelope. Required for "
-                "ws/wss gateways with token auth. Env: AGENTM_TOKEN. "
-                "NOTE: CLI args leak into /proc and shell history — "
-                "prefer --token-file or AGENTM_TOKEN."
+                "Bearer token for ws/wss gateways. Prefer --token-file or "
+                "AGENTM_TOKEN (CLI args leak into /proc). Env: AGENTM_TOKEN."
             ),
         ),
     ] = None,
     token_file: Annotated[
         str | None,
-        typer.Option(
-            "--token-file",
-            metavar="PATH",
-            help=(
-                "Read the bearer token from PATH (whitespace stripped). "
-                "Mutually exclusive with --token. Preferred for production."
-            ),
-        ),
+        typer.Option("--token-file", metavar="PATH", help="Read the token from PATH."),
     ] = None,
     tls_ca: Annotated[
         str | None,
         typer.Option(
-            "--tls-ca",
-            metavar="PATH",
-            help=(
-                "CA bundle (PEM) to verify the gateway certificate. Only "
-                "meaningful with wss://. Default: system trust store."
-            ),
+            "--tls-ca", metavar="PATH", help="CA bundle (PEM) to verify a wss:// cert."
         ),
     ] = None,
     output_format: Annotated[
@@ -173,21 +128,18 @@ def cli(
             "--format",
             envvar="AGENTM_FORMAT",
             help=(
-                "Output format / frontend. Choices: text, json, textual. "
-                "Default: 'text' on a TTY, 'json' otherwise. Use 'json' for "
-                "scripts / agent drivers; 'textual' for the rich TUI."
+                "Frontend: tui (rich TUI), text, json. Default: tui on a TTY, "
+                "json when piped. Use json for scripts / agent drivers."
             ),
         ),
     ] = None,
+    theme: Annotated[
+        str,
+        typer.Option("--theme", help="TUI theme: dark or light (default: dark)."),
+    ] = "dark",
     no_color: Annotated[
         bool,
-        typer.Option(
-            "--no-color",
-            help=(
-                "Disable ANSI color in text mode. Also honoured via the "
-                "NO_COLOR environment variable (https://no-color.org)."
-            ),
-        ),
+        typer.Option("--no-color", help="Disable ANSI colour in text mode."),
     ] = False,
     sender_id: Annotated[
         str,
@@ -202,53 +154,25 @@ def cli(
         typer.Option(
             "--scenario",
             envvar="AGENTM_SCENARIO",
-            help=(
-                "Scenario the gateway constructs this chat's session in "
-                "(sent on the first message only). Default: gateway default."
-            ),
+            help="Scenario the gateway builds this chat in (first message only).",
         ),
     ] = None,
     no_input: Annotated[
         bool,
-        typer.Option(
-            "--no-input",
-            help=(
-                "Exit immediately after the gateway handshake. Useful for "
-                "liveness probes; not the default — the client normally "
-                "reads stdin."
-            ),
-        ),
+        typer.Option("--no-input", help="Exit after the handshake (liveness probe)."),
     ] = False,
     verbose: Annotated[
         bool,
-        typer.Option(
-            "--verbose",
-            help="Raise log level on stderr to INFO (default: WARNING).",
-        ),
+        typer.Option("--verbose", help="Raise stderr log level to INFO."),
     ] = False,
     _version: Annotated[
         bool,
         typer.Option(
-            "--version",
-            is_eager=True,
-            callback=_version_callback,
-            help="Print version and exit.",
+            "--version", is_eager=True, callback=_version_callback, help="Print version."
         ),
     ] = False,
 ) -> None:
-    """Terminal chat-client peer for the AgentM gateway.
-
-    Connects over the v2 wire protocol and renders outbound messages on
-    stdout.
-
-    Examples:
-
-      Interactive (TTY auto-selects text format):
-        agentm-terminal --connect unix:///tmp/gw.sock
-
-      Piped (auto-selects JSON format):
-        printf '/help\\n' | agentm-terminal --connect unix:///tmp/gw.sock
-    """
+    """Interactive terminal chat-client peer for the AgentM gateway."""
     from agentm.gateway import resolve_token
 
     try:
@@ -256,11 +180,11 @@ def cli(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    if output_format is not None and output_format not in ("text", "json", "textual"):
+    if output_format is not None and output_format not in _FORMATS:
         _err(
             "bad-argument",
-            f"--format {output_format!r} is not one of text/json/textual",
-            "choose one of text, json, textual",
+            f"--format {output_format!r} is not one of {'/'.join(_FORMATS)}",
+            f"choose one of {', '.join(_FORMATS)}",
         )
         raise typer.Exit(code=EXIT_USAGE)
 
@@ -277,6 +201,7 @@ def cli(
                     connect=connect, token=effective_token, tls_ca=tls_ca
                 ),
                 output_format=output_format,
+                theme=theme,
                 no_color=no_color,
                 sender_id=sender_id,
                 chat_id=chat_id,
@@ -289,99 +214,30 @@ def cli(
     raise typer.Exit(code=rc)
 
 
-# -- async run loop ----------------------------------------------------
+# -- async run ---------------------------------------------------------
 
 
 async def _arun(
     *,
     connect_opts: ConnectOptions,
     output_format: str | None,
+    theme: str,
     no_color: bool,
     sender_id: str,
     chat_id: str,
     scenario: str | None,
     no_input: bool,
 ) -> int:
-    connect = connect_opts.connect
-    token = connect_opts.token
-    tls_ca = connect_opts.tls_ca
     fmt = _resolve_format(output_format)
-    color = _resolve_color(no_color, fmt)
-    renderer = (
-        Renderer(fmt=fmt, color=color) if fmt in ("text", "json") else None
-    )
-    textual_outbound: asyncio.Queue[dict[str, Any]] | None = (
-        asyncio.Queue() if fmt == "textual" else None
-    )
+    _spec, transport = _resolve_connect(connect_opts.connect, connect_opts.tls_ca)
 
-    _spec, transport = _resolve_connect(connect, tls_ca)
-
-    # Peer name: stable-ish within a single run. A uuid suffix prevents
-    # collisions between concurrent terminal peers connecting to one gateway.
-    peer_name = f"terminal-{uuid.uuid4().hex[:8]}"
-    # session_key per §3.4: <channel>:<chat_id>. The gateway treats it as
-    # opaque; here a terminal is one conversation, so this is stable.
-    session_key = f"terminal:{chat_id}"
-
-    stop_event = asyncio.Event()
-    exit_code = EXIT_OK
-
-    async def on_outbound(env: Envelope) -> None:
-        if env.kind == KIND_OUTBOUND:
-            body = env.body if isinstance(env.body, dict) else {}
-            # Defence-in-depth: the gateway routes by channel (§3.2); a dumb
-            # adapter also drops anything not addressed to its own channel so
-            # a foreign-channel reply never renders here. Empty = degenerate,
-            # allowed through.
-            out_channel = str(body.get("channel") or "")
-            if out_channel and out_channel != "terminal":
-                return
-            if textual_outbound is not None:
-                await textual_outbound.put(body)
-                return
-            try:
-                assert renderer is not None
-                renderer.render_outbound(body)
-            except Exception:  # noqa: BLE001
-                log.exception("renderer failed on envelope id=%s", env.id)
-            return
-        if env.kind in (KIND_PING, KIND_PONG):
-            return  # WireClient handles ping/pong itself
-        if env.kind == KIND_ERROR:
-            nonlocal exit_code
-            body = env.body if isinstance(env.body, dict) else {}
-            code = body.get("code", "unknown")
-            message = body.get("message", "")
-            _err(
-                "gateway-error",
-                f"gateway emitted error code={code!r} message={message!r}",
-                "check the gateway logs (stderr on its side)",
-            )
-            exit_code = EXIT_GENERIC
-            stop_event.set()
-            return
-
-    client = WireClient(
+    client = TerminalClient(
         transport=transport,
-        peer_name=peer_name,
-        token=token,
-        on_outbound=on_outbound,
+        peer_name=f"terminal-{uuid.uuid4().hex[:8]}",
+        token=connect_opts.token,
+        chat_id=chat_id,
+        scenario=scenario,
     )
-
-    # Scenario is sent on the FIRST inbound only (§2.2): it tells the
-    # gateway which scenario to build a fresh session in. Later inbounds
-    # route to the live session and omit it.
-    first_sent = {"done": False}
-
-    async def send_inbound(body: dict[str, Any]) -> None:
-        env_scenario = None if first_sent["done"] else scenario
-        first_sent["done"] = True
-        await client.send_inbound(
-            body,
-            session_key=session_key,
-            scenario=env_scenario,
-            env_id=f"in-{int(time.time() * 1_000_000)}",
-        )
 
     try:
         await client.connect()
@@ -389,136 +245,135 @@ async def _arun(
         _err(
             "auth-failed",
             f"gateway rejected handshake (code={exc.code!r})",
-            "verify --bind-allow-uid on the gateway covers this client's uid",
+            "verify the gateway's auth (--bind-allow-uid / --bind-token-file)",
         )
         return EXIT_AUTH
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         _err(
             "connect-failed",
-            f"cannot connect to {connect!r} ({exc.__class__.__name__})",
-            "is the gateway running with --bind on that path",
+            f"cannot connect to {connect_opts.connect!r} ({exc.__class__.__name__})",
+            "is the gateway running with --bind on that address",
         )
         return EXIT_CONNECT
     except OSError as exc:
         _err(
             "connect-failed",
-            f"cannot connect to {connect!r}: {exc.strerror or exc}",
+            f"cannot connect to {connect_opts.connect!r}: {exc.strerror or exc}",
             "check the socket path and gateway state",
         )
         return EXIT_CONNECT
-
-    if renderer is not None:
-        renderer.ready()
 
     if no_input:
         await client.close()
         return EXIT_OK
 
-    if fmt == "textual":
-        assert textual_outbound is not None
-        from .ui.textual import run_textual
-
-        async def _send_inbound(body: dict[str, Any]) -> None:
-            await send_inbound(body)
+    if fmt == "tui":
+        from .frontends.tui import run_tui
 
         try:
-            code = await run_textual(
-                send_inbound=_send_inbound,
-                outbound_queue=textual_outbound,
-                sender_id=sender_id,
-                chat_id=chat_id,
+            return await run_tui(
+                client=client, sender_id=sender_id, chat_id=chat_id, theme=theme
             )
         finally:
             await client.close()
-        return int(code)
 
+    return await _run_plain(
+        client=client,
+        fmt=fmt,
+        color=_resolve_color(no_color, fmt),
+        sender_id=sender_id,
+        chat_id=chat_id,
+    )
+
+
+async def _run_plain(
+    *,
+    client: TerminalClient,
+    fmt: str,
+    color: bool,
+    sender_id: str,
+    chat_id: str,
+) -> int:
+    from .frontends.plain import PlainRenderer
+
+    renderer = PlainRenderer(fmt=fmt, color=color)
+    stop = asyncio.Event()
     sigint_seen = False
 
     def _on_sigint() -> None:
         nonlocal sigint_seen
         sigint_seen = True
-        stop_event.set()
+        stop.set()
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(
-                sig, _on_sigint if sig == signal.SIGINT else stop_event.set
+                sig, _on_sigint if sig == signal.SIGINT else stop.set
             )
         except (NotImplementedError, RuntimeError):  # pragma: no cover — Windows
             pass
 
-    reader_task = asyncio.create_task(
-        _stdin_reader(send_inbound, sender_id, chat_id, stop_event),
-        name="terminal-stdin",
-    )
-    stop_task = asyncio.create_task(stop_event.wait(), name="terminal-stop")
+    renderer.ready()
 
+    async def _drain_outbound() -> None:
+        async for body in client.outbound():
+            try:
+                renderer.render_outbound(body)
+            except Exception:  # noqa: BLE001
+                log.exception("renderer failed")
+        stop.set()
+
+    reader = asyncio.create_task(
+        _stdin_reader(client, sender_id, chat_id, stop), name="terminal-stdin"
+    )
+    drain = asyncio.create_task(_drain_outbound(), name="terminal-drain")
+    stop_task = asyncio.create_task(stop.wait(), name="terminal-stop")
     try:
-        done, pending = await asyncio.wait(
-            [reader_task, stop_task],
-            return_when=asyncio.FIRST_COMPLETED,
+        _done, pending = await asyncio.wait(
+            [reader, drain, stop_task], return_when=asyncio.FIRST_COMPLETED
         )
         for t in pending:
             t.cancel()
     finally:
-        if renderer is not None:
-            renderer.stopped()
+        renderer.stopped()
         await client.close()
-
-    if sigint_seen:
-        return EXIT_SIGINT
-    return exit_code
+    return EXIT_SIGINT if sigint_seen else EXIT_OK
 
 
 async def _stdin_reader(
-    send_inbound: Any,
-    sender_id: str,
-    chat_id: str,
-    stop_event: asyncio.Event,
+    client: TerminalClient, sender_id: str, chat_id: str, stop: asyncio.Event
 ) -> None:
-    """Read stdin line by line, wrap into v2 ``inbound`` bodies (§2.4)."""
     loop = asyncio.get_running_loop()
-    while not stop_event.is_set():
-        try:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
-        except Exception:  # pragma: no cover — defensive
-            log.exception("stdin read failed")
-            stop_event.set()
-            return
+    while not stop.is_set():
+        line = await loop.run_in_executor(None, sys.stdin.readline)
         if not line:
-            stop_event.set()
+            stop.set()
             return
         content = line.rstrip("\n")
         if not content:
             continue
-        button_value: str | None = None
-        if content.startswith("="):
-            button_value = content[1:].strip() or None
-            display = f"[button click: {button_value or ''}]"
-        else:
-            display = content
         body: dict[str, Any] = {
             "channel": "terminal",
             "sender_id": sender_id,
             "chat_id": chat_id,
-            "content": display,
+            "content": content,
         }
-        if button_value is not None:
-            body["button_value"] = button_value
+        if content.startswith("="):
+            value = content[1:].strip() or None
+            body["content"] = f"[button click: {value or ''}]"
+            if value is not None:
+                body["button_value"] = value
         try:
-            await send_inbound(body)
+            await client.send_inbound(body)
         except Exception:  # noqa: BLE001
             log.exception("failed to send inbound; closing")
-            stop_event.set()
+            stop.set()
             return
 
 
-# -- entrypoint --------------------------------------------------------
-
-
 def main() -> None:
-    """Entry point referenced by the ``agentm-terminal`` console script."""
+    """Entry point for the ``agentm-terminal`` console script."""
     app()
 
 

@@ -1,15 +1,15 @@
-"""Rendering helpers for the v2 ``outbound`` envelope body (§2.5).
+"""Non-TTY renderer for the v2 ``outbound`` body (text / json).
 
-The wire carries outbound payloads as plain dicts. The discriminator is
-``metadata.kind`` (one of ``assistant_text`` / ``approval_request`` /
-``approval_resolved`` / ``diagnostic_warning`` / ``diagnostic_error``).
+The frontend used when stdout is not a TTY (scripts, agent drivers) or when
+``--format text|json`` is passed. Behaviour is unchanged from the previous
+``renderer.py``: text mode prints ``agent ▸``-prefixed lines + an ANSI button
+block; json mode emits one ``{"kind": ...}`` object per line. The rich TUI
+(``frontends.tui``) is the default on a TTY.
 
-* text mode: ``agent ▸`` prefix; diagnostics get a ``⚠``/``✖`` prefix;
-  ANSI-coloured ``[N] label   value=…`` button block with the
-  ``(type =<value> to round-trip a button click)`` hint.
-* json mode: ``{"kind":"ready"}`` after handshake, then one
-  ``{"kind":"message",…}`` per outbound (carrying ``content``, optional
-  ``buttons``, optional ``metadata``), ``{"kind":"stopped"}`` on shutdown.
+Discriminator is ``metadata.kind`` (assistant_text / approval_request /
+approval_resolved / diagnostic_warning / diagnostic_error); the streaming /
+control kinds the gateway now also emits are rendered as plain assistant text
+or ignored here — the TUI is the surface that renders them richly.
 """
 
 from __future__ import annotations
@@ -24,21 +24,41 @@ _BLUE = "\033[94m"
 _YELLOW = "\033[93m"
 _GREEN = "\033[92m"
 
+# Streaming/lifecycle kinds the plain renderer deliberately drops (they are
+# live decoration for the TUI; a piped consumer wants whole messages).
+_PLAIN_SKIP_KINDS = frozenset(
+    {
+        "turn_start",
+        "stream_text",
+        "stream_thinking",
+        "tool_call",
+        "tool_result",
+        "usage",
+        "child_start",
+        "child_end",
+        "agent_end",
+        "extension_install",
+        "extension_reload",
+        "extension_unload",
+        "api_register",
+        "api_send_user_message",
+        "resource_write",
+        "plan_submitted",
+        "after_compact",
+        "cost_budget_exceeded",
+        "session_ready",
+        "command_dispatched",
+    }
+)
 
-class Renderer:
-    """Stateless-ish renderer wrapping stdout writes.
 
-    ``color`` is honoured in text mode only; JSON mode is always
-    plain ASCII / UTF-8 so a downstream parser sees clean lines.
-    """
+class PlainRenderer:
+    """Stateless-ish renderer wrapping stdout writes."""
 
     def __init__(self, *, fmt: str, color: bool) -> None:
         if fmt not in ("text", "json"):
-            raise ValueError(
-                f"renderer format must be 'text' or 'json' (got {fmt!r})"
-            )
+            raise ValueError(f"renderer format must be 'text' or 'json' (got {fmt!r})")
         self._format = fmt
-        # JSON mode forces ANSI off (the legacy channel did the same).
         self._color = False if fmt == "json" else color
 
     # --- lifecycle markers ---------------------------------------------
@@ -62,17 +82,11 @@ class Renderer:
     # --- per-outbound --------------------------------------------------
 
     def render_outbound(self, body: dict[str, Any]) -> None:
-        """Render one v2 ``outbound`` envelope body (§2.5).
-
-        Fields read:
-
-        * ``content`` — assistant text / card body (may be empty).
-        * ``buttons`` — optional list of ``{"label","value","style"}``.
-        * ``metadata.kind`` — render-style discriminator.
-        """
         raw_meta = body.get("metadata")
         meta = raw_meta if isinstance(raw_meta, dict) else {}
         meta_kind = str(meta.get("kind") or "assistant_text")
+        if meta_kind in _PLAIN_SKIP_KINDS:
+            return
         if self._format == "json":
             self._render_json(meta_kind, body)
         else:
@@ -81,8 +95,7 @@ class Renderer:
     # --- text ----------------------------------------------------------
 
     def _render_text(self, meta_kind: str, body: dict[str, Any]) -> None:
-        content = str(body.get("content") or "")
-        text = content.rstrip()
+        text = str(body.get("content") or "").rstrip()
         if text:
             if meta_kind == "diagnostic_error":
                 self._print(self._style("✖ " + text, _YELLOW))
@@ -102,9 +115,7 @@ class Renderer:
                     + self._style(f"   value={value}", _DIM)
                 )
             self._print(
-                self._style(
-                    "  (type =<value> to round-trip a button click)", _DIM
-                )
+                self._style("  (type =<value> to round-trip a button click)", _DIM)
             )
 
     # --- json ----------------------------------------------------------
@@ -125,18 +136,13 @@ class Renderer:
                 for b in buttons
             ]
         metadata = body.get("metadata")
-        if metadata:
-            payload["metadata"] = dict(metadata)
-        else:
-            payload["metadata"] = {"kind": meta_kind}
+        payload["metadata"] = dict(metadata) if metadata else {"kind": meta_kind}
         self._emit(payload)
 
     # --- low-level -----------------------------------------------------
 
     def _style(self, text: str, code: str) -> str:
-        if not self._color:
-            return text
-        return f"{code}{text}{_RESET}"
+        return f"{code}{text}{_RESET}" if self._color else text
 
     @staticmethod
     def _print(text: str) -> None:
@@ -144,10 +150,8 @@ class Renderer:
 
     @staticmethod
     def _emit(obj: dict[str, Any]) -> None:
-        """One JSON object per line on stdout. ``ensure_ascii=False``
-        keeps non-ASCII (e.g. Chinese) human-readable."""
         sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
         sys.stdout.flush()
 
 
-__all__ = ["Renderer"]
+__all__ = ["PlainRenderer"]
