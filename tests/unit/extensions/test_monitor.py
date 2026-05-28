@@ -356,6 +356,10 @@ async def test_create_monitor_refuses_kernel_control_channels() -> None:
     mgr = _manager(api)
 
     # Pick a representative across the categories the denylist covers.
+    # The list includes ``message_appended`` and ``session_header_emitted``
+    # explicitly because they are the exact siblings A1's first revision
+    # missed (boundary re-review) — regressing them out of the denylist
+    # would reopen the same spin class.
     for channel in (
         "context",
         "decide_turn_action",
@@ -363,6 +367,8 @@ async def test_create_monitor_refuses_kernel_control_channels() -> None:
         "agent_end",
         "before_send_to_llm",
         "message_persisted",
+        "message_appended",
+        "session_header_emitted",
         "session_ready",
         "session_shutdown",
         "extension_install",

@@ -106,11 +106,13 @@ _KERNEL_CONTROL_CHANNELS: frozenset[str] = frozenset(
         # pipeline; treating them as agent-observable would mix substrate
         # plumbing into the agent's reasoning surface.
         "message_persisted",
+        "message_appended",
         "entry_appended",
         "before_compact",
         "after_compact",
         # Session lifecycle — substrate-owned; the agent has its own way to
         # observe these (e.g. the dispatch tools) without a monitor.
+        "session_header_emitted",
         "session_ready",
         "session_shutdown",
         "child_session_start",

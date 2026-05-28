@@ -135,7 +135,7 @@ MANIFEST = ExtensionManifest(
                 ),
             },
         },
-        "additionalProperties": True,
+        "additionalProperties": False,
     },
     requires=(),  # Defers wrapping to agent_start so tool atoms may load in any order.
 )

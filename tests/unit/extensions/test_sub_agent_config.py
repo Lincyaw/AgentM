@@ -124,9 +124,6 @@ def test_install_subscribes_tool_call_handler() -> None:
     silently re-enable the unbounded counter)."""
 
     api = _FakeApi()
-    # ``install`` also calls ``register_tool`` — give the fake just enough
-    # surface to absorb those without crashing the wiring path under test.
-    api.register_tool = lambda tool: None  # type: ignore[attr-defined,method-assign]
 
     async def _drive() -> None:
         from agentm.extensions.builtin import sub_agent

@@ -613,7 +613,7 @@ class _ChildTaskManager:
         # checks ``status == _RUNNING`` (terminal states are not its
         # concern), so we do NOT set ``state.read`` here — that flag is
         # owned by the tools that surface findings directly to the model
-        # (``check_tasks``, ``wait_subagent``, ``_reset_running_only_cancels``).
+        # (``check_tasks``, ``wait_subagent``).
         try:
             self._api.post_inbox(
                 source="subagent",
