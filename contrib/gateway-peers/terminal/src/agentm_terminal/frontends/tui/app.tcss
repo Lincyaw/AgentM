@@ -20,8 +20,12 @@ Screen {
     padding: 0 1;
 }
 
-#prompt-input {
+#input-dock {
     dock: bottom;
+    height: auto;
+}
+
+#prompt-input {
     height: 4;
     border: round $primary;
     background: $surface;
@@ -103,23 +107,18 @@ Toast.-selfmod {
     background: $warning 20%;
 }
 
-/* --- command palette modal --- */
+/* --- inline command autocomplete (docked under the input, not floating) --- */
 
-CommandPalette {
-    align: center middle;
-}
-#palette {
-    width: 70%;
-    max-width: 100;
+#suggestions {
     height: auto;
-    max-height: 80%;
-    background: $surface;
+    max-height: 8;
+    margin: 0 1;
+    background: $panel;
     border: round $accent;
-    padding: 1 2;
 }
-#palette-list {
-    height: auto;
-    max-height: 20;
+#suggestions > .option-list--option-highlighted {
+    background: $accent 30%;
+    color: $text;
 }
 
 /* Belt-and-suspenders: every transcript block sizes to its content. (Textual
