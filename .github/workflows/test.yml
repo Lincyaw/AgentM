@@ -30,14 +30,17 @@ jobs:
         run: uv sync --frozen
 
       - name: Lint (ruff)
-        run: uv run ruff check src/ contrib/channels/src/ contrib/extensions/llmharness/src contrib/scenarios/rca/src
+        run: uv run ruff check src/ contrib/gateway-peers/terminal/src contrib/gateway-peers/feishu/src contrib/extensions/llmharness/src contrib/scenarios/rca/src
 
       - name: Type check (mypy)
-        # Workspace members ship their own mypy config; check each from its
-        # own root so per-package overrides apply.
+        # The gateway lives in src/ (channels v2 — single process). Chat-client
+        # peers ship their own mypy config; check each from its own root so
+        # per-package overrides apply.
         run: |
-          uv run mypy src/ contrib/channels/src/
-          cd contrib/extensions/llmharness && uv run mypy src/llmharness
+          uv run mypy src/
+          cd contrib/gateway-peers/terminal && uv run mypy src/agentm_terminal
+          cd ../feishu && uv run mypy src/agentm_feishu
+          cd ../../extensions/llmharness && uv run mypy src/llmharness
           cd ../../scenarios/rca && uv run mypy src/agentm_rca
 
       - name: Tests (pytest)

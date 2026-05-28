@@ -143,6 +143,14 @@ so adoption is opt-in per scenario.
 
 ## 4. Cleanup checklist (channels layer)
 
+> **Historical (2026-05-28).** The paths below refer to the
+> `contrib/channels/src/agentm_channels/` layout that the **channels v2
+> rewrite** (`single-process-gateway.md`) deleted outright — the gateway
+> now lives in `src/agentm/gateway/` and there is no `runtime_identity.py`
+> / in-process `Gateway` class to clean up. This checklist is retained as
+> a record of the original migration intent; do not action it against the
+> current tree.
+
 After the atom lands, `contrib/channels/` ends up knowing **zero** about
 prompts. Concrete deletions:
 

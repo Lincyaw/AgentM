@@ -15,8 +15,11 @@ mechanism; every policy is a replaceable atom. Boundary contract in
 - `agentm trace …` — query the OTLP/JSON session log
   (`messages` · `turns` · `tools` · `chats` · `info` · `index`); preferred
   over hand-parsing `.agentm/observability/*.jsonl`.
-- Channel CLIs: `agentm-gateway`, `agentm-worker`, `agentm-terminal`,
-  `agentm-feishu`.
+- `agentm gateway --bind …` — single-process gateway subcommand: holds
+  all chat sessions in memory and serves chat-client peers over the v2
+  wire protocol (`.claude/designs/single-process-gateway.md`).
+- Chat-client peer CLIs (separate binaries, vendor-SDK isolation only):
+  `agentm-terminal`, `agentm-feishu`.
 - Shared `AGENTM_*` env namespace; `.env` autoloaded. Long-lived model
   settings can live in `~/.agentm/config.toml` instead of env vars
   (`$AGENTM_HOME/config.toml` overrides the directory). Precedence:
@@ -146,7 +149,8 @@ Prefer targeted `# type: ignore[attr-defined]` over broad suppression.
 For identity-affecting changes (atoms, kernel, catalog): also run an E2E
 prompt against a sandbox repo and inspect the trace.
 
-CI lints/types a broader scope — `src/`, `contrib/channels/src/`,
+CI lints/types a broader scope — `src/` (gateway lives at
+`src/agentm/gateway/`), `contrib/gateway-peers/{terminal,feishu}/src`,
 `contrib/extensions/llmharness/src`, `contrib/scenarios/rca/src` — and
 runs mypy per workspace from each member's root (per-package overrides).
 For sweeping changes, mirror that scope locally.
@@ -156,6 +160,16 @@ For sweeping changes, mirror that scope locally.
 - `progress.tsv` — dev-loop keep/discard decisions + metric values.
 - `decisions.md` — long-horizon autonomous decisions (L2+).
 - `.claude/{plans,tasks}/` — append-only design history.
+
+## Autonomy level: high
+
+(Per `/autoharness:long-horizon`. Decide through L4 autonomously, log in
+`decisions.md`, flag L4 entries with `[flagged]` for post-hoc review.
+Self-merge small / low-risk PRs (docs, single-atom cleanups, polish) once
+CI is green and any boundary review is clean. Escalate to the user only
+for: large/architectural PRs (hand off for review before merge),
+strategic drift (north-star changes, scope creep), access/credentials,
+or genuinely ambiguous requirements that research cannot resolve.)
 
 ## Conventions
 

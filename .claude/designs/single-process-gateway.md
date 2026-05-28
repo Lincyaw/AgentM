@@ -1,6 +1,6 @@
 # Design: Single-Process Gateway (channels v2)
 
-**Status**: PROPOSED
+**Status**: ACCEPTED
 **Created**: 2026-05-28
 **Supersedes**: [`historical/client-server-architecture.md`](historical/client-server-architecture.md) (channels v1) and [`historical/gateway-channels.md`](historical/gateway-channels.md) (channels v0). Both now live in `designs/historical/`.
 
@@ -181,7 +181,7 @@ Gone from v1: `bye` (close-on-socket is fine), `delivery_batch` / `ack_batch` (p
     {"label": "Deny",    "value": "appr-deadbeef:deny",    "style": "danger"}
   ],
   "metadata": {
-    "kind": "assistant_text" | "approval_request" | "diagnostic_warning" | "diagnostic_error"
+    "kind": "assistant_text" | "approval_request" | "approval_resolved" | "diagnostic_warning" | "diagnostic_error"
   }
 }
 ```
@@ -397,7 +397,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
 That's it. Translation glue, fully expressible inside the §11 atom contract. No new ExtensionAPI surface — just `set_service` / `get_service` / `@on`, all of which already exist.
 
-`peer_send` atom moves from `contrib/channels-clients/worker/src/agentm_worker/peer_send_atom.py` to `src/agentm/extensions/builtin/peer_send.py` and is rewritten to look up the target session in `SessionManager` directly — same-process dict lookup, no wire round-trip.
+**`peer_send` is removed, not ported** (was planned to move from `contrib/channels-clients/worker/src/agentm_worker/peer_send_atom.py` into builtin). It has no users — no scenario mounts it, no test covers it — and same-process delegation with a `wait_for_reply` future is semantically a sibling of the existing `sub_agent` atom (spawn a child unit, await its result), so a same-process port would have been a redundant second way to do what `sub_agent` already does. The old `agentm_worker/peer_send_atom.py` is deleted with the rest of the worker package. Cross-peer / agent-to-agent messaging is **out of scope** until a concrete need appears; if one does, resolve the `sub_agent` overlap first (one tool, not two) before reintroducing anything.
 
 ---
 
@@ -458,7 +458,7 @@ Hard list. The Phase-1 worker must delete these files outright.
 | `contrib/channels/src/agentm_channels/wire_bridge.py` | Bridge between v0 manager and wire — both ends deleted |
 | `contrib/channels/src/agentm_channels/session_bindings.py` | session→peer binding for worker peers; no worker peers exist |
 | `contrib/channels/src/agentm_channels/worker_registry.py` | No worker peers |
-| `contrib/channels-clients/worker/` (whole package) | Collapses into SDK; `peer_send_atom` moves to `src/agentm/extensions/builtin/peer_send.py`; rest deleted |
+| `contrib/channels-clients/worker/` (whole package) | Deleted entirely. `peer_send_atom` is **not** ported (§4 — no users, redundant with `sub_agent`). |
 
 ### 7.2 Code constructs
 
@@ -500,7 +500,7 @@ Keep / write (target invariants):
 | Current | New |
 |---|---|
 | `agentm-channels` (package `agentm_channels`) | **deleted**; contents move into `agentm` SDK under `src/agentm/gateway/` |
-| `agentm-worker` (package `agentm_worker`) | **deleted**; `peer_send_atom` moves to `src/agentm/extensions/builtin/peer_send.py` |
+| `agentm-worker` (package `agentm_worker`) | **deleted**; `peer_send_atom` not ported (§4) |
 | Entry-point group `agentm_channels.commands` | `agentm.gateway.commands` |
 
 ### 8.2 Directories
@@ -538,8 +538,7 @@ The `agentm` console script gains `gateway` as a subcommand alongside the existi
 
 * `src/agentm/gateway/` — new subpackage holding everything from §3.
 * `src/agentm/gateway/wire/types.py` — typed `InboundBody`, `OutboundBody` dataclasses (from the deleted `bus.py`).
-* `src/agentm/extensions/builtin/wire_driver.py` — §4.
-* `src/agentm/extensions/builtin/peer_send.py` — moved from contrib, rewritten for same-process.
+* `src/agentm/extensions/builtin/wire_driver.py` — §4. (`peer_send` removed, not ported — see §4.)
 * `src/agentm/cli/gateway.py` — `agentm gateway` subcommand glue.
 * `scripts/agentm-all-in-one` (optional) — convenience shell wrapper that `popen`s gateway + chosen chat client in one command, for single-user installs. Not a daemon mode — just a process supervisor.
 
@@ -590,7 +589,7 @@ The Phase-1 dev-worker is dispatched against this design as its complete specifi
    2. move surviving channel infrastructure (wire/, transport/, auth/, outbox/, commands/) into `src/agentm/gateway/`
    3. delete `agentm-channels` and `agentm-worker` packages (pyproject + workspace + CLI entry points); add `agentm gateway` subcommand
    4. write `Router` + `SessionManager` + `ApprovalManager` (CommandRouter + Outbox carry over with minor rename)
-   5. write `wire_driver` atom; move `peer_send_atom` → `peer_send` (rewrite for same-process)
+   5. write `wire_driver` atom (`peer_send_atom` is dropped, not ported — §4)
    6. update chat clients (terminal, feishu) for v2 envelope and new package paths
    7. prune tests + add fail-stop tests per §7.3
    8. update design docs (this one moves to PROPOSED→ACCEPTED, gateway-channels + client-server-architecture move to historical/, index.yaml updated)

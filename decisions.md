@@ -217,3 +217,32 @@ for the gate + judges. Phase 1 oversight, not Phase 2 regression.
 - **Re-eval results land in the SAME phase2_results.md, overwriting
   C3's** (L2: file is the deliverable, not the history; git preserves
   history). Commit message references C3 as the prior version.
+
+## 2026-05-28 — channels v2 rewrite cycle
+
+- **Autonomy set to HIGH for this cycle** (L5: user preference, confirmed
+  via AskUserQuestion). Recorded in `CLAUDE.md` under `## Autonomy level:
+  high`. Plus: user authorized self-merging small/low-risk PRs; large/
+  architectural PRs still get a review hand-off before merge.
+- **[flagged] Single-process gateway over daemon/worker split** (L4:
+  north-star reasoning — minimalism + maintainability dominate v1's
+  distribution/isolation properties at this codebase's scale). Spec in
+  `.claude/designs/single-process-gateway.md`, shipped as design PR #182.
+- **[flagged] Wire v1 → v2 hard break, no compat layer** (L4: simplicity
+  dominates backward-compat at pre-1.0 internal-use scale).
+- **Phase-1 worker isolation slip — recovered non-destructively** (L3:
+  research + careful recovery). The dev-worker's worktree was never
+  created (harness slip); it committed 8 commits onto the primary
+  checkout's `chore/merge-authority` branch. Recovery: preserved the
+  work on `channels-v2-single-process-gateway`, deleted the redundant
+  `chore/merge-authority`, left origin/main untouched. No reset --hard,
+  no working-tree clobber (the irreversible class the worker correctly
+  escalated rather than guessing).
+- **Removed accidental llmharness/record.py contamination from Phase-1**
+  (L2: codebase convention — unrelated change must not ride the channels
+  PR). The worker swept an uncommitted working-tree WIP edit (replay
+  pre-rename sidecar backward-compat) into commit ebeb80c7. Restored to
+  origin/main version; preserved the diff as a standalone patch
+  (`/tmp/llmharness-record-compat.patch`) for its original author. Net
+  Phase-1 diff excludes record.py. Verified: llmharness replay suite
+  still 22 passed with the revert.

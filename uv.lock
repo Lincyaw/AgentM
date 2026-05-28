@@ -17,13 +17,11 @@ resolution-markers = [
 members = [
     "agentm",
     "agentm-agentenv",
-    "agentm-channels",
     "agentm-feishu",
     "agentm-mcp-bridge",
     "agentm-rca",
     "agentm-rca-hfsm",
     "agentm-terminal",
-    "agentm-worker",
     "llmharness",
 ]
 
@@ -112,43 +110,11 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
-name = "agentm-channels"
-version = "0.1.0"
-source = { editable = "contrib/channels" }
-dependencies = [
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-    { name = "typer" },
-    { name = "websockets" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "pyyaml", specifier = ">=6" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "typer", specifier = ">=0.25.1" },
-    { name = "websockets", specifier = ">=13" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "agentm-feishu"
-version = "0.1.0"
-source = { editable = "contrib/channels-clients/feishu" }
+version = "0.2.0"
+source = { editable = "contrib/gateway-peers/feishu" }
 dependencies = [
-    { name = "agentm-channels" },
+    { name = "agentm" },
     { name = "lark-oapi" },
     { name = "python-dotenv" },
     { name = "typer" },
@@ -164,7 +130,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentm-channels", editable = "contrib/channels" },
+    { name = "agentm", editable = "." },
     { name = "lark-oapi", specifier = ">=1.6" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
@@ -259,10 +225,10 @@ dev = [
 
 [[package]]
 name = "agentm-terminal"
-version = "0.1.0"
-source = { editable = "contrib/channels-clients/terminal" }
+version = "0.2.0"
+source = { editable = "contrib/gateway-peers/terminal" }
 dependencies = [
-    { name = "agentm-channels" },
+    { name = "agentm" },
     { name = "textual" },
     { name = "typer" },
 ]
@@ -277,42 +243,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentm-channels", editable = "contrib/channels" },
+    { name = "agentm", editable = "." },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "textual", specifier = ">=0.85" },
-    { name = "typer", specifier = ">=0.25.1" },
-]
-provides-extras = ["dev"]
-
-[[package]]
-name = "agentm-worker"
-version = "0.1.0"
-source = { editable = "contrib/channels-clients/worker" }
-dependencies = [
-    { name = "agentm" },
-    { name = "agentm-channels" },
-    { name = "typer" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "agentm", editable = "." },
-    { name = "agentm-channels", editable = "contrib/channels" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "typer", specifier = ">=0.25.1" },
 ]
 provides-extras = ["dev"]
