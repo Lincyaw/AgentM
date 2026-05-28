@@ -329,6 +329,13 @@ async def _arun(
     async def on_outbound(env: Envelope) -> None:
         if env.kind == KIND_OUTBOUND:
             body = env.body if isinstance(env.body, dict) else {}
+            # Defence-in-depth: the gateway routes by channel (§3.2); a dumb
+            # adapter also drops anything not addressed to its own channel so
+            # a foreign-channel reply never renders here. Empty = degenerate,
+            # allowed through.
+            out_channel = str(body.get("channel") or "")
+            if out_channel and out_channel != "terminal":
+                return
             if textual_outbound is not None:
                 await textual_outbound.put(body)
                 return

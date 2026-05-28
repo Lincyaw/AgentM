@@ -252,6 +252,13 @@ class FeishuAdapter:
         if self._channel is None:
             raise RuntimeError("FeishuAdapter.start() has not completed")
         body = env.body if isinstance(env.body, dict) else {}
+        # Defence-in-depth: the gateway routes outbound by channel (§3.2),
+        # but a dumb adapter must also refuse to post anything not addressed
+        # to its own channel — otherwise a foreign-channel reply would land
+        # in Feishu. An empty channel is allowed through (degenerate case).
+        out_channel = str(body.get("channel") or "")
+        if out_channel and out_channel != self._config.channel_name:
+            return
         chat_id = str(body.get("chat_id") or "")
         if not chat_id:
             log.warning("outbound dropped: empty chat_id (env id=%s)", env.id)

@@ -268,12 +268,31 @@ def _build_session_factory(
 # -------- gateway runtime ---------------------------------------------
 
 
+def _route_targets(
+    peers: list[PeerSession],
+    peer_channels: dict[str, str],
+    target_channel: str,
+) -> list[PeerSession]:
+    """Pick the peers an outbound for ``target_channel`` should reach (§3.2).
+
+    A peer "serves" the channel it stamped on its inbound (§3.4), recorded
+    in ``peer_channels``. Route only to peers known to serve
+    ``target_channel`` — so a Feishu reply is not mis-delivered to a
+    simultaneously-connected terminal client. If no connected peer is known
+    to serve the channel (single-client deployment before its first inbound,
+    or an empty channel), fall back to every peer so the degenerate case
+    still delivers.
+    """
+    matching = [p for p in peers if peer_channels.get(p.peer_id) == target_channel]
+    return matching if matching else peers
+
+
 class _GatewayRuntime:
     """Glues WireServer <-> Router/SessionManager/Approval/Commands.
 
     One instance per ``agentm gateway`` process. Holds the outbound sink
-    that every component writes into; the sink enqueues an ``outbound``
-    envelope onto every connected peer's durable outbox.
+    that every component writes into; the sink routes an ``outbound``
+    envelope to the durable outbox of the peer(s) serving its channel.
     """
 
     def __init__(
@@ -293,7 +312,7 @@ class _GatewayRuntime:
         self._command_router = command_router
         require, block, timeout = approval_policy
         self._approval = ApprovalManager(
-            self._broadcast_outbound,
+            self._emit_outbound,
             require_approval=require,
             always_block=block,
             timeout_seconds=timeout,
@@ -302,7 +321,7 @@ class _GatewayRuntime:
             cwd=cwd,
             chat_map=chat_map,
             session_factory=session_factory,
-            outbound_sink=self._broadcast_outbound,
+            outbound_sink=self._emit_outbound,
             approval_manager=self._approval,
         )
         self._server: WireServer | None = None
@@ -310,24 +329,33 @@ class _GatewayRuntime:
         # GC'd mid-flight and are cancelled/awaited on shutdown rather than
         # orphaned.
         self._inflight: set[asyncio.Task[Any]] = set()
+        # peer_id -> the channel that peer serves, learned from its inbound
+        # (§3.4). Drives outbound routing so a reply reaches only the chat
+        # client that owns the conversation.
+        self._peer_channels: dict[str, str] = {}
 
     def attach_server(self, server: WireServer) -> None:
         self._server = server
 
     # -- outbound sink ------------------------------------------------
 
-    async def _broadcast_outbound(self, body: dict[str, Any]) -> None:
-        """Enqueue one ``outbound`` envelope to every connected peer.
+    async def _emit_outbound(self, body: dict[str, Any]) -> None:
+        """Enqueue one ``outbound`` envelope to the peer(s) serving its channel.
 
-        At this scale (one user / small team) every chat client renders
-        the same conversation surface; the durable per-peer outbox means
-        a momentarily-disconnected client still gets the message on
-        reconnect. session_key on the envelope lets a multi-surface
-        client route.
+        Routing (§3.2): a chat client "serves" the channel it stamps on its
+        inbound (§3.4); we learn that mapping in :meth:`handle_inbound`. An
+        outbound goes only to peers known to serve ``body["channel"]`` — so
+        with a Feishu peer and a terminal peer connected at once, a Feishu
+        reply does not get mis-delivered to the terminal (and vice versa).
+        If no connected peer is known to serve the channel (a single-client
+        deployment before its first inbound, or an empty channel) we fall
+        back to every peer. The durable per-peer outbox means a
+        momentarily-disconnected client still gets its message on reconnect.
         """
         if self._server is None:
             return
         session_key = str(body.pop("_session_key", "") or "") or None
+        target_channel = str(body.get("channel") or "")
         env = Envelope(
             v=WIRE_VERSION,
             id=f"out-{uuid.uuid4().hex[:12]}",
@@ -336,12 +364,15 @@ class _GatewayRuntime:
             session_key=session_key,
             body=body,
         )
-        for peer in self._server.registry:
+        targets = _route_targets(
+            list(self._server.registry), self._peer_channels, target_channel
+        )
+        for peer in targets:
             await asyncio.to_thread(self._outbox.enqueue, peer.peer_id, env)
 
     # -- inbound handler ----------------------------------------------
 
-    async def handle_inbound(self, _peer: PeerSession, env: Envelope) -> None:
+    async def handle_inbound(self, peer: PeerSession, env: Envelope) -> None:
         session_key = env.session_key
         if not session_key:
             logger.warning("dropping inbound id=%s with no session_key", env.id)
@@ -352,6 +383,10 @@ class _GatewayRuntime:
             logger.exception("router failed for inbound id=%s", env.id)
             return
         body = decision.body
+        # Learn which channel this peer serves (§3.4) so its replies route
+        # back to it instead of broadcasting to every connected client.
+        if body.channel:
+            self._peer_channels[peer.peer_id] = body.channel
         if decision.action is RouterAction.RESOLVE_APPROVAL:
             # Resolve inline: it must not sit behind a session.prompt that
             # is itself awaiting THIS approval's future (that would
@@ -407,7 +442,7 @@ class _GatewayRuntime:
         for out in result.outbound:
             out_body = out.to_dict()
             out_body["_session_key"] = session_key
-            await self._broadcast_outbound(out_body)
+            await self._emit_outbound(out_body)
         if result.side_effect is not None:
             try:
                 await result.side_effect(self)
@@ -469,7 +504,7 @@ class _GatewayRuntime:
     ) -> None:
         err_type = type(exc).__name__
         err_msg = (str(exc).strip() or "(no message)")[:800]
-        await self._broadcast_outbound(
+        await self._emit_outbound(
             {
                 "channel": body.channel,
                 "chat_id": body.chat_id,
