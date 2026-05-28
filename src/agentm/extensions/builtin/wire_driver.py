@@ -357,7 +357,6 @@ _ASYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
     (TurnEndEvent.CHANNEL, _p_turn_end),
     (ChildSessionStartEvent.CHANNEL, _p_child_start),
     (ChildSessionEndEvent.CHANNEL, _p_child_end),
-    (DiagnosticEvent.CHANNEL, _p_diagnostic),
     (AgentEndEvent.CHANNEL, _p_agent_end),
 )
 
@@ -366,6 +365,10 @@ _ASYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
 # async handler is silently skipped by ``emit_sync`` — so these schedule the
 # async sink on the running loop.
 _SYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
+    # ``diagnostic`` can be dispatched via emit_sync (e.g. recovery-floor
+    # diagnostics), where an async handler is silently skipped — so it lives
+    # here. A sync handler is valid under both emit and emit_sync.
+    (DiagnosticEvent.CHANNEL, _p_diagnostic),
     (ExtensionInstallEvent.CHANNEL, _p_extension_install),
     (ExtensionReloadEvent.CHANNEL, _p_extension_reload),
     (ExtensionUnloadEvent.CHANNEL, _p_extension_unload),
