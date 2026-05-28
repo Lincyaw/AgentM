@@ -105,12 +105,12 @@ substrate:  agentm.core/  (abi · runtime · lib — write-protected)
 ## Design docs (`.claude/`)
 
 - `index.yaml` — concept graph; keep in sync on every concept change.
-- `designs/<concept>.md` — continuously maintained.
-- `plans/YYYY-MM-DD-*.md`, `tasks/YYYY-MM-DD-*.md` — append-only.
+- `designs/<concept>.md` — continuously maintained; one per live concept.
+  Only current design is kept — superseded designs are deleted, not archived
+  (git history is the archive).
 
 Concept-change flow: update the design doc → check `index.yaml`
-`related_concepts` → propagate → update `index.yaml` → append plan/task
-if implementing.
+`related_concepts` → propagate → update `index.yaml`.
 
 ## Testing
 
@@ -159,7 +159,6 @@ For sweeping changes, mirror that scope locally.
 
 - `progress.tsv` — dev-loop keep/discard decisions + metric values.
 - `decisions.md` — long-horizon autonomous decisions (L2+).
-- `.claude/{plans,tasks}/` — append-only design history.
 
 ## Autonomy level: high
 

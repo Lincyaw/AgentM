@@ -1,7 +1,6 @@
 """Fail-stop coverage for the SessionInbox spine (step 1).
 
-Design: ``.claude/designs/session-inbox.md`` / plan
-``.claude/plans/2026-05-28-session-inbox.md``. The inbox is the single entry
+Design: ``.claude/designs/session-inbox.md``. The inbox is the single entry
 point for messages reaching the loop. These tests pin the load-bearing
 positions only (quality over quantity):
 

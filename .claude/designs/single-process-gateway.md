@@ -1,8 +1,8 @@
 # Design: Single-Process Gateway (channels v2)
 
-**Status**: ACCEPTED
+**Status**: IMPLEMENTED (channels v2, merged 2026-05-28)
 **Created**: 2026-05-28
-**Supersedes**: [`historical/client-server-architecture.md`](historical/client-server-architecture.md) (channels v1) and [`historical/gateway-channels.md`](historical/gateway-channels.md) (channels v0). Both now live in `designs/historical/`.
+**Supersedes**: channels v1 (peer-mesh daemon/worker split) and channels v0 (in-process channels) — both fully retired by this rewrite; see git history for the prior designs.
 
 ## 0. Mandate
 
@@ -349,7 +349,7 @@ Same-process Future. No cross-peer rewriting (no worker), no `root_session_key` 
 
 ## 4. `wire_driver` atom
 
-The new code. **One §11 atom**, ~80 LoC, replaces what would have been the entire `agentm-worker` package.
+The new code. **One §11 atom**, ~150 LoC, replaces what would have been the entire `agentm-worker` package.
 
 `src/agentm/extensions/builtin/wire_driver.py`:
 
@@ -556,54 +556,10 @@ This is acceptable because AgentM is pre-1.0, internal-only (single user / small
 
 ## 11. Concept-graph updates (`.claude/index.yaml`)
 
-Two existing entries flipped:
-
-* `gateway_channels` — already `historical`; no change needed, but add `superseded_by: single_process_gateway`.
-* `client_server_architecture` → `status: historical`, `superseded_by: single_process_gateway`.
-
-One new entry:
-
-```yaml
-  single_process_gateway:
-    description: "channels v2. Single-process gateway: one agentm gateway daemon holds all sessions in memory and serves all chat-client peers. Wire protocol exists only for chat-client vendor SDK isolation (lark_oapi, Textual). No separate worker process — earlier daemon/worker split carried v1 abstractions whose isolation/distribution properties were not actually needed at this codebase's scale. Daemon imports agentm.core directly. Sessions live as dict[session_key, AgentSession] in daemon memory; persistence via ChatSessionMap (session_key → session_id) for crash recovery only. session_key is chat-client-computed (channel:chat_id default, optionally thread_id/sender_id), opaque to gateway. wire_driver atom (~80 LoC, §11 contract) is the only new code: translates session events to outbound envelopes via api.set_service / api.get_service / @api.on. peer_send atom moves from contrib/.../worker/ to builtin, rewritten for same-process dict lookup. sub_agent works unchanged (child sessions in same dict). Three pluggability Protocols: OutboxStore, InboxLog, Authenticator — all with default impls, no hidden optional-method surfaces. Seven wire kinds (down from 11): hello/welcome, inbound/outbound, ack, ping/pong, error. Envelope is minimal: v, id, kind, ts, session_key, scenario, body; routing primitives (to/correlation_id/hops/root_session_key/session_id) all deleted because there's no cross-process routing. No worker pool, no spawn-on-demand, no inactivity timeout, no --resume normal path, no --inproc-worker mode. Approval: same-process Future map in ApprovalManager; identity check against original requester's sender_id; chat-client renders card. Commands: /help, /status synthesised locally; /new shuts down session keeping ChatSessionMap (next message resumes from transcript); /end shuts down + clears map (fresh session); /skill:X and /<markdown> expanded server-side and fall through to session; /atom:install/uninstall mutates session atom registry directly. CLI: agentm gateway subcommand alongside existing agentm prompt and agentm trace; agentm-feishu and agentm-terminal stay as separate binaries (vendor SDK isolation only); agentm-worker deleted. Single-jump rewrite — no compat with v0 or v1; v1 hello → error{unsupported_wire_version}. Fail-stop test set is ~40 tests covering wire round-trip, outbox/inbox semantics, Router three-case dispatch, SessionManager get_or_create + resume, CommandRouter handler classes, ApprovalManager identity check + timeout, wire_driver atom translation, auth, wire version negotiation."
-    design: "designs/single-process-gateway.md"
-    replaces: [client_server_architecture, gateway_channels]
-    related_concepts: [pluggable_architecture, command_routing, single_file_extension_contract, sub_agent_lifecycle, session_inbox]
-    plans: ["plans/2026-05-28-single-process-gateway.md"]
-    tasks: []
-```
-
-(Note: the design file path in the index entry above is `single-process-gateway.md`. This doc was initially named `daemon-as-router.md` while the design was being negotiated; the Phase-1 worker may either keep that filename or rename to `single-process-gateway.md` and update the index reference. The filename is a cosmetic decision the worker can make.)
-
----
-
-## 12. Implementation contract for the Phase-1 worker
-
-The Phase-1 dev-worker is dispatched against this design as its complete specification. The worker:
-
-1. **Reads this doc** as the authoritative contract.
-2. **Operates in a worktree** branched from latest `main`.
-3. **Lands one PR** containing the entire rewrite (no incremental landing).
-4. **Commits incrementally inside the worktree** for review readability. Suggested commit sequence:
-   1. delete v0 + v1 dead code (`base.py`, `manager.py`, `_WireChannel`, etc.); tests fail loudly
-   2. move surviving channel infrastructure (wire/, transport/, auth/, outbox/, commands/) into `src/agentm/gateway/`
-   3. delete `agentm-channels` and `agentm-worker` packages (pyproject + workspace + CLI entry points); add `agentm gateway` subcommand
-   4. write `Router` + `SessionManager` + `ApprovalManager` (CommandRouter + Outbox carry over with minor rename)
-   5. write `wire_driver` atom (`peer_send_atom` is dropped, not ported — §4)
-   6. update chat clients (terminal, feishu) for v2 envelope and new package paths
-   7. prune tests + add fail-stop tests per §7.3
-   8. update design docs (this one moves to PROPOSED→ACCEPTED, gateway-channels + client-server-architecture move to historical/, index.yaml updated)
-5. **Gates landing on**:
-   * `uv run ruff check` clean across the whole repo
-   * `uv run mypy` clean across the whole repo (per existing per-workspace configs)
-   * `uv run pytest --tb=short` passes
-   * E2E smoke the worker self-invents: two-process boot (`agentm gateway` + a stub chat client driver), one inbound → one outbound round-trip, one approval round-trip, one `/help` command round-trip. Worker shows the trace.
-6. **Does not** self-review; does not merge; returns the branch + commit SHAs + test summary for human review.
-
-A Phase-2 worker, if needed, handles polish items (`chat_id_prefix` → `channel_name` rename in feishu config, `ws_patch.py` upstream issue, socket buffer constant naming, envelope id `uuid4`, `_install_lark_log_filters` Handler fix, `_assert_handler` test extraction). Most of these are subsumed by Phase 1's rewrite; only platform-specific polish remains.
-
----
-
-## 13. Open questions
-
-None. All forks resolved.
+The live graph carries one entry for this design, `single_process_gateway`
+(related to `pluggable_architecture`, `command_routing`,
+`single_file_extension_contract`, `sub_agent_lifecycle`, `session_inbox`).
+The superseded `gateway_channels` (v0) and `client_server_architecture` (v1)
+concepts were removed when their designs were retired. `.claude/index.yaml`
+is the source of truth for the current description — this doc does not
+duplicate it.

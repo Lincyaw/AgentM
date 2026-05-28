@@ -339,8 +339,7 @@ history note. The tree no longer has an `agentm.harness` package, an
 `agentm.llm` package, or `core/_internal/operations_impl.py`. The §2
 three-layer target is the current shape.
 
-Summary of what landed (full trail in
-`.claude/plans/2026-05-11-collapse-harness-into-core.md`):
+Summary of what landed:
 
 1. **Default policies promoted to atoms.** `LocalFileOperations` /
    `LocalBashOperations` → `extensions/builtin/operations_local.py`; provider

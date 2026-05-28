@@ -1,7 +1,6 @@
 """Fail-stop coverage for the ``monitor`` atom (Session Inbox step 4).
 
-Design: ``.claude/designs/session-inbox.md`` (``monitor`` section) +
-``.claude/plans/2026-05-28-session-inbox.md`` (step 4). Same fail-stop
+Design: ``.claude/designs/session-inbox.md`` (``monitor`` section). Same fail-stop
 discipline as ``test_background_exec``: every test pins a load-bearing
 position (the wakeup fire path, the channel dedup-replace, the cancel
 isolation that does NOT touch the shared signal, the shutdown drain, the

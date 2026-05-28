@@ -21,7 +21,6 @@ requirements:
       - path: tests/unit/llm/test_retry_policy.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-95-wire-policy-leaks.md
     depends_on:
       - REQ-093-llm-provider-stream-common
 
@@ -48,7 +47,6 @@ requirements:
       - path: tests/unit/llm/test_common_stream_accumulator.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-93-llm-stream-common.md
     depends_on: []
 
   - id: REQ-085-session-policy-extraction
@@ -82,8 +80,6 @@ requirements:
       - path: tests/unit/extensions/test_extension_contract.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-85-session-refactor.md
-      - path: .claude/tasks/2026-05-09-issue-85-review-follow-up.md
     depends_on:
       - REQ-079-atom-reloader-fail-stop
       - REQ-086-atom-rework-infra
@@ -120,7 +116,6 @@ requirements:
     docs:
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/self-modifiable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-86-atom-rework-infra.md
     depends_on: []
 
   - id: REQ-079-atom-reloader-fail-stop
@@ -140,7 +135,6 @@ requirements:
       - path: tests/unit/harness/test_transactional_reload.py
     docs:
       - path: .claude/designs/self-modifiable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-79-atom-reloader-hardening.md
     depends_on: []
 
   - id: REQ-087-builtin-atoms-extension-api
@@ -181,7 +175,6 @@ requirements:
       - path: .claude/designs/observability.md
       - path: .claude/designs/sub-agent-lifecycle.md
       - path: .claude/designs/artifact-system.md
-      - path: .claude/tasks/2026-05-09-issue-87-builtin-atoms-extension-api.md
     depends_on:
       - REQ-086-atom-rework-infra
       - REQ-176-background-tasks-registry
@@ -207,7 +200,6 @@ requirements:
       - path: tests/unit/extensions/test_issue_88_hygiene.py
     docs:
       - path: .claude/designs/extension-as-scenario.md
-      - path: .claude/tasks/2026-05-09-issue-88-builtin-atom-hygiene.md
     depends_on:
       - REQ-086-atom-rework-infra
 
@@ -246,7 +238,6 @@ requirements:
       - path: core-manifest.yaml
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/self-modifiable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-100-cc-package.md
     depends_on:
       - REQ-086-atom-rework-infra
 
@@ -288,7 +279,6 @@ requirements:
     docs:
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/sub-agent-lifecycle.md
-      - path: .claude/tasks/2026-05-09-issue-102-rca-cleanup.md
     depends_on:
       - REQ-087-builtin-atoms-extension-api
 
@@ -323,7 +313,6 @@ requirements:
       - path: .claude/designs/pluggable-architecture.md
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/search-tools.md
-      - path: .claude/tasks/2026-05-09-issue-89-file-tool-io-seams.md
     depends_on:
       - REQ-086-atom-rework-infra
 
@@ -351,7 +340,6 @@ requirements:
     docs:
       - path: .claude/designs/git-backed-versioning.md
       - path: README.md
-      - path: .claude/tasks/2026-05-09-issue-101-tool-catalog-split.md
     depends_on:
       - REQ-086-atom-rework-infra
 
@@ -374,7 +362,8 @@ requirements:
       - path: src/agentm/ai/__init__.py
     tests:
       - path: tests/ai/test_provider_registry.py
-    docs: []
+    docs:
+      - path: .claude/designs/pluggable-architecture.md
     depends_on: []
 
   - id: REQ-092-retry-transport-policy
@@ -400,7 +389,6 @@ requirements:
       - path: tests/integration/test_observability_cli.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-92-retry-policy.md
     depends_on:
       - REQ-086-atom-rework-infra
       - REQ-093-llm-provider-stream-common
@@ -431,7 +419,6 @@ requirements:
       - path: tests/ai/test_provider_registry.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-96-cli-provider-session-seams.md
     depends_on:
       - REQ-094-ai-provider-descriptor-registry
 
@@ -460,7 +447,6 @@ requirements:
     docs:
       - path: .claude/designs/textual-tui.md
       - path: .claude/designs/pluggable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-98-textual-tui-registries.md
     depends_on:
       - REQ-086-atom-rework-infra
 
@@ -496,7 +482,6 @@ requirements:
       - path: tests/unit/core/catalog/test_indexer.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-97-shared-rendering.md
     depends_on:
       - REQ-086-atom-rework-infra
 
@@ -521,7 +506,6 @@ requirements:
       - path: tests/integration/test_textual_tui.py
     docs:
       - path: .claude/designs/textual-tui.md
-      - path: .claude/tasks/2026-05-09-issue-99-presenter-seams.md
     depends_on:
       - REQ-096-cli-provider-session-seams
       - REQ-098-textual-tui-registries
@@ -556,7 +540,6 @@ requirements:
       - path: tests/unit/core/abi/test_decide_turn_action.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
-      - path: .claude/tasks/2026-05-09-issue-119-core-kernel-residuals.md
     depends_on:
       - REQ-086-atom-rework-infra
 
@@ -583,7 +566,7 @@ requirements:
     tests:
       - path: tests/unit/harness/test_transactional_reload.py
     docs:
-      - path: .claude/tasks/2026-05-09-issue-120-harness-reload-dedup.md
+      - path: .claude/designs/self-modifiable-architecture.md
     depends_on:
       - REQ-086-atom-rework-infra
     depends_on:
@@ -612,7 +595,6 @@ requirements:
       - path: tests/unit/core/test_session_inbox.py
     docs:
       - path: .claude/designs/session-inbox.md
-      - path: .claude/plans/2026-05-28-session-inbox.md
     depends_on:
       - REQ-086-atom-rework-infra
 
@@ -656,7 +638,6 @@ requirements:
       - path: tests/unit/extensions/test_background_exec.py
     docs:
       - path: .claude/designs/session-inbox.md
-      - path: .claude/plans/2026-05-28-session-inbox.md
     depends_on:
       - REQ-176-session-inbox
       - REQ-176-background-tasks-registry
@@ -680,6 +661,5 @@ requirements:
       - path: tests/unit/extensions/test_monitor.py
     docs:
       - path: .claude/designs/session-inbox.md
-      - path: .claude/plans/2026-05-28-session-inbox.md
     depends_on:
       - REQ-176-session-inbox
