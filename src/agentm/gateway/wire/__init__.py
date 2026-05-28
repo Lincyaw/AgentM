@@ -21,7 +21,15 @@ from .kinds import (
     KIND_WELCOME,
     VALID_KINDS,
 )
-from .types import Button, ButtonStyle, InboundBody, OutboundBody, OutboundMetaKind
+from .types import (
+    DURABLE_OUTBOUND_KINDS,
+    EPHEMERAL_OUTBOUND_KINDS,
+    Button,
+    ButtonStyle,
+    InboundBody,
+    OutboundBody,
+    OutboundMetaKind,
+)
 
 __all__ = [
     "HEADER_BYTES",
@@ -36,6 +44,8 @@ __all__ = [
     "MAX_FRAME_BYTES",
     "VALID_KINDS",
     "WIRE_VERSION",
+    "DURABLE_OUTBOUND_KINDS",
+    "EPHEMERAL_OUTBOUND_KINDS",
     "Button",
     "ButtonStyle",
     "Envelope",

@@ -401,9 +401,13 @@ class WireServer:
         """
         writer = session.transport_writer
         try:
-            for r in records:
-                writer.write(encode(r.envelope))
-                await writer.drain()
+            # Hold the per-peer write lock across the batch so durable frames
+            # never interleave with ephemeral live frames on the same writer
+            # (one wire frame == one WS message; see PeerSession.write_lock).
+            async with session.write_lock:
+                for r in records:
+                    writer.write(encode(r.envelope))
+                    await writer.drain()
         except asyncio.CancelledError:
             await self._nack_records(records)
             raise
