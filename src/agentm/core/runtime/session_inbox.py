@@ -111,9 +111,13 @@ class SessionInbox:
 def render_item(item: InboxItem) -> AgentMessage:
     """Render an :class:`InboxItem` into an :class:`AgentMessage`.
 
-    Step 1 handles ``source="user"`` → :class:`UserMessage`. Other sources
-    are reserved for later steps (background completion → synthetic
-    tool_result, ticker/monitor → ``<system-reminder>`` note, etc.) and raise
+    Handles ``source="user"`` → :class:`UserMessage` (step 1) and
+    ``source="background"`` → a ``<system-reminder>``-wrapped
+    :class:`UserMessage` (step 3: auto-backgrounding completion / ticker
+    status). Both land as new ``user`` messages so the prefix stays stable and
+    the KV/prefix cache survives (no synthetic ``tool_result``, which would
+    need a live ``tool_call_id`` the inbox does not carry at drain time).
+    Other sources are reserved for later steps (monitor / subagent) and raise
     until then so a mis-routed item fails loudly rather than landing wrong.
     """
 
@@ -125,10 +129,19 @@ def render_item(item: InboxItem) -> AgentMessage:
             content = list(item.payload)
         return UserMessage(role="user", content=content, timestamp=time.time())
 
+    if item.source == "background":
+        text = item.payload if isinstance(item.payload, str) else str(item.payload)
+        wrapped = f"<system-reminder>\n{text}\n</system-reminder>"
+        return UserMessage(
+            role="user",
+            content=[TextContent(type="text", text=wrapped)],
+            timestamp=time.time(),
+        )
+
     raise NotImplementedError(
-        f"SessionInbox.render_item: source {item.source!r} is not handled in "
-        f"step 1 (only 'user'); later steps add background/ticker/monitor/"
-        f"subagent rendering."
+        f"SessionInbox.render_item: source {item.source!r} is not handled "
+        f"(only 'user' / 'background'); later steps add monitor/subagent "
+        f"rendering."
     )
 
 

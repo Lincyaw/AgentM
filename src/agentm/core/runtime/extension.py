@@ -519,19 +519,39 @@ class _ExtensionAPIImpl:
 
     # --- Actions -----------------------------------------------------------
 
+    def post_inbox(
+        self,
+        *,
+        source: str,
+        payload: Any,
+        dedup_key: str | None = None,
+    ) -> None:
+        """Push an item onto the session inbox — the generic producer entry.
+
+        Thin wrapper over :meth:`SessionInbox.push`. The runtime-owned
+        ``context`` handler drains the inbox at the next turn boundary and
+        renders each item per its ``source``, so a posted item surfaces on the
+        very next turn. ``dedup_key`` makes a later same-key push replace the
+        earlier undrained item in place (no stacking). See
+        ``.claude/designs/session-inbox.md`` (step-3 design decisions).
+        """
+        self._assert_active()
+        self._inbox.push(
+            InboxItem(source=source, payload=payload, dedup_key=dedup_key)
+        )
+
     def send_user_message(self, content: str | list[Any]) -> None:
         """Push a user message onto the session inbox for the next turn.
 
-        Thin wrapper over :meth:`SessionInbox.push` (``source="user"``). The
-        runtime-owned ``context`` handler drains the inbox at the next turn
-        boundary, so content surfaces on the very next turn — the same
-        observable behaviour the old ``pending_user_messages`` queue had,
-        now riding the single session-inbox entry point.
+        Sugar over :meth:`post_inbox` (``source="user"``). The runtime-owned
+        ``context`` handler drains the inbox at the next turn boundary, so
+        content surfaces on the very next turn — the same observable behaviour
+        the old ``pending_user_messages`` queue had, now riding the single
+        session-inbox entry point.
         """
-        self._assert_active()
         from agentm.core.abi.events import ApiSendUserMessageEvent
 
-        self._inbox.push(InboxItem(source="user", payload=content))
+        self.post_inbox(source="user", payload=content)
         self._bus.emit_sync(
             ApiSendUserMessageEvent.CHANNEL,
             ApiSendUserMessageEvent(

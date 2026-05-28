@@ -91,9 +91,20 @@ def test_render_user_item_to_user_message() -> None:
     assert msg.content[0].text == "hi there"
 
 
+def test_render_background_item_to_system_reminder() -> None:
+    # Step 3: background completion / ticker → a <system-reminder>-wrapped
+    # user message (append-only, cache-stable; no synthetic tool_result).
+    msg = render_item(InboxItem(source="background", payload="task 7 finished"))
+    assert msg.role == "user"
+    assert msg.content[0].type == "text"
+    assert "<system-reminder>" in msg.content[0].text
+    assert "task 7 finished" in msg.content[0].text
+
+
 def test_render_unknown_source_raises() -> None:
+    # Sources not yet wired (monitor/subagent) must still fail loudly.
     with pytest.raises(NotImplementedError):
-        render_item(InboxItem(source="background", payload="x"))
+        render_item(InboxItem(source="monitor", payload="x"))
 
 
 @pytest.mark.asyncio
@@ -276,6 +287,55 @@ async def test_send_user_message_seen_on_next_turn(tmp_path: Path) -> None:
         assert "first" in assistant_texts and "second" in assistant_texts
         # The injected note is persisted to the session log.
         assert "mid-run note" in _texts(
+            session.session_manager.get_messages(), "user"
+        )
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_post_inbox_user_matches_send_user_message(tmp_path: Path) -> None:
+    """``api.post_inbox(source="user", ...)`` round-trips to a user message on
+    the next turn — identical to ``send_user_message`` (its sugar)."""
+    module_name = f"tests.unit._inbox_postinbox_{id(tmp_path)}"
+
+    seen: list[bool] = []
+    turn = [0]
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del model, tools, system, signal, thinking
+        idx = turn[0]
+        turn[0] += 1
+        if idx == 0:
+            api = next(iter(session._apis.values()))  # type: ignore[attr-defined]
+            # Generic producer entry, source="user" — the path send_user_message
+            # now delegates to.
+            api.post_inbox(source="user", payload="posted note")
+        else:
+            seen.append("posted note" in _texts(messages, "user"))
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text=f"t{idx}")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        await session.prompt("go")
+        assert seen == [True]
+        assert "posted note" in _texts(
             session.session_manager.get_messages(), "user"
         )
     finally:
