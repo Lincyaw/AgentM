@@ -301,8 +301,8 @@ Each is one Python module with `install(api, config)` doing **one thing**. The a
 | `extensions.builtin.system_prompt` | `before_agent_start`: prepends `config["prompt"]` to the assembled system prompt. Single most-reused atom. |
 | `extensions.builtin.loop_budget` | `install`: registers a `LoopConfig` under `LOOP_BUDGET_SERVICE` from `config["max_turns"]` / `config["max_tool_calls"]`. The session factory reads it to cap the agent loop; absent ⇒ no cap. |
 | `contrib.extensions.turn_reminder` | `before_send_to_llm`: when the loop nears its `max_turns`/`max_tool_calls` cap (read via `get_loop_config()`), appends a runway warning to the **last message's tail** — never the system prompt, to preserve prompt cache. Pairs with `loop_budget`. |
-| `extensions.builtin.micro_compact` | Compacts context near limit; emits `before_compact` / `after_compact`. |
-| `extensions.builtin.llm_compaction` | Performs LLM-driven compaction when the durable session branch exceeds the reserved-token threshold; rebuilds context from the session tree after persisting a `compaction` entry. |
+| `extensions.builtin.llm_compaction` | Full-compress LLM compaction: when the durable branch crosses the reserved-token threshold, summarizes every turn since the last compaction into one `user` message (incremental chaining), tagging chunks `[Turn N]`. Persists a `compaction` entry; rebuilds context from the session tree. Emits `before_compact` / `after_compact`. See `compaction.md`. |
+| `extensions.builtin.read_history` | Tool `read_history(start, end?)` — returns the verbatim messages of a past turn (or range) from `get_branch`, so the agent can recover detail behind a `[Turn N]` reference in a compaction summary. Pairs with `llm_compaction`. |
 | `extensions.builtin.trajectory` | Records every event to JSONL. |
 
 #### Policy atoms
@@ -407,8 +407,8 @@ src/agentm/
 │   │   ├── cost_budget.py
 │   │   ├── tool_result_budget.py
 │   │   ├── file_mutation_queue.py
-│   │   ├── micro_compact.py
 │   │   ├── llm_compaction.py
+│   │   ├── read_history.py
 │   │   ├── trajectory.py
 │   │   └── sub_agent.py
 │   │
@@ -468,7 +468,7 @@ src/agentm/
 Each atom is independent (only depends on `core/kernel/`, `core/operations.py`, `harness/extension.py`). Spawn implementer agents in parallel, one per logical group:
 
 - **Group A (policy atoms)**: permission, tool_filter, dedup, cost_budget, tool_result_budget
-- **Group B (context atoms)**: turn_reminder, system_prompt, file_mutation_queue, micro_compact, trajectory
+- **Group B (context atoms)**: turn_reminder, system_prompt, file_mutation_queue, llm_compaction, trajectory
 - **Group C (multi-agent atom)**: sub_agent
 - **Group D1 (tool atoms)** — depends on A0: tool_read, tool_bash, tool_edit, tool_write, tool_hypothesis_store, tool_trajectory_loader, tool_submit_plan
 - **Group D2 (scenario recipes + loader)** — depends on A, B, D1: 4 YAML files (general_purpose, rca, trajectory_analysis, plan_mode) + `extensions/loader.py` (`load_scenario`)
@@ -499,7 +499,7 @@ Phase 1 + 1b are landed and reviewed. Before launching Phase 2 in parallel, thes
 
 | Event | Why | Owners |
 |---|---|---|
-| `before_compact` / `after_compact` | compaction extension needs cancel/replace semantics | `micro_compact`, future `agent_memory` |
+| `before_compact` / `after_compact` | compaction extension needs cancel/replace semantics | `llm_compaction`, future `agent_memory` |
 | `before_send_to_llm` (with token-counted payload) | `cost_budget` needs hook before the bytes hit the wire (`context` event fires too early — no usage data yet) | `cost_budget` |
 | `child_session_start` / `child_session_end` | sub-agent lifecycle visibility for trajectory + cost rollups | `sub_agent`, `trajectory` |
 | `render_message` (custom_type → component) | message-renderer extensions need a place to push UI; without it, TUI mode has no contract | deferred until interactive mode |
@@ -508,7 +508,7 @@ Phase 1 + 1b are landed and reviewed. Before launching Phase 2 in parallel, thes
 
 ### 10b.2 The `context`-vs-SessionManager divergence
 
-When a `context` handler rewrites the message list (e.g. `micro_compact`), the rewrite is what the **kernel** sends to the LLM but is **not** persisted to SessionManager. This is intentional: SessionManager is the truth (full history), `context` is a per-turn transformation layer. Compaction extensions that want to *also* persist the compacted form must explicitly `session_manager.append(compaction_entry(...))`.
+When a `context` handler rewrites the message list (e.g. `llm_compaction`), the rewrite is what the **kernel** sends to the LLM but is **not** persisted to SessionManager. This is intentional: SessionManager is the truth (full history), `context` is a per-turn transformation layer. Compaction extensions that want to *also* persist the compacted form must explicitly `session_manager.append(compaction_entry(...))`.
 
 Document this contract here so Phase 2 extension authors don't trip over it. It is **not** a bug.
 
@@ -564,14 +564,14 @@ This is delivered by **Phase 2 Group A0** before Group D1 so the tool atoms can 
 
 ### 10b.7 ReadonlySession.append_entry expansion
 
-Multiple Phase 2 extensions (`micro_compact`, `rca`, `trajectory_analysis`) need to write structured `SessionEntry` records back into the session tree. The current `ReadonlySession` only exposes `get_messages()`. Decision: **expand `ReadonlySession`** with one method:
+Multiple Phase 2 extensions (`llm_compaction`, `rca`, `trajectory_analysis`) need to write structured `SessionEntry` records back into the session tree. The current `ReadonlySession` only exposes `get_messages()`. Decision: **expand `ReadonlySession`** with one method:
 
 ```python
 def append_entry(self, type: str, payload: Any, parent_id: str | None = None) -> str:
     """Append a custom entry to the active branch. Returns the new entry id."""
 ```
 
-It returns the new entry id (compaction needs the id to build parent_id chains). Implementation delegates to the underlying `SessionManager.append`. Done in Phase 2 Group B alongside `micro_compact` (smallest blast radius — one method on one Protocol).
+It returns the new entry id (compaction needs the id to build parent_id chains). Implementation delegates to the underlying `SessionManager.append`. Done in Phase 2 Group B alongside `llm_compaction` (smallest blast radius — one method on one Protocol).
 
 **2026-05-21 addition — `get_session_id() -> str`.** Atoms that maintain a sidecar file keyed on the session JSONL stem (e.g. llmharness `audit_replay/<id>.jsonl`) need the persisted `SessionManager.header.id` so the sidecar name lines up with the on-disk session file. `api.root_session_id` (the OTel trace_id) is generated independently at session-construction time and diverges from the header id on every real run. The new `ReadonlySession.get_session_id()` returns the header id when persisted and an empty string when in-memory; the substrate impl (`SessionView`) delegates to `SessionManager.get_session_id()`.
 

@@ -142,7 +142,7 @@ async def _snapshot_and_register(
         names.append(bridged_name)
 
     # Lifecycle observability — emit via the public event bus the same way
-    # other atoms do (e.g. ``micro_compact``). Channels are free-form
+    # other atoms do (e.g. ``llm_compaction``). Channels are free-form
     # strings; payload is a plain dict so observers don't need to import
     # this atom's module.
     await api.events.emit(  # type: ignore[attr-defined]

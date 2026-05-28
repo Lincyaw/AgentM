@@ -850,6 +850,13 @@ class SessionManager:
             if isinstance(latest_compaction.payload, dict)
             else {}
         )
+        # ``first_kept_entry_id`` is the general kernel seam for compaction
+        # strategies that keep a verbatim tail: it names the first entry to
+        # replay after the summary. The default ``llm_compaction`` atom is
+        # full-compress and omits it, so this is ``None`` and the fallback
+        # below keeps nothing before the compaction entry — yielding
+        # ``[summary] + post-compaction``. Kept generic so a tail-keeping
+        # compaction atom can plug in without editing core.
         first_kept_id = details.get("first_kept_entry_id") or details.get(
             "firstKeptEntryId"
         )

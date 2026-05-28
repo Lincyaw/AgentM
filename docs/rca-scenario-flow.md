@@ -247,7 +247,7 @@ All middleware can be toggled via `scenario.yaml` for ablation experiments:
 | Compression | `compression.enabled` | `true` | (if compression block present) |
 | Dedup | `dedup.enabled` | `true` | |
 | Tool result budget | `tool_result_budget` | `true` | Truncate oversized results |
-| Micro-compact | `micro_compact` | `true` | Clear stale tool results |
+| Compaction | `llm_compaction` | `true` | LLM semantic compaction near token limit |
 | Budget-excluded tools | `budget_excluded_tools` | `[vault_read, ...]` | Tools not counted toward budget |
 
 ## Sanitizer Check Triggers

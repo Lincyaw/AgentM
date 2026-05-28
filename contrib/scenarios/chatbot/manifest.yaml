@@ -92,6 +92,14 @@ extensions:
         - contrib/scenarios/chatbot/skills
   - module: agentm.extensions.builtin.prompt_templates
 
+  # --- context compaction: long-lived chat sessions overflow the window
+  # eventually; summarize older turns into one structured checkpoint and
+  # rebuild context from the session tree. Resolves prompt bodies via the
+  # auto-mounted ``compaction_prompts`` floor atom. ``read_history`` lets the
+  # agent recover the verbatim content of any [Turn N] the summary cites. ---
+  - module: agentm.extensions.builtin.llm_compaction
+  - module: agentm.extensions.builtin.read_history
+
   # --- project-local persistent memory: MEMORY.md index + typed
   # frontmatter files, the evolving-facts companion to persona. ---
   - module: agentm.extensions.builtin.memory

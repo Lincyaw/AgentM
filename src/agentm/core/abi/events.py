@@ -568,8 +568,8 @@ class SessionShutdownEvent(Event):
 class BeforeCompactEvent(Event):
     """Fires before an extension performs context compaction.
 
-    Observation-only channel: emitters (``llm_compaction``, ``micro_compact``)
-    discard handler return values. Subscribers may inspect or mutate
+    Observation-only channel: the emitter (``llm_compaction``)
+    discards handler return values. Subscribers may inspect or mutate
     ``messages`` in place to influence the buffer that compaction will see,
     but cannot cancel or replace the compaction itself.
 
