@@ -19,13 +19,88 @@ from typing import Any, Literal
 ButtonStyle = Literal["primary", "danger", "default"]
 
 # Discriminator for how a chat client renders an outbound (§2.5).
+#
+# Two delivery classes share this one envelope kind (see
+# ``.claude/designs/textual-tui.md`` §4.3): DURABLE kinds go through the
+# per-peer outbox (at-least-once, survive reconnect); EPHEMERAL kinds are
+# written best-effort straight to the connected peer and dropped if it is
+# absent (live decoration — streaming text, tool lifecycle, runtime
+# control/observability events). The durable set is the reliability floor;
+# everything else is ephemeral.
+#
+# This module is the *single home* of the wire kind vocabulary AND its
+# delivery-class partition. The gateway sink (``agentm.gateway.cli``) imports
+# :data:`DURABLE_OUTBOUND_KINDS` to route — it does not keep its own copy — and
+# ``test_outbound_routing`` asserts the two sets partition
+# ``OutboundMetaKind`` exactly (disjoint, union == every Literal member), so a
+# new kind cannot be added to the Literal without being classified, and a
+# kind cannot drift between the two layers.
 OutboundMetaKind = Literal[
+    # -- durable (reliability floor) --
     "assistant_text",
     "approval_request",
     "approval_resolved",
     "diagnostic_warning",
     "diagnostic_error",
+    # -- ephemeral: conversation (live transcript) --
+    "turn_start",
+    "stream_text",
+    "stream_thinking",
+    "tool_call",
+    "tool_result",
+    "usage",
+    "child_start",
+    "child_end",
+    "agent_end",
+    # -- ephemeral: runtime control / observability --
+    "extension_install",
+    "extension_reload",
+    "extension_unload",
+    "api_register",
+    "api_send_user_message",
+    "resource_write",
+    "plan_submitted",
+    "after_compact",
+    "cost_budget_exceeded",
+    "session_ready",
+    "command_dispatched",
 ]
+
+# Delivery-class partition of OutboundMetaKind. DURABLE = the reliability
+# floor (outbox, at-least-once); everything else is ephemeral live decoration.
+DURABLE_OUTBOUND_KINDS: frozenset[str] = frozenset(
+    {
+        "assistant_text",
+        "approval_request",
+        "approval_resolved",
+        "diagnostic_warning",
+        "diagnostic_error",
+    }
+)
+EPHEMERAL_OUTBOUND_KINDS: frozenset[str] = frozenset(
+    {
+        "turn_start",
+        "stream_text",
+        "stream_thinking",
+        "tool_call",
+        "tool_result",
+        "usage",
+        "child_start",
+        "child_end",
+        "agent_end",
+        "extension_install",
+        "extension_reload",
+        "extension_unload",
+        "api_register",
+        "api_send_user_message",
+        "resource_write",
+        "plan_submitted",
+        "after_compact",
+        "cost_budget_exceeded",
+        "session_ready",
+        "command_dispatched",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,4 +226,12 @@ class OutboundBody:
         return out
 
 
-__all__ = ["Button", "ButtonStyle", "InboundBody", "OutboundBody", "OutboundMetaKind"]
+__all__ = [
+    "DURABLE_OUTBOUND_KINDS",
+    "EPHEMERAL_OUTBOUND_KINDS",
+    "Button",
+    "ButtonStyle",
+    "InboundBody",
+    "OutboundBody",
+    "OutboundMetaKind",
+]

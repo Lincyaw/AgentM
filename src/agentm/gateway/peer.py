@@ -28,6 +28,14 @@ class PeerSession:
     # high-water mark. Cleared when drained below high_water / 2.
     backpressure: bool = False
     capabilities: dict[str, object] = field(default_factory=dict)
+    # Serialises ALL writes to ``transport_writer``. The durable delivery
+    # worker and the ephemeral-frame sink (live streaming, §4 of
+    # textual-tui.md) both write to the same writer; the WebSocket adapter
+    # coalesces buffered writes into ONE ``ws.send`` per ``drain()``, so two
+    # concurrent ``write()+drain()`` pairs would merge two wire frames into a
+    # single WS message and corrupt the stream. Every writer acquires this
+    # lock around its write+drain so each frame maps to exactly one flush.
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class PeerRegistry:
