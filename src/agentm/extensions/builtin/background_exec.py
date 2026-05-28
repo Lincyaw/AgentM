@@ -51,13 +51,14 @@ from agentm.core.abi import (
     ToolResult,
     ToolTerminate,
 )
+from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.lib import to_jsonable
 from agentm.core.lib.background_tasks import (
     BackgroundTask,
     BackgroundTaskRegistry,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
 
 _RUNNING: Literal["running"] = "running"
 _COMPLETED: Literal["completed"] = "completed"
@@ -73,6 +74,10 @@ _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_HEARTBEAT = 120.0
 _DEFAULT_SILENCE_WARNING = 300.0
 
+# Grace window the shutdown handler gives still-running background tasks to
+# finish on their own before it sets their abort signal (mirrors sub_agent).
+_SHUTDOWN_GRACE_SECONDS = 5.0
+
 
 MANIFEST = ExtensionManifest(
     name="background_exec",
@@ -85,6 +90,7 @@ MANIFEST = ExtensionManifest(
         "tool:wait_background",
         "tool:cancel_background",
         "event:agent_start",
+        "event:session_shutdown",
     ),
     config_schema={
         "type": "object",
@@ -145,6 +151,10 @@ class _BgTask(BackgroundTask):
     outcome: ToolOutcome | None = None
     error: str | None = None
     ticker: asyncio.Task[Any] | None = None
+    # Optional task that forwards a host-supplied kernel signal into this
+    # task's own ``abort_signal`` (see ``_BgTool.execute``). Cancelled once the
+    # task is terminal so it never outlives the work it was guarding.
+    forwarder: asyncio.Task[Any] | None = None
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
@@ -216,6 +226,20 @@ def _task_payload(state: _BgTask) -> dict[str, Any]:
     return payload
 
 
+async def _forward_abort(source: asyncio.Event, target: asyncio.Event) -> None:
+    """Set ``target`` once ``source`` fires (one-directional bridge).
+
+    Used to propagate a host-supplied kernel signal into a background task's
+    own abort event WITHOUT the reverse coupling: setting ``target`` (via
+    ``cancel_background``) never touches ``source``, so cancelling one task
+    leaves the shared kernel signal — and every other in-flight call bound to
+    it — untouched. Cancelled by the owner when the task goes terminal.
+    """
+
+    await source.wait()
+    target.set()
+
+
 class _BgTool:
     """Transparent auto-bg shim wrapping one registered tool.
 
@@ -239,12 +263,19 @@ class _BgTool:
         *,
         signal: asyncio.Event | None = None,
     ) -> ToolResult | ToolOutcome:
+        # Always run the inner tool against a fresh PER-TASK abort event, never
+        # the shared kernel ``signal``. ``cancel_background`` only ever sets this
+        # per-task event, so cancelling one background task cannot abort the live
+        # turn or any unrelated in-flight work that shares the kernel signal.
         abort = asyncio.Event()
-        # The kernel's signal must still abort the in-flight call; chain it into
-        # the per-task abort so cancel_background and the kernel both work.
-        inner_signal = signal if signal is not None else abort
+        # The kernel's signal must still abort this call when it fires; forward
+        # it INTO the per-task event (one direction only) rather than handing
+        # the shared signal to the inner tool.
+        forwarder: asyncio.Task[None] | None = None
+        if signal is not None:
+            forwarder = asyncio.create_task(_forward_abort(signal, abort))
         task: asyncio.Task[ToolResult | ToolOutcome] = asyncio.create_task(
-            self._wrapped.execute(args, signal=inner_signal)
+            self._wrapped.execute(args, signal=abort)
         )
         done, _pending = await asyncio.wait(
             {task}, timeout=self._manager.timeout
@@ -252,12 +283,17 @@ class _BgTool:
         if task in done:
             # Finished within the foreground window → byte-for-byte unchanged.
             # A foreground ToolTerminate (sub-timeout) passes through verbatim.
+            if forwarder is not None:
+                forwarder.cancel()
             return task.result()
-        # Overran: leave it running in the background, return a ticket.
+        # Overran: leave it running in the background, return a ticket. The
+        # manager takes ownership of the forwarder and tears it down on the
+        # task's terminal transition.
         return await self._manager.background(
             tool_name=self.name,
             task=task,
-            abort_signal=abort if signal is None else signal,
+            abort_signal=abort,
+            forwarder=forwarder,
         )
 
 
@@ -280,24 +316,29 @@ class _BgManager:
         self._silence_warning = silence_warning
         self._denylist = denylist
         # No max_workers cap for backgrounded tool calls (each is a single
-        # coroutine, not a whole child session); use a large ceiling so
-        # reserve_slot never trips — the manager creates tasks directly.
+        # coroutine, not a whole child session); use a large ceiling so the
+        # running-count guard never trips. This atom registers handles WITHOUT
+        # reserving a slot first (the work is already running when we register),
+        # which the registry tolerates by clamping its reservation counter.
         self._registry: BackgroundTaskRegistry[_BgTask] = BackgroundTaskRegistry(
             max_workers=1_000_000
         )
-        self._wrapped = False
+        # Guards the shutdown handler against a background() racing in after the
+        # bus has been cleared: once set, background() refuses to register.
+        self._shutting_down = False
 
     # --- install-time tool wrapping ---------------------------------------
 
     def wrap_tools(self) -> None:
         """Replace every wrappable tool in ``api.tools`` with a ``_BgTool``.
 
-        Idempotent across repeated ``agent_start`` fires. Companion tools and
-        denylisted names are left as-is; tools already wrapped are skipped.
+        Idempotent across repeated ``agent_start`` fires via the
+        ``isinstance(tool, _BgTool)`` skip alone — no run-once flag — so tools
+        registered BETWEEN prompts (e.g. by a later ``install_atom``) still get
+        wrapped on the next ``agent_start``. Companion tools and denylisted
+        names are left as-is; tools already wrapped are skipped.
         """
 
-        if self._wrapped:
-            return
         tools = self._api.tools
         for index, tool in enumerate(tools):
             if tool.name in _COMPANION_TOOLS or tool.name in self._denylist:
@@ -305,7 +346,6 @@ class _BgManager:
             if isinstance(tool, _BgTool):
                 continue
             tools[index] = _BgTool(tool, self)
-        self._wrapped = True
 
     # --- backgrounding -----------------------------------------------------
 
@@ -315,20 +355,37 @@ class _BgManager:
         tool_name: str,
         task: asyncio.Task[ToolResult | ToolOutcome],
         abort_signal: asyncio.Event,
+        forwarder: asyncio.Task[None] | None = None,
     ) -> ToolResult:
         """Register an overran tool task and return its immediate ticket."""
 
+        if self._shutting_down:
+            # The session is tearing down; do not strand new detached tasks on
+            # a bus that is about to be cleared. Abort the inner work and any
+            # signal forwarder, then surface the refusal as an error result.
+            abort_signal.set()
+            if forwarder is not None:
+                forwarder.cancel()
+            return _tool_result(
+                {"error": "session is shutting down; background task refused"},
+                is_error=True,
+            )
         task_id = uuid.uuid4().hex
         state = _BgTask(
             task_id=task_id,
             tool_name=tool_name,
             task=task,
             abort_signal=abort_signal,
+            forwarder=forwarder,
         )
         # Watch completion + drive the ticker from one wrapper task so the
         # original tool task stays exactly what the inner tool returned.
         state.task = asyncio.create_task(self._watch(state, task))
         state.ticker = asyncio.create_task(self._ticker(state))
+        # NOTE: registered WITHOUT a paired reserve_slot() — the work is already
+        # running, there is nothing to fail-fast on. The registry clamps its
+        # reservation counter so this no-reservation register stays at zero
+        # rather than going negative.
         await self._registry.register(state)
         return _tool_result(
             {
@@ -349,16 +406,12 @@ class _BgManager:
             outcome = await inner
         except asyncio.CancelledError:
             state.status = _CANCELLED
-            state.last_milestone_at = time.monotonic()
-            self._stop_ticker(state)
-            self._post_completion(state)
+            self._finalize(state)
             return
         except Exception as exc:  # noqa: BLE001
             state.status = _ERROR
             state.error = str(exc) or exc.__class__.__name__
-            state.last_milestone_at = time.monotonic()
-            self._stop_ticker(state)
-            self._post_completion(state)
+            self._finalize(state)
             return
         # Normalize a bare ToolResult to ToolContinue so downstream rendering
         # has one shape (the kernel does the same for foreground returns).
@@ -371,21 +424,44 @@ class _BgManager:
         # TODO(step 5): once the persistent driver exists, route a backgrounded
         # ToolTerminate so it can actually end the loop.
         state.status = _COMPLETED
+        self._finalize(state)
+
+    def _finalize(self, state: _BgTask) -> None:
+        """Tear down per-task helpers and post the terminal completion.
+
+        Called from ``_watch`` on every terminal transition. Cancels the ticker
+        and the (optional) signal forwarder so neither outlives the work, then
+        posts the completion. ``post_inbox`` can raise ``ExtensionStaleError``
+        if the atom was reloaded mid-flight — that is swallowed in
+        ``_post_completion`` so a detached task never dies with an unretrieved
+        exception.
+        """
+
         state.last_milestone_at = time.monotonic()
         self._stop_ticker(state)
+        if state.forwarder is not None and not state.forwarder.done():
+            state.forwarder.cancel()
         self._post_completion(state)
 
     def _post_completion(self, state: _BgTask) -> None:
-        """Post the terminal background result to the inbox (milestone)."""
+        """Post the terminal background result to the inbox (milestone).
+
+        Swallows ``ExtensionStaleError`` (atom reloaded between dispatch and
+        completion): the inbox we hold is stale, there is nothing to deliver
+        into, so we stop gracefully rather than crash the detached task.
+        """
 
         if state.read:
             return
         state.read = True
-        self._api.post_inbox(
-            source="background",
-            payload=_completion_note(state),
-            dedup_key=f"bg-complete-{state.task_id}",
-        )
+        try:
+            self._api.post_inbox(
+                source="background",
+                payload=_completion_note(state),
+                dedup_key=f"bg-complete-{state.task_id}",
+            )
+        except ExtensionStaleError:
+            return
 
     # --- ticker ------------------------------------------------------------
 
@@ -429,6 +505,10 @@ class _BgManager:
                 )
         except asyncio.CancelledError:
             return
+        except ExtensionStaleError:
+            # Atom reloaded while this detached ticker was sleeping: the inbox
+            # we hold is stale. Stop gracefully (no unretrieved exception).
+            return
 
     def _stop_ticker(self, state: _BgTask) -> None:
         if state.ticker is not None and not state.ticker.done():
@@ -437,11 +517,20 @@ class _BgManager:
     # --- companion tools ---------------------------------------------------
 
     async def check_background(self, _args: dict[str, Any]) -> ToolResult:
-        """List task states, blocking on the first running task to complete."""
+        """List task states, blocking on the first running task to complete.
+
+        A terminal task surfaced here is marked ``read`` (like
+        ``sub_agent.check_tasks``) so the completion reported in this tool
+        result is NOT also re-injected into the inbox by ``_watch`` — the agent
+        would otherwise see the same completion twice.
+        """
 
         await self._registry.poll_first_completed()
         async with self._registry.lock:
             tasks = self._registry.values()
+            for state in tasks:
+                if state.status != _RUNNING:
+                    state.read = True
         return _tool_result({"tasks": [_task_payload(state) for state in tasks]})
 
     async def wait_background(self, args: dict[str, Any]) -> ToolResult:
@@ -481,6 +570,39 @@ class _BgManager:
             )
         return _tool_result({"task_id": task_id, "status": "cancelling"})
 
+    # --- session shutdown --------------------------------------------------
+
+    async def on_session_shutdown(self, _event: SessionShutdownEvent) -> None:
+        """Drain detached tasks so none leak past ``session.shutdown()``.
+
+        Without this the inner tool, its ``_watch`` wrapper, the ticker, and any
+        signal forwarder stay pending when the bus is cleared, producing "Task
+        was destroyed but it is pending" and leaving the inner tool running
+        detached. Mirrors ``sub_agent.on_session_shutdown``: cancel each ticker
+        and forwarder, give the still-running watch tasks a grace window to
+        finish on their own, then set their abort signal and gather everything.
+        """
+
+        self._shutting_down = True
+        async with self._registry.lock:
+            states = self._registry.values()
+        for state in states:
+            self._stop_ticker(state)
+            if state.forwarder is not None and not state.forwarder.done():
+                state.forwarder.cancel()
+        running = [state for state in states if state.status == _RUNNING]
+        if not running:
+            return
+        watches = [state.task for state in running]
+        _done, still_running = await asyncio.wait(
+            watches, timeout=_SHUTDOWN_GRACE_SECONDS
+        )
+        if still_running:
+            for state in running:
+                if state.task in still_running:
+                    state.abort_signal.set()
+            await asyncio.gather(*still_running, return_exceptions=True)
+
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     manager = _BgManager(
@@ -495,6 +617,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         manager.wrap_tools()
 
     api.on(AgentStartEvent.CHANNEL, on_agent_start)
+    api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
     api.register_tool(
         FunctionTool(
             name="check_background",

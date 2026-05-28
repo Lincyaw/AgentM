@@ -34,7 +34,8 @@ from agentm.core.abi import (
     ToolResult,
     ToolTerminate,
 )
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi.events import SessionShutdownEvent
+from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
 from agentm.core.runtime.session_inbox import InboxItem, SessionInbox
 from agentm.extensions.builtin import background_exec
 from agentm.extensions.builtin.background_exec import _BgManager, _BgTool
@@ -335,11 +336,257 @@ async def test_backgrounded_terminate_injected_as_completion() -> None:
 
 
 def test_install_registers_companion_tools() -> None:
-    """``install`` registers exactly the three companion tools and an
-    agent_start handler."""
+    """``install`` registers exactly the three companion tools and the
+    agent_start + session_shutdown handlers."""
 
     api = _FakeApi()
     background_exec.install(cast(ExtensionAPI, api), {})
     names = {t.name for t in api.tools}
     assert names == {"check_background", "wait_background", "cancel_background"}
     assert "agent_start" in api._handlers
+    assert "session_shutdown" in api._handlers
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_host_signal_does_not_touch_shared_signal() -> None:
+    """MAJOR 2 regression: under a host-supplied kernel ``signal``,
+    ``cancel_background`` must cancel ONLY the per-task work — never set the
+    shared signal that the live turn and other in-flight calls share."""
+
+    started = asyncio.Event()
+    shared_signal = asyncio.Event()  # the kernel/session signal
+
+    async def cancellable(_a: dict[str, Any], sig: asyncio.Event | None) -> ToolResult:
+        assert sig is not None
+        # The inner tool is handed the PER-TASK event, not the shared signal.
+        assert sig is not shared_signal
+        started.set()
+        await sig.wait()
+        raise asyncio.CancelledError()
+
+    api = _FakeApi()
+    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    wrapped = _BgTool(_FakeTool("cancellable", cancellable), mgr)
+
+    # Drive execute with a non-None host signal — the path the old tests never
+    # exercised (they all ran signal=None, which is why the bug slipped).
+    ticket = await wrapped.execute({}, signal=shared_signal)
+    task_id = _payload(ticket)["task_id"]
+    await started.wait()
+
+    res = await mgr.cancel_background({"task_id": task_id})
+    assert _payload(res)["status"] == "cancelling"
+
+    async with mgr._registry.lock:
+        state = mgr._registry.get(task_id)
+    assert state is not None
+    await state.task
+    assert state.status == "cancelled"
+
+    # The shared kernel signal was NOT tripped by cancelling this one task.
+    assert not shared_signal.is_set()
+    # And the per-task abort is a different object than the shared signal.
+    assert state.abort_signal is not shared_signal
+
+
+@pytest.mark.asyncio
+async def test_host_signal_still_aborts_backgrounded_task() -> None:
+    """The kernel signal must still abort a backgrounded call when it fires —
+    the per-task isolation (Major 2) keeps the forward direction working."""
+
+    started = asyncio.Event()
+    shared_signal = asyncio.Event()
+
+    async def waits(_a: dict[str, Any], sig: asyncio.Event | None) -> ToolResult:
+        assert sig is not None
+        started.set()
+        await sig.wait()
+        raise asyncio.CancelledError()
+
+    api = _FakeApi()
+    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    wrapped = _BgTool(_FakeTool("waits", waits), mgr)
+
+    ticket = await wrapped.execute({}, signal=shared_signal)
+    task_id = _payload(ticket)["task_id"]
+    await started.wait()
+
+    # Host fires the shared signal → forwarder propagates it into the per-task
+    # abort → the inner tool observes it and the task goes terminal.
+    shared_signal.set()
+    async with mgr._registry.lock:
+        state = mgr._registry.get(task_id)
+    assert state is not None
+    await state.task
+    assert state.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_session_shutdown_drains_running_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAJOR 1: the shutdown handler cancels tickers/forwarders, aborts running
+    tasks within the grace window, and gathers them so nothing leaks pending."""
+
+    # Tiny grace window so the test does not wait the real 5s.
+    monkeypatch.setattr(background_exec, "_SHUTDOWN_GRACE_SECONDS", 0.05)
+    started = asyncio.Event()
+
+    async def long_running(_a: dict[str, Any], sig: asyncio.Event | None) -> ToolResult:
+        assert sig is not None
+        started.set()
+        await sig.wait()  # cooperative: returns when aborted
+        return ToolResult(content=[TextContent(type="text", text="stopped")])
+
+    api = _FakeApi()
+    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    wrapped = _BgTool(_FakeTool("long_running", long_running), mgr)
+
+    ticket = await wrapped.execute({})
+    task_id = _payload(ticket)["task_id"]
+    await started.wait()
+
+    async with mgr._registry.lock:
+        state = mgr._registry.get(task_id)
+    assert state is not None
+    assert state.ticker is not None
+
+    await mgr.on_session_shutdown(SessionShutdownEvent(cwd="."))
+
+    # Inner watch task finished (abort fired), ticker cancelled — nothing left
+    # pending that would warn "Task was destroyed but it is pending".
+    assert state.task.done()
+    assert state.ticker.done()
+    assert mgr._shutting_down is True
+
+
+@pytest.mark.asyncio
+async def test_background_refused_after_shutdown() -> None:
+    """Once shutdown has begun, a fresh overrun is refused (not stranded on a
+    cleared bus): the inner work is aborted and an error ticket returned."""
+
+    started = asyncio.Event()
+
+    async def slow(_a: dict[str, Any], sig: asyncio.Event | None) -> ToolResult:
+        assert sig is not None
+        started.set()
+        await sig.wait()
+        return ToolResult(content=[TextContent(type="text", text="x")])
+
+    api = _FakeApi()
+    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    # Shutdown already ran (no tasks), then a late overrun arrives.
+    await mgr.on_session_shutdown(SessionShutdownEvent(cwd="."))
+    wrapped = _BgTool(_FakeTool("slow", slow), mgr)
+
+    ticket = await wrapped.execute({})
+    await started.wait()
+    assert isinstance(ticket, ToolResult)
+    payload = _payload(ticket)
+    assert ticket.is_error
+    assert "shutting down" in payload["error"]
+    async with mgr._registry.lock:
+        assert mgr._registry.values() == []
+
+
+@pytest.mark.asyncio
+async def test_post_inbox_stale_does_not_crash_watcher() -> None:
+    """MAJOR 3: if the atom was reloaded mid-flight, ``post_inbox`` raises
+    ``ExtensionStaleError``; the detached watcher must stop gracefully rather
+    than die with an unretrieved exception."""
+
+    release = asyncio.Event()
+
+    async def slow(_a: dict[str, Any], _s: asyncio.Event | None) -> ToolResult:
+        await release.wait()
+        return ToolResult(content=[TextContent(type="text", text="late")])
+
+    class _StaleApi(_FakeApi):
+        def post_inbox(self, *, source: str, payload: Any, dedup_key: Any = None) -> None:
+            raise ExtensionStaleError("reloaded mid-flight")
+
+    api = _StaleApi()
+    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    wrapped = _BgTool(_FakeTool("slow", slow), mgr)
+
+    ticket = await wrapped.execute({})
+    task_id = _payload(ticket)["task_id"]
+    release.set()
+    async with mgr._registry.lock:
+        state = mgr._registry.get(task_id)
+    assert state is not None
+    # Must not raise: the watcher swallows ExtensionStaleError from post_inbox.
+    await state.task
+    assert state.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_check_background_marks_terminal_read_no_double_show() -> None:
+    """NIT A: ``check_background`` marks a terminal task ``read`` so that the
+    same completion reported in the tool result is NOT also re-injected into
+    the inbox by ``_watch``.
+
+    Deterministic: drive the state to terminal-but-unposted (the race window
+    where ``check_background`` observes completion before ``_watch`` posts),
+    then prove ``check_background`` claims it and a subsequent ``_watch`` post
+    attempt (via ``_post_completion``) is a no-op."""
+
+    release = asyncio.Event()
+
+    async def slow(_a: dict[str, Any], _s: asyncio.Event | None) -> ToolResult:
+        await release.wait()
+        return ToolResult(content=[TextContent(type="text", text="ok")])
+
+    api = _FakeApi()
+    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    wrapped = _BgTool(_FakeTool("slow", slow), mgr)
+
+    ticket = await wrapped.execute({})
+    task_id = _payload(ticket)["task_id"]
+    async with mgr._registry.lock:
+        state = mgr._registry.get(task_id)
+    assert state is not None
+
+    # Simulate the race window: status is terminal but _watch has not yet
+    # posted (read still False). check_background must claim it.
+    state.status = "completed"  # type: ignore[assignment]
+    state.outcome = None
+    res = await mgr.check_background({})
+    assert any(t["task_id"] == task_id for t in _payload(res)["tasks"])
+    assert state.read is True
+
+    # _watch's terminal post, arriving afterwards, is suppressed (no double).
+    mgr._post_completion(state)
+    assert api.inbox.is_empty()
+
+    # Release the real inner task so it does not leak; its watcher also sees
+    # read=True and stays silent.
+    release.set()
+    await state.task
+    assert api.inbox.is_empty()
+
+
+@pytest.mark.asyncio
+async def test_wrap_tools_wraps_tools_registered_between_prompts() -> None:
+    """NIT B: dropping the run-once flag lets a SECOND agent_start wrap tools
+    that were registered after the first, with no double-wrapping."""
+
+    async def noop(_a: dict[str, Any], _s: asyncio.Event | None) -> ToolResult:
+        return ToolResult(content=[])
+
+    api = _FakeApi()
+    api.tools = [_FakeTool("first", noop)]
+    mgr = _manager(api)
+
+    mgr.wrap_tools()  # agent_start cycle 1
+    assert isinstance(api.tools[0], _BgTool)
+
+    # A later install_atom registers another tool between prompts.
+    api.tools.append(_FakeTool("second", noop))
+
+    mgr.wrap_tools()  # agent_start cycle 2
+    by_name = {t.name: t for t in api.tools}
+    assert isinstance(by_name["first"], _BgTool)
+    assert isinstance(by_name["second"], _BgTool)
+    # No double-wrap: still exactly one _BgTool per original tool name.
+    assert sum(isinstance(t, _BgTool) for t in api.tools) == 2

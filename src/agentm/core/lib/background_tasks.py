@@ -125,10 +125,19 @@ class BackgroundTaskRegistry(Generic[T]):
 
     async def register(self, task: T) -> None:
         """Insert ``task`` and release the reservation that preceded it in one
-        critical section (a reserved slot becomes a live running slot)."""
+        critical section (a reserved slot becomes a live running slot).
+
+        Owners that follow the documented ``reserve_slot → create task →
+        register`` flow (sub_agent) net to zero here. Owners whose work is
+        already running when they register — and therefore have nothing to
+        fail-fast on, so never reserve (background_exec) — would otherwise drive
+        the counter negative; the ``max(0, ...)`` clamp keeps the invariant
+        ``_reserved_slots >= 0`` for both flows, and the reserve→register net
+        is unchanged because reserve always increments before this decrements.
+        """
 
         async with self._lock:
-            self._reserved_slots -= 1
+            self._reserved_slots = max(0, self._reserved_slots - 1)
             self._tasks[task.task_id] = task
 
     async def poll_first_completed(self) -> None:

@@ -131,3 +131,34 @@ def test_registry_only_counts_running_for_slots() -> None:
     # ``RUNNING`` is the one status that occupies a slot; this is the contract
     # owners rely on when they flip a handle to a terminal value.
     assert RUNNING == "running"
+
+
+@pytest.mark.asyncio
+async def test_register_without_reservation_never_drives_counter_negative() -> None:
+    """The reservation counter holds ``>= 0`` for both owner flows.
+
+    ``background_exec`` registers handles whose work is ALREADY running, so it
+    never reserves first. Without the clamp, each such ``register`` would
+    decrement ``_reserved_slots`` below zero; here it must stay pinned at zero.
+    The sub_agent ``reserve_slot → register`` net must remain unchanged (a
+    reservation taken before a register cancels out exactly).
+    """
+
+    registry: BackgroundTaskRegistry[BackgroundTask] = BackgroundTaskRegistry(
+        max_workers=1_000_000
+    )
+
+    # No-reservation registers (background_exec flow): counter stays at 0.
+    for i in range(3):
+        await registry.register(_make_task(f"bg{i}"))
+        assert registry._reserved_slots >= 0
+    assert registry._reserved_slots == 0
+
+    # Mixed in a reserve→register pair (sub_agent flow): still nets to 0.
+    await registry.reserve_slot()
+    assert registry._reserved_slots == 1
+    await registry.register(_make_task("reserved"))
+    assert registry._reserved_slots == 0
+
+    for handle in registry.values():
+        handle.task.cancel()
