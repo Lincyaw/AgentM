@@ -1,0 +1,104 @@
+/* Terminal TUI design language — colour via Textual theme variables only.
+   Layout is outside-in dock (textual-tui.md §5.1): status top, input+footer
+   bottom, transcript fills the middle. */
+
+Screen {
+    layout: vertical;
+    layers: base overlay;
+}
+
+#status-bar {
+    dock: top;
+    height: 1;
+    background: $primary 30%;
+    color: $text;
+    padding: 0 1;
+}
+
+#transcript {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#prompt-input {
+    dock: bottom;
+    height: 4;
+    border: round $primary;
+    background: $surface;
+    margin: 0 1;
+}
+
+/* --- attribution gutters (single source: border-left, no Rich panels) --- */
+
+.turn {
+    margin: 1 0 0 0;
+    padding: 0 0 0 1;
+}
+.turn--user {
+    border-left: thick $primary;
+}
+.turn--assistant {
+    border-left: thick $accent;
+}
+.turn--system {
+    border-left: thick $warning;
+}
+
+.attrib {
+    color: $accent;
+    text-style: bold;
+}
+.attrib--system {
+    color: $warning;
+    text-style: bold;
+}
+
+.thinking {
+    color: $text-muted;
+    text-style: italic;
+}
+
+ToolBlock {
+    border-left: thick $warning;
+    margin: 1 0 0 2;
+    padding: 0 0 0 1;
+}
+ToolBlock > .tool-body {
+    color: $text-muted;
+}
+
+SubagentBlock {
+    border-left: thick $accent;
+    margin: 1 0 0 2;
+    padding: 0 0 0 1;
+}
+
+ApprovalBlock {
+    border: round $warning;
+    padding: 0 1;
+    margin: 1 0;
+}
+ApprovalBlock > .approval-choice {
+    color: $accent;
+}
+
+/* --- transient overlay for control / observability events --- */
+
+Toast {
+    layer: overlay;
+    dock: bottom;
+    width: auto;
+    max-width: 60%;
+    height: auto;
+    background: $panel;
+    border: round $accent;
+    padding: 0 1;
+    margin: 0 2 4 0;
+}
+Toast.-warn {
+    border: round $warning;
+}
+Toast.-selfmod {
+    border: round $warning;
+    background: $warning 20%;
+}
