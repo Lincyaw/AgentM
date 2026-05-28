@@ -63,10 +63,13 @@ from agentm.gateway.transport import (
     WebSocketServerTransport,
 )
 from agentm.gateway.wire import (
+    DURABLE_OUTBOUND_KINDS,
+    EPHEMERAL_OUTBOUND_KINDS,
     KIND_OUTBOUND,
     WIRE_VERSION,
     Envelope,
     InboundBody,
+    encode,
 )
 
 autoload_dotenv()
@@ -268,6 +271,27 @@ def _build_session_factory(
 # -------- gateway runtime ---------------------------------------------
 
 
+async def _ephemeral_send(peer: PeerSession, env: Envelope) -> None:
+    """Write ``env`` straight to ``peer`` best-effort, bypassing the outbox.
+
+    Holds the peer's write lock so the frame never interleaves with the
+    durable delivery worker (one wire frame == one WS message). A dead/slow
+    peer just drops the frame — ephemeral frames are live decoration, not a
+    durable record (the durable ``assistant_text`` is the fallback). See the
+    delivery-class contract in ``agentm.gateway.wire.types`` / textual-tui §4.3.
+    """
+    try:
+        async with peer.write_lock:
+            peer.transport_writer.write(encode(env))
+            await peer.transport_writer.drain()
+    except (ConnectionResetError, BrokenPipeError):
+        return
+    except Exception:  # noqa: BLE001 — a bad peer must not break the session
+        logger.debug(
+            "ephemeral outbound dropped for peer=%s", peer.peer_id, exc_info=True
+        )
+
+
 def _route_targets(
     peers: list[PeerSession],
     peer_channels: dict[str, str],
@@ -356,6 +380,8 @@ class _GatewayRuntime:
             return
         session_key = str(body.pop("_session_key", "") or "") or None
         target_channel = str(body.get("channel") or "")
+        meta = body.get("metadata")
+        kind = str((meta or {}).get("kind") or "assistant_text")
         env = Envelope(
             v=WIRE_VERSION,
             id=f"out-{uuid.uuid4().hex[:12]}",
@@ -367,8 +393,23 @@ class _GatewayRuntime:
         targets = _route_targets(
             list(self._server.registry), self._peer_channels, target_channel
         )
-        for peer in targets:
-            await asyncio.to_thread(self._outbox.enqueue, peer.peer_id, env)
+        if kind in DURABLE_OUTBOUND_KINDS:
+            for peer in targets:
+                await asyncio.to_thread(self._outbox.enqueue, peer.peer_id, env)
+        else:
+            # Ephemeral live frame: written straight to the connected peer(s),
+            # bypassing the durable outbox (delivery-class contract: wire.types
+            # / textual-tui §4.3). An unknown kind falls here too — surface it,
+            # since a typo'd DURABLE kind would otherwise silently downgrade to
+            # droppable.
+            if kind not in EPHEMERAL_OUTBOUND_KINDS:
+                logger.warning(
+                    "outbound kind %r is not in the known wire vocabulary; "
+                    "delivering as ephemeral (best-effort, droppable)",
+                    kind,
+                )
+            for peer in targets:
+                await _ephemeral_send(peer, env)
 
     # -- inbound handler ----------------------------------------------
 
