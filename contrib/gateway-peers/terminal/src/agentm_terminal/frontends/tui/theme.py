@@ -28,7 +28,9 @@ TOOL_RUNNING: Final[str] = "⟳"
 TOOL_OK: Final[str] = "✓"
 TOOL_ERROR: Final[str] = "✗"
 
-# Attribution labels (the "● assistant" style prefix per turn).
+# Attribution labels — a restrained one-line role header per turn. Separation
+# between turns comes from these headers + vertical spacing, not a left gutter.
+LABEL_USER: Final[str] = "› you"
 LABEL_ASSISTANT: Final[str] = "● assistant"
 LABEL_SYSTEM: Final[str] = "system → you"
 
@@ -50,6 +52,7 @@ __all__ = [
     "CSS_PATH",
     "LABEL_ASSISTANT",
     "LABEL_SYSTEM",
+    "LABEL_USER",
     "PHASE_GLYPH",
     "Phase",
     "TOOL_ERROR",

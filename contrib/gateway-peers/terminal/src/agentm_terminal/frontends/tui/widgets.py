@@ -21,6 +21,7 @@ from .state import StatusModel
 from .theme import (
     LABEL_ASSISTANT,
     LABEL_SYSTEM,
+    LABEL_USER,
     TOOL_ERROR,
     TOOL_OK,
     TOOL_RUNNING,
@@ -36,11 +37,17 @@ class StatusBar(Static):
         self.update(model.line())
 
 
-class UserTurn(Static):
-    """One user line (right-of-gutter)."""
+class UserTurn(Vertical):
+    """One user message: a muted ``› you`` header + the typed text. No left
+    gutter — the header + spacing carry the attribution."""
 
     def __init__(self, content: str) -> None:
-        super().__init__(content, markup=False, classes="turn turn--user")
+        super().__init__(classes="turn turn--user")
+        self._content = content
+
+    def compose(self) -> ComposeResult:
+        yield Static(LABEL_USER, classes="attrib--user")
+        yield Static(self._content, markup=False)
 
 
 class SystemTurn(Vertical):
@@ -87,6 +94,8 @@ class AssistantTurn(Vertical):
         self._dirty_think = False
         self._text_widget: AssistantText | None = None
         self._think_widget: ThinkingBlock | None = None
+        # Prevent assistant turn from stretching to full height
+        self.styles.height = "auto"
 
     def compose(self) -> ComposeResult:
         yield Static(LABEL_ASSISTANT, classes="attrib")
@@ -99,19 +108,27 @@ class AssistantTurn(Vertical):
         self._think_buf += delta
         self._dirty_think = True
 
-    async def flush(self) -> None:
+    async def flush(self) -> bool:
+        """Apply any buffered stream deltas to the widgets. Returns True iff a
+        widget was actually mutated, so the app's flush timer only repaints /
+        scrolls on real changes (a slow thinking phase otherwise repaints at the
+        full timer rate even when nothing arrived)."""
+        changed = False
         if self._dirty_think:
             if self._think_widget is None:
                 self._think_widget = ThinkingBlock()
                 await self.mount(self._think_widget)
             self._think_widget.set_text(self._think_buf)
             self._dirty_think = False
+            changed = True
         if self._dirty_text:
             if self._text_widget is None:
                 self._text_widget = AssistantText()
                 await self.mount(self._text_widget)
             self._text_widget.set_markdown(self._text_buf)
             self._dirty_text = False
+            changed = True
+        return changed
 
     async def set_final_text(self, text: str) -> None:
         # The durable turn_end text is authoritative — it replaces whatever the
@@ -134,6 +151,8 @@ class ToolBlock(Collapsible):
         super().__init__(
             self._body, title=f"{self._label}  {TOOL_RUNNING}", collapsed=True
         )
+        # Prevent tool block from stretching to full height
+        self.styles.height = "auto"
 
     def set_result(self, *, ok: bool, content: str) -> None:
         glyph = TOOL_OK if ok else TOOL_ERROR
