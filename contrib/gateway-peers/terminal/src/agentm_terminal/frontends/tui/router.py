@@ -138,7 +138,9 @@ class Router:
 
     async def _assistant_text(self, body: dict, meta: dict) -> None:
         turn = await self._ensure_turn()
-        await turn.set_final_text(str(body.get("content") or ""))
+        content = str(body.get("content") or "")
+        await turn.set_final_text(content)
+        self._app.note_assistant_text(content)  # for /copy-last
         self._active = None  # the turn is complete; the next turn_start opens one
         self._app.set_phase("idle")
         self._app.scroll_end()
@@ -178,18 +180,32 @@ class Router:
 
     async def _session_ready(self, body: dict, meta: dict) -> None:
         self._app.status.model = str(meta.get("model") or self._app.status.model)
-        names = meta.get("tool_names")
-        if isinstance(names, list):
-            self._app.status.tool_count = len(names)
+        tools = meta.get("tool_names")
+        if isinstance(tools, list):
+            for t in tools:
+                self._app.catalog.add_tool(str(t))
+            self._app.status.tool_count = len(self._app.catalog.tools)
+        commands = meta.get("command_names")
+        if isinstance(commands, list):
+            for c in commands:
+                self._app.catalog.add_command(_as_slash(str(c)))
         self._app.show_status()
 
     async def _api_register(self, body: dict, meta: dict) -> None:
+        name = str(meta.get("name") or "")
         if meta.get("reg_kind") == "tool":
-            self._app.status.tool_count += 1
+            self._app.catalog.add_tool(name)
+            self._app.status.tool_count = len(self._app.catalog.tools)
             self._app.show_status()
+        elif meta.get("reg_kind") == "command":
+            self._app.catalog.add_command(_as_slash(name))
 
     async def _budget(self, body: dict, meta: dict) -> None:
         self._app.status.budget_exceeded = True
+        self._app.catalog.budget = (
+            f"exceeded: {meta.get('used')}/{meta.get('limit')} "
+            f"{meta.get('currency', '')}".strip()
+        )
         self._app.show_status()
         self._app.toast(
             f"budget exceeded: {meta.get('used')}/{meta.get('limit')} "
@@ -199,12 +215,29 @@ class Router:
 
     async def _control(self, body: dict, meta: dict) -> None:
         kind = str(meta.get("kind") or "")
+        # Record extension lifecycle into the catalog (backs /extensions),
+        # for every phase — not just the ones we toast.
+        if kind == "extension_install":
+            mod = str(meta.get("module_path") or "")
+            err = meta.get("error")
+            self._app.catalog.extensions[mod] = (
+                f"{meta.get('phase')}: {err}" if err else str(meta.get("phase") or "")
+            )
+        elif kind in ("extension_reload", "extension_unload"):
+            self._app.catalog.extensions[str(meta.get("name") or "")] = kind.split(
+                "_", 1
+            )[1]
         # Skip the noisy bootstrap install start/end; surface failures + reloads.
         if kind == "extension_install" and meta.get("phase") != "error":
             return
         text, variant = _control_summary(kind, meta)
         if text:
             self._app.toast(text, variant=variant)
+
+
+def _as_slash(name: str) -> str:
+    """Normalise a command name to its ``/name`` invocation form."""
+    return name if name.startswith("/") else f"/{name}"
 
 
 def _control_summary(kind: str, meta: dict[str, Any]) -> tuple[str, str]:
