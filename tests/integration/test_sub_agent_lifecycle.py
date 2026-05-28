@@ -321,7 +321,8 @@ async def test_subagent_finding_arrives_via_inbox_after_next_turn_boundary(
         if getattr(block, "type", None) == "text"
     ]
     assert any(
-        "<subagent_result" in text and "<system-reminder>" in text
+        "<subagent_result" in text
+        and '<system-reminder source="subagent">' in text
         for text in user_texts
     ), f"expected an inbox-drained subagent finding; got user_texts={user_texts!r}"
 

@@ -132,17 +132,25 @@ def render_item(item: InboxItem) -> AgentMessage:
     """Render an :class:`InboxItem` into an :class:`AgentMessage`.
 
     Handles ``source="user"`` → :class:`UserMessage` (step 1),
-    ``source="background"`` → a ``<system-reminder>``-wrapped
-    :class:`UserMessage` (step 3: auto-backgrounding completion / ticker
-    status), ``source="monitor"`` → the same ``<system-reminder>``-wrapped
-    :class:`UserMessage` shape (step 4: agent-defined wakeups + channel
-    subscriptions), and ``source="subagent"`` → the same shape (step 5:
-    child-task findings posted by ``sub_agent._finalize_state`` once it
-    rides the inbox instead of its bespoke completed-unread floor). All four
+    ``source="background"`` → a
+    ``<system-reminder source="background">``-wrapped :class:`UserMessage`
+    (step 3: auto-backgrounding completion / ticker status),
+    ``source="monitor"`` → ``<system-reminder source="monitor">`` (step 4:
+    agent-defined wakeups + channel subscriptions), and
+    ``source="subagent"`` → ``<system-reminder source="subagent">`` (step 5:
+    child-task findings posted by ``sub_agent._finalize_state``). All four
     land as new ``user`` messages so the prefix stays stable and the
     KV/prefix cache survives (no synthetic ``tool_result``, which would need
-    a live ``tool_call_id`` the inbox does not carry at drain time). Any
-    other source raises so a mis-routed item fails loudly rather than
+    a live ``tool_call_id`` the inbox does not carry at drain time).
+
+    The ``source="..."`` attribute on the wrapper tag exists so the agent
+    can distinguish producer classes textually — first surfaced as an E2E
+    finding (#176 post-merge validation): without the tag the agent has to
+    guess from payload shape whether a reminder is a bg completion vs a
+    monitor wakeup vs a sub_agent finding. Keep this attribute stable —
+    downstream prompts / extractors may key off it.
+
+    Any other source raises so a mis-routed item fails loudly rather than
     landing wrong.
     """
 
@@ -156,7 +164,7 @@ def render_item(item: InboxItem) -> AgentMessage:
 
     if item.source in ("background", "monitor", "subagent"):
         text = item.payload if isinstance(item.payload, str) else str(item.payload)
-        wrapped = f"<system-reminder>\n{text}\n</system-reminder>"
+        wrapped = f'<system-reminder source="{item.source}">\n{text}\n</system-reminder>'
         return UserMessage(
             role="user",
             content=[TextContent(type="text", text=wrapped)],
