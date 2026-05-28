@@ -1,13 +1,14 @@
 # Design: Gateway & Channels (Feishu / Lark and beyond) — channels v0
 
-**Status**: SHIPPED (PR #137)
+**Status**: HISTORICAL (shipped in PR #137, deprecated by v1, fully retired by [v2](../single-process-gateway.md))
 **Created**: 2026-05-11
 **Superseded by**: [`client-server-architecture.md`](client-server-architecture.md)
-for v1 (process-level split). This doc continues to describe the
-**v0 in-process design** that ships today; it stays load-bearing
-during the migration window because v0 channels remain supported until
-every shipping platform has a v1 client. Once that migration
-completes, this doc moves to `designs/historical/`.
+(channels v1, also historical) and then by
+[`../single-process-gateway.md`](../single-process-gateway.md)
+(channels v2, current). This file describes the **v0 in-process design**
+for reference only; the abstractions documented here (`BaseChannel`,
+`ChannelManager`, in-process `Gateway`, `MessageBus`) are deleted from
+the codebase in the v2 rewrite.
 
 ---
 
