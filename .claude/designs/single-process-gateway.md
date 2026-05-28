@@ -181,7 +181,7 @@ Gone from v1: `bye` (close-on-socket is fine), `delivery_batch` / `ack_batch` (p
     {"label": "Deny",    "value": "appr-deadbeef:deny",    "style": "danger"}
   ],
   "metadata": {
-    "kind": "assistant_text" | "approval_request" | "diagnostic_warning" | "diagnostic_error"
+    "kind": "assistant_text" | "approval_request" | "approval_resolved" | "diagnostic_warning" | "diagnostic_error"
   }
 }
 ```
@@ -397,7 +397,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
 That's it. Translation glue, fully expressible inside the §11 atom contract. No new ExtensionAPI surface — just `set_service` / `get_service` / `@on`, all of which already exist.
 
-`peer_send` atom moves from `contrib/channels-clients/worker/src/agentm_worker/peer_send_atom.py` to `src/agentm/extensions/builtin/peer_send.py` and is rewritten to look up the target session in `SessionManager` directly — same-process dict lookup, no wire round-trip.
+**`peer_send` is deferred out of v2** (was planned to move from `contrib/channels-clients/worker/src/agentm_worker/peer_send_atom.py` into builtin, rewritten for same-process dict lookup). The Phase-1 review found that same-process delegation with a `wait_for_reply` future is semantically a sibling of the existing `sub_agent` atom (spawn a child unit, await its result) — reconciling the two (one tool or two, shared correlation machinery) is a design question, not a mechanical port. Rather than ship a dead-on-arrival atom (its `peer_messaging` service was never wired host-side), `peer_send` is dropped from this rewrite and revisited in a dedicated follow-up. The old `agentm_worker/peer_send_atom.py` is deleted with the rest of the worker package.
 
 ---
 
@@ -538,8 +538,7 @@ The `agentm` console script gains `gateway` as a subcommand alongside the existi
 
 * `src/agentm/gateway/` — new subpackage holding everything from §3.
 * `src/agentm/gateway/wire/types.py` — typed `InboundBody`, `OutboundBody` dataclasses (from the deleted `bus.py`).
-* `src/agentm/extensions/builtin/wire_driver.py` — §4.
-* `src/agentm/extensions/builtin/peer_send.py` — moved from contrib, rewritten for same-process.
+* `src/agentm/extensions/builtin/wire_driver.py` — §4. (`peer_send` deferred — see §4.)
 * `src/agentm/cli/gateway.py` — `agentm gateway` subcommand glue.
 * `scripts/agentm-all-in-one` (optional) — convenience shell wrapper that `popen`s gateway + chosen chat client in one command, for single-user installs. Not a daemon mode — just a process supervisor.
 

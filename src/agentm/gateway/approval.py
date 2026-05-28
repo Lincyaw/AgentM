@@ -95,6 +95,7 @@ class ApprovalManager:
         await self._sink(
             self._render_card(
                 approval_id=approval_id,
+                session_key=session_key,
                 channel=channel,
                 chat_id=chat_id,
                 thread_id=thread_id,
@@ -109,6 +110,7 @@ class ApprovalManager:
             self._pending.pop(approval_id, None)
             await self._sink(
                 self._render_resolution(
+                    session_key=session_key,
                     channel=channel,
                     chat_id=chat_id,
                     thread_id=thread_id,
@@ -158,6 +160,7 @@ class ApprovalManager:
         self,
         *,
         approval_id: str,
+        session_key: str,
         channel: str,
         chat_id: str,
         thread_id: str | None,
@@ -198,6 +201,7 @@ class ApprovalManager:
                 "tool_name": tool_name,
                 "requested_by": sender_id,
             },
+            "_session_key": session_key,
         }
         if thread_id is not None:
             body["thread_id"] = thread_id
@@ -206,6 +210,7 @@ class ApprovalManager:
     def _render_resolution(
         self,
         *,
+        session_key: str,
         channel: str,
         chat_id: str,
         thread_id: str | None,
@@ -220,6 +225,7 @@ class ApprovalManager:
             "chat_id": chat_id,
             "content": f"{icon} `{tool_name}` {verb} by {by_user}",
             "metadata": {"kind": "approval_resolved", "decision": decision},
+            "_session_key": session_key,
         }
         if thread_id is not None:
             body["thread_id"] = thread_id

@@ -100,6 +100,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:  # noqa: ARG001
             "chat_id": addr["chat_id"],
             "content": content,
             "metadata": {"kind": body_kind},
+            # Echoed onto the envelope by the gateway sink so a multi-surface
+            # chat client can attribute this outbound to its conversation
+            # (§2.5 / §3.3). Without it the dominant outbound kinds ship
+            # session_key=None.
+            "_session_key": session_key,
         }
         if addr["thread_id"] is not None:
             body["thread_id"] = addr["thread_id"]
@@ -131,14 +136,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:  # noqa: ARG001
         return None
 
     async def on_diagnostic(ev: DiagnosticEvent) -> None:
-        severity = getattr(ev, "level", "info")
-        message = getattr(ev, "message", "")
-        if not message:
+        if not ev.message:
             return
-        if severity == "warning":
-            await emit("diagnostic_warning", message)
-        elif severity == "error":
-            await emit("diagnostic_error", message)
+        if ev.level == "warning":
+            await emit("diagnostic_warning", ev.message)
+        elif ev.level == "error":
+            await emit("diagnostic_error", ev.message)
 
     api.on(TurnEndEvent.CHANNEL, on_turn_end)
     api.on(ToolCallEvent.CHANNEL, on_tool_call)

@@ -97,6 +97,10 @@ async def test_turn_end_emits_assistant_text_outbound() -> None:
     assert body["metadata"]["kind"] == "assistant_text"
     assert body["channel"] == "terminal"
     assert body["chat_id"] == "t1"
+    # Outbound must carry _session_key so the gateway sink stamps it onto
+    # the envelope (§2.5/§3.3) — without it a multi-surface client cannot
+    # attribute the message to its conversation.
+    assert body["_session_key"] == "terminal:t1"
 
 
 @pytest.mark.asyncio

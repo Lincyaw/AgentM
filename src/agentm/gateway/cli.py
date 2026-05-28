@@ -306,6 +306,10 @@ class _GatewayRuntime:
             approval_manager=self._approval,
         )
         self._server: WireServer | None = None
+        # Detached inbound-dispatch tasks (§3.2). Tracked so they are not
+        # GC'd mid-flight and are cancelled/awaited on shutdown rather than
+        # orphaned.
+        self._inflight: set[asyncio.Task[Any]] = set()
 
     def attach_server(self, server: WireServer) -> None:
         self._server = server
@@ -358,10 +362,12 @@ class _GatewayRuntime:
         # an approval future never stalls the WireServer read loop — the
         # button click that resolves the future must still be routed
         # (mirrors the per-inbound task-spawn the v1 gateway used).
-        asyncio.create_task(
+        task = asyncio.create_task(
             self._dispatch_command_or_prompt(session_key, env.scenario, decision.action, body),
             name=f"gw-inbound-{session_key}",
         )
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
 
     async def _dispatch_command_or_prompt(
         self,
@@ -443,12 +449,7 @@ class _GatewayRuntime:
 
         def get_extension_api() -> Any | None:
             sess = self._sessions.get(session_key)
-            if sess is None:
-                return None
-            api = getattr(sess, "extension_api", None)
-            if api is not None:
-                return api
-            return getattr(sess, "_extension_api", None)
+            return sess.extension_api if sess is not None else None
 
         return CommandContext(
             session_key=session_key,
@@ -479,6 +480,13 @@ class _GatewayRuntime:
         )
 
     async def shutdown(self) -> None:
+        # Cancel + drain any in-flight inbound dispatches before tearing
+        # down sessions, so no prompt task is left orphaned.
+        inflight = list(self._inflight)
+        for task in inflight:
+            task.cancel()
+        if inflight:
+            await asyncio.gather(*inflight, return_exceptions=True)
         await self._sessions.shutdown_all()
 
 

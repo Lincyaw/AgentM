@@ -6,9 +6,11 @@ lives in :mod:`agentm.gateway.outbox.sqlite`. A contrib backend
 (Redis Streams, NATS JetStream, ...) only needs to satisfy these
 Protocols.
 
-See ``.claude/designs/client-server-architecture.md`` §4.5 for the
+See ``.claude/designs/single-process-gateway.md`` §2.6 for the
 delivery semantics this surface supports (at-least-once outbound,
-at-most-once-with-ack inbound, dead-letter on retry exhaustion).
+at-most-once-with-ack inbound, dead-letter on retry exhaustion). The
+detailed reliability rationale lives in the historical v1 design,
+``.claude/designs/historical/client-server-architecture.md`` §4.5.
 
 Mechanism only — retry/backoff policy lives in
 :mod:`agentm.gateway.outbox.policy` so callers (the server) decide

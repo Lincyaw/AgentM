@@ -38,6 +38,8 @@ async def test_matching_click_approves() -> None:
     )
     await asyncio.sleep(0)  # let the card render
     appr_id = out[0]["metadata"]["approval_id"]
+    # Card must carry _session_key so the gateway sink routes it (§3.3).
+    assert out[0]["_session_key"] == "terminal:t1"
     assert mgr.resolve(f"{appr_id}:approve", "u1") is True
     assert await task is True
 
