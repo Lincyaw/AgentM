@@ -15,7 +15,8 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.widgets import Footer
+from textual.dom import DOMNode
+from textual.widgets import Collapsible, Footer, TextArea
 
 from ...client import TerminalClient
 from .modals import CommandPalette, HelpScreen, InfoModal
@@ -43,6 +44,7 @@ class AgentMTui(App[int]):
         Binding("ctrl+d", "quit_app", "quit", priority=True, show=True),
         Binding("ctrl+l", "clear_log", "clear", show=True),
         Binding("ctrl+r", "command_palette", "commands", show=True),
+        Binding("ctrl+e", "toggle_tool", "expand", show=True),
         Binding("escape", "cancel", "cancel", show=False),
     ]
 
@@ -64,6 +66,7 @@ class AgentMTui(App[int]):
         self._router = Router(self)
         self._consumer: asyncio.Task[None] | None = None
         self._history: list[str] = []
+        self._hist_idx = 0  # cursor into _history (== len means "fresh line")
         self._last_text = ""  # last assistant text, for /copy-last
         self._ctrlc_ts = 0.0
         # True from prompt-submit until the loop's agent_end; gates Esc-interrupt.
@@ -168,6 +171,7 @@ class AgentMTui(App[int]):
         if not text:
             return
         self._history.append(text)
+        self._hist_idx = len(self._history)  # reset history cursor to the fresh line
         # Slash commands (not ``//path``): TUI-local ones are handled here;
         # everything else is forwarded to the gateway's command router.
         if text.startswith("/") and not text.startswith("//"):
@@ -223,6 +227,30 @@ class AgentMTui(App[int]):
         except Exception:  # noqa: BLE001
             self.toast("failed to send to gateway", variant="warn")
 
+    @on(PromptInput.HistoryNav)
+    def _on_history_nav(self, msg: PromptInput.HistoryNav) -> None:
+        if not self._history:
+            return
+        inp = self.query_one("#prompt-input", PromptInput)
+        if msg.delta < 0:  # older
+            if self._hist_idx > 0:
+                self._hist_idx -= 1
+                inp.text = self._history[self._hist_idx]
+        elif self._hist_idx < len(self._history) - 1:  # newer
+            self._hist_idx += 1
+            inp.text = self._history[self._hist_idx]
+        else:  # past the newest -> back to a fresh empty line
+            self._hist_idx = len(self._history)
+            inp.text = ""
+
+    @on(TextArea.Changed, "#prompt-input")
+    def _on_input_changed(self, event: TextArea.Changed) -> None:
+        # Typing `/` on an otherwise-empty line opens the command palette
+        # (Claude-Code style) rather than inserting a literal slash.
+        if event.text_area.text == "/":
+            event.text_area.text = ""
+            self.action_command_palette()
+
     # --- bindings -------------------------------------------------------
 
     def action_interrupt_or_quit(self) -> None:
@@ -237,6 +265,15 @@ class AgentMTui(App[int]):
 
     def action_quit_app(self) -> None:
         self.exit(0)
+
+    def action_toggle_tool(self) -> None:
+        # Expand/collapse the nearest Collapsible (tool block) up from focus.
+        node: DOMNode | None = self.focused
+        while node is not None:
+            if isinstance(node, Collapsible):
+                node.collapsed = not node.collapsed
+                return
+            node = node.parent
 
     async def action_clear_log(self) -> None:
         await self.transcript.remove_children()

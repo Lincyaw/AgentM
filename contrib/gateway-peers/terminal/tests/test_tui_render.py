@@ -151,3 +151,59 @@ async def test_tools_slash_opens_info_modal() -> None:
         assert "bash" in app.screen._body
         # A local slash command is NOT forwarded to the gateway.
         assert all(b.get("content") != "/tools" for b in client.sent)
+
+
+async def test_input_history_up_down_cycles_prior_inputs() -> None:
+    client = _FakeClient()
+    app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
+    async with app.run_test(size=(100, 30)) as pilot:
+        inp = app.query_one("#prompt-input")
+        for text in ("first", "second"):
+            inp.text = text  # type: ignore[attr-defined]
+            inp.action_submit()  # type: ignore[attr-defined]
+            await pilot.pause(0.05)
+        # Input is empty; Up walks back (newest first), Down walks forward.
+        await pilot.press("up")
+        await pilot.pause(0.05)
+        assert inp.text == "second"  # type: ignore[attr-defined]
+        await pilot.press("up")
+        await pilot.pause(0.05)
+        assert inp.text == "first"  # type: ignore[attr-defined]
+        await pilot.press("down")
+        await pilot.pause(0.05)
+        assert inp.text == "second"  # type: ignore[attr-defined]
+        await pilot.press("down")
+        await pilot.pause(0.05)
+        assert inp.text == ""  # type: ignore[attr-defined]
+
+
+async def test_slash_on_empty_line_opens_palette() -> None:
+    from agentm_terminal.frontends.tui.modals import CommandPalette
+
+    client = _FakeClient()
+    app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
+    async with app.run_test(size=(100, 30)) as pilot:
+        inp = app.query_one("#prompt-input")
+        inp.text = "/"  # type: ignore[attr-defined]  # simulate typing a slash
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, CommandPalette)
+        assert inp.text == ""  # type: ignore[attr-defined]  # the slash was consumed
+
+
+async def test_tool_block_title_shows_arg_summary() -> None:
+    client = _FakeClient()
+    app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
+    async with app.run_test(size=(100, 30)) as pilot:
+        client.push(_frame("turn_start", turn_id=1))
+        client.push(
+            _frame(
+                "tool_call",
+                tool_call_id="t1",
+                name="bash",
+                args={"command": "ls -la"},
+            )
+        )
+        await pilot.pause(0.15)
+        blocks = list(app.query(ToolBlock))
+        assert len(blocks) == 1
+        assert "bash(ls -la)" in str(blocks[0].title)
