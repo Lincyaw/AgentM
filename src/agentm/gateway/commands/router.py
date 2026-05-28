@@ -5,8 +5,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from ..bus import InboundMessage, OutboundMessage
-from .protocol import CommandContext, CommandResult, parse_invocation
+from .protocol import (
+    CommandContext,
+    CommandInbound,
+    CommandResult,
+    parse_invocation,
+)
 from .registry import CommandRegistry
 
 
@@ -25,14 +29,14 @@ class CommandRouter:
     """Routes inbound messages whose content starts with ``/``.
 
     The router is stateless beyond the registry; per-route capabilities
-    (drop, stats, approval bridge) are injected via :class:`CommandContext`
-    by the gateway on each dispatch.
+    (end session, stats, extension API) are injected via
+    :class:`CommandContext` by the gateway on each dispatch.
     """
 
     registry: CommandRegistry
 
     async def try_dispatch(
-        self, msg: InboundMessage, ctx: CommandContext
+        self, msg: CommandInbound, ctx: CommandContext
     ) -> CommandResult | None:
         """Returns ``None`` iff ``msg`` is not a command. Otherwise
         always returns a :class:`CommandResult` — the gateway can
@@ -41,23 +45,14 @@ class CommandRouter:
         if inv is None:
             return None
         if not inv.name:
-            return CommandResult(
-                outbound=[
-                    OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=_EMPTY_REPLY,
-                    )
-                ]
-            )
+            return CommandResult(outbound=[ctx.reply(_EMPTY_REPLY)])
         handler = self.registry.lookup(namespace=inv.namespace, name=inv.name)
         if handler is None:
             return CommandResult(
                 outbound=[
-                    OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=_UNKNOWN_REPLY.format(raw=inv.raw),
+                    ctx.reply(
+                        _UNKNOWN_REPLY.format(raw=inv.raw),
+                        kind="diagnostic_error",
                     )
                 ]
             )
@@ -67,13 +62,10 @@ class CommandRouter:
             logger.exception("command %r raised", inv.raw)
             return CommandResult(
                 outbound=[
-                    OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=(
-                            f"Command `{inv.raw}` failed unexpectedly. "
-                            "The error has been logged."
-                        ),
+                    ctx.reply(
+                        f"Command `{inv.raw}` failed unexpectedly. "
+                        "The error has been logged.",
+                        kind="diagnostic_error",
                     )
                 ]
             )

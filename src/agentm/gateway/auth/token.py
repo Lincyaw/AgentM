@@ -15,7 +15,7 @@ import asyncio
 import hmac
 import logging
 
-log = logging.getLogger("agentm_channels.auth")
+log = logging.getLogger("agentm.gateway.auth")
 
 
 def _constant_time_membership(token: str, allowed: tuple[str, ...]) -> bool:
@@ -54,30 +54,21 @@ class TokenAuthenticator:
 
     async def authenticate(
         self,
-        peer_kind: str,
         peer_id: str,
         token: str | None,
         transport: asyncio.StreamWriter,  # noqa: ARG002 — token auth ignores transport
     ) -> bool:
         if token is None or token == "":
-            log.warning(
-                "token reject: peer=%s kind=%s — no token presented",
-                peer_id,
-                peer_kind,
-            )
+            log.warning("token reject: peer=%s — no token presented", peer_id)
             return False
         # Constant-time membership check (issue #3): naive ``in`` against
         # a set leaks a timing oracle on the comparing bytes. Walk the
         # whole allow-list with ``hmac.compare_digest`` and only branch
         # on the OR-accumulated result.
         if _constant_time_membership(str(token), self._allowed_tokens):
-            log.info("token accept: peer=%s kind=%s", peer_id, peer_kind)
+            log.info("token accept: peer=%s", peer_id)
             return True
-        log.warning(
-            "token reject: peer=%s kind=%s — token not in allow-list",
-            peer_id,
-            peer_kind,
-        )
+        log.warning("token reject: peer=%s — token not in allow-list", peer_id)
         return False
 
 

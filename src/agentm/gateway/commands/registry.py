@@ -175,10 +175,10 @@ def _load_skills(
 
 
 def _load_entry_points(registry: CommandRegistry) -> None:
-    """External plugins register via the ``agentm_channels.commands``
+    """External plugins register via the ``agentm.gateway.commands``
     entry-point group::
 
-        [project.entry-points."agentm_channels.commands"]
+        [project.entry-points."agentm.gateway.commands"]
         my_command = "my_pkg.commands:MyCommand"
 
     The loaded value can be a handler instance or a callable that
@@ -187,7 +187,7 @@ def _load_entry_points(registry: CommandRegistry) -> None:
     from importlib.metadata import entry_points
 
     try:
-        eps = entry_points(group="agentm_channels.commands")
+        eps = entry_points(group="agentm.gateway.commands")
     except TypeError:
         return
     for ep in eps:

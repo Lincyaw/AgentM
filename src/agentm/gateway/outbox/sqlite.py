@@ -28,7 +28,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from agentm_channels.wire import Envelope
+from agentm.gateway.wire import Envelope
 
 from .errors import OutboxClosed
 from .protocol import OutboxRecord

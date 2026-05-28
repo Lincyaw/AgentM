@@ -1,13 +1,12 @@
-"""In-tree asyncio wire client.
+"""In-tree asyncio wire client (v2).
 
-Used by Phase 1 integration tests and (in Phase 2+) by extracted
-channel processes. No reconnect logic — callers handle reconnect; the
-server-side outbox makes that safe (see §4.5 of the design doc).
+The shared client library chat-client peers (terminal, feishu) and tests
+use to talk to a :class:`WireServer`. No reconnect logic — callers handle
+reconnect; the server-side outbox makes that safe.
 
-The on_outbound callback fires once per delivered envelope. For
-``delivery_batch`` frames (catch-up), the client iterates ``items``
-in order and invokes the callback for each item synchronously
-inside the read loop, so the application sees ordering as published.
+The ``on_outbound`` callback fires once per delivered ``outbound``
+envelope. v2 has no ``delivery_batch`` / ``bye`` frames — pipelined
+single-envelope push is enough at this scale (§2.3).
 """
 
 from __future__ import annotations
@@ -19,10 +18,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from agentm_channels.transport import ClientTransport, UnixClientTransport
-from agentm_channels.wire import (
-    KIND_BYE,
-    KIND_DELIVERY_BATCH,
+from agentm.gateway.transport import ClientTransport, UnixClientTransport
+from agentm.gateway.wire import (
     KIND_ERROR,
     KIND_HELLO,
     KIND_INBOUND,
@@ -38,7 +35,7 @@ from agentm_channels.wire import (
     encode,
 )
 
-log = logging.getLogger("agentm_channels.client")
+log = logging.getLogger("agentm.gateway.client")
 
 OutboundHandler = Callable[[Envelope], Awaitable[None]]
 
@@ -53,13 +50,13 @@ class AuthError(Exception):
 
 
 class WireClient:
-    """Asyncio Unix-socket client to a :class:`WireServer`."""
+    """Asyncio wire client to a :class:`WireServer` (v2)."""
 
     def __init__(
         self,
         *,
-        peer_id: str,
-        peer_kind: str,
+        peer_name: str,
+        peer_version: str = "0.2.0",
         transport: ClientTransport | None = None,
         socket_path: str | None = None,
         token: str | None = None,
@@ -79,8 +76,8 @@ class WireClient:
                 "WireClient: pass either transport= or socket_path=, not both"
             )
         self._transport = transport
-        self._peer_id = peer_id
-        self._peer_kind = peer_kind
+        self._peer_name = peer_name
+        self._peer_version = peer_version
         self._token = token
         self._on_outbound = on_outbound
         self._capabilities: dict[str, Any] = dict(capabilities or {})
@@ -95,17 +92,19 @@ class WireClient:
 
     async def connect(self) -> None:
         self._reader, self._writer = await self._transport.connect()
+        body: dict[str, Any] = {
+            "peer_name": self._peer_name,
+            "peer_version": self._peer_version,
+            "capabilities": dict(self._capabilities),
+        }
+        if self._token is not None:
+            body["auth"] = self._token
         hello = Envelope(
             v=WIRE_VERSION,
-            id=f"hello-{self._peer_id}-{int(time.time() * 1000)}",
+            id=f"hello-{self._peer_name}-{int(time.time() * 1000)}",
             kind=KIND_HELLO,
             ts=time.time(),
-            body={
-                "peer_id": self._peer_id,
-                "peer_kind": self._peer_kind,
-                "token": self._token,
-                "capabilities": dict(self._capabilities),
-            },
+            body=body,
         )
         self._writer.write(encode(hello))
         await self._writer.drain()
@@ -114,9 +113,9 @@ class WireClient:
         if first is None:
             raise ConnectionRefusedError("server closed before welcome")
         if first.kind == KIND_ERROR:
-            body = first.body if isinstance(first.body, dict) else {}
-            code = str(body.get("code", "unknown"))
-            message = str(body.get("message", ""))
+            err_body = first.body if isinstance(first.body, dict) else {}
+            code = str(err_body.get("code", "unknown"))
+            message = str(err_body.get("message", ""))
             with contextlib.suppress(Exception):
                 self._writer.close()
                 await self._writer.wait_closed()
@@ -124,23 +123,15 @@ class WireClient:
         if first.kind != KIND_WELCOME:
             raise ConnectionRefusedError(f"expected welcome, got {first.kind!r}")
         self._welcome = first
-        self._read_task = asyncio.create_task(self._read_loop(), name=f"client-read:{self._peer_id}")
+        self._read_task = asyncio.create_task(
+            self._read_loop(), name=f"client-read:{self._peer_name}"
+        )
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         if self._writer is not None and not self._writer.is_closing():
-            bye = Envelope(
-                v=WIRE_VERSION,
-                id=f"bye-{self._peer_id}-{int(time.time() * 1000)}",
-                kind=KIND_BYE,
-                ts=time.time(),
-                body={},
-            )
-            with contextlib.suppress(Exception):
-                self._writer.write(encode(bye))
-                await self._writer.drain()
             with contextlib.suppress(Exception):
                 self._writer.close()
                 await self._writer.wait_closed()
@@ -157,13 +148,27 @@ class WireClient:
         self._writer.write(encode(env))
         await self._writer.drain()
 
-    async def send_inbound(self, body: dict[str, Any], env_id: str | None = None) -> None:
-        """Convenience: build + send an ``inbound`` envelope."""
+    async def send_inbound(
+        self,
+        body: dict[str, Any],
+        *,
+        session_key: str,
+        scenario: str | None = None,
+        env_id: str | None = None,
+    ) -> None:
+        """Convenience: build + send an ``inbound`` envelope (§2.4).
+
+        ``session_key`` is required — it is how the gateway routes the
+        message to (or creates) the right session. ``scenario`` is set on
+        the first inbound for a chat the gateway has not seen.
+        """
         env = Envelope(
             v=WIRE_VERSION,
-            id=env_id or f"in-{self._peer_id}-{int(time.time() * 1000_000)}",
+            id=env_id or f"in-{self._peer_name}-{int(time.time() * 1_000_000)}",
             kind=KIND_INBOUND,
             ts=time.time(),
+            session_key=session_key,
+            scenario=scenario,
             body=body,
         )
         await self.send(env)
@@ -171,7 +176,7 @@ class WireClient:
     async def ping(self) -> None:
         env = Envelope(
             v=WIRE_VERSION,
-            id=f"ping-{self._peer_id}-{int(time.time() * 1000)}",
+            id=f"ping-{self._peer_name}-{int(time.time() * 1000)}",
             kind=KIND_PING,
             ts=time.time(),
             body={},
@@ -206,55 +211,28 @@ class WireClient:
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("client read loop crashed for peer=%s", self._peer_id)
+            log.exception("client read loop crashed for peer=%s", self._peer_name)
 
     async def _dispatch(self, env: Envelope) -> None:
         if env.kind == KIND_OUTBOUND:
             if self._on_outbound is not None:
                 await self._on_outbound(env)
             return
-        if env.kind == KIND_INBOUND:
-            # Worker peers receive forwarded inbound envelopes from
-            # the gateway. The on_outbound callback name is historical
-            # ("messages delivered to this peer"); the wire kind tells
-            # the handler which way the message flows.
-            if self._on_outbound is not None:
-                await self._on_outbound(env)
-            return
-        if env.kind == KIND_DELIVERY_BATCH:
-            items = (env.body or {}).get("items", []) if isinstance(env.body, dict) else []
-            if self._on_outbound is not None:
-                for item in items:
-                    try:
-                        sub = Envelope.from_dict(item)
-                    except (InvalidEnvelope, WireError):
-                        log.exception("client: bad item in delivery_batch")
-                        continue
-                    await self._on_outbound(sub)
-            return
         if env.kind == KIND_PONG:
             return
         if env.kind == KIND_ERROR:
-            # Errors land on both surfaces: the queue is what
-            # ``next_error()`` consumes (auth path uses it during
-            # handshake); the on_outbound callback lets agent_worker
-            # peers observe envelope-level errors (hop_limit_exceeded,
-            # missing_root_session_key, …) alongside their normal
-            # inbound/outbound stream — without it, a peer_send waiting
-            # on correlation_id would never learn the dispatch failed.
             await self._errors.put(env)
             if self._on_outbound is not None:
                 await self._on_outbound(env)
             return
-        # ping from server (future use): reply pong
         if env.kind == KIND_PING:
             if self._writer is not None:
                 pong = Envelope(
                     v=WIRE_VERSION,
-                    id=f"pong-{self._peer_id}-{int(time.time() * 1000)}",
+                    id=f"pong-{self._peer_name}-{int(time.time() * 1000)}",
                     kind=KIND_PONG,
                     ts=time.time(),
-                    body={"echo_id": env.id},
+                    body={},
                 )
                 self._writer.write(encode(pong))
                 with contextlib.suppress(Exception):

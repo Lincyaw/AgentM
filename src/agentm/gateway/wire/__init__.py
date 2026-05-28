@@ -1,8 +1,8 @@
-"""Wire protocol: envelopes, kinds, length-prefixed framing.
+"""Wire protocol v2: envelopes, kinds, length-prefixed framing, body types.
 
-Pure-function foundation for the gateway/client process split. See
-``.claude/designs/client-server-architecture.md`` §4. Pure module —
-no I/O, no asyncio. Importable in a notebook with no harness.
+Pure-function foundation for the single-process gateway. See
+``.claude/designs/single-process-gateway.md`` §2. Pure module — no I/O,
+no asyncio.
 """
 
 from __future__ import annotations
@@ -12,9 +12,6 @@ from .errors import IncompleteFrame, InvalidEnvelope, WireError
 from .framing import HEADER_BYTES, MAX_FRAME_BYTES, decode, decode_stream, encode
 from .kinds import (
     KIND_ACK,
-    KIND_ACK_BATCH,
-    KIND_BYE,
-    KIND_DELIVERY_BATCH,
     KIND_ERROR,
     KIND_HELLO,
     KIND_INBOUND,
@@ -24,13 +21,11 @@ from .kinds import (
     KIND_WELCOME,
     VALID_KINDS,
 )
+from .types import Button, ButtonStyle, InboundBody, OutboundBody, OutboundMetaKind
 
 __all__ = [
     "HEADER_BYTES",
     "KIND_ACK",
-    "KIND_ACK_BATCH",
-    "KIND_BYE",
-    "KIND_DELIVERY_BATCH",
     "KIND_ERROR",
     "KIND_HELLO",
     "KIND_INBOUND",
@@ -41,9 +36,14 @@ __all__ = [
     "MAX_FRAME_BYTES",
     "VALID_KINDS",
     "WIRE_VERSION",
+    "Button",
+    "ButtonStyle",
     "Envelope",
+    "InboundBody",
     "IncompleteFrame",
     "InvalidEnvelope",
+    "OutboundBody",
+    "OutboundMetaKind",
     "WireError",
     "decode",
     "decode_stream",

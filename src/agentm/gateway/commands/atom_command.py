@@ -34,7 +34,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..bus import OutboundMessage
 from .protocol import (
     CommandContext,
     CommandHandler,
@@ -117,15 +116,7 @@ class _AtomVerbBase:
     kind: CommandKind = "control"
 
     def _reply(self, ctx: CommandContext, text: str) -> CommandResult:
-        return CommandResult(
-            outbound=[
-                OutboundMessage(
-                    channel=ctx.channel,
-                    chat_id=ctx.chat_id,
-                    content=text,
-                )
-            ]
-        )
+        return CommandResult(outbound=[ctx.reply(text)])
 
     def _resolve_api(self, ctx: CommandContext) -> Any | None:
         get_api = getattr(ctx, "get_extension_api", None)

@@ -1,7 +1,7 @@
 """Transport protocols for the channels wire layer.
 
 The wire framing (length-prefixed JSON envelopes, see
-:mod:`agentm_channels.wire`) is transport-agnostic; this module pins
+:mod:`agentm.gateway.wire`) is transport-agnostic; this module pins
 down the seam between the framing-aware server/client and the
 underlying byte stream. Implementations expose the connection as an
 :class:`asyncio.StreamReader` / :class:`asyncio.StreamWriter` pair so

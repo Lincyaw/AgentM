@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ...bus import OutboundMessage
 from ..protocol import (
     CommandKind,
     CommandContext,
@@ -35,15 +34,7 @@ class StatusCommand:
             f"- turns this session: {turn_count}\n"
             f"- pending approvals: {pending}"
         )
-        return CommandResult(
-            outbound=[
-                OutboundMessage(
-                    channel=ctx.channel,
-                    chat_id=ctx.chat_id,
-                    content=body,
-                )
-            ]
-        )
+        return CommandResult(outbound=[ctx.reply(body)])
 
 
 HANDLER = StatusCommand()

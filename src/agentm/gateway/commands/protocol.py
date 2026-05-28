@@ -22,27 +22,39 @@ private prompts. The router prefers a polite "no such command" over
 "the LLM has no idea what you meant either."
 
 The :class:`CommandContext` facade is intentionally narrow. Handlers
-should never receive the :class:`agentm_channels.gateway.Gateway`
-directly; they get the few capabilities they need (drop the route,
-read route stats, list peer commands, talk to the approval bridge).
-Mirrors the §11 ``ExtensionAPI`` pattern: atoms reach gateway
-internals only through documented services.
+should never receive a gateway object directly; they get the few
+capabilities they need (end the session, read stats, list commands,
+reach the live ExtensionAPI). Mirrors the §11 ``ExtensionAPI`` pattern:
+atoms reach gateway internals only through documented services.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
-from ..bus import InboundMessage, OutboundMessage
-
-
-if TYPE_CHECKING:
-    from ..approval import ApprovalBridge
+from ..wire.types import OutboundBody
 
 
 CommandKind = Literal["control", "prompt"]
+
+
+@dataclass(frozen=True, slots=True)
+class CommandInbound:
+    """The slash-command-relevant slice of an inbound envelope.
+
+    Built by the gateway from the inbound :class:`Envelope` +
+    :class:`InboundBody`; handlers read these fields rather than the
+    full wire envelope.
+    """
+
+    session_key: str
+    channel: str
+    chat_id: str
+    sender_id: str
+    content: str
+    thread_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,9 +75,9 @@ class CommandInvocation:
     when the command has no args. *Not* shell-split — handlers parse
     their own args."""
 
-    inbound: InboundMessage
-    """The original inbound message — handlers read ``sender_id`` /
-    ``chat_id`` / ``metadata`` from here when needed."""
+    inbound: CommandInbound
+    """The originating inbound — handlers read ``sender_id`` / ``chat_id``
+    when needed."""
 
 
 @dataclass(slots=True)
@@ -81,7 +93,7 @@ class CommandResult:
     fields are ignored.
     """
 
-    outbound: list[OutboundMessage] = field(default_factory=list)
+    outbound: list[OutboundBody] = field(default_factory=list)
     side_effect: Callable[["Any"], Awaitable[None]] | None = None
     expanded_prompt: str | None = None
 
@@ -90,37 +102,44 @@ class CommandResult:
 class CommandContext:
     """Narrow facade passed to every handler — see module docstring."""
 
-    route_key: str
+    session_key: str
     channel: str
     chat_id: str
     sender_id: str
-    drop_route: Callable[[], Awaitable[None]]
-    """Tear down the active :class:`agentm.harness.AgentSession` for
-    this chat and clear the ``ChatSessionMap`` entry. The next inbound
-    will mint a fresh session. Used by ``/new`` / ``/end``."""
+    thread_id: str | None
+    end_session: Callable[[], Awaitable[None]]
+    """Tear down the active ``AgentSession`` for this chat. ``/new`` keeps
+    the :class:`ChatSessionMap` entry (next message resumes from
+    transcript); ``/end`` additionally clears it (next message starts
+    fresh). The flavour is selected via ``forget_chat_mapping`` below."""
+
+    forget_chat_mapping: Callable[[], Awaitable[None]]
+    """Clear the persistent ``ChatSessionMap`` entry for this chat. Used
+    by ``/end`` after ``end_session`` so the next message starts cold."""
 
     get_route_stats: Callable[[], dict[str, Any]]
-    """Returns a snapshot dict (``session_id``, ``pending_approvals``,
-    …) for ``/status``-style introspection. Implementation lives in
-    the gateway."""
+    """Returns a snapshot dict (``session_id``, ``turn_count``,
+    ``pending_approvals``) for ``/status``-style introspection."""
 
     list_commands: Callable[[], list["CommandHandler"]]
     """Returns every handler the router currently knows about. Used by
     ``/help``. The list is a snapshot — handlers must not mutate it."""
 
-    approval_bridge: "ApprovalBridge | None"
-    """The bridge associated with this route, if any. ``None`` when
-    the route has not yet seen its first inbound (e.g. the user
-    types ``/help`` as their very first message in a fresh chat).
-    Used by future ``/approve`` / ``/deny`` text fallbacks."""
-
     get_extension_api: Callable[[], Any | None] = lambda: None
-    """Live :class:`agentm.harness.extension.ExtensionAPI` for this
-    chat's session, or ``None`` if the session has not been created
-    yet. Used by ``/atom:*`` commands to call ``install_atom`` /
-    ``unload_atom`` / ``list_atoms``. The default no-op lambda keeps
-    test fixtures terse — production code paths through
-    :meth:`Gateway._command_context_for` always set a real callable."""
+    """Live ``ExtensionAPI`` for this chat's session, or ``None`` if the
+    session has not been created yet. Used by ``/atom:*`` commands."""
+
+    def reply(self, text: str, **meta: Any) -> OutboundBody:
+        """Build a plain ``assistant_text`` outbound back to this chat."""
+        metadata: dict[str, Any] = {"kind": "assistant_text"}
+        metadata.update(meta)
+        return OutboundBody(
+            channel=self.channel,
+            chat_id=self.chat_id,
+            content=text,
+            thread_id=self.thread_id,
+            metadata=metadata,
+        )
 
 
 @runtime_checkable
@@ -145,7 +164,7 @@ class CommandHandler(Protocol):
 # --- parsing ----------------------------------------------------------
 
 
-def parse_invocation(msg: InboundMessage) -> CommandInvocation | None:
+def parse_invocation(msg: CommandInbound) -> CommandInvocation | None:
     """Return a :class:`CommandInvocation` if ``msg`` looks like a
     command, otherwise ``None``.
 
@@ -184,3 +203,14 @@ def parse_invocation(msg: InboundMessage) -> CommandInvocation | None:
         args=args,
         inbound=msg,
     )
+
+
+__all__ = [
+    "CommandContext",
+    "CommandHandler",
+    "CommandInbound",
+    "CommandInvocation",
+    "CommandKind",
+    "CommandResult",
+    "parse_invocation",
+]

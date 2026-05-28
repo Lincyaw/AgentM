@@ -22,7 +22,7 @@ import struct
 import sys
 from typing import Any
 
-log = logging.getLogger("agentm_channels.auth")
+log = logging.getLogger("agentm.gateway.auth")
 
 
 # Linux SO_PEERCRED struct ucred = (pid, uid, gid), three native ints.
@@ -75,7 +75,6 @@ class UnixPeerCredAuthenticator:
 
     async def authenticate(
         self,
-        peer_kind: str,
         peer_id: str,
         token: str | None,  # noqa: ARG002 — peer-cred ignores tokens by design
         transport: asyncio.StreamWriter,
@@ -85,38 +84,25 @@ class UnixPeerCredAuthenticator:
         # which proxies ``getsockopt`` and ``fileno`` — both of which is
         # all peer-cred lookup needs.
         if sock is None or not hasattr(sock, "fileno"):
-            log.warning(
-                "peer-cred reject: peer=%s kind=%s — no socket on transport",
-                peer_id,
-                peer_kind,
-            )
+            log.warning("peer-cred reject: peer=%s — no socket on transport", peer_id)
             return False
         uid = _peer_uid(sock)
         if uid is None:
             log.warning(
-                "peer-cred reject: peer=%s kind=%s — could not read peer uid "
+                "peer-cred reject: peer=%s — could not read peer uid "
                 "(unsupported platform?)",
                 peer_id,
-                peer_kind,
             )
             return False
         if self._allowed_uids is None:
-            log.info(
-                "peer-cred accept: peer=%s kind=%s uid=%d (any-uid policy)",
-                peer_id,
-                peer_kind,
-                uid,
-            )
+            log.info("peer-cred accept: peer=%s uid=%d (any-uid policy)", peer_id, uid)
             return True
         if uid in self._allowed_uids:
-            log.info(
-                "peer-cred accept: peer=%s kind=%s uid=%d", peer_id, peer_kind, uid
-            )
+            log.info("peer-cred accept: peer=%s uid=%d", peer_id, uid)
             return True
         log.warning(
-            "peer-cred reject: peer=%s kind=%s uid=%d not in allow-list %s",
+            "peer-cred reject: peer=%s uid=%d not in allow-list %s",
             peer_id,
-            peer_kind,
             uid,
             sorted(self._allowed_uids),
         )

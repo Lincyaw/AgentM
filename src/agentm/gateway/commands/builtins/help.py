@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 
-from ...bus import OutboundMessage
 from ..protocol import (
     CommandKind,
     CommandContext,
@@ -27,15 +26,7 @@ class HelpCommand:
     ) -> CommandResult:
         del inv
         body = _format_help(ctx.list_commands())
-        return CommandResult(
-            outbound=[
-                OutboundMessage(
-                    channel=ctx.channel,
-                    chat_id=ctx.chat_id,
-                    content=body,
-                )
-            ]
-        )
+        return CommandResult(outbound=[ctx.reply(body)])
 
 
 HANDLER = HelpCommand()

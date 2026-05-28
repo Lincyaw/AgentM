@@ -2,7 +2,7 @@
 
 Two ``typing.Protocol`` definitions form the only extension surface
 for durable delivery in the gateway. The default SQLite implementation
-lives in :mod:`agentm_channels.outbox.sqlite`. A contrib backend
+lives in :mod:`agentm.gateway.outbox.sqlite`. A contrib backend
 (Redis Streams, NATS JetStream, ...) only needs to satisfy these
 Protocols.
 
@@ -11,16 +11,19 @@ delivery semantics this surface supports (at-least-once outbound,
 at-most-once-with-ack inbound, dead-letter on retry exhaustion).
 
 Mechanism only — retry/backoff policy lives in
-:mod:`agentm_channels.outbox.policy` so callers (the server) decide
+:mod:`agentm.gateway.outbox.policy` so callers (the server) decide
 when to nack vs dead_letter and what delay to set.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from agentm_channels.wire import Envelope
+from agentm.gateway.wire import Envelope
+
+from .policy import exponential_backoff
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +75,7 @@ class OutboxStore(Protocol):
         """Release the lease and reschedule for later retry.
 
         ``next_retry_at`` is computed by the caller (see
-        :mod:`agentm_channels.outbox.policy`).
+        :mod:`agentm.gateway.outbox.policy`).
         """
         ...
 
@@ -86,6 +89,41 @@ class OutboxStore(Protocol):
     def pending_count(self, peer_id: str) -> int:
         """Total rows queued for ``peer_id`` regardless of lease state."""
         ...
+
+    # -- delivery-loop hints (first-class, §6) ------------------------
+    # These were ``getattr``-probed optional methods in v1. They are now
+    # declared on the Protocol with default implementations so the server
+    # never has to duck-type — a backend that wants none of them inherits
+    # the no-op / module-default behaviour and stays correct (just at
+    # LEASE_REFRESH_INTERVAL polling granularity).
+
+    def set_notifier(
+        self, peer_id: str, notifier: Callable[[str], None] | None
+    ) -> None:
+        """Register/clear a wakeup callback for ``peer_id``.
+
+        Default: no-op. A backend that supports push-style wakeups (the
+        SQLite default) overrides this so ``enqueue`` can wake the
+        delivery worker immediately instead of waiting on the poll.
+        """
+        return None
+
+    def backoff_delay(self, attempts: int) -> float:
+        """Retry delay after ``attempts`` failures.
+
+        Default: the module-level :func:`exponential_backoff`. Backends
+        that pin a custom schedule override this.
+        """
+        return exponential_backoff(attempts)
+
+    def next_retry_at_min(self, peer_id: str) -> float | None:
+        """Earliest ``next_retry_at`` for any non-leased pending row.
+
+        Default: ``None`` (no hint — the server falls back to the
+        safety-net poll). Backends that can answer cheaply override this
+        for tighter retry-wake latency.
+        """
+        return None
 
     def close(self) -> None:
         """Release storage resources."""
