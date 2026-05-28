@@ -14,6 +14,7 @@ from agentm.core.runtime.extension import (
     _ExtensionAPIImpl,
 )
 from agentm.core.runtime.resource_loader import ResourceLoader
+from agentm.core.runtime.session_inbox import SessionInbox
 from agentm.core.runtime.session_manager import SessionManager
 
 
@@ -31,4 +32,4 @@ class SessionRuntime:
     apis: dict[str, _ExtensionAPIImpl]
     services: dict[str, Any]
     reloader: AtomReloader
-    pending_user_messages: list[str | list[Any]]
+    inbox: SessionInbox

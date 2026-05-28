@@ -48,11 +48,11 @@ from agentm.core.abi import (
     Inject,
     Model,
     NoPendingInput,
+    Step,
     Stop,
     TextContent,
     Tool,
     TurnObservation,
-    UserMessage,
 )
 from agentm.core.abi.events import (
     BeforeAgentStartEvent,
@@ -60,12 +60,17 @@ from agentm.core.abi.events import (
     MessagePersistedEvent,
     SessionShutdownEvent,
 )
+from agentm.core.abi.events import ContextEvent
 from agentm.core.abi.loop import resolve_loop_action
 from agentm.core.runtime.resource_loader import ResourceLoader
 from agentm.core.runtime.session_helpers import (
     collect_start_veto,
     collect_system_replacement,
-    now,
+)
+from agentm.core.runtime.session_inbox import (
+    InboxItem,
+    SessionInbox,
+    render_item,
 )
 from agentm.core.runtime.session_runtime import SessionRuntime
 from agentm.core.runtime.session_manager import SessionManager
@@ -115,7 +120,7 @@ class AgentSession:
         self._extension_api = (
             next(iter(runtime.apis.values())) if runtime.apis else None
         )
-        self._pending_user_messages = runtime.pending_user_messages
+        self._inbox: SessionInbox = runtime.inbox
         self._session_id = session_id
         self._parent_bus = parent_bus
         self._parent_session_id = parent_session_id
@@ -145,6 +150,78 @@ class AgentSession:
         self._bus.on(
             MessagePersistedEvent.CHANNEL, self._on_message_persisted
         )
+
+        # SessionInbox spine (see .claude/designs/session-inbox.md, step 1).
+        # Two runtime-owned handlers, registered as closures over the inbox +
+        # session_manager — NOT atoms (the inbox is substrate). They reuse the
+        # existing loop seams without modifying the kernel ``AgentLoop``:
+        #
+        #  * ``context`` (turn start, loop.py:466): the single message-entry
+        #    point. Drains the inbox and appends every rendered message to the
+        #    turn's message list in place, so the LLM sees pending input on the
+        #    very next turn.
+        #  * ``decide_turn_action`` (turn end): keep-alive floor. If the inbox
+        #    is non-empty, return ``Step()`` so the loop runs another turn
+        #    whose ``context`` will drain it. This generalizes sub_agent's
+        #    lifecycle floor; ``final=True`` causes still hard-win via the
+        #    resolve lattice (loop.py:301).
+        self._bus.on(ContextEvent.CHANNEL, self._on_context_drain_inbox)
+        self._bus.on(
+            DecideTurnActionEvent.CHANNEL, self._on_decide_inbox_keep_alive
+        )
+
+    # --- SessionInbox runtime handlers ------------------------------------
+
+    def _on_context_drain_inbox(self, event: ContextEvent) -> None:
+        """Drain the inbox into the turn's message list (in place) + persist.
+
+        The ``context`` channel lets handlers mutate ``event.messages`` in
+        place (loop.py:472); we append the drained, rendered messages so the
+        prefix stays stable and the KV/prefix cache survives (append-only, per
+        the design's cache-discipline note).
+        """
+
+        self._drain_inbox_and_persist(messages=event.messages)
+
+    def _on_decide_inbox_keep_alive(
+        self, event: DecideTurnActionEvent
+    ) -> Step | None:
+        """Keep the loop alive while the inbox holds undrained items.
+
+        Returning ``Step()`` defers to the next turn, whose ``context``
+        handler drains the inbox. A ``final=True`` default (budget / signal /
+        max_turns) overrides this via ``resolve_loop_action`` (loop.py:301),
+        so a hard ceiling stays hard.
+        """
+
+        del event
+        if not self._inbox.is_empty():
+            return Step()
+        return None
+
+    def _drain_inbox_and_persist(
+        self, *, messages: list[AgentMessage] | None
+    ) -> int:
+        """Shared drain helper: pop every inbox item, render it, persist it via
+        the session manager, and (when ``messages`` is given) splice it into
+        that live list. Returns the number of items drained.
+
+        Persistence mirrors the loop's injected-message contract (loop.py:609,
+        session.py:396): every message that lands in the live context must also
+        reach the session log, or a mid-run kill would lose it. Used by both
+        the per-turn ``context`` handler (with the turn's ``messages`` list) and
+        the ``_drive`` entry (``messages=None`` — the live context list does not
+        exist yet; it is built from the log right after).
+        """
+
+        count = 0
+        for item in self._inbox.drain():
+            rendered = render_item(item)
+            self._session_manager.append_message(rendered)
+            if messages is not None:
+                messages.append(rendered)
+            count += 1
+        return count
 
     def _on_message_persisted(self, event: MessagePersistedEvent) -> None:
         leaf = self._session_manager.get_leaf_id()
@@ -248,9 +325,11 @@ class AgentSession:
     ) -> list[AgentMessage]:
         """Run one user-prompt → assistant-final-answer turn cycle.
 
-        Drains queued ``send_user_message`` content, dispatches slash-commands,
-        budget-gate-checks, drives the kernel loop, appends every new
-        assistant + tool_result message, and returns the full active-branch
+        Sugar over the session inbox (see session-inbox.md, decision §"one
+        entry, one driver"): the caller's text is pushed as a
+        ``source="user"`` inbox item, then :meth:`_drive` runs the loop.
+        Dispatches slash-commands first; drives the kernel loop; appends every
+        new assistant + tool_result message; returns the full active-branch
         message list. Stays a mechanical dispatcher per design §4.
         """
 
@@ -261,44 +340,18 @@ class AgentSession:
         if slash_handled is not None:
             return slash_handled
 
-        # 1. Drain ``send_user_message`` queue (FIFO) into user-message
-        # entries in the session. This is how ``sub_agent.inject_instruction``
-        # and similar extensions push content into the next turn.
-        await self._drain_pending_user_messages()
-
-        # 3. Build the caller's user message, after any drained queue items
-        # so they appear as turn-prefix context.
-        user_msg = self._build_user_message(text=text, images=images)
-        self._append_message(user_msg)
-
-        # 4. Gather active-branch messages and run before_agent_start.
-        messages = self._session_manager.build_session_context().messages
-        system_prompt = self._build_system_prompt()
-        before_returns = await self._bus.emit(
-            BeforeAgentStartEvent.CHANNEL,
-            BeforeAgentStartEvent(messages=messages, system=system_prompt),
-        )
-        veto_cause = collect_start_veto(before_returns)
-        if veto_cause is not None:
-            await self._bus.emit(
-                AgentEndEvent.CHANNEL,
-                AgentEndEvent(messages=messages, cause=veto_cause),
+        # 1. Push the caller's message onto the inbox. ``_drive`` drains it at
+        # entry (before ``build_session_context``) so the originating message
+        # lands before the first LLM call — no first-turn delay. Image-only
+        # prompts still produce a UserMessage (matching the old behaviour
+        # where an empty text yielded an empty-content user message).
+        self._inbox.push(
+            InboxItem(
+                source="user",
+                payload=self._user_payload(text=text, images=images),
             )
-            return messages
-        replacement_system = collect_system_replacement(before_returns)
-        if replacement_system is not None:
-            system_prompt = replacement_system
-
-        # 5. Run the loop. Every new assistant / tool_result / injected
-        # message is persisted in real time by ``_on_message_persisted``;
-        # the loop's return value is the final live list.
-        return await self._loop.run(
-            messages=messages,
-            model=self._require_model(),
-            tools=self._tools,
-            system=system_prompt,
-            signal=signal,
         )
+        return await self._drive(signal=signal)
 
     # --- tick (resume-without-prompt) -------------------------------------
 
@@ -309,40 +362,56 @@ class AgentSession:
     ) -> list[AgentMessage]:
         """Advance the session by one decide-cycle without new user input.
 
-        Used by the CLI when ``agentm --resume <sid>`` is invoked with no
-        positional prompt: harness-injected messages (e.g. the prefix-replay
-        ``reminder_seed`` atom) are the source of the first message, and the
-        kernel must give extensions a chance to ``Inject`` BEFORE any LLM
-        call. Fires :class:`AgentStartEvent` then a synthetic
-        :class:`DecideTurnActionEvent` whose default is
-        ``Stop(NoPendingInput())``; resolves the decision via the same
-        lattice the kernel uses post-turn.
+        Sugar over :meth:`_drive` with no inbox push. Used by the CLI when
+        ``agentm --resume <sid>`` is invoked with no positional prompt:
+        harness-injected messages (e.g. the prefix-replay ``reminder_seed``
+        atom) are the source of the first message, and the kernel must give
+        extensions a chance to ``Inject`` BEFORE any LLM call.
 
-        * On ``Inject(messages=[...])`` — append the injected messages to
-          the live context and hand off to :meth:`AgentLoop.run` for one
-          (or more) normal turns. The next assistant message is persisted
-          identically to the ``prompt`` path.
-        * Otherwise — emit :class:`AgentEndEvent` with
-          ``NoPendingInput()`` and return the unchanged message list. No
-          message for this tick is appended to the session log.
-
-        Drain caveat: ``tick`` still drains the ``send_user_message``
-        queue first, so atoms that pushed content into the queue via
-        :meth:`ExtensionAPI.send_user_message` BEFORE the tick will have
-        their messages persisted as session entries even on the no-
-        injector exit path. That is by design (the queue is the
-        documented entry point for out-of-band content) and matches what
-        ``prompt`` does. The "unchanged trajectory" guarantee above
-        applies only when the queue was empty entering ``tick``.
+        ``_drive`` drains whatever the inbox already holds (e.g. items pushed
+        via :meth:`ExtensionAPI.send_user_message` before the tick) and fires a
+        synthetic :class:`DecideTurnActionEvent` so resume-atoms can ``Inject``.
+        Empty inbox + no injector ⇒ ``AgentEndEvent(NoPendingInput())`` and the
+        unchanged message list (today's tick contract). A pre-tick inbox item is
+        drained and persisted even on the no-injector exit path — by design (the
+        inbox is the documented out-of-band entry point), matching ``prompt``.
         """
 
-        # Drain queued send_user_messages so atoms that pushed content via
-        # the standard queue still get to drive this tick. Harmless when
-        # the queue is empty.
-        await self._drain_pending_user_messages()
+        return await self._drive(signal=signal)
 
-        # Build the live context + system prompt — symmetric with ``prompt``
-        # so before_agent_start handlers see the same state they always do.
+    # --- shared driver ----------------------------------------------------
+
+    async def _drive(
+        self,
+        *,
+        signal: asyncio.Event | None = None,
+    ) -> list[AgentMessage]:
+        """Shared entry for ``prompt``/``tick``: run the loop to idle.
+
+        1. Drain the inbox once at entry (before ``build_session_context``) so
+           any originating / queued message lands before the first LLM call.
+        2. Build the live context + system prompt; run ``before_agent_start``
+           (veto / system replacement) symmetric with the pre-inbox path.
+        3. Fire a synthetic :class:`DecideTurnActionEvent` (default
+           ``Stop(NoPendingInput())``) so resume-atoms may ``Inject`` before
+           any LLM call; the runtime keep-alive floor is a no-op here (the
+           inbox was just drained).
+        4. Run :meth:`AgentLoop.run` if the entry-drain produced any message OR
+           a handler injected/stepped; otherwise emit ``AgentEndEvent`` with the
+           resolved no-work cause and return the unchanged list.
+
+        Persistence of drained / injected messages happens in
+        :meth:`_drain_inbox_and_persist` and the inline inject splice; the
+        kernel loop persists its own assistant / tool_result messages in real
+        time via ``_on_message_persisted``.
+        """
+
+        # 1. Drain the inbox into the session log up front so the originating
+        # message is part of the context the LLM first sees (no live-context
+        # list yet — it is built from the log at step 2).
+        drained_any = self._drain_inbox_and_persist(messages=None) > 0
+
+        # 2. Build the live context + system prompt and run before_agent_start.
         messages = self._session_manager.build_session_context().messages
         system_prompt = self._build_system_prompt()
         before_returns = await self._bus.emit(
@@ -364,6 +433,8 @@ class AgentSession:
             AgentStartEvent.CHANNEL, AgentStartEvent(messages=messages)
         )
 
+        # 3. Synthetic decide-cycle: resume-atoms may ``Inject`` before any
+        # LLM call. The inbox keep-alive floor is a no-op (drained at step 1).
         default_action = Stop(NoPendingInput())
         observation = TurnObservation(
             turn_index=0,
@@ -377,12 +448,15 @@ class AgentSession:
         )
         action = resolve_loop_action(default_action, returns)
 
-        if not isinstance(action, Inject):
-            # No extension provided input → terminate cleanly. The default
-            # ``NoPendingInput`` cause is the literal that observers should
-            # match on. A non-Inject override (Stop / Step) is also treated
-            # as "no work" — Step has no meaning here because there is no
-            # assistant turn to chain off of.
+        if isinstance(action, Inject):
+            # Persist + splice handler-injected messages, then run.
+            for injected_msg in action.messages:
+                self._session_manager.append_message(injected_msg)
+            messages.extend(action.messages)
+        elif not drained_any:
+            # No entry-drained content and no injector → no work this drive.
+            # The default ``NoPendingInput`` cause is the literal observers
+            # match on (a non-Inject Stop override wins via the lattice).
             cause = action.cause if isinstance(action, Stop) else default_action.cause
             await self._bus.emit(
                 AgentEndEvent.CHANNEL,
@@ -390,13 +464,9 @@ class AgentSession:
             )
             return messages
 
-        # Inject — persist each injected message and splice into the live
-        # context. The kernel loop will then persist its assistant /
-        # tool_result messages in real time via ``_on_message_persisted``.
-        for injected_msg in action.messages:
-            self._session_manager.append_message(injected_msg)
-        messages.extend(action.messages)
-
+        # 4. Run the loop. Every new assistant / tool_result / injected message
+        # is persisted in real time by ``_on_message_persisted``; the loop's
+        # return value is the final live list.
         return await self._loop.run(
             messages=messages,
             model=self._require_model(),
@@ -423,31 +493,23 @@ class AgentSession:
         new_text = event.get("text")
         return (new_text if isinstance(new_text, str) else text), None
 
-    async def _drain_pending_user_messages(self) -> None:
-        """Pop every queued ``send_user_message`` payload and append it as a
-        user-message entry. Called once per ``prompt`` before the caller's
-        text is appended, so queued items act as turn-prefix context.
+    def _user_payload(
+        self, *, text: str, images: list[ImageContent] | None
+    ) -> list[TextContent | ImageContent]:
+        """Build the content-block list a ``source="user"`` inbox item carries.
+
+        ``render_item`` turns this into a :class:`UserMessage`. Mirrors the old
+        ``_build_user_message`` shape: text block (if any) then any images, so
+        an image-only prompt still produces a valid user message and an empty
+        text yields an empty-content message exactly as before.
         """
 
-        while self._pending_user_messages:
-            queued = self._pending_user_messages.pop(0)
-            content: list[TextContent | ImageContent]
-            if isinstance(queued, str):
-                content = [TextContent(type="text", text=queued)]
-            else:
-                content = list(queued)
-            queued_msg = UserMessage(role="user", content=content, timestamp=now())
-            self._append_message(queued_msg)
-
-    def _build_user_message(
-        self, *, text: str, images: list[ImageContent] | None
-    ) -> UserMessage:
         content: list[TextContent | ImageContent] = []
         if text:
             content.append(TextContent(type="text", text=text))
         if images:
             content.extend(images)
-        return UserMessage(role="user", content=content, timestamp=now())
+        return content
 
     def _append_message(self, msg: AgentMessage) -> Any:
         return self._session_manager.append_message(msg)

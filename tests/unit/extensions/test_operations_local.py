@@ -16,6 +16,7 @@ from agentm.core.runtime.extension import (
     _ExtensionAPIImpl,
     build_extension_api_scope,
 )
+from agentm.core.runtime.session_inbox import SessionInbox
 
 
 class _SessionView:
@@ -50,7 +51,7 @@ def _api(tmp_path: Path) -> _ExtensionAPIImpl:
         commands={},
         providers={},
         renderers={},
-        pending_user_messages=[],
+        inbox=SessionInbox(),
         model_getter=lambda: None,
         provider_getter=lambda: None,
     )
