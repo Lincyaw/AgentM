@@ -165,6 +165,16 @@ class AgentSession:
         # ``agent_end``. The handler set below fulfills each future once and
         # drops them, so a follow-up prompt subscribes a fresh waiter.
         self._end_waiters: list[asyncio.Future[None]] = []
+        # Serializes ``prompt`` callers (A4 boundary-review fix): two
+        # concurrent ``prompt``s would otherwise both subscribe a waiter on
+        # the same upcoming ``agent_end``, race past the push, and each
+        # return the live message list with whichever prompt's reply landed
+        # last — giving the second caller stale data attributed to its own
+        # turn. The lock FIFO-queues prompts; the driver still owns
+        # ``_loop.run`` exclusively (``tick`` is NOT locked because resume-
+        # atom semantics need to fire a synthetic ``decide_turn_action``
+        # concurrently with an in-flight prompt to deliver injected work).
+        self._prompt_lock: asyncio.Lock = asyncio.Lock()
 
         # Real-time persistence: the loop emits MessagePersistedEvent for
         # every durable addition (assistant turn / tool_result / injected
@@ -420,6 +430,16 @@ class AgentSession:
         message list. The driver is the SOLE caller of ``_loop.run`` — this
         method does no LLM work itself.
 
+        **Concurrent prompts are FIFO-serialized** by
+        :attr:`_prompt_lock` (A4 boundary-review fix). Without the lock, two
+        concurrent ``prompt`` callers both subscribe a waiter for the same
+        upcoming ``agent_end`` and each return the same final message list,
+        attributing the FIRST prompt's reply to the SECOND caller. The lock
+        guarantees each ``prompt`` sees the message list ending in its OWN
+        turn's reply. ``tick`` is intentionally NOT locked: it must remain
+        callable mid-prompt by resume-atoms that fire a synthetic
+        ``decide_turn_action`` to inject work.
+
         Optional ``signal``: if the caller passes an :class:`asyncio.Event`,
         it's one-directionally forwarded into the session's own ``_signal``
         (preempting the in-flight run with :class:`SignalAborted`, same shape
@@ -429,31 +449,36 @@ class AgentSession:
         kernel signal directly.
         """
 
-        # 0. Slash-command dispatch / input preprocessing. Code commands win;
-        # otherwise ``input`` handlers may rewrite slash-prefixed text before
-        # it falls through to the agent loop.
-        text, slash_handled = await self._preprocess_input(text)
-        if slash_handled is not None:
-            return slash_handled
+        async with self._prompt_lock:
+            # 0. Slash-command dispatch / input preprocessing. Code commands
+            # win; otherwise ``input`` handlers may rewrite slash-prefixed
+            # text before it falls through to the agent loop. Done inside the
+            # lock so a slash-handled prompt does not starve later prompts
+            # (it does no LLM work but may still synchronously append
+            # messages we don't want to interleave with another prompt's
+            # turn).
+            text, slash_handled = await self._preprocess_input(text)
+            if slash_handled is not None:
+                return slash_handled
 
-        # 1. Subscribe a waiter BEFORE the push: if the driver was already
-        # awake from a prior wake the run could finish between push and
-        # subscribe, and we'd hang on a fulfilled event we never registered
-        # for.
-        waiter = self._subscribe_end_waiter()
-        forwarder = self._spawn_signal_forwarder(signal)
-        self._inbox.push(
-            InboxItem(
-                source="user",
-                payload=self._user_payload(text=text, images=images),
+            # 1. Subscribe a waiter BEFORE the push: if the driver was
+            # already awake from a prior wake the run could finish between
+            # push and subscribe, and we'd hang on a fulfilled event we
+            # never registered for.
+            waiter = self._subscribe_end_waiter()
+            forwarder = self._spawn_signal_forwarder(signal)
+            self._inbox.push(
+                InboxItem(
+                    source="user",
+                    payload=self._user_payload(text=text, images=images),
+                )
             )
-        )
-        try:
-            await waiter
-        finally:
-            if forwarder is not None:
-                forwarder.cancel()
-        return self._session_manager.get_messages()
+            try:
+                await waiter
+            finally:
+                if forwarder is not None:
+                    forwarder.cancel()
+            return self._session_manager.get_messages()
 
     def _spawn_signal_forwarder(
         self, external: asyncio.Event | None

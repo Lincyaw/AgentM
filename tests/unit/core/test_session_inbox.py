@@ -965,3 +965,96 @@ async def test_tick_external_signal_during_decide_does_not_poison_next_prompt(
         await session.shutdown()
         sys.modules.pop(module_name, None)
 
+
+@pytest.mark.asyncio
+async def test_concurrent_prompts_serialize_no_stale_data(tmp_path: Path) -> None:
+    """A4 fail-stop: two concurrent ``prompt`` callers FIFO-serialize, and
+    each returns a message list ending in ITS OWN turn's reply.
+
+    Without ``_prompt_lock``, both callers subscribe a waiter for the same
+    upcoming ``agent_end``, both unblock together when the FIRST turn
+    finishes, and both call ``session_manager.get_messages()`` before the
+    second turn even starts — the second prompt returns a message list whose
+    last assistant reply is the FIRST prompt's reply (stale data attributed
+    to the wrong caller). The lock prevents that interleave.
+
+    Deterministic per-turn stream so cross-attribution is detectable: the
+    provider stamps a fresh reply each turn, and each prompt's returned
+    message list must end in the reply minted on ITS turn.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._prompt_concurrent_{id(tmp_path)}"
+
+    turn_index = [0]
+    turn_started = _aio.Event()
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del messages, model, tools, system, signal, thinking
+        idx = turn_index[0]
+        turn_index[0] += 1
+        turn_started.set()
+        # Yield control so the second prompt task gets a chance to schedule
+        # while we're "mid-turn" — without the lock this is when its waiter
+        # would attach to the same agent_end as the first prompt.
+        await _aio.sleep(0.01)
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text=f"reply-{idx}")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+
+        # Fire both prompts together. Order is FIFO under the lock: the first
+        # task that *enters* prompt() also acquires the lock first.
+        first = _aio.create_task(session.prompt("first"))
+        # Give the first task a turn on the event loop so it definitely
+        # acquires the lock before the second; otherwise scheduling order is
+        # what the lock would silently rely on.
+        await _aio.sleep(0)
+        second = _aio.create_task(session.prompt("second"))
+
+        first_msgs = await _aio.wait_for(first, timeout=2.0)
+        second_msgs = await _aio.wait_for(second, timeout=2.0)
+
+        # Each prompt's returned list ends in the assistant reply minted on
+        # ITS OWN turn, never the other prompt's. Without the lock both
+        # callers would unblock on the same agent_end and the second would
+        # return reply-0 (the first prompt's reply attributed to the wrong
+        # caller).
+        first_assistant = _texts(first_msgs, "assistant")
+        second_assistant = _texts(second_msgs, "assistant")
+        assert first_assistant[-1] == "reply-0", (
+            f"first prompt got stale reply: {first_assistant}"
+        )
+        assert second_assistant[-1] == "reply-1", (
+            f"second prompt got stale reply: {second_assistant}"
+        )
+        # The second prompt sees BOTH user messages + BOTH replies on the
+        # log — proving the lock made the second prompt wait until the
+        # first's turn was committed before its own turn started.
+        all_user = _texts(second_msgs, "user")
+        assert all_user.index("first") < all_user.index("second")
+        assert "reply-0" in second_assistant
+        assert "reply-1" in second_assistant
+        # And the first prompt returned BEFORE the second prompt ran, so its
+        # message list only sees its own user message and its own reply.
+        assert _texts(first_msgs, "user") == ["first"]
+        assert first_assistant == ["reply-0"]
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
