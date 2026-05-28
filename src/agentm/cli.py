@@ -944,10 +944,10 @@ _BUILTIN_SUBCOMMANDS: dict[str, Any] = {
 def _discover_external_subcommands() -> dict[str, Any]:
     """Scan ``importlib.metadata`` entry points for additional subcommands.
 
-    Each contrib package registers itself via::
+    A contrib package registers itself via::
 
         [project.entry-points."agentm.subcommands"]
-        gateway = "agentm_channels.cli:main"
+        myverb = "my_pkg.cli:main"
 
     Returns ``name → EntryPoint``; the EP is lazily ``.load()``-ed only
     when the user actually invokes the subcommand, so ``agentm --help``
