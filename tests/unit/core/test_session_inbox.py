@@ -967,6 +967,156 @@ async def test_tick_external_signal_during_decide_does_not_poison_next_prompt(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_strict_reraises_driver_exception(tmp_path: Path) -> None:
+    """B6 fail-stop: ``shutdown(strict=True)`` re-raises a driver-thrown
+    exception that the default-False path silently swallows + logs.
+
+    Setup: cancel the driver task ourselves to a custom RuntimeError-shaped
+    exception (matches the "driver raised mid-round" shape ``shutdown``'s
+    broad-except catches), then call ``shutdown(strict=True)`` and assert
+    the exception propagates. ``strict=False`` on a sibling session swallows
+    the same shape — preserving the legacy CLI path.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._shutdown_strict_{id(tmp_path)}"
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del messages, model, tools, system, signal, thinking
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text="ok")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    async def _inject_failure(session: AgentSession) -> None:
+        """Replace the driver task with one that raises a known exception
+        on await, simulating the "driver task raised after shutdown was
+        already in flight" path the broad-except in shutdown() catches."""
+
+        # The original driver is parked on wait_nonempty; cancel + replace
+        # with a task that raises a tagged error so the test can pin the
+        # propagation.
+        session._driver_task.cancel()
+        try:
+            await session._driver_task
+        except _aio.CancelledError:
+            pass
+
+        async def _raises() -> None:
+            raise RuntimeError("driver-crash-B6")
+
+        session._driver_task = _aio.create_task(_raises())
+        # Let the replacement task run to terminal state so wait_for sees
+        # the exception, not a still-pending task.
+        await _aio.sleep(0)
+
+    # Strict path → re-raises.
+    session_strict = await _make_session(tmp_path, module_name, stream_fn)
+    try:
+        await _inject_failure(session_strict)
+        with pytest.raises(RuntimeError, match="driver-crash-B6"):
+            await session_strict.shutdown(strict=True)
+    finally:
+        sys.modules.pop(module_name, None)
+
+    # Default path → swallows + logs (the legacy CLI contract).
+    module_name2 = f"tests.unit._shutdown_default_{id(tmp_path)}"
+    session_default = await _make_session(tmp_path, module_name2, stream_fn)
+    try:
+        await _inject_failure(session_default)
+        # Must NOT raise.
+        await session_default.shutdown()
+    finally:
+        sys.modules.pop(module_name2, None)
+
+
+@pytest.mark.asyncio
+async def test_discarded_inbox_items_leave_session_trace(tmp_path: Path) -> None:
+    """B2 fail-stop: items discarded by ``_drain_inbox_on_early_return``
+    must be appended to the session log as a structured ``inbox.discarded``
+    entry so the original payload is recoverable from the trace.
+
+    Previously the discard was log-only — a sticky veto on a user prompt
+    silently dropped the prompt text. The B2 fix appends an
+    ``append_custom_entry("inbox.discarded", ...)`` capturing the reason,
+    every source, and the verbatim payload of each discarded item.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._inbox_discarded_trace_{id(tmp_path)}"
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del messages, model, tools, system, signal, thinking
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text="unreachable")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    def _sticky_veto(_event: Any) -> dict[str, Any]:
+        return {
+            "block": True,
+            "cause": BudgetExhausted(detail="b2-discard test"),
+        }
+
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        session._bus.on(BeforeAgentStartEvent.CHANNEL, _sticky_veto)
+
+        # The veto path triggers ``_drain_inbox_on_early_return`` after the
+        # originating push has been consumed by the driver but before the
+        # kernel ``context`` event fires.
+        await _aio.wait_for(session.prompt("vetoed user input"), timeout=2.0)
+
+        # The session log must carry an inbox.discarded entry whose payload
+        # records the reason, the sources, and the original user content.
+        entries = session.session_manager.get_entries()
+        discarded = [e for e in entries if e.type == "inbox.discarded"]
+        assert len(discarded) == 1, (
+            f"expected exactly one inbox.discarded entry; got {len(discarded)}"
+        )
+        payload = discarded[0].payload
+        assert payload["sources"] == ["user"], payload
+        assert "veto" in payload["reason"].lower(), payload["reason"]
+        items = payload["items"]
+        assert len(items) == 1
+        # The original user content blocks survive into the trace verbatim
+        # (the session manager runs them through to_jsonable on write).
+        item_payload = items[0]["payload"]
+        # The user payload is a list of TextContent dataclass instances; the
+        # trace stores them as their dataclass repr through to_jsonable.
+        rendered_text = str(item_payload)
+        assert "vetoed user input" in rendered_text, rendered_text
+        assert items[0]["source"] == "user"
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
 async def test_concurrent_prompts_serialize_no_stale_data(tmp_path: Path) -> None:
     """A4 fail-stop: two concurrent ``prompt`` callers FIFO-serialize, and
     each returns a message list ending in ITS OWN turn's reply.

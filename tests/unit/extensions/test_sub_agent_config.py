@@ -1,36 +1,36 @@
-"""Fail-stop coverage for ``sub_agent`` config propagation (A3).
+"""Fail-stop coverage for ``sub_agent`` boundary-review fixes (A3 + B3).
 
-Validates that the ``shutdown_grace_seconds`` config knob added in the
-boundary-review polish flows from ``install(config)`` into the manager and
-bounds the actual ``on_session_shutdown`` drain. The integration suites
-(``test_sub_agent_lifecycle`` / ``test_sub_agent_budgets``) cover the full
-child-session lifecycle behaviour — this is a focused fail-stop test for the
-config propagation alone, so a future refactor cannot silently revert the
-constant-extracted shutdown grace back to a hard-coded ``5.0``.
+* A3: ``shutdown_grace_seconds`` config knob propagation from
+  ``install(config)`` into the manager and the actual drain.
+* B3: counter-reset encapsulation — pin that ``ToolCallEvent`` on the bus
+  resets ``_running_only_cancels`` (the single source of truth that replaced
+  the five per-tool ``await self._reset_running_only_cancels()`` callsites).
+
+The integration suites (``test_sub_agent_lifecycle`` /
+``test_sub_agent_budgets``) cover the full child-session lifecycle and
+auto-abort behaviour — those tests are the behaviour-unchanged proof. These
+unit tests pin the mechanism so a future refactor cannot silently revert
+either piece (e.g. re-add a hard-coded ``5.0``, or drop the
+``ToolCallEvent`` subscription so the counter only resets on sub_agent's
+own tools).
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any, cast
+from typing import cast
 
 import pytest
 
+from agentm.core.abi import ToolCallEvent
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions.builtin.sub_agent import _ChildTask, _ChildTaskManager
+from tests.unit.extensions._fake_api import FakeExtensionAPI
 
-
-class _FakeApi:
-    """Minimal stub for the ExtensionAPI bits ``_ChildTaskManager`` touches in
-    its shutdown drain. Construction-only — no dispatch is exercised here."""
-
-    def __init__(self) -> None:
-        self._handlers: dict[str, list[Any]] = {}
-
-    def on(self, channel: str, handler: Any, *, priority: int = 500) -> Any:
-        self._handlers.setdefault(channel, []).append(handler)
-        return lambda: None
+# Alias for diff continuity; the shared helper is enough for the wiring
+# tests below (subscribe + a no-op register_tool wired in test_install_*).
+_FakeApi = FakeExtensionAPI
 
 
 @pytest.mark.asyncio
@@ -83,3 +83,59 @@ async def test_shutdown_grace_seconds_config_bounds_drain() -> None:
     # overhead — would have been ~5s with the previous hard-coded constant.
     assert elapsed < 1.0, f"drain took {elapsed:.3f}s — grace config not honoured"
     assert coop_task.done()
+
+
+def test_tool_call_event_resets_running_only_cancels() -> None:
+    """B3 fail-stop: a ``ToolCallEvent`` on the bus resets
+    ``_running_only_cancels`` (the single source of truth that replaced
+    the five per-tool ``await self._reset_running_only_cancels()``
+    callsites).
+
+    Deliberately ANY tool name, not just sub_agent's own — that's the
+    behaviour the bus-subscription approach gives us (the agent is engaged
+    whenever it invokes any tool, regardless of which atom owns it). The
+    handler is sync (single int assignment) so the test calls it directly.
+    """
+
+    manager = _ChildTaskManager(
+        api=cast(ExtensionAPI, _FakeApi()),
+        inherit_extensions=[],
+        available_inherited={},
+        max_workers=4,
+        system_prompt_module="agentm.extensions.builtin.system_prompt",
+    )
+    # Force a non-zero counter (the decide_turn_action path puts it there).
+    manager._running_only_cancels = 1
+
+    # ANY tool — even one not owned by sub_agent — fires the reset. That
+    # was the whole point of moving off the per-method callsites.
+    event = ToolCallEvent(
+        tool_call_id="t1",
+        tool_name="bash",  # not a sub_agent tool
+        args={},
+    )
+    manager._on_tool_call_reset_counter(event)
+    assert manager._running_only_cancels == 0
+
+
+def test_install_subscribes_tool_call_handler() -> None:
+    """B3 wiring: ``install`` registers the ToolCallEvent handler so the
+    reset mechanism is actually wired up (a forgotten subscription would
+    silently re-enable the unbounded counter)."""
+
+    api = _FakeApi()
+    # ``install`` also calls ``register_tool`` — give the fake just enough
+    # surface to absorb those without crashing the wiring path under test.
+    api.register_tool = lambda tool: None  # type: ignore[attr-defined,method-assign]
+
+    async def _drive() -> None:
+        from agentm.extensions.builtin import sub_agent
+
+        await sub_agent.install(cast(ExtensionAPI, api), {})
+
+    asyncio.run(_drive())
+    handlers = api._handlers.get(ToolCallEvent.CHANNEL, [])
+    assert len(handlers) == 1, (
+        f"install() must subscribe exactly one ToolCallEvent handler; "
+        f"got {len(handlers)}"
+    )

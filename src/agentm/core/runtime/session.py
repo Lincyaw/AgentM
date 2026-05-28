@@ -296,17 +296,53 @@ class AgentSession:
         or with the exception via ``_fail_end_waiters``), so silently
         re-running the vetoed/failed work on the queued message would be
         wrong. If the user wants to try again they re-push.
+
+        **Trace fidelity (B2 boundary-review fix)**: the discarded items are
+        also appended as a structured ``inbox.discarded`` custom entry on the
+        session log so the prompt text is not silently lost to the warning
+        log only. Replay tooling and post-hoc auditors can now distinguish
+        "vetoed user input" from "no user input ever arrived".
         """
 
         drained = self._inbox.drain()
-        if drained:
-            logger.warning(
-                "agentm session driver: discarded %d undrained inbox "
-                "item(s) after a pre-context-event early return (%s; "
-                "sources=%r) to avoid driver spin",
-                len(drained),
-                reason,
-                [item.source for item in drained],
+        if not drained:
+            return
+        logger.warning(
+            "agentm session driver: discarded %d undrained inbox "
+            "item(s) after a pre-context-event early return (%s; "
+            "sources=%r) to avoid driver spin",
+            len(drained),
+            reason,
+            [item.source for item in drained],
+        )
+        # ``payload`` may be a JSON-native shape (str / dict / list of
+        # TextContent/ImageContent dataclasses). The session manager runs the
+        # whole payload through to_jsonable before persisting, so attaching
+        # the original payload object is safe; if a producer wedges in a
+        # non-serialisable type the persistence path will fail loudly there
+        # rather than silently here.
+        try:
+            self._session_manager.append_custom_entry(
+                "inbox.discarded",
+                {
+                    "reason": reason,
+                    "sources": [item.source for item in drained],
+                    "items": [
+                        {
+                            "source": item.source,
+                            "payload": item.payload,
+                            "dedup_key": item.dedup_key,
+                        }
+                        for item in drained
+                    ],
+                },
+            )
+        except Exception:
+            # The warning log already captured the discard; a persistence
+            # hiccup here must not crash the driver or hide the original
+            # early-return path.
+            logger.exception(
+                "agentm session driver: failed to persist inbox.discarded entry"
             )
 
     def _on_message_persisted(self, event: MessagePersistedEvent) -> None:
@@ -533,8 +569,12 @@ class AgentSession:
         launched_run = False
         try:
             if not self._inbox.is_empty():
+                # C1 boundary-review fix: NO ``kick`` here. The inbox is
+                # already non-empty, so the driver's ``wait_nonempty`` is
+                # already past the await (or returns immediately on the
+                # next loop turn); an extra ``kick`` is a no-op
+                # (``asyncio.Event.set`` on an already-set event).
                 waiter = self._subscribe_end_waiter()
-                self._inbox.kick()  # no new item, but wake the driver to drain.
                 launched_run = True
                 await waiter
                 return self._session_manager.get_messages()
@@ -827,7 +867,7 @@ class AgentSession:
 
     # --- Lifecycle --------------------------------------------------------
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, strict: bool = False) -> None:
         """Signal extensions and clear handlers.
 
         Order matters:
@@ -843,6 +883,12 @@ class AgentSession:
 
         Idempotent: a second ``shutdown`` call is a no-op (the driver task is
         already terminal and ``_closed`` is sticky).
+
+        ``strict``: when ``True``, a captured driver exception is re-raised
+        AFTER the bus is drained / parent is notified / catalog is indexed —
+        the cleanup still runs, but the embedding host gets the failure to
+        propagate. ``False`` (the default, CLI-friendly) swallows + logs
+        the same way prior versions did. B6 boundary-review fix.
         """
 
         if self._closed:
@@ -850,6 +896,10 @@ class AgentSession:
         self._closed = True
         self._signal.set()
         self._inbox.kick()
+        # Captured driver exception, re-raised in strict mode AFTER the
+        # remainder of shutdown runs so the embedding host gets cleanup +
+        # failure both.
+        driver_exc: BaseException | None = None
         try:
             await asyncio.wait_for(
                 self._driver_task, timeout=_DRIVER_SHUTDOWN_GRACE_SECONDS
@@ -866,13 +916,12 @@ class AgentSession:
             # Log the exception class explicitly so an embedding host can
             # tell "clean shutdown" from "driver crashed during shutdown"
             # from the log line alone (``logger.exception`` still attaches
-            # the traceback). A future ``shutdown(strict=True)`` could
-            # re-raise after the bus is drained for hosts that want to
-            # propagate the failure; tracked as a follow-up.
+            # the traceback). Captured for ``strict=True`` re-raise below.
             logger.exception(
                 "agentm session driver: shutdown await raised (%s); continuing",
                 type(exc).__name__,
             )
+            driver_exc = exc
 
         # Any prompt/tick still parked on a waiter will never see its
         # agent_end (the driver is gone). Cancel them so the caller surfaces
@@ -929,6 +978,13 @@ class AgentSession:
                     self._eval_sandbox,
                     exc,
                 )
+
+        # B6 boundary-review fix: in strict mode, propagate the captured
+        # driver exception AFTER cleanup finished. The bus is drained, the
+        # parent is notified, the catalog is indexed — the host gets a
+        # clean half-shutdown PLUS the failure to act on.
+        if strict and driver_exc is not None:
+            raise driver_exc
 
     # --- Helpers ----------------------------------------------------------
 

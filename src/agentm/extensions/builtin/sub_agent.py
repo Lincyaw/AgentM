@@ -29,6 +29,7 @@ from agentm.core.abi import (
     ModelEndTurn,
     Stop,
     TextContent,
+    ToolCallEvent,
     ToolResult,
     ToolTerminated,
     UserMessage,
@@ -76,6 +77,7 @@ MANIFEST = ExtensionManifest(
         "event:decide_turn_action",
         "event:session_shutdown",
         "event:session_ready",
+        "event:tool_call",
     ),
     config_schema={
         "type": "object",
@@ -516,11 +518,31 @@ class _ChildTaskManager:
         )
         self._parent_session_id = "unknown"
         self._root_session_id = "unknown"
+        # Auto-abort counter (see ``decide_turn_action``): increments on a
+        # consecutive ``ModelEndTurn`` with empty text AND running children,
+        # triggering an auto-abort on the second strike. Reset on ANY tool
+        # call (sync handler subscribed to ``ToolCallEvent`` in ``install``):
+        # if the agent is actively invoking tools it is engaged and should
+        # not be auto-aborted out of its workflow. B3 boundary-review fix:
+        # this was five per-tool ``await self._reset_running_only_cancels()``
+        # callsites; the single bus subscription collapses the footgun
+        # surface (a forgotten reset can no longer silently change
+        # auto-abort behaviour).
         self._running_only_cancels = 0
 
-    async def _reset_running_only_cancels(self) -> None:
-        async with self._registry.lock:
-            self._running_only_cancels = 0
+    def _on_tool_call_reset_counter(self, _event: ToolCallEvent) -> None:
+        """Reset the running-only-cancels counter on any tool invocation.
+
+        Subscribed to ``ToolCallEvent.CHANNEL`` at ``install`` time. The
+        kernel fires this BEFORE the tool executes (``loop.py``); a sync
+        handler is sufficient because the reset is a single attribute
+        assignment with no async needs. Behaviourally equivalent to the
+        pre-B3 per-tool resets — the integration suites
+        (``test_sub_agent_lifecycle`` / ``test_sub_agent_budgets``) prove
+        the auto-abort semantics are unchanged.
+        """
+
+        self._running_only_cancels = 0
 
     async def _abort_running_states(
         self, running: list[_ChildTask]
@@ -658,7 +680,6 @@ class _ChildTaskManager:
             return state.final_messages
 
     async def dispatch(self, args: dict[str, Any]) -> ToolResult:
-        await self._reset_running_only_cancels()
         purpose = str(args.get("purpose", "subagent"))
         prompt = str(args.get("prompt", ""))
         subagent_type = args.get("subagent_type")
@@ -786,7 +807,6 @@ class _ChildTaskManager:
         )
 
     async def check_tasks(self, _args: dict[str, Any]) -> ToolResult:
-        await self._reset_running_only_cancels()
         await self._registry.poll_first_completed()
         async with self._registry.lock:
             tasks = self._registry.values()
@@ -796,7 +816,6 @@ class _ChildTaskManager:
         return _tool_result({"tasks": [_task_payload(state) for state in tasks]})
 
     async def wait_subagent(self, args: dict[str, Any]) -> ToolResult:
-        await self._reset_running_only_cancels()
         task_id = str(args.get("task_id", ""))
         async with self._registry.lock:
             if self._registry.get(task_id) is None:
@@ -813,7 +832,6 @@ class _ChildTaskManager:
         return _tool_result(payload)
 
     async def inject_instruction(self, args: dict[str, Any]) -> ToolResult:
-        await self._reset_running_only_cancels()
         task_id = str(args.get("task_id", ""))
         message = str(args.get("message", ""))
         async with self._registry.lock:
@@ -836,7 +854,6 @@ class _ChildTaskManager:
         return _tool_result({"task_id": task_id, "status": _RUNNING})
 
     async def abort(self, args: dict[str, Any]) -> ToolResult:
-        await self._reset_running_only_cancels()
         task_id = str(args.get("task_id", ""))
         # The two distinct error messages (unknown vs already-terminal) are
         # part of this tool's observable contract, so resolve the handle here
@@ -1012,6 +1029,11 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.on(SessionReadyEvent.CHANNEL, manager.on_session_ready)
     api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
     api.on(DecideTurnActionEvent.CHANNEL, manager.decide_turn_action)
+    # B3 boundary-review fix: encapsulate the counter reset behind the bus
+    # so any tool invocation drives it (not just sub_agent's own tools).
+    # ToolCallEvent fires per tool call BEFORE execute, sync handler is
+    # sufficient (single int assignment).
+    api.on(ToolCallEvent.CHANNEL, manager._on_tool_call_reset_counter)
     api.register_tool(
         FunctionTool(
             name="dispatch_agent",

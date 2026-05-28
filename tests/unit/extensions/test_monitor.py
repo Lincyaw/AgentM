@@ -23,50 +23,16 @@ import pytest
 from agentm.core.abi import TextContent, ToolResult
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
-from agentm.core.runtime.session_inbox import InboxItem, SessionInbox, render_item
+from agentm.core.runtime.session_inbox import InboxItem, render_item
 from agentm.extensions.builtin import monitor
 from agentm.extensions.builtin.monitor import _MonitorManager
+from tests.unit.extensions._fake_api import FakeExtensionAPI
 
-
-class _FakeApi:
-    """Minimal ExtensionAPI surface ``monitor`` touches.
-
-    ``post_inbox`` delegates to a real :class:`SessionInbox`; ``on`` records
-    handlers per channel and hands back a real ``Unsubscribe`` that drops the
-    matching entry so the test can fire a channel by calling its handlers and
-    verify subscribe/unsubscribe semantics.
-    """
-
-    def __init__(self) -> None:
-        self.tools: list[Any] = []
-        self.inbox = SessionInbox()
-        self._handlers: dict[str, list[Any]] = {}
-
-    def post_inbox(
-        self, *, source: str, payload: Any, dedup_key: str | None = None
-    ) -> None:
-        self.inbox.push(
-            InboxItem(source=source, payload=payload, dedup_key=dedup_key)
-        )
-
-    def register_tool(self, tool: Any) -> None:
-        self.tools.append(tool)
-
-    def on(self, channel: str, handler: Any, *, priority: int = 500) -> Any:
-        bucket = self._handlers.setdefault(channel, [])
-        bucket.append(handler)
-
-        def _unsub() -> None:
-            if handler in bucket:
-                bucket.remove(handler)
-
-        return _unsub
-
-    def fire(self, channel: str, event: Any) -> None:
-        """Test helper — invoke every subscribed handler for ``channel``."""
-
-        for h in list(self._handlers.get(channel, [])):
-            h(event)
+# Alias for diff continuity with the pre-B7 tests; the shared helper IS the
+# minimal ExtensionAPI shim these tests rely on (subscribe/unsubscribe,
+# post_inbox + dedup, and a ``fire(channel, event)`` test sugar to dispatch
+# subscribed handlers without standing up the real EventBus).
+_FakeApi = FakeExtensionAPI
 
 
 def _manager(api: _FakeApi) -> _MonitorManager:

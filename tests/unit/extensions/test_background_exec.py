@@ -36,9 +36,13 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
-from agentm.core.runtime.session_inbox import InboxItem, SessionInbox
 from agentm.extensions.builtin import background_exec
 from agentm.extensions.builtin.background_exec import _BgManager, _BgTool
+from tests.unit.extensions._fake_api import FakeExtensionAPI
+
+# Alias for diff continuity with the pre-B7 tests; the shared helper IS the
+# minimal ExtensionAPI shim these tests rely on.
+_FakeApi = FakeExtensionAPI
 
 
 class _FakeTool:
@@ -54,33 +58,6 @@ class _FakeTool:
         self, args: dict[str, Any], *, signal: asyncio.Event | None = None
     ) -> Any:
         return await self._fn(args, signal)
-
-
-class _FakeApi:
-    """Fake ExtensionAPI exposing the surface ``background_exec`` touches.
-
-    ``post_inbox`` delegates to a real :class:`SessionInbox` so dedup-replace
-    semantics are the genuine ones; the runtime impl does exactly this.
-    """
-
-    def __init__(self) -> None:
-        self.tools: list[Any] = []
-        self.inbox = SessionInbox()
-        self._handlers: dict[str, list[Any]] = {}
-
-    def post_inbox(
-        self, *, source: str, payload: Any, dedup_key: str | None = None
-    ) -> None:
-        self.inbox.push(
-            InboxItem(source=source, payload=payload, dedup_key=dedup_key)
-        )
-
-    def register_tool(self, tool: Any) -> None:
-        self.tools.append(tool)
-
-    def on(self, channel: str, handler: Any, *, priority: int = 500) -> Any:
-        self._handlers.setdefault(channel, []).append(handler)
-        return lambda: None
 
 
 def _manager(api: _FakeApi, *, timeout: float = 60.0, **kw: Any) -> _BgManager:

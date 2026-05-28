@@ -109,13 +109,20 @@ class SessionInbox:
     def kick(self) -> None:
         """Wake :meth:`wait_nonempty` without enqueuing an item.
 
-        Used by :meth:`AgentSession.tick` when a synthetic
-        ``decide_turn_action`` handler injects messages directly into the
-        session log (so the next ``loop.run`` will see them via
-        ``build_session_context``): the driver still needs to be woken even
-        though no inbox item carries the content. The kick is one-shot —
-        ``drain`` clears the event, so the driver returns to blocking on its
-        next iteration without a stale "kicked" flag.
+        **Contract**: the caller MUST guarantee a downstream :meth:`drain`
+        (the kernel ``context`` event will call it) OR a driver exit before
+        the next ``wait_nonempty`` iteration. Otherwise ``wait_nonempty``
+        returns immediately on the next iteration (the event is still set)
+        AND the driver tight-loops with no work to do. The two existing
+        callsites both honour this:
+
+        * :meth:`AgentSession.tick` (inject path): the kick is paired with
+          messages appended directly to the session log; the next
+          ``loop.run`` runs a real turn whose ``context`` handler drains
+          the (empty) inbox and clears the event.
+        * :meth:`AgentSession.shutdown`: flips ``_closed`` BEFORE the kick;
+          the driver's ``if self._closed: return`` check after
+          ``wait_nonempty`` exits the loop.
         """
 
         self._nonempty.set()
