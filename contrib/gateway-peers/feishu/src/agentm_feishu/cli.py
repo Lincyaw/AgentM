@@ -40,12 +40,10 @@ from typing import Annotated
 
 import typer
 
-from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
-from agentm_channels.client import AuthError, WireClient
-from agentm_channels.client_cli import ConnectError, ConnectOptions, resolve_connect
-from agentm_channels.wire import (
-    KIND_BYE,
-    KIND_DELIVERY_BATCH,
+from agentm.gateway import DEFAULT_SOCKET_URL, autoload_dotenv
+from agentm.gateway.client import AuthError, WireClient
+from agentm.gateway.client_cli import ConnectError, ConnectOptions, resolve_connect
+from agentm.gateway.wire import (
     KIND_ERROR,
     KIND_OUTBOUND,
     KIND_PING,
@@ -124,7 +122,9 @@ def _resolve_config(
     app_id: str | None,
     app_secret_path: str | None,
     allow_from: list[str] | None,
-    chat_id_prefix: str,
+    channel_name: str,
+    scenario: str | None,
+    session_scope: str,
 ) -> FeishuConfig:
     """Materialize the adapter config or exit 2."""
     resolved_app_id = app_id or os.environ.get("LARK_APP_ID", "").strip()
@@ -143,12 +143,20 @@ def _resolve_config(
             "pass --app-secret PATH or set LARK_APP_SECRET",
         )
         raise typer.Exit(code=EXIT_USAGE)
+    if session_scope not in ("chat", "user"):
+        _err(
+            "bad-argument",
+            f"--session-scope {session_scope!r} is not 'chat' or 'user'",
+            "choose 'chat' (shared session per chat) or 'user' (per sender)",
+        )
+        raise typer.Exit(code=EXIT_USAGE)
     return FeishuConfig(
         app_id=resolved_app_id,
         app_secret=resolved_app_secret,
         allow_from=list(allow_from) if allow_from else ["*"],
-        chat_id_prefix=chat_id_prefix,
-        channel_name=chat_id_prefix,
+        channel_name=channel_name,
+        scenario=scenario,
+        session_scope=session_scope,
     )
 
 
@@ -283,14 +291,35 @@ def cli(
             ),
         ),
     ] = None,
-    chat_id_prefix: Annotated[
+    channel_name: Annotated[
         str,
         typer.Option(
-            "--chat-id-prefix",
+            "--channel-name",
             metavar="STR",
             help="Channel name reported on inbound envelopes (default: feishu).",
         ),
     ] = "feishu",
+    scenario: Annotated[
+        str | None,
+        typer.Option(
+            "--scenario",
+            envvar="AGENTM_SCENARIO",
+            help=(
+                "Scenario the gateway builds new sessions in (sent on the "
+                "first message per chat). Default: gateway default."
+            ),
+        ),
+    ] = None,
+    session_scope: Annotated[
+        str,
+        typer.Option(
+            "--session-scope",
+            help=(
+                "How session_key is composed (§3.4): 'chat' = one session "
+                "per chat (default); 'user' = per sender within a chat."
+            ),
+        ),
+    ] = "chat",
     check_config: Annotated[
         bool,
         typer.Option(
@@ -335,7 +364,7 @@ def cli(
         LARK_APP_ID=cli_xxxx LARK_APP_SECRET=... \\
           agentm-feishu --connect unix:///tmp/gw.sock
     """
-    from agentm_channels import resolve_token
+    from agentm.gateway import resolve_token
 
     try:
         effective_token = resolve_token(token, token_file)
@@ -358,7 +387,9 @@ def cli(
                 app_id=app_id,
                 app_secret_path=app_secret,
                 allow_from=allow_from,
-                chat_id_prefix=chat_id_prefix,
+                channel_name=channel_name,
+                scenario=scenario,
+                session_scope=session_scope,
                 check_config=check_config,
             )
         )
@@ -376,7 +407,9 @@ async def _arun(
     app_id: str | None,
     app_secret_path: str | None,
     allow_from: list[str] | None,
-    chat_id_prefix: str,
+    channel_name: str,
+    scenario: str | None,
+    session_scope: str,
     check_config: bool,
 ) -> int:
     connect = connect_opts.connect
@@ -386,13 +419,15 @@ async def _arun(
         app_id=app_id,
         app_secret_path=app_secret_path,
         allow_from=allow_from,
-        chat_id_prefix=chat_id_prefix,
+        channel_name=channel_name,
+        scenario=scenario,
+        session_scope=session_scope,
     )
 
     if check_config:
         return EXIT_OK
 
-    peer_id = f"feishu-{uuid.uuid4().hex[:8]}"
+    peer_name = f"feishu-{uuid.uuid4().hex[:8]}"
     stop_event = asyncio.Event()
     exit_code = EXIT_OK
     adapter: FeishuAdapter | None = None
@@ -407,13 +442,7 @@ async def _arun(
             except Exception:  # noqa: BLE001
                 log.exception("adapter.handle_outbound failed id=%s", env.id)
             return
-        if env.kind == KIND_DELIVERY_BATCH:  # pragma: no cover — unwrapped upstream
-            return
         if env.kind in (KIND_PING, KIND_PONG):
-            return
-        if env.kind == KIND_BYE:
-            log.info("gateway sent BYE; shutting down")
-            stop_event.set()
             return
         if env.kind == KIND_ERROR:
             body = env.body if isinstance(env.body, dict) else {}
@@ -430,8 +459,7 @@ async def _arun(
 
     client = WireClient(
         transport=transport,
-        peer_id=peer_id,
-        peer_kind="chat_client",
+        peer_name=peer_name,
         token=token,
         on_outbound=on_outbound,
     )

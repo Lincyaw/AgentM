@@ -1,18 +1,15 @@
-"""Feishu / Lark adapter for the ``agentm-feishu`` client process.
+"""Feishu / Lark adapter for the ``agentm-feishu`` chat-client peer (v2).
 
-Lifted from the legacy in-process ``FeishuChannel`` driver in
-``agentm_channels.channels.feishu``. Interface differences:
+Owns a :class:`WireClient`, maps Feishu message / card-action events to
+v2 ``inbound`` envelopes (computing ``session_key`` per §3.4 and sending
+``scenario`` on the first message for a chat), and renders ``outbound``
+envelopes as schema-2.0 interactive cards.
 
-* No ``BaseChannel`` parent. The adapter is a plain class that owns a
-  :class:`WireClient` and pushes inbound traffic out over the wire
-  instead of an in-process :class:`MessageBus`.
-* Outbound delivery is no longer dispatched by a manager; the CLI's
-  wire read loop calls :meth:`handle_outbound` for every
-  ``KIND_OUTBOUND`` envelope from the gateway.
-
-Card schema 2.0, approval buttons, the ACK-emoji reaction handling,
-``cardAction`` → ``button_value`` round-trip, and ``thread_id`` →
-``session_key`` mapping are preserved byte-for-byte.
+The v1 in-place card-streaming machinery is gone: v2 emits one
+assistant-text outbound per turn (§2.5), so each outbound is a fresh
+card. (Card streaming is a Phase-2 polish item.) ``metadata.kind`` picks
+the render style; approval cards carry ``buttons`` whose ``value``
+round-trips back as ``button_value``.
 """
 
 from __future__ import annotations
@@ -23,14 +20,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from agentm_channels.client import WireClient
-from agentm_channels.wire import KIND_INBOUND, WIRE_VERSION, Envelope
+from agentm.gateway.client import WireClient
+from agentm.gateway.wire import KIND_INBOUND, WIRE_VERSION, Envelope
 
 log = logging.getLogger("agentm_feishu.adapter")
 
 
-# Mirrors ``agentm_channels.bus.ButtonStyle`` without depending on the
-# enum module — the adapter sees raw outbound bodies off the wire.
+# Maps the typed v2 button style to Lark's button type.
 _BUTTON_STYLE_MAP: dict[str, str] = {
     "primary": "primary",
     "danger": "danger",
@@ -43,20 +39,10 @@ async def _cancel_lark_tasks() -> None:
 
     lark-oapi's WS client schedules ``_ping_loop`` / ``_receive_message_loop``
     / ``ExpiringCache._start_clear_cron`` via ``loop.create_task`` on a
-    separate loop installed by :func:`apply_ws_patch` and run in a
-    daemon thread. lark's own teardown stops that loop after closing
-    the WebSocket — but the tasks scheduled on it are left pending,
-    and the stopped loop can't process ``task.cancel()`` callbacks
-    from our main thread. The asyncio garbage collector then logs
-    "Task was destroyed but it is pending" at process exit.
-
-    Trying to restart that loop from our main thread fights both
-    ``asyncio.run`` (only one loop per thread) and the bg thread that
-    used to drive it. The pragmatic move is to (a) flag the tasks
-    cancelled for hygiene, then (b) silence the asyncio warning for
-    coroutines that live in ``lark_oapi.*`` — those tasks are owned by
-    a daemon thread that dies with the process anyway, so the warning
-    has no remediation value. See :func:`_install_lark_warning_filter`.
+    separate loop run in a daemon thread. lark's teardown stops that loop
+    but leaves the tasks pending, so the asyncio GC logs "Task was
+    destroyed but it is pending" at exit. We flag them cancelled for
+    hygiene; the cli's log filter silences the residual warning.
     """
     try:
         import lark_oapi.ws.client as _ws_client  # noqa: PLC0415
@@ -80,54 +66,16 @@ class FeishuConfig:
     app_id: str
     app_secret: str
     allow_from: list[str] = field(default_factory=lambda: ["*"])
-    chat_id_prefix: str = "feishu"
     ack_emoji: str = "OK"
     channel_name: str = "feishu"
-    """Channel name announced on inbound envelopes. The gateway uses it
-    as the synthetic-channel key registered through ``inject_channel``.
-    """
-    stream_debounce_s: float = 0.3
-    """Trailing-edge debounce window for streamed message updates.
-    Feishu's ``update_card`` is rate-limited to roughly 5 QPS per
-    message; coalescing rapid updates into one patch every ~300 ms
-    keeps us comfortably under that ceiling while still feeling live.
-    """
-
-
-@dataclass(slots=True)
-class _StreamState:
-    """Per-(chat_id, stream_id) state for in-place card updates.
-
-    The adapter sends the first frame as a fresh card and records
-    ``message_id`` from the SendResult; every subsequent frame for the
-    same stream re-renders the card and calls ``channel.update_card``.
-    A debounced flush task (see :attr:`flush_task`) coalesces rapid
-    updates so we patch at most once per ``stream_debounce_s``.
-    """
-
-    message_id: str | None = None
-    """``None`` until the first SendResult comes back. Frames that
-    arrive before the initial send completes are queued by simply
-    overwriting :attr:`pending` — they'll be flushed once the
-    initial send registers ``message_id``."""
-
-    pending: tuple[str, list["_ButtonLike"]] | None = None
-    """Latest queued (content, buttons) waiting for the next patch
-    window. Always the most recent update — older intermediate frames
-    are discarded by design."""
-
-    flush_task: asyncio.Task[Any] | None = None
-    """Sleeper task that waits ``stream_debounce_s`` then flushes
-    :attr:`pending`. None when no flush is scheduled."""
-
-    flush_now: asyncio.Event = field(default_factory=asyncio.Event)
-    """Set to short-circuit the debounce sleep — the flush task wakes
-    on either the timer or this event. Used by ``final=True`` frames
-    and ``turn_complete`` to land the last update immediately."""
-
-    final_seen: bool = False
-    """Set when an outbound for this stream arrived with ``final=True``.
-    The flush path tears the state down once ``pending`` drains."""
+    """Channel name announced on inbound envelopes (§2.4) and used as the
+    ``<channel>`` half of the computed session_key (§3.4)."""
+    scenario: str | None = None
+    """Scenario the gateway builds new sessions in; sent on the first
+    inbound for a chat the gateway has not seen (§2.2)."""
+    session_scope: str = "chat"
+    """How session_key is composed (§3.4): ``chat`` -> ``feishu:<chat_id>``;
+    ``user`` -> ``feishu:<chat_id>:<sender_id>``."""
 
 
 class FeishuAdapter:
@@ -137,26 +85,23 @@ class FeishuAdapter:
         self._client = client
         self._config = config
         self._channel: Any = None
-        # Pending ACK reactions keyed by chat_id — same lifetime contract
-        # as the legacy implementation. Cleared on turn_complete.
+        # Pending ACK reactions keyed by chat_id. Cleared when the agent's
+        # reply lands (v2 has no turn_complete signal; the assistant_text
+        # outbound is the cue).
         self._pending_acks: dict[str, list[asyncio.Task[Any]]] = {}
-        # Per-(chat_id, stream_id) state for streamed updates. Keyed on
-        # the tuple so two streams to the same chat (e.g. tool-call
-        # progress + final reply) don't clobber each other.
-        self._streams: dict[tuple[str, str], _StreamState] = {}
-        self._streams_lock = asyncio.Lock()
+        # session_keys we have already sent ``scenario`` for, so later
+        # inbounds for the same chat omit it (§2.2).
+        self._scenario_sent: set[str] = set()
         self._running = False
-        # Signalled by stop() to wake start() out of its idle wait. We
-        # used to ``await asyncio.create_task(channel.connect())`` here,
-        # but lark-oapi 1.6.x made ``connect()`` a thin alias for
-        # ``start_background()`` — it returns once the WebSocket handshake
-        # completes, instead of blocking for the lifetime of the
-        # connection. That made adapter.start() exit ~0.4 s after handshake,
-        # the cli's asyncio.wait fall through, and the finally block
-        # ``adapter.stop()`` tear the WS down with code 1000 (mis-logged
-        # as ERROR by lark). An explicit stop event makes the intended
-        # "block until somebody tells me to stop" lifetime obvious.
         self._stop_event: asyncio.Event = asyncio.Event()
+
+    # -- session_key (§3.4) -------------------------------------------
+
+    def _session_key(self, chat_id: str, sender_id: str) -> str:
+        base = f"{self._config.channel_name}:{chat_id}"
+        if self._config.session_scope == "user":
+            return f"{base}:{sender_id}"
+        return base
 
     # -- lifecycle -----------------------------------------------------
 
@@ -174,9 +119,7 @@ class FeishuAdapter:
 
         cfg = self._config
         if not cfg.app_id or not cfg.app_secret:
-            raise RuntimeError(
-                "feishu adapter: app_id / app_secret missing"
-            )
+            raise RuntimeError("feishu adapter: app_id / app_secret missing")
 
         channel = _Lark(app_id=cfg.app_id, app_secret=cfg.app_secret)
         self._channel = channel
@@ -185,15 +128,11 @@ class FeishuAdapter:
         channel.on("message", self._on_message)
         channel.on("cardAction", self._on_card_action)
         try:
-            # start_background spawns the WS receive loop, returns once
-            # the handshake is ready.
             await channel.connect_until_ready(timeout=20.0)
         except Exception:
             log.exception("feishu connect_until_ready failed")
             raise
         self._running = True
-        # Block until stop() is invoked. The lark client keeps its own
-        # background reader / ping tasks alive in the meantime.
         await self._stop_event.wait()
 
     async def stop(self) -> None:
@@ -211,17 +150,9 @@ class FeishuAdapter:
                 await self._channel.stop_background()
             except Exception:
                 log.exception("FeishuAdapter.stop_background raised")
-        # lark's ws client spawns its own ``_ping_loop`` /
-        # ``_receive_message_loop`` / ``ExpiringCache._start_clear_cron``
-        # tasks via ``loop.create_task`` and never tracks them. After our
-        # disconnect closes the WS, ``auto_reconnect=True`` (lark's
-        # default) keeps the recv loop alive waiting to reconnect. Find
-        # any task whose coroutine lives under lark_oapi and cancel it
-        # so the process can exit clean without "Task was destroyed but
-        # it is pending" warnings.
         await _cancel_lark_tasks()
 
-    # -- inbound (Feishu → gateway) -----------------------------------
+    # -- inbound (Feishu -> gateway) ----------------------------------
 
     async def _on_message(self, msg: Any) -> None:
         sender = getattr(msg, "sender_id", "") or ""
@@ -239,17 +170,14 @@ class FeishuAdapter:
             return
         if not self._is_allowed(sender):
             return
-        # Quick visual ACK so the user knows the bot got it before the
-        # LLM has had a chance to reply. Best-effort, fire-and-forget —
-        # we MUST NOT await it here: if the SDK's reaction RPC hangs or
-        # holds a lock, awaiting blocks the inbound handler and the
-        # message never reaches the agent.
+        # Quick visual ACK so the user knows the bot got it. Fire-and-forget
+        # — awaiting here would block the inbound handler if the RPC hangs.
         if message_id and self._config.ack_emoji:
             task = asyncio.create_task(
                 self._safe_reaction(message_id, self._config.ack_emoji),
                 name="feishu-ack",
             )
-            self._pending_acks.setdefault(chat_id, []).append(task)
+            self._pending_acks.setdefault(str(chat_id), []).append(task)
         await self._forward_inbound(
             sender_id=str(sender),
             chat_id=str(chat_id),
@@ -278,8 +206,6 @@ class FeishuAdapter:
         await self._forward_inbound(
             sender_id=str(sender),
             chat_id=str(chat_id),
-            # The gateway routes on ``button_value``; ``content`` is
-            # informational only (shows up in observability traces).
             content=f"[card click: {button_value}]",
             button_value=button_value,
         )
@@ -292,6 +218,7 @@ class FeishuAdapter:
         content: str,
         button_value: str | None,
     ) -> None:
+        session_key = self._session_key(chat_id, sender_id)
         body: dict[str, Any] = {
             "channel": self._config.channel_name,
             "sender_id": sender_id,
@@ -300,11 +227,17 @@ class FeishuAdapter:
         }
         if button_value is not None:
             body["button_value"] = button_value
+        scenario = None
+        if session_key not in self._scenario_sent:
+            scenario = self._config.scenario
+            self._scenario_sent.add(session_key)
         env = Envelope(
             v=WIRE_VERSION,
             id=f"in-feishu-{int(time.time() * 1_000_000)}",
             kind=KIND_INBOUND,
             ts=time.time(),
+            session_key=session_key,
+            scenario=scenario,
             body=body,
         )
         try:
@@ -312,276 +245,53 @@ class FeishuAdapter:
         except Exception:  # noqa: BLE001
             log.exception("forward_inbound failed; dropping envelope")
 
-    # -- outbound (gateway → Feishu) ----------------------------------
+    # -- outbound (gateway -> Feishu) ---------------------------------
 
     async def handle_outbound(self, env: Envelope) -> None:
-        """Render and deliver one outbound envelope to Feishu."""
+        """Render and deliver one v2 ``outbound`` envelope to Feishu (§2.5)."""
         if self._channel is None:
             raise RuntimeError("FeishuAdapter.start() has not completed")
         body = env.body if isinstance(env.body, dict) else {}
-        out_kind = str(body.get("kind") or "message")
         chat_id = str(body.get("chat_id") or "")
         if not chat_id:
             log.warning("outbound dropped: empty chat_id (env id=%s)", env.id)
             return
-        if out_kind == "turn_complete":
-            # Control signal — clear ACK reactions and flush any active
-            # streams in this chat (a turn ending without an explicit
-            # final=True frame still needs the in-place card to settle).
+        meta = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        meta_kind = str(meta.get("kind") or "assistant_text")
+        # The agent has produced output — clear the ACK reaction(s) for
+        # this chat (v2 has no turn_complete; assistant_text is the cue).
+        if meta_kind == "assistant_text":
             await self._clear_pending_acks(chat_id)
-            await self._finalize_streams_for_chat(chat_id)
-            return
-        # Buttons travel in the body under "buttons" — list of dicts
-        # ``{"label": str, "value": str, "style": str}`` mirroring the
-        # in-process Button dataclass. The wire bridge does not yet
-        # serialize buttons (Phase 1 outbound body has no field for
-        # them); when it gains one, this code path is already prepared.
-        buttons_raw = body.get("buttons") or []
         buttons: list[_ButtonLike] = []
-        if isinstance(buttons_raw, list):
-            for b in buttons_raw:
-                if not isinstance(b, dict):
-                    continue
-                label = str(b.get("label", ""))
-                value = str(b.get("value", ""))
-                style = str(b.get("style", "default"))
-                if label and value:
-                    buttons.append(_ButtonLike(label=label, value=value, style=style))
+        for b in body.get("buttons") or []:
+            if not isinstance(b, dict):
+                continue
+            label = str(b.get("label", ""))
+            value = str(b.get("value", ""))
+            style = str(b.get("style", "default"))
+            if label and value:
+                buttons.append(_ButtonLike(label=label, value=value, style=style))
         content = str(body.get("content") or "")
-        stream_id = body.get("stream_id")
-        final = bool(body.get("final"))
-        if isinstance(stream_id, str) and stream_id:
-            await self._handle_stream_frame(
-                chat_id=chat_id,
-                stream_id=stream_id,
-                content=content,
-                buttons=buttons,
-                final=final,
-            )
-            return
         await self._send_card(chat_id, content, buttons)
 
     async def _send_card(
         self, chat_id: str, content: str, buttons: list[_ButtonLike]
     ) -> None:
-        # Render every chat message as a schema-2.0 interactive card so
-        # Chinese, markdown (code fences, lists, headings) and action
-        # buttons all use the same path. Lark's plain ``text`` message
-        # type does not render markdown.
+        # Every chat message is a schema-2.0 interactive card so Chinese,
+        # markdown, and action buttons share one path.
         assert self._channel is not None
         await self._channel.send(
             chat_id,
             {"card": _markdown_card(content, buttons=buttons)},
         )
 
-    # -- streaming ----------------------------------------------------
-
-    async def _handle_stream_frame(
-        self,
-        *,
-        chat_id: str,
-        stream_id: str,
-        content: str,
-        buttons: list[_ButtonLike],
-        final: bool,
-    ) -> None:
-        """Apply one frame of a streamed update.
-
-        First frame for a ``(chat_id, stream_id)`` does a real ``send``
-        and captures the resulting ``message_id``. Subsequent frames
-        queue into the state's ``pending`` slot and schedule a
-        trailing-edge debounce flush. The ``final`` flag forces an
-        immediate flush and tears the entry down once delivered.
-        """
-        assert self._channel is not None
-        key = (chat_id, stream_id)
-        async with self._streams_lock:
-            state = self._streams.get(key)
-            if state is None:
-                state = _StreamState()
-                self._streams[key] = state
-                first_frame = True
-            else:
-                first_frame = False
-            if final:
-                state.final_seen = True
-
-        if first_frame:
-            # Initial send happens synchronously so we capture
-            # message_id before any subsequent frame tries to patch.
-            try:
-                result = await self._channel.send(
-                    chat_id,
-                    {"card": _markdown_card(content, buttons=buttons)},
-                )
-            except Exception:
-                log.exception(
-                    "[feishu] stream %s: initial send failed; dropping stream",
-                    stream_id,
-                )
-                async with self._streams_lock:
-                    self._streams.pop(key, None)
-                return
-            message_id = getattr(result, "message_id", None)
-            async with self._streams_lock:
-                state.message_id = (
-                    str(message_id) if isinstance(message_id, str) else None
-                )
-            if final:
-                async with self._streams_lock:
-                    self._streams.pop(key, None)
-            return
-
-        # Subsequent frame: stash latest content + schedule flush.
-        async with self._streams_lock:
-            state.pending = (content, buttons)
-            if final:
-                # Either wake the running flush task so it skips the
-                # rest of the debounce window, or start one with no
-                # debounce if none was scheduled yet.
-                state.flush_now.set()
-                if state.flush_task is None:
-                    state.flush_task = asyncio.create_task(
-                        self._flush_stream(key, debounce=False),
-                        name=f"feishu-stream-flush-{stream_id}",
-                    )
-            elif state.flush_task is None:
-                state.flush_task = asyncio.create_task(
-                    self._flush_stream(key, debounce=True),
-                    name=f"feishu-stream-flush-{stream_id}",
-                )
-
-    async def _flush_stream(
-        self, key: tuple[str, str], *, debounce: bool
-    ) -> None:
-        """Trailing-edge flush loop for one stream's pending updates.
-
-        Loops:
-          1. wait the debounce window (skipped on the first pass if
-             ``debounce=False`` — used by ``final=True`` and turn_complete
-             paths so the last frame lands immediately);
-          2. pull the latest pending content (older frames already
-             dropped by the producer side);
-          3. patch the card (or fall back to a fresh send if the initial
-             send never yielded a ``message_id``);
-          4. if another frame arrived during the patch RPC, debounce
-             again and patch the new latest; otherwise release the
-             flush slot (and drop the state if ``final_seen``).
-        """
-        chat_id, stream_id = key
-        first = True
-        while True:
-            async with self._streams_lock:
-                state = self._streams.get(key)
-                if state is None:
-                    return
-                event = state.flush_now
-            if not (first and not debounce):
-                try:
-                    await asyncio.wait_for(
-                        event.wait(), timeout=self._config.stream_debounce_s
-                    )
-                except (asyncio.TimeoutError, TimeoutError):
-                    pass
-                except asyncio.CancelledError:
-                    return
-            first = False
-
-            async with self._streams_lock:
-                state = self._streams.get(key)
-                if state is None:
-                    return
-                pending = state.pending
-                state.pending = None
-                state.flush_now.clear()
-                if pending is None:
-                    state.flush_task = None
-                    if state.final_seen:
-                        self._streams.pop(key, None)
-                    return
-                message_id = state.message_id
-
-            content, buttons = pending
-            if message_id is None:
-                try:
-                    await self._send_card(chat_id, content, buttons)
-                except Exception:
-                    log.exception(
-                        "[feishu] stream %s: fallback send failed", stream_id
-                    )
-            else:
-                try:
-                    assert self._channel is not None
-                    await self._channel.update_card(
-                        message_id,
-                        _markdown_card(content, buttons=buttons),
-                    )
-                except Exception:
-                    log.exception(
-                        "[feishu] stream %s: update_card failed (msg=%s)",
-                        stream_id,
-                        message_id,
-                    )
-            # If this was the final frame and no new frame arrived
-            # during the patch RPC, the stream is done — release the
-            # slot now instead of waiting another debounce window.
-            async with self._streams_lock:
-                state = self._streams.get(key)
-                if state is None:
-                    return
-                if state.final_seen and state.pending is None:
-                    state.flush_task = None
-                    self._streams.pop(key, None)
-                    return
-
-    async def _finalize_streams_for_chat(self, chat_id: str) -> None:
-        """Flush + drop every stream belonging to ``chat_id``.
-
-        Called on ``turn_complete``: any stream that ended without an
-        explicit ``final=True`` frame still needs its last update to
-        land so the in-place card matches the agent's actual final
-        output. We force ``final_seen`` and trigger a no-debounce
-        flush for each affected key.
-        """
-        start_keys: list[tuple[str, str]] = []
-        async with self._streams_lock:
-            for key, state in self._streams.items():
-                if key[0] != chat_id:
-                    continue
-                state.final_seen = True
-                # Wake any in-flight flush task so its debounce wait
-                # returns immediately and it patches with the latest
-                # pending content.
-                state.flush_now.set()
-                if state.pending is not None and state.flush_task is None:
-                    start_keys.append(key)
-        for key in start_keys:
-            async with self._streams_lock:
-                pending_state = self._streams.get(key)
-                if pending_state is None or pending_state.flush_task is not None:
-                    continue
-                pending_state.flush_task = asyncio.create_task(
-                    self._flush_stream(key, debounce=False),
-                    name=f"feishu-stream-finalize-{key[1]}",
-                )
-        # Garbage-collect entries with no pending work.
-        async with self._streams_lock:
-            stale = [
-                k
-                for k, s in self._streams.items()
-                if k[0] == chat_id and s.pending is None and s.flush_task is None
-            ]
-            for k in stale:
-                self._streams.pop(k, None)
-
     # -- ACK reactions ------------------------------------------------
 
     async def _safe_reaction(
         self, message_id: str, emoji: str
     ) -> tuple[str, str] | None:
-        """Add an ACK reaction; return ``(message_id, reaction_id)`` on
-        success so the turn-complete cleanup can remove it.
-        """
+        """Add an ACK reaction; return ``(message_id, reaction_id)`` so the
+        cleanup can remove it."""
         assert self._channel is not None
         try:
             result = await self._channel.add_reaction(message_id, emoji)
@@ -610,7 +320,7 @@ class FeishuAdapter:
         return message_id, reaction_id
 
     async def _clear_pending_acks(self, chat_id: str) -> None:
-        """Remove every ACK reaction we attached for ``chat_id``."""
+        """Remove every ACK reaction attached for ``chat_id``."""
         tasks = self._pending_acks.pop(chat_id, None)
         if not tasks:
             return
@@ -656,12 +366,8 @@ class FeishuAdapter:
 
 @dataclass(slots=True)
 class _ButtonLike:
-    """Local mirror of ``agentm_channels.bus.Button``.
-
-    Kept local so the adapter doesn't need to import bus types — the
-    wire transports buttons as plain dicts (when the bridge gains
-    button serialization).
-    """
+    """Local mirror of the wire ``Button`` shape (kept local so the
+    adapter need not import gateway types)."""
 
     label: str
     value: str
@@ -671,13 +377,10 @@ class _ButtonLike:
 def _markdown_card(text: str, *, buttons: list[_ButtonLike]) -> dict[str, Any]:
     """Construct a Lark schema-2.0 interactive card.
 
-    Body is one ``markdown`` element so Chinese, code fences, lists,
-    and inline formatting all render. When ``buttons`` is non-empty an
-    ``action`` block is appended; each button's ``value`` round-trips
-    through Lark's ``cardAction`` callback as the typed inbound
-    ``button_value``. Style mapping is mechanical — no label-string
-    heuristics — so the caller controls visual emphasis via
-    ``Button.style``.
+    Body is one ``markdown`` element so Chinese, code fences, lists, and
+    inline formatting render. A non-empty ``buttons`` list appends an
+    ``action`` block; each button's ``value`` round-trips through Lark's
+    ``cardAction`` callback as the typed ``button_value``.
     """
     elements: list[dict[str, Any]] = [
         {"tag": "markdown", "content": text or "*(empty)*"}

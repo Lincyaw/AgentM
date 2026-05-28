@@ -35,12 +35,10 @@ from typing import Annotated, Any
 
 import typer
 
-from agentm_channels import DEFAULT_SOCKET_URL, autoload_dotenv
-from agentm_channels.client import AuthError, WireClient
-from agentm_channels.client_cli import ConnectError, ConnectOptions, resolve_connect
-from agentm_channels.wire import (
-    KIND_BYE,
-    KIND_DELIVERY_BATCH,
+from agentm.gateway import DEFAULT_SOCKET_URL, autoload_dotenv
+from agentm.gateway.client import AuthError, WireClient
+from agentm.gateway.client_cli import ConnectError, ConnectOptions, resolve_connect
+from agentm.gateway.wire import (
     KIND_ERROR,
     KIND_OUTBOUND,
     KIND_PING,
@@ -199,6 +197,17 @@ def cli(
         str,
         typer.Option("--chat-id", help="Chat / session id (default: 'terminal')."),
     ] = "terminal",
+    scenario: Annotated[
+        str | None,
+        typer.Option(
+            "--scenario",
+            envvar="AGENTM_SCENARIO",
+            help=(
+                "Scenario the gateway constructs this chat's session in "
+                "(sent on the first message only). Default: gateway default."
+            ),
+        ),
+    ] = None,
     no_input: Annotated[
         bool,
         typer.Option(
@@ -227,10 +236,10 @@ def cli(
         ),
     ] = False,
 ) -> None:
-    """Terminal client for the AgentM channels gateway.
+    """Terminal chat-client peer for the AgentM gateway.
 
-    Connects over the v1 wire protocol (Unix socket) and renders
-    outbound messages on stdout.
+    Connects over the v2 wire protocol and renders outbound messages on
+    stdout.
 
     Examples:
 
@@ -240,7 +249,7 @@ def cli(
       Piped (auto-selects JSON format):
         printf '/help\\n' | agentm-terminal --connect unix:///tmp/gw.sock
     """
-    from agentm_channels import resolve_token
+    from agentm.gateway import resolve_token
 
     try:
         effective_token = resolve_token(token, token_file)
@@ -271,6 +280,7 @@ def cli(
                 no_color=no_color,
                 sender_id=sender_id,
                 chat_id=chat_id,
+                scenario=scenario,
                 no_input=no_input,
             )
         )
@@ -289,6 +299,7 @@ async def _arun(
     no_color: bool,
     sender_id: str,
     chat_id: str,
+    scenario: str | None,
     no_input: bool,
 ) -> int:
     connect = connect_opts.connect
@@ -305,18 +316,17 @@ async def _arun(
 
     _spec, transport = _resolve_connect(connect, tls_ca)
 
-    # Peer id: stable-ish within a single run. The gateway uses this as
-    # the synthetic channel name registered on the bus; pairing it with
-    # a uuid prevents collisions between concurrent terminal sessions.
-    peer_id = f"terminal-{uuid.uuid4().hex[:8]}"
+    # Peer name: stable-ish within a single run. A uuid suffix prevents
+    # collisions between concurrent terminal peers connecting to one gateway.
+    peer_name = f"terminal-{uuid.uuid4().hex[:8]}"
+    # session_key per §3.4: <channel>:<chat_id>. The gateway treats it as
+    # opaque; here a terminal is one conversation, so this is stable.
+    session_key = f"terminal:{chat_id}"
 
     stop_event = asyncio.Event()
     exit_code = EXIT_OK
 
     async def on_outbound(env: Envelope) -> None:
-        # WireClient already unpacks delivery_batch items and dispatches
-        # each as its own ``KIND_OUTBOUND`` envelope, so we only need to
-        # handle the single-item case here.
         if env.kind == KIND_OUTBOUND:
             body = env.body if isinstance(env.body, dict) else {}
             if textual_outbound is not None:
@@ -328,16 +338,8 @@ async def _arun(
             except Exception:  # noqa: BLE001
                 log.exception("renderer failed on envelope id=%s", env.id)
             return
-        if env.kind == KIND_DELIVERY_BATCH:  # pragma: no cover — handled upstream
-            return
-        if env.kind == KIND_PING:
-            return  # WireClient replies pong itself
-        if env.kind == KIND_PONG:
-            return
-        if env.kind == KIND_BYE:
-            log.info("gateway sent BYE; shutting down")
-            stop_event.set()
-            return
+        if env.kind in (KIND_PING, KIND_PONG):
+            return  # WireClient handles ping/pong itself
         if env.kind == KIND_ERROR:
             nonlocal exit_code
             body = env.body if isinstance(env.body, dict) else {}
@@ -354,11 +356,25 @@ async def _arun(
 
     client = WireClient(
         transport=transport,
-        peer_id=peer_id,
-        peer_kind="chat_client",
+        peer_name=peer_name,
         token=token,
         on_outbound=on_outbound,
     )
+
+    # Scenario is sent on the FIRST inbound only (§2.2): it tells the
+    # gateway which scenario to build a fresh session in. Later inbounds
+    # route to the live session and omit it.
+    first_sent = {"done": False}
+
+    async def send_inbound(body: dict[str, Any]) -> None:
+        env_scenario = None if first_sent["done"] else scenario
+        first_sent["done"] = True
+        await client.send_inbound(
+            body,
+            session_key=session_key,
+            scenario=env_scenario,
+            env_id=f"in-{int(time.time() * 1_000_000)}",
+        )
 
     try:
         await client.connect()
@@ -396,9 +412,7 @@ async def _arun(
         from .ui.textual import run_textual
 
         async def _send_inbound(body: dict[str, Any]) -> None:
-            await client.send_inbound(
-                body, env_id=f"in-{int(time.time() * 1_000_000)}"
-            )
+            await send_inbound(body)
 
         try:
             code = await run_textual(
@@ -428,7 +442,7 @@ async def _arun(
             pass
 
     reader_task = asyncio.create_task(
-        _stdin_reader(client, sender_id, chat_id, stop_event),
+        _stdin_reader(send_inbound, sender_id, chat_id, stop_event),
         name="terminal-stdin",
     )
     stop_task = asyncio.create_task(stop_event.wait(), name="terminal-stop")
@@ -451,12 +465,12 @@ async def _arun(
 
 
 async def _stdin_reader(
-    client: WireClient,
+    send_inbound: Any,
     sender_id: str,
     chat_id: str,
     stop_event: asyncio.Event,
 ) -> None:
-    """Read stdin line by line, wrap into ``inbound`` envelopes."""
+    """Read stdin line by line, wrap into v2 ``inbound`` bodies (§2.4)."""
     loop = asyncio.get_running_loop()
     while not stop_event.is_set():
         try:
@@ -486,9 +500,7 @@ async def _stdin_reader(
         if button_value is not None:
             body["button_value"] = button_value
         try:
-            await client.send_inbound(
-                body, env_id=f"in-{int(time.time() * 1_000_000)}"
-            )
+            await send_inbound(body)
         except Exception:  # noqa: BLE001
             log.exception("failed to send inbound; closing")
             stop_event.set()

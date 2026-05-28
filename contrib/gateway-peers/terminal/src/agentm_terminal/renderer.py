@@ -1,21 +1,15 @@
-"""Rendering helpers ported byte-for-byte from the legacy
-``agentm_channels.channels.terminal.TerminalChannel``.
+"""Rendering helpers for the v2 ``outbound`` envelope body (§2.5).
 
-The wire protocol carries outbound payloads as plain dicts (the
-gateway-side ``WireBridge`` serialises an ``OutboundMessage`` into the
-envelope body). The renderer therefore consumes a ``dict`` shape, not
-the in-process ``OutboundMessage`` dataclass — that's the only
-difference from the legacy code. All output formats are identical:
+The wire carries outbound payloads as plain dicts. The discriminator is
+``metadata.kind`` (one of ``assistant_text`` / ``approval_request`` /
+``approval_resolved`` / ``diagnostic_warning`` / ``diagnostic_error``).
 
-* text mode: ``agent ▸`` prefix, ANSI-coloured ``[N] label   value=…``
-  button block, ``(type =<value> to round-trip a button click)`` hint,
-  ``[terminal channel ready …]`` greeting, ``… (turn complete)`` after
-  each turn.
+* text mode: ``agent ▸`` prefix; diagnostics get a ``⚠``/``✖`` prefix;
+  ANSI-coloured ``[N] label   value=…`` button block with the
+  ``(type =<value> to round-trip a button click)`` hint.
 * json mode: ``{"kind":"ready"}`` after handshake, then one
-  ``{"kind":"message",…}`` per outbound (carrying ``content``,
-  optional ``buttons``, optional ``metadata``),
-  ``{"kind":"turn_complete"}`` at end-of-turn, ``{"kind":"stopped"}``
-  on shutdown.
+  ``{"kind":"message",…}`` per outbound (carrying ``content``, optional
+  ``buttons``, optional ``metadata``), ``{"kind":"stopped"}`` on shutdown.
 """
 
 from __future__ import annotations
@@ -29,12 +23,6 @@ _DIM = "\033[2m"
 _BLUE = "\033[94m"
 _YELLOW = "\033[93m"
 _GREEN = "\033[92m"
-
-
-# Outbound "kind" values used by the gateway-side bus. Matches
-# ``agentm_channels.bus.OutboundKind`` without importing it (the client
-# process must not depend on bus internals).
-_KIND_TURN_COMPLETE = "turn_complete"
 
 
 class Renderer:
@@ -74,34 +62,33 @@ class Renderer:
     # --- per-outbound --------------------------------------------------
 
     def render_outbound(self, body: dict[str, Any]) -> None:
-        """Render one outbound envelope body.
+        """Render one v2 ``outbound`` envelope body (§2.5).
 
-        ``body`` is the dict shape that the gateway puts in
-        ``Envelope.body`` for ``kind="outbound"``. Fields read:
+        Fields read:
 
-        * ``kind`` — optional, defaults to ``"message"``. ``"turn_complete"``
-          renders the per-turn marker only.
-        * ``content`` — assistant text (may be empty).
+        * ``content`` — assistant text / card body (may be empty).
         * ``buttons`` — optional list of ``{"label","value","style"}``.
-        * ``metadata`` — optional dict, forwarded as-is in JSON mode.
+        * ``metadata.kind`` — render-style discriminator.
         """
-        kind = body.get("kind") or "message"
+        meta = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        meta_kind = str(meta.get("kind") or "assistant_text")
         if self._format == "json":
-            self._render_json(kind, body)
+            self._render_json(meta_kind, body)
         else:
-            self._render_text(kind, body)
+            self._render_text(meta_kind, body)
 
     # --- text ----------------------------------------------------------
 
-    def _render_text(self, kind: str, body: dict[str, Any]) -> None:
-        if kind == _KIND_TURN_COMPLETE:
-            self._print(self._style("… (turn complete)", _DIM))
-            return
+    def _render_text(self, meta_kind: str, body: dict[str, Any]) -> None:
         content = str(body.get("content") or "")
         text = content.rstrip()
         if text:
-            prefix = self._style("agent ▸ ", _BLUE)
-            self._print(prefix + text)
+            if meta_kind == "diagnostic_error":
+                self._print(self._style("✖ " + text, _YELLOW))
+            elif meta_kind == "diagnostic_warning":
+                self._print(self._style("⚠ " + text, _YELLOW))
+            else:
+                self._print(self._style("agent ▸ ", _BLUE) + text)
         buttons = body.get("buttons") or []
         if buttons:
             for idx, btn in enumerate(buttons, start=1):
@@ -121,10 +108,7 @@ class Renderer:
 
     # --- json ----------------------------------------------------------
 
-    def _render_json(self, kind: str, body: dict[str, Any]) -> None:
-        if kind == _KIND_TURN_COMPLETE:
-            self._emit({"kind": "turn_complete"})
-            return
+    def _render_json(self, meta_kind: str, body: dict[str, Any]) -> None:
         payload: dict[str, Any] = {
             "kind": "message",
             "content": str(body.get("content") or ""),
@@ -142,6 +126,8 @@ class Renderer:
         metadata = body.get("metadata")
         if metadata:
             payload["metadata"] = dict(metadata)
+        else:
+            payload["metadata"] = {"kind": meta_kind}
         self._emit(payload)
 
     # --- low-level -----------------------------------------------------
