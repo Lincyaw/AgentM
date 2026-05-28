@@ -108,3 +108,46 @@ async def test_esc_interrupts_an_in_flight_turn() -> None:
         await pilot.pause(0.1)
         after = len([b for b in client.sent if b.get("control") == "interrupt"])
         assert after == before  # idle Esc does not send another interrupt
+
+
+async def test_command_palette_lists_local_and_gateway_commands() -> None:
+    from agentm_terminal.frontends.tui.modals import CommandPalette
+
+    client = _FakeClient()
+    app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
+    async with app.run_test(size=(100, 30)) as pilot:
+        client.push(
+            _frame(
+                "session_ready",
+                tool_names=["bash", "read"],
+                command_names=["new", "status"],
+                model="m",
+            )
+        )
+        await pilot.pause(0.1)
+        assert app.catalog.tools == ["bash", "read"]
+        assert "/new" in app.catalog.commands and "/status" in app.catalog.commands
+
+        await pilot.press("ctrl+r")
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, CommandPalette)
+        # built-ins + the gateway commands surfaced from session_ready.
+        assert "/help" in app.screen._all and "/new" in app.screen._all
+
+
+async def test_tools_slash_opens_info_modal() -> None:
+    from agentm_terminal.frontends.tui.modals import InfoModal
+
+    client = _FakeClient()
+    app = AgentMTui(client=client, sender_id="local", chat_id="terminal")
+    async with app.run_test(size=(100, 30)) as pilot:
+        client.push(_frame("session_ready", tool_names=["bash"], model="m"))
+        await pilot.pause(0.1)
+        inp = app.query_one("#prompt-input")
+        inp.text = "/tools"  # type: ignore[attr-defined]
+        inp.action_submit()  # type: ignore[attr-defined]
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, InfoModal)
+        assert "bash" in app.screen._body
+        # A local slash command is NOT forwarded to the gateway.
+        assert all(b.get("content") != "/tools" for b in client.sent)

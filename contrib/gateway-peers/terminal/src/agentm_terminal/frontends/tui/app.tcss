@@ -102,3 +102,26 @@ Toast.-selfmod {
     border: round $warning;
     background: $warning 20%;
 }
+
+/* --- modal screens (help / info snapshots / command palette) --- */
+
+HelpScreen, InfoModal, CommandPalette {
+    align: center middle;
+}
+#help-body, #info-body, #palette {
+    width: 70%;
+    max-width: 100;
+    height: auto;
+    max-height: 80%;
+    background: $surface;
+    border: round $accent;
+    padding: 1 2;
+}
+.modal-title {
+    color: $accent;
+    text-style: bold;
+}
+#palette-list {
+    height: auto;
+    max-height: 20;
+}

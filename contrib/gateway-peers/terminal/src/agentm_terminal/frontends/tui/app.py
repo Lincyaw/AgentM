@@ -18,10 +18,22 @@ from textual.containers import VerticalScroll
 from textual.widgets import Footer
 
 from ...client import TerminalClient
+from .modals import CommandPalette, HelpScreen, InfoModal
 from .router import Router
-from .state import StatusModel
+from .state import Catalog, StatusModel
 from .theme import CSS_PATH, Phase, resolve_theme
 from .widgets import PromptInput, StatusBar, Toast, UserTurn
+
+# Slash commands the TUI owns (handled locally, never sent to the gateway).
+_LOCAL_COMMANDS = (
+    "/help",
+    "/clear",
+    "/copy-last",
+    "/tools",
+    "/extensions",
+    "/budget",
+    "/quit",
+)
 
 
 class AgentMTui(App[int]):
@@ -30,6 +42,7 @@ class AgentMTui(App[int]):
         Binding("ctrl+c", "interrupt_or_quit", "interrupt", priority=True, show=True),
         Binding("ctrl+d", "quit_app", "quit", priority=True, show=True),
         Binding("ctrl+l", "clear_log", "clear", show=True),
+        Binding("ctrl+r", "command_palette", "commands", show=True),
         Binding("escape", "cancel", "cancel", show=False),
     ]
 
@@ -47,9 +60,11 @@ class AgentMTui(App[int]):
         self._chat_id = chat_id
         self._theme_name = resolve_theme(theme)
         self.status = StatusModel()
+        self.catalog = Catalog()
         self._router = Router(self)
         self._consumer: asyncio.Task[None] | None = None
         self._history: list[str] = []
+        self._last_text = ""  # last assistant text, for /copy-last
         self._ctrlc_ts = 0.0
         # True from prompt-submit until the loop's agent_end; gates Esc-interrupt.
         self._in_flight = False
@@ -113,6 +128,11 @@ class AgentMTui(App[int]):
     def scroll_end(self) -> None:
         self.transcript.scroll_end(animate=False)
 
+    def note_assistant_text(self, text: str) -> None:
+        """Record the latest assistant text so /copy-last can yank it."""
+        if text.strip():
+            self._last_text = text
+
     async def send_button(self, value: str) -> None:
         await self._send(
             {
@@ -147,10 +167,12 @@ class AgentMTui(App[int]):
         inp.text = ""
         if not text:
             return
-        if text in ("/quit", "/exit", "/q"):
-            self.exit(0)
-            return
         self._history.append(text)
+        # Slash commands (not ``//path``): TUI-local ones are handled here;
+        # everything else is forwarded to the gateway's command router.
+        if text.startswith("/") and not text.startswith("//"):
+            if await self._run_slash(text):
+                return
         await self.mount_widget(UserTurn(text))
         self.scroll_end()
         self._in_flight = True
@@ -162,6 +184,38 @@ class AgentMTui(App[int]):
                 "content": text,
             }
         )
+
+    async def _run_slash(self, text: str) -> bool:
+        """Handle a TUI-local slash command. Returns True if handled here,
+        False if it should be forwarded to the gateway."""
+        name = text.split(maxsplit=1)[0]
+        if name in ("/quit", "/exit", "/q"):
+            self.exit(0)
+        elif name == "/clear":
+            await self.action_clear_log()
+        elif name == "/help":
+            await self.push_screen(HelpScreen())
+        elif name == "/copy-last":
+            self._copy_last()
+        elif name == "/tools":
+            await self.push_screen(InfoModal("tools", self.catalog.tools_text()))
+        elif name == "/extensions":
+            await self.push_screen(
+                InfoModal("extensions", self.catalog.extensions_text())
+            )
+        elif name == "/budget":
+            await self.push_screen(InfoModal("budget", self.catalog.budget_text()))
+        else:
+            return False
+        return True
+
+    def _copy_last(self) -> None:
+        if not self._last_text:
+            self.toast("nothing to copy yet")
+            return
+        # OSC 52 clipboard write — works over SSH/tmux without a clipboard dep.
+        self.copy_to_clipboard(self._last_text)
+        self.toast("copied last reply")
 
     async def _send(self, body: dict[str, object]) -> None:
         try:
@@ -177,8 +231,8 @@ class AgentMTui(App[int]):
             self.exit(0)
             return
         self._ctrlc_ts = now
-        # Interrupting an in-flight turn needs a gateway cancel affordance
-        # (Phase 3). Until then Ctrl+C only escalates to quit on double-tap.
+        # Esc is the in-flight interrupt (see action_cancel); Ctrl+C is the
+        # quit affordance — double-tap within 1.5s to confirm.
         self.toast("press Ctrl+C again within 1.5s to quit")
 
     def action_quit_app(self) -> None:
@@ -187,6 +241,30 @@ class AgentMTui(App[int]):
     async def action_clear_log(self) -> None:
         await self.transcript.remove_children()
         self._router = Router(self)  # drop active turn + tool/child registries
+
+    def action_command_palette(self) -> None:
+        commands = list(_LOCAL_COMMANDS) + [
+            c for c in self.catalog.commands if c not in _LOCAL_COMMANDS
+        ]
+        self.push_screen(CommandPalette(commands), self._on_palette_pick)
+
+    async def _on_palette_pick(self, command: str | None) -> None:
+        if not command:
+            return
+        if await self._run_slash(command):
+            return
+        # A gateway/extension command picked from the palette: echo + send.
+        await self.mount_widget(UserTurn(command))
+        self.scroll_end()
+        self._in_flight = True
+        await self._send(
+            {
+                "channel": "terminal",
+                "sender_id": self._sender_id,
+                "chat_id": self._chat_id,
+                "content": command,
+            }
+        )
 
     async def action_cancel(self) -> None:
         if self._in_flight:
