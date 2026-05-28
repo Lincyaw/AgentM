@@ -234,26 +234,24 @@ class AgentSession:
         return None
 
     def _drain_inbox_and_persist(
-        self, *, messages: list[AgentMessage] | None
+        self, *, messages: list[AgentMessage]
     ) -> int:
-        """Shared drain helper: pop every inbox item, render it, persist it via
-        the session manager, and (when ``messages`` is given) splice it into
-        that live list. Returns the number of items drained.
+        """Drain the inbox into the live turn message list and persist.
 
-        Persistence mirrors the loop's injected-message contract (loop.py:609,
-        session.py:396): every message that lands in the live context must also
-        reach the session log, or a mid-run kill would lose it. Used by both
-        the per-turn ``context`` handler (with the turn's ``messages`` list) and
-        the ``_drive`` entry (``messages=None`` — the live context list does not
-        exist yet; it is built from the log right after).
+        Called from the ``context`` handler at the top of each kernel turn
+        (loop.py:466) — the ONLY caller, so ``messages`` is always the
+        turn's live list. For each drained item we render it, persist it
+        via the session manager (so a mid-run kill still leaves every
+        message on disk — same contract as loop.py:609), and append it to
+        ``messages`` so the LLM sees it on this very turn. Returns the
+        count purely as a diagnostic.
         """
 
         count = 0
         for item in self._inbox.drain():
             rendered = render_item(item)
             self._session_manager.append_message(rendered)
-            if messages is not None:
-                messages.append(rendered)
+            messages.append(rendered)
             count += 1
         return count
 
@@ -282,6 +280,17 @@ class AgentSession:
     @property
     def session_manager(self) -> SessionManager:
         return self._session_manager
+
+    @property
+    def inbox(self) -> SessionInbox:
+        """Read-only handle to the session's :class:`SessionInbox`.
+
+        Exposed so a test or embedding host can push items without reaching
+        into the private ``_inbox`` attribute. Atoms should keep using
+        :meth:`ExtensionAPI.post_inbox` — same backing inbox, with the
+        scope's ``ExtensionStaleError`` guard.
+        """
+        return self._inbox
 
     @property
     def resources(self) -> ResourceLoader:
@@ -452,10 +461,12 @@ class AgentSession:
         """
 
         forwarder = self._spawn_signal_forwarder(signal)
+        launched_run = False
         try:
             if not self._inbox.is_empty():
                 waiter = self._subscribe_end_waiter()
                 self._inbox.kick()  # no new item, but wake the driver to drain.
+                launched_run = True
                 await waiter
                 return self._session_manager.get_messages()
 
@@ -480,6 +491,7 @@ class AgentSession:
                     self._session_manager.append_message(injected_msg)
                 waiter = self._subscribe_end_waiter()
                 self._inbox.kick()
+                launched_run = True
                 await waiter
                 return self._session_manager.get_messages()
 
@@ -495,6 +507,15 @@ class AgentSession:
         finally:
             if forwarder is not None:
                 forwarder.cancel()
+            # Major-1 review fix (tick leak path): if the synthetic decide-
+            # cycle propagated an external signal (the forwarder fired
+            # ``_signal.set()``) but no run was launched, ``_signal`` would
+            # otherwise carry over and abort the next ``prompt``. Clear it
+            # here so the no-run paths leave the session clean. When a run
+            # WAS launched, the driver's bottom-of-loop clear runs after
+            # the round so we don't fight it.
+            if not launched_run and self._signal.is_set():
+                self._signal.clear()
 
     # --- interrupt --------------------------------------------------------
 
@@ -503,14 +524,25 @@ class AgentSession:
 
         Sets the kernel abort event the driver passed into ``_loop.run`` —
         the loop terminates with ``SignalAborted`` (``final=True``, so no
-        floor / no Inject can override). The driver clears the signal after
-        the run returns and resumes on the next ``inbox.push`` /
-        ``inbox.kick``, with full conversation context preserved (the
-        session log is untouched). Idempotent: setting an already-set event
-        is a no-op.
+        floor / no Inject can override). The driver's bottom-of-loop clear
+        wipes ``_signal`` after the round returns; the next push drives a
+        fresh run with full conversation context preserved (the session
+        log is untouched).
+
+        Major-1 review fix: this is a NO-OP when no round is in flight
+        (``_in_run`` is False). Previously an idle-time ``interrupt()``
+        latched ``_signal``; the next ``prompt`` push woke the driver, the
+        kernel's per-turn signal check (``loop.py:440``) fired
+        ``SignalAborted`` before any real work happened. With the no-op
+        guard, idle interrupts are silently dropped — which is the right
+        semantic ("interrupt what's running" — nothing is running, so
+        nothing to interrupt). Within one round multiple calls are
+        idempotent (``asyncio.Event.set`` on an already-set event is a
+        no-op).
         """
 
-        self._signal.set()
+        if self._in_run:
+            self._signal.set()
 
     # --- driver -----------------------------------------------------------
 
@@ -556,11 +588,44 @@ class AgentSession:
                 # never going to see ``agent_end`` (the run died before
                 # emitting it).
                 self._fail_end_waiters(exc)
-            # An ``interrupt()`` that fired during this round leaves the
-            # signal set — clear it so the next round starts clean. Any
-            # signal that fires BETWEEN the clear and the next ``run`` is
-            # honoured on the next ``run`` entry (the kernel checks it at
-            # the top of every turn).
+                # Pre-first-turn failures (build_session_context /
+                # before_agent_start / agent_start) raise BEFORE the kernel
+                # emits its first ``context`` event, so the inbox never got
+                # drained — its ``_nonempty`` flag stays set, ``wait_nonempty``
+                # would return immediately on the next iteration, and the
+                # driver would tight-loop on a persistent failure (e.g. a
+                # before_agent_start handler that always raises). Drain
+                # (discarding) here so the next iteration parks on
+                # ``wait_nonempty`` until a fresh push arrives. The discard
+                # is acceptable for MVP: the failure already logged via
+                # ``logger.exception`` above, and the originating push's
+                # waiter (if any) was rejected with ``exc`` via
+                # ``_fail_end_waiters``. Post-first-turn failures (stream
+                # raises mid-turn) have already drained the inbox via the
+                # ``context`` handler, so the drain here is a no-op for them.
+                drained = self._inbox.drain()
+                if drained:
+                    logger.warning(
+                        "agentm session driver: discarded %d undrained "
+                        "inbox item(s) after a pre-first-turn round failure "
+                        "(sources=%r) to avoid driver spin",
+                        len(drained),
+                        [item.source for item in drained],
+                    )
+            # An ``interrupt()`` that fired during the round leaves the
+            # signal set; clear it so the next round starts clean. We do
+            # NOT clear at the top of ``_run_one_round`` because the kernel
+            # signal is also written by the per-call signal forwarder
+            # (``_spawn_signal_forwarder``) — a top-of-round clear would
+            # silently swallow a forwarder-set abort that fired BEFORE the
+            # round started (which legitimately happens when ``sub_agent``'s
+            # parent calls ``abort`` before the child's driver got scheduled).
+            # The corresponding Major-1 fix for the two leak paths
+            # (idle-time ``interrupt`` and ``tick``'s synthetic decide
+            # leaking through the forwarder) lives in ``interrupt`` itself
+            # (no-op when not in a run) and in ``tick``'s ``finally`` block
+            # (clears ``_signal`` after the no-run paths if the forwarder
+            # set it during the synthetic decide).
             if self._signal.is_set():
                 self._signal.clear()
 

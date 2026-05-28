@@ -352,10 +352,17 @@ async def test_running_only_second_cancel_auto_aborts_and_surfaces_in_messages(
 
     messages = await session.prompt("start")
 
-    # The auto-abort path now requires one additional LLM call vs. the
-    # legacy event.messages mutation: the abort notification is delivered
-    # via Inject, then the model gets a final turn to terminate cleanly.
-    # Trade-off documented in agent-loop.md migration notes.
+    # Auto-abort flow (post Major-2-option-a, 2026-05-28): turn 1
+    # dispatches; turn 2 voluntarily ends, the still-running floor injects
+    # <subagent_pending> and bumps the cancel counter; turn 3 voluntarily
+    # ends again, the floor aborts every running child and returns None,
+    # each child's _finalize_state.post_inbox queues its <subagent_result>
+    # onto the session inbox, the runtime keep-alive floor turns the Stop
+    # into Step; turn 4 sees the drained <subagent_result> and terminates.
+    # No double-delivery (Major 2): the auto-abort branch no longer
+    # Inject-s the same payload that the inbox-drain will deliver next
+    # turn — that's pinned by
+    # test_auto_abort_delivers_each_finding_exactly_once below.
     assert provider.parent_calls == 4
     assert "Task aborted before producing final text." in provider.parent_snapshots[-1]
     user_texts = [
@@ -371,3 +378,80 @@ async def test_running_only_second_cancel_auto_aborts_and_surfaces_in_messages(
     )
 
     await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_auto_abort_delivers_each_finding_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """Major-2 fail-stop (review of 821f4b23): each aborted child's
+    ``<subagent_result>`` MUST appear EXACTLY ONCE across the consecutive
+    turns following the auto-abort.
+
+    Pre-fix bug: ``decide_turn_action`` Inject-ed
+    ``_notification_message(pending=aborted)`` THIS turn AND
+    ``_finalize_state.post_inbox`` queued the same finding for NEXT-turn
+    inbox-drain delivery. The inbox dedup_key only dedupes within the
+    inbox (not against the Inject), so on fan-outs of N aborted children
+    each finding double-appeared. Post-fix (option a): the auto-abort
+    branch returns ``None``; the runtime keep-alive floor sees the
+    non-empty inbox and turns the parent's ``Stop`` into ``Step``; the
+    next turn's context-drain delivers each finding exactly once.
+
+    Uses the single-child ``auto_abort`` scenario from the suite; the
+    invariant is "exactly one ``<subagent_result>`` per aborted child" so
+    a single child is enough to fail-stop the regression (the bug
+    duplicated each finding regardless of fan-out width).
+    """
+    provider = _LifecycleProvider("auto_abort")
+    provider_module = _install_provider_module(
+        "tests.integration._fake_subagent_lifecycle_once_provider", provider
+    )
+    resolver_module = _install_resolver_module(
+        "tests.integration._fake_subagent_lifecycle_once_resolver"
+    )
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            extensions=_extensions(resolver_module=resolver_module),
+            provider=(provider_module, {}),
+            resource_loader=InMemoryResourceLoader(),
+        )
+    )
+
+    try:
+        messages = await session.prompt("start")
+
+        # Count <subagent_result> blocks in user-role messages across the
+        # WHOLE final transcript (both the auto-abort turn and any
+        # subsequent inbox-drained turn). Counting on user_texts catches
+        # both the legacy Inject path and the inbox-drain path; the
+        # invariant is the total count.
+        user_texts = [
+            block.text
+            for message in messages
+            if getattr(message, "role", None) == "user"
+            for block in getattr(message, "content", [])
+            if getattr(block, "type", None) == "text"
+        ]
+        joined = "\n".join(user_texts)
+        result_count = joined.count("<subagent_result")
+        assert result_count == 1, (
+            f"each aborted child's finding must appear exactly once; "
+            f"got {result_count} occurrences of <subagent_result in "
+            f"user_texts={user_texts!r}"
+        )
+
+        # Cross-check on the LAST parent snapshot too (the parent's final
+        # turn context): the finding must be visible there (the model
+        # needs to see it to terminate gracefully) and exactly once.
+        last_snapshot_count = provider.parent_snapshots[-1].count(
+            "<subagent_result"
+        )
+        assert last_snapshot_count == 1, (
+            f"final parent snapshot should contain exactly one "
+            f"<subagent_result; got {last_snapshot_count}"
+        )
+    finally:
+        await session.shutdown()
+

@@ -313,7 +313,7 @@ async def test_post_inbox_user_seen_on_next_turn(tmp_path: Path) -> None:
         # via ExtensionAPI scope — by mounting an atom and reading off
         # api.post_inbox. Tests assert against the inbox spine directly to
         # stay independent of the producer-entry sugar layer.
-        inbox_handle.append(session._inbox)  # type: ignore[attr-defined]
+        inbox_handle.append(session.inbox)
         messages = await session.prompt("go")
 
         # The loop ran a second turn (keep-alive floor fired on the non-empty
@@ -384,10 +384,8 @@ async def test_tick_nonempty_inbox_runs(tmp_path: Path) -> None:
         session = await _make_session(tmp_path, module_name, _stream_text("ran"))
         # Push out-of-band content directly onto the inbox spine — same
         # path ``api.post_inbox(source="user", ...)`` takes, no SDK-internal
-        # reach into ``session._apis``.
-        session._inbox.push(  # type: ignore[attr-defined]
-            InboxItem(source="user", payload="resume me")
-        )
+        # reach.
+        session.inbox.push(InboxItem(source="user", payload="resume me"))
 
         messages = await session.tick()
 
@@ -438,7 +436,7 @@ async def test_keep_alive_floor_overrides_model_end_turn(tmp_path: Path) -> None
 
     try:
         session = await _make_session(tmp_path, module_name, stream_fn)
-        inbox_handle.append(session._inbox)  # type: ignore[attr-defined]
+        inbox_handle.append(session.inbox)
         messages = await session.prompt("start")
 
         assistant_texts = _texts(messages, "assistant")
@@ -672,3 +670,205 @@ async def test_interrupt_aborts_then_next_push_runs_with_preserved_context(
     finally:
         await session.shutdown()
         sys.modules.pop(module_name, None)
+
+
+# ---------------------------------------------------------------------------
+# Step-5 review fixes (Major 1, Major 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_interrupt_while_idle_does_not_poison_next_prompt(
+    tmp_path: Path,
+) -> None:
+    """Major-1 fix: calling ``session.interrupt()`` while the driver is idle
+    (blocked on ``wait_nonempty`` with no in-flight run) MUST NOT poison the
+    next ``prompt()`` with a stale ``SignalAborted``.
+
+    Reproducer for the bug: previously ``_driver`` cleared ``_signal`` AFTER
+    ``_run_one_round`` returned, so an idle-time ``interrupt()`` left
+    ``_signal`` set; the next ``prompt`` push woke the driver, the kernel's
+    per-turn signal check (``loop.py:440``) fired ``SignalAborted`` before
+    any real work happened.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._idle_interrupt_{id(tmp_path)}"
+
+    try:
+        session = await _make_session(
+            tmp_path, module_name, _stream_text("hello back")
+        )
+        # Driver is idle (no prior prompt). Interrupt now.
+        session.interrupt()
+        # Yield once so any latent driver-loop iteration would observe the
+        # signal — but the driver should still be parked on wait_nonempty
+        # (no inbox push happened yet, no run in flight).
+        await _aio.sleep(0)
+
+        # Next prompt MUST complete normally with the stub provider's reply,
+        # not raise SignalAborted. A short timeout catches the
+        # tight-loop / hang failure modes.
+        messages = await _aio.wait_for(
+            session.prompt("hello agent"), timeout=2.0
+        )
+        assistant_texts = _texts(messages, "assistant")
+        assert "hello back" in assistant_texts
+        # The originating prompt also landed (proves the run actually
+        # executed rather than short-circuiting).
+        assert "hello agent" in _texts(messages, "user")
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_driver_parks_after_pre_first_turn_failure_no_spin(
+    tmp_path: Path,
+) -> None:
+    """Major-3 fix: a persistent pre-first-turn failure (e.g. a
+    ``build_session_context`` that always raises) MUST NOT tight-loop the
+    driver. The driver drains the inbox on the exception, parks on
+    ``wait_nonempty``, and only re-attempts on a fresh push.
+
+    Reproducer: previously ``_run_one_round`` raised before the kernel
+    emitted its first ``context`` event, so the inbox was never drained —
+    ``_nonempty`` stayed set, ``wait_nonempty`` returned immediately, and
+    the driver attempted the failing round again and again at CPU speed.
+
+    We monkeypatch ``session_manager.build_session_context`` because the
+    bus suppresses handler exceptions (event handlers cannot escape
+    ``emit``), so the realistic propagating-failure path is a callsite the
+    driver invokes directly. Same shape applies to a buggy resource
+    loader, a transient FS error during context build, etc.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._driver_parks_{id(tmp_path)}"
+
+    call_count = [0]
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del messages, model, tools, system, signal, thinking
+        # Should never reach the stream if build_session_context raises first.
+        call_count[0] += 1
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text="unreachable")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    build_calls = [0]
+
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        original_build = session.session_manager.build_session_context
+
+        def _always_raises(*args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            build_calls[0] += 1
+            raise RuntimeError("build_session_context always-raise")
+
+        session.session_manager.build_session_context = _always_raises  # type: ignore[method-assign]
+
+        try:
+            # Push a user message; the driver picks it up, fails in
+            # build_session_context, drains the inbox (Major-3 fix), parks.
+            prompt_task = _aio.create_task(session.prompt("kick"))
+
+            # The waiter is rejected via _fail_end_waiters with the RuntimeError.
+            with pytest.raises(RuntimeError, match="always-raise"):
+                await _aio.wait_for(prompt_task, timeout=2.0)
+
+            # Snapshot the build-call count, then let many event-loop ticks
+            # pass. Before the fix, the driver would tight-loop and
+            # ``build_calls`` would climb without bound. After the fix the
+            # driver is parked on wait_nonempty and the count stays put.
+            count_after_first = build_calls[0]
+            assert count_after_first == 1, (
+                f"originating push should drive exactly one attempt; "
+                f"got {count_after_first}"
+            )
+            for _ in range(100):
+                await _aio.sleep(0)
+            await _aio.sleep(0.1)
+
+            # Bounded: the count stays at 1 (no spin afterwards). A tight
+            # loop would produce hundreds.
+            assert build_calls[0] == count_after_first, (
+                f"driver tight-looped: build_session_context called "
+                f"{build_calls[0]} times after the originating push "
+                f"(expected exactly {count_after_first})"
+            )
+
+            # And the stream was never reached.
+            assert call_count[0] == 0
+
+            # Restore + push again: ensure the driver is still alive and
+            # not jammed, just parked.
+            session.session_manager.build_session_context = original_build  # type: ignore[method-assign]
+        finally:
+            # Always restore so shutdown's catalog-index path can use it
+            # (shutdown reads session.session_manager.get_messages but
+            # not build, so technically optional; restore for safety).
+            session.session_manager.build_session_context = original_build  # type: ignore[method-assign]
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_tick_external_signal_during_decide_does_not_poison_next_prompt(
+    tmp_path: Path,
+) -> None:
+    """Major-1 fix (second sub-case): an external ``signal`` fired during
+    ``tick``'s synthetic decide-cycle MUST NOT poison the next ``prompt``
+    with a stale ``SignalAborted``.
+
+    Pre-fix bug: ``tick``'s signal forwarder bridged the external event
+    into ``_signal``; if no run was launched (empty inbox + no injector),
+    ``_signal`` carried over and the next ``prompt`` push aborted before
+    any LLM call. Fix: ``tick``'s ``finally`` clears ``_signal`` on the
+    no-run paths.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._tick_leak_{id(tmp_path)}"
+
+    try:
+        session = await _make_session(
+            tmp_path, module_name, _stream_text("good reply")
+        )
+
+        external = _aio.Event()
+        # Fire the external signal BEFORE tick — the forwarder spawns and
+        # the synthetic decide runs; tick's no-run path returns. The fix
+        # clears _signal in the finally so the next prompt is clean.
+        external.set()
+        await session.tick(signal=external)
+        # Yield to let the forwarder run (it awaits external.wait() which
+        # is already set).
+        await _aio.sleep(0)
+
+        # Next prompt MUST complete normally with the stub provider's
+        # reply, not raise SignalAborted.
+        messages = await _aio.wait_for(
+            session.prompt("hi after tick"), timeout=2.0
+        )
+        assert "good reply" in _texts(messages, "assistant")
+        assert "hi after tick" in _texts(messages, "user")
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+

@@ -576,10 +576,11 @@ class _ChildTaskManager:
         state.error = error
         # Step 5b: post the per-child finding through the session inbox so
         # the parent's context-drain injects it the same way background_exec
-        # completions land. ``read`` is flipped here to prevent the (now
-        # narrowed) decide_turn_action floor from also surfacing the same
-        # finding via Inject — the inbox path is authoritative.
-        state.read = True
+        # completions land. The narrowed decide_turn_action floor only
+        # checks ``status == _RUNNING`` (terminal states are not its
+        # concern), so we do NOT set ``state.read`` here — that flag is
+        # owned by the tools that surface findings directly to the model
+        # (``check_tasks``, ``wait_subagent``, ``_reset_running_only_cancels``).
         try:
             self._api.post_inbox(
                 source="subagent",
@@ -869,11 +870,15 @@ class _ChildTaskManager:
         ignored anyway, so we return ``None``.
 
         Auto-abort path: the second consecutive running-only cancel triggers
-        abort signals on every running child. Their final findings will be
-        posted by ``_finalize_state`` and surfaced via the inbox; the
-        keep-alive floor itself injects a one-shot ``<subagent_pending>``
-        notice for the still-running set so the model can react this turn
-        without waiting for the inbox-drained finding next turn.
+        abort signals on every running child. Each aborted child's
+        ``_finalize_state`` posts its finding through the session inbox
+        before ``_abort_running_states`` returns; we then return ``None``
+        so the runtime keep-alive floor (which sees the now-non-empty
+        inbox) turns the parent's ``Stop`` into ``Step()`` and the next
+        turn's context-drain delivers each ``<subagent_result>`` exactly
+        once. (Earlier code Inject-ed the aborted set AND let the inbox
+        drain redeliver, double-surfacing every finding — Major-2 fix on
+        the step-5 review.)
         """
 
         default = event.observation.default_action
@@ -918,10 +923,18 @@ class _ChildTaskManager:
             aborted = await self._abort_running_states(running)
             if not aborted:
                 return None
-            # Aborted children's findings will be posted via _finalize_state
-            # → inbox. Inject the aborted-set notice so the model gets to
-            # react in the next turn without waiting for the inbox drain.
-            return Inject(messages=[_notification_message(pending=aborted, running=[])])
+            # Major-2 fix (option a, decided 2026-05-28): the aborted
+            # children's findings are ALREADY queued on the inbox by their
+            # ``_finalize_state.post_inbox`` (which ran inside the await of
+            # ``_abort_running_states``). Returning ``None`` here lets the
+            # runtime keep-alive floor see the non-empty inbox and turn the
+            # parent's ``Stop(ModelEndTurn)`` into ``Step()`` — so the next
+            # turn's ``context`` drain delivers each ``<subagent_result>``
+            # EXACTLY ONCE. The previous code Inject-ed the same findings
+            # this turn AND let the inbox deliver them next turn (the
+            # dedup_key only dedupes inside the inbox, not across the two
+            # delivery paths), compounding under multi-child fan-outs.
+            return None
 
         # Still-running children: keep the parent alive by injecting a
         # <subagent_pending> notice so the model can choose to wait or
