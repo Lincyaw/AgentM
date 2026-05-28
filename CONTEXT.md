@@ -4,7 +4,7 @@ Terms with precise meaning inside this project. Implementation details belong el
 
 ## Entry point
 
-The CLI (`agentm`, `agentm-gateway`, `agentm-worker`, `agentm-feishu`, `agentm-terminal`) is the supported entry. `AgentSession.create` is the substrate-level constructor those CLIs call. Notebook / embedder use is not a current priority — there is no `agentm.Session` façade.
+The CLI is the supported entry: `agentm` (one-shot prompt, plus the `agentm gateway` and `agentm trace` subcommands) and the separate chat-client peer binaries `agentm-feishu` / `agentm-terminal` (vendor-SDK isolation only). `AgentSession.create` is the substrate-level constructor those CLIs call. Notebook / embedder use is not a current priority — there is no `agentm.Session` façade.
 
 Power-users override defaults by passing fields into `AgentSessionConfig`.
 

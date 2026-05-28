@@ -4,8 +4,8 @@ The wire layer expects an :class:`asyncio.StreamReader` /
 :class:`asyncio.StreamWriter` byte stream — see ``wire/framing.py`` and
 ``server._read_one_frame``. WebSocket connections speak in discrete
 *messages*, not a byte stream, so we bridge the two while preserving
-the "one envelope per WebSocket message" invariant (Phase 2 design,
-``.claude/plans/2026-05-12-gateway-websocket-transport.md``).
+the "one envelope per WebSocket message" invariant (see
+``.claude/designs/single-process-gateway.md``).
 
 The reader pulls binary messages on demand and exposes them as a
 contiguous byte buffer to ``readexactly``. The writer accumulates the

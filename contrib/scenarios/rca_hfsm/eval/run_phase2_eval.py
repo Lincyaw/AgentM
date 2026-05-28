@@ -1,8 +1,8 @@
 """Phase 2 eval runner for rca_hfsm — drives the LLM-mode judge stack
 against the rca:baseline task suite.
 
-Per the C3 plan (.claude/plans/2026-05-13-rca-hfsm-phase2-llm-native-
-judges.md): pick up to 10 representative tasks from
+Per ``.claude/designs/llm-native-judges.md``: pick up to 10 representative
+tasks from
 ``contrib/scenarios/rca/eval/baseline/tasks/`` (the only YAML-defined
 task suite — the 50-case ops-lite eval lives in HF dataset form and is
 driven by ``rcabench-platform``, not local YAML), run each through a

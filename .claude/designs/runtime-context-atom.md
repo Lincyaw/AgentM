@@ -32,7 +32,7 @@ that any scenario can opt into.
 
 The chat-format hint (Feishu prefers short paragraphs, no large headings, no
 tables) is scenario-shaped, not channel-shaped: it is part of the agent's
-persona on a chat surface. It belongs in the `feishu_chat` scenario's existing
+persona on a chat surface. It belongs in the `chatbot` scenario's existing
 `system_prompt` text, not in the channel layer or the runtime atom.
 
 ---
@@ -112,7 +112,7 @@ the scenario YAML controls which sits on top.
 
 ## 3. Scenario integration
 
-`feishu_chat` and every other scenario that wants the fix opts in by adding
+`chatbot` and every other scenario that wants the fix opts in by adding
 **one line** to `extensions:`, listed *after* the persona `system_prompt`
 so its prepend runs last and lands at the top of the assembled prompt:
 
@@ -141,43 +141,7 @@ so adoption is opt-in per scenario.
 
 ---
 
-## 4. Cleanup checklist (channels layer)
-
-> **Historical (2026-05-28).** The paths below refer to the
-> `contrib/channels/src/agentm_channels/` layout that the **channels v2
-> rewrite** (`single-process-gateway.md`) deleted outright — the gateway
-> now lives in `src/agentm/gateway/` and there is no `runtime_identity.py`
-> / in-process `Gateway` class to clean up. This checklist is retained as
-> a record of the original migration intent; do not action it against the
-> current tree.
-
-After the atom lands, `contrib/channels/` ends up knowing **zero** about
-prompts. Concrete deletions:
-
-1. **Delete entirely**:
-   `contrib/channels/src/agentm_channels/runtime_identity.py`
-2. **`contrib/channels/src/agentm_channels/cli.py`**:
-   - drop the `from .runtime_identity import build_runtime_identity` import.
-   - drop the `identity = build_runtime_identity(...)` and `extra = [...]`
-     block inside `_build_session_factory.factory`.
-   - drop the `extra_extensions=extra` arg on `AgentSessionConfig(...)`.
-3. **`contrib/channels/src/agentm_channels/gateway.py`**:
-   - revert `SessionFactory` signature to
-     `Callable[[str, EventBus, str | None], Awaitable[Any]]` (no `channel`).
-   - update `_get_or_create_route` to call
-     `self._session_factory(self._config.cwd, bus, resume_id)` (drop the
-     `msg.channel` arg).
-4. **Scenario manifest** (`contrib/scenarios/feishu_chat/manifest.yaml`):
-   add `- module: agentm.extensions.builtin.runtime_context` *after* the
-   `system_prompt` block in
-   `extensions:`. Leave the existing `system_prompt` text alone — Feishu format
-   guidance stays where it already is.
-
-After (4), the channel layer mentions neither prompts nor atoms anywhere.
-
----
-
-## 5. Tests
+## 4. Tests
 
 No new fail-stop test. Per CLAUDE.md "Testing philosophy", this atom is in the
 "single happy path / framework guarantee" zone:
@@ -195,7 +159,7 @@ workspace path. That is a follow-up, not a blocker for this design.
 
 ---
 
-## 6. Index propagation
+## 5. Index propagation
 
 - New concept `runtime_context_atom` registered in `.claude/index.yaml`.
 - `extension_as_scenario` and `pluggable_architecture` gain `runtime_context_atom`

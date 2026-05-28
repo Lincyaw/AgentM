@@ -1,9 +1,8 @@
 """Builtin ``monitor`` atom: agent-defined subscriptions and wakeups.
 
-Design: ``.claude/designs/session-inbox.md`` (the ``monitor`` section) +
-``.claude/plans/2026-05-28-session-inbox.md`` (step 4). Step 4 of the Session
-Inbox work — the third producer atom on the inbox spine after ``background_exec``
-(whose lifecycle / cancel / stale wiring this atom mirrors so we don't relearn
+Design: ``.claude/designs/session-inbox.md`` (the ``monitor`` section) — the
+third producer atom on the inbox spine after ``background_exec`` (whose
+lifecycle / cancel / stale wiring this atom mirrors so we don't relearn
 step-3's hard lessons).
 
 What it exposes (all four are tools the agent calls):

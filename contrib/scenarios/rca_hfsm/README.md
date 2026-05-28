@@ -31,8 +31,8 @@ Three structural commitments back the framing:
 Phase 1 (this commit set) lands the L1 schema and the single-writer
 hypothesis-graph store. Subsequent commits land the falsification gate, the
 evidence-tool surface, the FSM policy + brief builder, and the full
-manifest + investigator persona. Phasing detail in
-[`.claude/plans/2026-05-13-rca-hfsm-phase1.md`](../../../.claude/plans/2026-05-13-rca-hfsm-phase1.md).
+manifest + investigator persona. Design in
+[`.claude/designs/hypothesis-driven-rca.md`](../../../.claude/designs/hypothesis-driven-rca.md).
 
 ## Layout
 

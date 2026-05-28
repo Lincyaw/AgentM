@@ -313,7 +313,7 @@ requirements:
   # ---------------------------------------------------------------------------
   # V2 redirection — issue #134 (2026-05-10). LLM-led judgment, free-text
   # verdict shape, Phase 1 graph validator, branches as first-class audit
-  # objects. Plan: .claude/plans/2026-05-10-llmharness-issue-134-redirection.md
+  # objects. Design: .claude/designs/llmharness-cognitive-audit.md
 
   - id: REQ-025
     title: V2 verdict schema — surface_reminder + continuation_notes
@@ -415,7 +415,7 @@ requirements:
   # ---------------------------------------------------------------------------
   # V3 redesign — issue #134 (2026-05-10). Schema break, scenario-registered
   # audit checks, witness-pipeline extractor, partial-extraction adapter.
-  # Plan: .claude/plans/2026-05-10-llmharness-issue-134-v3.md
+  # Design: .claude/designs/llmharness-cognitive-audit.md
 
   - id: REQ-029
     title: scenario-registered audit checks via llmharness.audit_registry service

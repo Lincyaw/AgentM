@@ -1,9 +1,9 @@
-"""Transport abstraction for the channels wire layer.
+"""Transport abstraction for the gateway wire layer.
 
-PR1 of `.claude/plans/2026-05-12-gateway-websocket-transport.md`:
-extract the Unix-socket plumbing out of :class:`WireServer` /
-:class:`WireClient` behind a transport-agnostic interface. PR2 will
-add a WebSocket implementation alongside :mod:`unix`.
+The Unix-socket plumbing is split out of :class:`WireServer` /
+:class:`WireClient` behind a transport-agnostic interface, so a
+WebSocket transport (:mod:`websocket`) sits alongside :mod:`unix`.
+See ``.claude/designs/single-process-gateway.md``.
 """
 
 from __future__ import annotations
