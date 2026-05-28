@@ -128,16 +128,16 @@ class ToolBlock(Collapsible):
     """One tool call: title ``name ⟳/✓/✗`` + collapsible args/result body."""
 
     def __init__(self, *, name: str, args: dict[str, Any]) -> None:
-        self._name = name
+        self._label = _tool_label(name, args)  # e.g. "bash(ls -la)" / "read(README.md)"
         self._args_text = _format_args(args)
         self._body = Static(self._args_text, classes="tool-body", markup=False)
         super().__init__(
-            self._body, title=f"{name}  {TOOL_RUNNING}", collapsed=True
+            self._body, title=f"{self._label}  {TOOL_RUNNING}", collapsed=True
         )
 
     def set_result(self, *, ok: bool, content: str) -> None:
         glyph = TOOL_OK if ok else TOOL_ERROR
-        self.title = f"{self._name}  {glyph}"
+        self.title = f"{self._label}  {glyph}"
         body = f"{self._args_text}\n\n{content}" if content else self._args_text
         self._body.update(body)
         if not ok:
@@ -212,6 +212,8 @@ class PromptInput(TextArea):
     BINDINGS = [
         Binding("enter", "submit", "send", show=False, priority=True),
         Binding("ctrl+j", "newline", "newline", show=False, priority=True),
+        Binding("up", "history_prev", show=False),
+        Binding("down", "history_next", show=False),
     ]
 
     class Submitted(Message):
@@ -221,12 +223,59 @@ class PromptInput(TextArea):
             super().__init__()
             self.text = text
 
+    class HistoryNav(Message):
+        """Posted when Up/Down should browse input history (delta -1 older / +1 newer)."""
+
+        def __init__(self, delta: int) -> None:
+            super().__init__()
+            self.delta = delta
+
     def action_submit(self) -> None:
         # Bubble up; the App owns the send (it holds the wire client).
         self.post_message(self.Submitted(self.text))
 
     def action_newline(self) -> None:
         self.insert("\n")
+
+    def action_history_prev(self) -> None:
+        # On the first row, Up browses older history; otherwise move the cursor.
+        if self.cursor_location[0] == 0:
+            self.post_message(self.HistoryNav(-1))
+        else:
+            self.action_cursor_up()
+
+    def action_history_next(self) -> None:
+        # On the last row, Down browses newer history; otherwise move the cursor.
+        if self.cursor_location[0] >= self.text.count("\n"):
+            self.post_message(self.HistoryNav(1))
+        else:
+            self.action_cursor_down()
+
+
+_TOOL_SUMMARY_KEY = {
+    "bash": "command",
+    "read": "file_path",
+    "write": "file_path",
+    "edit": "file_path",
+}
+
+
+def _tool_label(name: str, args: dict[str, Any], limit: int = 48) -> str:
+    """``name(summary)`` — Claude-Code-style one-glance label. Summary is the
+    salient arg (command / file_path) or the first scalar arg value."""
+    key = _TOOL_SUMMARY_KEY.get(name.lower())
+    value: Any = args.get(key) if key else None
+    if value is None:
+        value = next(
+            (v for v in args.values() if isinstance(v, (str, int, float, bool))),
+            None,
+        )
+    if value is None:
+        return name
+    text = str(value).splitlines()[0] if isinstance(value, str) else str(value)
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return f"{name}({text})"
 
 
 def _format_args(args: dict[str, Any], limit: int = 600) -> str:
