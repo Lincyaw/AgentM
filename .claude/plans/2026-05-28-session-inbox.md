@@ -1,0 +1,78 @@
+# 2026-05-28 — Session Inbox
+
+Design: [session-inbox.md](../designs/session-inbox.md) (accepted 2026-05-28).
+Concept: `session_inbox` in `index.yaml`.
+
+Goal: one first-class `SessionInbox` as the single entry point for every message
+reaching the loop (user input + background completion + ticker + monitor + subagent
+findings), plus one driver. Unlocks per-tool-call background, auto-backgrounding,
+ticker status, agent-defined monitors — all as thin producers on the spine.
+
+## Step 1 — the spine (this iteration)
+
+Scope: build the inbox + unified message-entry + single driver. **Do not touch
+`sub_agent`** (its bespoke floor coexists for now — both handlers' `Inject`/`Step`
+returns reconcile via `core/abi/loop.py:317`). No `background_exec` / `monitor` yet.
+**Do not modify the kernel `AgentLoop` (`core/abi/loop.py`)** — wire everything through
+runtime-owned bus handlers (closures over the inbox + session_manager).
+
+### Pieces
+
+- `core/runtime/session_inbox.py` (new): `SessionInbox` (`push` / `drain` /
+  `async wait_nonempty` / non-blocking emptiness check), `InboxItem(source, payload,
+  dedup_key=None)`, `InboxSource` (str-based, open). `push` with a `dedup_key`
+  **replaces** the same-key undrained item (no stacking). asyncio-safe `push` (plain
+  list append) + an `asyncio.Event` backing `wait_nonempty`.
+- `_render_item(item) -> AgentMessage`: step 1 handles `source="user"` →
+  `UserMessage`. Other sources are stubs for later steps.
+- One shared drain+persist helper on the session: for each drained item, render →
+  append to the messages list **and** `session_manager.append_message(msg)` (injected
+  messages must be persisted — same contract as `core/abi/loop.py:609` and
+  `session.py:396`).
+- Two runtime-owned bus handlers registered by the session (closures, not atoms):
+  - **`context`** (turn start, `core/abi/loop.py:466`): drain+persist into the turn's
+    message list. **This is the single message-entry point** — it is what lets the
+    LLM see pending input on the very next turn.
+  - **`decide_turn_action`** (turn end): if the inbox is non-empty, return `Step()`
+    to keep the loop alive (the next turn's `context` drains it). This generalizes
+    `sub_agent`'s floor. `final=True` causes still hard-win (`loop.py:301`).
+- `prompt(text)` collapses to: `inbox.push(InboxItem("user", text))` → `_drive()`,
+  where `_drive()` = drain+persist once at entry (so the originating message lands
+  before `build_session_context`, no first-turn delay) → before_agent_start → `run`.
+- `tick()` collapses to `_drive()` with no push (drains whatever is already queued;
+  empty ⇒ `NoPendingInput`). Share the entry logic with `prompt`.
+- `send_user_message` → `inbox.push(InboxItem("user", content))`. Delete
+  `pending_user_messages` and `_drain_pending_user_messages`
+  (`extension.py:415,521-526`; `session.py:118,267,342,426-440`; runtime scope field).
+  Behaviour preserved: content still surfaces on the next turn — now via the inbox.
+
+### Driver note
+
+Step 1's "driver" is just `prompt`/`tick`'s internal `run` (run-to-idle). A
+**persistent** driver (`while: await inbox.wait_nonempty(); await run()`) that wakes
+an idle agent on a late background push is only needed once producers exist — deferred
+to step 5 (host). `wait_nonempty` is implemented now but unused by step 1.
+
+### Fail-stop tests (quality over quantity)
+
+- inbox FIFO drain order + `dedup_key` replace semantics
+- originating prompt message lands + is persisted (trace parity with pre-change)
+- a `send_user_message` issued mid-run is seen on the next turn (per-turn drain)
+- `tick`: empty inbox ⇒ `NoPendingInput`; non-empty ⇒ runs
+- keep-alive floor: model wants `Stop(ModelEndTurn)` but inbox non-empty ⇒ loop
+  continues
+- existing `prompt`/`tick`/`send_user_message` tests still pass (regression net)
+
+### Dev loop
+
+`uv run ruff check`, `uv run mypy`, `uv run pytest --tb=short` on touched files.
+
+## Later steps (see design doc)
+
+2. Extract `sub_agent` registry + completion-injection → `core.lib`; route findings
+   through the inbox (`source="subagent"`); delete `sub_agent`'s bespoke floor.
+3. `background_exec` atom: auto-backgrounding (`asyncio.wait(timeout=60)`) + ticker
+   (milestone-driven + sparse heartbeat, `dedup_key` replace) + `check/wait/cancel_background`.
+4. `monitor` atom: `schedule_wakeup` / `create_monitor` / `list_monitors` / `cancel_monitor`.
+5. Long-lived host driver loop + interrupt-and-resume (abort turn via `signal`,
+   preserve context, resume with new inbox input); validate on one channel first.
