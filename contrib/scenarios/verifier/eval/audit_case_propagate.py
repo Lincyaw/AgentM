@@ -430,9 +430,21 @@ def extract_hop_verdict(obs_dir: Path) -> dict | None:
             except Exception:  # noqa: BLE001
                 continue
             result = row.get("result")
-            if not result or not isinstance(result, str):
+            if not result:
                 continue
-            if "error" in result:
+            # result is either a raw string or a ToolResult dict
+            # {"content": [{"type":"text","text":"..."}], "is_error": ...}
+            if isinstance(result, dict):
+                if result.get("is_error"):
+                    continue
+                content = result.get("content", [])
+                if content and isinstance(content[0], dict):
+                    result = content[0].get("text", "")
+                else:
+                    continue
+            if not isinstance(result, str) or not result:
+                continue
+            if '"error"' in result and '"verdict"' not in result:
                 continue
             try:
                 obj = json.loads(result)
@@ -453,7 +465,6 @@ def run_hop(
     injection_target: str,
     out_dir: Path,
     budget: int,
-    timeout: int,
     is_infra: bool = False,
 ) -> dict | None:
     """Run one hop-agent and return its verdict dict (or None)."""
@@ -514,15 +525,11 @@ def run_hop(
         prompt,
     ]
 
-    try:
-        with open(hop_dir / "stdout.log", "w") as fout, \
-             open(hop_dir / "stderr.log", "w") as ferr:
-            subprocess.run(
-                cmd, env=env, stdout=fout, stderr=ferr, timeout=timeout,
-            )
-    except subprocess.TimeoutExpired:
-        (hop_dir / "stderr.log").write_text("TIMEOUT\n")
-        return {"verdict": "timeout", "rationale": "agent timed out"}
+    with open(hop_dir / "stdout.log", "w") as fout, \
+         open(hop_dir / "stderr.log", "w") as ferr:
+        subprocess.run(
+            cmd, env=env, stdout=fout, stderr=ferr,
+        )
 
     obs_dir = hop_dir / ".agentm" / "observability"
     return extract_hop_verdict(obs_dir) if obs_dir.exists() else None
@@ -562,7 +569,6 @@ def propagate(
     *,
     budget: int,
     parallel: int,
-    timeout: int,
     infra_nodes: set[str] | None = None,
     node_map: dict[str, str] | None = None,
 ) -> dict:
@@ -684,7 +690,7 @@ def propagate(
                         run_hop, data_dir,
                         froms[0][0], to_svc, froms[0][1],
                         hop_fk, hop_doc, hop_target,
-                        out_dir, budget, timeout,
+                        out_dir, budget,
                         to_svc in infra_nodes,
                     )
                     futures[fut] = (to_svc, froms)
@@ -693,14 +699,12 @@ def propagate(
                     agent_checked.add(to_svc)
                     result = future.result()
                     verdict = result.get("verdict") if result else None
-                    display = verdict or "no-result"
-                    if verdict == "timeout":
-                        display = "timeout"
                     hop_log.append({
                         "round": round_n, "from": froms[0][0],
                         "to": to_svc, "verdict": verdict or "no-result",
                     })
-                    print(f"    {froms[0][0]} -> {to_svc}: {display}")
+                    print(f"    {froms[0][0]} -> {to_svc}: "
+                          f"{verdict or 'no-result'}")
                     if verdict == "confirmed":
                         confirmed.add(to_svc)
                         node_evidence[to_svc] = {
@@ -775,11 +779,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("case_dir", type=Path)
     ap.add_argument("--out", type=Path, default=None)
-    ap.add_argument("--budget", type=int, default=30,
+    ap.add_argument("--budget", type=int, default=15,
                     help="tool-call budget per hop agent")
     ap.add_argument("--parallel", type=int, default=4)
-    ap.add_argument("--timeout", type=int, default=180,
-                    help="timeout per hop agent (seconds)")
     args = ap.parse_args()
 
     data_dir = args.case_dir.resolve()
@@ -814,7 +816,7 @@ def main() -> int:
 
     result = propagate(
         data_dir, injections, neighbor_graph, fault_doc, out,
-        budget=args.budget, parallel=args.parallel, timeout=args.timeout,
+        budget=args.budget, parallel=args.parallel,
         infra_nodes=infra_nodes, node_map=node_map,
     )
     (out / "propagation_trace.json").write_text(
