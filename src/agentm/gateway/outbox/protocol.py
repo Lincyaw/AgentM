@@ -10,20 +10,18 @@ See ``.claude/designs/single-process-gateway.md`` §2.6 for the
 delivery semantics this surface supports (at-least-once outbound,
 at-most-once-with-ack inbound, dead-letter on retry exhaustion).
 
-Mechanism only — retry/backoff policy lives in
-:mod:`agentm.gateway.outbox.policy` so callers (the server) decide
-when to nack vs dead_letter and what delay to set.
+Mechanism only — the retry schedule lives in the caller (the server),
+which decides when to nack vs dead_letter and what ``next_retry_at`` to
+pass; :mod:`agentm.gateway.outbox.policy` offers an ``exponential_backoff``
+helper a backend may use, but the Protocol does not mandate one.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from agentm.gateway.wire import Envelope
-
-from .policy import exponential_backoff
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,41 +88,6 @@ class OutboxStore(Protocol):
     def pending_count(self, peer_id: str) -> int:
         """Total rows queued for ``peer_id`` regardless of lease state."""
         ...
-
-    # -- delivery-loop hints (first-class, §6) ------------------------
-    # These were ``getattr``-probed optional methods in v1. They are now
-    # declared on the Protocol with default implementations so the server
-    # never has to duck-type — a backend that wants none of them inherits
-    # the no-op / module-default behaviour and stays correct (just at
-    # LEASE_REFRESH_INTERVAL polling granularity).
-
-    def set_notifier(
-        self, peer_id: str, notifier: Callable[[str], None] | None
-    ) -> None:
-        """Register/clear a wakeup callback for ``peer_id``.
-
-        Default: no-op. A backend that supports push-style wakeups (the
-        SQLite default) overrides this so ``enqueue`` can wake the
-        delivery worker immediately instead of waiting on the poll.
-        """
-        return None
-
-    def backoff_delay(self, attempts: int) -> float:
-        """Retry delay after ``attempts`` failures.
-
-        Default: the module-level :func:`exponential_backoff`. Backends
-        that pin a custom schedule override this.
-        """
-        return exponential_backoff(attempts)
-
-    def next_retry_at_min(self, peer_id: str) -> float | None:
-        """Earliest ``next_retry_at`` for any non-leased pending row.
-
-        Default: ``None`` (no hint — the server falls back to the
-        safety-net poll). Backends that can answer cheaply override this
-        for tighter retry-wake latency.
-        """
-        return None
 
     def close(self) -> None:
         """Release storage resources."""

@@ -194,7 +194,7 @@ Outbound to a chat client flows through **one ordered channel per peer**: a sing
 
 **Ordering and reliability are orthogonal**, carried on the *same* queue:
 
-- A **durable** frame (`assistant_text` / `approval_*` / `diagnostic_*`, see `wire/types.py:DURABLE_OUTBOUND_KINDS`) is first written to the per-peer SQLite outbox (the replay floor) and enqueued carrying its row id; the sender acks the row only after a successful write. On socket failure it is left in the outbox and replayed — in FIFO order, ahead of new live frames — when the peer reconnects (`WireServer._prefill_from_outbox`). This preserves **at-least-once**, idempotent on envelope `id`, with exponential-backoff dead-lettering of poison rows.
+- A **durable** frame (`assistant_text` / `approval_*` / `diagnostic_*`, see `wire/types.py:DURABLE_OUTBOUND_KINDS`) is first written to the per-peer SQLite outbox (the replay floor) and enqueued carrying its row id; the sender acks the row only after a successful write. On socket failure the row is left in the outbox (nacked for immediate re-lease) and replayed — in FIFO order, ahead of new live frames — when the peer reconnects (`WireServer._prefill_from_outbox`). This preserves **at-least-once**, idempotent on envelope `id`. A row's `attempts` advances once per reconnect-lease; a row that exceeds the attempt cap is dead-lettered at prefill rather than replayed forever. (No live retry loop exists — the sender exits on failure and waits for reconnect — so there is no backoff schedule to tune.)
 - An **ephemeral** frame (`stream_text` / `tool_call` / `agent_end` …) carries no row id, is never persisted, and is **best-effort**: under backpressure the queue sheds its *oldest ephemeral* item (durable items are never dropped — they are already on disk), bounding memory without ever losing a durable record or reordering survivors.
 
 > **Why one channel.** v1/earlier-v2 split delivery into two paths — durable via the outbox/async worker, ephemeral written straight to the socket. They reordered relative to each other (the async-outbox round-trip lags the direct write), so a later-produced `agent_end` reliably overtook an earlier durable `assistant_text`. Unifying onto one FIFO fixes ordering at the source; the outbox is demoted to a persistence side-channel for reconnect replay, not a delivery path.
@@ -438,7 +438,7 @@ Three Protocols, documented and complete. No accidental extension surfaces.
 
 | Protocol | File | Default impl | Purpose |
 |---|---|---|---|
-| `OutboxStore` | `gateway/outbox/protocol.py` | `SqliteOutbox` | Per-peer at-least-once durable delivery. All performance hint methods (`set_notifier`, `backoff_delay`, `next_retry_at_min`) declared on the Protocol with default implementations — no `getattr` probing. |
+| `OutboxStore` | `gateway/outbox/protocol.py` | `SqliteOutbox` | Per-peer at-least-once durable delivery (replay-on-reconnect side-channel). Minimal surface — `enqueue` (returns row id) / `lease` / `ack` / `nack` / `dead_letter` / `pending_count` / `close`. The v1 delivery-worker hint methods (`set_notifier` / `backoff_delay` / `next_retry_at_min`) were removed when the lease-poll worker was replaced by the unified send queue — a backend implements only what the sender actually calls. |
 | `InboxLog` | `gateway/outbox/protocol.py` | `SqliteInbox` | Per-peer at-most-once ledger. |
 | `Authenticator` | `gateway/auth/__init__.py` | `AllowAllAuthenticator`, `UnixPeerCredAuthenticator`, `TokenAuthenticator` | Hello-time identity check. |
 

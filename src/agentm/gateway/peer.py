@@ -18,7 +18,7 @@ class PeerSession:
     """One connected chat-client peer's bookkeeping.
 
     ``transport_writer`` is the live :class:`asyncio.StreamWriter`.
-    ``pending_count_hint`` is the last sample of ``outbox.pending_count``
+    ``pending_count_hint`` is the last sampled depth of :attr:`send_q`
     used by the slow-consumer gate; it is a hint, not a source of truth.
     """
 
@@ -26,17 +26,17 @@ class PeerSession:
     transport_writer: asyncio.StreamWriter
     last_seen: float = 0.0
     pending_count_hint: int = 0
-    # Set when the per-peer delivery worker trips the slow-consumer
-    # high-water mark. Cleared when drained below high_water / 2.
+    # Set when the sender trips the slow-consumer high-water mark on the
+    # send queue. Cleared when it drains below high_water / 2.
     backpressure: bool = False
     capabilities: dict[str, object] = field(default_factory=dict)
-    # Serialises ALL writes to ``transport_writer``. The durable delivery
-    # worker and the ephemeral-frame sink (live streaming, §4 of
-    # textual-tui.md) both write to the same writer; the WebSocket adapter
-    # coalesces buffered writes into ONE ``ws.send`` per ``drain()``, so two
-    # concurrent ``write()+drain()`` pairs would merge two wire frames into a
-    # single WS message and corrupt the stream. Every writer acquires this
-    # lock around its write+drain so each frame maps to exactly one flush.
+    # Serialises ALL writes to ``transport_writer``. The per-peer sender is
+    # the usual writer, but handshake/pong frames (``server._send``) also
+    # write here; the WebSocket adapter coalesces buffered writes into ONE
+    # ``ws.send`` per ``drain()``, so two concurrent ``write()+drain()``
+    # pairs would merge two wire frames into a single WS message and corrupt
+    # the stream. Every writer acquires this lock around its write+drain so
+    # each frame maps to exactly one flush.
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Unified per-peer ordered send queue (§2.6): every outbound — durable
     # and ephemeral — is enqueued here and drained by the single sender
