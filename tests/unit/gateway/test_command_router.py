@@ -18,6 +18,7 @@ from agentm.gateway.commands import (
     CommandInbound,
     CommandRegistry,
     CommandRouter,
+    parse_invocation,
 )
 from agentm.gateway.commands.builtins.end import EndCommand
 from agentm.gateway.commands.builtins.help import HelpCommand
@@ -134,3 +135,116 @@ async def test_markdown_command_expands_and_falls_through(tmp_path: Any) -> None
     assert result is not None
     # Prompt command: expanded text falls through to the session.
     assert result.expanded_prompt == "Summarise yesterday's commits in one line."
+
+
+def _model_ctx(
+    *,
+    list_models: Any = None,
+    switch_model: Any = None,
+) -> CommandContext:
+    async def _noop() -> None:
+        return None
+
+    async def _no_switch(_name: str) -> tuple[bool, str]:
+        return (False, "unsupported")
+
+    return CommandContext(
+        session_key="terminal:t1",
+        channel="terminal",
+        chat_id="t1",
+        sender_id="u1",
+        thread_id=None,
+        end_session=_noop,
+        forget_chat_mapping=_noop,
+        get_route_stats=lambda: {},
+        list_commands=lambda: [],
+        list_models=list_models or (lambda: ("", [])),
+        switch_model=switch_model or _no_switch,
+    )
+
+
+def _inv(content: str):
+    """Build a CommandInvocation the way the router does (handlers read .args)."""
+    invocation = parse_invocation(_inbound(content))
+    assert invocation is not None
+    return invocation
+
+
+@pytest.mark.asyncio
+async def test_model_command_is_discovered() -> None:
+    from agentm.gateway.commands import discover_commands
+
+    reg = discover_commands(".")
+    assert "model" in {h.name for h in reg.all()}
+
+
+@pytest.mark.asyncio
+async def test_model_no_arg_lists_and_marks_active() -> None:
+    from agentm.gateway.commands.builtins.model import ModelCommand
+
+    ctx = _model_ctx(list_models=lambda: ("doubao", ["doubao", "deepseek"]))
+    res = await ModelCommand().handle(_inv("/model"), ctx)
+    body = res.outbound[0].content
+    assert "doubao" in body and "deepseek" in body
+    assert "active" in body.lower()
+
+
+@pytest.mark.asyncio
+async def test_model_switch_invokes_capability_and_confirms() -> None:
+    from agentm.gateway.commands.builtins.model import ModelCommand
+
+    switched: list[str] = []
+
+    async def _switch(name: str) -> tuple[bool, str]:
+        switched.append(name)
+        return (True, name)
+
+    ctx = _model_ctx(switch_model=_switch)
+    res = await ModelCommand().handle(_inv("/model deepseek"), ctx)
+    assert switched == ["deepseek"]
+    assert "deepseek" in res.outbound[0].content
+
+
+@pytest.mark.asyncio
+async def test_model_switch_failure_is_a_diagnostic() -> None:
+    from agentm.gateway.commands.builtins.model import ModelCommand
+
+    async def _switch(name: str) -> tuple[bool, str]:
+        return (False, f"unknown model '{name}'")
+
+    ctx = _model_ctx(switch_model=_switch, list_models=lambda: ("doubao", ["doubao"]))
+    res = await ModelCommand().handle(_inv("/model nope"), ctx)
+    assert res.outbound[0].metadata.get("kind") == "diagnostic_error"
+    assert "nope" in res.outbound[0].content
+
+
+def test_merge_gateway_commands_folds_builtins(tmp_path: Any) -> None:
+    # session_ready frames must gain the gateway's top-level command names so
+    # chat clients surface /model, /new, /end, /status in autocomplete.
+    from agentm.gateway.chat_session_map import ChatSessionMap
+    from agentm.gateway.cli import _GatewayRuntime
+    from agentm.gateway.commands import discover_commands
+    from agentm.gateway.outbox import SqliteOutbox
+
+    outbox = SqliteOutbox(str(tmp_path / "o.sqlite"))
+    try:
+        runtime = _GatewayRuntime(
+            cwd=".",
+            scenario="general_purpose",
+            outbox=outbox,
+            chat_map=ChatSessionMap(tmp_path / "m.json"),
+            session_factory=lambda *a: None,  # unused by this method
+            command_router=CommandRouter(registry=discover_commands(".")),
+            approval_policy=(frozenset(), frozenset(), 300.0),
+            model_name="doubao",
+            make_factory=lambda _n: (lambda *a: None),
+        )
+        meta: dict[str, Any] = {"kind": "session_ready", "command_names": ["mytool"]}
+        runtime._merge_gateway_commands(meta)
+        names = meta["command_names"]
+        assert "mytool" in names  # session-provided names preserved
+        assert {"model", "new", "end", "status"} <= set(names)
+        assert len(names) == len(set(names))  # deduped
+        assert not any(":" in n for n in names)  # no namespaced /atom:* entries
+    finally:
+        outbox.close()
