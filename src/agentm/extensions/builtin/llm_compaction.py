@@ -58,7 +58,7 @@ from agentm.core.abi.tool import (
 from agentm.core.lib import Turn, enumerate_turns
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import AfterCompactEvent, BeforeCompactEvent
-from agentm.core.abi.extension import ExtensionAPI, ProviderConfig
+from agentm.core.abi.extension import CommandSpec, ExtensionAPI, ProviderConfig
 
 
 # Prompt registry keys. Kept in sync with ``compaction_prompts.py``;
@@ -72,7 +72,12 @@ _PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
 MANIFEST = ExtensionManifest(
     name="llm_compaction",
     description="LLM-driven full-compress compaction for long session branches.",
-    registers=("event:before_send_to_llm", "event:before_compact", "event:after_compact"),
+    registers=(
+        "event:before_send_to_llm",
+        "event:before_compact",
+        "event:after_compact",
+        "command:compact",
+    ),
     config_schema={
         "type": "object",
         "properties": {
@@ -533,28 +538,33 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     if not isinstance(custom_instructions, str):
         custom_instructions = None
 
-    async def before_send_to_llm(event: BeforeSendToLlmEvent) -> None:
+    async def _run_compaction(
+        reason: str, session_messages: list[AgentMessage], est_tokens: int
+    ) -> list[AgentMessage] | None:
+        """Compact ``session_messages`` and append the compaction entry.
+
+        Returns the rebuilt session messages on success, or ``None`` when there
+        is nothing to compact / no provider. Shared by the automatic overflow
+        path and the on-demand ``/compact`` command.
+        """
         provider = api.provider
         model = api.model
         if provider is None or model is None:
-            return
-
-        session_messages = api.session.get_messages()
-        usage_estimate = estimate_context_tokens(session_messages)
-        if not should_compact(usage_estimate.tokens, model.context_window, settings):
-            return
+            return None
 
         branch = api.session.get_branch()
         preparation = prepare_compaction(
             branch, settings, current_messages=session_messages, tools=list(api.tools)
         )
         if preparation is None:
-            return
+            return None
 
         prompts, summarization_body = await _resolve_prompts(api)
 
-        before = BeforeCompactEvent(messages=event.messages, reason="llm_auto_overflow")
-        await api.events.emit(BeforeCompactEvent.CHANNEL, before)
+        await api.events.emit(
+            BeforeCompactEvent.CHANNEL,
+            BeforeCompactEvent(messages=session_messages, reason=reason),
+        )
 
         result = await compact(
             preparation,
@@ -570,10 +580,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # ``build_session_context`` rebuild the context as ``[user(summary)]``
         # plus anything appended after this entry.
         details = {
-            "reason": "llm_auto_overflow",
+            "reason": reason,
             "reserve_tokens": settings.reserve_tokens,
             "covered_through_turn": result.covered_through_turn,
-            "estimated_tokens_before": usage_estimate.tokens,
+            "estimated_tokens_before": est_tokens,
             "summary": result.summary,
             "read_files": result.details.read_files,
             "modified_files": result.details.modified_files,
@@ -582,7 +592,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         details["entry_id"] = entry_id
 
         rebuilt_messages = api.session.get_messages()
-        event.messages[:] = rebuilt_messages
         await api.events.emit(
             AfterCompactEvent.CHANNEL,
             AfterCompactEvent(
@@ -592,8 +601,47 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 details=details,
             ),
         )
+        return rebuilt_messages
+
+    async def before_send_to_llm(event: BeforeSendToLlmEvent) -> None:
+        model = api.model
+        if model is None:
+            return
+        session_messages = api.session.get_messages()
+        usage_estimate = estimate_context_tokens(session_messages)
+        if not should_compact(usage_estimate.tokens, model.context_window, settings):
+            return
+        rebuilt = await _run_compaction(
+            "llm_auto_overflow", session_messages, usage_estimate.tokens
+        )
+        if rebuilt is not None:
+            event.messages[:] = rebuilt
+
+    async def compact_command(_args: str, _api: ExtensionAPI) -> None:
+        # On-demand compaction. Skips the overflow gate (the user asked for it)
+        # but still no-ops when there is nothing summarisable. Feedback reaches
+        # the user via the AfterCompactEvent the shared path emits.
+        session_messages = api.session.get_messages()
+        usage_estimate = estimate_context_tokens(session_messages)
+        rebuilt = await _run_compaction("manual", session_messages, usage_estimate.tokens)
+        if rebuilt is None:
+            await api.events.emit(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="info",
+                    source="compaction",
+                    message="Nothing to compact yet.",
+                ),
+            )
 
     api.on(BeforeSendToLlmEvent.CHANNEL, before_send_to_llm)
+    api.register_command(
+        "compact",
+        CommandSpec(
+            description="Compact this session's history now to free up context.",
+            handler=compact_command,
+        ),
+    )
 
 
 async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
