@@ -46,6 +46,10 @@ async def _default_switch_model(_name: str) -> tuple[bool, str]:
     return (False, "model switching is not supported in this context")
 
 
+async def _default_resume(_sid: str) -> None:
+    raise NotImplementedError("resume_session not wired")
+
+
 @dataclass(frozen=True, slots=True)
 class CommandInbound:
     """The slash-command-relevant slice of an inbound envelope.
@@ -114,14 +118,11 @@ class CommandContext:
     sender_id: str
     thread_id: str | None
     end_session: Callable[[], Awaitable[None]]
-    """Tear down the active ``AgentSession`` for this chat. ``/new`` keeps
-    the :class:`ChatSessionMap` entry (next message resumes from
-    transcript); ``/end`` additionally clears it (next message starts
-    fresh). The flavour is selected via ``forget_chat_mapping`` below."""
+    """Tear down the active ``AgentSession`` for this chat."""
 
     forget_chat_mapping: Callable[[], Awaitable[None]]
-    """Clear the persistent ``ChatSessionMap`` entry for this chat. Used
-    by ``/end`` after ``end_session`` so the next message starts cold."""
+    """Clear the persistent ``ChatSessionMap`` entry for this chat so the
+    next message starts a brand-new session with no prior history."""
 
     get_route_stats: Callable[[], dict[str, Any]]
     """Returns a snapshot dict (``session_id``, ``turn_count``,
@@ -142,9 +143,18 @@ class CommandContext:
     switch_model: Callable[[str], Awaitable[tuple[bool, str]]] = (
         lambda _name: _default_switch_model(_name)
     )
-    """Switch the active model profile and restart this chat's session
-    (keeps transcript). Returns ``(ok, message)`` — ``message`` is the
-    resolved model name on success, or an error reason on failure."""
+    """Switch the active model profile and start a fresh session.
+    Returns ``(ok, message)``."""
+
+    cwd: str = "."
+    """Working directory for the gateway process."""
+
+    resume_session: Callable[[str], Awaitable[None]] = (
+        lambda _sid: _default_resume(_sid)
+    )
+    """Shut down the current session and set the ChatSessionMap entry to
+    ``session_id`` so the next inbound message resumes from that
+    session's transcript."""
 
     def reply(self, text: str, **meta: Any) -> OutboundBody:
         """Build a plain ``assistant_text`` outbound back to this chat."""

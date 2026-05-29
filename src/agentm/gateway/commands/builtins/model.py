@@ -1,9 +1,8 @@
 """``/model`` — show or switch the active model.
 
 ``/model`` lists the named profiles from ``config.toml`` and marks the active
-one. ``/model <name>`` switches to that profile and restarts this chat's
-session, keeping the transcript (the next message resumes on the new model) —
-the same teardown ``/new`` uses. Contrast ``/end``, which clears context.
+one. ``/model <name>`` switches to that profile and starts a fresh session on
+the new model (history cleared, same as ``/new``).
 
 A ``control`` command: the typed text never reaches the LLM.
 """
@@ -24,7 +23,7 @@ from ..protocol import (
 class ModelCommand:
     name: str = "model"
     namespace: str | None = None
-    summary: str = "Show or switch the active model (keeps transcript)"
+    summary: str = "Show or switch the active model"
     kind: CommandKind = "control"
 
     async def handle(
@@ -41,8 +40,7 @@ class ModelCommand:
             return CommandResult(
                 outbound=[
                     ctx.reply(
-                        f"🔀 Switched to `{message}`. The next message uses the "
-                        "new model (transcript kept)."
+                        f"🔀 Switched to `{message}`. Fresh session started."
                     )
                 ]
             )
@@ -69,7 +67,7 @@ def _render_list(current: str, available: list[str]) -> str:
     )
     return (
         f"**Models** (active: `{active}`)\n{lines}\n\n"
-        "Switch with `/model <name>` — keeps the transcript."
+        "Switch with `/model <name>`."
     )
 
 

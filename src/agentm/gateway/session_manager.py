@@ -5,7 +5,7 @@ process, so every chat conversation lives as an in-memory
 :class:`AgentSession` keyed by its (chat-client-computed) ``session_key``.
 
 ``get_or_create`` is the only public method that matters. On the first
-inbound for a ``session_key`` in this process lifetime it either resumes
+inbound for a ``session_key`` in this process lifetime it either recovers
 (if the persistent :class:`ChatSessionMap` has a prior session_id — a
 daemon-restart recovery) or creates fresh. Either way it stamps the
 ``wire_driver`` atom so the session's events fan out as outbound
@@ -146,9 +146,8 @@ class SessionManager:
         return _extract_session_id(sess) if sess is not None else None
 
     async def shutdown_session(self, session_key: str) -> None:
-        """Tear down the in-memory session. The ChatSessionMap entry STAYS
-        (so /new-then-message resumes the transcript); only ``/end`` clears
-        it via :meth:`forget`."""
+        """Tear down the in-memory session. Call :meth:`forget` afterwards
+        to also clear the persistent ``ChatSessionMap`` entry."""
         async with self._lock:
             sess = self._sessions.pop(session_key, None)
             self._turn_ctx.pop(session_key, None)
@@ -159,8 +158,12 @@ class SessionManager:
                 logger.exception("session shutdown failed for %s", session_key)
 
     def forget(self, session_key: str) -> None:
-        """Clear the persistent ChatSessionMap entry (``/end``)."""
+        """Clear the persistent ChatSessionMap entry."""
         self._chat_map.drop(session_key)
+
+    def set_chat_mapping(self, session_key: str, session_id: str) -> None:
+        """Point the persistent ChatSessionMap entry to ``session_id``."""
+        self._chat_map.set(session_key, session_id)
 
     async def shutdown_all(self) -> None:
         async with self._lock:

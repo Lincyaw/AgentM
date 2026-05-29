@@ -307,25 +307,15 @@ class AgentMTui(App[int]):
     # --- bindings -------------------------------------------------------
 
     def action_interrupt_or_quit(self) -> None:
-        # Ctrl+C copies first when there's a mouse text selection -- the same
-        # terminal-native gesture Textual binds by default (this priority
-        # binding otherwise shadows its screen.copy_text). The selection is
-        # cleared afterwards so a follow-up Ctrl+C falls through to quit. The
-        # in-flight interrupt lives on Esc (action_cancel), so copying here
-        # never steals it.
-        selected = self.screen.get_selected_text()
-        if selected:
-            self.copy_to_clipboard(selected)
-            self.clear_selection()
-            self.toast(f"copied {len(selected)} chars")
+        inp = self.query_one("#prompt-input", PromptInput)
+        if inp.text.strip():
+            inp.text = ""
             return
         now = time.monotonic()
         if now - self._ctrlc_ts < 1.5:
             self.exit(0)
             return
         self._ctrlc_ts = now
-        # Esc is the in-flight interrupt (see action_cancel); Ctrl+C is the
-        # quit affordance — double-tap within 1.5s to confirm.
         self.toast("press Ctrl+C again within 1.5s to quit")
 
     def action_quit_app(self) -> None:
@@ -350,14 +340,14 @@ class AgentMTui(App[int]):
     async def _clear_and_reset(self) -> None:
         """`/clear`: wipe the transcript AND cold-reset the gateway session so
         the model's context is cleared and the next message opens a fresh
-        session. Forwards the gateway's ``/end`` (shut down + forget mapping)."""
+        session. Forwards the gateway's ``/new``."""
         await self.action_clear_log()
         await self._send(
             {
                 "channel": "terminal",
                 "sender_id": self._sender_id,
                 "chat_id": self._chat_id,
-                "content": "/end",
+                "content": "/new",
             }
         )
 

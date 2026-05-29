@@ -378,7 +378,7 @@ class _GatewayRuntime:
         meta = body.get("metadata")
         kind = str((meta or {}).get("kind") or "assistant_text")
         if kind == "session_ready" and isinstance(meta, dict):
-            # Fold the gateway's own builtin commands (/new, /end, /status,
+            # Fold the gateway's own builtin commands (/new, /status,
             # /model, ...) into the session_ready command list so chat clients
             # surface them in autocomplete. They are routed by the gateway, not
             # the session, so they never appear in the session-emitted list.
@@ -421,7 +421,7 @@ class _GatewayRuntime:
 
     def _merge_gateway_commands(self, meta: dict[str, Any]) -> None:
         """Fold the gateway's top-level command names (builtins like /model,
-        /new, /end, /status, plus markdown and skill commands) into a
+        /new, /status, plus markdown and skill commands) into a
         session_ready frame's ``command_names`` (deduped, order preserved).
         These are routed by the gateway, not registered inside the session, so
         without this the chat client never learns about them and they don't
@@ -575,6 +575,10 @@ class _GatewayRuntime:
         async def switch_model(name: str) -> tuple[bool, str]:
             return await self._switch_model(session_key, name)
 
+        async def resume_session(target_sid: str) -> None:
+            await self._sessions.shutdown_session(session_key)
+            self._sessions.set_chat_mapping(session_key, target_sid)
+
         return CommandContext(
             session_key=session_key,
             channel=body.channel,
@@ -588,12 +592,13 @@ class _GatewayRuntime:
             get_extension_api=get_extension_api,
             list_models=list_models,
             switch_model=switch_model,
+            cwd=self._cwd,
+            resume_session=resume_session,
         )
 
     async def _switch_model(self, session_key: str, name: str) -> tuple[bool, str]:
-        """Swap the session factory to ``name``'s model profile and tear down
-        this chat's live session so the next message rebuilds it on the new
-        model (the transcript resumes — same as ``/new``).
+        """Swap the session factory to ``name``'s model profile and start a
+        fresh session (same as ``/new``).
 
         Note: the factory is process-wide, so a switch affects the model used
         for every chat's *next* session, not just this one. Adequate for the
@@ -609,6 +614,7 @@ class _GatewayRuntime:
         self._sessions.set_factory(self._make_factory(key))
         self._model_name = key
         await self._sessions.shutdown_session(session_key)
+        self._sessions.forget(session_key)
         return (True, key)
 
     async def _send_error(

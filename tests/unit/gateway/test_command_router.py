@@ -1,7 +1,7 @@
 """Fail-stop: CommandRouter handler classes (§3.5).
 
 Slash commands are intercepted before the LLM sees them. A leak (unknown
-command forwarded to the model, /end not clearing the map, a prompt
+command forwarded to the model, /new not clearing the map, a prompt
 command not falling through) either exposes prompts or breaks the
 session lifecycle.
 """
@@ -20,7 +20,6 @@ from agentm.gateway.commands import (
     CommandRouter,
     parse_invocation,
 )
-from agentm.gateway.commands.builtins.end import EndCommand
 from agentm.gateway.commands.builtins.help import HelpCommand
 from agentm.gateway.commands.builtins.new import NewCommand
 from agentm.gateway.commands.markdown_command import MarkdownPromptCommand
@@ -99,26 +98,14 @@ async def test_unknown_command_rejected_not_forwarded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_new_ends_session_keeps_map() -> None:
+async def test_new_ends_session_and_clears_map() -> None:
     reg = _registry(NewCommand())
     router = CommandRouter(registry=reg)
     calls = _Calls()
     result = await router.try_dispatch(_inbound("/new"), _ctx(calls, reg))
     assert result is not None
-    if result.side_effect is None:
-        # NewCommand calls end_session in handle(); confirm it fired.
-        assert calls.ended == 1
-    assert calls.forgot == 0  # /new must not clear the map
-
-
-@pytest.mark.asyncio
-async def test_end_ends_session_and_clears_map() -> None:
-    reg = _registry(EndCommand())
-    router = CommandRouter(registry=reg)
-    calls = _Calls()
-    await router.try_dispatch(_inbound("/end"), _ctx(calls, reg))
     assert calls.ended == 1
-    assert calls.forgot == 1  # /end clears the map for a cold start
+    assert calls.forgot == 1  # /new must clear the map for a fresh start
 
 
 @pytest.mark.asyncio
@@ -220,7 +207,7 @@ async def test_model_switch_failure_is_a_diagnostic() -> None:
 
 def test_merge_gateway_commands_folds_builtins(tmp_path: Any) -> None:
     # session_ready frames must gain the gateway's top-level command names so
-    # chat clients surface /model, /new, /end, /status in autocomplete.
+    # chat clients surface /model, /new, /status in autocomplete.
     from agentm.gateway.chat_session_map import ChatSessionMap
     from agentm.gateway.cli import _GatewayRuntime
     from agentm.gateway.commands import discover_commands
@@ -243,7 +230,7 @@ def test_merge_gateway_commands_folds_builtins(tmp_path: Any) -> None:
         runtime._merge_gateway_commands(meta)
         names = meta["command_names"]
         assert "mytool" in names  # session-provided names preserved
-        assert {"model", "new", "end", "status"} <= set(names)
+        assert {"model", "new", "status"} <= set(names)
         assert len(names) == len(set(names))  # deduped
         assert not any(":" in n for n in names)  # no namespaced /atom:* entries
     finally:
