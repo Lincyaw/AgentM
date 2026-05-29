@@ -518,11 +518,10 @@ def run_hop(
     )
     cmd = [
         *base, "--scenario", "verifier",
-        "--provider", env.get("AGENTM_PROVIDER", "openai"),
-        "--model", env.get("AGENTM_MODEL", "K2.6"),
+        "--model", env.get("AGENTM_MODEL", "doubao"),
         "--cwd", str(hop_dir),
         "--max-tool-calls", str(budget),
-        prompt,
+        "-p", prompt,
     ]
 
     with open(hop_dir / "stdout.log", "w") as fout, \
@@ -782,7 +781,12 @@ def main() -> int:
     ap.add_argument("--budget", type=int, default=15,
                     help="tool-call budget per hop agent")
     ap.add_argument("--parallel", type=int, default=4)
+    ap.add_argument("--model", default=None,
+                    help="config.toml profile name (overrides AGENTM_MODEL)")
     args = ap.parse_args()
+
+    if args.model:
+        os.environ["AGENTM_MODEL"] = args.model
 
     data_dir = args.case_dir.resolve()
     out = (args.out or data_dir / ".verify_propagate").resolve()
