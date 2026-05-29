@@ -126,7 +126,7 @@ its default injection.
 The default scenario is `general_purpose` — no flag needed:
 
 ```bash
-uv run agentm "list files in src/"
+uv run agentm -p "list files in src/"
 ```
 
 Pick another by name (resolves to `contrib/scenarios/<name>/manifest.yaml`):
@@ -222,7 +222,7 @@ subscriber writing OTel-flavored JSONL to
 
 ```bash
 uv sync
-uv run agentm "list files in src/"
+uv run agentm -p "list files in src/"
 ```
 
 Model provider settings can be supplied through environment variables or
@@ -239,8 +239,8 @@ base_url = "https://api.openai.com/v1"
 api_key = "..."
 ```
 
-Select a profile with `uv run agentm --model my-model "..."`; if
-`default_model` is set, the bare `uv run agentm "..."` path uses it.
+Select a profile with `uv run agentm --model my-model -p "..."`; if
+`default_model` is set, `uv run agentm -p "..."` uses it.
 
 Programmatic:
 

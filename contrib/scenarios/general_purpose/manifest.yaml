@@ -1,6 +1,6 @@
 name: general_purpose
 description: |
-  Default scenario for ``agentm "<prompt>"`` (no ``--scenario`` flag).
+  Default scenario for ``agentm -p "<prompt>"`` (no ``--scenario`` flag).
 
   Built around the "9 atomic tools + ~100-line loop" philosophy:
   load a small core of always-useful capabilities and trust the LLM to
