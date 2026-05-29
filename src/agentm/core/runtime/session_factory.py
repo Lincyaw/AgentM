@@ -150,10 +150,8 @@ async def create_agent_session(
     inbox = SessionInbox()
     apis: dict[str, _ExtensionAPIImpl] = {}
     services: dict[str, Any] = {}
-    # Seed caller-supplied services BEFORE atoms install so an atom can read
-    # them at its own install time and subscribe in time to forward
-    # creation-time events (e.g. the gateway's wire_driver delivering the
-    # initial SessionReadyEvent). See AgentSessionConfig.initial_services.
+    # Seed caller-supplied services BEFORE atoms install.
+    # See AgentSessionConfig.initial_services.
     services.update(config.initial_services)
 
     active_provider_box: dict[str, ProviderConfig | None] = {"value": None}
