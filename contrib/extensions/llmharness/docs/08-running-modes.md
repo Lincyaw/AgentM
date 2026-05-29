@@ -124,7 +124,7 @@ unchanged.
 Default mode — every knob defaults to `true`:
 
 ```bash
-agentm --extension llmharness.adapters.agentm "<prompt>"
+agentm --extension llmharness.adapters.agentm -p "<prompt>"
 ```
 
 For data collection (live full pipeline, no reminder side-effects on

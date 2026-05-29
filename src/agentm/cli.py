@@ -541,7 +541,7 @@ async def run(
         sid = session_manager.get_session_id()
         if sid:
             print(
-                f'session_id={sid}  (resume with: agentm --resume {sid} "<prompt>")',
+                f'session_id={sid}  (resume with: agentm --resume {sid} -p "<prompt>")',
                 file=output,
             )
     return 1 if diagnostic_state["error_seen"] else 0
