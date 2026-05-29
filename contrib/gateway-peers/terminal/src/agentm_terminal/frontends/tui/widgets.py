@@ -63,7 +63,18 @@ class SystemTurn(Vertical):
         yield Static(self._content, markup=False)
 
 
-class ThinkingBlock(Collapsible):
+class _ChromeCollapsible(Collapsible):
+    """A Collapsible whose title bar never grabs keyboard focus, so clicking it
+    to expand/collapse leaves the prompt focused -- the click still toggles
+    (CollapsibleTitle handles on_click regardless of focus). Used for the
+    transcript's thinking/tool blocks, which are output, never input."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._title.can_focus = False
+
+
+class ThinkingBlock(_ChromeCollapsible):
     """Dim, collapsed-by-default reasoning text."""
 
     def __init__(self) -> None:
@@ -141,7 +152,7 @@ class AssistantTurn(Vertical):
         await self.mount(widget)
 
 
-class ToolBlock(Collapsible):
+class ToolBlock(_ChromeCollapsible):
     """One tool call: title ``name ⟳/✓/✗`` + collapsible args/result body."""
 
     def __init__(self, *, name: str, args: dict[str, Any]) -> None:
