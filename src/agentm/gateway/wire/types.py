@@ -20,13 +20,15 @@ ButtonStyle = Literal["primary", "danger", "default"]
 
 # Discriminator for how a chat client renders an outbound (§2.5).
 #
-# Two delivery classes share this one envelope kind (see
-# ``.claude/designs/textual-tui.md`` §4.3): DURABLE kinds go through the
-# per-peer outbox (at-least-once, survive reconnect); EPHEMERAL kinds are
-# written best-effort straight to the connected peer and dropped if it is
-# absent (live decoration — streaming text, tool lifecycle, runtime
-# control/observability events). The durable set is the reliability floor;
-# everything else is ephemeral.
+# Both delivery classes ride the SAME ordered per-peer send queue (§2.6 of
+# ``.claude/designs/single-process-gateway.md``) — ordering is guaranteed by
+# the single sender, independent of class. The class controls only
+# *persistence*: a DURABLE kind is also written to the per-peer outbox
+# (at-least-once, replayed in order on reconnect — the reliability floor); an
+# EPHEMERAL kind is never persisted and is shed oldest-first under
+# backpressure or dropped if the peer is absent (live decoration — streaming
+# text, tool lifecycle, runtime control/observability). The durable set is
+# the reliability floor; everything else is ephemeral.
 #
 # This module is the *single home* of the wire kind vocabulary AND its
 # delivery-class partition. The gateway sink (``agentm.gateway.cli``) imports

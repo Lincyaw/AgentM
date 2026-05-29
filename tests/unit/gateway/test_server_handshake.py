@@ -45,7 +45,9 @@ async def test_allow_all_welcomes_and_round_trips(tmp_path: Path) -> None:
 
     async def on_inbound(peer: PeerSession, env: Envelope) -> None:
         received.append(env)
-        # Echo an outbound back to the same peer via the outbox.
+        # Echo a durable outbound back: persist to the outbox (replay floor)
+        # and queue it for the sender carrying its row id, mirroring what
+        # _emit_outbound does for a durable kind (§2.6 unified delivery).
         out = Envelope(
             v=WIRE_VERSION,
             id="out1",
@@ -54,7 +56,8 @@ async def test_allow_all_welcomes_and_round_trips(tmp_path: Path) -> None:
             session_key=env.session_key,
             body={"channel": "terminal", "chat_id": "t1", "content": "ack"},
         )
-        await asyncio.to_thread(outbox.enqueue, peer.peer_id, out)
+        row_id = await asyncio.to_thread(outbox.enqueue, peer.peer_id, out)
+        peer.send_q.put(out, row_id)
 
     server, outbox, inbox = await _make_server(
         tmp_path, sock, authenticator=AllowAllAuthenticator(), on_inbound=on_inbound
@@ -82,6 +85,8 @@ async def test_allow_all_welcomes_and_round_trips(tmp_path: Path) -> None:
             await asyncio.sleep(0.02)
         assert received and received[0].session_key == "terminal:t1"
         assert delivered and delivered[0].body["content"] == "ack"
+        # The durable row was acked after a successful write (outbox drains).
+        assert await asyncio.to_thread(outbox.pending_count, "terminal-1") == 0
         await client.close()
     finally:
         await server.stop()
@@ -183,6 +188,62 @@ async def test_v1_hello_rejected_with_unsupported_wire_version(tmp_path: Path) -
         assert reply["kind"] == "error"
         assert reply["body"]["code"] == "unsupported_wire_version"
         writer.close()
+    finally:
+        await server.stop()
+        outbox.close()
+        inbox.close()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_replays_unacked_durable_in_order(tmp_path: Path) -> None:
+    """Fail-stop: at-least-once across reconnect (§2.6).
+
+    Durable frames left unacked by a prior connection sit in the outbox.
+    On reconnect the server prefills them onto the fresh send queue in FIFO
+    order *before* the sender starts, so the client receives every missed
+    frame, in order, and the outbox drains (acked) once delivered. If this
+    breaks, a client that blips offline silently loses its final answers.
+    """
+    sock = str(tmp_path / "gw.sock")
+    delivered: list[Envelope] = []
+
+    async def on_inbound(peer: PeerSession, env: Envelope) -> None:
+        return None
+
+    server, outbox, inbox = await _make_server(
+        tmp_path, sock, authenticator=AllowAllAuthenticator(), on_inbound=on_inbound
+    )
+    try:
+        # Frames a previous connection persisted but never acked.
+        for i in range(3):
+            out = Envelope(
+                v=WIRE_VERSION,
+                id=f"r{i}",
+                kind="outbound",
+                ts=1.0,
+                session_key="terminal:t1",
+                body={"channel": "terminal", "chat_id": "t1", "content": f"r{i}"},
+            )
+            await asyncio.to_thread(outbox.enqueue, "terminal-1", out)
+
+        async def on_outbound(env: Envelope) -> None:
+            delivered.append(env)
+
+        client = WireClient(
+            transport=UnixClientTransport(sock),
+            peer_name="terminal-1",
+            on_outbound=on_outbound,
+        )
+        await client.connect()
+        for _ in range(100):
+            if len(delivered) >= 3:
+                break
+            await asyncio.sleep(0.02)
+        # All three replayed, in enqueue order.
+        assert [e.body["content"] for e in delivered] == ["r0", "r1", "r2"]
+        # ... and acked, so the outbox is drained.
+        assert await asyncio.to_thread(outbox.pending_count, "terminal-1") == 0
+        await client.close()
     finally:
         await server.stop()
         outbox.close()

@@ -138,17 +138,28 @@ class SqliteOutbox:
 
     # -- OutboxStore --------------------------------------------------
 
-    def enqueue(self, peer_id: str, env: Envelope) -> None:
+    def enqueue(self, peer_id: str, env: Envelope) -> int:
         payload = json.dumps(env.to_dict(), separators=(",", ":"))
         with self._lock:
             c = self._c()
-            c.execute(
+            cur = c.execute(
                 "INSERT OR IGNORE INTO outbox "
                 "(peer_id, envelope_id, envelope_json, attempts, "
                 " enqueued_at, next_retry_at, leased_until) "
                 "VALUES (?, ?, ?, 0, ?, 0, 0)",
                 (peer_id, env.id, payload, env.ts),
             )
+            # Idempotent on (peer_id, env.id): a duplicate INSERT is IGNOREd
+            # (rowcount 0), so resolve the existing row's id rather than
+            # returning the unreliable lastrowid — the caller acks by this id.
+            if cur.rowcount:
+                row_id = int(cur.lastrowid or 0)
+            else:
+                row = c.execute(
+                    "SELECT id FROM outbox WHERE peer_id = ? AND envelope_id = ?",
+                    (peer_id, env.id),
+                ).fetchone()
+                row_id = int(row[0]) if row else 0
             notifier = self._notifiers.get(peer_id)
         # Fire the notifier *outside* the lock — the callback is
         # responsible for being non-blocking and thread-safe (the
@@ -159,6 +170,7 @@ class SqliteOutbox:
             except Exception:  # noqa: BLE001
                 # A misbehaving notifier must not break enqueue.
                 pass
+        return row_id
 
     def lease(
         self, peer_id: str, batch_max: int, now: float
