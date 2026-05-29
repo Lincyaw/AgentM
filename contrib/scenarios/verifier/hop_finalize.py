@@ -74,6 +74,23 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
             )
 
     failures: list[dict[str, str]] = []
+
+    if verdict.verdict == "confirmed":
+        if not verdict.symptom_evidence:
+            failures.append({
+                "location": "symptom_evidence",
+                "error": "confirmed verdict requires non-empty symptom_evidence",
+                "sql": "",
+            })
+        if not verdict.relationship_sql:
+            failures.append({
+                "location": "relationship_sql",
+                "error": "confirmed verdict requires non-empty relationship_sql",
+                "sql": "",
+            })
+        if failures:
+            return failures
+
     for i, ev in enumerate(verdict.symptom_evidence):
         try:
             rows = conn.execute(ev.sql).fetchall()
