@@ -30,6 +30,8 @@ import types
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
+
 from agentm.core.abi import (
     AssistantMessage,
     AssistantStreamEvent,
@@ -100,6 +102,7 @@ def _inbound() -> InboundBody:
     )
 
 
+@pytest.mark.asyncio
 async def test_gateway_delivers_creation_time_session_ready(tmp_path: Any) -> None:
     provider_module = _install_provider_module(
         "tests.integration._fake_session_ready_provider"
