@@ -11,7 +11,8 @@ mechanism; every policy is a replaceable atom. Boundary contract in
 
 ## CLI
 
-- `agentm "<prompt>"` — one-shot prompt (default scenario `general_purpose`).
+- `agentm -p "<prompt>"` — one-shot prompt (default scenario `general_purpose`).
+- `agentm` (no args) — show help and subcommand list.
 - `agentm trace …` — query the OTLP/JSON session log
   (`messages` · `turns` · `tools` · `chats` · `info` · `index`); preferred
   over hand-parsing `.agentm/observability/*.jsonl`.

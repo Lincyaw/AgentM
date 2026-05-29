@@ -550,7 +550,9 @@ async def run(
 def run_cmd(
     prompt: Annotated[
         str,
-        typer.Argument(
+        typer.Option(
+            "--prompt",
+            "-p",
             help=(
                 "User prompt to send to the agent. Optional when --resume / "
                 "--continue is set — in that case extensions on "
@@ -995,18 +997,19 @@ def main() -> None:
 
     Dispatch order:
 
-    1. ``agentm <subcommand> [args...]`` — builtin introspection
+    1. ``agentm`` (no args) — show help + subcommand list.
+    2. ``agentm <subcommand> [args...]`` — builtin introspection
        (``list-extensions``) or any subcommand registered via the
        ``agentm.subcommands`` entry-point group (contrib clients like
        ``gateway`` / ``worker`` / ``terminal`` / ``feishu``).
-    2. ``agentm [options] [PROMPT]`` — the legacy single-shot prompt
-       runner. ``agentm "<prompt>"`` stays backwards compatible.
+    3. ``agentm -p "prompt" [options]`` — single-shot prompt runner.
     """
 
     argv = sys.argv[1:]
     external = _discover_external_subcommands()
 
-    if argv and argv[0] in {"--help", "-h"}:
+    if not argv or argv[0] in {"--help", "-h"}:
+        sys.argv = [sys.argv[0], "--help"]
         try:
             typer.run(run_cmd)
         except SystemExit:
@@ -1019,11 +1022,6 @@ def main() -> None:
         if sub in _BUILTIN_SUBCOMMANDS:
             sys.argv = [f"{sys.argv[0]} {sub}", *argv[1:]]
             target = _BUILTIN_SUBCOMMANDS[sub]
-            # Builtin subcommands come in two shapes: a single typer-decorated
-            # function (e.g. ``list_extensions_cmd``) — wrap with ``typer.run``
-            # so its options parse; or a no-arg dispatcher that owns its own
-            # ``typer.Typer()`` app (e.g. ``_trace_subcommand``) — call
-            # directly so the inner app consumes ``sys.argv``.
             if getattr(target, "__agentm_owns_argv__", False):
                 target()
             else:
