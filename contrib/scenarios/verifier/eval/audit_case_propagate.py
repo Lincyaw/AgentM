@@ -217,6 +217,64 @@ def get_infra_edges(data_dir: Path, infra_nodes: set[str]) -> list[Rel]:
     return rels
 
 
+def get_node_map(data_dir: Path) -> dict[str, str]:
+    """Return ``{service_name: k8s_node_name}`` from metrics."""
+    conn = _duckdb_conn(data_dir)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT service_name, \"attr.k8s.node.name\" "
+            "FROM normal_metrics "
+            "WHERE service_name IS NOT NULL AND service_name <> '' "
+            "  AND \"attr.k8s.node.name\" IS NOT NULL"
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        conn.close()
+        return {}
+    conn.close()
+    return {svc: node for svc, node in rows}
+
+
+def check_node_degraded(data_dir: Path, node_name: str) -> bool:
+    """Quick check: does this k8s node show CPU or memory degradation?
+
+    Compares average CPU/memory usage between normal and abnormal windows.
+    Returns True if degradation exceeds 20%, meaning co_deployed services
+    on this node may be genuinely affected.
+    """
+    conn = _duckdb_conn(data_dir)
+    try:
+        rows = conn.execute(
+            "SELECT 'normal' AS win, "
+            "  AVG(CASE WHEN metric_name LIKE '%cpu%' THEN value END), "
+            "  AVG(CASE WHEN metric_name LIKE '%memory%' THEN value END) "
+            "FROM normal_metrics "
+            "WHERE \"attr.k8s.node.name\" = ? "
+            "UNION ALL "
+            "SELECT 'abnormal', "
+            "  AVG(CASE WHEN metric_name LIKE '%cpu%' THEN value END), "
+            "  AVG(CASE WHEN metric_name LIKE '%memory%' THEN value END) "
+            "FROM abnormal_metrics "
+            "WHERE \"attr.k8s.node.name\" = ?",
+            [node_name, node_name],
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        conn.close()
+        return True  # err on the side of checking
+    conn.close()
+
+    if len(rows) != 2:
+        return True
+    normal_cpu, normal_mem = rows[0][1], rows[0][2]
+    abnormal_cpu, abnormal_mem = rows[1][1], rows[1][2]
+
+    threshold = 1.2  # 20% increase
+    if normal_cpu and abnormal_cpu and abnormal_cpu > normal_cpu * threshold:
+        return True
+    if normal_mem and abnormal_mem and abnormal_mem > normal_mem * threshold:
+        return True
+    return False
+
+
 def get_injections(data_dir: Path) -> list[dict[str, str]]:
     """Extract ``[{target, chaos_type}]`` from injection.json."""
     injection = json.loads((data_dir / "injection.json").read_text())
@@ -271,11 +329,12 @@ def get_target_evidence(data_dir: Path, target: str) -> dict[str, object]:
     """Quick SQL check: latency comparison for the injection target."""
     conn = _duckdb_conn(data_dir)
     rows = conn.execute(
-        f"SELECT 'normal' AS win, AVG(duration)/1e6, COUNT(*) "
-        f"FROM normal_traces WHERE service_name = '{target}' "
-        f"UNION ALL "
-        f"SELECT 'abnormal', AVG(duration)/1e6, COUNT(*) "
-        f"FROM abnormal_traces WHERE service_name = '{target}'"
+        "SELECT 'normal' AS win, AVG(duration)/1e6, COUNT(*) "
+        "FROM normal_traces WHERE service_name = ? "
+        "UNION ALL "
+        "SELECT 'abnormal', AVG(duration)/1e6, COUNT(*) "
+        "FROM abnormal_traces WHERE service_name = ?",
+        [target, target],
     ).fetchall()
     conn.close()
 
@@ -338,39 +397,49 @@ _REL_DESCRIPTIONS = {
 }
 
 
-def _walk(obj: object):  # noqa: ANN202
-    if isinstance(obj, str):
-        yield obj
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            yield from _walk(v)
-    elif isinstance(obj, list):
-        for v in obj:
-            yield from _walk(v)
-
-
 def extract_hop_verdict(obs_dir: Path) -> dict | None:
-    """Walk observability JSONL to find the submitted HopVerdict."""
-    best = None
+    """Extract the last accepted HopVerdict via ``agentm trace tools``.
+
+    Shells out to the CLI rather than sniffing raw JSONL, so only accepted
+    tool *results* are considered (rejected tool-call arguments are ignored).
+    """
+    base = (
+        ["agentm"]
+        if shutil.which("agentm")
+        else ["uv", "run", "--no-sync", "agentm"]
+    )
+    best: dict | None = None
     for f in sorted(obs_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime):
-        for line in f.read_text().splitlines():
+        cmd = [
+            *base, "trace", "tools",
+            "--file", str(f),
+            "--tool", "submit_hop_verdict",
+            "--format", "ndjson",
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if proc.returncode != 0:
+            continue
+        for line in proc.stdout.splitlines():
             try:
                 row = json.loads(line)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 continue
-            for s in _walk(row):
-                t = s.strip()
-                if (
-                    t.startswith("{")
-                    and '"verdict"' in t
-                    and '"symptom_evidence"' in t
-                ):
-                    try:
-                        obj = json.loads(t)
-                    except Exception:
-                        continue
-                    if isinstance(obj, dict) and "verdict" in obj:
-                        best = obj
+            result = row.get("result")
+            if not result or not isinstance(result, str):
+                continue
+            if "error" in result:
+                continue
+            try:
+                obj = json.loads(result)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(obj, dict) and "verdict" in obj:
+                best = obj
     return best
 
 
@@ -453,7 +522,7 @@ def run_hop(
             )
     except subprocess.TimeoutExpired:
         (hop_dir / "stderr.log").write_text("TIMEOUT\n")
-        return None
+        return {"verdict": "timeout", "rationale": "agent timed out"}
 
     obs_dir = hop_dir / ".agentm" / "observability"
     return extract_hop_verdict(obs_dir) if obs_dir.exists() else None
@@ -467,13 +536,14 @@ def _verify_edge_sql(data_dir: Path, from_svc: str, to_svc: str) -> bool:
     """Check that a direct relationship exists between the two services."""
     conn = _duckdb_conn(data_dir)
     row = conn.execute(
-        f"SELECT COUNT(*) FROM normal_traces child "
-        f"JOIN normal_traces parent "
-        f"  ON child.parent_span_id = parent.span_id "
-        f"WHERE (parent.service_name = '{to_svc}' "
-        f"   AND child.service_name = '{from_svc}') "
-        f"   OR (parent.service_name = '{from_svc}' "
-        f"   AND child.service_name = '{to_svc}')"
+        "SELECT COUNT(*) FROM normal_traces child "
+        "JOIN normal_traces parent "
+        "  ON child.parent_span_id = parent.span_id "
+        "WHERE (parent.service_name = ? "
+        "   AND child.service_name = ?) "
+        "   OR (parent.service_name = ? "
+        "   AND child.service_name = ?)",
+        [to_svc, from_svc, from_svc, to_svc],
     ).fetchone()
     conn.close()
     return bool(row and row[0] >= 5)
@@ -494,6 +564,7 @@ def propagate(
     parallel: int,
     timeout: int,
     infra_nodes: set[str] | None = None,
+    node_map: dict[str, str] | None = None,
 ) -> dict:
     """Producer-consumer fault propagation.
 
@@ -566,6 +637,34 @@ def propagate(
                 })
                 print(f"  edge (SQL): {from_svc} -> {to_svc}")
 
+        # co_deployed pre-check: skip neighbours on healthy nodes.
+        # Group co_deployed targets by shared node, check node health once.
+        if node_map:
+            _checked_nodes: dict[str, bool] = {}
+            skip_co: set[str] = set()
+            for to_svc, froms in agent_hops.items():
+                if all(rel == "co_deployed" for _, rel in froms):
+                    node = node_map.get(to_svc)
+                    if node:
+                        if node not in _checked_nodes:
+                            _checked_nodes[node] = check_node_degraded(
+                                data_dir, node,
+                            )
+                        if not _checked_nodes[node]:
+                            skip_co.add(to_svc)
+            if skip_co:
+                for svc in skip_co:
+                    agent_checked.add(svc)
+                    hop_log.append({
+                        "round": round_n, "from": "node_health",
+                        "to": svc, "verdict": "co_deployed_node_healthy",
+                    })
+                    print(f"    skip co_deployed {svc}: node healthy")
+                agent_hops = {
+                    k: v for k, v in agent_hops.items()
+                    if k not in skip_co
+                }
+
         need_agent = {
             to: froms for to, froms in agent_hops.items()
             if to not in agent_checked
@@ -594,12 +693,14 @@ def propagate(
                     agent_checked.add(to_svc)
                     result = future.result()
                     verdict = result.get("verdict") if result else None
+                    display = verdict or "no-result"
+                    if verdict == "timeout":
+                        display = "timeout"
                     hop_log.append({
                         "round": round_n, "from": froms[0][0],
-                        "to": to_svc, "verdict": verdict,
+                        "to": to_svc, "verdict": verdict or "no-result",
                     })
-                    print(f"    {froms[0][0]} -> {to_svc}: "
-                          f"{verdict or 'no-result'}")
+                    print(f"    {froms[0][0]} -> {to_svc}: {display}")
                     if verdict == "confirmed":
                         confirmed.add(to_svc)
                         node_evidence[to_svc] = {
@@ -697,6 +798,7 @@ def main() -> int:
     infra_nodes = get_infra_nodes(data_dir)
     rels.extend(get_infra_edges(data_dir, infra_nodes))
     neighbor_graph = _build_neighbor_graph(rels)
+    node_map = get_node_map(data_dir)
     (out / "relationships.json").write_text(json.dumps(
         [{"a": a, "b": b, "rel": r, "weight": w} for a, b, r, w in rels],
         indent=2, ensure_ascii=False,
@@ -713,7 +815,7 @@ def main() -> int:
     result = propagate(
         data_dir, injections, neighbor_graph, fault_doc, out,
         budget=args.budget, parallel=args.parallel, timeout=args.timeout,
-        infra_nodes=infra_nodes,
+        infra_nodes=infra_nodes, node_map=node_map,
     )
     (out / "propagation_trace.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False, default=str)
