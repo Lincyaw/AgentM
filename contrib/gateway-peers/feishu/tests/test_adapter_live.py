@@ -199,6 +199,38 @@ async def test_text_less_run_finalizes_on_timeout(
 
 
 @pytest.mark.asyncio
+async def test_oneshot_command_reply_is_its_own_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slash-command reply (bare assistant_text, no turn_start/agent_end)
+    must finalize immediately as its own card. Otherwise it becomes a zombie
+    turn with no agent_end to retire it, and EVERY later reply reuses (patches)
+    that one stale card — the live bug. Two commands in a row -> two cards."""
+    adapter, channel = _make_adapter(monkeypatch)
+    chat = "oc_1"
+
+    await adapter.handle_outbound(_outbound(chat, "assistant_text", content="model: doubao"))
+    assert len(channel.sends) == 1
+    assert adapter._live == {}  # retired immediately, no zombie turn
+
+    await adapter.handle_outbound(_outbound(chat, "assistant_text", content="help text"))
+    # A SECOND card, not a patch of the first.
+    assert len(channel.sends) == 2
+    assert adapter._live == {}
+
+    # And a subsequent real agent turn opens a fresh card too.
+    for env in [
+        _outbound(chat, "turn_start", meta={"turn_id": "t1"}),
+        _outbound(chat, "agent_end", meta={"cause": "WaitForUser"}),
+        _outbound(chat, "assistant_text", content="agent answer"),
+    ]:
+        await adapter.handle_outbound(env)
+    await asyncio.sleep(0.05)
+    assert len(channel.sends) == 3
+    assert _element(_last_card(channel), "body")["content"] == "agent answer"
+
+
+@pytest.mark.asyncio
 async def test_noise_kinds_emit_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter, channel = _make_adapter(monkeypatch)
     for kind in ("usage", "child_start", "extension_install", "command_dispatched",
