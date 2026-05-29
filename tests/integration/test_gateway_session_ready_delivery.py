@@ -97,7 +97,7 @@ def _inbound() -> InboundBody:
     return InboundBody(
         channel="terminal",
         chat_id="chat-1",
-        text="hi",
+        content="hi",
         sender_id="user-1",
     )
 
@@ -135,7 +135,7 @@ async def test_gateway_delivers_creation_time_session_ready(tmp_path: Any) -> No
 
     mgr = SessionManager(
         cwd=str(tmp_path),
-        chat_map=ChatSessionMap(str(tmp_path)),
+        chat_map=ChatSessionMap(tmp_path / "session_map.json"),
         session_factory=_factory,
         outbound_sink=_sink,
     )
