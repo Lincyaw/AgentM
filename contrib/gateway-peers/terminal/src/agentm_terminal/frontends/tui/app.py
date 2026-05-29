@@ -16,7 +16,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.dom import DOMNode
-from textual.widgets import Collapsible, Footer, OptionList, TextArea
+from textual.widgets import Collapsible, OptionList, TextArea
 
 from ...client import TerminalClient
 from .router import Router
@@ -35,12 +35,15 @@ _LOCAL_COMMANDS = ("/clear",)
 
 class AgentMTui(App[int]):
     CSS_PATH = str(CSS_PATH)
+    # Keybindings stay active but are not advertised in a Footer hint bar —
+    # the bottom of the screen is reserved for input + autocomplete, and the
+    # ^C/^D/^L affordances are conventional enough to leave implicit.
     BINDINGS = [
-        Binding("ctrl+c", "interrupt_or_quit", "interrupt", priority=True, show=True),
-        Binding("ctrl+d", "quit_app", "quit", priority=True, show=True),
-        Binding("ctrl+l", "clear_log", "clear", show=True),
-        Binding("ctrl+y", "copy_last", "copy", show=True),
-        Binding("ctrl+e", "toggle_tool", "expand", show=True),
+        Binding("ctrl+c", "interrupt_or_quit", "interrupt", priority=True, show=False),
+        Binding("ctrl+d", "quit_app", "quit", priority=True, show=False),
+        Binding("ctrl+l", "clear_log", "clear", show=False),
+        Binding("ctrl+y", "copy_last", "copy", show=False),
+        Binding("ctrl+e", "toggle_tool", "expand", show=False),
         Binding("escape", "cancel", "cancel", show=False),
     ]
 
@@ -70,14 +73,18 @@ class AgentMTui(App[int]):
 
     def compose(self) -> ComposeResult:
         yield StatusBar(id="status-bar")
-        yield VerticalScroll(id="transcript")
+        # can_focus=False keeps the caret on the prompt: a click in the
+        # transcript no longer moves keyboard focus onto the scroll container
+        # (Textual only refocuses on mouse-down when the target is focusable).
+        # Mouse-wheel scrolling and text selection both work without focus.
+        yield VerticalScroll(id="transcript", can_focus=False)
         # The input and its autocomplete share one bottom-docked column so the
         # suggestions render *below* the input (normal top-to-bottom flow),
-        # inline — not a floating modal. Footer still pins to the very bottom.
+        # inline — not a floating modal. No Footer: the input column is the
+        # very bottom of the screen.
         with Vertical(id="input-dock"):
             yield PromptInput(id="prompt-input", show_line_numbers=False)
             yield CommandSuggestions(id="suggestions")
-        yield Footer()
 
     async def on_mount(self) -> None:
         try:
@@ -169,6 +176,15 @@ class AgentMTui(App[int]):
 
     @on(PromptInput.Submitted)
     async def _on_submit(self, msg: PromptInput.Submitted) -> None:
+        # With the command-suggestion popup open, Enter accepts the highlighted
+        # entry (like Tab / click) -- UNLESS the command is already fully typed,
+        # in which case it runs. So a partial command completes on the first
+        # Enter, and a second Enter (now exact) sends it.
+        if self.suggestions.display:
+            chosen = self.suggestions.current()
+            if chosen is not None and chosen != msg.text.strip():
+                self._apply_completion()
+                return
         inp = self.query_one("#prompt-input", PromptInput)
         text = msg.text.strip()
         inp.text = ""
@@ -291,6 +307,18 @@ class AgentMTui(App[int]):
     # --- bindings -------------------------------------------------------
 
     def action_interrupt_or_quit(self) -> None:
+        # Ctrl+C copies first when there's a mouse text selection -- the same
+        # terminal-native gesture Textual binds by default (this priority
+        # binding otherwise shadows its screen.copy_text). The selection is
+        # cleared afterwards so a follow-up Ctrl+C falls through to quit. The
+        # in-flight interrupt lives on Esc (action_cancel), so copying here
+        # never steals it.
+        selected = self.screen.get_selected_text()
+        if selected:
+            self.copy_to_clipboard(selected)
+            self.clear_selection()
+            self.toast(f"copied {len(selected)} chars")
+            return
         now = time.monotonic()
         if now - self._ctrlc_ts < 1.5:
             self.exit(0)

@@ -1,6 +1,6 @@
 /* Terminal TUI design language — colour via Textual theme variables only.
-   Layout is outside-in dock (textual-tui.md §5.1): status top, input+footer
-   bottom, transcript fills the middle. */
+   Layout is outside-in dock (textual-tui.md §5.1): status top, input column
+   bottom (no Footer hint bar), transcript fills the middle. */
 
 Screen {
     layout: vertical;

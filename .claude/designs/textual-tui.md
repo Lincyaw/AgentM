@@ -160,9 +160,10 @@ to transport; it only tags delivery class.
 │     ApprovalBlock   — Allow / Allow-always / Deny                  ▼   │
 ├──────────────────────────────────────────────────────────────────────┤
 │ PromptInput (multi-line, rounded, autosize)                            │ dock bottom, h:auto
-├──────────────────────────────────────────────────────────────────────┤
-│ Footer: ⌃C interrupt · ⌃D quit · ⌃L clear · ⌃R commands · ⌃E expand   │ dock bottom, h:1
+│ CommandSuggestions (inline autocomplete, shown below input on /…)      │ h:auto
 └──────────────────────────────────────────────────────────────────────┘
+  Keybindings (⌃C/⌃D/⌃L/⌃Y/⌃E) stay active but are not rendered in a Footer
+  hint bar — the input column is the bottom row.
               Toast(s): transient overlay for control/observability events
 ```
 
@@ -179,12 +180,12 @@ AgentMTui(App[int])
 │   │   ├── ToolBlock(Collapsible) # generic; Edit/Write→diff, Bash→cmd+out, Read→path
 │   │   └── SubagentBlock(Vertical)
 │   └── ApprovalBlock(Vertical)
-├── PromptInput(TextArea)          # dock bottom
-├── Footer()                       # dock bottom, BINDINGS hints
-├── Toast(Static)                  # transient overlay
-├── CommandPalette(ModalScreen)    # `/` or ⌃R
-├── HelpScreen(ModalScreen)        # /help
-└── InfoModal(ModalScreen)         # /extensions /tools /budget
+├── input-dock(Vertical)           # dock bottom, h:auto
+│   ├── PromptInput(TextArea)       # the prompt
+│   └── CommandSuggestions          # inline autocomplete, below input
+└── Toast(Static)                  # transient overlay
+                                   # no Footer; slash-command help is inline
+                                   # autocomplete, not a modal palette
 ```
 
 ### 5.3 Design language
