@@ -35,8 +35,19 @@ from .wire import InboundBody
 
 logger = logging.getLogger("agentm.gateway.session_manager")
 
-# (cwd, session_key, scenario, resume_session_id) -> AgentSession
-SessionFactory = Callable[[str, str, str | None, str | None], Awaitable[Any]]
+# (cwd, session_key, scenario, resume_session_id, wire_services) -> AgentSession
+#
+# ``wire_services`` is seeded into the session's service registry BEFORE any
+# atom installs (via ``AgentSessionConfig.initial_services``) and carries the
+# ``wire_outbound`` / ``session_key`` / ``turn_context`` / ``approval_manager``
+# the ``wire_driver`` atom reads at install time. The factory is responsible
+# for listing ``wire_driver`` in the config so it installs DURING ``create()``
+# and is subscribed in time to forward the creation-time ``SessionReadyEvent``
+# (the chat client's slash-command catalog) — stamping it after ``create()``
+# returns drops that first frame.
+SessionFactory = Callable[
+    [str, str, str | None, str | None, dict[str, Any]], Awaitable[Any]
+]
 
 OutboundSink = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -75,12 +86,6 @@ class SessionManager:
                 return sess
 
             prior_session_id = self._chat_map.get(session_key)
-            sess = await self._factory(
-                self._cwd, session_key, scenario, prior_session_id
-            )
-            new_id = _extract_session_id(sess)
-            if new_id and new_id != prior_session_id:
-                self._chat_map.set(session_key, new_id)
 
             turn_ctx: dict[str, Any] = {
                 "channel": inbound.channel,
@@ -90,14 +95,26 @@ class SessionManager:
             }
             self._turn_ctx[session_key] = turn_ctx
 
-            # Stamp the wire_driver atom so this session's events fan out
-            # via outbound_sink, scoped to this session_key (§3.3).
-            sess.set_service("wire_outbound", self._outbound_sink)
-            sess.set_service("session_key", session_key)
-            sess.set_service("turn_context", turn_ctx)
+            # Hand the wire_driver's services to the factory so they are seeded
+            # into the service registry BEFORE atoms install. The factory mounts
+            # wire_driver during create(), so it is subscribed in time to
+            # forward the creation-time SessionReadyEvent (the chat client's
+            # slash-command catalog). Stamping after create() returns dropped
+            # that first frame (§3.3).
+            wire_services: dict[str, Any] = {
+                "wire_outbound": self._outbound_sink,
+                "session_key": session_key,
+                "turn_context": turn_ctx,
+            }
             if self._approval is not None:
-                sess.set_service("approval_manager", self._approval)
-            sess.install_atom("wire_driver")
+                wire_services["approval_manager"] = self._approval
+
+            sess = await self._factory(
+                self._cwd, session_key, scenario, prior_session_id, wire_services
+            )
+            new_id = _extract_session_id(sess)
+            if new_id and new_id != prior_session_id:
+                self._chat_map.set(session_key, new_id)
 
             self._sessions[session_key] = sess
             return sess

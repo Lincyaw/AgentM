@@ -98,6 +98,21 @@ class AgentSessionConfig:
     loop_config: LoopConfig | None = None
     bus: EventBus | None = None
 
+    initial_services: dict[str, Any] = field(default_factory=dict)
+    """Services seeded into the runtime service registry BEFORE any atom is
+    installed. Use this when an atom must read a service at its own install
+    time (``api.get_service(...)``) or must be able to forward a
+    creation-time event the instant it subscribes.
+
+    The single-process gateway relies on this: the ``wire_driver`` atom
+    reads ``wire_outbound`` / ``session_key`` / ``turn_context`` /
+    ``approval_manager`` during install and subscribes to
+    ``SessionReadyEvent``, which fires inside ``create()``. Seeding here (paired
+    with listing ``wire_driver`` in ``extra_extensions``) makes the atom present
+    in time to deliver that first frame; setting the services after ``create()``
+    returns drops it. A late ``api.set_service`` still works for services only
+    read on the live turn path."""
+
     provider_resolver: ProviderResolver[Any] | None = None
     """Selects the active provider after provider registrations complete."""
 
