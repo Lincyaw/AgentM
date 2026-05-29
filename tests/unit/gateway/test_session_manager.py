@@ -51,12 +51,25 @@ def _make_manager(tmp_path: Path, factory_log: list[tuple[str, str | None]]):
     chat_map = ChatSessionMap(tmp_path / "map.json")
     counter = {"n": 0}
 
-    async def factory(cwd: str, session_key: str, scenario: str | None, resume: str | None):
+    async def factory(
+        cwd: str,
+        session_key: str,
+        scenario: str | None,
+        resume: str | None,
+        wire_services: dict[str, Any],
+    ):
         counter["n"] += 1
         factory_log.append((session_key, resume))
-        # When resuming, keep the same id; else mint a fresh one.
+        # When resuming, keep the same id; else mint a fresh one. The gateway
+        # now seeds the wire_driver services BEFORE atom install and mounts
+        # wire_driver inside the factory; mirror both on the fake so the
+        # stamp/install assertions still hold.
         sid = resume or f"sid-{counter['n']}"
-        return _FakeSession(sid, resume)
+        sess = _FakeSession(sid, resume)
+        for name, obj in wire_services.items():
+            sess.set_service(name, obj)
+        sess.install_atom("wire_driver")
+        return sess
 
     async def sink(body: dict) -> None:
         return None

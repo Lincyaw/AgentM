@@ -313,7 +313,9 @@ class _GatewayRuntime:
         scenario: str | None,
         outbox: SqliteOutbox,
         chat_map: ChatSessionMap,
-        session_factory: Callable[[str, str, str | None, str | None], Awaitable[Any]],
+        session_factory: Callable[
+            [str, str, str | None, str | None, dict[str, Any]], Awaitable[Any]
+        ],
         command_router: CommandRouter,
         approval_policy: tuple[frozenset[str], frozenset[str], float],
         model_name: str = "",
