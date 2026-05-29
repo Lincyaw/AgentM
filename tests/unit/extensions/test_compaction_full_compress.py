@@ -190,6 +190,35 @@ def test_read_history_returns_turn_content() -> None:
     assert out_of_range.is_error
 
 
+# --- 5. /compact is a pluggable, atom-registered command -------------------
+
+
+def test_install_registers_compact_command() -> None:
+    """The atom must declare /compact via register_command — otherwise the
+    on-demand command silently does not exist (the manifest tag alone does
+    nothing). install() registers it without touching provider/session."""
+    from agentm.extensions.builtin import llm_compaction
+
+    class _Api:
+        def __init__(self) -> None:
+            self.commands: dict[str, Any] = {}
+
+        def on(self, channel: str, handler: Any, *, priority: int = 500) -> Any:
+            return lambda: None
+
+        def register_command(self, name: str, spec: Any) -> None:
+            self.commands[name] = spec
+
+    api = _Api()
+    llm_compaction.install(api, {})  # type: ignore[arg-type]
+    assert "compact" in api.commands
+    spec = api.commands["compact"]
+    assert spec.description.strip()
+    assert callable(spec.handler)
+    # And the manifest advertises it so catalogs/autocomplete surface it.
+    assert "command:compact" in llm_compaction.MANIFEST.registers
+
+
 # --- stubs -----------------------------------------------------------------
 
 
