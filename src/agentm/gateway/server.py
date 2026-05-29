@@ -65,6 +65,10 @@ from agentm.gateway.wire import (
 log = logging.getLogger("agentm.gateway.server")
 
 SERVER_VERSION: str = "0.2.0"
+# Dead-letter cap for durable replay. ``attempts`` advances once per
+# reconnect-prefill lease (not per live retry — there is no live retry
+# loop), so this bounds reconnect-replays of a row, i.e. "5 reconnects",
+# not "5 rapid retries".
 MAX_DELIVERY_ATTEMPTS: int = 5
 
 InboundHandler = Callable[[PeerSession, Envelope], Awaitable[None]]

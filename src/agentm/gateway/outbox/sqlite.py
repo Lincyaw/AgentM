@@ -16,8 +16,9 @@ Thread safety
 -------------
 Each store/inbox owns a single sqlite3 connection opened with
 ``check_same_thread=False`` and serialises mutating operations behind
-a ``threading.Lock``. The server-side delivery worker calls into the
-store via ``asyncio.to_thread`` so this synchronous API stays simple.
+a ``threading.Lock``. The server's sender / reconnect-prefill paths call
+into the store via ``asyncio.to_thread`` so this synchronous API stays
+simple.
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Callable
 from typing import Any
 
 from agentm.gateway.wire import Envelope
@@ -88,46 +88,12 @@ class SqliteOutbox:
         path: str,
         *,
         lease_ttl: float = LEASE_TTL_SECONDS,
-        backoff: Callable[[int], float] | None = None,
     ) -> None:
         self._path = path
         self._lease_ttl = lease_ttl
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = _open(path)
         self._conn.executescript(_OUTBOX_SCHEMA)
-        # Optional retry-delay policy. The store doesn't use it
-        # internally — callers (server delivery loop) call
-        # :meth:`backoff_delay` to compute ``next_retry_at`` and pass it
-        # to ``nack``. Kept as injected state so tests can replace the
-        # policy without monkey-patching module globals.
-        from .policy import exponential_backoff as _default_backoff
-        self._backoff: Callable[[int], float] = backoff or _default_backoff
-        # Per-peer wakeup notifier registered by the server.
-        self._notifiers: dict[str, Callable[[str], None]] = {}
-
-    def set_notifier(
-        self, peer_id: str, notifier: Callable[[str], None] | None
-    ) -> None:
-        """Register/clear a wakeup callback for ``peer_id``.
-
-        Called by :class:`WireServer` so ``enqueue`` can wake the
-        delivery worker immediately instead of waiting on the
-        ``LEASE_REFRESH_INTERVAL`` poll. ``None`` clears the entry.
-        """
-        with self._lock:
-            if notifier is None:
-                self._notifiers.pop(peer_id, None)
-            else:
-                self._notifiers[peer_id] = notifier
-
-    def backoff_delay(self, attempts: int) -> float:
-        """Compute the retry delay for ``attempts`` failures.
-
-        Indirection so callers don't import ``exponential_backoff``
-        directly and tests can pin a fast schedule via the ``backoff``
-        constructor arg.
-        """
-        return self._backoff(attempts)
 
     # -- internal -----------------------------------------------------
 
@@ -160,16 +126,6 @@ class SqliteOutbox:
                     (peer_id, env.id),
                 ).fetchone()
                 row_id = int(row[0]) if row else 0
-            notifier = self._notifiers.get(peer_id)
-        # Fire the notifier *outside* the lock — the callback is
-        # responsible for being non-blocking and thread-safe (the
-        # server bounces it through loop.call_soon_threadsafe).
-        if notifier is not None:
-            try:
-                notifier(peer_id)
-            except Exception:  # noqa: BLE001
-                # A misbehaving notifier must not break enqueue.
-                pass
         return row_id
 
     def lease(
@@ -269,27 +225,6 @@ class SqliteOutbox:
                 "SELECT COUNT(*) FROM outbox WHERE peer_id = ?", (peer_id,)
             ).fetchone()
             return int(row[0])
-
-    def next_retry_at_min(self, peer_id: str) -> float | None:
-        """Earliest ``next_retry_at`` for any non-leased pending row.
-
-        Returned to the delivery worker so it can sleep just long
-        enough for the soonest retryable row to come due, rather than
-        waiting the full ``LEASE_REFRESH_INTERVAL`` safety-net. Rows
-        currently under an active lease are ignored — they're someone
-        else's responsibility until the lease expires.
-
-        Returns ``None`` when no pending row exists for the peer.
-        """
-        with self._lock:
-            c = self._c()
-            row = c.execute(
-                "SELECT MIN(next_retry_at) FROM outbox WHERE peer_id = ?",
-                (peer_id,),
-            ).fetchone()
-        if row is None or row[0] is None:
-            return None
-        return float(row[0])
 
     def dead_letter_count(self, peer_id: str) -> int:
         """Test/observability helper — count dead-lettered rows for a peer."""
