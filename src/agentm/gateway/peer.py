@@ -10,6 +10,8 @@ import asyncio
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+from agentm.gateway.send_queue import SendQueue
+
 
 @dataclass
 class PeerSession:
@@ -36,6 +38,11 @@ class PeerSession:
     # single WS message and corrupt the stream. Every writer acquires this
     # lock around its write+drain so each frame maps to exactly one flush.
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Unified per-peer ordered send queue (§2.6): every outbound — durable
+    # and ephemeral — is enqueued here and drained by the single sender
+    # task, which is what guarantees delivery order. The server replaces
+    # this with one sized to its slow-consumer high-water mark.
+    send_q: SendQueue = field(default_factory=SendQueue)
 
 
 class PeerRegistry:

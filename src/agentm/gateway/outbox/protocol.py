@@ -47,11 +47,12 @@ class OutboxRecord:
 class OutboxStore(Protocol):
     """Durable per-peer queue. At-least-once delivery."""
 
-    def enqueue(self, peer_id: str, env: Envelope) -> None:
-        """Append ``env`` to ``peer_id``'s queue.
+    def enqueue(self, peer_id: str, env: Envelope) -> int:
+        """Append ``env`` to ``peer_id``'s queue; return its row id.
 
         Idempotent on ``(peer_id, env.id)``: a duplicate enqueue is a
-        silent no-op so producer retry is safe.
+        silent no-op that returns the *existing* row's id, so producer
+        retry is safe and the caller can always ``ack`` by the returned id.
         """
         ...
 
