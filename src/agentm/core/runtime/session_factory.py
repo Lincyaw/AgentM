@@ -150,6 +150,9 @@ async def create_agent_session(
     inbox = SessionInbox()
     apis: dict[str, _ExtensionAPIImpl] = {}
     services: dict[str, Any] = {}
+    # Seed caller-supplied services BEFORE atoms install.
+    # See AgentSessionConfig.initial_services.
+    services.update(config.initial_services)
 
     active_provider_box: dict[str, ProviderConfig | None] = {"value": None}
     loop_box: dict[str, AgentLoop | None] = {"value": None}

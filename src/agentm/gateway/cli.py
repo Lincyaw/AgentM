@@ -229,7 +229,7 @@ def _build_authenticator(spec: BindSpec) -> Authenticator:
 
 def _build_session_factory(
     *, provider: str, model: str, profile: Any | None
-) -> Callable[[str, str, str | None, str | None], Awaitable[Any]]:
+) -> Callable[[str, str, str | None, str | None, dict[str, Any]], Awaitable[Any]]:
     from typing import cast as _cast
 
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
@@ -242,7 +242,11 @@ def _build_session_factory(
     )
 
     async def factory(
-        cwd: str, session_key: str, scenario: str | None, resume: str | None
+        cwd: str,
+        session_key: str,
+        scenario: str | None,
+        resume: str | None,
+        wire_services: dict[str, Any],
     ) -> Any:
         del session_key  # routing identity; not needed for construction
         store = make_default_session_store(cwd)
@@ -261,6 +265,11 @@ def _build_session_factory(
             scenario=scenario,
             session_manager=_cast(Any, state),
             bus=EventBus(),
+            # Seed the wire_driver's services before atoms install and mount the
+            # atom during create() so it forwards the creation-time
+            # SessionReadyEvent (the chat client's slash-command catalog).
+            initial_services=dict(wire_services),
+            extra_extensions=[("agentm.extensions.builtin.wire_driver", {})],
         )
         return await AgentSession.create(config)
 
@@ -304,7 +313,9 @@ class _GatewayRuntime:
         scenario: str | None,
         outbox: SqliteOutbox,
         chat_map: ChatSessionMap,
-        session_factory: Callable[[str, str, str | None, str | None], Awaitable[Any]],
+        session_factory: Callable[
+            [str, str, str | None, str | None, dict[str, Any]], Awaitable[Any]
+        ],
         command_router: CommandRouter,
         approval_policy: tuple[frozenset[str], frozenset[str], float],
         model_name: str = "",
