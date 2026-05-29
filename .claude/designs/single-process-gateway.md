@@ -190,7 +190,14 @@ Gone from v1: `bye` (close-on-socket is fine), `delivery_batch` / `ack_batch` (p
 
 ### 2.6 Delivery semantics
 
-Outbound from gateway to chat client is **at-least-once via durable outbox** — per-peer SQLite-backed queue, deliver-and-ack, retry with exponential backoff, idempotent on envelope `id`. Unchanged from v1's outbox layer (§4.5 of `client-server-architecture.md`), which works fine and is one of the surviving good parts.
+Outbound to a chat client flows through **one ordered channel per peer**: a single in-memory FIFO send queue (`send_queue.SendQueue`) drained by one sender task that is the peer's only socket writer. Enqueue order == event order == delivery order — so no frame overtakes another, and the receiver never has to reorder (no wire sequence number is needed in a single-process gateway).
+
+**Ordering and reliability are orthogonal**, carried on the *same* queue:
+
+- A **durable** frame (`assistant_text` / `approval_*` / `diagnostic_*`, see `wire/types.py:DURABLE_OUTBOUND_KINDS`) is first written to the per-peer SQLite outbox (the replay floor) and enqueued carrying its row id; the sender acks the row only after a successful write. On socket failure it is left in the outbox and replayed — in FIFO order, ahead of new live frames — when the peer reconnects (`WireServer._prefill_from_outbox`). This preserves **at-least-once**, idempotent on envelope `id`, with exponential-backoff dead-lettering of poison rows.
+- An **ephemeral** frame (`stream_text` / `tool_call` / `agent_end` …) carries no row id, is never persisted, and is **best-effort**: under backpressure the queue sheds its *oldest ephemeral* item (durable items are never dropped — they are already on disk), bounding memory without ever losing a durable record or reordering survivors.
+
+> **Why one channel.** v1/earlier-v2 split delivery into two paths — durable via the outbox/async worker, ephemeral written straight to the socket. They reordered relative to each other (the async-outbox round-trip lags the direct write), so a later-produced `agent_end` reliably overtook an earlier durable `assistant_text`. Unifying onto one FIFO fixes ordering at the source; the outbox is demoted to a persistence side-channel for reconnect replay, not a delivery path.
 
 Inbound from chat client to gateway is **at-most-once via ack-on-process** — gateway writes to inbox ledger, processes, then acks. Unchanged from v1.
 

@@ -19,9 +19,7 @@ from agentm.gateway.peer import PeerSession
 from agentm.gateway.wire import (
     DURABLE_OUTBOUND_KINDS,
     EPHEMERAL_OUTBOUND_KINDS,
-    KIND_OUTBOUND,
     OutboundMetaKind,
-    decode_stream,
 )
 
 
@@ -83,19 +81,30 @@ def test_routes_to_all_same_channel_peers_mirror_case() -> None:
     assert _route_targets(peers, channels, "terminal") == [t1, t2]
 
 
-# --- delivery-class split (durable outbox vs ephemeral direct write) -------
+# --- delivery-class split (durable persisted + queued, ephemeral queued) ----
+# Unified ordered delivery (§2.6): _emit_outbound enqueues BOTH classes onto
+# the peer's single send queue (the sender is the only socket writer). The
+# classes differ only in persistence — durable rides the outbox (replay on
+# reconnect) carrying its row id; ephemeral carries no row id.
 
 
 class _RecordingOutbox:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, Any]] = []
+        self._next_id = 0
 
-    def enqueue(self, peer_id: str, env: Any) -> None:
+    def enqueue(self, peer_id: str, env: Any) -> int:
+        self._next_id += 1
         self.enqueued.append((peer_id, env))
+        return self._next_id
 
 
 class _RecordingWriter:
-    """Captures bytes written straight to the peer (the ephemeral path)."""
+    """Captures any bytes written straight to the peer.
+
+    _emit_outbound must NOT write here — the per-peer sender is the only
+    socket writer now — so this stays empty in these unit tests.
+    """
 
     def __init__(self) -> None:
         self.buf = bytearray()
@@ -137,7 +146,7 @@ def _body(kind: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_durable_kind_enqueues_and_does_not_write_directly() -> None:
+async def test_durable_kind_persists_to_outbox_and_queues_with_row_id() -> None:
     outbox = _RecordingOutbox()
     writer = _RecordingWriter()
     peer = PeerSession(peer_id="terminal-1", transport_writer=cast(Any, writer))
@@ -145,12 +154,19 @@ async def test_durable_kind_enqueues_and_does_not_write_directly() -> None:
 
     await rt._emit_outbound(_body("assistant_text"))
 
-    assert len(outbox.enqueued) == 1  # durable -> outbox
-    assert bytes(writer.buf) == b""  # never written straight to the peer
+    # durable -> persisted to outbox (so it replays on reconnect) ...
+    assert len(outbox.enqueued) == 1
+    # ... and queued for ordered delivery carrying its outbox row id.
+    assert len(peer.send_q) == 1
+    item = await peer.send_q.get()
+    assert item.outbox_id == 1
+    assert item.envelope.body["metadata"]["kind"] == "assistant_text"
+    # _emit_outbound never writes the socket directly — the sender does.
+    assert bytes(writer.buf) == b""
 
 
 @pytest.mark.asyncio
-async def test_ephemeral_kind_writes_directly_and_skips_the_outbox() -> None:
+async def test_ephemeral_kind_queues_without_persisting() -> None:
     outbox = _RecordingOutbox()
     writer = _RecordingWriter()
     peer = PeerSession(peer_id="terminal-1", transport_writer=cast(Any, writer))
@@ -159,12 +175,34 @@ async def test_ephemeral_kind_writes_directly_and_skips_the_outbox() -> None:
     await rt._emit_outbound(_body("stream_text"))
 
     # Streaming deltas MUST bypass the durable outbox (a turn streams ~50/s;
-    # otherwise the SQLite queue explodes and replays stale frames).
+    # otherwise the SQLite queue explodes and replays stale frames) ...
     assert outbox.enqueued == []
-    # ... and land as one valid `outbound` envelope on the live socket.
-    envelopes, rest = decode_stream(bytes(writer.buf))
-    assert rest == b""
-    assert len(envelopes) == 1
-    assert envelopes[0].kind == KIND_OUTBOUND
-    assert envelopes[0].session_key == "terminal:t1"
-    assert envelopes[0].body["metadata"]["kind"] == "stream_text"
+    # ... and queue with no row id (best-effort, droppable under backpressure).
+    assert len(peer.send_q) == 1
+    item = await peer.send_q.get()
+    assert item.outbox_id is None
+    assert item.envelope.body["metadata"]["kind"] == "stream_text"
+    assert bytes(writer.buf) == b""
+
+
+@pytest.mark.asyncio
+async def test_mixed_kinds_queue_in_emit_order() -> None:
+    """The ordering-fix regression lock: consecutive durable/ephemeral emits
+    land on the ONE send queue in call order. The old split routed durable to
+    the async outbox and ephemeral straight to the socket, so a later
+    ephemeral (agent_end) overtook an earlier durable (assistant_text). Now a
+    single FIFO carries both — delivery order == emit order."""
+    outbox = _RecordingOutbox()
+    writer = _RecordingWriter()
+    peer = PeerSession(peer_id="terminal-1", transport_writer=cast(Any, writer))
+    rt = _runtime_with(peer, outbox)
+
+    # A realistic turn tail: tool_call (eph), assistant_text (durable),
+    # agent_end (eph) — the exact sequence that used to reorder.
+    for kind in ("tool_call", "assistant_text", "agent_end"):
+        await rt._emit_outbound(_body(kind))
+
+    kinds = []
+    while len(peer.send_q):
+        kinds.append((await peer.send_q.get()).envelope.body["metadata"]["kind"])
+    assert kinds == ["tool_call", "assistant_text", "agent_end"]

@@ -35,10 +35,10 @@ from agentm.gateway.auth import (
 )
 from agentm.gateway.outbox import (
     InboxLog,
-    OutboxRecord,
     OutboxStore,
 )
 from agentm.gateway.peer import PeerRegistry, PeerSession
+from agentm.gateway.send_queue import SendItem, SendQueue
 from agentm.gateway.transport import (
     ServerTransport,
     UnixServerTransport,
@@ -66,11 +66,6 @@ log = logging.getLogger("agentm.gateway.server")
 
 SERVER_VERSION: str = "0.2.0"
 MAX_DELIVERY_ATTEMPTS: int = 5
-# Safety-net poll: the delivery worker waits on an asyncio.Event woken by
-# outbox.enqueue, but it also re-checks every LEASE_REFRESH_INTERVAL
-# seconds so leases that expired without a fresh enqueue (crash recovery)
-# eventually get re-leased.
-LEASE_REFRESH_INTERVAL: float = 5.0
 
 InboundHandler = Callable[[PeerSession, Envelope], Awaitable[None]]
 
@@ -139,16 +134,14 @@ class WireServer:
         self._started = False
         self._stopped = False
         self._conn_tasks: set[asyncio.Task[None]] = set()
+        # peer_id -> the per-peer sender task draining its SendQueue.
         self._delivery_tasks: dict[str, asyncio.Task[None]] = {}
-        self._wake_events: dict[str, asyncio.Event] = {}
-        self._loop: asyncio.AbstractEventLoop | None = None
 
     # -- lifecycle ----------------------------------------------------
 
     async def start(self) -> None:
         if self._started:
             return
-        self._loop = asyncio.get_running_loop()
         await self._transport.serve(self._handle_connection)
         self._started = True
 
@@ -250,25 +243,23 @@ class WireServer:
                 ),
             )
 
-            wake = asyncio.Event()
-            self._wake_events[peer_id] = wake
-            self._register_outbox_notifier(peer_id, wake)
-            # An enqueue may have landed before we registered: prime the
-            # event so the first drain pass runs.
-            wake.set()
-            delivery = asyncio.create_task(
-                self._delivery_loop(session, wake), name=f"deliver:{peer_id}"
+            # Size the unified send queue to the slow-consumer high-water,
+            # then prefill any durable rows left unacked by a prior
+            # connection (reconnect replay) in FIFO order *before* the sender
+            # starts — replayed durable frames thus precede new live frames.
+            session.send_q = SendQueue(high_water=self._high_water)
+            await self._prefill_from_outbox(session)
+            sender = asyncio.create_task(
+                self._sender_loop(session), name=f"send:{peer_id}"
             )
-            self._delivery_tasks[peer_id] = delivery
+            self._delivery_tasks[peer_id] = sender
             try:
                 await self._read_loop(session, reader)
             finally:
-                delivery.cancel()
+                sender.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await delivery
+                    await sender
                 self._delivery_tasks.pop(peer_id, None)
-                self._wake_events.pop(peer_id, None)
-                self._unregister_outbox_notifier(peer_id)
         except (ConnectionResetError, BrokenPipeError):
             pass
         except asyncio.CancelledError:
@@ -328,59 +319,86 @@ class WireServer:
             "server: ignoring unexpected kind %s from %s", env.kind, session.peer_id
         )
 
-    # -- delivery worker ---------------------------------------------
+    # -- unified sender (§2.6 ordered delivery channel) --------------
 
-    async def _delivery_loop(
-        self, session: PeerSession, wake: asyncio.Event
-    ) -> None:
-        """Drain outbox rows for ``session.peer_id`` until cancelled.
+    async def _prefill_from_outbox(self, session: PeerSession) -> None:
+        """Replay durable rows left unacked from a prior connection.
 
-        Wakeup model: blocks on ``wake`` (set by ``outbox.enqueue`` via
-        the registered notifier) with a ``LEASE_REFRESH_INTERVAL``
-        timeout (the crash-recovery safety net). Pipelined push: each
-        leased record ships as one ``outbound`` envelope, one wire write
-        per record.
-
-        Slow-consumer accounting is observational: we log a diagnostic
-        when the pending queue crosses ``slow_consumer_high_water`` and
-        clear the flag below ``high_water / 2``; we never stop draining.
+        On reconnect, every durable frame that was never acked is still in
+        the outbox. We lease them all (FIFO by row id) and push them onto
+        the fresh send queue *before* the sender starts, so a reconnecting
+        client receives its missed durable frames in order, ahead of any
+        new live frames. Rows whose attempts exceed the cap are dead-
+        lettered instead of replayed forever (poison-pill guard).
         """
         peer_id = session.peer_id
+        now = time.time()
+        while True:
+            records = await asyncio.to_thread(
+                self._outbox.lease, peer_id, self._delivery_batch_max, now
+            )
+            if not records:
+                return
+            for r in records:
+                if r.attempts > self._max_attempts:
+                    await asyncio.to_thread(
+                        self._outbox.dead_letter, r.id, "max delivery attempts"
+                    )
+                    log.warning(
+                        "dead_letter peer=%s env_id=%s reason=max_attempts",
+                        peer_id,
+                        r.envelope.id,
+                    )
+                    continue
+                session.send_q.put(r.envelope, r.id)
+
+    async def _sender_loop(self, session: PeerSession) -> None:
+        """Drain the per-peer send queue in order until cancelled.
+
+        This is the single writer for the peer: durable and ephemeral
+        frames share this one ordered path, so delivery order == enqueue
+        order (the ordering guarantee — see ``send_queue``). A durable item
+        (``outbox_id is not None``) is acked only after a successful write;
+        on socket failure it is left in the outbox for reconnect replay and
+        the loop exits via ``_ConnectionLost``. An ephemeral item is dropped
+        on failure (best-effort).
+
+        Slow-consumer accounting is observational: flag when the queue
+        depth crosses ``high_water`` and clear below ``high_water / 2``.
+        """
+        peer_id = session.peer_id
+        writer = session.transport_writer
         try:
             while True:
-                pending = await asyncio.to_thread(self._outbox.pending_count, peer_id)
-                session.pending_count_hint = pending
-                if pending > self._high_water and not session.backpressure:
+                item = await session.send_q.get()
+                depth = len(session.send_q)
+                session.pending_count_hint = depth
+                if depth > self._high_water and not session.backpressure:
                     log.warning(
-                        "slow_consumer peer=%s pending=%d high_water=%d",
+                        "slow_consumer peer=%s queued=%d high_water=%d "
+                        "dropped_ephemeral=%d",
                         peer_id,
-                        pending,
+                        depth,
                         self._high_water,
+                        session.send_q.dropped_ephemeral,
                     )
                     session.backpressure = True
-                elif session.backpressure and pending <= self._low_water:
+                elif session.backpressure and depth <= self._low_water:
                     session.backpressure = False
-                wake.clear()
-                now = time.time()
-                records = await asyncio.to_thread(
-                    self._outbox.lease, peer_id, self._delivery_batch_max, now
-                )
-                if not records:
-                    next_retry = await asyncio.to_thread(
-                        self._outbox.next_retry_at_min, peer_id
-                    )
-                    if next_retry is not None and next_retry > now:
-                        timeout = min(
-                            max(next_retry - now, 0.0), LEASE_REFRESH_INTERVAL
-                        )
-                    else:
-                        timeout = LEASE_REFRESH_INTERVAL
-                    try:
-                        await asyncio.wait_for(wake.wait(), timeout=timeout)
-                    except asyncio.TimeoutError:
-                        pass
-                    continue
-                await self._deliver(session, records)
+                try:
+                    # One wire frame == one WS message; the write lock keeps
+                    # each frame mapped to exactly one flush.
+                    async with session.write_lock:
+                        writer.write(encode(item.envelope))
+                        await writer.drain()
+                except (ConnectionResetError, BrokenPipeError) as exc:
+                    await self._account_failure(session, item, repr(exc))
+                    raise _ConnectionLost() from exc
+                except Exception as exc:
+                    await self._account_failure(session, item, repr(exc))
+                    raise _ConnectionLost() from exc
+                if item.outbox_id is not None:
+                    await asyncio.to_thread(self._outbox.ack, [item.outbox_id])
         except _ConnectionLost:
             with contextlib.suppress(Exception):
                 session.transport_writer.close()
@@ -388,81 +406,22 @@ class WireServer:
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("delivery loop for peer=%s crashed", peer_id)
+            log.exception("sender loop for peer=%s crashed", peer_id)
 
-    async def _deliver(
-        self, session: PeerSession, records: list[OutboxRecord]
+    async def _account_failure(
+        self, session: PeerSession, item: SendItem, reason: str
     ) -> None:
-        """Write each record as one ``outbound`` envelope and ack the set.
+        """On write failure, release a durable item for reconnect replay.
 
-        On socket failure: account the records (nack or dead-letter per
-        attempts) and re-raise ``_ConnectionLost`` so the delivery loop
-        exits until the peer reconnects.
+        Ephemeral items (``outbox_id is None``) are best-effort and simply
+        dropped. A durable item is nacked with an immediate retry time so
+        the next connection's prefill re-leases it promptly (the sender has
+        already exited, so there is no tight-loop to throttle); the lease
+        TTL is the crash-recovery backstop for items still queued behind it.
         """
-        writer = session.transport_writer
-        try:
-            # Hold the per-peer write lock across the batch so durable frames
-            # never interleave with ephemeral live frames on the same writer
-            # (one wire frame == one WS message; see PeerSession.write_lock).
-            async with session.write_lock:
-                for r in records:
-                    writer.write(encode(r.envelope))
-                    await writer.drain()
-        except asyncio.CancelledError:
-            await self._nack_records(records)
-            raise
-        except (ConnectionResetError, BrokenPipeError) as exc:
-            await self._handle_delivery_failure(session, records, repr(exc))
-            raise _ConnectionLost() from exc
-        except Exception as exc:
-            await self._handle_delivery_failure(session, records, repr(exc))
-            raise _ConnectionLost() from exc
-        await asyncio.to_thread(self._outbox.ack, [r.id for r in records])
-
-    async def _nack_records(self, records: list[OutboxRecord]) -> None:
-        now = time.time()
-        for r in records:
-            delay = self._outbox.backoff_delay(r.attempts)
-            await asyncio.to_thread(self._outbox.nack, [r.id], now + delay)
-
-    async def _handle_delivery_failure(
-        self,
-        session: PeerSession,
-        records: list[OutboxRecord],
-        reason: str,
-    ) -> None:
-        now = time.time()
-        for r in records:
-            if r.attempts >= self._max_attempts:
-                await asyncio.to_thread(self._outbox.dead_letter, r.id, reason)
-                log.warning(
-                    "dead_letter peer=%s env_id=%s reason=%s",
-                    session.peer_id,
-                    r.envelope.id,
-                    reason,
-                )
-            else:
-                delay = self._outbox.backoff_delay(r.attempts)
-                await asyncio.to_thread(self._outbox.nack, [r.id], now + delay)
-
-    # -- outbox notifier wiring --------------------------------------
-
-    def _register_outbox_notifier(self, peer_id: str, event: asyncio.Event) -> None:
-        """Register a per-peer wakeup with the outbox (§6 first-class)."""
-        loop = self._loop
-        if loop is None:
+        if item.outbox_id is None:
             return
-
-        def notify(_pid: str) -> None:
-            # outbox.enqueue runs in worker threads (via asyncio.to_thread).
-            # Bounce the set() through the loop.
-            if not loop.is_closed():
-                loop.call_soon_threadsafe(event.set)
-
-        self._outbox.set_notifier(peer_id, notify)
-
-    def _unregister_outbox_notifier(self, peer_id: str) -> None:
-        self._outbox.set_notifier(peer_id, None)
+        await asyncio.to_thread(self._outbox.nack, [item.outbox_id], time.time())
 
 
 # -- helpers ---------------------------------------------------------

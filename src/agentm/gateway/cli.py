@@ -69,7 +69,6 @@ from agentm.gateway.wire import (
     WIRE_VERSION,
     Envelope,
     InboundBody,
-    encode,
 )
 
 autoload_dotenv()
@@ -271,27 +270,6 @@ def _build_session_factory(
 # -------- gateway runtime ---------------------------------------------
 
 
-async def _ephemeral_send(peer: PeerSession, env: Envelope) -> None:
-    """Write ``env`` straight to ``peer`` best-effort, bypassing the outbox.
-
-    Holds the peer's write lock so the frame never interleaves with the
-    durable delivery worker (one wire frame == one WS message). A dead/slow
-    peer just drops the frame — ephemeral frames are live decoration, not a
-    durable record (the durable ``assistant_text`` is the fallback). See the
-    delivery-class contract in ``agentm.gateway.wire.types`` / textual-tui §4.3.
-    """
-    try:
-        async with peer.write_lock:
-            peer.transport_writer.write(encode(env))
-            await peer.transport_writer.drain()
-    except (ConnectionResetError, BrokenPipeError):
-        return
-    except Exception:  # noqa: BLE001 — a bad peer must not break the session
-        logger.debug(
-            "ephemeral outbound dropped for peer=%s", peer.peer_id, exc_info=True
-        )
-
-
 def _route_targets(
     peers: list[PeerSession],
     peer_channels: dict[str, str],
@@ -405,23 +383,30 @@ class _GatewayRuntime:
         targets = _route_targets(
             list(self._server.registry), self._peer_channels, target_channel
         )
-        if kind in DURABLE_OUTBOUND_KINDS:
-            for peer in targets:
-                await asyncio.to_thread(self._outbox.enqueue, peer.peer_id, env)
-        else:
-            # Ephemeral live frame: written straight to the connected peer(s),
-            # bypassing the durable outbox (delivery-class contract: wire.types
-            # / textual-tui §4.3). An unknown kind falls here too — surface it,
-            # since a typo'd DURABLE kind would otherwise silently downgrade to
-            # droppable.
-            if kind not in EPHEMERAL_OUTBOUND_KINDS:
-                logger.warning(
-                    "outbound kind %r is not in the known wire vocabulary; "
-                    "delivering as ephemeral (best-effort, droppable)",
-                    kind,
+        # Unified ordered delivery (§2.6): every outbound — durable and
+        # ephemeral — is enqueued onto the peer's single send queue, drained
+        # in order by the per-peer sender. Enqueue order == event order ==
+        # delivery order, so no frame overtakes another. The two classes
+        # differ only in persistence: a durable frame is first written to the
+        # outbox (so it replays on reconnect) and its row id rides along to be
+        # acked after a successful write; an ephemeral frame carries no row id
+        # (best-effort, dropped under backpressure / on a dead peer).
+        durable = kind in DURABLE_OUTBOUND_KINDS
+        if not durable and kind not in EPHEMERAL_OUTBOUND_KINDS:
+            # An unknown kind falls through as ephemeral — surface it, since a
+            # typo'd DURABLE kind would otherwise silently downgrade.
+            logger.warning(
+                "outbound kind %r is not in the known wire vocabulary; "
+                "delivering as ephemeral (best-effort, droppable)",
+                kind,
+            )
+        for peer in targets:
+            outbox_id: int | None = None
+            if durable:
+                outbox_id = await asyncio.to_thread(
+                    self._outbox.enqueue, peer.peer_id, env
                 )
-            for peer in targets:
-                await _ephemeral_send(peer, env)
+            peer.send_q.put(env, outbox_id)
 
     def _merge_gateway_commands(self, meta: dict[str, Any]) -> None:
         """Fold the gateway's top-level command names (builtins like /model,
