@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -171,6 +172,13 @@ class _LiveTurn:
     body: str = ""
     steps: list[_Step] = field(default_factory=list)
     message_id: str | None = None
+    # True once any agent-lifecycle event (turn_start / stream_* / tool_*)
+    # has been seen. A turn that reaches assistant_text WITHOUT this is a
+    # one-shot reply (a slash command's ctx.reply emits no turn_start /
+    # agent_end), so it must finalize immediately instead of waiting for an
+    # agent_end that never comes — otherwise it becomes a zombie turn that
+    # later turns reuse, freezing every reply onto one stale card.
+    saw_lifecycle: bool = False
     agent_ended: bool = False
     finalized: bool = False
     last_render: float = 0.0
@@ -206,10 +214,17 @@ class FeishuAdapter:
         self._client = client
         self._config = config
         self._channel: Any = None
-        # Pending ACK reactions keyed by chat_id. Cleared when the agent's
-        # reply lands (v2 has no turn_complete signal; the assistant_text
-        # outbound is the cue).
-        self._pending_acks: dict[str, list[asyncio.Task[Any]]] = {}
+        # The asyncio loop that owns the WireClient + card rendering. lark's
+        # WS callbacks (_on_message / _on_card_action) fire on lark's OWN loop
+        # in a daemon thread, so any reaction work scheduled from there must be
+        # bounced onto this loop — otherwise an ack task created on lark's loop
+        # is awaited from this one and asyncio raises "Future attached to a
+        # different loop". Captured in :meth:`start`.
+        self._main_loop: asyncio.AbstractEventLoop | None = None
+        # Pending ACK reactions keyed by chat_id, as concurrent futures from
+        # run_coroutine_threadsafe (resolved on the main loop). Cleared when the
+        # agent's reply lands (v2 has no turn_complete; assistant_text is cue).
+        self._pending_acks: dict[str, list[Future[Any]]] = {}
         # session_keys we have already sent ``scenario`` for, so later
         # inbounds for the same chat omit it (§2.2).
         self._scenario_sent: set[str] = set()
@@ -232,6 +247,9 @@ class FeishuAdapter:
         """Connect to Feishu and stay alive until :meth:`stop`."""
         if self._running:
             return
+        # Capture the loop that owns the WireClient / card rendering, so lark's
+        # daemon-thread callbacks can bounce reaction work back onto it.
+        self._main_loop = asyncio.get_running_loop()
         try:
             from lark_oapi.channel import FeishuChannel as _Lark
         except ImportError as exc:  # pragma: no cover
@@ -298,14 +316,17 @@ class FeishuAdapter:
             return
         if not self._is_allowed(sender):
             return
-        # Quick visual ACK so the user knows the bot got it. Fire-and-forget
-        # — awaiting here would block the inbound handler if the RPC hangs.
-        if message_id and self._config.ack_emoji:
-            task = asyncio.create_task(
+        # Quick visual ACK so the user knows the bot got it. Scheduled onto the
+        # main loop (this callback runs on lark's daemon-thread loop) so the
+        # reaction task — and its later removal in _clear_pending_acks — live on
+        # the same loop. Fire-and-forget: awaiting here would block the inbound
+        # handler if the RPC hangs.
+        if message_id and self._config.ack_emoji and self._main_loop is not None:
+            cf = asyncio.run_coroutine_threadsafe(
                 self._safe_reaction(message_id, self._config.ack_emoji),
-                name="feishu-ack",
+                self._main_loop,
             )
-            self._pending_acks.setdefault(str(chat_id), []).append(task)
+            self._pending_acks.setdefault(str(chat_id), []).append(cf)
         await self._forward_inbound(
             sender_id=str(sender),
             chat_id=str(chat_id),
@@ -429,6 +450,12 @@ class FeishuAdapter:
             turn = _LiveTurn(chat_id=chat_id)
             self._live[chat_id] = turn
 
+        # Any of these marks an actual agent run (a slash-command reply emits
+        # only a bare assistant_text), so the turn must wait for agent_end.
+        if kind in ("turn_start", "stream_thinking", "tool_call", "tool_result",
+                    "stream_text"):
+            turn.saw_lifecycle = True
+
         if kind == "turn_start":
             # One per LLM turn. Render once to show 思考中 before any tool;
             # later turns within a run change nothing visible (the activity
@@ -468,6 +495,12 @@ class FeishuAdapter:
             # reopen a second card.
             turn.body = str(body.get("content") or "")
             await self._clear_pending_acks(chat_id)
+            if not turn.saw_lifecycle:
+                # One-shot reply (slash command) — no agent_end will come.
+                # Finalize now so it lands as its own card and the next reply
+                # starts fresh instead of reusing this turn.
+                await self._finalize(turn)
+                return
             if turn.agent_ended:
                 self._schedule_finalize_timeout(turn, restart=True)
         elif kind == "agent_end":
@@ -637,13 +670,16 @@ class FeishuAdapter:
 
     async def _clear_pending_acks(self, chat_id: str) -> None:
         """Remove every ACK reaction attached for ``chat_id``."""
-        tasks = self._pending_acks.pop(chat_id, None)
-        if not tasks:
+        futures = self._pending_acks.pop(chat_id, None)
+        if not futures:
             return
         assert self._channel is not None
-        for task in tasks:
+        for cf in futures:
             try:
-                pair = await task
+                # The reaction coro runs on the main loop (scheduled via
+                # run_coroutine_threadsafe); wrap_future lets us await its
+                # concurrent.futures.Future from this same loop.
+                pair = await asyncio.wrap_future(cf)
             except Exception:
                 log.exception("[feishu] ack-add task raised")
                 continue
