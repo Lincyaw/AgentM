@@ -329,11 +329,17 @@ class _GatewayRuntime:
         session_factory: Callable[[str, str, str | None, str | None], Awaitable[Any]],
         command_router: CommandRouter,
         approval_policy: tuple[frozenset[str], frozenset[str], float],
+        model_name: str = "",
+        make_factory: Callable[[str], Any] | None = None,
     ) -> None:
         self._cwd = cwd
         self._scenario = scenario
         self._outbox = outbox
         self._command_router = command_router
+        # Active model label + a builder that produces a new session factory for
+        # a given model name — together these back the runtime ``/model`` switch.
+        self._model_name = model_name
+        self._make_factory = make_factory
         require, block, timeout = approval_policy
         self._approval = ApprovalManager(
             self._emit_outbound,
@@ -382,6 +388,12 @@ class _GatewayRuntime:
         target_channel = str(body.get("channel") or "")
         meta = body.get("metadata")
         kind = str((meta or {}).get("kind") or "assistant_text")
+        if kind == "session_ready" and isinstance(meta, dict):
+            # Fold the gateway's own builtin commands (/new, /end, /status,
+            # /model, ...) into the session_ready command list so chat clients
+            # surface them in autocomplete. They are routed by the gateway, not
+            # the session, so they never appear in the session-emitted list.
+            self._merge_gateway_commands(meta)
         env = Envelope(
             v=WIRE_VERSION,
             id=f"out-{uuid.uuid4().hex[:12]}",
@@ -410,6 +422,25 @@ class _GatewayRuntime:
                 )
             for peer in targets:
                 await _ephemeral_send(peer, env)
+
+    def _merge_gateway_commands(self, meta: dict[str, Any]) -> None:
+        """Fold the gateway's top-level command names (builtins like /model,
+        /new, /end, /status, plus markdown and skill commands) into a
+        session_ready frame's ``command_names`` (deduped, order preserved).
+        These are routed by the gateway, not registered inside the session, so
+        without this the chat client never learns about them and they don't
+        appear in slash autocomplete. Namespaced commands (``/atom:*``) are
+        skipped — they are not bare ``/name`` invocations."""
+        existing = meta.get("command_names")
+        names: list[str] = list(existing) if isinstance(existing, list) else []
+        seen = set(names)
+        for handler in self._command_router.registry.all():
+            if handler.namespace is not None:
+                continue
+            if handler.name not in seen:
+                names.append(handler.name)
+                seen.add(handler.name)
+        meta["command_names"] = names
 
     # -- inbound handler ----------------------------------------------
 
@@ -540,6 +571,14 @@ class _GatewayRuntime:
             sess = self._sessions.get(session_key)
             return sess.extension_api if sess is not None else None
 
+        def list_models() -> tuple[str, list[str]]:
+            from agentm.core.lib.user_config import load_user_config
+
+            return (self._model_name, list(load_user_config().models.keys()))
+
+        async def switch_model(name: str) -> tuple[bool, str]:
+            return await self._switch_model(session_key, name)
+
         return CommandContext(
             session_key=session_key,
             channel=body.channel,
@@ -551,7 +590,30 @@ class _GatewayRuntime:
             get_route_stats=get_route_stats,
             list_commands=self._command_router.registry.all,
             get_extension_api=get_extension_api,
+            list_models=list_models,
+            switch_model=switch_model,
         )
+
+    async def _switch_model(self, session_key: str, name: str) -> tuple[bool, str]:
+        """Swap the session factory to ``name``'s model profile and tear down
+        this chat's live session so the next message rebuilds it on the new
+        model (the transcript resumes — same as ``/new``).
+
+        Note: the factory is process-wide, so a switch affects the model used
+        for every chat's *next* session, not just this one. Adequate for the
+        single-user terminal; revisit if multi-tenant per-chat models are
+        needed."""
+        from agentm.core.lib.user_config import load_user_config
+
+        if self._make_factory is None:
+            return (False, "model switching is not configured")
+        key = name.lower()
+        if key not in load_user_config().models:
+            return (False, f"unknown model '{name}'")
+        self._sessions.set_factory(self._make_factory(key))
+        self._model_name = key
+        await self._sessions.shutdown_session(session_key)
+        return (True, key)
 
     async def _send_error(
         self, session_key: str, body: InboundBody, exc: Exception
@@ -767,6 +829,21 @@ async def _arun(
         frozenset(),
         300.0,
     )
+    # Builder the runtime calls on ``/model <name>`` to produce a fresh factory
+    # for a named profile (the command validates the name exists first).
+    def make_factory(model_name: str) -> Any:
+        prof = resolve_model_profile(model_name)
+        if prof is None:  # pragma: no cover — caller validates
+            raise ValueError(f"no model profile {model_name!r}")
+        return _build_session_factory(
+            provider=provider_flag or prof.provider, model=prof.model, profile=prof
+        )
+
+    from agentm.core.lib.user_config import load_user_config
+
+    initial_model_label = (
+        raw_model or load_user_config().default_model or resolved_model
+    )
     runtime = _GatewayRuntime(
         cwd=cwd,
         scenario=scenario,
@@ -777,6 +854,8 @@ async def _arun(
         ),
         command_router=CommandRouter(registry=command_registry),
         approval_policy=approval_policy,
+        model_name=str(initial_model_label or ""),
+        make_factory=make_factory,
     )
     server = WireServer(
         transport=_build_server_transport(bind_spec),

@@ -40,6 +40,12 @@ from ..wire.types import OutboundBody
 CommandKind = Literal["control", "prompt"]
 
 
+async def _default_switch_model(_name: str) -> tuple[bool, str]:
+    """Default ``switch_model`` capability — model switching is unsupported on
+    this context (e.g. a unit-test stub). The gateway injects a real one."""
+    return (False, "model switching is not supported in this context")
+
+
 @dataclass(frozen=True, slots=True)
 class CommandInbound:
     """The slash-command-relevant slice of an inbound envelope.
@@ -128,6 +134,17 @@ class CommandContext:
     get_extension_api: Callable[[], Any | None] = lambda: None
     """Live ``ExtensionAPI`` for this chat's session, or ``None`` if the
     session has not been created yet. Used by ``/atom:*`` commands."""
+
+    list_models: Callable[[], tuple[str, list[str]]] = lambda: ("", [])
+    """Returns ``(active_model_name, available_profile_names)`` for ``/model``.
+    Names are the ``[models.<name>]`` keys from ``config.toml``."""
+
+    switch_model: Callable[[str], Awaitable[tuple[bool, str]]] = (
+        lambda _name: _default_switch_model(_name)
+    )
+    """Switch the active model profile and restart this chat's session
+    (keeps transcript). Returns ``(ok, message)`` — ``message`` is the
+    resolved model name on success, or an error reason on failure."""
 
     def reply(self, text: str, **meta: Any) -> OutboundBody:
         """Build a plain ``assistant_text`` outbound back to this chat."""

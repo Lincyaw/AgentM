@@ -116,6 +116,14 @@ class SessionManager:
     def get(self, session_key: str) -> Any | None:
         return self._sessions.get(session_key)
 
+    def set_factory(self, factory: SessionFactory) -> None:
+        """Swap the session factory (e.g. after ``/model``). Live sessions keep
+        the model they were built with until torn down; the next
+        ``get_or_create`` uses the new factory. Pair with
+        :meth:`shutdown_session` to make a model switch take effect on the
+        current chat's next message (transcript resumes)."""
+        self._factory = factory
+
     def session_id(self, session_key: str) -> str | None:
         sess = self._sessions.get(session_key)
         return _extract_session_id(sess) if sess is not None else None
