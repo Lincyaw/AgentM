@@ -637,6 +637,105 @@ class _GatewayRuntime:
         await self._sessions.shutdown_all()
 
 
+# -------- systemd integration ------------------------------------------
+
+_UNIT_NAME = "agentm-gateway"
+
+
+def _systemd_action(*, install: bool) -> None:
+    """Install or uninstall a systemd user unit for the gateway.
+
+    Install reconstructs the current ``agentm gateway …`` invocation
+    (minus ``--install-systemd`` itself) from ``sys.argv`` and bakes it
+    into ``ExecStart``. The unit inherits the current environment via an
+    ``EnvironmentFile`` pointing at ``~/.config/agentm/gateway.env``.
+    """
+    import shutil
+    import subprocess
+    import textwrap
+
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    unit_path = unit_dir / f"{_UNIT_NAME}.service"
+
+    if not install:
+        subprocess.run(
+            ["systemctl", "--user", "stop", _UNIT_NAME],
+            check=False,
+        )
+        subprocess.run(
+            ["systemctl", "--user", "disable", _UNIT_NAME],
+            check=False,
+        )
+        if unit_path.exists():
+            unit_path.unlink()
+            subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+            sys.stdout.write(f"Removed {unit_path}\n")
+        else:
+            sys.stdout.write(f"{unit_path} does not exist, nothing to remove.\n")
+        return
+
+    agentm_bin = shutil.which("agentm")
+    if agentm_bin is None:
+        raise SystemExit(
+            "Cannot find `agentm` on $PATH. Install it first or run from "
+            "the venv (`uv run agentm gateway --install-systemd`)."
+        )
+
+    argv = sys.argv[:]
+    cleaned: list[str] = []
+    for arg in argv:
+        if arg in ("--install-systemd", "--uninstall-systemd"):
+            continue
+        cleaned.append(arg)
+    # sys.argv[0] is "agentm gateway" (merged by the main CLI dispatcher);
+    # the remaining elements are the gateway flags.  Reconstruct a clean
+    # command line using the resolved binary path.
+    exec_start = f"{agentm_bin} gateway {' '.join(cleaned[1:])}"
+
+    env_dir = Path.home() / ".config" / "agentm"
+    env_file = env_dir / "gateway.env"
+
+    unit = textwrap.dedent(f"""\
+        [Unit]
+        Description=AgentM Gateway
+        After=network.target
+
+        [Service]
+        Type=simple
+        ExecStart={exec_start}
+        Restart=on-failure
+        RestartSec=3
+        EnvironmentFile=-{env_file}
+        WorkingDirectory={Path.cwd()}
+
+        [Install]
+        WantedBy=default.target
+    """)
+
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(unit, encoding="utf-8")
+    sys.stdout.write(f"Wrote {unit_path}\n")
+
+    if not env_file.exists():
+        env_dir.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(
+            "# Environment variables for agentm-gateway.\n"
+            "# e.g. AGENTM_MODEL=doubao\n",
+            encoding="utf-8",
+        )
+        sys.stdout.write(f"Created {env_file} (edit to add API keys / env vars)\n")
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", _UNIT_NAME], check=True)
+    sys.stdout.write(
+        f"\n{_UNIT_NAME} is running. Useful commands:\n"
+        f"  journalctl --user -u {_UNIT_NAME} -f    # follow logs\n"
+        f"  systemctl --user status {_UNIT_NAME}     # check status\n"
+        f"  systemctl --user restart {_UNIT_NAME}    # restart\n"
+        f"  agentm gateway --uninstall-systemd       # remove\n"
+    )
+
+
 # -------- typer app ----------------------------------------------------
 
 
@@ -716,8 +815,25 @@ def cli(
         bool,
         typer.Option("--check", help="Validate config and exit (no server, no LLM)."),
     ] = False,
+    install_systemd: Annotated[
+        bool,
+        typer.Option(
+            "--install-systemd",
+            help="Generate a systemd user unit, enable and start it, then exit.",
+        ),
+    ] = False,
+    uninstall_systemd: Annotated[
+        bool,
+        typer.Option(
+            "--uninstall-systemd",
+            help="Stop, disable and remove the systemd user unit, then exit.",
+        ),
+    ] = False,
 ) -> None:
     """Single-process gateway: hold all chat sessions and serve chat clients."""
+    if install_systemd or uninstall_systemd:
+        _systemd_action(install=install_systemd)
+        return
     logging.basicConfig(
         level=getattr(logging, str(log_level).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
