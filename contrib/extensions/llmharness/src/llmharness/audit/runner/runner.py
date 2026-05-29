@@ -776,7 +776,18 @@ class HarnessRunner:
         recent_graph_payload: list[dict[str, Any]] = []
         for e in events_cum:
             entry = e.to_dict()
-            entry["source_turn_texts"] = [state.turn_texts.get(t, "") for t in e.source_turns]
+            # Raw text only for turns in the current window — the evidence
+            # being distilled into nodes *this* firing. Historical turns
+            # (already folded into the graph) carry their meaning in the
+            # node's own ``summary`` plus each ``external_refs.cited_quote``,
+            # so re-shipping their raw text every firing is pure redundancy —
+            # and the dominant extractor-payload cost, growing without bound as
+            # the run lengthens. ``state.turn_texts`` itself stays complete, so
+            # edge/ref witness validation (server-side) is unaffected.
+            entry["source_turn_texts"] = [
+                state.turn_texts.get(t, "") if t >= window_lo else ""
+                for t in e.source_turns
+            ]
             recent_graph_payload.append(entry)
 
         payload = {
