@@ -98,6 +98,13 @@ class AgentSessionConfig:
     loop_config: LoopConfig | None = None
     bus: EventBus | None = None
 
+    initial_services: dict[str, Any] = field(default_factory=dict)
+    """Entries are merged into the runtime service registry before the
+    extension install loop; atoms see them via ``api.get_service()`` at
+    install time. Use this when an atom must read a caller-supplied service
+    during install or must subscribe to a creation-time event that fires
+    inside ``create()``."""
+
     provider_resolver: ProviderResolver[Any] | None = None
     """Selects the active provider after provider registrations complete."""
 
