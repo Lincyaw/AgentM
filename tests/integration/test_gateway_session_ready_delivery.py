@@ -25,6 +25,7 @@ with the command catalog.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from collections.abc import AsyncIterator
@@ -142,6 +143,12 @@ async def test_gateway_delivers_creation_time_session_ready(tmp_path: Any) -> No
 
     sess = await mgr.get_or_create("key-1", "general_purpose", _inbound())
     try:
+        # session_ready is projected by wire_driver via a SYNC bus handler that
+        # schedules the outbound ship with ``loop.create_task`` (see
+        # wire_driver._make_sync) — so the frame lands on a later event-loop
+        # turn, not synchronously inside get_or_create. Yield the loop so the
+        # scheduled ship task runs before we inspect the sink.
+        await asyncio.sleep(0.05)
         ready = [
             body
             for body in outbound
