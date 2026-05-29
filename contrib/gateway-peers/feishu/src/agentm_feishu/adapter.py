@@ -415,7 +415,15 @@ class FeishuAdapter:
     async def _apply_live(
         self, chat_id: str, kind: str, body: dict[str, Any], meta: dict[str, Any]
     ) -> None:
-        """Fold one live-transcript event into the chat's turn card."""
+        """Fold one live-transcript event into the chat's turn card.
+
+        The get-or-create below has no lock: it is safe because WireClient
+        dispatches outbound frames one at a time (``await on_outbound`` per
+        frame in its read loop), so calls into here are serialised per
+        connection and never interleave at the create. The deferred-flush /
+        finalize tasks only ever call :meth:`_render` (guarded by
+        ``turn.lock``), never this method.
+        """
         turn = self._live.get(chat_id)
         if turn is None or turn.finalized:
             turn = _LiveTurn(chat_id=chat_id)
