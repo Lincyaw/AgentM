@@ -29,3 +29,24 @@ Exit codes (per `cli-design` rule group 3):
 | 4 | Auth rejected by gateway or Feishu credentials invalid |
 | 6 | User interrupt (SIGINT) |
 | 7 | Cannot connect to socket |
+
+## Card rendering
+
+The gateway fans out the full session event surface (`turn_start`,
+`stream_text`, `tool_call`, `usage`, …). Rather than post a card per
+event — which would flood the chat — the adapter collapses one agent run
+into a single **live card** that is updated in place:
+
+- an **activity line** shows the latest 1-2 operations in real time (⏳
+  running → ✅/❌ done, falling back to 思考中 / ✅ 完成) so the chat
+  perceives ongoing progress — there is no generic "正在回答" state;
+- the answer body is filled by the final `assistant_text`;
+- the full tool-step history accumulates in a **collapsible panel**
+  (auto-expanded while working, collapsed once the answer lands) so detail
+  is available without crowding the reply.
+
+`approval_request` and `diagnostic_error` / `diagnostic_warning` get
+their own standalone cards (approvals carry interactive buttons and must
+persist). Runtime/observability kinds (`usage`, `child_*`, `extension_*`,
+`api_*`, `session_ready`, …) are dropped — they belong in the terminal
+TUI, not a chat.
