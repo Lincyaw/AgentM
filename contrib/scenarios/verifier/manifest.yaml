@@ -35,6 +35,14 @@ extensions:
 
         Tools: `list_tables`, `query_sql`, `submit_hop_verdict`.
 
+        Data units — keep these straight, do NOT convert:
+        - `*_traces.duration`: microseconds (μs), UBIGINT.
+          Query it raw — do not divide by 1e3/1e6.
+        - `*_metrics_histogram` (`traces.span.metrics.duration`):
+          `sum` is in seconds (s), `count` is span count.
+        - `*_metrics.value`: unit depends on the metric name
+          (cpu.usage = ratio, memory = bytes, etc.).
+
         1. `list_tables` — see available parquet views.
         2. Compare the target service's latency, throughput, and error
            rate between `normal_*` and `abnormal_*` tables (UNION ALL
