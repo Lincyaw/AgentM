@@ -80,7 +80,7 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.messages import AgentMessage
+from agentm.core.abi.messages import AgentMessage, ToolCallBlock
 from agentm.extensions import ExtensionManifest
 
 from ..audit import entry_types as _et
@@ -102,6 +102,8 @@ from ..audit.runner import (
 from ..audit.seams.live import LiveChildRunner, LiveOpSink
 from ..audit.toolkit.reminder_format import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
 from ..audit.toolkit.reminder_format import build_reminder_message
+from ..audit.triggers import SERVICE_KEY as TRIGGER_SERVICE_KEY
+from ..audit.triggers import TriggerRegistry
 from ..replay.record import audit_session_id, replay_log_path
 from ..schema import Reminder
 
@@ -308,6 +310,7 @@ class _RunnerStepJob:
 
     messages: tuple[AgentMessage, ...]
     turn_count: int
+    tool_names_called: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -316,6 +319,13 @@ class _ShutdownJob:
 
 
 _Job = _RunnerStepJob | _ShutdownJob
+
+
+def _extract_tool_names(event: TurnEndEvent) -> frozenset[str]:
+    """Return all tool names from the turn's AssistantMessage."""
+    from ..audit.triggers import tool_names_from_message
+
+    return tool_names_from_message(event.message)
 
 
 # --- install ----------------------------------------------------------------
@@ -423,11 +433,23 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     with contextlib.suppress(KeyError):
         api.set_service(AUDIT_REGISTRY_SERVICE_KEY, AuditCheckRegistry())
 
+    # Publish the trigger registry for pluggable audit cadence. Trigger
+    # atoms (e.g. trigger_cadence, trigger_on_submission) call
+    # ``api.get_service(TRIGGER_SERVICE_KEY).register_trigger(...)``
+    # from their own ``install``.
+    trigger_registry = TriggerRegistry()
+    with contextlib.suppress(KeyError):
+        api.set_service(TRIGGER_SERVICE_KEY, trigger_registry)
+
     # Construct the single runner for this install. Hydrate the
     # cumulative state once from the existing session log so process
     # restarts pick up where they left off; thereafter the in-memory
     # state is authoritative (no per-firing re-reads).
     cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
+    # The trigger_registry is passed to the runner unconditionally; the
+    # runner checks whether any triggers have been registered at
+    # evaluation time. When no trigger atoms are registered (backward
+    # compat), the runner falls through to the legacy hardcoded cadence.
     runner = HarnessRunner(
         cumulative=cumulative,
         child=LiveChildRunner(api),
@@ -443,6 +465,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         provider_extractor=extractor_provider,
         provider_auditor=auditor_provider,
         audit_registry=_resolve_registry(api),
+        trigger_registry=trigger_registry,
     )
 
     pending_reminders: list[Reminder] = []
@@ -462,7 +485,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             # but before the first turn, so a None at install time
             # doesn't mean "no checks ever".
             runner.set_audit_registry(_resolve_registry(api))
-            step = await runner.on_trajectory_progress(list(event.messages), turn_count=turn_count)
+            step = await runner.on_trajectory_progress(
+                list(event.messages),
+                turn_count=turn_count,
+                tool_names_called=_extract_tool_names(event),
+            )
             _drain_step_result(step.surfaced_reminder)
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
@@ -493,20 +520,26 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     def _on_turn_end(event: TurnEndEvent) -> None:
         nonlocal turn_count
         turn_count += 1
-        # Cadence is decided inside ``runner.on_trajectory_progress``.
-        # We still gate enqueueing so that a no-op turn (no extractor /
-        # auditor due) doesn't even wake the worker — matches the
-        # legacy behaviour where TurnEndEvent below the cadence dropped
-        # the job on the floor.
-        auditor_due = enable_auditor and (turn_count % k) == 0
-        extractor_due = (turn_count % extractor_k) == 0 or auditor_due
-        if not extractor_due and not auditor_due:
+        # When trigger atoms are registered, always enqueue: the runner
+        # evaluates the trigger registry internally and the pre-check
+        # cannot replicate arbitrary trigger logic without building a
+        # full TriggerContext. When no trigger atoms are registered, fall
+        # back to the legacy cadence gate so no-op turns don't wake the
+        # worker.
+        if trigger_registry:
+            enqueue = True
+        else:
+            auditor_due = enable_auditor and (turn_count % k) == 0
+            extractor_due = (turn_count % extractor_k) == 0 or auditor_due
+            enqueue = extractor_due or auditor_due
+        if not enqueue:
             return
         _ensure_worker()
         queue.put_nowait(
             _RunnerStepJob(
                 messages=tuple(event.messages),
                 turn_count=turn_count,
+                tool_names_called=_extract_tool_names(event),
             )
         )
 
@@ -635,7 +668,9 @@ async def _drain_queue(
                 # the sync handler.
                 runner.set_audit_registry(_resolve_registry(api))
                 step = await runner.on_trajectory_progress(
-                    list(job.messages), turn_count=job.turn_count
+                    list(job.messages),
+                    turn_count=job.turn_count,
+                    tool_names_called=job.tool_names_called,
                 )
                 if step.surfaced_reminder is not None:
                     pending_reminders.append(step.surfaced_reminder)

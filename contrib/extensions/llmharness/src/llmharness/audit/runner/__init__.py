@@ -31,6 +31,7 @@ from .runner import (
     RawVerdictOutput,
     SidecarWriter,
     StepResult,
+    TriggerRegistry,
     _flatten_assistant_blocks,
     _serialize_full_trajectory,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "RawVerdictOutput",
     "SidecarWriter",
     "StepResult",
+    "TriggerRegistry",
     "_flatten_assistant_blocks",
     "_serialize_full_trajectory",
 ]
