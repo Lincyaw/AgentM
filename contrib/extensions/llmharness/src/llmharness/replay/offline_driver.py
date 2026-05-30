@@ -29,7 +29,16 @@ from ..audit.runner import (
     StepResult,
 )
 from ..audit.seams.offline import InMemorySink, StandaloneChildRunner
+from ..audit.triggers import TriggerRegistry, tool_names_from_message
 from ..schema import Reminder
+
+
+def _tool_names_from_prefix(prefix: list[AgentMessage]) -> frozenset[str]:
+    """Extract tool-call names from the last AssistantMessage in *prefix*."""
+    for msg in reversed(prefix):
+        if isinstance(msg, AssistantMessage):
+            return tool_names_from_message(msg)
+    return frozenset()
 
 __all__ = [
     "AuditorSettings",
@@ -127,6 +136,7 @@ async def replay_pipeline_over_trajectory(
     seed_cumulative: CumulativeAuditState | None = None,
     start_turn: int = 1,
     skip_extractor: bool = False,
+    trigger_registry: TriggerRegistry | None = None,
 ) -> OfflineRunResult:
     """Replay the cognitive-audit pipeline over a captured trajectory.
 
@@ -182,6 +192,7 @@ async def replay_pipeline_over_trajectory(
         provider_auditor=provider,
         audit_registry=None,
         skip_extractor=skip_extractor,
+        trigger_registry=trigger_registry,
     )
 
     all_steps: list[StepResult] = []
@@ -193,7 +204,13 @@ async def replay_pipeline_over_trajectory(
         # segment / arriving via ``seed_cumulative``).
         if prefix_len < start_turn:
             continue
-        step = await runner.on_trajectory_progress(messages[:prefix_len], turn_count=turn_number)
+        prefix = messages[:prefix_len]
+        tool_names = _tool_names_from_prefix(prefix)
+        step = await runner.on_trajectory_progress(
+            prefix,
+            turn_count=turn_number,
+            tool_names_called=tool_names,
+        )
         all_steps.append(step)
         if step.surfaced_reminder is not None:
             if stop_on_first_surface:
