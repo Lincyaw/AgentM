@@ -203,6 +203,7 @@ class AgentMAgent(BaseAgent):
         scenario: str = "rca",
         model: str | None = None,
         provider: str | None = None,
+        provider_tuple: tuple[str, dict[str, Any]] | None = None,
         exp_id: str | None = None,
         max_turns: Any = None,
         chained_fork: Any = None,
@@ -220,6 +221,9 @@ class AgentMAgent(BaseAgent):
             or os.environ.get("AGENTM_PROVIDER")
             or "anthropic"
         )
+        self._provider_tuple = provider_tuple
+        if provider_tuple is not None:
+            self._model = provider_tuple[1].get("model", self._model)
         self._exp_id = exp_id
         self._max_turns = _coerce_max_turns(max_turns, _DEFAULT_MAX_TURNS)
         self._chained_fork = _coerce_bool(chained_fork, default=False)
@@ -457,16 +461,17 @@ class AgentMAgent(BaseAgent):
         bus.on("tool_result", _on_tool_result)
         bus.on("before_send_to_llm", _on_before_llm)
 
-        # Mirror ``agentm.cli._build_provider`` so the eval adapter honors
-        # the same ``AGENTM_PROVIDER`` / ``OPENAI_*`` / ``ANTHROPIC_*``
-        # convention as ``uv run agentm``. Previously we always pinned
-        # the anthropic provider, which silently routed Doubao-Seed
-        # requests through whatever ``ANTHROPIC_BASE_URL`` happened to
-        # point at (e.g. the Kimi anthropic-compat gateway) instead of
-        # the intended ``OPENAI_BASE_URL`` LiteLLM endpoint.
-        provider_module, provider_config = _build_provider(
-            self._provider, self._model
-        )
+        # When a pre-resolved config.toml profile is available, use it
+        # directly so the agent's endpoint/key are explicit and no
+        # ambient OPENAI_*/ANTHROPIC_* env vars can bleed in.  Fall back
+        # to the legacy env-based builder for callers that still pass
+        # raw model/provider strings (e.g. rcabench-platform eval YAML).
+        if self._provider_tuple is not None:
+            provider_module, provider_config = self._provider_tuple
+        else:
+            provider_module, provider_config = _build_provider(
+                self._provider, self._model
+            )
 
         # Auto-write a distill meta sidecar so ``llmharness-distill export``
         # can pair this rollout's replay sidecar to ground truth without a
@@ -513,7 +518,7 @@ class AgentMAgent(BaseAgent):
             extra_extensions=extra_extensions,
             initial_messages=list(initial_messages or []),
             bus=bus,
-            loop_config=LoopConfig(max_turns=max_turns),
+            loop_config=LoopConfig(max_turns=max_turns, max_tool_calls_per_turn=20),
         )
 
         session = await create_agent_session(AgentSession, config)
