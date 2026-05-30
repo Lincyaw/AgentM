@@ -51,6 +51,7 @@ from ..auditor import (
     AuditorOutputError,
     RawVerdictOutput,
     compose_auditor_extensions,
+    compose_auditor_trajectory_extensions,
 )
 from ..extractor import (
     FINALIZE_EXTRACTION_TOOL_NAME,
@@ -648,6 +649,7 @@ class HarnessRunner:
         # passing it in keeps the runner independent of ExtensionAPI so an
         # offline driver can supply a synthetic registry or ``None``.
         audit_registry: AuditCheckRegistry | None = None,
+        skip_extractor: bool = False,
     ) -> None:
         self.cumulative = cumulative
         self._child = child
@@ -663,6 +665,7 @@ class HarnessRunner:
         self._provider_extractor = provider_extractor
         self._provider_auditor = provider_auditor
         self._audit_registry = audit_registry
+        self._skip_extractor = skip_extractor
         # Track whether the most recent extractor firing held the cursor,
         # so the auditor doesn't fire on top of stale state.
         self._last_extractor_held_cursor: bool = False
@@ -693,14 +696,14 @@ class HarnessRunner:
         auditor_record: ReplayRecord | None = None
         extractor_record: ReplayRecord | None = None
 
-        if extractor_due:
+        if extractor_due and not self._skip_extractor:
             result = await self.fire_extractor_once(messages)
             fired_extractor = True
             self._last_extractor_held_cursor = not result.ok
             extractor_record = result.record
 
         if auditor_due:
-            if self._last_extractor_held_cursor:
+            if self._last_extractor_held_cursor and not self._skip_extractor:
                 _logger.debug(
                     "HarnessRunner: skipping auditor — preceding extractor firing held the cursor"
                 )
@@ -958,61 +961,94 @@ class HarnessRunner:
         self,
         messages: list[AgentMessage],
     ) -> _AuditorFiringResult:
-        events_tuple, edges_tuple, phases_tuple = self.cumulative.graph_view()
-
-        findings: list[Any] = []
-        check_errors: dict[str, str] = {}
-        registry = self._audit_registry
-        if isinstance(registry, AuditCheckRegistry):
-            try:
-                ctx = CheckContext(events=events_tuple, edges=edges_tuple)
-                findings, check_errors = registry.run_all(ctx)
-            except Exception:
-                _logger.exception("audit-check registry run_all failed; using empty findings")
-                findings, check_errors = [], {}
-
         trajectory_snapshot = _serialize_full_trajectory(messages)
         continuation_notes = list(self.cumulative.last_continuation_notes)
         recent_verdicts = list(self.cumulative.recent_verdicts)
 
-        firing_extensions = compose_auditor_extensions(
-            base_prompt=self._auditor_settings.base_prompt,
-            observability_config=self._auditor_settings.observability_config,
-            trajectory_snapshot=trajectory_snapshot,
-            events=events_tuple,
-            edges=edges_tuple,
-            phases=phases_tuple,
-            findings=list(findings),
-            check_errors=dict(check_errors),
-            continuation_notes=continuation_notes,
-            summary_threshold=self._auditor_settings.summary_threshold,
-            tools=self._auditor_settings.tools,
-        )
+        if self._skip_extractor:
+            # Trajectory-mode: bypass the graph entirely and feed raw
+            # trajectory to the auditor.  Force the trajectory prompt
+            # variant regardless of AuditorSettings.base_prompt (which
+            # defaults to the graph-oriented minimal framing).
+            firing_extensions = compose_auditor_trajectory_extensions(
+                base_prompt=None,
+                observability_config=self._auditor_settings.observability_config,
+                trajectory=trajectory_snapshot,
+                continuation_notes=continuation_notes,
+                tools=self._auditor_settings.tools,
+            )
+            replay_compose_kwargs: dict[str, Any] = {
+                "base_prompt": self._auditor_settings.base_prompt,
+                "observability_config": self._auditor_settings.observability_config,
+                "trajectory_snapshot": trajectory_snapshot,
+                "skip_extractor": True,
+                "events": [],
+                "edges": [],
+                "phases": [],
+                "findings": [],
+                "check_errors": {},
+                "continuation_notes": continuation_notes,
+                "summary_threshold": self._auditor_settings.summary_threshold,
+                "tools": list(self._auditor_settings.tools),
+            }
+            replay_payload: dict[str, Any] = {
+                "graph": [],
+                "recent_verdicts": recent_verdicts,
+                "continuation_notes_from_prior_firing": continuation_notes,
+            }
+            events_tuple: tuple[Event, ...] = ()
+        else:
+            events_tuple, edges_tuple, phases_tuple = self.cumulative.graph_view()
 
-        # Always compute the replay record metadata (independent of
-        # sidecar emission) so the runner can return a synthetic
-        # auditor :class:`ReplayRecord` per firing via
-        # :class:`StepResult.auditor_record`. Offline drivers depend
-        # on this for in-memory record capture without a disk
-        # round-trip.
-        replay_compose_kwargs: dict[str, Any] = {
-            "base_prompt": self._auditor_settings.base_prompt,
-            "observability_config": self._auditor_settings.observability_config,
-            "trajectory_snapshot": trajectory_snapshot,
-            "events": [e.to_dict() for e in events_tuple],
-            "edges": [ed.to_dict() for ed in edges_tuple],
-            "phases": [ph.to_dict() for ph in phases_tuple],
-            "findings": [f.to_dict() for f in findings],
-            "check_errors": dict(check_errors),
-            "continuation_notes": continuation_notes,
-            "summary_threshold": self._auditor_settings.summary_threshold,
-            "tools": list(self._auditor_settings.tools),
-        }
-        replay_payload: dict[str, Any] = {
-            "graph": [e.to_dict() for e in events_tuple],
-            "recent_verdicts": recent_verdicts,
-            "continuation_notes_from_prior_firing": continuation_notes,
-        }
+            findings: list[Any] = []
+            check_errors: dict[str, str] = {}
+            registry = self._audit_registry
+            if isinstance(registry, AuditCheckRegistry):
+                try:
+                    ctx = CheckContext(events=events_tuple, edges=edges_tuple)
+                    findings, check_errors = registry.run_all(ctx)
+                except Exception:
+                    _logger.exception("audit-check registry run_all failed; using empty findings")
+                    findings, check_errors = [], {}
+
+            firing_extensions = compose_auditor_extensions(
+                base_prompt=self._auditor_settings.base_prompt,
+                observability_config=self._auditor_settings.observability_config,
+                trajectory_snapshot=trajectory_snapshot,
+                events=events_tuple,
+                edges=edges_tuple,
+                phases=phases_tuple,
+                findings=list(findings),
+                check_errors=dict(check_errors),
+                continuation_notes=continuation_notes,
+                summary_threshold=self._auditor_settings.summary_threshold,
+                tools=self._auditor_settings.tools,
+            )
+
+            # Always compute the replay record metadata (independent of
+            # sidecar emission) so the runner can return a synthetic
+            # auditor :class:`ReplayRecord` per firing via
+            # :class:`StepResult.auditor_record`. Offline drivers depend
+            # on this for in-memory record capture without a disk
+            # round-trip.
+            replay_compose_kwargs = {
+                "base_prompt": self._auditor_settings.base_prompt,
+                "observability_config": self._auditor_settings.observability_config,
+                "trajectory_snapshot": trajectory_snapshot,
+                "events": [e.to_dict() for e in events_tuple],
+                "edges": [ed.to_dict() for ed in edges_tuple],
+                "phases": [ph.to_dict() for ph in phases_tuple],
+                "findings": [f.to_dict() for f in findings],
+                "check_errors": dict(check_errors),
+                "continuation_notes": continuation_notes,
+                "summary_threshold": self._auditor_settings.summary_threshold,
+                "tools": list(self._auditor_settings.tools),
+            }
+            replay_payload = {
+                "graph": [e.to_dict() for e in events_tuple],
+                "recent_verdicts": recent_verdicts,
+                "continuation_notes_from_prior_firing": continuation_notes,
+            }
 
         child_result = await self._child.run_auditor(
             extensions=firing_extensions,

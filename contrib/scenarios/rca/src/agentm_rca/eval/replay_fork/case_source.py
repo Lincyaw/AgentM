@@ -74,11 +74,13 @@ class EvalDbCaseSource:
         *,
         limit: int | None = None,
         case_ids: Sequence[str] | None = None,
+        skip_case_ids: Sequence[str] | None = None,
     ) -> None:
         self._db_path = str(db_path)
         self._exp_id = exp_id
         self._limit = limit
         self._case_ids = set(case_ids) if case_ids else None
+        self._skip_case_ids = set(skip_case_ids) if skip_case_ids else None
 
     def cases(self) -> Iterator[ReplayCase]:
         conn = sqlite3.connect(self._db_path)
@@ -98,6 +100,8 @@ class EvalDbCaseSource:
                 if case is None:
                     continue
                 if self._case_ids is not None and case.case_id not in self._case_ids:
+                    continue
+                if self._skip_case_ids is not None and case.case_id in self._skip_case_ids:
                     continue
                 yield case
         finally:
