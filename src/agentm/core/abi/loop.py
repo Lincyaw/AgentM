@@ -37,8 +37,11 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 import os
 import time
+
+_logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 from typing import Any
 
@@ -124,6 +127,7 @@ class LoopConfig:
 
     max_turns: int | None = None
     max_tool_calls: int | None = None
+    max_tool_calls_per_turn: int | None = None
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -572,6 +576,17 @@ class AgentLoop:
                 )
 
                 tool_calls = _extract_tool_calls(assistant_msg)
+                cap = self._config.max_tool_calls_per_turn
+                dropped_tool_calls: list[ToolCallBlock] = []
+                if cap is not None and len(tool_calls) > cap:
+                    dropped_tool_calls = tool_calls[cap:]
+                    tool_calls = tool_calls[:cap]
+                    _logger.warning(
+                        "turn %d: %d tool calls truncated to %d "
+                        "(max_tool_calls_per_turn=%d)",
+                        turn_index, len(tool_calls) + len(dropped_tool_calls),
+                        cap, cap,
+                    )
                 paired_outcomes: list[tuple[str, ToolOutcome]] = []
                 if tool_calls:
                     raw_outcomes = await self._execute_tool_calls(
@@ -595,6 +610,24 @@ class AgentLoop:
                         )
                     paired_outcomes = raw_outcomes
                     tool_calls_used += len(paired_outcomes)
+                if dropped_tool_calls:
+                    total = len(dropped_tool_calls) + len(tool_calls)
+                    limit = cap or len(tool_calls)
+                    drop_msg = (
+                        f"Tool call dropped: you issued {total} parallel "
+                        f"tool calls but the limit is {limit} per turn. "
+                        f"Split your queries across multiple turns."
+                    )
+                    for tc in dropped_tool_calls:
+                        paired_outcomes.append((
+                            tc.name,
+                            ToolContinue(
+                                result=ToolResult(
+                                    content=[TextContent(type="text", text=drop_msg)],
+                                    is_error=True,
+                                ),
+                            ),
+                        ))
 
                 action = await self._dispatch_decision(
                     turn_index=turn_index,
