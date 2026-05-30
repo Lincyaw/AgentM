@@ -1,25 +1,19 @@
-"""Replay-fork driver: re-audit a recorded baseline, fork on surface, judge.
+"""Replay-fork driver: run a fork strategy over recorded baselines, judge.
+
+The driver is strategy-agnostic: it delegates fork logic to a
+:class:`~.strategy.ForkStrategy`, then judges the result and formats it
+into a :class:`ReplayCaseResult`.  Adding a new ablation means writing a
+new strategy, not editing this file.
 
 Per case:
 
-1. The recorded baseline trajectory is the control backbone -- the main
-   agent is *not* re-run for control (its answer is already known).
-2. The fork-tree engine re-runs extractor + auditor over that backbone with
-   the harness model. ``max_surfaces_per_node=1`` makes it a greedy spine:
-   the first reminder forks a continuation, which is itself re-audited, and
-   so on up to ``max_depth`` -- the offline analogue of the live "inject
-   when the auditor fires, then keep going" behaviour.
-3. Each fork continuation is a real main-agent rollout (the agent model)
-   seeded with the surfaced reminder, started from the parent prefix.
-4. The deepest continuation's submission is judged against ground truth.
-   When the auditor never fires, there is no intervention and the case's
-   intervene outcome is its control outcome.
-
-The harness model and the agent model are independent: the harness provider
-is passed to the engine, the agent provider lives on the ``AgentMAgent``.
-The driver depends only on :class:`~.case_source.ReplayCase`, the engine,
-and the :class:`~.judge.LeafJudge` -- never on where the baseline was
-stored.
+1. The strategy receives the recorded backbone and produces a
+   :class:`~.strategy.ForkResult` -- the leaf continuation's response plus
+   metadata about what was injected and where.
+2. When the strategy fires (``ForkResult.fired``), the driver judges the
+   leaf response against ground truth.  When it does not fire, the
+   intervention outcome equals the control outcome (no re-judge needed).
+3. Results are written to a sink in completion order.
 """
 
 from __future__ import annotations
@@ -31,10 +25,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentm.core.abi.messages import AgentMessage
-
 from .case_source import CaseSource, ReplayCase
 from .judge import LeafJudge
+from .strategy import ForkStrategy
 
 _logger = logging.getLogger(__name__)
 
@@ -45,19 +38,6 @@ __all__ = [
     "ReplaySummary",
     "ResultSink",
 ]
-
-
-@dataclass(frozen=True)
-class _RecordedBackbone:
-    """A control backbone served from a recording (no agent run).
-
-    Structurally satisfies the engine's ``SessionPayload`` protocol
-    (``session_log_id`` + ``final_messages``), so the fork-tree audits the
-    recorded trajectory exactly as it would a freshly produced one.
-    """
-
-    session_log_id: str
-    final_messages: list[AgentMessage]
 
 
 @dataclass
@@ -137,10 +117,10 @@ class ResultSink:
 class JsonlResultSink(ResultSink):
     """Append one JSON line per case result."""
 
-    def __init__(self, path: str | os.PathLike[str]) -> None:
+    def __init__(self, path: str | os.PathLike[str], *, append: bool = False) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = self._path.open("w", encoding="utf-8")
+        self._fh = self._path.open("a" if append else "w", encoding="utf-8")
 
     def write(self, result: ReplayCaseResult) -> None:
         import json
@@ -154,112 +134,60 @@ class JsonlResultSink(ResultSink):
 
 
 class ReplayForkDriver:
-    """Drives the replay-fork experiment over a stream of recorded cases."""
+    """Drives the replay-fork experiment over a stream of recorded cases.
+
+    The driver is strategy-agnostic: it delegates fork logic to the
+    :class:`~.strategy.ForkStrategy` and handles judging, error isolation,
+    concurrency, and result formatting.
+    """
 
     def __init__(
         self,
         *,
         agent: Any,
-        harness_provider: tuple[str, dict[str, Any]],
+        strategy: ForkStrategy,
         judge: LeafJudge,
         scenario: str = "rca:baseline",
-        max_depth: int = 3,
-        extractor_interval: int = 5,
-        audit_interval: int = 5,
-        cwd: str | None = None,
-        sidecar_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         self._agent = agent
-        self._harness_provider = harness_provider
+        self._strategy = strategy
         self._judge = judge
         self._scenario = scenario
-        self._max_depth = max_depth
-        self._extractor_interval = extractor_interval
-        self._audit_interval = audit_interval
-        self._cwd = cwd or os.getcwd()
-        self._sidecar_dir = Path(sidecar_dir) if sidecar_dir is not None else None
 
     async def run_case(self, case: ReplayCase) -> ReplayCaseResult:
-        from llmharness import (
-            AuditorSettings,
-            ExtractorSettings,
-            SessionPayload,
-            run_fork_tree_experiment,
+        fork = await self._strategy.execute(
+            case,
+            agent=self._agent,
+            scenario=self._scenario,
         )
 
-        session_runs: dict[str, Any] = {}
-        control_id = f"{case.case_id}-control"
-
-        async def factory(
-            *,
-            initial_messages: list[Any] | None,
-            seed_reminder_text: str | None,
-        ) -> SessionPayload:
-            if initial_messages is None:
-                # Control backbone: serve the recording, never re-run the agent.
-                return _RecordedBackbone(  # type: ignore[return-value]
-                    session_log_id=control_id,
-                    final_messages=case.backbone_messages,
-                )
-            run = await self._agent._execute_session(
-                incident=None,
-                data_dir=case.data_dir,
-                scenario=self._scenario,
-                initial_messages=initial_messages,
-                seed_reminder_text=seed_reminder_text,
-            )
-            session_runs[run.session_log_id] = run
-            return run  # type: ignore[return-value]  # structural SessionPayload match
-
-        out_path = None
-        if self._sidecar_dir is not None:
-            out_path = self._sidecar_dir / f"{case.case_id}.chained.jsonl"
-
-        experiment = await run_fork_tree_experiment(
-            session_factory=factory,
-            cwd=self._cwd,
-            provider=self._harness_provider,
-            extractor_settings=ExtractorSettings.default(),
-            auditor_settings=AuditorSettings.default(),
-            extractor_interval=self._extractor_interval,
-            audit_interval=self._audit_interval,
-            max_depth=self._max_depth,
-            max_surfaces_per_node=1,
-            out_path=out_path,
-        )
-
-        fork_nodes = [n for n in experiment.nodes if n.parent_id is not None]
-        if not fork_nodes:
-            # Auditor never surfaced: no intervention possible -> intervene
-            # outcome is the control outcome (no re-judge needed).
+        if not fork.fired:
+            # Strategy did not intervene: intervention outcome = control.
             return ReplayCaseResult(
                 case_id=case.case_id,
                 fired=False,
                 n_interventions=0,
                 control_correct=case.control_correct,
                 intervene_correct=case.control_correct,
-                intervene_response=case.control_response,
+                intervene_response=fork.response,
                 intervention_path=[],
                 leaf_session_log_id=None,
             )
 
-        leaf = max(fork_nodes, key=lambda n: n.depth)
-        leaf_run = session_runs.get(leaf.backbone_session_id)
-        response = getattr(leaf_run, "response", None)
         outcome = await self._judge.judge(
-            agent_output_json=response,
+            agent_output_json=fork.response,
             data_dir=case.data_dir,
             case_id=case.case_id,
         )
         return ReplayCaseResult(
             case_id=case.case_id,
             fired=True,
-            n_interventions=leaf.depth,
+            n_interventions=fork.n_interventions,
             control_correct=case.control_correct,
             intervene_correct=outcome.correct,
-            intervene_response=response,
-            intervention_path=list(leaf.path),
-            leaf_session_log_id=leaf.backbone_session_id,
+            intervene_response=fork.response,
+            intervention_path=fork.intervention_path,
+            leaf_session_log_id=fork.leaf_session_log_id,
             judge_detail=outcome.detail,
             error=outcome.error,
         )

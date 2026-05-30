@@ -81,11 +81,37 @@ def run(
         Path | None,
         typer.Option("--sidecar-dir", help="dir for per-case fork-tree replay sidecars"),
     ] = None,
+    resume: Annotated[
+        bool,
+        typer.Option(
+            "--resume",
+            help="skip cases already present in --out and append (restart-safe)",
+        ),
+    ] = False,
+    skip_extractor: Annotated[
+        bool,
+        typer.Option(
+            "--skip-extractor",
+            help="bypass the extractor and feed raw trajectory directly to the auditor",
+        ),
+    ] = False,
+    upper_bound: Annotated[
+        bool,
+        typer.Option(
+            "--upper-bound",
+            help=(
+                "ceiling test: skip the auditor pipeline entirely, fork just "
+                "before submission with a fixed reflection prompt"
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Run the replay-fork experiment over a recorded baseline exp."""
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+
+    import json as _json
 
     from agentm_rca.eval.agent import AgentMAgent
 
@@ -93,14 +119,54 @@ def run(
     from .driver import JsonlResultSink, ReplayForkDriver
     from .judge import RcabenchJudge
     from .providers import build_profile_provider
+    from .strategy import (
+        FixedInjectionStrategy,
+        ForkStrategy,
+        HarnessStrategy,
+        UPPER_BOUND_REFLECTION,
+        after_submission,
+    )
 
     ids = [c.strip() for c in case_ids.split(",") if c.strip()] if case_ids else None
 
+    # Resume: read case_ids already written to --out and skip them, appending
+    # new results rather than truncating. Lets a killed run pick up where it
+    # left off without re-running the cases it already finished.
+    skip_ids: list[str] = []
+    if resume and out.exists():
+        for line in out.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                skip_ids.append(str(_json.loads(line)["case_id"]))
+            except (ValueError, KeyError):
+                continue
+        typer.echo(f"# resume: skipping {len(skip_ids)} cases already in {out}")
+
     harness_provider = build_profile_provider(harness_model)
-    typer.echo(
-        f"# harness: {harness_provider[0]} model={harness_provider[1].get('model')} "
-        f"base_url={harness_provider[1].get('base_url')}"
-    )
+
+    # -- Build the fork strategy from CLI flags --
+    strategy: ForkStrategy
+    if upper_bound:
+        strategy = FixedInjectionStrategy(
+            reminder=UPPER_BOUND_REFLECTION,
+            turn_selector=after_submission,
+        )
+        typer.echo(f"# strategy: {strategy.label} (upper-bound ceiling test)")
+    else:
+        strategy = HarnessStrategy(
+            harness_provider=harness_provider,
+            max_depth=max_depth,
+            sidecar_dir=sidecar_dir,
+            skip_extractor=skip_extractor,
+        )
+        typer.echo(
+            f"# strategy: {strategy.label}\n"
+            f"# harness: {harness_provider[0]} model={harness_provider[1].get('model')} "
+            f"base_url={harness_provider[1].get('base_url')}"
+        )
+
     typer.echo(f"# agent:   provider={agent_provider} model={agent_model} scenario={scenario}")
 
     agent = AgentMAgent(
@@ -109,16 +175,16 @@ def run(
         provider=agent_provider,
         max_turns=max_turns,
     )
-    source = EvalDbCaseSource(db, source_exp, limit=limit, case_ids=ids)
+    source = EvalDbCaseSource(
+        db, source_exp, limit=limit, case_ids=ids, skip_case_ids=skip_ids or None
+    )
     driver = ReplayForkDriver(
         agent=agent,
-        harness_provider=harness_provider,
+        strategy=strategy,
         judge=RcabenchJudge(),
         scenario=scenario,
-        max_depth=max_depth,
-        sidecar_dir=sidecar_dir,
     )
-    sink = JsonlResultSink(out)
+    sink = JsonlResultSink(out, append=resume)
     try:
         summary = asyncio.run(driver.run(source, sink, max_concurrency=max_concurrency))
     finally:
