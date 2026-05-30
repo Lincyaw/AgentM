@@ -59,6 +59,7 @@ from ..audit.runner import (
     StepResult,
 )
 from ..audit.seams.offline import InMemorySink, StandaloneChildRunner
+from ..audit.triggers import TriggerRegistry
 from .offline_driver import SurfaceFiring, replay_pipeline_over_trajectory
 from .record import ReplayRecord, write_record
 
@@ -297,6 +298,7 @@ async def run_fork_tree_experiment(
     sink: InMemorySink | None = None,
     child: StandaloneChildRunner | None = None,
     skip_extractor: bool = False,
+    trigger_registry: TriggerRegistry | None = None,
 ) -> ForkTreeExperiment:
     """Drive a fork-tree counterfactual experiment to completion.
 
@@ -394,6 +396,7 @@ async def run_fork_tree_experiment(
             # (no boundary to skip) starts at ``fork_turn`` == 1.
             start_turn=(task.fork_turn if task.parent_id is None else task.fork_turn + 1),
             skip_extractor=skip_extractor,
+            trigger_registry=trigger_registry,
         )
         surfaces = _collect_surfaces(run.surfaces)
         # Defence-in-depth: ignore any surface at or before the fork floor.

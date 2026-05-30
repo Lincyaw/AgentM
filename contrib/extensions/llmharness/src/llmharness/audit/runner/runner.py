@@ -64,6 +64,7 @@ from ..graph.phase import merge_to_phases
 from ..registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..registry import AuditCheckRegistry, CheckContext
 from ..seams.session import bind_extractor_state
+from ..triggers import TriggerContext, TriggerRegistry
 
 _logger = logging.getLogger(__name__)
 
@@ -650,6 +651,7 @@ class HarnessRunner:
         # offline driver can supply a synthetic registry or ``None``.
         audit_registry: AuditCheckRegistry | None = None,
         skip_extractor: bool = False,
+        trigger_registry: TriggerRegistry | None = None,
     ) -> None:
         self.cumulative = cumulative
         self._child = child
@@ -666,6 +668,7 @@ class HarnessRunner:
         self._provider_auditor = provider_auditor
         self._audit_registry = audit_registry
         self._skip_extractor = skip_extractor
+        self._trigger_registry = trigger_registry
         # Track whether the most recent extractor firing held the cursor,
         # so the auditor doesn't fire on top of stale state.
         self._last_extractor_held_cursor: bool = False
@@ -685,10 +688,27 @@ class HarnessRunner:
         messages: list[AgentMessage],
         *,
         turn_count: int,
+        terminal_tool_called: str | None = None,
     ) -> StepResult:
         """One cadence step. Decides whether to fire extractor / auditor."""
-        auditor_due = self._enable_auditor and (turn_count % self._audit_interval) == 0
-        extractor_due = (turn_count % self._extractor_interval) == 0 or auditor_due
+        if self._trigger_registry is not None and self._trigger_registry.registered_triggers():
+            latest_assistant = None
+            for msg in reversed(messages):
+                if isinstance(msg, AssistantMessage):
+                    latest_assistant = msg
+                    break
+            ctx = TriggerContext(
+                turn_count=turn_count,
+                messages=tuple(messages),
+                latest_assistant_message=latest_assistant,
+                terminal_tool_called=terminal_tool_called,
+            )
+            auditor_due_raw, extractor_due_raw, _reasons = self._trigger_registry.evaluate(ctx)
+            auditor_due = self._enable_auditor and auditor_due_raw
+            extractor_due = extractor_due_raw or auditor_due
+        else:
+            auditor_due = self._enable_auditor and (turn_count % self._audit_interval) == 0
+            extractor_due = (turn_count % self._extractor_interval) == 0 or auditor_due
 
         fired_extractor = False
         fired_auditor = False
@@ -1156,6 +1176,7 @@ __all__ = [
     "RawVerdictOutput",
     "SidecarWriter",
     "StepResult",
+    "TriggerRegistry",
     "_flatten_assistant_blocks",
     "_serialize_full_trajectory",
 ]
