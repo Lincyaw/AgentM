@@ -137,6 +137,7 @@ async def replay_pipeline_over_trajectory(
     start_turn: int = 1,
     skip_extractor: bool = False,
     trigger_registry: TriggerRegistry | None = None,
+    trace_id: str | None = None,
 ) -> OfflineRunResult:
     """Replay the cognitive-audit pipeline over a captured trajectory.
 
@@ -171,12 +172,13 @@ async def replay_pipeline_over_trajectory(
     ``sink`` / ``child`` are exposed for tests that want to inject
     stubs while still exercising the real :class:`HarnessRunner`.
     """
+    resolved_trace_id = trace_id if trace_id is not None else session_id
     cumulative = seed_cumulative if seed_cumulative is not None else CumulativeAuditState.fresh()
     sink_used = sink if sink is not None else InMemorySink()
     child_used = child if child is not None else StandaloneChildRunner(
         cwd,
         parent_session_id=session_id,
-        trace_id=session_id,
+        trace_id=resolved_trace_id,
     )
     sidecar = SidecarWriter(sidecar_path) if sidecar_path is not None else None
 
@@ -191,7 +193,7 @@ async def replay_pipeline_over_trajectory(
         audit_interval=audit_interval,
         enable_auditor=enable_auditor,
         session_id=session_id,
-        trace_id=session_id,
+        trace_id=resolved_trace_id,
         provider_extractor=provider,
         provider_auditor=provider,
         audit_registry=None,
