@@ -15,15 +15,27 @@ import os
 import sqlite3
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from agentm.core.abi.messages import AgentMessage
+from agentm.core.abi.messages import (
+    AgentMessage,
+    AssistantContent,
+    AssistantMessage,
+    TextContent,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+    ToolResultMessage,
+    UserMessage,
+)
+from agentm.core.runtime.trace_reader import TraceReader
 
 from .trajectory import openai_chat_to_agentm
 
 _logger = logging.getLogger(__name__)
 
-__all__ = ["CaseSource", "EvalDbCaseSource", "ReplayCase"]
+__all__ = ["CaseSource", "EvalDbCaseSource", "ReplayCase", "SessionFileCaseSource"]
 
 
 @dataclass(frozen=True)
@@ -186,3 +198,206 @@ def _resolve_data_dir(path: Any) -> str | None:
     if not os.path.isdir(resolved):
         return None
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# Session-file case source
+# ---------------------------------------------------------------------------
+
+
+class SessionFileCaseSource:
+    """Recorded baselines parsed from agentm OTLP/JSON session files.
+
+    Reads one or more ``.agentm/observability/*.jsonl`` session files via
+    :class:`TraceReader` and converts the ``agentm.message.appended`` log
+    records into :class:`ReplayCase` objects. The ``data_dir`` is supplied
+    externally (via CLI flag) because session files do not carry the
+    dataset path.
+
+    The ``control_response`` is extracted from the ``submit_final_report``
+    tool call arguments when present in the trajectory.
+    """
+
+    def __init__(
+        self,
+        file_paths: Sequence[str | os.PathLike[str]],
+        data_dir: str,
+        *,
+        case_id: str | None = None,
+    ) -> None:
+        self._file_paths = [Path(p) for p in file_paths]
+        self._data_dir = data_dir
+        self._case_id = case_id
+
+    def cases(self) -> Iterator[ReplayCase]:
+        for path in self._file_paths:
+            case = self._file_to_case(path)
+            if case is not None:
+                yield case
+
+    def _file_to_case(self, path: Path) -> ReplayCase | None:
+        reader = TraceReader(path)
+        records = reader.load_messages()
+        if not records:
+            _logger.warning(
+                "SessionFileCaseSource: %s has no message records; skipping",
+                path,
+            )
+            return None
+
+        backbone = _records_to_messages(records)
+        if not backbone:
+            _logger.warning(
+                "SessionFileCaseSource: %s rehydrated to 0 messages; skipping",
+                path,
+            )
+            return None
+
+        case_id = self._case_id
+        if case_id is None:
+            identity = reader.first_session_identity()
+            case_id = (identity.session_id if identity else None) or path.stem
+
+        control_response = _extract_control_response(backbone)
+
+        return ReplayCase(
+            case_id=case_id,
+            system_prompt="",
+            backbone_messages=backbone,
+            data_dir=self._data_dir,
+            control_response=control_response,
+            meta={"source_file": str(path)},
+        )
+
+
+# -- Session-file payload deserialization ------------------------------------
+# The payload dicts in ``agentm.message.appended`` records use AgentM's
+# native format (``{role, content: [{type, ...}], ...}``).  The canonical
+# deserializer lives in ``core.runtime.session_manager._deserialize_payload``
+# but that is a private API.  We reimplement the subset needed here so the
+# scenario package stays at the public ABI boundary.
+
+_REPLAY_TS = 0.0
+
+
+def _records_to_messages(records: list[dict[str, Any]]) -> list[AgentMessage]:
+    """Convert ``agentm.message.appended`` record dicts to AgentM messages."""
+    out: list[AgentMessage] = []
+    for record in records:
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        msg = _payload_to_message(payload)
+        if msg is not None:
+            out.append(msg)
+    return out
+
+
+def _payload_to_message(payload: dict[str, Any]) -> AgentMessage | None:
+    role = payload.get("role")
+    if role == "user":
+        return UserMessage(
+            role="user",
+            content=_deserialize_user_blocks(payload.get("content", [])),
+            timestamp=_REPLAY_TS,
+        )
+    if role == "assistant":
+        return AssistantMessage(
+            role="assistant",
+            content=_deserialize_assistant_blocks(payload.get("content", [])),
+            timestamp=_REPLAY_TS,
+            stop_reason=payload.get("stop_reason"),
+        )
+    if role == "tool_result":
+        return ToolResultMessage(
+            role="tool_result",
+            content=_deserialize_tool_result_blocks(payload.get("content", [])),
+            timestamp=_REPLAY_TS,
+        )
+    return None
+
+
+def _deserialize_user_blocks(raw: Any) -> list[TextContent]:
+    if not isinstance(raw, list):
+        return []
+    blocks: list[TextContent] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if kind == "text":
+            blocks.append(TextContent(type="text", text=str(item.get("text", ""))))
+    return blocks
+
+
+def _deserialize_assistant_blocks(raw: Any) -> list[AssistantContent]:
+    if not isinstance(raw, list):
+        return []
+    blocks: list[AssistantContent] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if kind == "text":
+            blocks.append(TextContent(type="text", text=str(item.get("text", ""))))
+        elif kind == "thinking":
+            signature = item.get("signature")
+            blocks.append(
+                ThinkingBlock(
+                    type="thinking",
+                    text=str(item.get("text", "")),
+                    signature=str(signature) if isinstance(signature, str) else None,
+                )
+            )
+        elif kind == "tool_call":
+            args = item.get("arguments", {})
+            blocks.append(
+                ToolCallBlock(
+                    type="tool_call",
+                    id=str(item.get("id", "")),
+                    name=str(item.get("name", "")),
+                    arguments=args if isinstance(args, dict) else {},
+                )
+            )
+    return blocks
+
+
+def _deserialize_tool_result_blocks(raw: Any) -> list[ToolResultBlock]:
+    if not isinstance(raw, list):
+        return []
+    blocks: list[ToolResultBlock] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        content = _deserialize_user_blocks(item.get("content", []))
+        blocks.append(
+            ToolResultBlock(
+                type="tool_result",
+                tool_call_id=str(item.get("tool_call_id", "")),
+                content=content,
+                is_error=bool(item.get("is_error", False)),
+            )
+        )
+    return blocks
+
+
+def _extract_control_response(messages: list[AgentMessage]) -> str | None:
+    """Find the ``submit_final_report`` tool call and return its ``text`` arg.
+
+    Scans assistant messages for a ``ToolCallBlock`` named
+    ``submit_final_report`` and returns the ``text`` argument value. Returns
+    ``None`` when no such call is present (e.g. the agent exhausted its turn
+    budget before submitting).
+    """
+    for msg in messages:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in msg.content:
+            if (
+                isinstance(block, ToolCallBlock)
+                and block.name == "submit_final_report"
+            ):
+                text = block.arguments.get("text")
+                if isinstance(text, str):
+                    return text
+    return None
