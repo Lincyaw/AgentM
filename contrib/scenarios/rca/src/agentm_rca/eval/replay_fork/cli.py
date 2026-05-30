@@ -44,8 +44,23 @@ def _root() -> None:
 @app.command()
 def run(
     source_exp: Annotated[
-        str, typer.Option("--source-exp", help="eval.db exp_id holding the recorded baselines")
-    ],
+        str | None,
+        typer.Option("--source-exp", help="eval.db exp_id holding the recorded baselines"),
+    ] = None,
+    source_file: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--source-file",
+            help="OTLP/JSON session file(s) to replay (repeatable)",
+        ),
+    ] = None,
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="case data directory (required with --source-file)",
+        ),
+    ] = None,
     db: Annotated[Path, typer.Option("--db", help="Path to eval.db")] = Path("eval.db"),
     harness_model: Annotated[
         str, typer.Option("--harness-model", help="config.toml profile for extractor+auditor")
@@ -115,7 +130,7 @@ def run(
 
     from agentm_rca.eval.agent import AgentMAgent
 
-    from .case_source import EvalDbCaseSource
+    from .case_source import EvalDbCaseSource, SessionFileCaseSource
     from .driver import JsonlResultSink, ReplayForkDriver
     from .judge import RcabenchJudge
     from .providers import build_profile_provider
@@ -126,6 +141,16 @@ def run(
         UPPER_BOUND_REFLECTION,
         after_submission,
     )
+
+    # -- Validate source flags --
+    have_exp = source_exp is not None
+    have_file = source_file is not None and len(source_file) > 0
+    if have_exp == have_file:
+        raise typer.BadParameter(
+            "exactly one of --source-exp or --source-file must be provided"
+        )
+    if have_file and data_dir is None:
+        raise typer.BadParameter("--data-dir is required when using --source-file")
 
     ids = [c.strip() for c in case_ids.split(",") if c.strip()] if case_ids else None
 
@@ -175,9 +200,21 @@ def run(
         provider=agent_provider,
         max_turns=max_turns,
     )
-    source = EvalDbCaseSource(
-        db, source_exp, limit=limit, case_ids=ids, skip_case_ids=skip_ids or None
-    )
+    source: EvalDbCaseSource | SessionFileCaseSource
+    if have_file:
+        assert source_file is not None
+        assert data_dir is not None
+        resolved_data_dir = str(data_dir.resolve())
+        source = SessionFileCaseSource(
+            file_paths=source_file,
+            data_dir=resolved_data_dir,
+        )
+        typer.echo(f"# source:  {len(source_file)} session file(s), data_dir={resolved_data_dir}")
+    else:
+        assert source_exp is not None
+        source = EvalDbCaseSource(
+            db, source_exp, limit=limit, case_ids=ids, skip_case_ids=skip_ids or None
+        )
     driver = ReplayForkDriver(
         agent=agent,
         strategy=strategy,

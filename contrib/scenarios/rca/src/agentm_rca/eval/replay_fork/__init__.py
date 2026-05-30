@@ -32,7 +32,7 @@ this foundation.
 
 from __future__ import annotations
 
-from .case_source import CaseSource, EvalDbCaseSource, ReplayCase
+from .case_source import CaseSource, EvalDbCaseSource, ReplayCase, SessionFileCaseSource
 from .driver import (
     JsonlResultSink,
     ReplayCaseResult,
@@ -55,6 +55,7 @@ from .trajectory import openai_chat_to_agentm
 __all__ = [
     "CaseSource",
     "EvalDbCaseSource",
+    "SessionFileCaseSource",
     "FixedInjectionStrategy",
     "ForkStrategy",
     "HarnessStrategy",
