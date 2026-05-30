@@ -55,8 +55,16 @@ class StandaloneChildRunner:
     ``cwd`` is the working directory the child sessions execute in.
     """
 
-    def __init__(self, cwd: str) -> None:
+    def __init__(
+        self,
+        cwd: str,
+        *,
+        parent_session_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
         self._cwd = cwd
+        self._parent_session_id = parent_session_id
+        self._trace_id = trace_id
 
     async def run_extractor(
         self,
@@ -90,6 +98,8 @@ class StandaloneChildRunner:
             payload=directive + payload_json,
             terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
             purpose="cognitive_audit_extractor_offline",
+            parent_session_id=self._parent_session_id,
+            trace_id=self._trace_id,
         )
         if result.status in ("spawn_error", "prompt_error"):
             raise ExtractorSpawnError(result.error or result.status)
@@ -130,6 +140,8 @@ class StandaloneChildRunner:
             payload=payload,
             terminal_tool=SUBMIT_VERDICT_TOOL_NAME,
             purpose="cognitive_audit_auditor_offline",
+            parent_session_id=self._parent_session_id,
+            trace_id=self._trace_id,
         )
         raw_blocks = _flatten_assistant_blocks(result.messages)
         latency_ms = result.latency_ms
