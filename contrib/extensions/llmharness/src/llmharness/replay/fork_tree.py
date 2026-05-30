@@ -299,6 +299,7 @@ async def run_fork_tree_experiment(
     child: StandaloneChildRunner | None = None,
     skip_extractor: bool = False,
     trigger_registry: TriggerRegistry | None = None,
+    trace_id: str | None = None,
 ) -> ForkTreeExperiment:
     """Drive a fork-tree counterfactual experiment to completion.
 
@@ -397,6 +398,7 @@ async def run_fork_tree_experiment(
             start_turn=(task.fork_turn if task.parent_id is None else task.fork_turn + 1),
             skip_extractor=skip_extractor,
             trigger_registry=trigger_registry,
+            trace_id=trace_id,
         )
         surfaces = _collect_surfaces(run.surfaces)
         # Defence-in-depth: ignore any surface at or before the fork floor.

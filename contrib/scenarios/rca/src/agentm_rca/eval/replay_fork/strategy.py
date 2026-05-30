@@ -237,6 +237,7 @@ class HarnessStrategy(ForkStrategy):
             max_surfaces_per_node=1,
             out_path=out_path,
             skip_extractor=self._skip_extractor,
+            trace_id=control_id,
         )
 
         fork_nodes = [n for n in experiment.nodes if n.parent_id is not None]
