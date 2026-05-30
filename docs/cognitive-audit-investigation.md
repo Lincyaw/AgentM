@@ -319,6 +319,17 @@ input from ~25K to ~17K tokens at deepest firing).
 
 ### Experiment Runs
 
+Artifacts live in the **replay-fork worktree** at
+`/home/ddq/AoyangSpace/AgentM-replay-fork/runs/` (not committed to
+git). Each directory contains `results.jsonl` (one JSON line per case)
+and, where applicable, `sidecars/` (per-case extractor/auditor
+records) and `run.log`.
+
+The baseline evaluations are in `eval.db` (experiment
+`agentm-ab100-baseline-0525-0847`). Agent continuation sessions are
+in `.agentm/observability/` keyed by `leaf_session_log_id` from the
+results (OTLP/JSON, readable via `agentm trace messages --file`).
+
 | Directory | Config | Key Result |
 |---|---|---|
 | `runs/doubao-ab100/` | with-ext, concurrency 30 | helped=0 harmed=2 |
