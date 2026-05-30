@@ -163,7 +163,11 @@ async def replay_pipeline_over_trajectory(
     """
     cumulative = seed_cumulative if seed_cumulative is not None else CumulativeAuditState.fresh()
     sink_used = sink if sink is not None else InMemorySink()
-    child_used = child if child is not None else StandaloneChildRunner(cwd)
+    child_used = child if child is not None else StandaloneChildRunner(
+        cwd,
+        parent_session_id=session_id,
+        trace_id=session_id,
+    )
     sidecar = SidecarWriter(sidecar_path) if sidecar_path is not None else None
 
     runner = HarnessRunner(

@@ -62,6 +62,8 @@ async def run_phase_standalone(
     payload: dict[str, Any] | str,
     terminal_tool: str,
     purpose: str = "cognitive_audit_replay",
+    parent_session_id: str | None = None,
+    trace_id: str | None = None,
 ) -> PhaseResult:
     """Spawn a top-level session, send ``payload`` as a user message,
     return the ``terminal_tool`` arguments.
@@ -74,12 +76,19 @@ async def run_phase_standalone(
     message) or a string (sent verbatim). Callers that need a per-phase
     directive prefix construct the combined string themselves and pass
     it in — this engine no longer special-cases any terminal tool.
+
+    ``parent_session_id`` / ``trace_id`` are optional linkage fields:
+    when set, the child session's observability file carries the parent
+    and trace ids so ``agentm trace index`` can associate it with the
+    originating experiment.
     """
     config = AgentSessionConfig(
         cwd=cwd,
         provider=provider,
         extensions=extensions,
         purpose=purpose,
+        parent_session_id=parent_session_id,
+        root_session_id=trace_id,
     )
     t0 = time.monotonic()
     try:
