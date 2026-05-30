@@ -40,7 +40,7 @@ def _register_processer_aliases() -> None:
         )
     except Exception:  # noqa: BLE001 — optional dep at import time
         return
-    for alias in ("ops-lite", "opslite"):
+    for alias in ("ops-lite", "opslite", "ops-lite-clean"):
         PROCESSER_FACTORY.register(alias, RCABenchProcesser)
 
 
