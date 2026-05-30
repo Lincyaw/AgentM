@@ -32,6 +32,9 @@ class CaseMeta:
     auditor_firings: int
     surfaced_reminders: int
     silent_verdicts: int
+    fork_tree: dict[str, Any] | None = None
+    """Fork-tree topology header when the sidecar is a fork-tree replay.
+    ``None`` for single-backbone replays."""
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,9 @@ class FiringRecord:
     produce Qwen/GLM-style ``<think>...</think>`` training targets.
     Empty when the firing pre-dates the field or the child made no LLM
     call (spawn_error)."""
+    node_id: str | None = None
+    """Fork-tree node that owns this firing (``n0`` = control backbone).
+    ``None`` when the sidecar is not a fork-tree replay."""
 
 
 @dataclass(frozen=True)

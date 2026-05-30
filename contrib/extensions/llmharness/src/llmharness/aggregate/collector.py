@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..distill.binding import read_sample_meta
+from ..replay.fork_tree import read_fork_tree_header
 from ..replay.record import ReplayRecord, iter_records
 from .case import CaseData, CaseMeta, FiringRecord, FiringStatus, GraphSnapshot
 
@@ -53,6 +54,7 @@ def _firing_status(rec: ReplayRecord) -> FiringStatus:
 
 
 def _to_firing(rec: ReplayRecord, sequence: int) -> FiringRecord:
+    extras = rec.extras or {}
     return FiringRecord(
         phase=rec.phase,
         sequence=sequence,
@@ -64,6 +66,7 @@ def _to_firing(rec: ReplayRecord, sequence: int) -> FiringRecord:
         error=rec.error,
         latency_ms=int(rec.latency_ms or 0),
         raw_assistant_messages=list(rec.raw_assistant_messages),
+        node_id=extras.get("node_id"),
     )
 
 
@@ -178,10 +181,11 @@ def _verdicts_from_auditor(auditor_firings: list[FiringRecord]) -> list[dict[str
     for fr in auditor_firings:
         if fr.status != "ok" or fr.output is None:
             continue
-        row = {
+        row: dict[str, Any] = {
             "sequence": fr.sequence,
             "turn_index": fr.turn_index,
             "ts_ns": fr.ts_ns,
+            "node_id": fr.node_id,
         }
         row.update(fr.output)
         out.append(row)
@@ -273,6 +277,7 @@ def collect_case(
     mount ``llmharness.distill.binding`` (e.g. rca llm-eval runs).
     """
     records = list(iter_records(replay_path))
+    fork_tree_header = read_fork_tree_header(replay_path)
     extractor_records = [r for r in records if r.phase == "extractor"]
     auditor_records = [r for r in records if r.phase == "auditor"]
 
@@ -327,6 +332,7 @@ def collect_case(
         auditor_firings=len(auditor_firings),
         surfaced_reminders=surfaced,
         silent_verdicts=silent,
+        fork_tree=fork_tree_header,
     )
 
     return CaseData(
