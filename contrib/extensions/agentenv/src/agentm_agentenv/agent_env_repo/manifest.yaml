@@ -34,5 +34,4 @@ extensions:
   # above routes these to the sandbox.
   - module: agentm.extensions.builtin.tool_read
   - module: agentm.extensions.builtin.tool_edit
-  - module: agentm.extensions.builtin.tool_write
   - module: agentm.extensions.builtin.tool_bash
