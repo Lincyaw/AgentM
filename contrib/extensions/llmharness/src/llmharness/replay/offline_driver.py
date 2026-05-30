@@ -196,21 +196,23 @@ async def replay_pipeline_over_trajectory(
         # segment / arriving via ``seed_cumulative``).
         if prefix_len < start_turn:
             continue
-        # Detect terminal tool calls in the last AssistantMessage of
-        # the current prefix so triggers can react to submission events.
-        terminal_tool: str | None = None
+        # Collect tool names from the last AssistantMessage of the
+        # current prefix so triggers can react to submission events.
+        tool_names: frozenset[str] = frozenset()
         if trigger_registry is not None:
             prefix = messages[:prefix_len]
             for msg in reversed(prefix):
                 if isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, ToolCallBlock):
-                            terminal_tool = block.name
+                    tool_names = frozenset(
+                        block.name
+                        for block in msg.content
+                        if isinstance(block, ToolCallBlock)
+                    )
                     break
         step = await runner.on_trajectory_progress(
             messages[:prefix_len],
             turn_count=turn_number,
-            terminal_tool_called=terminal_tool,
+            tool_names_called=tool_names,
         )
         all_steps.append(step)
         if step.surfaced_reminder is not None:

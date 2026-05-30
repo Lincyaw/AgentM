@@ -17,8 +17,11 @@ Follow the pattern of :mod:`llmharness.audit.registry` (the existing
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, runtime_checkable
+
+_logger = logging.getLogger(__name__)
 
 SERVICE_KEY: Final[str] = "llmharness.audit_triggers"
 """ExtensionAPI service key for the per-session :class:`TriggerRegistry`."""
@@ -36,7 +39,7 @@ class TriggerContext:
     turn_count: int
     messages: tuple[Any, ...]
     latest_assistant_message: Any | None
-    terminal_tool_called: str | None
+    tool_names_called: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -79,7 +82,18 @@ class TriggerRegistry:
         self._seen: set[tuple[str, int]] = set()
 
     def register_trigger(self, trigger: Trigger) -> None:
-        """Register ``trigger``. Idempotent on ``(trigger.name, id(trigger))``."""
+        """Register ``trigger``. Idempotent on ``(trigger.name, id(trigger))``.
+
+        Raises :class:`TypeError` immediately if ``trigger`` does not
+        expose a ``should_fire`` method -- registration is fail-fast so
+        misconfigurations surface during ``install(api, config)`` rather
+        than at the first cadence evaluation.
+        """
+        if not callable(getattr(trigger, "should_fire", None)):
+            raise TypeError(
+                f"register_trigger: expected a Trigger with should_fire method, "
+                f"got {type(trigger).__name__}"
+            )
         name = getattr(trigger, "name", "")
         key = (str(name), id(trigger))
         if key in self._seen:
@@ -104,14 +118,17 @@ class TriggerRegistry:
         extractor_due = False
         reasons: list[str] = []
         for trigger in self._triggers:
-            decision = trigger.should_fire(ctx)
+            name = str(getattr(trigger, "name", ""))
+            try:
+                decision = trigger.should_fire(ctx)
+            except Exception:
+                _logger.exception("trigger %r raised in should_fire; skipping", name)
+                continue
             if decision.fire:
                 auditor_due = True
                 if decision.requires_extractor:
                     extractor_due = True
-                reasons.append(
-                    f"{trigger.name}: {decision.reason}" if decision.reason else trigger.name
-                )
+                reasons.append(f"{name}: {decision.reason}" if decision.reason else name)
         return auditor_due, extractor_due, reasons
 
 

@@ -80,7 +80,7 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.messages import AgentMessage
+from agentm.core.abi.messages import AgentMessage, ToolCallBlock
 from agentm.extensions import ExtensionManifest
 
 from ..audit import entry_types as _et
@@ -310,6 +310,7 @@ class _RunnerStepJob:
 
     messages: tuple[AgentMessage, ...]
     turn_count: int
+    tool_names_called: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -318,6 +319,15 @@ class _ShutdownJob:
 
 
 _Job = _RunnerStepJob | _ShutdownJob
+
+
+def _extract_tool_names(event: TurnEndEvent) -> frozenset[str]:
+    """Return all tool names from the turn's AssistantMessage."""
+    return frozenset(
+        block.name
+        for block in event.message.content
+        if isinstance(block, ToolCallBlock)
+    )
 
 
 # --- install ----------------------------------------------------------------
@@ -438,12 +448,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # restarts pick up where they left off; thereafter the in-memory
     # state is authoritative (no per-firing re-reads).
     cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
-    # If no trigger atoms were registered (backward compat), the runner
-    # receives trigger_registry=None and falls through to the legacy
-    # hardcoded cadence path. The trigger_registry is passed to the
-    # runner unconditionally; the runner checks whether any triggers
-    # have been registered at evaluation time. We resolve this lazily
-    # after all atoms have installed (see _resolve_trigger_registry).
+    # The trigger_registry is passed to the runner unconditionally; the
+    # runner checks whether any triggers have been registered at
+    # evaluation time. When no trigger atoms are registered (backward
+    # compat), the runner falls through to the legacy hardcoded cadence.
     runner = HarnessRunner(
         cumulative=cumulative,
         child=LiveChildRunner(api),
@@ -479,7 +487,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             # but before the first turn, so a None at install time
             # doesn't mean "no checks ever".
             runner.set_audit_registry(_resolve_registry(api))
-            step = await runner.on_trajectory_progress(list(event.messages), turn_count=turn_count)
+            step = await runner.on_trajectory_progress(
+                list(event.messages),
+                turn_count=turn_count,
+                tool_names_called=_extract_tool_names(event),
+            )
             _drain_step_result(step.surfaced_reminder)
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
@@ -529,6 +541,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             _RunnerStepJob(
                 messages=tuple(event.messages),
                 turn_count=turn_count,
+                tool_names_called=_extract_tool_names(event),
             )
         )
 
@@ -657,7 +670,9 @@ async def _drain_queue(
                 # the sync handler.
                 runner.set_audit_registry(_resolve_registry(api))
                 step = await runner.on_trajectory_progress(
-                    list(job.messages), turn_count=job.turn_count
+                    list(job.messages),
+                    turn_count=job.turn_count,
+                    tool_names_called=job.tool_names_called,
                 )
                 if step.surfaced_reminder is not None:
                     pending_reminders.append(step.surfaced_reminder)

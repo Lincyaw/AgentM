@@ -688,7 +688,7 @@ class HarnessRunner:
         messages: list[AgentMessage],
         *,
         turn_count: int,
-        terminal_tool_called: str | None = None,
+        tool_names_called: frozenset[str] = frozenset(),
     ) -> StepResult:
         """One cadence step. Decides whether to fire extractor / auditor."""
         if self._trigger_registry is not None and self._trigger_registry.registered_triggers():
@@ -701,7 +701,7 @@ class HarnessRunner:
                 turn_count=turn_count,
                 messages=tuple(messages),
                 latest_assistant_message=latest_assistant,
-                terminal_tool_called=terminal_tool_called,
+                tool_names_called=tool_names_called,
             )
             auditor_due_raw, extractor_due_raw, _reasons = self._trigger_registry.evaluate(ctx)
             auditor_due = self._enable_auditor and auditor_due_raw

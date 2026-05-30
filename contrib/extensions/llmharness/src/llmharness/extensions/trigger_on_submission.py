@@ -1,7 +1,7 @@
 """SS11 single-file trigger atom: fire on terminal tool submission.
 
-Fires when ``ctx.terminal_tool_called`` matches one of a configured
-set of tool names. Default tools: ``submit_final_report`` and
+Fires when ``ctx.tool_names_called`` intersects a configured set of
+tool names. Default tools: ``submit_final_report`` and
 ``submit_investigation``.
 
 SS11 contract: single file, no atom-to-atom imports, no
@@ -44,7 +44,7 @@ _DEFAULT_TOOL_NAMES = ("submit_final_report", "submit_investigation")
 
 
 class _OnSubmissionTrigger:
-    """Fires when ``ctx.terminal_tool_called`` is in the configured set."""
+    """Fires when ``ctx.tool_names_called`` intersects the configured set."""
 
     name: str = "on_submission"
 
@@ -52,10 +52,12 @@ class _OnSubmissionTrigger:
         self._tool_names = tool_names
 
     def should_fire(self, ctx: TriggerContext) -> TriggerDecision:
-        if ctx.terminal_tool_called and ctx.terminal_tool_called in self._tool_names:
+        matched = ctx.tool_names_called & self._tool_names
+        if matched:
+            names_str = ", ".join(sorted(matched))
             return TriggerDecision(
                 fire=True,
-                reason=f"terminal tool {ctx.terminal_tool_called!r} called",
+                reason=f"terminal tool(s) {names_str} called",
             )
         return TriggerDecision(fire=False)
 
