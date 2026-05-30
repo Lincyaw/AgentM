@@ -296,6 +296,7 @@ async def run_fork_tree_experiment(
     out_path: Path | None = None,
     sink: InMemorySink | None = None,
     child: StandaloneChildRunner | None = None,
+    skip_extractor: bool = False,
 ) -> ForkTreeExperiment:
     """Drive a fork-tree counterfactual experiment to completion.
 
@@ -392,6 +393,7 @@ async def run_fork_tree_experiment(
             # that the non-progressing floor below then discards. The root
             # (no boundary to skip) starts at ``fork_turn`` == 1.
             start_turn=(task.fork_turn if task.parent_id is None else task.fork_turn + 1),
+            skip_extractor=skip_extractor,
         )
         surfaces = _collect_surfaces(run.surfaces)
         # Defence-in-depth: ignore any surface at or before the fork floor.

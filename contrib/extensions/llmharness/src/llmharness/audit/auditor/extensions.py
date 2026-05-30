@@ -31,7 +31,9 @@ from .profiles import (
 )
 from .prompt import (
     DEFAULT_PROMPT_NAME,
+    TRAJECTORY_PROMPT_NAME,
     build_auditor_system_prompt,
+    build_auditor_trajectory_prompt,
     load_auditor_prompt,
 )
 
@@ -113,4 +115,50 @@ def compose_auditor_extensions(
     return extensions
 
 
-__all__ = ["compose_auditor_extensions", "resolve_tools"]
+def compose_auditor_trajectory_extensions(
+    *,
+    base_prompt: str | None = None,
+    observability_config: dict[str, Any] | None = UNSET,
+    trajectory: list[dict[str, Any]],
+    continuation_notes: list[str] | None = None,
+    tools: tuple[str, ...] | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Build the extensions list for a trajectory-mode auditor firing.
+
+    Used by the skip-extractor ablation: the raw conversation trajectory
+    is embedded directly instead of the extractor-produced graph.  Only
+    ``submit_verdict`` is mounted (no drill-down tools needed since the
+    full trajectory is already in the prompt).
+    """
+    framing = (
+        base_prompt
+        if base_prompt is not None
+        else load_auditor_prompt(TRAJECTORY_PROMPT_NAME)
+    )
+
+    prompt_text = build_auditor_trajectory_prompt(
+        trajectory=trajectory,
+        continuation_notes=continuation_notes or [],
+        base_prompt=framing,
+    )
+
+    # In trajectory mode only submit_verdict is useful -- drill-down
+    # tools reference a graph that doesn't exist.
+    selected: list[str] = [TOOL_SUBMIT_VERDICT]
+
+    auditor_tools_cfg: dict[str, Any] = {"tools": selected}
+
+    extensions = compose_audit_extensions(
+        submit_tool_module=_AUDITOR_TOOLS_MODULE,
+        default_prompt=prompt_text,
+        observability_config=observability_config,
+        submit_tool_config=auditor_tools_cfg,
+    )
+    return extensions
+
+
+__all__ = [
+    "compose_auditor_extensions",
+    "compose_auditor_trajectory_extensions",
+    "resolve_tools",
+]

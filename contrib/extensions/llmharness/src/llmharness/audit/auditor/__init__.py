@@ -7,7 +7,7 @@ from .atom import (
     AUDITOR_TOOL_NAMES,
     AUDITOR_TOOLS,
 )
-from .extensions import compose_auditor_extensions
+from .extensions import compose_auditor_extensions, compose_auditor_trajectory_extensions
 from .output import AuditorOutputError, RawVerdictOutput
 from .prompt import load_auditor_prompt
 from .submit_verdict import SUBMIT_VERDICT_TOOL_NAME
@@ -20,5 +20,6 @@ __all__ = [
     "AuditorOutputError",
     "RawVerdictOutput",
     "compose_auditor_extensions",
+    "compose_auditor_trajectory_extensions",
     "load_auditor_prompt",
 ]

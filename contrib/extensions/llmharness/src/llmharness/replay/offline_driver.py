@@ -126,6 +126,7 @@ async def replay_pipeline_over_trajectory(
     child: StandaloneChildRunner | None = None,
     seed_cumulative: CumulativeAuditState | None = None,
     start_turn: int = 1,
+    skip_extractor: bool = False,
 ) -> OfflineRunResult:
     """Replay the cognitive-audit pipeline over a captured trajectory.
 
@@ -180,6 +181,7 @@ async def replay_pipeline_over_trajectory(
         provider_extractor=provider,
         provider_auditor=provider,
         audit_registry=None,
+        skip_extractor=skip_extractor,
     )
 
     all_steps: list[StepResult] = []
