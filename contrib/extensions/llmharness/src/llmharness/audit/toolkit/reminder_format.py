@@ -22,7 +22,7 @@ from agentm.core.abi.messages import UserMessage, text_message
 # under its own name for backwards-compat with the existing reminder-injector
 # tests). Do not localise / vary.
 REMINDER_PREAMBLE = (
-    "[harness advisory — meta-injection from cognitive audit, not from the human user]\n"
+    "[system reminder — automated review of your investigation so far]\n"
 )
 
 
