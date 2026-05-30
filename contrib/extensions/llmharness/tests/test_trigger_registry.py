@@ -23,8 +23,6 @@ def _ctx(
 ) -> TriggerContext:
     return TriggerContext(
         turn_count=turn_count,
-        messages=(),
-        latest_assistant_message=None,
         tool_names_called=tool_names_called,
     )
 
@@ -84,29 +82,25 @@ class _RaisingTrigger:
 
 def test_empty_registry_evaluates_to_no_fire() -> None:
     reg = TriggerRegistry()
-    auditor_due, extractor_due, reasons = reg.evaluate(_ctx())
+    auditor_due, extractor_due = reg.evaluate(_ctx())
     assert auditor_due is False
     assert extractor_due is False
-    assert reasons == []
 
 
 def test_single_trigger_fires() -> None:
     reg = TriggerRegistry()
     reg.register_trigger(_CadenceTrigger(interval=5))
-    auditor_due, extractor_due, reasons = reg.evaluate(_ctx(turn_count=10))
+    auditor_due, extractor_due = reg.evaluate(_ctx(turn_count=10))
     assert auditor_due is True
     assert extractor_due is True
-    assert len(reasons) == 1
-    assert "cadence" in reasons[0]
 
 
 def test_single_trigger_does_not_fire() -> None:
     reg = TriggerRegistry()
     reg.register_trigger(_CadenceTrigger(interval=5))
-    auditor_due, extractor_due, reasons = reg.evaluate(_ctx(turn_count=3))
+    auditor_due, extractor_due = reg.evaluate(_ctx(turn_count=3))
     assert auditor_due is False
     assert extractor_due is False
-    assert reasons == []
 
 
 def test_or_semantics_compound_triggers() -> None:
@@ -116,32 +110,27 @@ def test_or_semantics_compound_triggers() -> None:
     reg.register_trigger(_SubmissionTrigger())
 
     # Neither fires
-    auditor_due, extractor_due, reasons = reg.evaluate(_ctx(turn_count=3))
+    auditor_due, extractor_due = reg.evaluate(_ctx(turn_count=3))
     assert auditor_due is False
-    assert reasons == []
 
     # Cadence fires (turn 5), submission does not
-    auditor_due, extractor_due, reasons = reg.evaluate(_ctx(turn_count=5))
+    auditor_due, extractor_due = reg.evaluate(_ctx(turn_count=5))
     assert auditor_due is True
     assert extractor_due is True
-    assert len(reasons) == 1
 
     # Submission fires (turn 3), cadence does not
-    auditor_due, extractor_due, reasons = reg.evaluate(
+    auditor_due, extractor_due = reg.evaluate(
         _ctx(turn_count=3, tool_names_called=frozenset({"submit_final_report"}))
     )
     assert auditor_due is True
     assert extractor_due is True
-    assert len(reasons) == 1
-    assert "submit_final_report" in reasons[0]
 
     # Both fire (turn 10, with submission)
-    auditor_due, extractor_due, reasons = reg.evaluate(
+    auditor_due, extractor_due = reg.evaluate(
         _ctx(turn_count=10, tool_names_called=frozenset({"submit_final_report"}))
     )
     assert auditor_due is True
     assert extractor_due is True
-    assert len(reasons) == 2
 
 
 def test_multi_tool_turn_detects_submission() -> None:
@@ -150,12 +139,10 @@ def test_multi_tool_turn_detects_submission() -> None:
     reg.register_trigger(_SubmissionTrigger())
 
     # submit_final_report is NOT the last tool, but still detected
-    auditor_due, _, reasons = reg.evaluate(
+    auditor_due, _ = reg.evaluate(
         _ctx(tool_names_called=frozenset({"submit_final_report", "get_metrics"}))
     )
     assert auditor_due is True
-    assert len(reasons) == 1
-    assert "submit_final_report" in reasons[0]
 
 
 def test_extractor_due_false_when_no_trigger_requires_it() -> None:
@@ -163,10 +150,9 @@ def test_extractor_due_false_when_no_trigger_requires_it() -> None:
     reg = TriggerRegistry()
     reg.register_trigger(_ExtractorFreeTrigger())
 
-    auditor_due, extractor_due, reasons = reg.evaluate(_ctx())
+    auditor_due, extractor_due = reg.evaluate(_ctx())
     assert auditor_due is True
     assert extractor_due is False
-    assert len(reasons) == 1
 
 
 def test_extractor_due_true_when_mixed_triggers() -> None:
@@ -175,10 +161,9 @@ def test_extractor_due_true_when_mixed_triggers() -> None:
     reg.register_trigger(_ExtractorFreeTrigger())
     reg.register_trigger(_CadenceTrigger(interval=1))
 
-    auditor_due, extractor_due, reasons = reg.evaluate(_ctx(turn_count=1))
+    auditor_due, extractor_due = reg.evaluate(_ctx(turn_count=1))
     assert auditor_due is True
     assert extractor_due is True
-    assert len(reasons) == 2
 
 
 def test_raising_trigger_is_skipped_others_still_run() -> None:
@@ -187,12 +172,10 @@ def test_raising_trigger_is_skipped_others_still_run() -> None:
     reg.register_trigger(_RaisingTrigger(msg="kaboom"))
     reg.register_trigger(_CadenceTrigger(interval=1))
 
-    auditor_due, extractor_due, reasons = reg.evaluate(_ctx(turn_count=1))
+    auditor_due, extractor_due = reg.evaluate(_ctx(turn_count=1))
     assert auditor_due is True
     assert extractor_due is True
     # Only the cadence trigger contributed a reason; the raising one was skipped
-    assert len(reasons) == 1
-    assert "cadence" in reasons[0]
 
 
 def test_idempotent_registration() -> None:

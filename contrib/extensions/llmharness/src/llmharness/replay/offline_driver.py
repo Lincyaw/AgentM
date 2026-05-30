@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
+from agentm.core.abi.messages import AgentMessage, AssistantMessage
 
 from ..audit.runner import (
     AuditorSettings,
@@ -29,8 +29,16 @@ from ..audit.runner import (
     StepResult,
 )
 from ..audit.seams.offline import InMemorySink, StandaloneChildRunner
-from ..audit.triggers import TriggerRegistry
+from ..audit.triggers import TriggerRegistry, tool_names_from_message
 from ..schema import Reminder
+
+
+def _tool_names_from_prefix(prefix: list[AgentMessage]) -> frozenset[str]:
+    """Extract tool-call names from the last AssistantMessage in *prefix*."""
+    for msg in reversed(prefix):
+        if isinstance(msg, AssistantMessage):
+            return tool_names_from_message(msg)
+    return frozenset()
 
 __all__ = [
     "AuditorSettings",
@@ -196,21 +204,10 @@ async def replay_pipeline_over_trajectory(
         # segment / arriving via ``seed_cumulative``).
         if prefix_len < start_turn:
             continue
-        # Collect tool names from the last AssistantMessage of the
-        # current prefix so triggers can react to submission events.
-        tool_names: frozenset[str] = frozenset()
-        if trigger_registry is not None:
-            prefix = messages[:prefix_len]
-            for msg in reversed(prefix):
-                if isinstance(msg, AssistantMessage):
-                    tool_names = frozenset(
-                        block.name
-                        for block in msg.content
-                        if isinstance(block, ToolCallBlock)
-                    )
-                    break
+        prefix = messages[:prefix_len]
+        tool_names = _tool_names_from_prefix(prefix)
         step = await runner.on_trajectory_progress(
-            messages[:prefix_len],
+            prefix,
             turn_count=turn_number,
             tool_names_called=tool_names,
         )

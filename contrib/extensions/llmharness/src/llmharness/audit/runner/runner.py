@@ -691,19 +691,12 @@ class HarnessRunner:
         tool_names_called: frozenset[str] = frozenset(),
     ) -> StepResult:
         """One cadence step. Decides whether to fire extractor / auditor."""
-        if self._trigger_registry is not None and self._trigger_registry.registered_triggers():
-            latest_assistant = None
-            for msg in reversed(messages):
-                if isinstance(msg, AssistantMessage):
-                    latest_assistant = msg
-                    break
+        if self._trigger_registry:
             ctx = TriggerContext(
                 turn_count=turn_count,
-                messages=tuple(messages),
-                latest_assistant_message=latest_assistant,
                 tool_names_called=tool_names_called,
             )
-            auditor_due_raw, extractor_due_raw, _reasons = self._trigger_registry.evaluate(ctx)
+            auditor_due_raw, extractor_due_raw = self._trigger_registry.evaluate(ctx)
             auditor_due = self._enable_auditor and auditor_due_raw
             extractor_due = extractor_due_raw or auditor_due
         else:
