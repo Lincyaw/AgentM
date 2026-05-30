@@ -19,12 +19,22 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Final, Protocol, runtime_checkable
+from typing import Final, Protocol, runtime_checkable
 
 _logger = logging.getLogger(__name__)
 
 SERVICE_KEY: Final[str] = "llmharness.audit_triggers"
 """ExtensionAPI service key for the per-session :class:`TriggerRegistry`."""
+
+
+def tool_names_from_message(msg: object) -> frozenset[str]:
+    """Extract tool-call names from an AssistantMessage's content blocks."""
+    content = getattr(msg, "content", None)
+    if not isinstance(content, list):
+        return frozenset()
+    return frozenset(
+        block.name for block in content if hasattr(block, "name") and hasattr(block, "id")
+    )
 
 
 @dataclass(frozen=True)
@@ -37,8 +47,6 @@ class TriggerContext:
     """
 
     turn_count: int
-    messages: tuple[Any, ...]
-    latest_assistant_message: Any | None
     tool_names_called: frozenset[str]
 
 
@@ -101,14 +109,18 @@ class TriggerRegistry:
         self._seen.add(key)
         self._triggers.append(trigger)
 
+    def __bool__(self) -> bool:
+        """True when at least one trigger is registered."""
+        return bool(self._triggers)
+
     def registered_triggers(self) -> tuple[Trigger, ...]:
         """Return registered triggers in insertion order."""
         return tuple(self._triggers)
 
-    def evaluate(self, ctx: TriggerContext) -> tuple[bool, bool, list[str]]:
+    def evaluate(self, ctx: TriggerContext) -> tuple[bool, bool]:
         """Evaluate all registered triggers against ``ctx``.
 
-        Returns ``(auditor_due, extractor_due, reasons)``.
+        Returns ``(auditor_due, extractor_due)``.
 
         OR-semantics: any trigger that fires causes ``auditor_due=True``.
         ``extractor_due`` is ``True`` iff at least one firing trigger has
@@ -116,7 +128,6 @@ class TriggerRegistry:
         """
         auditor_due = False
         extractor_due = False
-        reasons: list[str] = []
         for trigger in self._triggers:
             name = str(getattr(trigger, "name", ""))
             try:
@@ -128,8 +139,8 @@ class TriggerRegistry:
                 auditor_due = True
                 if decision.requires_extractor:
                     extractor_due = True
-                reasons.append(f"{name}: {decision.reason}" if decision.reason else name)
-        return auditor_due, extractor_due, reasons
+                _logger.debug("trigger %s fired: %s", name, decision.reason)
+        return auditor_due, extractor_due
 
 
 __all__ = [
@@ -138,4 +149,5 @@ __all__ = [
     "TriggerContext",
     "TriggerDecision",
     "TriggerRegistry",
+    "tool_names_from_message",
 ]

@@ -323,11 +323,9 @@ _Job = _RunnerStepJob | _ShutdownJob
 
 def _extract_tool_names(event: TurnEndEvent) -> frozenset[str]:
     """Return all tool names from the turn's AssistantMessage."""
-    return frozenset(
-        block.name
-        for block in event.message.content
-        if isinstance(block, ToolCallBlock)
-    )
+    from ..audit.triggers import tool_names_from_message
+
+    return tool_names_from_message(event.message)
 
 
 # --- install ----------------------------------------------------------------
@@ -528,7 +526,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # full TriggerContext. When no trigger atoms are registered, fall
         # back to the legacy cadence gate so no-op turns don't wake the
         # worker.
-        if trigger_registry.registered_triggers():
+        if trigger_registry:
             enqueue = True
         else:
             auditor_due = enable_auditor and (turn_count % k) == 0
