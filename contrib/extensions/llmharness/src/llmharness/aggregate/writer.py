@@ -41,6 +41,8 @@ def _firing_payload(fr: FiringRecord) -> dict[str, Any]:
     }
     if fr.raw_assistant_messages:
         payload["raw_assistant_messages"] = fr.raw_assistant_messages
+    if fr.node_id is not None:
+        payload["node_id"] = fr.node_id
     return payload
 
 
