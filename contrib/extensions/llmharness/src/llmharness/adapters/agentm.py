@@ -102,6 +102,8 @@ from ..audit.runner import (
 from ..audit.seams.live import LiveChildRunner, LiveOpSink
 from ..audit.toolkit.reminder_format import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
 from ..audit.toolkit.reminder_format import build_reminder_message
+from ..audit.triggers import SERVICE_KEY as TRIGGER_SERVICE_KEY
+from ..audit.triggers import TriggerRegistry
 from ..replay.record import audit_session_id, replay_log_path
 from ..schema import Reminder
 
@@ -423,11 +425,25 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     with contextlib.suppress(KeyError):
         api.set_service(AUDIT_REGISTRY_SERVICE_KEY, AuditCheckRegistry())
 
+    # Publish the trigger registry for pluggable audit cadence. Trigger
+    # atoms (e.g. trigger_cadence, trigger_on_submission) call
+    # ``api.get_service(TRIGGER_SERVICE_KEY).register_trigger(...)``
+    # from their own ``install``.
+    trigger_registry = TriggerRegistry()
+    with contextlib.suppress(KeyError):
+        api.set_service(TRIGGER_SERVICE_KEY, trigger_registry)
+
     # Construct the single runner for this install. Hydrate the
     # cumulative state once from the existing session log so process
     # restarts pick up where they left off; thereafter the in-memory
     # state is authoritative (no per-firing re-reads).
     cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
+    # If no trigger atoms were registered (backward compat), the runner
+    # receives trigger_registry=None and falls through to the legacy
+    # hardcoded cadence path. The trigger_registry is passed to the
+    # runner unconditionally; the runner checks whether any triggers
+    # have been registered at evaluation time. We resolve this lazily
+    # after all atoms have installed (see _resolve_trigger_registry).
     runner = HarnessRunner(
         cumulative=cumulative,
         child=LiveChildRunner(api),
@@ -443,6 +459,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         provider_extractor=extractor_provider,
         provider_auditor=auditor_provider,
         audit_registry=_resolve_registry(api),
+        trigger_registry=trigger_registry,
     )
 
     pending_reminders: list[Reminder] = []
@@ -493,14 +510,19 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     def _on_turn_end(event: TurnEndEvent) -> None:
         nonlocal turn_count
         turn_count += 1
-        # Cadence is decided inside ``runner.on_trajectory_progress``.
-        # We still gate enqueueing so that a no-op turn (no extractor /
-        # auditor due) doesn't even wake the worker — matches the
-        # legacy behaviour where TurnEndEvent below the cadence dropped
-        # the job on the floor.
-        auditor_due = enable_auditor and (turn_count % k) == 0
-        extractor_due = (turn_count % extractor_k) == 0 or auditor_due
-        if not extractor_due and not auditor_due:
+        # When trigger atoms are registered, always enqueue: the runner
+        # evaluates the trigger registry internally and the pre-check
+        # cannot replicate arbitrary trigger logic without building a
+        # full TriggerContext. When no trigger atoms are registered, fall
+        # back to the legacy cadence gate so no-op turns don't wake the
+        # worker.
+        if trigger_registry.registered_triggers():
+            enqueue = True
+        else:
+            auditor_due = enable_auditor and (turn_count % k) == 0
+            extractor_due = (turn_count % extractor_k) == 0 or auditor_due
+            enqueue = extractor_due or auditor_due
+        if not enqueue:
             return
         _ensure_worker()
         queue.put_nowait(

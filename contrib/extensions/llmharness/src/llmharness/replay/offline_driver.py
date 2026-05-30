@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentm.core.abi.messages import AgentMessage, AssistantMessage
+from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 
 from ..audit.runner import (
     AuditorSettings,
@@ -29,6 +29,7 @@ from ..audit.runner import (
     StepResult,
 )
 from ..audit.seams.offline import InMemorySink, StandaloneChildRunner
+from ..audit.triggers import TriggerRegistry
 from ..schema import Reminder
 
 __all__ = [
@@ -127,6 +128,7 @@ async def replay_pipeline_over_trajectory(
     seed_cumulative: CumulativeAuditState | None = None,
     start_turn: int = 1,
     skip_extractor: bool = False,
+    trigger_registry: TriggerRegistry | None = None,
 ) -> OfflineRunResult:
     """Replay the cognitive-audit pipeline over a captured trajectory.
 
@@ -182,6 +184,7 @@ async def replay_pipeline_over_trajectory(
         provider_auditor=provider,
         audit_registry=None,
         skip_extractor=skip_extractor,
+        trigger_registry=trigger_registry,
     )
 
     all_steps: list[StepResult] = []
@@ -193,7 +196,22 @@ async def replay_pipeline_over_trajectory(
         # segment / arriving via ``seed_cumulative``).
         if prefix_len < start_turn:
             continue
-        step = await runner.on_trajectory_progress(messages[:prefix_len], turn_count=turn_number)
+        # Detect terminal tool calls in the last AssistantMessage of
+        # the current prefix so triggers can react to submission events.
+        terminal_tool: str | None = None
+        if trigger_registry is not None:
+            prefix = messages[:prefix_len]
+            for msg in reversed(prefix):
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, ToolCallBlock):
+                            terminal_tool = block.name
+                    break
+        step = await runner.on_trajectory_progress(
+            messages[:prefix_len],
+            turn_count=turn_number,
+            terminal_tool_called=terminal_tool,
+        )
         all_steps.append(step)
         if step.surfaced_reminder is not None:
             if stop_on_first_surface:
