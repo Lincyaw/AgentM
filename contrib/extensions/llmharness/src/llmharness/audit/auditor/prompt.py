@@ -19,11 +19,13 @@ and pointing the adapter config at it; no code change needed.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from ...schema import Edge, Event, Finding, Phase
 from ..toolkit.prompt_loader import load_prompt
 
 DEFAULT_PROMPT_NAME = "minimal"
+TRAJECTORY_PROMPT_NAME = "trajectory"
 
 
 def load_auditor_prompt(name_or_path: str = DEFAULT_PROMPT_NAME) -> str:
@@ -139,8 +141,47 @@ def build_auditor_system_prompt(
     return "\n".join(sections)
 
 
+def build_auditor_trajectory_prompt(
+    *,
+    trajectory: list[dict[str, Any]],
+    continuation_notes: list[str],
+    base_prompt: str | None = None,
+) -> str:
+    """Assemble the auditor system prompt for a trajectory-mode firing.
+
+    Used by the skip-extractor ablation: the raw conversation trajectory
+    is embedded directly instead of the extractor-produced graph.  No
+    GRAPH, FINDINGS, or PHASES sections are emitted.
+
+    ``base_prompt`` defaults to the ``trajectory`` variant loaded via
+    :func:`load_auditor_prompt`.
+    """
+    framing = (
+        base_prompt
+        if base_prompt is not None
+        else load_auditor_prompt(TRAJECTORY_PROMPT_NAME)
+    )
+
+    sections: list[str] = [framing.rstrip(), ""]
+
+    sections.append("## TRAJECTORY")
+    sections.append(
+        f"conversation turns ({len(trajectory)} total):"
+    )
+    sections.append(json.dumps(trajectory, ensure_ascii=False))
+    sections.append("")
+
+    sections.append("## CONTINUATION_NOTES (from your prior firing)")
+    sections.append(json.dumps(list(continuation_notes), ensure_ascii=False))
+    sections.append("")
+
+    return "\n".join(sections)
+
+
 __all__ = [
     "DEFAULT_PROMPT_NAME",
+    "TRAJECTORY_PROMPT_NAME",
     "build_auditor_system_prompt",
+    "build_auditor_trajectory_prompt",
     "load_auditor_prompt",
 ]

@@ -246,3 +246,65 @@ async def test_replay_pipeline_breaks_on_first_surface(tmp_path: Path) -> None:
     # The surfacing step is the last one recorded.
     assert result.all_step_results[-1].surfaced_reminder is not None
     assert result.all_step_results[-1].surfaced_reminder.text == "halt"
+
+
+@pytest.mark.asyncio
+async def test_historical_source_turn_texts_elided_from_payload(tmp_path: Path) -> None:
+    """Historical (prior-firing) node source turns carry no raw text in the
+    extractor payload; the current window's raw text still ships via
+    ``new_turns``.
+
+    Fail-stop position: the extractor payload must not grow with run length
+    by re-shipping every cumulative node's full source-turn text on every
+    firing. A node folded into the graph in an earlier firing is represented
+    by its ``summary`` + ``external_refs``; re-sending its raw turn text was
+    the dominant, unbounded extractor cost.
+    """
+    import json
+
+    messages = _make_trajectory(15)  # extractor_interval=5 → firings at 5/10/15
+    sink = InMemorySink()
+    stub = _StubChildRunner()
+
+    extractor_settings = ExtractorSettings(
+        extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
+        compose_kwargs={"base_prompt": "stub-extractor-prompt"},
+    )
+    auditor_settings = AuditorSettings(
+        base_prompt="stub-auditor-prompt",
+        observability_config=None,
+        summary_threshold=30,
+        tools=(),
+    )
+
+    await replay_pipeline_over_trajectory(
+        messages=messages,
+        cwd=str(tmp_path),
+        session_id="test-session",
+        provider=None,
+        extractor_settings=extractor_settings,
+        auditor_settings=auditor_settings,
+        extractor_interval=5,
+        audit_interval=5,
+        enable_auditor=True,
+        stop_on_first_surface=False,
+        sidecar_path=None,
+        sink=sink,
+        child=stub,
+    )
+
+    # Need at least two firings so a later payload carries prior-firing nodes.
+    assert stub.extractor_calls >= 3
+    last_payload = stub.extractor_payloads[-1]
+    recent = last_payload.get("recent_graph") or []
+    assert recent, "expected prior-firing nodes in recent_graph"
+
+    # Every historical node's source-turn texts are elided to empty strings.
+    for node in recent:
+        stt = node.get("source_turn_texts")
+        assert stt is not None
+        assert all(t == "" for t in stt), f"historical node kept raw text: {node}"
+
+    # The current window's raw text is NOT lost — it still ships via new_turns.
+    new_turns_blob = json.dumps(last_payload.get("new_turns") or [])
+    assert "narrative" in new_turns_blob
