@@ -707,6 +707,7 @@ def _seed_sandbox_from_host(session: Any, gateway_url: str, host_dir: str, work_
 
     base_ref = os.environ.get("AGENTM_GIT_BASE_REF")
     ident = " ".join(_SYNC_GIT_IDENT)
+    print(f"INFO: [agent_env_sync] AGENTM_GIT_BASE_REF={base_ref!r} host_dir={host_dir!r}", file=sys.stderr)
 
     if base_ref:
         base_archive = _run_host_git(host_dir, "archive", "--format=tar.gz", base_ref)
