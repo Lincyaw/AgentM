@@ -1,0 +1,26 @@
+package app
+
+// Key binding constants matching tea.KeyMsg.String() values.
+const (
+	keyEnter        = "enter"
+	keyCtrlJ        = "ctrl+j"
+	keyCtrlC        = "ctrl+c"
+	keyCtrlD        = "ctrl+d"
+	keyCtrlL        = "ctrl+l"
+	keyCtrlE        = "ctrl+e"
+	keyCtrlY        = "ctrl+y"
+	keyCtrlB        = "ctrl+b"
+	keyCtrlG        = "ctrl+g"
+	keyCtrlF        = "ctrl+f"
+	keyCtrlR        = "ctrl+r"
+	keyCtrlS        = "ctrl+s"
+	keyEsc          = "esc"
+	keyTab          = "tab"
+	keyUp           = "up"
+	keyDown         = "down"
+	keyPgUp         = "pgup"
+	keyPgDown       = "pgdown"
+	keyBracketOpen  = "["
+	keyBracketClose = "]"
+	keyQuestion     = "?"
+)
