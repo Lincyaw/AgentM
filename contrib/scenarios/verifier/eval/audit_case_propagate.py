@@ -483,6 +483,33 @@ def extract_hop_verdict(obs_dir: Path) -> dict | None:
     return best
 
 
+def _format_upstream_evidence(evidence: dict) -> str:
+    """Format upstream node evidence for the hop agent prompt."""
+    lines: list[str] = []
+    src = evidence.get("source", "")
+    if src == "injection_target":
+        n_ms = evidence.get("normal_avg_ms")
+        a_ms = evidence.get("abnormal_avg_ms")
+        ratio = evidence.get("ratio")
+        if n_ms is not None and a_ms is not None:
+            lines.append(
+                f"Avg latency: normal {n_ms:.1f}ms → abnormal {a_ms:.1f}ms "
+                f"({ratio}x)"
+            )
+    elif src == "hop_agent":
+        rationale = evidence.get("rationale")
+        if rationale:
+            lines.append(f"Rationale: {rationale}")
+        for ev in evidence.get("symptom_evidence", []):
+            claim = ev.get("claim", "")
+            sql = ev.get("sql", "")
+            if claim:
+                lines.append(f"- {claim}")
+            if sql:
+                lines.append(f"  ```sql\n  {sql}\n  ```")
+    return "\n".join(lines)
+
+
 def run_hop(
     data_dir: Path,
     from_service: str,
@@ -494,6 +521,7 @@ def run_hop(
     out_dir: Path,
     budget: int,
     is_infra: bool = False,
+    upstream_evidence: dict | None = None,
 ) -> dict | None:
     """Run one hop-agent and return its verdict dict (or None)."""
     hop_dir = out_dir / "hops" / f"{from_service}__{to_service}"
@@ -508,6 +536,17 @@ def run_hop(
         f"Relationship: {rel_text}",
         f"Fault injected: {fault_kind} on {injection_target}",
     ]
+    if upstream_evidence:
+        ev_text = _format_upstream_evidence(upstream_evidence)
+        if ev_text:
+            parts.append(
+                f"\n## Observed symptoms on {from_service}\n{ev_text}\n\n"
+                f"This is only a partial picture of the upstream's "
+                f"degradation. Look for **different signals** on "
+                f"{to_service} — do not just repeat the same queries. "
+                f"The propagation may manifest differently on the "
+                f"downstream (e.g. errors vs latency vs missing spans)."
+            )
     if fault_doc:
         parts.append(f"\n## Fault reference ({fault_kind})\n{fault_doc}")
     if is_infra:
@@ -604,17 +643,15 @@ def propagate(
     infra_nodes: set[str] | None = None,
     node_map: dict[str, str] | None = None,
 ) -> dict:
-    """Producer-consumer fault propagation.
+    """Edge-level fault propagation.
 
-    Every confirmed node is a *producer*: it enqueues ALL its
-    neighbours (callers, callees, co-deployed). For each neighbour:
-      - already confirmed → SQL-verify the edge (no agent)
-      - not yet confirmed → run a hop agent (may confirm the node)
-    No edge is skipped; no node agent runs twice.
+    Every confirmed node enqueues ALL its neighbours. Each directed edge
+    (from, to) is independently evaluated — a service rejected via one
+    relationship (e.g. co_deployed) can still be confirmed via another
+    (e.g. caller_to_callee) from a different source in a later round.
     """
     infra_nodes = infra_nodes or set()
     confirmed: set[str] = set()
-    agent_checked: set[str] = set()
     checked_edges: set[tuple[str, str]] = set()
     queue: deque[str] = deque()
     edges: list[tuple[str, str]] = []
@@ -635,7 +672,6 @@ def propagate(
         if target and target not in SYNTHETIC:
             ev = get_target_evidence(data_dir, target)
             confirmed.add(target)
-            agent_checked.add(target)
             queue.append(target)
             node_evidence[target] = {"source": "injection_target", **ev}
             node_fault[target] = (inj["chaos_type"], target)
@@ -646,8 +682,8 @@ def propagate(
         level_size = len(queue)
 
         sql_edges: list[tuple[str, str]] = []
-        # to_service -> [(from_service, rel_type)]
-        agent_hops: dict[str, list[tuple[str, str]]] = {}
+        # Each entry is one edge to evaluate: (from_service, to_service, rel_type)
+        pending_hops: list[tuple[str, str, str]] = []
 
         for _ in range(level_size):
             current = queue.popleft()
@@ -662,9 +698,7 @@ def propagate(
                 if neighbor in confirmed:
                     sql_edges.append(edge)
                 else:
-                    agent_hops.setdefault(neighbor, []).append(
-                        (current, rel_type)
-                    )
+                    pending_hops.append((current, neighbor, rel_type))
 
         for from_svc, to_svc in sql_edges:
             if _verify_edge_sql(data_dir, from_svc, to_svc):
@@ -675,13 +709,19 @@ def propagate(
                 })
                 print(f"  edge (SQL): {from_svc} -> {to_svc}")
 
-        # co_deployed pre-check: skip neighbours on healthy nodes.
-        # Group co_deployed targets by shared node, check node health once.
+        # co_deployed pre-check: skip edges to services on healthy nodes
+        # when ALL edges to that target are co_deployed.
         if node_map:
             _checked_nodes: dict[str, bool] = {}
-            skip_co: set[str] = set()
-            for to_svc, froms in agent_hops.items():
-                if all(rel == "co_deployed" for _, rel in froms):
+            # Group by target to check if ALL edges are co_deployed
+            target_rels: dict[str, list[tuple[str, str, str]]] = {}
+            for from_svc, to_svc, rel in pending_hops:
+                target_rels.setdefault(to_svc, []).append(
+                    (from_svc, to_svc, rel)
+                )
+            skip_edges: set[tuple[str, str]] = set()
+            for to_svc, hop_list in target_rels.items():
+                if all(rel == "co_deployed" for _, _, rel in hop_list):
                     node = node_map.get(to_svc)
                     if node:
                         if node not in _checked_nodes:
@@ -689,77 +729,65 @@ def propagate(
                                 data_dir, node,
                             )
                         if not _checked_nodes[node]:
-                            skip_co.add(to_svc)
-            if skip_co:
-                for svc in skip_co:
-                    agent_checked.add(svc)
-                    hop_log.append({
-                        "round": round_n, "from": "node_health",
-                        "to": svc, "verdict": "co_deployed_node_healthy",
-                    })
-                    print(f"    skip co_deployed {svc}: node healthy")
-                agent_hops = {
-                    k: v for k, v in agent_hops.items()
-                    if k not in skip_co
-                }
+                            for from_svc, _, _ in hop_list:
+                                skip_edges.add((from_svc, to_svc))
+                            hop_log.append({
+                                "round": round_n, "from": "node_health",
+                                "to": to_svc,
+                                "verdict": "co_deployed_node_healthy",
+                            })
+                            print(f"    skip co_deployed {to_svc}: "
+                                  f"node healthy")
+            pending_hops = [
+                h for h in pending_hops
+                if (h[0], h[1]) not in skip_edges
+            ]
 
-        need_agent = {
-            to: froms for to, froms in agent_hops.items()
-            if to not in agent_checked
-        }
+        # Filter out edges whose target was confirmed earlier in this round
+        # (by a parallel agent or a previous edge in this batch).
+        pending_hops = [
+            h for h in pending_hops if h[1] not in confirmed
+        ]
 
-        if need_agent:
-            print(f"  round {round_n}: {len(need_agent)} agents, "
+        if pending_hops:
+            print(f"  round {round_n}: {len(pending_hops)} agents, "
                   f"{len(sql_edges)} SQL edges")
             with ThreadPoolExecutor(max_workers=parallel) as pool:
                 futures = {}
-                for to_svc, froms in need_agent.items():
+                for from_svc, to_svc, rel_type in pending_hops:
                     hop_fk, hop_target = node_fault.get(
-                        froms[0][0], (fault_kind, inj_target)
+                        from_svc, (fault_kind, inj_target)
                     )
                     hop_doc = _load_fault_doc(hop_fk) or fault_doc
                     fut = pool.submit(
                         run_hop, data_dir,
-                        froms[0][0], to_svc, froms[0][1],
+                        from_svc, to_svc, rel_type,
                         hop_fk, hop_doc, hop_target,
                         out_dir, budget,
                         to_svc in infra_nodes,
+                        node_evidence.get(from_svc),
                     )
-                    futures[fut] = (to_svc, froms)
+                    futures[fut] = (from_svc, to_svc, rel_type)
                 for future in as_completed(futures):
-                    to_svc, froms = futures[future]
-                    agent_checked.add(to_svc)
+                    from_svc, to_svc, rel_type = futures[future]
                     result = future.result()
                     verdict = result.get("verdict") if result else None
                     hop_log.append({
-                        "round": round_n, "from": froms[0][0],
+                        "round": round_n, "from": from_svc,
                         "to": to_svc, "verdict": verdict or "no-result",
                     })
-                    print(f"    {froms[0][0]} -> {to_svc}: "
+                    print(f"    {from_svc} -> {to_svc}: "
                           f"{verdict or 'no-result'}")
-                    if verdict == "confirmed":
+                    if verdict == "confirmed" and to_svc not in confirmed:
                         confirmed.add(to_svc)
                         node_evidence[to_svc] = {
                             "source": "hop_agent", **(result or {}),
                         }
-                        # inherit the producer's fault context for the next hop
-                        if froms[0][0] in node_fault:
-                            node_fault[to_svc] = node_fault[froms[0][0]]
-                        # Infra nodes (mysql, redis…) are propagation SINKS: a
-                        # localized fault on ONE service's path to the DB does
-                        # not degrade every other consumer of that DB. Confirm
-                        # the edge into it, but do not fan out from it (which
-                        # would falsely implicate all DB users via starvation).
+                        if from_svc in node_fault:
+                            node_fault[to_svc] = node_fault[from_svc]
                         if to_svc not in infra_nodes:
                             queue.append(to_svc)
-                        edges.append((froms[0][0], to_svc))
-                        for other_from, _other_rel in froms[1:]:
-                            if _verify_edge_sql(
-                                data_dir, other_from, to_svc
-                            ):
-                                edges.append((other_from, to_svc))
-                                print(f"    {other_from} -> "
-                                      f"{to_svc}: edge_sql")
+                        edges.append((from_svc, to_svc))
 
     return {
         "confirmed_nodes": sorted(confirmed),
