@@ -34,36 +34,44 @@ func (b *AssistantTurn) SetComplete() { b.complete = true }
 func (b *AssistantTurn) Complete() bool { return b.complete }
 
 func (b *AssistantTurn) Render(width int, th *theme.Theme) string {
-	spine := th.SpineAssistant.Render(theme.Spine)
-	attrib := th.AssistantAttrib.Render(theme.LabelAssistant)
+	cw := width - 2 // 2 chars for "● " prefix
+	if cw < 20 {
+		cw = 20
+	}
 
 	var sb strings.Builder
-	sb.WriteString(spine + " " + attrib + "\n")
 
 	// Thinking block (if present)
 	if b.Thinking != nil && b.Thinking.Text != "" {
-		sb.WriteString(prefixLines(b.Thinking.Render(width-4, th), spine+" ") + "\n")
+		sb.WriteString(b.Thinking.Render(width, th) + "\n")
 	}
 
-	// Main text
+	// Main text with ● prefix on first line
 	if b.Text != "" {
-		rendered := b.renderText(width - 4)
-		sb.WriteString(prefixLines(rendered, spine+" ") + "\n")
+		rendered := b.renderText(cw)
+		dot := th.AssistantDot.Render(theme.BlackCircle)
+		lines := strings.Split(rendered, "\n")
+		if len(lines) > 0 {
+			sb.WriteString(dot + " " + lines[0] + "\n")
+			for _, line := range lines[1:] {
+				sb.WriteString("  " + line + "\n")
+			}
+		}
 	}
 
 	// Tool blocks
 	for _, tool := range b.Tools {
-		sb.WriteString(prefixLines(tool.Render(width-4, th), spine+" ") + "\n")
+		sb.WriteString(tool.Render(width, th) + "\n")
 	}
 
 	// Sub-agent blocks
 	for _, child := range b.Children {
-		sb.WriteString(prefixLines(child.Render(width-4, th), spine+" ") + "\n")
+		sb.WriteString(child.Render(width, th) + "\n")
 	}
 
 	// Approval blocks
 	for _, appr := range b.Approvals {
-		sb.WriteString(prefixLines(appr.Render(width-4, th), spine+" ") + "\n")
+		sb.WriteString(appr.Render(width, th) + "\n")
 	}
 
 	return strings.TrimRight(sb.String(), "\n")
@@ -78,11 +86,7 @@ func (b *AssistantTurn) renderText(width int) string {
 
 	opts := []glamour.TermRendererOption{
 		glamour.WithWordWrap(width),
-	}
-	if b.GlamourStyle == "light" {
-		opts = append(opts, glamour.WithAutoStyle())
-	} else {
-		opts = append(opts, glamour.WithAutoStyle())
+		glamour.WithAutoStyle(),
 	}
 
 	r, err := glamour.NewTermRenderer(opts...)
@@ -94,13 +98,4 @@ func (b *AssistantTurn) renderText(width int) string {
 		return b.Text
 	}
 	return strings.TrimSpace(rendered)
-}
-
-// prefixLines prepends prefix to every line of s.
-func prefixLines(s, prefix string) string {
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		lines[i] = prefix + line
-	}
-	return strings.Join(lines, "\n")
 }
