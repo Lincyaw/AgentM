@@ -387,10 +387,19 @@ class _AgentEnvResourceWriter:
             raise FileNotFoundError(
                 f"agent-env writer cannot read {path!r}: outside {self._work_dir!r}"
             )
-        stdout, stderr, code = await self._run(["cat", "--", abs_path])
+        # Use base64 to avoid the ARL gateway's ~8KB stdout truncation.
+        stdout, stderr, code = await self._run(
+            ["bash", "-c", f"base64 -w0 -- {shlex.quote(abs_path)}"],
+        )
         if code != 0:
             raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
-        return stdout
+        try:
+            return base64.b64decode(stdout)
+        except Exception:
+            stdout2, stderr2, code2 = await self._run(["cat", "--", abs_path])
+            if code2 != 0:
+                raise FileNotFoundError(stderr2.decode("utf-8", "replace") or path)
+            return stdout2
 
     async def write(
         self,
