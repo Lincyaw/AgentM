@@ -42,12 +42,13 @@ extensions:
           `sum` is in seconds (s), `count` is span count.
         - `*_metrics.value`: unit depends on the metric name
           (cpu.usage = ratio, memory = bytes, etc.).
-        - `attr.status_code`: values vary by instrumentation —
-          can be 'Error', 'STATUS_CODE_ERROR', 'ERROR', etc.
-          Use case-insensitive match: `LOWER("attr.status_code")
-          LIKE '%error%'`. Also check `attr.http.response.status_code`
-          for HTTP errors (4xx/5xx) and error logs in `*_logs`
-          tables (`WHERE level = 'ERROR'`).
+        - Error signals: do NOT hardcode status value strings.
+          `attr.status_code` values vary by instrumentation. Run
+          `SELECT DISTINCT "attr.status_code"` first to see actual
+          values, then filter accordingly. Also check
+          `attr.http.response.status_code` for HTTP errors and
+          `*_logs` tables for error logs — traces alone can miss
+          errors.
 
         1. `list_tables` — see available parquet views.
         2. Compare the target service's latency, throughput, and error
