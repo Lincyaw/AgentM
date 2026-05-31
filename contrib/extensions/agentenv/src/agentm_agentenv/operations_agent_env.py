@@ -242,22 +242,34 @@ class _AgentEnvFileOperations:
         return out.stdout.encode("utf-8"), out.stderr.encode("utf-8"), out.exit_code
 
     async def read_file(self, path: str) -> bytes:
-        # Use base64 encoding to avoid stdout truncation at the ARL gateway's
-        # buffer limit (~8KB). Raw `cat` output gets clipped for files > 8KB.
+        # ARL gateway truncates binary stdout and text stdout > ~8KB.
+        # Use base64 to temp file + chunked head/tail to read safely.
         abs_path = self._abs(path)
+        tmp = "/tmp/.agentm_frd"
+        qpath = shlex.quote(abs_path)
         stdout, stderr, code = await self._run(
-            ["bash", "-c", f"base64 -w0 -- {shlex.quote(abs_path)}"],
+            ["bash", "-c", f"base64 -w0 -- {qpath} > {tmp} && wc -c < {tmp}"],
         )
         if code != 0:
             raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
-        try:
-            return base64.b64decode(stdout)
-        except Exception:
-            # Fallback: maybe base64 not available, try raw cat
-            stdout2, stderr2, code2 = await self._run(["cat", "--", abs_path])
-            if code2 != 0:
-                raise FileNotFoundError(stderr2.decode("utf-8", "replace") or path)
-            return stdout2
+        total = int(stdout.strip())
+        if total == 0:
+            await self._run(["rm", "-f", tmp])
+            return b""
+        chunks: list[bytes] = []
+        offset = 0
+        chunk_size = 6000
+        while offset < total:
+            start = offset + 1
+            stdout2, _, code2 = await self._run(
+                ["bash", "-c", f"tail -c +{start} {tmp} | head -c {chunk_size}"],
+            )
+            if code2 != 0 or not stdout2:
+                break
+            chunks.append(stdout2)
+            offset += len(stdout2)
+        await self._run(["rm", "-f", tmp])
+        return base64.b64decode(b"".join(chunks))
 
     async def access(self, path: str) -> bool:
         _stdout, _stderr, code = await self._run(["test", "-r", self._abs(path)])
@@ -385,29 +397,34 @@ class _AgentEnvResourceWriter:
             raise FileNotFoundError(
                 f"agent-env writer cannot read {path!r}: outside {self._work_dir!r}"
             )
-        # The ARL gateway truncates stdout at ~8KB. Read in 6KB chunks
-        # via `dd` to bypass the limit. Each chunk stays well under 8KB.
-        # First get the file size.
+        # ARL gateway truncates binary stdout and text stdout > ~8KB.
+        # Workaround: base64-encode the file to a temp file, then read
+        # the base64 text in chunks via head/tail (ASCII, no truncation).
+        tmp = "/tmp/.agentm_rd"
+        qpath = shlex.quote(abs_path)
         stdout, stderr, code = await self._run(
-            ["bash", "-c", f"wc -c < {shlex.quote(abs_path)}"],
+            ["bash", "-c", f"base64 -w0 -- {qpath} > {tmp} && wc -c < {tmp}"],
         )
         if code != 0:
             raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
         total = int(stdout.strip())
         if total == 0:
+            await self._run(["rm", "-f", tmp])
             return b""
         chunks: list[bytes] = []
         offset = 0
         chunk_size = 6000
         while offset < total:
+            start = offset + 1  # tail -c is 1-based
             stdout2, _, code2 = await self._run(
-                ["bash", "-c", f"dd if={shlex.quote(abs_path)} bs=1 skip={offset} count={chunk_size} 2>/dev/null"],
+                ["bash", "-c", f"tail -c +{start} {tmp} | head -c {chunk_size}"],
             )
             if code2 != 0 or not stdout2:
                 break
             chunks.append(stdout2)
             offset += len(stdout2)
-        return b"".join(chunks)
+        await self._run(["rm", "-f", tmp])
+        return base64.b64decode(b"".join(chunks))
 
     async def write(
         self,
