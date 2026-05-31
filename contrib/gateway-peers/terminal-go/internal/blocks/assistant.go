@@ -84,12 +84,14 @@ func (b *AssistantTurn) renderText(width int) string {
 		return b.Text
 	}
 
-	opts := []glamour.TermRendererOption{
-		glamour.WithWordWrap(width),
-		glamour.WithAutoStyle(),
+	style := "dark"
+	if b.GlamourStyle == "light" {
+		style = "light"
 	}
-
-	r, err := glamour.NewTermRenderer(opts...)
+	r, err := glamour.NewTermRenderer(
+		glamour.WithWordWrap(width),
+		glamour.WithStandardStyle(style),
+	)
 	if err != nil {
 		return b.Text
 	}
