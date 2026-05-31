@@ -18,7 +18,6 @@ func (b *SystemTurn) SetCollapsed(_ bool) {} // no-op
 
 func (b *SystemTurn) Render(width int, th *theme.Theme) string {
 	_ = width
-	spine := th.SpineSystem.Render(theme.Spine)
 	label := theme.LabelSystem
 	if b.Source != "" {
 		label += "  (" + b.Source + ")"
@@ -26,9 +25,9 @@ func (b *SystemTurn) Render(width int, th *theme.Theme) string {
 	attrib := th.SystemAttrib.Render(label)
 
 	var sb strings.Builder
-	sb.WriteString(spine + " " + attrib + "\n")
+	sb.WriteString(attrib + "\n")
 	for _, line := range strings.Split(b.Content, "\n") {
-		sb.WriteString(spine + "  " + line + "\n")
+		sb.WriteString("  " + line + "\n")
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
