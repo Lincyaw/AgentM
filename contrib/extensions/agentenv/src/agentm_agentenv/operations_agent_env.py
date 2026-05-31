@@ -842,6 +842,42 @@ def _sync_sandbox_to_host(session: Any, host_dir: str, work_dir: str) -> None:
     )
 
 
+def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
+    """Clone the target repo into the sandbox and checkout the issue branch.
+
+    Uses WORKBUDDY_REPO, WORKBUDDY_ISSUE_NUM, and GH_TOKEN from the host env.
+    If the branch workbuddy/issue-N exists on the remote, checks it out so
+    review/merge agents see the dev agent's changes.
+    """
+    repo = os.environ.get("WORKBUDDY_REPO")
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    issue_num = os.environ.get("WORKBUDDY_ISSUE_NUM")
+    if not repo or not token:
+        print("WARNING: [agent_env_sync] WORKBUDDY_REPO or GH_TOKEN not set, skipping clone", file=sys.stderr)
+        return
+    clone_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+    branch = f"workbuddy/issue-{issue_num}" if issue_num else ""
+    clone_cmd = (
+        f"set -e; "
+        f"git clone --quiet {shlex.quote(clone_url)} {work_dir} 2>/dev/null || "
+        f"  (rm -rf {work_dir} && git clone --quiet {shlex.quote(clone_url)} {work_dir}); "
+        f"cd {work_dir}; "
+        "git config user.email 'workbuddy@local'; "
+        "git config user.name 'workbuddy'; "
+    )
+    if branch:
+        clone_cmd += (
+            f"git fetch origin {shlex.quote(branch)} 2>/dev/null && "
+            f"git checkout {shlex.quote(branch)} 2>/dev/null || true"
+        )
+    out, err, code = _pod_exec(session, clone_cmd, "/")
+    if code != 0:
+        raise RuntimeError(
+            f"operations_agent_env: git clone failed (exit {code}): {err or out}"
+        )
+    print(f"INFO: [agent_env_sync] cloned {repo} into {work_dir}", file=sys.stderr)
+
+
 def _inject_gh_token(session: Any, work_dir: str) -> None:
     """Make GH_TOKEN available in the sandbox so agents can use `gh` CLI.
 
@@ -965,15 +1001,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
     session.create_sandbox()
 
-    # Seed the sandbox from the host work tree before any tool runs. A seed
-    # failure is fatal: continuing would let the agent edit an empty workspace
-    # and silently produce an empty diff/PR.
-    if sync_cwd:
-        _seed_sandbox_from_host(session, gateway_url, host_dir, work_dir)
-
-    # Inject GH_TOKEN into the sandbox so the agent can use `gh` CLI to
-    # read issues, write comments, etc. — same as Claude/Codex runtimes.
+    # Inject GH_TOKEN and clone the repo into the sandbox. The agent works
+    # directly with git/gh inside the sandbox (autonomous mode).
     _inject_gh_token(session, work_dir)
+    _clone_repo_into_sandbox(session, work_dir)
 
     # Upload skill files from host PVC into the sandbox so skill_loader can
     # discover them. Non-fatal: missing dir or upload errors are logged, not raised.
@@ -995,13 +1026,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
-        # Recover the agent's diff into the host work tree BEFORE tearing the
-        # sandbox down, so the dispatcher's commit/push step sees the changes.
-        if sync_cwd:
-            try:
-                _sync_sandbox_to_host(session, host_dir, work_dir)
-            except Exception as exc:  # noqa: BLE001
-                print(f"ERROR: [agent_env_sync] sync-back raised: {exc}", file=sys.stderr)
+        # Agent handles git push/PR/labels autonomously — no sync-back needed.
         try:
             session.delete_sandbox()
         except Exception:  # noqa: BLE001

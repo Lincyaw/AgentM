@@ -1,37 +1,25 @@
 name: agent_env_repo
 description: |
-  agent_env + host-repo workspace sync. Identical to the ``agent_env`` scenario
-  (sandboxed bash + file I/O against an ARL pod's /workspace), but with
-  ``operations_agent_env``'s ``sync_cwd`` enabled: before the run the sandbox is
-  seeded from the host cwd's git HEAD, and on shutdown the agent's diff is applied
-  back onto the host cwd.
+  Autonomous agent sandbox with full git/gh access. The sandbox pod provides
+  environment isolation (OS, toolchains, dependencies) while the agent has
+  complete autonomy: it clones the repo, edits code, runs tests, commits,
+  pushes, creates PRs, writes issue comments, and flips labels ��� exactly
+  like Claude/Codex runtimes but in an isolated container.
 
-  Intended for dispatchers (e.g. workbuddy) that:
-    1. clone a repo into a host work tree with their own credentials,
-    2. hand AgentM that work tree as ``--cwd``,
-    3. want the agent's in-pod edits back in the work tree so they can
-       commit/push them — without any VCS credentials ever entering the pod.
+  On startup the sandbox automatically:
+    1. Clones the target repo (from WORKBUDDY_REPO + GH_TOKEN)
+    2. Checks out the issue branch if it exists (workbuddy/issue-N)
+    3. Configures git identity
+    4. Uploads skill files from host PVC
 
-  Everything ``agent_env`` documents applies (gateway URL, image/pool_ref,
-  ``uv sync --extra agent-env``). The only delta is ``sync_cwd: true``. For
-  non-repo / RL / trajectory-collection uses, prefer the plain ``agent_env``
-  scenario — seeding does nothing useful there and requires a git work tree.
+  The agent then works with full git/gh capabilities inside /workspace.
+  No sync-back needed — the agent pushes its own changes.
 
 extensions:
-  # Sandbox-backed Operations bundle (bash + file I/O against /workspace),
-  # with bidirectional host-repo sync turned on.
   - module: agentm_agentenv.operations_agent_env
     config:
-      # image / experiment_id / gateway_url / namespace fall back to env vars
-      # (AGENTM_AGENT_ENV_*) exactly as in the agent_env scenario.
       work_dir: /workspace
-      # Seed the pod from the host cwd's git HEAD before the run, and apply the
-      # agent's diff back to the host cwd on shutdown. host_workspace defaults to
-      # the AgentM process cwd (the dispatcher-provided --cwd).
-      sync_cwd: true
 
-  # File I/O and shell tools, identical to agent_env. The Operations bundle
-  # above routes these to the sandbox.
   - module: agentm.extensions.builtin.tool_read
   - module: agentm.extensions.builtin.tool_edit
   - module: agentm.extensions.builtin.tool_bash
