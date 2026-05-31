@@ -1,8 +1,6 @@
 package blocks
 
 import (
-	"fmt"
-
 	"github.com/AoyangSpace/agentm-terminal/internal/theme"
 )
 
@@ -18,14 +16,13 @@ func (b *SubagentBlock) Collapsed() bool     { return false }
 func (b *SubagentBlock) SetCollapsed(_ bool) {} // no-op: always one line
 
 func (b *SubagentBlock) Render(_ int, th *theme.Theme) string {
-	glyph := theme.ToolRunning
-	if b.Done {
-		if b.Error == "" {
-			glyph = theme.ToolOK
-		} else {
-			glyph = theme.ToolError
-		}
+	var dot string
+	if !b.Done {
+		dot = th.AssistantDotDim.Render(theme.BlackCircle)
+	} else if b.Error != "" {
+		dot = th.AssistantDotErr.Render(theme.BlackCircle)
+	} else {
+		dot = th.AssistantDotOK.Render(theme.BlackCircle)
 	}
-	line := fmt.Sprintf("%s subagent: %s  %s", theme.PhaseGlyphMap[theme.PhaseSubagent], b.Purpose, glyph)
-	return th.ToolTitle.Render(line)
+	return dot + " " + "subagent: " + b.Purpose
 }
