@@ -1,9 +1,20 @@
-"""Tool atom for the ``extensions.builtin.tool_write`` §7.1 row.
+"""Tool atom for the ``extensions.builtin.tool_write`` row.
 
-Enforces read-before-write for existing files: a file that already exists
-must have been read via tool_read before it can be overwritten. New files
-(path does not exist yet) can be written freely. This prevents blind
-overwrites that discard content the agent has never seen.
+Enforces Claude-Code-style safety gates for file writes:
+
+1. **read-before-write** -- existing files must have a prior *full* read
+   (``is_partial=False``).  Partial reads (offset/limit) are rejected with
+   a clear message.  New files (path does not exist) can be written freely.
+
+2. **file-modified-since-read** -- if ``FileReadState.mtime_ns`` is
+   available (set by another worker's read_state update), the on-disk
+   mtime is compared before writing.  A mismatch means something else
+   touched the file after the agent read it; the write is rejected so the
+   agent re-reads first.
+
+3. **post-write read_state update** -- after a successful write,
+   ``record_read()`` is called with the new file's stats so downstream
+   tool_edit calls see fresh state.
 """
 
 from __future__ import annotations
@@ -39,8 +50,14 @@ _PARAMETERS: Final = {
     "type": "object",
     "properties": {
         "path": {"type": "string", "description": "File path to write."},
-        "content": {"type": "string", "description": "Content to write."},
-        "rationale": {"type": "string", "default": "agent write via tool_write"},
+        "content": {
+            "type": "string",
+            "description": "The full content to write.",
+        },
+        "rationale": {
+            "type": "string",
+            "default": "agent write via tool_write",
+        },
     },
     "required": ["path", "content"],
     "additionalProperties": False,
@@ -58,7 +75,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         normalized = os.path.normpath(path)
 
-        # Check if the file already exists — existing files need a prior read.
+        # Determine if the file already exists on disk.
         file_exists = False
         try:
             await writer.read(path)
@@ -66,11 +83,38 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         except Exception:
             pass
 
-        if file_exists and require_read and get_read_state(normalized) is None:
-            return _error(
-                f"File {path!r} already exists. Read it first before overwriting "
-                "so you can see its current content. Use the read tool, then write."
-            )
+        if file_exists and require_read:
+            rs = get_read_state(normalized)
+
+            # Gate 1: must have been read at all.
+            if rs is None:
+                return _error(
+                    f"File {path!r} already exists. Read it first before "
+                    "overwriting so you can see its current content. "
+                    "Use the read tool, then write."
+                )
+
+            # Gate 2: must have been a full read (no offset/limit).
+            if rs.is_partial:
+                return _error(
+                    f"You read {path!r} with offset/limit (partial view). "
+                    "Read the full file before overwriting."
+                )
+
+            # Gate 3: mtime must not have changed since the read.
+            # mtime_ns is being added by another worker; fall back
+            # gracefully when the field is not present yet.
+            recorded_mtime = getattr(rs, "mtime_ns", None)
+            if recorded_mtime is not None:
+                try:
+                    current_mtime = os.stat(normalized).st_mtime_ns
+                except OSError:
+                    current_mtime = None
+                if current_mtime is not None and current_mtime != recorded_mtime:
+                    return _error(
+                        "File has been modified since you read it. "
+                        "Read it again before writing."
+                    )
 
         try:
             result = await writer.write(
@@ -81,11 +125,30 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             if result.error is not None:
                 return _error(result.error)
 
+            # Post-write: update read_state so subsequent tool_edit calls
+            # see the file as freshly read (full content, not partial).
             total_lines = content.count("\n") + (1 if content else 0)
-            record_read(normalized, total_lines=total_lines, is_partial=False)
+            record_kwargs: dict[str, Any] = {
+                "total_lines": total_lines,
+                "is_partial": False,
+            }
+            # Forward mtime_ns if record_read accepts it (added by the
+            # other worker's read_state update).
+            try:
+                disk_mtime = os.stat(normalized).st_mtime_ns
+                # Only pass mtime_ns if record_read supports it; avoids
+                # TypeError on the current signature.
+                import inspect
+                sig = inspect.signature(record_read)
+                if "mtime_ns" in sig.parameters:
+                    record_kwargs["mtime_ns"] = disk_mtime
+            except OSError:
+                pass
+            record_read(normalized, **record_kwargs)
 
             action = "Updated" if file_exists else "Created"
-            return _ok(f"{action} {path!r} ({len(content)} bytes)")
+            byte_count = len(content.encode("utf-8"))
+            return _ok(f"{action} {path!r} ({byte_count} bytes)")
         except Exception as exc:
             return _error(f"Failed to write {path!r}: {exc}")
 
@@ -93,9 +156,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         FunctionTool(
             name="write",
             description=(
-                "Write a UTF-8 text file to disk. For existing files, you MUST "
-                "read the file first — use this tool only for creating new files "
-                "or for complete rewrites after reading."
+                "Write a UTF-8 text file. For existing files, you MUST read "
+                "the full file first. Prefer the edit tool for modifying "
+                "existing files — use write only for new files or complete "
+                "rewrites."
             ),
             parameters=_PARAMETERS,
             fn=_execute,
