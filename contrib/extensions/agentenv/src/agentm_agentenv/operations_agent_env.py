@@ -285,20 +285,15 @@ class _AgentEnvResourceWriter:
     fail-safe by construction: the agent literally cannot mutate its own
     code from a sandbox session.
 
-    Writes go through ARL ``execute`` steps. ``write`` uploads the bytes
-    via a base64-encoded ``tee`` pipeline so binary content survives;
-    ``replace`` reads-modifies-writes through the same path; ``delete``
-    runs ``rm -f``. Version tokens are best-effort: we use ``stat -c %Y``
-    (mtime) which is enough for ``current_version_for_path`` callers that
-    want an opaque "was-it-the-same-write" check. ``restore`` is not
-    supported — the sandbox doesn't keep per-file history outside of
-    ARL's own snapshot_id mechanism, which is per-step rather than
-    per-file.
+    Read and write use the ARL gateway HTTP file API (``/v1/sessions/{id}/files``)
+    to bypass the ~8KB stdout limit on ``session.execute``. Mtime tokens and
+    directory operations still use execute (small outputs).
     """
 
-    def __init__(self, session: Any, *, work_dir: str) -> None:
+    def __init__(self, session: Any, *, work_dir: str, gateway_url: str) -> None:
         self._session = session
         self._work_dir = work_dir.rstrip("/") or "/"
+        self._gateway_url = gateway_url.rstrip("/")
 
     # --- path classification ---------------------------------------------
 
@@ -364,20 +359,23 @@ class _AgentEnvResourceWriter:
         )
 
     async def _write_bytes(self, abs_path: str, content: bytes) -> tuple[bool, str]:
-        import base64
-
-        encoded = base64.b64encode(content).decode("ascii")
-        # mkdir -p the parent, then atomically replace via temp + mv so
-        # partial writes never leave a half-written file. Using base64
-        # avoids any shell quoting hazard on arbitrary bytes.
-        script = (
-            f"set -e; mkdir -p \"$(dirname -- {_sh_quote(abs_path)})\"; "
-            f"tmp=\"$(mktemp -- {_sh_quote(abs_path + '.XXXXXX')})\"; "
-            f"printf %s {_sh_quote(encoded)} | base64 -d > \"$tmp\"; "
-            f"mv -- \"$tmp\" {_sh_quote(abs_path)}"
-        )
-        _stdout, stderr, code = await self._run(["bash", "-lc", script])
-        return code == 0, stderr.decode("utf-8", "replace")
+        # Use the HTTP file API to bypass the execute stdout/command size limit.
+        session_id = getattr(self._session, "session_id", None)
+        if not session_id:
+            return False, "no session id"
+        # Ensure parent directory exists.
+        await self._run(["bash", "-lc", f"mkdir -p \"$(dirname -- {_sh_quote(abs_path)})\""])
+        # Compute the relative path from work_dir for the upload API.
+        rel_path = abs_path
+        if rel_path.startswith(self._work_dir + "/"):
+            rel_path = rel_path[len(self._work_dir) + 1:]
+        elif rel_path.startswith(self._work_dir):
+            rel_path = rel_path[len(self._work_dir):]
+        try:
+            _upload_to_pod(self._gateway_url, session_id, rel_path, content)
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
 
     # --- ResourceWriter API ----------------------------------------------
 
@@ -387,29 +385,29 @@ class _AgentEnvResourceWriter:
             raise FileNotFoundError(
                 f"agent-env writer cannot read {path!r}: outside {self._work_dir!r}"
             )
-        # The ARL gateway truncates stdout at ~8KB. To read files larger than
-        # that, we base64-encode to a temp file, then read it in chunks.
-        tmp = "/tmp/.agentm_read_buf"
+        # The ARL gateway truncates stdout at ~8KB. Read in 6KB chunks
+        # via `dd` to bypass the limit. Each chunk stays well under 8KB.
+        # First get the file size.
         stdout, stderr, code = await self._run(
-            ["bash", "-c", f"base64 -w0 -- {shlex.quote(abs_path)} > {tmp} && wc -c < {tmp}"],
+            ["bash", "-c", f"wc -c < {shlex.quote(abs_path)}"],
         )
         if code != 0:
             raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
         total = int(stdout.strip())
+        if total == 0:
+            return b""
         chunks: list[bytes] = []
         offset = 0
-        chunk_size = 6000  # well under the 8KB limit
+        chunk_size = 6000
         while offset < total:
             stdout2, _, code2 = await self._run(
-                ["bash", "-c", f"dd if={tmp} bs=1 skip={offset} count={chunk_size} 2>/dev/null"],
+                ["bash", "-c", f"dd if={shlex.quote(abs_path)} bs=1 skip={offset} count={chunk_size} 2>/dev/null"],
             )
             if code2 != 0 or not stdout2:
                 break
             chunks.append(stdout2)
             offset += len(stdout2)
-        await self._run(["rm", "-f", tmp])
-        encoded = b"".join(chunks)
-        return base64.b64decode(encoded)
+        return b"".join(chunks)
 
     async def write(
         self,
@@ -990,7 +988,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # sandbox. The writer rejects any path outside ``work_dir``, so the agent
     # cannot mutate its own code from inside a sandboxed session.
     api.register_resource_writer(
-        _AgentEnvResourceWriter(session, work_dir=work_dir)
+        _AgentEnvResourceWriter(session, work_dir=work_dir, gateway_url=gateway_url)
     )
 
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
