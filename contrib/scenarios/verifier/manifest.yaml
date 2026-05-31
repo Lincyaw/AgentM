@@ -35,13 +35,19 @@ extensions:
 
         Tools: `list_tables`, `query_sql`, `submit_hop_verdict`.
 
-        Data units — keep these straight, do NOT convert:
+        Data units and field values — keep these straight:
         - `*_traces.duration`: microseconds (μs), UBIGINT.
           Query it raw — do not divide by 1e3/1e6.
         - `*_metrics_histogram` (`traces.span.metrics.duration`):
           `sum` is in seconds (s), `count` is span count.
         - `*_metrics.value`: unit depends on the metric name
           (cpu.usage = ratio, memory = bytes, etc.).
+        - `attr.status_code`: values vary by instrumentation —
+          can be 'Error', 'STATUS_CODE_ERROR', 'ERROR', etc.
+          Use case-insensitive match: `LOWER("attr.status_code")
+          LIKE '%error%'`. Also check `attr.http.response.status_code`
+          for HTTP errors (4xx/5xx) and error logs in `*_logs`
+          tables (`WHERE level = 'ERROR'`).
 
         1. `list_tables` — see available parquet views.
         2. Compare the target service's latency, throughput, and error
