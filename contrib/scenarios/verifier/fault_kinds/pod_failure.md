@@ -57,3 +57,33 @@ Because killing a dependency reduces traffic system-wide, a throughput
 drop alone is evidence of a hop ONLY when the two services actually call
 each other — confirm the call relationship (either direction, from the
 normal window) before counting a drop as propagation.
+
+### Throughput drop without latency / error change
+When a service's span count drops but its latency and error rate are
+unchanged, the service itself is healthy — its callers simply stopped
+sending it requests (because THEIR upstream died). This is NOT
+degradation of the checked service. Reject it.
+
+A genuine propagation hop shows the service's OWN health worsening:
+latency tail exploding, error rate rising, or connection errors
+appearing — not just "fewer requests arrived."
+
+### Aggregate latency drops after a kill (overloaded baseline)
+Sometimes the normal window already shows high latency (resource
+pressure before the fault). When the fault kills a dependency and
+traffic drops, contention eases and the surviving requests complete
+faster — so aggregate latency DROPS in the abnormal window.
+
+A latency drop does not automatically mean "fine." If the aggregate
+is ambiguous, check per-span_name: the call path that depends on
+the killed service may show its spans disappearing or fast-failing
+while unrelated paths stay normal.
+
+### Uninstrumented backing components (DB / cache)
+These have no spans. Judge them via the CLIENT spans inside the caller
+(e.g. `WHERE service_name = '<caller>' AND attr.span_kind = 'Client'`).
+If the client-span latency or error rate for DB operations worsened,
+the backing component is affected. If the caller simply stopped
+sending DB calls (because the caller itself died), the backing
+component is NOT degraded — its CPU/memory dropping merely reflects
+reduced load.

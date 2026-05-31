@@ -39,3 +39,12 @@ propagates like cpu_stress: a direct caller waits on the slow dependency, its
 OWN latency rises, and it becomes the `from` of the next hop — each hop must
 show its own latency rise or the cascade stops there. If OOM-kill fires, that
 interval degenerates into a pod_unavailable-style throughput-collapse cascade.
+
+### Co-deployed (shared-node) neighbours
+Same principle as cpu_stress: memory stress on pod A does NOT
+automatically degrade pod B on the same node. A small latency wobble on
+a co-deployed neighbour that falls within its normal day-to-day variance
+is jitter, not propagation. To confirm, look for a disproportionate
+change that clearly stands out, AND corroborate with node-level memory
+metrics showing actual pressure (e.g. page faults spiking, working_set
+approaching node capacity).

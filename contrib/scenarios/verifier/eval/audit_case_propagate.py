@@ -9,22 +9,26 @@ whether it is genuinely degraded. If confirmed, it becomes a
 producer itself. Edges between already-confirmed nodes are verified
 by SQL alone (no agent). Same-round hops run in parallel.
 
-Usage:
-    uv run --no-sync python contrib/scenarios/verifier/eval/audit_case_propagate.py \\
-        <case_dir> [--out <dir>] [--budget N] [--parallel N]
+Usage (single case):
+    uv run python audit_case_propagate.py run <case_dir> [--model X]
+
+Usage (batch — ablation runs):
+    uv run python audit_case_propagate.py batch <dataset_dir> \\
+        --run-dir /tmp/verifier-seed2pro --model litellm --limit 10
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
 import shutil
 import subprocess
-import sys
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Annotated
+
+import typer
 
 REPO = Path(__file__).resolve().parents[4]
 FAULT_KINDS_DIR = REPO / "contrib" / "scenarios" / "verifier" / "fault_kinds"
@@ -328,11 +332,12 @@ def get_injections(data_dir: Path) -> list[dict[str, str]]:
 def get_target_evidence(data_dir: Path, target: str) -> dict[str, object]:
     """Quick SQL check: latency comparison for the injection target."""
     conn = _duckdb_conn(data_dir)
+    # duration is microseconds — convert to ms with /1e3
     rows = conn.execute(
-        "SELECT 'normal' AS win, AVG(duration)/1e6, COUNT(*) "
+        "SELECT 'normal' AS win, AVG(duration)/1e3, COUNT(*) "
         "FROM normal_traces WHERE service_name = ? "
         "UNION ALL "
-        "SELECT 'abnormal', AVG(duration)/1e6, COUNT(*) "
+        "SELECT 'abnormal', AVG(duration)/1e3, COUNT(*) "
         "FROM abnormal_traces WHERE service_name = ?",
         [target, target],
     ).fetchall()
@@ -350,7 +355,12 @@ def get_target_evidence(data_dir: Path, target: str) -> dict[str, object]:
 
 # chaos_type names whose doc filename abbreviates differently than a plain
 # normalization would catch (same fault, shorter slug).
-_FAULT_DOC_ALIAS = {"memorystress": "memstress"}
+_FAULT_DOC_ALIAS = {
+    "memorystress": "memstress",
+    "jvmlatency": "jvmmethodlatency",
+    "podkill": "podfailure",
+    "containerkill": "podfailure",
+}
 
 
 def _norm_fault(name: str) -> str:
@@ -774,28 +784,26 @@ def build_report(
     return report
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("case_dir", type=Path)
-    ap.add_argument("--out", type=Path, default=None)
-    ap.add_argument("--budget", type=int, default=15,
-                    help="tool-call budget per hop agent")
-    ap.add_argument("--parallel", type=int, default=4)
-    ap.add_argument("--model", default=None,
-                    help="config.toml profile name (overrides AGENTM_MODEL)")
-    args = ap.parse_args()
+def run_one_case(
+    case_dir: Path,
+    out_dir: Path,
+    *,
+    budget: int = 15,
+    parallel: int = 4,
+) -> dict:
+    """Run propagation verification on a single case.
 
-    if args.model:
-        os.environ["AGENTM_MODEL"] = args.model
-
-    data_dir = args.case_dir.resolve()
-    out = (args.out or data_dir / ".verify_propagate").resolve()
+    Returns a summary dict with keys: case, seeds, confirmed, edges,
+    rounds, error.  The full report and trace are written to *out_dir*.
+    """
+    data_dir = case_dir.resolve()
+    out = out_dir.resolve()
     out.mkdir(parents=True, exist_ok=True)
+    case_name = data_dir.name
 
     injections = get_injections(data_dir)
     if not injections:
-        print("ERROR: no injections found in injection.json")
-        return 1
+        return {"case": case_name, "error": "no injections"}
 
     fault_kind = injections[0]["chaos_type"]
     fault_doc = _load_fault_doc(fault_kind)
@@ -820,7 +828,7 @@ def main() -> int:
 
     result = propagate(
         data_dir, injections, neighbor_graph, fault_doc, out,
-        budget=args.budget, parallel=args.parallel,
+        budget=budget, parallel=parallel,
         infra_nodes=infra_nodes, node_map=node_map,
     )
     (out / "propagation_trace.json").write_text(
@@ -832,11 +840,317 @@ def main() -> int:
         json.dumps(report, indent=2, ensure_ascii=False)
     )
 
+    seeds = [i["target"] for i in injections]
+    confirmed = result["confirmed_nodes"]
+    propagated = [s for s in confirmed if s not in seeds]
+    edge_count = len(result["edges"])
+
     print(f"\nRounds: {result['rounds']}")
-    print(f"Confirmed: {result['confirmed_nodes']}")
-    print(f"Edges ({len(result['edges'])}): {result['edges']}")
-    return 0
+    print(f"Confirmed: {confirmed}")
+    print(f"Edges ({edge_count}): {result['edges']}")
+
+    return {
+        "case": case_name,
+        "fault_kind": fault_kind,
+        "seeds": seeds,
+        "confirmed": confirmed,
+        "propagated": propagated,
+        "edges": edge_count,
+        "rounds": result["rounds"],
+    }
+
+
+# ------------------------------------------------------------------
+# Batch runner
+# ------------------------------------------------------------------
+
+def _read_cached_summary(out_dir: Path, case_name: str) -> dict | None:
+    report_path = out_dir / "report.json"
+    trace_path = out_dir / "propagation_trace.json"
+    if not report_path.exists() or not trace_path.exists():
+        return None
+    try:
+        report = json.loads(report_path.read_text())
+        trace = json.loads(trace_path.read_text())
+    except Exception:  # noqa: BLE001
+        return None
+    seeds = [i["target_service"] for i in report.get("injections", [])]
+    confirmed = trace.get("confirmed_nodes", [])
+    return {
+        "case": case_name,
+        "fault_kind": report["injections"][0]["fault_kind"]
+        if report.get("injections") else "unknown",
+        "seeds": seeds,
+        "confirmed": confirmed,
+        "propagated": [s for s in confirmed if s not in seeds],
+        "edges": len(report.get("propagation_edges", [])),
+        "rounds": trace.get("rounds", 0),
+        "cached": True,
+    }
+
+
+def _run_or_cache(
+    dataset_dir: Path,
+    run_dir: Path,
+    name: str,
+    idx: int,
+    total: int,
+    budget: int,
+    parallel: int,
+) -> dict:
+    """Run one case or return cached result.  Thread-safe."""
+    case_out = run_dir / name
+    existing = _read_cached_summary(case_out, name)
+    if existing:
+        prop_str = (f"propagated={existing['propagated']}"
+                    if existing["propagated"] else "no propagation")
+        print(f"[{idx}/{total}] {name} CACHED: {prop_str}", flush=True)
+        return existing
+
+    print(f"[{idx}/{total}] {name} ...", flush=True)
+    try:
+        summary = run_one_case(
+            dataset_dir / name, case_out,
+            budget=budget, parallel=parallel,
+        )
+        if "error" in summary:
+            print(f"  [{name}] ERROR: {summary['error']}", flush=True)
+        else:
+            prop_str = (f"propagated={summary['propagated']}"
+                        if summary.get("propagated") else "no propagation")
+            print(f"  [{name}] OK: {prop_str}", flush=True)
+        return summary
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [{name}] EXCEPTION: {exc}", flush=True)
+        return {"case": name, "error": str(exc)}
+
+
+def run_batch(
+    dataset_dir: Path,
+    run_dir: Path,
+    *,
+    budget: int = 15,
+    parallel: int = 4,
+    case_parallel: int = 1,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict]:
+    """Run propagation on multiple cases under *dataset_dir*.
+
+    *case_parallel* controls how many cases run concurrently (each case
+    uses up to *parallel* hop agents internally).  A
+    ``run_summary.jsonl`` in *run_dir* holds one JSON line per case,
+    suitable for diff/analysis across ablation runs.
+    """
+    cases = sorted(p.name for p in dataset_dir.iterdir() if p.is_dir())
+    cases = cases[offset:]
+    if limit is not None:
+        cases = cases[:limit]
+
+    total = len(cases)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    if case_parallel <= 1:
+        summaries = [
+            _run_or_cache(dataset_dir, run_dir, name, i, total, budget, parallel)
+            for i, name in enumerate(cases, 1)
+        ]
+    else:
+        results: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=case_parallel) as pool:
+            futures = {
+                pool.submit(
+                    _run_or_cache,
+                    dataset_dir, run_dir, name, i, total, budget, parallel,
+                ): name
+                for i, name in enumerate(cases, 1)
+            }
+            for future in as_completed(futures):
+                name = futures[future]
+                results[name] = future.result()
+        summaries = [results[name] for name in cases]
+
+    ok = sum(1 for s in summaries if "error" not in s)
+    fail = sum(1 for s in summaries if "error" in s)
+    cached = sum(1 for s in summaries if s.get("cached"))
+
+    summary_path = run_dir / "run_summary.jsonl"
+    with open(summary_path, "w") as f:
+        for s in summaries:
+            f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
+    print(f"\n{'='*50}")
+    print(f"Total: {total}  OK: {ok}  Failed: {fail}  Cached: {cached}")
+    prop_count = sum(1 for s in summaries if s.get("propagated"))
+    print(f"Cases with propagation: {prop_count}/{ok}")
+    print(f"Summary: {summary_path}")
+
+    return summaries
+
+
+# ------------------------------------------------------------------
+# CLI
+# ------------------------------------------------------------------
+
+app = typer.Typer(
+    name="audit-propagate",
+    help=__doc__,
+    add_completion=False,
+    no_args_is_help=True,
+    pretty_exceptions_show_locals=False,
+)
+
+
+def _set_model(model: str | None) -> None:
+    if model:
+        os.environ["AGENTM_MODEL"] = model
+
+
+@app.command()
+def run(
+    case_dir: Annotated[Path, typer.Argument(help="single case directory")],
+    out: Annotated[Path | None, typer.Option(help="output directory")] = None,
+    budget: Annotated[int, typer.Option(help="tool-call budget per hop agent")] = 15,
+    parallel: Annotated[int, typer.Option(help="concurrent hop agents")] = 4,
+    model: Annotated[str | None, typer.Option(help="config.toml profile name")] = None,
+) -> None:
+    """Run propagation check on a single case."""
+    _set_model(model)
+    out_dir = out or case_dir.resolve() / ".verify_propagate"
+    summary = run_one_case(case_dir, out_dir, budget=budget, parallel=parallel)
+    if "error" in summary:
+        raise typer.Exit(1)
+
+
+@app.command()
+def batch(
+    dataset_dir: Annotated[Path, typer.Argument(help="directory containing case subdirectories")],
+    run_dir: Annotated[Path, typer.Option("--run-dir", help="output directory for this run")],
+    budget: Annotated[int, typer.Option(help="tool-call budget per hop agent")] = 15,
+    parallel: Annotated[int, typer.Option(help="concurrent hop agents per case")] = 4,
+    case_parallel: Annotated[int, typer.Option("--case-parallel", help="concurrent cases")] = 1,
+    model: Annotated[str | None, typer.Option(help="config.toml profile name")] = None,
+    limit: Annotated[int | None, typer.Option(help="max cases to run")] = None,
+    offset: Annotated[int, typer.Option(help="skip first N cases")] = 0,
+) -> None:
+    """Run propagation on all cases in a dataset."""
+    _set_model(model)
+    run_batch(
+        dataset_dir.resolve(), run_dir.resolve(),
+        budget=budget, parallel=parallel,
+        case_parallel=case_parallel,
+        limit=limit, offset=offset,
+    )
+
+
+def _gt_services(case_dir: Path) -> tuple[set[str], set[str]]:
+    """Extract GT injection seeds and propagated services.
+
+    Seeds come from injection.json ``engine_config``.  Propagated
+    services come from causal_graph.json: fold the span-level graph to
+    service granularity via ``component_to_service``, then subtract
+    the seeds.
+    """
+    inj_path = case_dir / "injection.json"
+    cg_path = case_dir / "causal_graph.json"
+    if not inj_path.exists():
+        return set(), set()
+
+    inj = json.loads(inj_path.read_text())
+    seeds: set[str] = set()
+    raw_ec = inj.get("engine_config", [])
+    if isinstance(raw_ec, list):
+        for item in raw_ec:
+            if isinstance(item, dict) and item.get("app"):
+                seeds.add(item["app"])
+    if not seeds:
+        for item in inj.get("engine_config_summary", []):
+            if isinstance(item, dict) and item.get("app"):
+                seeds.add(item["app"])
+    if not seeds:
+        gt = inj.get("ground_truth")
+        if isinstance(gt, dict):
+            for s in gt.get("service", []):
+                seeds.add(s)
+        elif isinstance(gt, list):
+            for g in gt:
+                if isinstance(g, dict):
+                    for s in g.get("service", []):
+                        seeds.add(s)
+
+    if not cg_path.exists():
+        return seeds, set()
+
+    cg = json.loads(cg_path.read_text())
+    c2s = cg.get("component_to_service", {})
+    gt_all = {svc for svc in c2s.values() if svc}
+    return seeds, gt_all - seeds
+
+
+@app.command()
+def diff(
+    dataset_dir: Annotated[Path, typer.Argument(help="dataset with GT labels")],
+    run_dir: Annotated[Path, typer.Option("--run-dir", help="verifier run output")],
+) -> None:
+    """Compare verifier findings against GT labels."""
+    summary_path = run_dir / "run_summary.jsonl"
+    if not summary_path.exists():
+        typer.echo("No run_summary.jsonl found — run batch first.")
+        raise typer.Exit(1)
+
+    with open(summary_path) as f:
+        cases = [json.loads(line) for line in f]
+
+    total = new_total = missed_total = match_total = 0
+    diff_rows: list[dict] = []
+
+    for s in cases:
+        name = s["case"]
+        if "error" in s:
+            continue
+        total += 1
+        case_dir = dataset_dir / name
+        gt_inj, gt_prop = _gt_services(case_dir)
+        v_seeds = set(s.get("seeds", []))
+        v_prop = set(s.get("propagated", []))
+
+        new_finds = v_prop - gt_prop - v_seeds
+        missed = gt_prop - v_prop
+
+        row = {
+            "case": name,
+            "gt_inj": sorted(gt_inj), "gt_prop": sorted(gt_prop),
+            "v_seeds": sorted(v_seeds), "v_prop": sorted(v_prop),
+            "new": sorted(new_finds), "missed": sorted(missed),
+        }
+        diff_rows.append(row)
+
+        tag = "MATCH" if (not new_finds and not missed) else ""
+        if new_finds:
+            new_total += len(new_finds)
+            tag = f"NEW +{len(new_finds)}"
+        if missed:
+            missed_total += len(missed)
+            tag += f"  MISSED -{len(missed)}"
+        if not new_finds and not missed:
+            match_total += 1
+
+        typer.echo(f"{name}  {tag}")
+        if new_finds:
+            typer.echo(f"  new:    {sorted(new_finds)}")
+        if missed:
+            typer.echo(f"  missed: {sorted(missed)}")
+
+    typer.echo(f"\n{'='*50}")
+    typer.echo(f"Cases: {total}  Match: {match_total}  "
+               f"New findings: {new_total}  Missed: {missed_total}")
+
+    diff_path = run_dir / "gt_diff.jsonl"
+    with open(diff_path, "w") as f:
+        for row in diff_rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    typer.echo(f"Diff: {diff_path}")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    app()

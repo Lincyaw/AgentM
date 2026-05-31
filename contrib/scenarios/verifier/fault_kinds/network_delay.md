@@ -20,3 +20,12 @@ communication; the peer experiences unreachability / latency from
 its perspective. From the rule-bearing side, latency cascades upward
 through its callers, who themselves slow down as their own
 dependencies-of-this-side block on slow responses.
+
+### Uninstrumented backing components (DB / cache)
+If the checked service has no traces of its own, judge it via the
+CLIENT spans inside the caller (DB-call latency / errors). If those
+client spans show the same degradation as the caller's own spans,
+the backing component path is genuinely affected. But if the caller
+simply sent fewer requests (throughput drop without latency/error
+change on the client spans), the backing component is not degraded —
+it just received less traffic.
