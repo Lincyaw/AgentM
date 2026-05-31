@@ -62,6 +62,7 @@ import asyncio
 import base64
 import json
 import os
+import shlex
 import subprocess
 import sys
 import urllib.request
@@ -241,10 +242,22 @@ class _AgentEnvFileOperations:
         return out.stdout.encode("utf-8"), out.stderr.encode("utf-8"), out.exit_code
 
     async def read_file(self, path: str) -> bytes:
-        stdout, stderr, code = await self._run(["cat", "--", self._abs(path)])
+        # Use base64 encoding to avoid stdout truncation at the ARL gateway's
+        # buffer limit (~8KB). Raw `cat` output gets clipped for files > 8KB.
+        abs_path = self._abs(path)
+        stdout, stderr, code = await self._run(
+            ["bash", "-c", f"base64 -w0 -- {shlex.quote(abs_path)}"],
+        )
         if code != 0:
             raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
-        return stdout
+        try:
+            return base64.b64decode(stdout)
+        except Exception:
+            # Fallback: maybe base64 not available, try raw cat
+            stdout2, stderr2, code2 = await self._run(["cat", "--", abs_path])
+            if code2 != 0:
+                raise FileNotFoundError(stderr2.decode("utf-8", "replace") or path)
+            return stdout2
 
     async def access(self, path: str) -> bool:
         _stdout, _stderr, code = await self._run(["test", "-r", self._abs(path)])
