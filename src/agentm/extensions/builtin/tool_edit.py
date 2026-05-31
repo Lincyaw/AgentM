@@ -12,6 +12,7 @@ the current session before it can be edited. Supports two modes:
 
 from __future__ import annotations
 
+import os
 from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
@@ -74,11 +75,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # Track reads from tool_read via the event bus.
     from agentm.core.abi import ToolCallEvent
 
+    def _normalize(p: str) -> str:
+        return os.path.normpath(p)
+
     def _on_tool_call(event: ToolCallEvent) -> None:
-        if event.name == "read":
-            path = event.arguments.get("path")
+        if event.tool_name == "read":
+            path = event.args.get("path")
             if path:
-                read_files.add(str(path))
+                read_files.add(_normalize(str(path)))
 
     api.on(ToolCallEvent.CHANNEL, _on_tool_call)
 
@@ -91,7 +95,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         replace_all = bool(args.get("replace_all", False))
         rationale = str(args.get("rationale", "agent edit via tool_edit"))
 
-        if require_read and path not in read_files:
+        if require_read and _normalize(path) not in read_files:
             return _error(
                 f"You must read {path!r} before editing it. "
                 "Use the read tool first so you can see the exact content and line numbers."
