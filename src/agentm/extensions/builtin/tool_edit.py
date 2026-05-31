@@ -8,6 +8,10 @@ the current session before it can be edited. Supports two modes:
 2. **Line-range replacement** (``start_line`` + ``end_line`` + ``new_string``):
    replace lines [start, end] (1-based, inclusive) with new_string.
    Requires a prior read so the agent has seen the line numbers.
+
+Aligned with Claude Code's ``FileEditTool``: file-modified-since-read
+detection, improved whitespace-tolerant string matching, and post-edit
+read-state update.
 """
 
 from __future__ import annotations
@@ -17,7 +21,12 @@ from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.tool import TOOL_RESULT_FORMAT_METADATA_KEY
-from agentm.core.lib.read_state import get_read_state
+from agentm.core.lib.read_state import (
+    content_hash_for,
+    file_modified_since_read,
+    get_read_state,
+    record_read,
+)
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 
@@ -115,6 +124,36 @@ def _snippet_around(content: str, start_line: int, end_line: int) -> str:
     return "\n".join(numbered)
 
 
+def _update_read_state_after_edit(normalized_path: str) -> None:
+    """Refresh read_state for *normalized_path* after a successful edit.
+
+    Without this, the next edit to the same file would trip the
+    file-modified-since-read guard because our own write bumped the mtime.
+    """
+    old = get_read_state(normalized_path)
+    total_lines = old.total_lines if old else 0
+    is_partial = old.is_partial if old else False
+    try:
+        stat = os.stat(normalized_path)
+        mtime_ns = stat.st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    try:
+        with open(normalized_path, "rb") as fh:
+            raw = fh.read()
+        chash = content_hash_for(raw)
+        total_lines = raw.decode("utf-8", errors="replace").count("\n") + 1
+    except OSError:
+        chash = ""
+    record_read(
+        normalized_path,
+        total_lines=total_lines,
+        is_partial=is_partial,
+        mtime_ns=mtime_ns,
+        content_hash=chash,
+    )
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     writer = api.get_resource_writer()
     require_read = bool(config.get("require_read", True))
@@ -136,6 +175,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "Use the read tool first so you can see the exact content and line numbers."
             )
 
+        # File-modified-since-read detection (aligned with Claude Code)
+        if state is not None and file_modified_since_read(normalized):
+            return _error(
+                f"File has been modified since you last read it. "
+                f"Read {path!r} again before editing."
+            )
+
         has_old = old_string is not None and old_string != ""
         has_lines = start_line is not None and end_line is not None
 
@@ -148,15 +194,22 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             original = (await writer.read(path)).decode("utf-8", errors="replace")
 
             if has_lines:
-                return await _line_range_replace(
+                result = await _line_range_replace(
                     writer, path, original, int(start_line), int(end_line),
                     new_string, rationale,
                 )
             else:
-                return await _string_replace(
+                result = await _string_replace(
                     writer, path, original, str(old_string), new_string,
                     replace_all, rationale,
                 )
+
+            # Post-edit: update read_state so subsequent edits don't
+            # false-positive on "modified since read".
+            if not result.is_error:
+                _update_read_state_after_edit(normalized)
+
+            return result
         except Exception as exc:
             return _error(f"Failed to edit {path!r}: {exc}")
 
@@ -176,15 +229,50 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
 
+def _strip_line_whitespace(s: str) -> str:
+    """Strip leading/trailing whitespace from each line, preserving newlines."""
+    return "\n".join(line.strip() for line in s.split("\n"))
+
+
 def _find_actual_string(file_content: str, search: str) -> str | None:
-    """Find *search* in *file_content*, falling back to quote-normalized matching."""
+    """Find *search* in *file_content* with progressive fallbacks.
+
+    Aligned with Claude Code's ``findActualString``:
+    1. Exact match
+    2. Quote-normalized match (curly -> straight)
+    3. Whitespace-trimmed per-line match
+
+    Always returns the ACTUAL string from the file, not the search string.
+    """
+    # 1. Exact match
     if search in file_content:
         return search
+
+    # 2. Quote-normalized match
     norm_search = _normalize_quotes(search)
     norm_file = _normalize_quotes(file_content)
     idx = norm_file.find(norm_search)
     if idx != -1:
-        return file_content[idx : idx + len(search)]
+        return file_content[idx : idx + len(norm_search)]
+
+    # 3. Whitespace-trimmed per-line match
+    stripped_search = _strip_line_whitespace(search)
+    stripped_file = _strip_line_whitespace(file_content)
+    idx = stripped_file.find(stripped_search)
+    if idx != -1:
+        # Map the position in the stripped file back to the original.
+        # Walk the original file's lines to find the matching range.
+        orig_lines = file_content.split("\n")
+        stripped_lines = stripped_file.split("\n")
+        # Find which line in stripped_file the match starts on
+        prefix = stripped_file[:idx]
+        start_line = prefix.count("\n")
+        # Count how many stripped lines the search spans
+        search_line_count = stripped_search.count("\n") + 1
+        # Extract corresponding lines from the original
+        matched_lines = orig_lines[start_line : start_line + search_line_count]
+        return "\n".join(matched_lines)
+
     return None
 
 
