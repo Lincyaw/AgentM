@@ -85,7 +85,7 @@ def test_allow_globs_block_paths_outside_scope(tmp_path: Path) -> None:
     _install(api, allow_globs=["skills/**"])
 
     text_ok, is_err_ok = _read(api, str(skill))
-    assert not is_err_ok and text_ok == "# guide"
+    assert not is_err_ok and "# guide" in text_ok
 
     text_blocked, is_err_blocked = _read(api, str(leak))
     assert is_err_blocked

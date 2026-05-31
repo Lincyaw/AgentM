@@ -47,6 +47,12 @@ dependencies = [
 agent-env = [
     { name = "agentm-agentenv" },
 ]
+eval = [
+    { name = "duckdb" },
+]
+terminal = [
+    { name = "agentm-terminal" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -62,7 +68,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agentm-agentenv", marker = "extra == 'agent-env'", editable = "contrib/extensions/agentenv" },
+    { name = "agentm-terminal", marker = "extra == 'terminal'", editable = "contrib/gateway-peers/terminal" },
     { name = "anthropic", specifier = ">=0.86.0" },
+    { name = "duckdb", marker = "extra == 'eval'", specifier = ">=1.5.2" },
     { name = "openai", specifier = ">=1.50.0" },
     { name = "opentelemetry-api", specifier = ">=1.30.0" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.30.0" },
@@ -74,7 +82,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.25.1" },
     { name = "websockets", specifier = ">=12.0" },
 ]
-provides-extras = ["agent-env"]
+provides-extras = ["agent-env", "eval", "terminal"]
 
 [package.metadata.requires-dev]
 dev = [

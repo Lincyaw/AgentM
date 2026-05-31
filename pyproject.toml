@@ -36,6 +36,12 @@ dependencies = [
 agent-env = [
     "agentm-agentenv",
 ]
+eval = [
+    "duckdb>=1.5.2",
+]
+terminal = [
+    "agentm-terminal",
+]
 
 [dependency-groups]
 dev = [
@@ -73,6 +79,7 @@ members = [
 # a published wheel takes over transparently outside the workspace.
 [tool.uv.sources]
 agentm-agentenv = { workspace = true }
+agentm-terminal = { workspace = true }
 
 [tool.pytest.ini_options]
 # UI tests exercise the Textual TUI; they pass but don't map to any

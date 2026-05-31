@@ -26,7 +26,8 @@ judge_concurrency: 5
 judge_model:
   model_provider:
     type: "chat.completions"
-    model: "doubao-seed-2-0-pro-260215"
+    model: "DeepSeek-V4-pro"
     api_format: "openai"
-    base_url: "https://ark.cn-beijing.volces.com/api/v3"
-    verify_ssl: true
+    base_url: "http://101.96.215.245:8088/v1"
+    api_key: "sk-DLbuXPx8tzeb29atiigWEIXoU9P0xkh_2amQNqJHpMk"
+    verify_ssl: false
