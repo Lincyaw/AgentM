@@ -35,20 +35,32 @@ extensions:
 
         Tools: `list_tables`, `query_sql`, `submit_hop_verdict`.
 
-        Data units and field values — keep these straight:
+        Data units — keep these straight, do NOT convert:
         - `*_traces.duration`: microseconds (μs), UBIGINT.
           Query it raw — do not divide by 1e3/1e6.
         - `*_metrics_histogram` (`traces.span.metrics.duration`):
           `sum` is in seconds (s), `count` is span count.
         - `*_metrics.value`: unit depends on the metric name
           (cpu.usage = ratio, memory = bytes, etc.).
-        - Error signals: do NOT hardcode status value strings.
-          `attr.status_code` values vary by instrumentation. Run
-          `SELECT DISTINCT "attr.status_code"` first to see actual
-          values, then filter accordingly. Also check
-          `attr.http.response.status_code` for HTTP errors and
-          `*_logs` tables for error logs — traces alone can miss
-          errors.
+
+        Field values — do NOT hardcode enum strings. Column values
+        like `attr.status_code` vary across instrumentation. Always
+        run `SELECT DISTINCT` first to discover actual values before
+        filtering.
+
+        Cross-signal verification — no single signal is reliable
+        alone. Corroborate across ALL three modalities:
+        - **Traces**: latency, throughput, span-level status code.
+          Check `attr.http.response.status_code` for HTTP errors
+          (4xx/5xx) in addition to `attr.status_code`.
+        - **Logs**: `*_logs` tables — check error log count between
+          normal and abnormal. Traces can miss errors that logs
+          capture.
+        - **Metrics**: `*_metrics` tables — CPU, memory, pod
+          restarts for resource-level signals.
+        A verdict based on only one modality is fragile. If traces
+        look clean, check logs before rejecting. If aggregates look
+        ambiguous, break down by span_name.
 
         1. `list_tables` — see available parquet views.
         2. Compare the target service's latency, throughput, and error
