@@ -74,7 +74,9 @@ _PARAMETERS: Final[dict[str, Any]] = {
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     cwd = Path(api.cwd)
-    obs_dir = cwd / ".agentm/observability"
+    from agentm.core.lib.observability_dir import resolve_observability_dir
+
+    obs_dir = resolve_observability_dir(cwd)
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         task_class = str(args["task_class"])

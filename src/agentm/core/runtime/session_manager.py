@@ -363,8 +363,9 @@ class SessionManager:
         codebase should rely on it.
         """
 
-        base = Path(cwd) if cwd else Path.cwd()
-        return base / ".agentm" / "observability"
+        from agentm.core.runtime.otel_export import resolve_observability_dir
+
+        return resolve_observability_dir(cwd)
 
     @staticmethod
     def _find_most_recent(session_dir: Path) -> Path | None:

@@ -85,7 +85,9 @@ class DefaultProjectLayout:
         return [self.cwd / ".agentm" / "prompts"]
 
     def observability_root(self) -> Path:
-        return self.cwd / ".agentm" / "observability"
+        from agentm.core.lib.observability_dir import resolve_observability_dir
+
+        return resolve_observability_dir(self.cwd)
 
 
 def default_project_layout(cwd: str | Path) -> ProjectLayout:

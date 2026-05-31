@@ -75,11 +75,14 @@ __all__ = [
     "iter_log_records",
     "iter_spans",
     "otlp_unwrap",
+    "resolve_observability_dir",
     "setup_process_telemetry",
     "setup_session_telemetry",
     "shutdown_process_telemetry",
     "span_attr",
 ]
+
+from agentm.core.lib.observability_dir import resolve_observability_dir  # noqa: E402
 
 
 def otlp_unwrap(value: Any) -> Any:
@@ -757,7 +760,7 @@ def setup_session_telemetry(
     tracer_provider, logger_provider = setup_process_telemetry()
 
     if file_path is None:
-        file_path = Path(cwd) / ".agentm" / "observability" / f"{session_id}.jsonl"
+        file_path = resolve_observability_dir(cwd) / f"{session_id}.jsonl"
     else:
         file_path = Path(file_path)
 

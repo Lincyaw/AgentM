@@ -162,7 +162,9 @@ def _evaluate_and_maybe_rollback(
             return
 
     # Collect recent production trace files, newest first by mtime.
-    obs_dir = cwd / ".agentm/observability"
+    from agentm.core.lib.observability_dir import resolve_observability_dir
+
+    obs_dir = resolve_observability_dir(cwd)
     if not obs_dir.is_dir():
         return
     candidates = sorted(

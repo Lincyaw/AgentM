@@ -52,9 +52,9 @@ class ResumeCommand:
                 ]
             )
 
-        trace_path = (
-            Path(ctx.cwd) / ".agentm" / "observability" / f"{target}.jsonl"
-        )
+        from agentm.core.runtime.otel_export import resolve_observability_dir
+
+        trace_path = resolve_observability_dir(ctx.cwd) / f"{target}.jsonl"
         if not trace_path.exists():
             return CommandResult(
                 outbound=[
