@@ -9,6 +9,7 @@ from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.operations import FileOperations
+from agentm.core.lib.read_state import record_read
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 
@@ -123,13 +124,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 sliced = all_lines[start:]
             else:
                 sliced = all_lines[start : start + limit]
+            is_partial = start > 0 or (limit >= 0 and start + limit < total)
+            record_read(path, total_lines=total, is_partial=is_partial)
             # Format with line numbers (1-based) like `cat -n`.
             numbered = [
                 f"{start + i + 1}\t{line}"
                 for i, line in enumerate(sliced)
             ]
             header = f"({total} lines total)"
-            if start > 0 or (limit >= 0 and start + limit < total):
+            if is_partial:
                 header = f"(showing lines {start + 1}-{start + len(sliced)} of {total})"
             return _ok(header + "\n" + "\n".join(numbered))
         except Exception as exc:
