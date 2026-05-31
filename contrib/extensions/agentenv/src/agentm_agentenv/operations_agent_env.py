@@ -825,6 +825,46 @@ def _sync_sandbox_to_host(session: Any, host_dir: str, work_dir: str) -> None:
     )
 
 
+def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> None:
+    """Upload SKILL.md files from ``AGENTM_SKILLS_DIR`` into the sandbox.
+
+    Skills are stored on the host PVC (persistent across sessions). This
+    function copies them into ``<work_dir>/.agentm/skills/`` inside the
+    sandbox so ``skill_loader`` can discover them at its normal path.
+    """
+    skills_dir = os.environ.get("AGENTM_SKILLS_DIR")
+    if not skills_dir or not os.path.isdir(skills_dir):
+        return
+    session_id = getattr(session, "session_id", None)
+    if not session_id:
+        return
+    target_base = ".agentm/skills"
+    _pod_exec(session, f"mkdir -p {work_dir}/{target_base}", work_dir)
+    count = 0
+    for entry in sorted(os.listdir(skills_dir)):
+        entry_path = os.path.join(skills_dir, entry)
+        if os.path.isdir(entry_path):
+            skill_file = os.path.join(entry_path, "SKILL.md")
+            if os.path.isfile(skill_file):
+                target = f"{target_base}/{entry}/SKILL.md"
+                _pod_exec(session, f"mkdir -p {work_dir}/{target_base}/{entry}", work_dir)
+                try:
+                    with open(skill_file, "rb") as fh:
+                        _upload_to_pod(gateway_url, session_id, target, fh.read())
+                    count += 1
+                except Exception as exc:
+                    print(f"WARNING: [agent_env_sync] skill upload failed for {entry}: {exc}", file=sys.stderr)
+        elif entry.endswith(".md") and os.path.isfile(entry_path):
+            try:
+                with open(entry_path, "rb") as fh:
+                    _upload_to_pod(gateway_url, session_id, f"{target_base}/{entry}", fh.read())
+                count += 1
+            except Exception as exc:
+                print(f"WARNING: [agent_env_sync] skill upload failed for {entry}: {exc}", file=sys.stderr)
+    if count:
+        print(f"INFO: [agent_env_sync] uploaded {count} skill(s) to {target_base}/", file=sys.stderr)
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # Deferred import keeps the SDK truly optional — atoms that never run
     # under agent-env shouldn't fail to load just because ``arl`` is absent.
@@ -895,6 +935,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # and silently produce an empty diff/PR.
     if sync_cwd:
         _seed_sandbox_from_host(session, gateway_url, host_dir, work_dir)
+
+    # Upload skill files from host PVC into the sandbox so skill_loader can
+    # discover them. Non-fatal: missing dir or upload errors are logged, not raised.
+    _upload_skills_to_sandbox(session, gateway_url, work_dir)
 
     api.register_operations(
         file=_AgentEnvFileOperations(session, default_work_dir=work_dir),
