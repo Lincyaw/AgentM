@@ -1387,6 +1387,97 @@ def judge(
         print(f"Output: {final_path}")
 
 
+def _run_judge_or_skip(
+    dataset_dir: Path,
+    run_dir: Path,
+    name: str,
+    idx: int,
+    total: int,
+    budget: int,
+) -> dict:
+    """Run judge on one case, skip if final_propagation.json already exists."""
+    case_out = run_dir / name
+    final_path = case_out / "final_propagation.json"
+    if final_path.exists():
+        try:
+            fp = json.loads(final_path.read_text())
+            overrides = fp.get("overrides", [])
+            print(f"[{idx}/{total}] {name} CACHED: "
+                  f"{len(fp['confirmed_nodes'])} confirmed, "
+                  f"{len(overrides)} overrides", flush=True)
+            return {"case": name, "cached": True,
+                    "confirmed": len(fp["confirmed_nodes"]),
+                    "overrides": len(overrides)}
+        except Exception:  # noqa: BLE001
+            pass
+
+    trace_path = case_out / "propagation_trace.json"
+    if not trace_path.exists():
+        print(f"[{idx}/{total}] {name} SKIP: no hop results", flush=True)
+        return {"case": name, "error": "no hop results"}
+
+    print(f"[{idx}/{total}] {name} judging...", flush=True)
+    try:
+        result = run_judge(dataset_dir / name, case_out, budget=budget)
+        fp = json.loads(final_path.read_text()) if final_path.exists() else {}
+        overrides = fp.get("overrides", [])
+        verdict = result.get("verdict", "none")
+        print(f"  [{name}] judge={verdict}, "
+              f"{len(fp.get('confirmed_nodes', []))} confirmed, "
+              f"{len(overrides)} overrides", flush=True)
+        return {"case": name, "judge_verdict": verdict,
+                "confirmed": len(fp.get("confirmed_nodes", [])),
+                "overrides": len(overrides)}
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [{name}] EXCEPTION: {exc}", flush=True)
+        return {"case": name, "error": str(exc)}
+
+
+@app.command(name="judge-batch")
+def judge_batch(
+    dataset_dir: Annotated[Path, typer.Argument(help="dataset directory")],
+    run_dir: Annotated[Path, typer.Option("--run-dir", help="verifier run output")],
+    budget: Annotated[int, typer.Option(help="tool-call budget per judge")] = 20,
+    parallel: Annotated[int, typer.Option(help="concurrent judge agents")] = 10,
+    model: Annotated[str | None, typer.Option(help="config.toml profile name")] = None,
+    limit: Annotated[int | None, typer.Option(help="max cases")] = None,
+) -> None:
+    """Run judge on all completed cases in a batch run."""
+    _set_model(model)
+    cases = sorted(
+        p.name for p in run_dir.iterdir()
+        if p.is_dir() and (p / "propagation_trace.json").exists()
+    )
+    if limit:
+        cases = cases[:limit]
+    total = len(cases)
+    print(f"Judging {total} cases (parallel={parallel})")
+
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        futures = {
+            pool.submit(
+                _run_judge_or_skip,
+                dataset_dir.resolve(), run_dir.resolve(),
+                name, i, total, budget,
+            ): name
+            for i, name in enumerate(cases, 1)
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            results[name] = future.result()
+
+    summaries = [results[name] for name in cases if name in results]
+    ok = sum(1 for s in summaries if "error" not in s)
+    cached = sum(1 for s in summaries if s.get("cached"))
+    overridden = sum(1 for s in summaries
+                     if s.get("judge_verdict") == "confirmed")
+
+    print(f"\n{'='*50}")
+    print(f"Total: {total}  OK: {ok}  Cached: {cached}  "
+          f"Judge overridden: {overridden}")
+
+
 def _gt_services(case_dir: Path) -> tuple[set[str], set[str]]:
     """Extract GT injection seeds and propagated services.
 
