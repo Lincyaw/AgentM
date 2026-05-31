@@ -105,6 +105,15 @@ type Theme struct {
 
 	// Input prompt style.
 	InputPrompt lipgloss.Style
+
+	// Overlay styles.
+	OverlayBorder     lipgloss.Style // border for centered overlay boxes
+	OverlayTitle      lipgloss.Style // overlay title text
+	OverlayText       lipgloss.Style // normal overlay body text
+	OverlayDim        lipgloss.Style // secondary/hint text in overlays
+	OverlayActive     lipgloss.Style // highlighted item in a list overlay
+	OverlayInput      lipgloss.Style // inline overlay input bar
+	SearchHighlight   lipgloss.Style // matched text highlight in search
 }
 
 // DarkTheme returns a theme suited for dark terminal backgrounds.
@@ -154,6 +163,17 @@ func DarkTheme() *Theme {
 		SuggestionActive: lipgloss.NewStyle().Foreground(accent).Bold(true),
 
 		InputPrompt: lipgloss.NewStyle().Foreground(accent),
+
+		OverlayBorder: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#6B7280")).
+			Padding(1, 2),
+		OverlayTitle:    lipgloss.NewStyle().Foreground(accent).Bold(true),
+		OverlayText:     lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")),
+		OverlayDim:      lipgloss.NewStyle().Foreground(dim),
+		OverlayActive:   lipgloss.NewStyle().Foreground(accent).Bold(true),
+		OverlayInput:    lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Background(lipgloss.Color("#1F2937")),
+		SearchHighlight: lipgloss.NewStyle().Background(lipgloss.Color("#FBBF24")).Foreground(lipgloss.Color("#1F2937")),
 	}
 }
 
@@ -204,6 +224,17 @@ func LightTheme() *Theme {
 		SuggestionActive: lipgloss.NewStyle().Foreground(accent).Bold(true),
 
 		InputPrompt: lipgloss.NewStyle().Foreground(accent),
+
+		OverlayBorder: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#9CA3AF")).
+			Padding(1, 2),
+		OverlayTitle:    lipgloss.NewStyle().Foreground(accent).Bold(true),
+		OverlayText:     lipgloss.NewStyle().Foreground(lipgloss.Color("#374151")),
+		OverlayDim:      lipgloss.NewStyle().Foreground(dim),
+		OverlayActive:   lipgloss.NewStyle().Foreground(accent).Bold(true),
+		OverlayInput:    lipgloss.NewStyle().Foreground(lipgloss.Color("#374151")).Background(lipgloss.Color("#F3F4F6")),
+		SearchHighlight: lipgloss.NewStyle().Background(lipgloss.Color("#FBBF24")).Foreground(lipgloss.Color("#1F2937")),
 	}
 }
 

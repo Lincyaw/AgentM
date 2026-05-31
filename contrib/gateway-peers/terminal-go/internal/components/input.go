@@ -197,3 +197,10 @@ func (i *Input) HistoryNext() string {
 func (i *Input) Height() int {
 	return i.textarea.Height()
 }
+
+// History returns a copy of the input history entries.
+func (i *Input) History() []string {
+	out := make([]string, len(i.history))
+	copy(out, i.history)
+	return out
+}
