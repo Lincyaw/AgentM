@@ -1,5 +1,6 @@
 """Pure helper utilities available to atoms and core code."""
 
+from agentm.core.lib.observability_dir import resolve_observability_dir
 from agentm.core.lib.redact import redact_headers, redact_messages
 from agentm.core.lib.serialization import to_jsonable
 from agentm.core.lib.shutdown import DEFAULT_SHUTDOWN_GRACE_SECONDS
@@ -11,6 +12,7 @@ __all__ = [
     "Turn",
     "enumerate_turns",
     "pydantic_to_openai_tool_schema",
+    "resolve_observability_dir",
     "redact_headers",
     "redact_messages",
     "to_jsonable",

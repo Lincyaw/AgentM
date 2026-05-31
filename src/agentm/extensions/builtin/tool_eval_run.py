@@ -652,7 +652,9 @@ def _read_trace_cost_usd(cwd: Path, session_id: str) -> float:
     themselves via a turn_end handler that mutates the message usage or
     publishes an extension event). Budget under-counts rather than aborts.
     """
-    trace_path = cwd / ".agentm/observability" / f"{session_id}.jsonl"
+    from agentm.core.lib.observability_dir import resolve_observability_dir
+
+    trace_path = resolve_observability_dir(cwd) / f"{session_id}.jsonl"
     if not trace_path.is_file():
         return 0.0
     total = 0.0
