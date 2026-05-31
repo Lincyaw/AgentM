@@ -1259,6 +1259,66 @@ When done, call `submit_hop_verdict` with:
         (judge_dir / "verdict.json").write_text(
             json.dumps(verdict, indent=2, ensure_ascii=False)
         )
+
+    # Merge judge overrides into a final propagation result
+    overrides: set[str] = set()
+    if verdict and verdict.get("verdict") == "confirmed":
+        claim = verdict.get("claim", "")
+        overrides = {
+            s.strip() for s in claim.split(",")
+            if s.strip() and s.strip() != "none"
+        }
+
+    seeds = {i["target"] for i in injections}
+    final_confirmed = sorted(set(confirmed) | overrides)
+    final_propagated = [s for s in final_confirmed if s not in seeds]
+
+    # Index hop verdicts by target service for evidence lookup
+    verdict_by_target: dict[str, dict] = {}
+    for v in all_verdicts:
+        verdict_by_target[v["to"]] = v
+
+    # Build per-node entry with provenance + evidence
+    nodes: list[dict] = []
+    for svc in final_confirmed:
+        if svc in seeds:
+            nodes.append({
+                "service": svc,
+                "source": "injection_seed",
+            })
+        elif svc in overrides and svc not in confirmed:
+            hop_v = verdict_by_target.get(svc, {})
+            nodes.append({
+                "service": svc,
+                "source": "judge_override",
+                "hop_verdict": hop_v.get("verdict", ""),
+                "hop_rationale": hop_v.get("rationale", ""),
+                "hop_evidence": hop_v.get("symptom_evidence", []),
+                "judge_rationale": verdict.get("rationale", "")
+                if verdict else "",
+            })
+        else:
+            hop_v = verdict_by_target.get(svc, {})
+            nodes.append({
+                "service": svc,
+                "source": "hop_agent",
+                "rationale": hop_v.get("rationale", ""),
+                "symptom_evidence": hop_v.get("symptom_evidence", []),
+            })
+
+    final = {
+        "seeds": sorted(seeds),
+        "confirmed_nodes": final_confirmed,
+        "propagated": final_propagated,
+        "nodes": nodes,
+        "judge_verdict": verdict.get("verdict") if verdict else None,
+        "judge_rationale": verdict.get("rationale", "") if verdict else "",
+        "overrides": sorted(overrides - set(confirmed) - seeds),
+    }
+    (out / "final_propagation.json").write_text(
+        json.dumps(final, indent=2, ensure_ascii=False)
+    )
+
     return verdict or {}
 
 
@@ -1277,6 +1337,14 @@ def judge(
         print(f"Rationale: {result.get('rationale', '?')}")
     else:
         print("Judge produced no verdict.")
+
+    final_path = run_dir / "final_propagation.json"
+    if final_path.exists():
+        final = json.loads(final_path.read_text())
+        overrides = final.get("overrides", [])
+        print(f"\nFinal propagation: {len(final['confirmed_nodes'])} services "
+              f"({len(overrides)} judge overrides)")
+        print(f"Output: {final_path}")
 
 
 def _gt_services(case_dir: Path) -> tuple[set[str], set[str]]:
