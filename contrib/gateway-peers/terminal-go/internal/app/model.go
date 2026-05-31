@@ -305,11 +305,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case wireMsg:
 		m.router.Dispatch(&m, msg.body)
 		m.transcriptDirty = true
-		if m.ready {
-			m.viewport.SetContent(m.renderTranscript())
-			m.transcriptDirty = false
-			m.viewport.GotoBottom()
-		}
 		return m, m.listenWire
 
 	case wireDisconnected:
@@ -336,6 +331,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.transcriptDirty && m.ready {
 			m.viewport.SetContent(m.renderTranscript())
 			m.transcriptDirty = false
+			if m.inFlight {
+				m.viewport.GotoBottom()
+			}
 		}
 		cmds = append(cmds, tickCmd())
 		return m, tea.Batch(cmds...)
@@ -882,12 +880,6 @@ func (m Model) View() string {
 		return "initializing..."
 	}
 
-	// 1. Viewport with transcript (only re-render when dirty)
-	if m.transcriptDirty {
-		m.viewport.SetContent(m.renderTranscript())
-		// cannot clear m.transcriptDirty here because View() is on a value receiver;
-		// the tick handler in Update() clears it.
-	}
 	vpView := m.viewport.View()
 
 	// 2. Full overlays replace the viewport content
