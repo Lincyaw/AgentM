@@ -796,10 +796,6 @@ def _seed_sandbox_from_host(session: Any, gateway_url: str, host_dir: str, work_
     # ``.git/info/exclude`` entry is non-invasive (never committed, never
     # touches the repo's tracked ``.gitignore``).
     _exclude_host_paths(host_dir, (".agentm/", _SEED_ARCHIVE_NAME))
-    print(
-        f"INFO: [agent_env_sync] seeded sandbox {work_dir} from {host_dir} ({len(archive.stdout)} bytes)",
-        file=sys.stderr,
-    )
 
 
 def _sync_sandbox_to_host(session: Any, host_dir: str, work_dir: str) -> None:
