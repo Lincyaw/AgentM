@@ -59,14 +59,25 @@ injection seed(s)
     │
     ▼  Post-processing
 ┌─────────────────────────────────────────────┐
-│ Judge agent: reviews all hop verdicts       │
-│ holistically, detects cascade patterns,     │
-│ overrides incorrect rejections              │
+│ Judge agent (promotion-only): per-edge hop  │
+│ verdicts are authoritative — judge does NOT │
+│ prune them. Its sole job is the global view │
+│ one edge can't see: under a system-wide     │
+│ cascade (>80% load-gen throughput drop) it  │
+│ PROMOTES services hop agents rejected for   │
+│ "fewer calls" that are in fact unavailable. │
 └─────────────────────────────────────────────┘
     │
     ▼
 final_propagation.json (nodes + edges + evidence)
 ```
+
+Why promotion-only: the hop agents already reason per-edge about error
+rate, latency magnitude, fault mechanism, and direction. An LLM judge
+re-deciding from rationale text alone reliably *removes genuinely-
+degraded* services (it can't tell a real tail-latency spike from
+throughput noise without re-querying everything). On the validation set,
+judge pruning was strongly net-negative, so only cascade promotion remains.
 
 ## How to use
 
@@ -98,7 +109,7 @@ Each case produces under `<run-dir>/<case>/`:
 |------|---------|
 | `report.json` | injections, propagated nodes, edges, rounds |
 | `all_verdicts.json` | all hop verdicts (confirmed + rejected) with SQL evidence |
-| `final_propagation.json` | merged graph after judge: nodes, edges, evidence, overrides |
+| `final_propagation.json` | final graph after judge: nodes, edges, evidence, `added` (cascade promotions), `suggested_remove` (judge prune suggestions, audit-only — not applied) |
 | `hops/<from>__<to>/` | per-hop agent session (stdout, stderr, verdict.json) |
 | `judge/` | judge agent session |
 
@@ -120,6 +131,31 @@ nodes to services. When comparing:
 These are discrepancies to investigate, not accuracy metrics. Do NOT
 compute precision/recall treating GT as ground truth — the whole point
 is that GT may be wrong.
+
+### Adjudicating who is right (raw-data oracle)
+
+Because GT is unreliable (it marks throughput-drops as
+`degraded`/`unavailable`), neither GT nor GT-matching can score the
+verifier. Adjudicate each discrepancy directly from the raw data:
+classify a service's abnormal-vs-normal signature into
+`ERROR` (error RATE up, logs + 4xx/5xx) / `SLOW` (p95 **or** p99 up by
+a large absolute amount) / `DOWN` (active→silent, ambiguous) /
+`THROUGHPUT` (fewer spans, latency & error flat → not degraded) /
+`FLAT`. Then:
+
+- verifier confirms a `THROUGHPUT`/`FLAT` service → false positive;
+- verifier rejects an `ERROR`/`SLOW` service → miss;
+- GT has a `THROUGHPUT`/`FLAT` service the verifier dropped → GT
+  over-label the verifier correctly fixed;
+- verifier has an `ERROR`/`SLOW` service GT lacks → GT under-label the
+  verifier correctly found.
+
+On a 34-case stratified validation set (doubao), this lifts confirmation
+precision from **0.37 → 0.97** (false positives 132 → 2) at unchanged
+recall, and the verifier **corrects GT on 57 services** (over- and
+under-labels) while being wrong on **0** and missing **5**. Note the
+oracle must check **p99**, not just p95: several genuine degradations are
+tail-only (a fraction of requests hit timeouts while p95 is flat).
 
 ## Known limitations
 
