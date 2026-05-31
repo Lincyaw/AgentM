@@ -43,7 +43,9 @@ class HopVerdict(BaseModel):
     )
     rationale: str = Field(description="Why this verdict, citing the data.")
     symptom_evidence: list[SqlEvidence] = Field(
-        description="SQL+claim pairs showing degradation (empty list if rejected)."
+        description="SQL+claim pairs showing the key evidence. Include the "
+        "queries you ran even for rejected verdicts (e.g. the throughput/"
+        "latency comparison that showed no degradation)."
     )
     relationship_sql: str = Field(
         description="SQL proving the call relationship between the two services "
