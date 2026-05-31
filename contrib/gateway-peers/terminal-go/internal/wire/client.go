@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 )
 
@@ -18,6 +19,7 @@ type WireClient struct {
 	outbound  chan *Envelope
 	done      chan struct{}
 	closeOnce sync.Once
+	lastErr   error // last error from readLoop, readable after Done() fires
 }
 
 // NewWireClient creates a new client (does not connect yet).
@@ -77,18 +79,25 @@ func (c *WireClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("unexpected response kind: %s", resp.Kind)
 	}
 
+	log.Printf("[wire] connected, welcome from server_version=%v", resp.Body["server_version"])
 	go c.readLoop()
 	return nil
 }
 
 // readLoop reads frames from the connection and dispatches them.
 func (c *WireClient) readLoop() {
-	defer close(c.done)
+	defer func() {
+		log.Printf("[wire] readLoop exiting")
+		close(c.done)
+	}()
 	for {
 		env, err := ReadFrame(c.conn)
 		if err != nil {
+			log.Printf("[wire] readLoop read error: %v", err)
+			c.lastErr = err
 			return
 		}
+		log.Printf("[wire] recv kind=%s id=%s", env.Kind, env.ID)
 		switch env.Kind {
 		case KindPing:
 			c.sendPong(env.ID)
@@ -96,7 +105,7 @@ func (c *WireClient) readLoop() {
 			select {
 			case c.outbound <- env:
 			default:
-				// Drop if channel full (backpressure)
+				log.Printf("[wire] outbound channel full, dropping frame kind=%s", env.Kind)
 			}
 		}
 	}
@@ -117,6 +126,7 @@ func (c *WireClient) SendInbound(body map[string]any, sessionKey, scenario strin
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	log.Printf("[wire] send inbound id=%s session_key=%s", env.ID, env.SessionKey)
 	return WriteFrame(c.conn, env)
 }
 
@@ -156,6 +166,11 @@ func (c *WireClient) Outbound() <-chan *Envelope {
 // Done returns a channel that is closed when the read loop exits.
 func (c *WireClient) Done() <-chan struct{} {
 	return c.done
+}
+
+// Err returns the error that caused the read loop to exit, if any.
+func (c *WireClient) Err() error {
+	return c.lastErr
 }
 
 // Close shuts down the connection.

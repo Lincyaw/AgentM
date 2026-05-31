@@ -74,14 +74,14 @@ func (r *Router) Dispatch(m *Model, body map[string]any) {
 // ensureActiveTurn guarantees an active assistant turn exists.
 func (r *Router) ensureActiveTurn(m *Model) *blocks.AssistantTurn {
 	if m.activeTurn == nil {
-		m.activeTurn = &blocks.AssistantTurn{}
+		m.activeTurn = &blocks.AssistantTurn{GlamourStyle: m.glamourStyle}
 		m.transcript = append(m.transcript, m.activeTurn)
 	}
 	return m.activeTurn
 }
 
 func (r *Router) turnStart(m *Model, _ map[string]any, _ map[string]any) {
-	turn := &blocks.AssistantTurn{}
+	turn := &blocks.AssistantTurn{GlamourStyle: m.glamourStyle}
 	m.transcript = append(m.transcript, turn)
 	m.activeTurn = turn
 	m.turnStartTime = time.Now()

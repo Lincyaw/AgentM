@@ -17,22 +17,20 @@ func (b *UserTurn) Collapsed() bool     { return false }
 func (b *UserTurn) SetCollapsed(_ bool) {} // no-op: user turns are always expanded
 
 func (b *UserTurn) Render(width int, th *theme.Theme) string {
-	spine := th.SpineUser.Render(theme.Spine)
 	attrib := th.UserAttrib.Render(theme.LabelUser)
-	content := util.Truncate(b.Content, contentWidth(width)*20) // generous limit, multi-line
+	content := util.Truncate(b.Content, contentWidth(width)*20)
 
 	var sb strings.Builder
-	sb.WriteString(spine + " " + attrib + "\n")
+	sb.WriteString(attrib + "\n")
 	for _, line := range strings.Split(content, "\n") {
-		sb.WriteString(spine + "  " + line + "\n")
+		sb.WriteString("  " + line + "\n")
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// contentWidth returns the usable width after accounting for the spine gutter.
+// contentWidth returns the usable width after accounting for the indent.
 func contentWidth(width int) int {
-	// spine (1 char rendered width ~1-2) + space = ~3 chars of gutter
-	w := width - 4
+	w := width - 2
 	if w < 20 {
 		w = 20
 	}

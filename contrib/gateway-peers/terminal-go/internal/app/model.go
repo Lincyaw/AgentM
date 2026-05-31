@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -73,6 +74,7 @@ type Model struct {
 	childRegistry   map[string]*blocks.SubagentBlock
 	pendingApproval *blocks.ApprovalBlock
 	turnStartTime   time.Time
+	glamourStyle    string // "dark" or "light", passed to new AssistantTurns
 }
 
 // Config holds initialization parameters for a Model.
@@ -109,7 +111,11 @@ func NewModel(cfg Config) Model {
 		toolRegistry:    make(map[string]*blocks.ToolBlock),
 		childRegistry:   make(map[string]*blocks.SubagentBlock),
 		commands:        []string{"/help", "/clear", "/status", "/new", "/end", "/compact"},
+		glamourStyle:    cfg.Theme,
 		transcriptDirty: true,
+	}
+	if m.glamourStyle == "" {
+		m.glamourStyle = "dark"
 	}
 
 	if cfg.WireClient == nil {
@@ -126,7 +132,7 @@ func NewModel(cfg Config) Model {
 			SessionKey:  "terminal:default",
 			SessionAge:  23 * time.Minute,
 		})
-		m.transcript = buildMockTranscript()
+		m.transcript = buildMockTranscript(cfg.Theme)
 		m.toasts.Push("mock mode -- no gateway connection", "info", 5*time.Second)
 	} else {
 		m.status.Update(components.StatusModel{
@@ -139,7 +145,11 @@ func NewModel(cfg Config) Model {
 	return m
 }
 
-func buildMockTranscript() []blocks.Block {
+func buildMockTranscript(themeName string) []blocks.Block {
+	glamourStyle := "dark"
+	if themeName == "light" {
+		glamourStyle = "light"
+	}
 	thinking1 := blocks.NewThinkingBlock()
 	thinking1.Text = "The user wants an overview of the codebase. Let me look at the directory structure and key files to understand the architecture..."
 
@@ -156,7 +166,8 @@ func buildMockTranscript() []blocks.Block {
 	}
 
 	assistant1 := &blocks.AssistantTurn{
-		Thinking: thinking1,
+		Thinking:     thinking1,
+		GlamourStyle: glamourStyle,
 		Text: "The codebase follows a layered architecture:\n\n" +
 			"**Core** (`src/agentm/core/`) -- The runtime substrate. Contains the ABI protocols, " +
 			"extension API, session management, and the agent loop. This layer is write-protected " +
@@ -169,8 +180,10 @@ func buildMockTranscript() []blocks.Block {
 		Tools:    []*blocks.ToolBlock{tool1},
 		Children: []*blocks.SubagentBlock{child1},
 	}
+	assistant1.SetComplete()
 
 	assistant2 := &blocks.AssistantTurn{
+		GlamourStyle: glamourStyle,
 		Text: "Tests focus on **fail-stop positions** -- invariants whose violation would cause " +
 			"silent corruption rather than visible errors. The key test categories are:\n\n" +
 			"1. Constitution boundary enforcement\n" +
@@ -180,6 +193,7 @@ func buildMockTranscript() []blocks.Block {
 			"5. Extension contract validation (section 11)\n\n" +
 			"Run `uv run pytest --tb=short` for the full suite. Markers `ui` and `slow` are opt-in.",
 	}
+	assistant2.SetComplete()
 
 	return []blocks.Block{
 		&blocks.UserTurn{Content: "explain the codebase structure"},
@@ -216,7 +230,11 @@ func (m Model) listenWire() tea.Msg {
 		}
 		return wireMsg{body: body}
 	case <-m.wireClient.Done():
-		return wireDisconnected{err: fmt.Errorf("connection lost")}
+		err := m.wireClient.Err()
+		if err == nil {
+			err = fmt.Errorf("connection closed")
+		}
+		return wireDisconnected{err: fmt.Errorf("connection lost: %w", err)}
 	}
 }
 
@@ -291,7 +309,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.listenWire
 
 	case wireDisconnected:
-		m.toasts.Push("disconnected from gateway", "warn", 10*time.Second)
+		reason := "disconnected from gateway"
+		if msg.err != nil {
+			reason = fmt.Sprintf("disconnected: %v", msg.err)
+		}
+		log.Printf("[app] %s", reason)
+		m.toasts.Push(reason, "warn", 10*time.Second)
 		m.inFlight = false
 		return m, nil
 

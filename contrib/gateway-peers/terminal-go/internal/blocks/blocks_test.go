@@ -263,10 +263,12 @@ func TestAssistantTurnRender(t *testing.T) {
 	child := &SubagentBlock{Purpose: "lint-check", Done: true}
 
 	b := &AssistantTurn{
-		Thinking: thinking,
-		Text:     "Here is the result of the analysis.",
-		Tools:    []*ToolBlock{tool},
-		Children: []*SubagentBlock{child},
+		Thinking:     thinking,
+		Text:         "Here is the result of the analysis.",
+		GlamourStyle: "dark",
+		TextDirty:    true, // simulate streaming so we get raw text (glamour adds escapes)
+		Tools:        []*ToolBlock{tool},
+		Children:     []*SubagentBlock{child},
 	}
 
 	out := b.Render(testWidth, darkTheme())

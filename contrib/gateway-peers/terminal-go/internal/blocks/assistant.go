@@ -34,58 +34,61 @@ func (b *AssistantTurn) SetComplete() { b.complete = true }
 func (b *AssistantTurn) Complete() bool { return b.complete }
 
 func (b *AssistantTurn) Render(width int, th *theme.Theme) string {
-	spine := th.SpineAssistant.Render(theme.Spine)
 	attrib := th.AssistantAttrib.Render(theme.LabelAssistant)
+	indent := "  "
+	contentWidth := width - len(indent)
+	if contentWidth < 20 {
+		contentWidth = 20
+	}
 
 	var sb strings.Builder
-	sb.WriteString(spine + " " + attrib + "\n")
+	sb.WriteString(attrib + "\n")
 
 	// Thinking block (if present)
 	if b.Thinking != nil && b.Thinking.Text != "" {
-		sb.WriteString(prefixLines(b.Thinking.Render(width-4, th), spine+" ") + "\n")
+		sb.WriteString(prefixLines(b.Thinking.Render(contentWidth, th), indent) + "\n")
 	}
 
 	// Main text
 	if b.Text != "" {
-		rendered := b.renderText(width - 4)
-		sb.WriteString(prefixLines(rendered, spine+" ") + "\n")
+		rendered := b.renderText(contentWidth)
+		sb.WriteString(prefixLines(rendered, indent) + "\n")
 	}
 
 	// Tool blocks
 	for _, tool := range b.Tools {
-		sb.WriteString(prefixLines(tool.Render(width-4, th), spine+" ") + "\n")
+		sb.WriteString(prefixLines(tool.Render(contentWidth, th), indent) + "\n")
 	}
 
 	// Sub-agent blocks
 	for _, child := range b.Children {
-		sb.WriteString(prefixLines(child.Render(width-4, th), spine+" ") + "\n")
+		sb.WriteString(prefixLines(child.Render(contentWidth, th), indent) + "\n")
 	}
 
 	// Approval blocks
 	for _, appr := range b.Approvals {
-		sb.WriteString(prefixLines(appr.Render(width-4, th), spine+" ") + "\n")
+		sb.WriteString(prefixLines(appr.Render(contentWidth, th), indent) + "\n")
 	}
 
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// renderText returns the text content, using glamour for completed turns
-// and raw text while still streaming (mid-stream markdown looks broken).
+// renderText returns the text content rendered with glamour markdown.
+// During active streaming (TextDirty && !complete), returns raw text to
+// avoid re-rendering partial markdown every flush tick.
 func (b *AssistantTurn) renderText(width int) string {
-	if !b.complete {
+	if b.TextDirty && !b.complete {
 		return b.Text
 	}
 
-	opts := []glamour.TermRendererOption{
-		glamour.WithWordWrap(width),
-	}
+	style := "dark"
 	if b.GlamourStyle == "light" {
-		opts = append(opts, glamour.WithAutoStyle())
-	} else {
-		opts = append(opts, glamour.WithAutoStyle())
+		style = "light"
 	}
-
-	r, err := glamour.NewTermRenderer(opts...)
+	r, err := glamour.NewTermRenderer(
+		glamour.WithWordWrap(width),
+		glamour.WithStandardStyle(style),
+	)
 	if err != nil {
 		return b.Text
 	}

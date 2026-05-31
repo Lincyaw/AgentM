@@ -21,7 +21,17 @@ func main() {
 	scenario := flag.String("scenario", "", "Scenario name (first message only)")
 	themeName := flag.String("theme", "dark", "Theme: dark or light")
 	mockMode := flag.Bool("mock", false, "Run with mock data (no gateway)")
+	logFile := flag.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
 	flag.Parse()
+
+	// Set up file logging. bubbletea owns stdout; stderr is unreliable in alt-screen.
+	logPath := *logFile
+	if logPath == "" {
+		logPath = "/tmp/agentm-terminal.log"
+	}
+	if f, err := tea.LogToFile(logPath, "agentm-terminal"); err == nil {
+		defer f.Close()
+	}
 
 	cfg := app.Config{
 		SenderID: *senderID,
@@ -45,9 +55,11 @@ func main() {
 		}
 		client := wire.NewWireClient(transport, "terminal-go", *token)
 
+		// Timeout applies only to the dial + handshake, not the long-lived connection.
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := client.Connect(ctx); err != nil {
+		err = client.Connect(ctx)
+		cancel()
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "connect error: %v\n", err)
 			os.Exit(1)
 		}

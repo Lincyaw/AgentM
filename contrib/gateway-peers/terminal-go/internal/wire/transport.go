@@ -56,7 +56,9 @@ func (t *WSTransport) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		return nil, fmt.Errorf("websocket dial %s: %w", t.URL, err)
 	}
 
-	return &wsReadWriteCloser{conn: conn, ctx: ctx}, nil
+	// Use a background context for read/write — the dial context is only
+	// for the handshake timeout and must not cancel the long-lived connection.
+	return &wsReadWriteCloser{conn: conn, ctx: context.Background()}, nil
 }
 
 // wsReadWriteCloser adapts a websocket.Conn to io.ReadWriteCloser.
