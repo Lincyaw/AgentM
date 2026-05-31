@@ -16,7 +16,7 @@ func (b *UserTurn) SetCollapsed(_ bool) {} // no-op: user turns are always expan
 
 func (b *UserTurn) Render(width int, th *theme.Theme) string {
 	content := util.Truncate(b.Content, contentWidth(width)*20)
-	style := th.UserMessageBg.Width(width)
+	style := th.UserMessageBg.Width(width).PaddingLeft(1).PaddingRight(1)
 	return style.Render(content)
 }
 
