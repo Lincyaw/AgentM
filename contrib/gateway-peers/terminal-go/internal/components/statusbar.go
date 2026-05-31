@@ -36,6 +36,9 @@ type StatusBar struct {
 // Update replaces the status model wholesale.
 func (s *StatusBar) Update(m StatusModel) { s.model = m }
 
+// GetModel returns a copy of the current status model.
+func (s *StatusBar) GetModel() StatusModel { return s.model }
+
 // View renders the two-line status bar at the given width.
 func (s *StatusBar) View(width int, th *theme.Theme) string {
 	m := s.model
