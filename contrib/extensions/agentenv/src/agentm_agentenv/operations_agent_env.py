@@ -704,6 +704,10 @@ def _seed_sandbox_from_host(session: Any, gateway_url: str, host_dir: str, work_
             )
             base_ref = None
 
+    # Exclude .agentm/ from sandbox git so uploaded skills and observability
+    # data don't pollute the sync-back diff (which uses git diff --cached).
+    _SANDBOX_GITIGNORE = "echo '.agentm/' >> .gitignore; "
+
     if base_ref:
         # Two-stage seed: base_ref → HEAD gives the agent real diff context.
         _upload_to_pod(gateway_url, session_id, _SEED_ARCHIVE_NAME, base_archive.stdout)
@@ -711,6 +715,7 @@ def _seed_sandbox_from_host(session: Any, gateway_url: str, host_dir: str, work_
             f"set -e; cd {work_dir}; "
             f"tar -xzf {_SEED_ARCHIVE_NAME}; rm -f {_SEED_ARCHIVE_NAME}; "
             "git init -q; "
+            + _SANDBOX_GITIGNORE +
             f"git {ident} add -A; "
             f"git {ident} commit -q -m 'main (base)' --allow-empty; "
             f"git tag -f {_BASE_TAG}"
@@ -756,6 +761,7 @@ def _seed_sandbox_from_host(session: Any, gateway_url: str, host_dir: str, work_
             f"set -e; cd {work_dir}; "
             f"tar -xzf {_SEED_ARCHIVE_NAME}; rm -f {_SEED_ARCHIVE_NAME}; "
             "git init -q; "
+            + _SANDBOX_GITIGNORE +
             f"git {ident} add -A; "
             f"git {ident} commit -q -m wb-baseline --allow-empty; "
             f"git tag -f {_BASELINE_TAG}"
