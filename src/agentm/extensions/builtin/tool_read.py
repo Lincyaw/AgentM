@@ -1,4 +1,9 @@
-"""Tool atom for the ``extensions.builtin.tool_read`` §7.1 row."""
+"""Tool atom for the ``extensions.builtin.tool_read`` §7.1 row.
+
+Aligned with Claude Code's FileReadTool behavior: no hardcoded line cap,
+max-file-size gate (default 256 KB), partial-view tracking for downstream
+edit/write safety.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +17,10 @@ from agentm.core.abi.operations import FileOperations
 from agentm.core.lib.read_state import record_read
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
+
+
+# 256 KB — matches Claude Code's MAX_OUTPUT_SIZE (0.25 * 1024 * 1024).
+_DEFAULT_MAX_SIZE_BYTES: Final[int] = 262_144
 
 
 MANIFEST = ExtensionManifest(
@@ -41,6 +50,12 @@ MANIFEST = ExtensionManifest(
                 "type": "array",
                 "items": {"type": "string"},
             },
+            # Max file size in bytes. Files larger than this are rejected
+            # with an error telling the model to use offset+limit.
+            "max_size_bytes": {
+                "type": "integer",
+                "default": _DEFAULT_MAX_SIZE_BYTES,
+            },
         },
         "additionalProperties": True,
     },
@@ -50,16 +65,23 @@ MANIFEST = ExtensionManifest(
 _PARAMETERS: Final = {
     "type": "object",
     "properties": {
-        "path": {"type": "string", "description": "File path to read."},
+        "path": {
+            "type": "string",
+            "description": "Absolute path to the file to read.",
+        },
         "offset": {
             "type": "integer",
-            "default": 0,
-            "description": "1-based line number to start reading from. 0 means start from the beginning.",
+            "description": (
+                "1-based line number to start reading from. "
+                "Only provide if the file is too large to read at once."
+            ),
         },
         "limit": {
             "type": "integer",
-            "default": 2000,
-            "description": "Maximum number of lines to return. Use -1 for no limit.",
+            "description": (
+                "Number of lines to read. "
+                "Only provide if the file is too large to read at once."
+            ),
         },
     },
     "required": ["path"],
@@ -101,11 +123,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     file_ops = _coerce_file_ops(api, config.get("file_ops"))
     allow_globs = _coerce_globs(config.get("allow_globs"), api.cwd)
     deny_globs = _coerce_globs(config.get("deny_globs"), api.cwd)
+    max_size_bytes: int = int(
+        config.get("max_size_bytes", _DEFAULT_MAX_SIZE_BYTES)
+    )
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         path = str(args["path"])
-        offset = int(args.get("offset", 0))
-        limit = int(args.get("limit", 2000))
+        raw_offset = args.get("offset")
+        raw_limit = args.get("limit")
 
         gate_error = _check_path_allowed(path, allow_globs, deny_globs)
         if gate_error is not None:
@@ -117,23 +142,51 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         try:
             data = await file_ops.read_file(path)
+        except Exception as exc:
+            return _error(f"Failed to read {path!r}: {exc}")
+
+        # --- max-size gate (checked on raw bytes, before decode) ---
+        file_size = len(data)
+        caller_wants_range = raw_offset is not None or raw_limit is not None
+        if file_size > max_size_bytes and not caller_wants_range:
+            return _error(
+                f"File content ({file_size} bytes) exceeds maximum "
+                f"allowed size ({max_size_bytes} bytes). "
+                "Use offset and limit parameters to read specific "
+                "portions of the file."
+            )
+
+        try:
             all_lines = data.decode("utf-8", errors="replace").splitlines()
             total = len(all_lines)
-            start = max(0, offset)
-            if limit < 0:
-                sliced = all_lines[start:]
+
+            # Offset: 1-based when provided, 0 means "from beginning".
+            offset = max(0, int(raw_offset) - 1) if raw_offset is not None else 0
+            limit = int(raw_limit) if raw_limit is not None else None
+
+            if limit is not None and limit > 0:
+                sliced = all_lines[offset : offset + limit]
             else:
-                sliced = all_lines[start : start + limit]
-            is_partial = start > 0 or (limit >= 0 and start + limit < total)
+                sliced = all_lines[offset:]
+
+            is_partial = (
+                offset > 0
+                or (limit is not None and limit > 0 and offset + limit < total)
+            )
+
             record_read(path, total_lines=total, is_partial=is_partial)
-            # Format with line numbers (1-based) like `cat -n`.
+
             numbered = [
-                f"{start + i + 1}\t{line}"
+                f"{offset + i + 1}\t{line}"
                 for i, line in enumerate(sliced)
             ]
-            header = f"({total} lines total)"
+
             if is_partial:
-                header = f"(showing lines {start + 1}-{start + len(sliced)} of {total})"
+                end_line = offset + len(sliced)
+                header = f"(showing lines {offset + 1}-{end_line} of {total})"
+            else:
+                header = f"({total} lines total)"
+
             return _ok(header + "\n" + "\n".join(numbered))
         except Exception as exc:
             return _error(f"Failed to read {path!r}: {exc}")
@@ -141,7 +194,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_tool(
         FunctionTool(
             name="read",
-            description="Read a UTF-8 text file from disk by line range.",
+            description=(
+                "Read a UTF-8 text file from disk. "
+                "By default reads the entire file. "
+                f"Files larger than {max_size_bytes} bytes require "
+                "offset and limit parameters."
+            ),
             parameters=_PARAMETERS,
             fn=_execute,
             metadata={"file_op": "read"},
