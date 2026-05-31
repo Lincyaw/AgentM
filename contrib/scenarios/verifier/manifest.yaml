@@ -91,6 +91,11 @@ extensions:
              reject — do not use the upstream's data as a proxy.
            - Use the fault reference to know what signals to expect.
         5. `submit_hop_verdict` with confirmed or rejected.
+           ALWAYS include `symptom_evidence` with the key SQLs you
+           ran — even for rejected verdicts. The downstream judge
+           needs your actual queries and numbers to verify your
+           reasoning. Include at least the throughput/latency/error
+           comparison SQL that drove your decision.
 
         Use diverse signals (traces, metrics, logs) but SUBMIT your
         verdict before you run out of budget. A quick verdict is

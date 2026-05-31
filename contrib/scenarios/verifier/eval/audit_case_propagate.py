@@ -559,7 +559,12 @@ def run_hop(
         )
 
     obs_dir = hop_dir / ".agentm" / "observability"
-    return extract_hop_verdict(obs_dir) if obs_dir.exists() else None
+    verdict = extract_hop_verdict(obs_dir) if obs_dir.exists() else None
+    if verdict:
+        (hop_dir / "verdict.json").write_text(
+            json.dumps(verdict, ensure_ascii=False, indent=2)
+        )
+    return verdict
 
 
 # ------------------------------------------------------------------
@@ -769,6 +774,55 @@ def propagate(
 # Output
 # ------------------------------------------------------------------
 
+def collect_all_verdicts(out_dir: Path) -> list[dict]:
+    """Collect all hop verdicts (confirmed + rejected) from a case run.
+
+    Walks the hops/ directory and extracts each hop's structured verdict
+    from verdict.json (new runs) or the observability JSONL (legacy runs).
+    Returns a list of dicts with from/to/verdict/rationale/claim.
+    """
+    hops_dir = out_dir / "hops"
+    if not hops_dir.exists():
+        return []
+
+    verdicts: list[dict] = []
+    for hop_dir in sorted(hops_dir.iterdir()):
+        if not hop_dir.is_dir():
+            continue
+        parts = hop_dir.name.split("__", 1)
+        if len(parts) != 2:
+            continue
+        from_svc, to_svc = parts
+
+        verdict_data: dict | None = None
+        vf = hop_dir / "verdict.json"
+        if vf.exists():
+            try:
+                verdict_data = json.loads(vf.read_text())
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not verdict_data:
+            obs_dir = hop_dir / ".agentm" / "observability"
+            if obs_dir.exists():
+                verdict_data = extract_hop_verdict(obs_dir)
+                if verdict_data:
+                    vf.write_text(json.dumps(
+                        verdict_data, ensure_ascii=False, indent=2,
+                    ))
+
+        if verdict_data:
+            verdicts.append({
+                "from": from_svc,
+                "to": to_svc,
+                "verdict": verdict_data.get("verdict", "unknown"),
+                "rationale": verdict_data.get("rationale", ""),
+                "claim": verdict_data.get("claim", ""),
+                "symptom_evidence": verdict_data.get("symptom_evidence", []),
+            })
+    return verdicts
+
+
 def build_report(
     result: dict, injections: list[dict[str, str]],
 ) -> dict:
@@ -856,6 +910,11 @@ def run_one_case(
     report = build_report(result, injections)
     (out / "report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False)
+    )
+
+    all_verdicts = collect_all_verdicts(out)
+    (out / "all_verdicts.json").write_text(
+        json.dumps(all_verdicts, indent=2, ensure_ascii=False)
     )
 
     seeds = [i["target"] for i in injections]
@@ -1059,6 +1118,165 @@ def batch(
         case_parallel=case_parallel,
         limit=limit, offset=offset,
     )
+
+
+def _get_system_throughput(data_dir: Path) -> dict:
+    """Compare load-generator root span counts between windows."""
+    conn = _duckdb_conn(data_dir)
+    result: dict = {}
+    try:
+        for w in ("normal", "abnormal"):
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {w}_traces "
+                "WHERE (parent_span_id = '' OR parent_span_id IS NULL) "
+                f"AND service_name IN {str(tuple(SYNTHETIC))}"
+            ).fetchone()
+            result[w] = row[0] if row else 0
+    except Exception:  # noqa: BLE001
+        pass
+    conn.close()
+    return result
+
+
+def run_judge(
+    case_dir: Path,
+    run_dir: Path,
+    *,
+    budget: int = 20,
+) -> dict:
+    """Run a judge agent on a completed case to review all hop verdicts."""
+    data_dir = case_dir.resolve()
+    out = run_dir.resolve()
+
+    # Collect inputs
+    all_verdicts_path = out / "all_verdicts.json"
+    if not all_verdicts_path.exists():
+        all_verdicts = collect_all_verdicts(out)
+        all_verdicts_path.write_text(
+            json.dumps(all_verdicts, indent=2, ensure_ascii=False)
+        )
+    else:
+        all_verdicts = json.loads(all_verdicts_path.read_text())
+
+    trace = json.loads((out / "propagation_trace.json").read_text())
+    confirmed = trace.get("confirmed_nodes", [])
+    injections = get_injections(data_dir)
+    throughput = _get_system_throughput(data_dir)
+
+    # Build the judge prompt
+    inj_lines = [
+        f"- {i['target']} ({i['chaos_type']})" for i in injections
+    ]
+    confirmed_str = ", ".join(confirmed) if confirmed else "(none)"
+
+    tp_normal = throughput.get("normal", 0)
+    tp_abnormal = throughput.get("abnormal", 0)
+    tp_drop = ((tp_normal - tp_abnormal) / tp_normal * 100
+               if tp_normal > 0 else 0)
+
+    rejected_entries = [v for v in all_verdicts if v["verdict"] == "rejected"]
+    confirmed_entries = [v for v in all_verdicts if v["verdict"] == "confirmed"]
+
+    verdict_lines: list[str] = []
+    for v in all_verdicts:
+        tag = "CONFIRMED" if v["verdict"] == "confirmed" else "REJECTED"
+        verdict_lines.append(
+            f"- [{tag}] {v['from']} → {v['to']}: {v['rationale']}"
+        )
+
+    prompt = f"""\
+You are a judge reviewing the results of a fault-propagation verifier.
+Individual hop agents each checked one edge in isolation — your job is to
+look at the FULL picture and decide whether any verdicts should be
+overturned.
+
+## Fault injection
+{chr(10).join(inj_lines)}
+
+## System-wide throughput
+- Normal window: {tp_normal} load-generator root spans
+- Abnormal window: {tp_abnormal} load-generator root spans
+- Drop: {tp_drop:.1f}%
+
+## Current confirmed propagation
+{confirmed_str}
+
+## All hop verdicts ({len(confirmed_entries)} confirmed, {len(rejected_entries)} rejected)
+{chr(10).join(verdict_lines)}
+
+## Your task
+1. Check causal consistency: does the propagation chain make sense for
+   this fault type?  Are there contradictions between hop verdicts?
+2. Check for system-wide cascade: if load-generator throughput dropped
+   >80%, the system is in cascading failure.  In that regime,
+   "throughput drop alone" is NOT a valid rejection reason — the
+   service is unavailable because the whole system is collapsing.
+   Flag any rejected hops that used this reasoning during a cascade.
+3. Check cross-hop consistency: if service A calls B and C, and B is
+   confirmed degraded but C is rejected despite similar evidence, flag
+   the inconsistency.
+4. For each flagged verdict, explain why it should be overturned and
+   what evidence supports the override.
+
+You also have access to `list_tables` and `query_sql` to independently
+verify any evidence you question.
+
+When done, call `submit_hop_verdict` with:
+- verdict: "confirmed" if you found overrides, "rejected" if all
+  original verdicts look correct
+- rationale: your overall assessment
+- claim: list of services whose verdicts should be overturned
+  (comma-separated), or "none"
+"""
+
+    judge_dir = out / "judge"
+    judge_dir.mkdir(parents=True, exist_ok=True)
+
+    env = dict(os.environ)
+    env["AGENTM_PROJECT_ROOT"] = str(REPO)
+    env["AGENTM_RCA_DATA_DIR"] = str(data_dir)
+    base = (
+        ["agentm"]
+        if shutil.which("agentm")
+        else ["uv", "run", "--no-sync", "agentm"]
+    )
+    cmd = [
+        *base, "--scenario", "verifier",
+        "--model", env.get("AGENTM_MODEL", "doubao"),
+        "--cwd", str(judge_dir),
+        "--max-tool-calls", str(budget),
+        "-p", prompt,
+    ]
+
+    with open(judge_dir / "stdout.log", "w") as fout, \
+         open(judge_dir / "stderr.log", "w") as ferr:
+        subprocess.run(cmd, env=env, stdout=fout, stderr=ferr)
+
+    # Extract judge verdict
+    obs_dir = judge_dir / ".agentm" / "observability"
+    verdict = extract_hop_verdict(obs_dir) if obs_dir.exists() else None
+    if verdict:
+        (judge_dir / "verdict.json").write_text(
+            json.dumps(verdict, indent=2, ensure_ascii=False)
+        )
+    return verdict or {}
+
+
+@app.command()
+def judge(
+    case_dir: Annotated[Path, typer.Argument(help="single case directory")],
+    run_dir: Annotated[Path, typer.Option("--run-dir", help="verifier run output for this case")],
+    budget: Annotated[int, typer.Option(help="tool-call budget for judge agent")] = 20,
+    model: Annotated[str | None, typer.Option(help="config.toml profile name")] = None,
+) -> None:
+    """Run judge agent on a completed case to review hop verdicts."""
+    _set_model(model)
+    result = run_judge(case_dir, run_dir, budget=budget)
+    if result:
+        print(f"\nJudge verdict: {result.get('verdict', '?')}")
+        print(f"Rationale: {result.get('rationale', '?')}")
+    else:
+        print("Judge produced no verdict.")
 
 
 def _gt_services(case_dir: Path) -> tuple[set[str], set[str]]:
