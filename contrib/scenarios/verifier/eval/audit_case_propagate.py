@@ -59,16 +59,27 @@ Rel = tuple[str, str, str, int]  # (service_a, service_b, rel_type, weight)
 
 
 def get_relationships(data_dir: Path) -> list[Rel]:
-    """Build bidirectional relationship list from call graph + deployment."""
+    """Build bidirectional relationship list from call graph + deployment.
+
+    Uses the UNION of normal and abnormal windows so that edges only
+    visible in one window (e.g. a short normal capture) are not lost.
+    """
     conn = _duckdb_conn(data_dir)
     rels: list[Rel] = []
 
     rows = conn.execute(
+        "WITH all_traces AS ("
+        "  SELECT parent_span_id, span_id, service_name "
+        "  FROM normal_traces "
+        "  UNION ALL "
+        "  SELECT parent_span_id, span_id, service_name "
+        "  FROM abnormal_traces"
+        ") "
         "SELECT parent.service_name AS caller, "
         "       child.service_name AS callee, "
         "       COUNT(*) AS cnt "
-        "FROM normal_traces child "
-        "JOIN normal_traces parent "
+        "FROM all_traces child "
+        "JOIN all_traces parent "
         "  ON child.parent_span_id = parent.span_id "
         "WHERE child.service_name <> parent.service_name "
         "GROUP BY 1, 2 HAVING COUNT(*) >= 5 "
@@ -81,10 +92,17 @@ def get_relationships(data_dir: Path) -> list[Rel]:
 
     try:
         dep_rows = conn.execute(
+            "WITH all_metrics AS ("
+            "  SELECT service_name, \"attr.k8s.node.name\" "
+            "  FROM normal_metrics "
+            "  UNION ALL "
+            "  SELECT service_name, \"attr.k8s.node.name\" "
+            "  FROM abnormal_metrics"
+            ") "
             "SELECT DISTINCT a.\"attr.k8s.node.name\" AS node, "
             "       a.service_name AS svc_a, b.service_name AS svc_b "
-            "FROM normal_metrics a "
-            "JOIN normal_metrics b "
+            "FROM all_metrics a "
+            "JOIN all_metrics b "
             "  ON a.\"attr.k8s.node.name\" = b.\"attr.k8s.node.name\" "
             "WHERE a.service_name < b.service_name "
             "  AND a.service_name <> '' AND b.service_name <> '' "
