@@ -150,6 +150,10 @@ async def test_G3_constitution_rejects_tool_edit(tmp_path: Path) -> None:
 
     session = await _create_session(tmp_path, ("agentm.extensions.builtin.tool_edit", {}))
     try:
+        # Simulate a prior read so the read-before-edit gate passes and
+        # the constitution guard is the one that rejects the edit.
+        from agentm.core.lib.read_state import record_read
+        record_read(os.path.normpath("core-manifest.yaml"), total_lines=4, is_partial=False)
         tool = next(tool for tool in session.tools if tool.name == "edit")
         result = await tool.execute(
             {
