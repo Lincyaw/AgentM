@@ -842,6 +842,24 @@ def _sync_sandbox_to_host(session: Any, host_dir: str, work_dir: str) -> None:
     )
 
 
+def _inject_gh_token(session: Any, work_dir: str) -> None:
+    """Make GH_TOKEN available in the sandbox so agents can use `gh` CLI.
+
+    Writes the token to /etc/profile.d/ so all `bash -l` sessions export it.
+    The `gh` binary itself must be in the sandbox image (baked at build time).
+    """
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        return
+    setup_cmd = (
+        f"echo 'export GH_TOKEN={shlex.quote(token)}' > /etc/profile.d/gh_token.sh; "
+        f"echo 'export GITHUB_TOKEN={shlex.quote(token)}' >> /etc/profile.d/gh_token.sh; "
+        "chmod 644 /etc/profile.d/gh_token.sh"
+    )
+    _pod_exec(session, setup_cmd, work_dir)
+    print("INFO: [agent_env_sync] injected GH_TOKEN into sandbox", file=sys.stderr)
+
+
 def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> None:
     """Upload SKILL.md files from ``AGENTM_SKILLS_DIR`` into the sandbox.
 
@@ -952,6 +970,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # and silently produce an empty diff/PR.
     if sync_cwd:
         _seed_sandbox_from_host(session, gateway_url, host_dir, work_dir)
+
+    # Inject GH_TOKEN into the sandbox so the agent can use `gh` CLI to
+    # read issues, write comments, etc. — same as Claude/Codex runtimes.
+    _inject_gh_token(session, work_dir)
 
     # Upload skill files from host PVC into the sandbox so skill_loader can
     # discover them. Non-fatal: missing dir or upload errors are logged, not raised.
