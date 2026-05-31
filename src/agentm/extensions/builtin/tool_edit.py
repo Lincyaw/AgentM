@@ -68,6 +68,25 @@ _PARAMETERS: Final = {
 }
 
 _CONTEXT_LINES = 4
+_MAX_UNINTENDED_SHRINK_LINES = 5
+
+
+def _check_shrinkage(original: str, updated: str, old_len: int, new_len: int) -> str | None:
+    """Reject edits that delete far more content than the replacement explains."""
+    expected_delta = new_len - old_len
+    actual_delta = len(updated) - len(original)
+    unintended = expected_delta - actual_delta
+    if unintended <= 0:
+        return None
+    lost_lines = original.count("\n") - updated.count("\n")
+    if lost_lines > _MAX_UNINTENDED_SHRINK_LINES:
+        return (
+            f"Edit rejected: this replacement would delete {lost_lines} lines "
+            f"beyond the matched region. This usually means old_string matched "
+            f"more content than intended. Re-read the file and use a more precise "
+            f"old_string, or use start_line/end_line for the exact range."
+        )
+    return None
 
 _QUOTE_MAP: Final[dict[str, str]] = {
     "‘": "'",  # left single curly
@@ -191,12 +210,14 @@ async def _string_replace(
         if replace_all
         else original.replace(actual, new_string, 1)
     )
+    shrinkage = _check_shrinkage(original, updated, len(actual), len(new_string))
+    if shrinkage:
+        return _error(shrinkage)
     result = await writer.replace(
         path, original.encode("utf-8"), updated.encode("utf-8"), rationale=rationale,
     )
     if result.error is not None:
         return _error(result.error)
-    # Show context around the change
     before_lines = original[: original.index(actual)].count("\n")
     new_lines_count = new_string.count("\n") + 1
     snippet = _snippet_around(updated, before_lines + 1, before_lines + new_lines_count)
@@ -225,6 +246,10 @@ async def _line_range_replace(
     if new_string and not new_string.endswith("\n"):
         new_string += "\n"
     updated = "".join(before) + new_string + "".join(after)
+    replaced_len = sum(len(l) for l in lines[start - 1 : end])
+    shrinkage = _check_shrinkage(original, updated, replaced_len, len(new_string))
+    if shrinkage:
+        return _error(shrinkage)
     result = await writer.replace(
         path, original.encode("utf-8"), updated.encode("utf-8"), rationale=rationale,
     )
