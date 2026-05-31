@@ -1306,14 +1306,54 @@ When done, call `submit_hop_verdict` with:
                 "symptom_evidence": hop_v.get("symptom_evidence", []),
             })
 
+    # Build edges with evidence from hop verdicts
+    confirmed_set = set(confirmed)
+    edges: list[dict] = []
+    seen_edges: set[tuple[str, str]] = set()
+
+    # Edges from hop_log (hop_agent confirmed + edge_sql)
+    for h in trace.get("hop_log", []):
+        frm, to = h.get("from", ""), h.get("to", "")
+        if not frm or not to:
+            continue
+        v = h.get("verdict", "")
+        if v in ("confirmed", "edge_sql") and (frm, to) not in seen_edges:
+            seen_edges.add((frm, to))
+            hop_v = verdict_by_target.get(to, {})
+            edge_entry: dict = {
+                "from": frm, "to": to,
+                "source": "hop_agent" if v == "confirmed" else "edge_sql",
+            }
+            if v == "confirmed":
+                edge_entry["rationale"] = hop_v.get("rationale", "")
+                edge_entry["symptom_evidence"] = hop_v.get(
+                    "symptom_evidence", [],
+                )
+            edges.append(edge_entry)
+
+    # Edges for judge-overridden nodes
+    for svc in overrides:
+        if svc in confirmed_set:
+            continue
+        override_v = verdict_by_target.get(svc)
+        if override_v and (override_v["from"], svc) not in seen_edges:
+            seen_edges.add((override_v["from"], svc))
+            edges.append({
+                "from": override_v["from"], "to": svc,
+                "source": "judge_override",
+                "hop_rationale": override_v.get("rationale", ""),
+                "hop_evidence": override_v.get("symptom_evidence", []),
+            })
+
     final = {
         "seeds": sorted(seeds),
         "confirmed_nodes": final_confirmed,
         "propagated": final_propagated,
+        "edges": edges,
         "nodes": nodes,
         "judge_verdict": verdict.get("verdict") if verdict else None,
         "judge_rationale": verdict.get("rationale", "") if verdict else "",
-        "overrides": sorted(overrides - set(confirmed) - seeds),
+        "overrides": sorted(overrides - confirmed_set - seeds),
     }
     (out / "final_propagation.json").write_text(
         json.dumps(final, indent=2, ensure_ascii=False)
