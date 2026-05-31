@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,12 +12,23 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/blocks"
 	"github.com/AoyangSpace/agentm-terminal/internal/components"
 	"github.com/AoyangSpace/agentm-terminal/internal/theme"
+	"github.com/AoyangSpace/agentm-terminal/internal/wire"
 )
 
 const (
 	statusBarHeight   = 3 // 2 content lines + 1 border
 	doubleCtrlCWindow = 1500 * time.Millisecond
 )
+
+// wireMsg wraps a decoded wire outbound event body for the bubbletea loop.
+type wireMsg struct {
+	body map[string]any
+}
+
+// wireDisconnected signals that the wire connection was lost or closed.
+type wireDisconnected struct {
+	err error
+}
 
 // Model is the root bubbletea model for the TUI.
 type Model struct {
@@ -39,6 +51,7 @@ type Model struct {
 	inFlight  bool
 
 	commands []string
+	tools    []string // registered tool names from gateway
 
 	overlay   Overlay
 	bookmarks []Bookmark
@@ -46,36 +59,82 @@ type Model struct {
 	// searchQuery is set while the search overlay is active so
 	// renderTranscript can highlight matches.
 	searchQuery string
+
+	// Wire integration
+	wireClient      *wire.WireClient
+	sessionKey      string
+	scenario        string
+	chatID          string
+	senderID        string
+	firstSent       bool // scenario sent only on first message
+	router          *Router
+	activeTurn      *blocks.AssistantTurn
+	toolRegistry    map[string]*blocks.ToolBlock
+	childRegistry   map[string]*blocks.SubagentBlock
+	pendingApproval *blocks.ApprovalBlock
+	turnStartTime   time.Time
 }
 
-// NewModel creates a new Model with mock data for visual testing.
-func NewModel(th *theme.Theme) Model {
+// Config holds initialization parameters for a Model.
+type Config struct {
+	WireClient *wire.WireClient // nil = mock mode (for testing UI)
+	SenderID   string
+	ChatID     string
+	Scenario   string
+	Theme      string // "dark" or "light"
+}
+
+// NewModel creates a new Model. When cfg.WireClient is nil the model runs
+// in mock mode with sample data; otherwise it connects to the gateway.
+func NewModel(cfg Config) Model {
+	th := theme.ForName(cfg.Theme)
+	chatID := cfg.ChatID
+	if chatID == "" {
+		chatID = "terminal"
+	}
+	senderID := cfg.SenderID
+	if senderID == "" {
+		senderID = "local"
+	}
+
 	m := Model{
 		theme:           th,
 		input:           components.NewInput(),
-		transcriptDirty: true,
+		wireClient:      cfg.WireClient,
+		senderID:        senderID,
+		chatID:          chatID,
+		sessionKey:      "terminal:" + chatID,
+		scenario:        cfg.Scenario,
+		router:          &Router{},
+		toolRegistry:    make(map[string]*blocks.ToolBlock),
+		childRegistry:   make(map[string]*blocks.SubagentBlock),
 		commands:        []string{"/help", "/clear", "/status", "/new", "/end", "/compact"},
+		transcriptDirty: true,
 	}
 
-	// Mock status
-	m.status.Update(components.StatusModel{
-		Phase:       theme.PhaseIdle,
-		Model:       "doubao",
-		TokensIn:    1234,
-		TokensOut:   567,
-		CtxUsed:     102400,
-		CtxTotal:    131072,
-		CostTurn:    0.12,
-		CostSession: 1.47,
-		SessionKey:  "terminal:default",
-		SessionAge:  23 * time.Minute,
-	})
-
-	// Mock transcript with realistic content using P1 block types
-	m.transcript = buildMockTranscript()
-
-	// Startup toast
-	m.toasts.Push("connected to gateway", "info", 5*time.Second)
+	if cfg.WireClient == nil {
+		// Mock mode: populate with test data
+		m.status.Update(components.StatusModel{
+			Phase:       theme.PhaseIdle,
+			Model:       "doubao",
+			TokensIn:    1234,
+			TokensOut:   567,
+			CtxUsed:     102400,
+			CtxTotal:    131072,
+			CostTurn:    0.12,
+			CostSession: 1.47,
+			SessionKey:  "terminal:default",
+			SessionAge:  23 * time.Minute,
+		})
+		m.transcript = buildMockTranscript()
+		m.toasts.Push("mock mode -- no gateway connection", "info", 5*time.Second)
+	} else {
+		m.status.Update(components.StatusModel{
+			Phase:      theme.PhaseIdle,
+			SessionKey: m.sessionKey,
+		})
+		m.toasts.Push("connected to gateway", "info", 5*time.Second)
+	}
 
 	return m
 }
@@ -130,12 +189,47 @@ func buildMockTranscript() []blocks.Block {
 	}
 }
 
+// listenWire blocks on the wire client's outbound channel and returns
+// one event as a wireMsg. When the channel closes, returns wireDisconnected.
+func (m Model) listenWire() tea.Msg {
+	if m.wireClient == nil {
+		// Should not be called in mock mode. Block forever.
+		select {}
+	}
+	select {
+	case env, ok := <-m.wireClient.Outbound():
+		if !ok {
+			return wireDisconnected{err: nil}
+		}
+		body := env.Body
+		if env.Kind == wire.KindError {
+			msg := ""
+			if body != nil {
+				if m, ok := body["message"].(string); ok {
+					msg = m
+				}
+			}
+			body = map[string]any{
+				"content":  fmt.Sprintf("gateway error: %s", msg),
+				"metadata": map[string]any{"kind": "diagnostic_error"},
+			}
+		}
+		return wireMsg{body: body}
+	case <-m.wireClient.Done():
+		return wireDisconnected{err: fmt.Errorf("connection lost")}
+	}
+}
+
 // Init returns the initial commands.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		m.input.Focus(),
 		tickCmd(),
-	)
+	}
+	if m.wireClient != nil {
+		cmds = append(cmds, m.listenWire)
+	}
+	return tea.Batch(cmds...)
 }
 
 type tickMsg time.Time
@@ -186,8 +280,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case components.InputComplete:
 		return m.handleCompletion()
 
+	case wireMsg:
+		m.router.Dispatch(&m, msg.body)
+		m.transcriptDirty = true
+		if m.ready {
+			m.viewport.SetContent(m.renderTranscript())
+			m.transcriptDirty = false
+			m.viewport.GotoBottom()
+		}
+		return m, m.listenWire
+
+	case wireDisconnected:
+		m.toasts.Push("disconnected from gateway", "warn", 10*time.Second)
+		m.inFlight = false
+		return m, nil
+
 	case tickMsg:
 		m.toasts.Tick()
+		if m.inFlight {
+			elapsed := time.Since(m.turnStartTime)
+			sm := m.status.GetModel()
+			sm.Elapsed = elapsed
+			if elapsed.Seconds() > 0 && sm.TokensOut > 0 {
+				sm.TokPerSec = float64(sm.TokensOut) / elapsed.Seconds()
+			}
+			m.status.Update(sm)
+		}
 		if m.transcriptDirty && m.ready {
 			m.viewport.SetContent(m.renderTranscript())
 			m.transcriptDirty = false
@@ -241,6 +359,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keyEsc:
 		if m.suggestions.Visible() {
 			m.suggestions.Hide()
+			return m, nil
+		}
+		if m.inFlight {
+			m.sendInterrupt()
+			m.toasts.Push("interrupt sent", "warn", 2*time.Second)
 			return m, nil
 		}
 		return m, nil
@@ -299,6 +422,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toasts.Push("no code blocks found", "warn", 2*time.Second)
 		}
 		return m, nil
+	}
+
+	// Approval digit keys: when a pending approval exists, 1-9 selects a button
+	if m.pendingApproval != nil && m.input.Text() == "" {
+		if key >= "1" && key <= "9" {
+			idx := int(key[0]-'0') - 1
+			if idx < len(m.pendingApproval.Buttons) {
+				m.sendApprovalResponse(m.pendingApproval.Buttons[idx].Value)
+				m.pendingApproval = nil
+			}
+			return m, nil
+		}
+		if key == "?" {
+			// Toggle approval detail view
+			m.pendingApproval.SetCollapsed(!m.pendingApproval.Collapsed())
+			m.transcriptDirty = true
+			return m, nil
+		}
 	}
 
 	// Block navigation (only when input is empty and not focused on multiline)
@@ -445,19 +586,52 @@ func (m Model) handleSubmit(msg components.InputSubmitted) (tea.Model, tea.Cmd) 
 	m.input.PushHistory(text)
 	m.suggestions.Hide()
 
+	// Slash commands
+	if strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "//") {
+		if text == "/clear" {
+			m.transcript = nil
+			m.activeTurn = nil
+			m.transcriptDirty = true
+			if m.ready {
+				m.viewport.SetContent("")
+				m.viewport.GotoTop()
+			}
+			m.sendToGateway("/new")
+			return m, nil
+		}
+		// All other slash commands are forwarded to the gateway
+	}
+
 	// Add user turn to transcript
 	m.transcript = append(m.transcript, &blocks.UserTurn{Content: text})
 
-	// For now, add a mock assistant response
-	mockAssistant := &blocks.AssistantTurn{
-		Text: "(mock response to: " + text + ")",
+	if m.wireClient != nil {
+		m.inFlight = true
+		m.turnStartTime = time.Now()
+		// Reset per-turn status fields
+		sm := m.status.GetModel()
+		sm.TokensOut = 0
+		sm.TokPerSec = 0
+		sm.CostTurn = 0
+		sm.Elapsed = 0
+		sm.ToolCount = 0
+		m.status.Update(sm)
+		m.sendToGateway(text)
+	} else {
+		// Mock mode: add a mock assistant response
+		mockAssistant := &blocks.AssistantTurn{
+			Text: "(mock response to: " + text + ")",
+		}
+		mockAssistant.SetComplete()
+		m.transcript = append(m.transcript, mockAssistant)
 	}
-	m.transcript = append(m.transcript, mockAssistant)
 
 	m.transcriptDirty = true
-	m.viewport.SetContent(m.renderTranscript())
-	m.transcriptDirty = false
-	m.viewport.GotoBottom()
+	if m.ready {
+		m.viewport.SetContent(m.renderTranscript())
+		m.transcriptDirty = false
+		m.viewport.GotoBottom()
+	}
 
 	return m, nil
 }
@@ -566,6 +740,78 @@ func (m *Model) jumpTurn(delta int) {
 		}
 		m.viewport.GotoBottom()
 	}
+}
+
+func (m *Model) sendToGateway(content string) {
+	if m.wireClient == nil {
+		return
+	}
+	scenario := ""
+	if !m.firstSent {
+		scenario = m.scenario
+		m.firstSent = true
+	}
+	body := map[string]any{
+		"channel":   "terminal",
+		"sender_id": m.senderID,
+		"chat_id":   m.chatID,
+		"content":   content,
+	}
+	// Best-effort send; if it fails the read loop will detect the disconnect
+	_ = m.wireClient.SendInbound(body, m.sessionKey, scenario)
+}
+
+func (m *Model) sendInterrupt() {
+	if m.wireClient == nil {
+		return
+	}
+	body := map[string]any{
+		"channel":   "terminal",
+		"sender_id": m.senderID,
+		"chat_id":   m.chatID,
+		"control":   "interrupt",
+	}
+	_ = m.wireClient.SendInbound(body, m.sessionKey, "")
+}
+
+func (m *Model) sendApprovalResponse(value string) {
+	if m.wireClient == nil {
+		return
+	}
+	body := map[string]any{
+		"channel":      "terminal",
+		"sender_id":    m.senderID,
+		"chat_id":      m.chatID,
+		"button_value": value,
+	}
+	_ = m.wireClient.SendInbound(body, m.sessionKey, "")
+}
+
+func (m *Model) addToolToCatalog(name string) {
+	if name == "" {
+		return
+	}
+	for _, t := range m.tools {
+		if t == name {
+			return
+		}
+	}
+	m.tools = append(m.tools, name)
+}
+
+func (m *Model) addCommand(name string) {
+	if name == "" {
+		return
+	}
+	if !strings.HasPrefix(name, "/") {
+		name = "/" + name
+	}
+	for _, c := range m.commands {
+		if c == name {
+			return
+		}
+	}
+	m.commands = append(m.commands, name)
 }
 
 func (m Model) viewportHeight() int {
