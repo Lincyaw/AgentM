@@ -17,8 +17,8 @@ from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
     name="hop_finalize",
-    description="Submit tool for single-hop fault propagation verdict.",
-    registers=("tool:submit_hop_verdict",),
+    description="Submit tools for single-hop verdict and judge review.",
+    registers=("tool:submit_hop_verdict", "tool:submit_judge_review"),
     config_schema={
         "type": "object",
         "properties": {"data_dir": {"type": "string"}},
@@ -52,6 +52,25 @@ class HopVerdict(BaseModel):
         "(empty string if rejected)."
     )
     claim: str = Field(description="One-line summary of the hop.")
+
+
+class JudgeReview(BaseModel):
+    """Whole-graph review verdict (JUDGE ONLY — not for hop agents)."""
+
+    model_config = _STRICT
+    remove: list[str] = Field(
+        description="Currently-confirmed services to DEMOTE — their evidence is "
+        "not genuine degradation of that service (throughput-only drop, "
+        "tiny/non-commensurate latency, infra egress double-count). Empty if none."
+    )
+    add: list[str] = Field(
+        description="Currently-rejected services to PROMOTE — genuinely degraded "
+        "on full-picture review (e.g. system-wide cascade unavailability). "
+        "Empty if none."
+    )
+    rationale: str = Field(
+        description="Per-service justification for each remove/add, citing data."
+    )
 
 
 def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
@@ -182,6 +201,44 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             ),
             parameters=pydantic_to_openai_tool_schema(HopVerdict),
             fn=_submit,
+        )
+    )
+
+    async def _submit_judge(args: dict[str, Any]) -> ToolResult | ToolTerminate:
+        try:
+            review = JudgeReview.model_validate(args)
+        except ValidationError as exc:
+            return ToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "validation_failed",
+                        "detail": exc.errors(include_url=False),
+                    }, ensure_ascii=False),
+                )],
+                is_error=True,
+            )
+        return ToolTerminate(
+            result=ToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=review.model_dump_json(),
+                )]
+            ),
+            reason="judge:review-submitted",
+        )
+
+    api.register_tool(
+        FunctionTool(
+            name="submit_judge_review",
+            description=(
+                "JUDGE ONLY (hop agents must use submit_hop_verdict). "
+                "Submit the whole-graph review: `remove` lists confirmed "
+                "services to demote, `add` lists rejected services to "
+                "promote. Either list may be empty."
+            ),
+            parameters=pydantic_to_openai_tool_schema(JudgeReview),
+            fn=_submit_judge,
         )
     )
 

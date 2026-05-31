@@ -412,24 +412,38 @@ def _load_fault_doc(fault_kind: str) -> str:
 # ------------------------------------------------------------------
 
 _REL_DESCRIPTIONS = {
-    "callee_to_caller": "{to} calls {frm} — if {frm} is slow/broken, "
-                        "{to} (the caller) may block waiting for it.",
-    "caller_to_callee": "{frm} calls {to} — if {frm} has a network fault, "
-                        "its outgoing calls to {to} may carry corrupted "
-                        "payloads or timeouts.",
-    "co_deployed": "{frm} and {to} share a k8s node — resource contention "
-                   "(CPU/memory/disk) from one can degrade the other.",
+    "callee_to_caller": "{to} calls {frm}, so {frm} is {to}'s downstream "
+                        "dependency. A degraded callee propagates UP to its "
+                        "caller {to}, which blocks on or fails with the bad "
+                        "response. This is the usual direction for latency "
+                        "and error faults.",
+    "caller_to_callee": "{frm} calls {to}, so {to} is {frm}'s downstream "
+                        "dependency. A caller affects its callee ONLY for "
+                        "data-corruption / bad-request faults (it sends {to} "
+                        "a wrong or corrupted request). A merely slow or "
+                        "failing caller does NOT by itself degrade {to} — be "
+                        "skeptical of confirming on this edge.",
+    "co_deployed": "{frm} and {to} share a k8s node — ONLY a node-level "
+                   "resource fault (CPU/memory/disk exhaustion) on one can "
+                   "degrade the other. An app-logic, JVM, or network fault "
+                   "does not cross to a co-located pod.",
     "infra_dependency": "{frm} depends on the backing component {to} "
                         "(database/cache/broker). {to} is uninstrumented: it "
                         "has NO spans of its own — its calls live inside {frm}.",
 }
 
 
-def extract_hop_verdict(obs_dir: Path) -> dict | None:
-    """Extract the last accepted HopVerdict via ``agentm trace tools``.
+def extract_hop_verdict(
+    obs_dir: Path,
+    tool: str = "submit_hop_verdict",
+    require_key: str = "verdict",
+) -> dict | None:
+    """Extract the last accepted tool result via ``agentm trace tools``.
 
     Shells out to the CLI rather than sniffing raw JSONL, so only accepted
     tool *results* are considered (rejected tool-call arguments are ignored).
+    ``tool``/``require_key`` let the same path read the judge review tool
+    (``submit_judge_review`` keyed on ``remove``).
     """
     base = (
         ["agentm"]
@@ -441,7 +455,7 @@ def extract_hop_verdict(obs_dir: Path) -> dict | None:
         cmd = [
             *base, "trace", "tools",
             "--file", str(f),
-            "--tool", "submit_hop_verdict",
+            "--tool", tool,
             "--format", "ndjson",
         ]
         try:
@@ -472,13 +486,13 @@ def extract_hop_verdict(obs_dir: Path) -> dict | None:
                     continue
             if not isinstance(result, str) or not result:
                 continue
-            if '"error"' in result and '"verdict"' not in result:
+            if '"error"' in result and f'"{require_key}"' not in result:
                 continue
             try:
                 obj = json.loads(result)
             except Exception:  # noqa: BLE001
                 continue
-            if isinstance(obj, dict) and "verdict" in obj:
+            if isinstance(obj, dict) and require_key in obj:
                 best = obj
     return best
 
@@ -561,12 +575,14 @@ def run_hop(
             f"Compare normal vs abnormal latency and error rate.\n"
             f"- (B) `{to_service}`'s own resource metrics: `*_metrics` tables "
             f"`WHERE service_name = '{to_service}'`.\n"
-            f"Judge by fault type: a JVM/JDBC fault leaves the DB itself "
-            f"healthy (the wait is in {from_service}'s client code — do NOT "
-            f"count {to_service} as degraded); a Network fault "
-            f"(loss/partition/delay) on the {from_service}↔{to_service} "
-            f"path genuinely breaks the dependency (DB-call spans "
-            f"error/time out — count it degraded)."
+            f"The component is degraded ONLY if (B) its own metrics worsen, "
+            f"or its DB/cache spans error/slow across MULTIPLE independent "
+            f"callers. A single caller's slow or failing client spans is that "
+            f"caller's egress problem — especially under a fault that lives on "
+            f"`{from_service}` (a JVM/JDBC fault, or a `tc netem` delay/loss "
+            f"that slows ALL of {from_service}'s packets). Do NOT count "
+            f"`{to_service}` degraded from `{from_service}`'s client spans "
+            f"alone — that double-counts {from_service}'s own degradation."
         )
     parts.append(
         f"\nDetermine whether {to_service} is genuinely degraded due to "
@@ -1192,69 +1208,87 @@ def run_judge(
     throughput = _get_system_throughput(data_dir)
 
     # Build the judge prompt
+    seeds = {i["target"] for i in injections}
     inj_lines = [
         f"- {i['target']} ({i['chaos_type']})" for i in injections
     ]
-    confirmed_str = ", ".join(confirmed) if confirmed else "(none)"
 
     tp_normal = throughput.get("normal", 0)
     tp_abnormal = throughput.get("abnormal", 0)
     tp_drop = ((tp_normal - tp_abnormal) / tp_normal * 100
                if tp_normal > 0 else 0)
 
-    rejected_entries = [v for v in all_verdicts if v["verdict"] == "rejected"]
-    confirmed_entries = [v for v in all_verdicts if v["verdict"] == "confirmed"]
+    # Index hop verdicts by target for evidence lookup.
+    verdict_by_target: dict[str, dict] = {v["to"]: v for v in all_verdicts}
 
-    verdict_lines: list[str] = []
-    for v in all_verdicts:
-        tag = "CONFIRMED" if v["verdict"] == "confirmed" else "REJECTED"
-        verdict_lines.append(
-            f"- [{tag}] {v['from']} → {v['to']}: {v['rationale']}"
+    def _ev_claims(svc: str) -> str:
+        v = verdict_by_target.get(svc, {})
+        claims = [
+            e.get("claim", "") for e in v.get("symptom_evidence", [])
+            if e.get("claim")
+        ]
+        return "; ".join(claims[:4])
+
+    confirmed_nonseed = [s for s in confirmed if s not in seeds]
+    confirmed_lines: list[str] = []
+    for s in confirmed_nonseed:
+        v = verdict_by_target.get(s, {})
+        frm = v.get("from", "?")
+        confirmed_lines.append(
+            f"- {frm} → **{s}**: {v.get('rationale', '(no rationale)')}\n"
+            f"    evidence: {_ev_claims(s) or '(none)'}"
         )
+    confirmed_block = "\n".join(confirmed_lines) or "(none)"
+
+    rejected_lines: list[str] = []
+    for v in all_verdicts:
+        if v["verdict"] == "rejected" and v["to"] not in confirmed:
+            rejected_lines.append(
+                f"- {v['from']} → {v['to']}: {v['rationale']}"
+            )
+    rejected_block = "\n".join(rejected_lines) or "(none)"
 
     prompt = f"""\
-You are a judge reviewing the results of a fault-propagation verifier.
-Individual hop agents each checked one edge in isolation — your job is to
-look at the FULL picture and decide whether any verdicts should be
-overturned.
+You are the lead auditor of a fault-propagation graph that independent
+hop agents built one edge at a time. Each hop agent ran careful
+per-edge analysis — checking error rate, latency magnitude, fault
+mechanism, and relationship direction — and already rejected
+throughput-only drops and noise. **Their confirmations are
+authoritative; you do NOT remove them.**
+
+Your ONLY job is to catch what no single edge could see: a system-wide
+CASCADE in which services the hop agents rejected for "fewer calls /
+throughput drop" are in fact genuinely unavailable because the whole
+system is collapsing.
 
 ## Fault injection
 {chr(10).join(inj_lines)}
 
-## System-wide throughput
-- Normal window: {tp_normal} load-generator root spans
-- Abnormal window: {tp_abnormal} load-generator root spans
-- Drop: {tp_drop:.1f}%
+## System-wide load (the cascade signal)
+- load-generator root spans: normal {tp_normal} → abnormal {tp_abnormal} (drop {tp_drop:.1f}%)
+- If drop > 80%: the system is in cascading collapse. Review the
+  rejected list and ADD any service that is down because the whole
+  system is down (was actively serving, now silent/erroring).
+- If drop <= 80%: there is NO cascade. ADD nothing — a throughput drop
+  is just the caller sending fewer requests.
 
-## Current confirmed propagation
-{confirmed_str}
+## Confirmed services (context — do NOT change these) ({len(confirmed_nonseed)})
+{confirmed_block}
 
-## All hop verdicts ({len(confirmed_entries)} confirmed, {len(rejected_entries)} rejected)
-{chr(10).join(verdict_lines)}
+## Rejected services — ADD only under a real cascade ({len(rejected_lines)})
+{rejected_block}
 
-## Your task
-1. Check causal consistency: does the propagation chain make sense for
-   this fault type?  Are there contradictions between hop verdicts?
-2. Check for system-wide cascade: if load-generator throughput dropped
-   >80%, the system is in cascading failure.  In that regime,
-   "throughput drop alone" is NOT a valid rejection reason — the
-   service is unavailable because the whole system is collapsing.
-   Flag any rejected hops that used this reasoning during a cascade.
-3. Check cross-hop consistency: if service A calls B and C, and B is
-   confirmed degraded but C is rejected despite similar evidence, flag
-   the inconsistency.
-4. For each flagged verdict, explain why it should be overturned and
-   what evidence supports the override.
+## Decide
+- Leave `remove` EMPTY. The per-edge analysis is authoritative for
+  what is degraded; second-guessing it from rationale text alone
+  removes genuinely-degraded services and corrupts the graph.
+- ADD a rejected service only if a system-wide cascade (loadgen drop
+  > 80%) makes it genuinely unavailable, not merely less-called. Use
+  `list_tables` / `query_sql` to confirm; state latencies in ms/s
+  (duration is nanoseconds).
 
-You also have access to `list_tables` and `query_sql` to independently
-verify any evidence you question.
-
-When done, call `submit_hop_verdict` with:
-- verdict: "confirmed" if you found overrides, "rejected" if all
-  original verdicts look correct
-- rationale: your overall assessment
-- claim: list of services whose verdicts should be overturned
-  (comma-separated), or "none"
+Most reviews add nothing. Call `submit_judge_review` with `add` (and
+`remove` empty) plus `rationale`.
 """
 
     judge_dir = out / "judge"
@@ -1280,50 +1314,53 @@ When done, call `submit_hop_verdict` with:
          open(judge_dir / "stderr.log", "w") as ferr:
         subprocess.run(cmd, env=env, stdout=fout, stderr=ferr)
 
-    # Extract judge verdict
+    # Extract judge review (bidirectional: remove confirmed, add rejected)
     obs_dir = judge_dir / ".agentm" / "observability"
-    verdict = extract_hop_verdict(obs_dir) if obs_dir.exists() else None
+    verdict = (
+        extract_hop_verdict(obs_dir, "submit_judge_review", "remove")
+        if obs_dir.exists() else None
+    )
     if verdict:
         (judge_dir / "verdict.json").write_text(
             json.dumps(verdict, indent=2, ensure_ascii=False)
         )
 
-    # Merge judge overrides into a final propagation result
-    overrides: set[str] = set()
-    if verdict and verdict.get("verdict") == "confirmed":
-        claim = verdict.get("claim", "")
-        overrides = {
-            s.strip() for s in claim.split(",")
-            if s.strip() and s.strip() != "none"
-        }
+    confirmed_set = set(confirmed)
+    # Judge is promotion-only: hop confirmations are authoritative. LLM
+    # pruning from rationale text alone is unreliable (it removes genuine
+    # SLOW/ERROR services), so we record any suggested removal for audit
+    # but do NOT apply it.
+    suggested_remove = sorted(({
+        s.strip() for s in (verdict.get("remove", []) if verdict else [])
+        if isinstance(s, str) and s.strip()
+    } & confirmed_set) - seeds)
+    removed: set[str] = set()
+    # add: rejected services to promote, not already confirmed, not seeds.
+    added = {
+        s.strip() for s in (verdict.get("add", []) if verdict else [])
+        if isinstance(s, str) and s.strip()
+    }
+    added -= confirmed_set
+    added -= seeds
 
-    seeds = {i["target"] for i in injections}
-    final_confirmed = sorted(set(confirmed) | overrides)
+    final_confirmed = sorted((confirmed_set - removed) | added)
     final_propagated = [s for s in final_confirmed if s not in seeds]
-
-    # Index hop verdicts by target service for evidence lookup
-    verdict_by_target: dict[str, dict] = {}
-    for v in all_verdicts:
-        verdict_by_target[v["to"]] = v
+    judge_rationale = verdict.get("rationale", "") if verdict else ""
 
     # Build per-node entry with provenance + evidence
     nodes: list[dict] = []
     for svc in final_confirmed:
         if svc in seeds:
-            nodes.append({
-                "service": svc,
-                "source": "injection_seed",
-            })
-        elif svc in overrides and svc not in confirmed:
+            nodes.append({"service": svc, "source": "injection_seed"})
+        elif svc in added:
             hop_v = verdict_by_target.get(svc, {})
             nodes.append({
                 "service": svc,
-                "source": "judge_override",
+                "source": "judge_promoted",
                 "hop_verdict": hop_v.get("verdict", ""),
                 "hop_rationale": hop_v.get("rationale", ""),
                 "hop_evidence": hop_v.get("symptom_evidence", []),
-                "judge_rationale": verdict.get("rationale", "")
-                if verdict else "",
+                "judge_rationale": judge_rationale,
             })
         else:
             hop_v = verdict_by_target.get(svc, {})
@@ -1334,15 +1371,13 @@ When done, call `submit_hop_verdict` with:
                 "symptom_evidence": hop_v.get("symptom_evidence", []),
             })
 
-    # Build edges with evidence from hop verdicts
-    confirmed_set = set(confirmed)
+    # Build edges, dropping any whose target the judge removed.
+    final_set = set(final_confirmed)
     edges: list[dict] = []
     seen_edges: set[tuple[str, str]] = set()
-
-    # Edges from hop_log (hop_agent confirmed + edge_sql)
     for h in trace.get("hop_log", []):
         frm, to = h.get("from", ""), h.get("to", "")
-        if not frm or not to:
+        if not frm or not to or to not in final_set:
             continue
         v = h.get("verdict", "")
         if v in ("confirmed", "edge_sql") and (frm, to) not in seen_edges:
@@ -1359,18 +1394,16 @@ When done, call `submit_hop_verdict` with:
                 )
             edges.append(edge_entry)
 
-    # Edges for judge-overridden nodes
-    for svc in overrides:
-        if svc in confirmed_set:
-            continue
-        override_v = verdict_by_target.get(svc)
-        if override_v and (override_v["from"], svc) not in seen_edges:
-            seen_edges.add((override_v["from"], svc))
+    # Edges for judge-promoted nodes
+    for svc in added:
+        promoted_v = verdict_by_target.get(svc)
+        if promoted_v and (promoted_v["from"], svc) not in seen_edges:
+            seen_edges.add((promoted_v["from"], svc))
             edges.append({
-                "from": override_v["from"], "to": svc,
-                "source": "judge_override",
-                "hop_rationale": override_v.get("rationale", ""),
-                "hop_evidence": override_v.get("symptom_evidence", []),
+                "from": promoted_v["from"], "to": svc,
+                "source": "judge_promoted",
+                "hop_rationale": promoted_v.get("rationale", ""),
+                "hop_evidence": promoted_v.get("symptom_evidence", []),
             })
 
     final = {
@@ -1379,9 +1412,10 @@ When done, call `submit_hop_verdict` with:
         "propagated": final_propagated,
         "edges": edges,
         "nodes": nodes,
-        "judge_verdict": verdict.get("verdict") if verdict else None,
-        "judge_rationale": verdict.get("rationale", "") if verdict else "",
-        "overrides": sorted(overrides - confirmed_set - seeds),
+        "judge_rationale": judge_rationale,
+        "removed": sorted(removed),
+        "suggested_remove": suggested_remove,
+        "added": sorted(added),
     }
     (out / "final_propagation.json").write_text(
         json.dumps(final, indent=2, ensure_ascii=False)
@@ -1401,17 +1435,17 @@ def judge(
     _set_model(model)
     result = run_judge(case_dir, run_dir, budget=budget)
     if result:
-        print(f"\nJudge verdict: {result.get('verdict', '?')}")
-        print(f"Rationale: {result.get('rationale', '?')}")
+        print(f"\nJudge rationale: {result.get('rationale', '?')}")
     else:
-        print("Judge produced no verdict.")
+        print("Judge produced no review.")
 
     final_path = run_dir / "final_propagation.json"
     if final_path.exists():
         final = json.loads(final_path.read_text())
-        overrides = final.get("overrides", [])
+        removed = final.get("removed", [])
+        added = final.get("added", [])
         print(f"\nFinal propagation: {len(final['confirmed_nodes'])} services "
-              f"({len(overrides)} judge overrides)")
+              f"(-{len(removed)} pruned, +{len(added)} promoted)")
         print(f"Output: {final_path}")
 
 
@@ -1429,13 +1463,14 @@ def _run_judge_or_skip(
     if final_path.exists():
         try:
             fp = json.loads(final_path.read_text())
-            overrides = fp.get("overrides", [])
+            removed = fp.get("removed", [])
+            added = fp.get("added", [])
             print(f"[{idx}/{total}] {name} CACHED: "
-                  f"{len(fp['confirmed_nodes'])} confirmed, "
-                  f"{len(overrides)} overrides", flush=True)
+                  f"{len(fp['confirmed_nodes'])} confirmed "
+                  f"(-{len(removed)}/+{len(added)})", flush=True)
             return {"case": name, "cached": True,
                     "confirmed": len(fp["confirmed_nodes"]),
-                    "overrides": len(overrides)}
+                    "removed": len(removed), "added": len(added)}
         except Exception:  # noqa: BLE001
             pass
 
@@ -1446,16 +1481,15 @@ def _run_judge_or_skip(
 
     print(f"[{idx}/{total}] {name} judging...", flush=True)
     try:
-        result = run_judge(dataset_dir / name, case_out, budget=budget)
+        run_judge(dataset_dir / name, case_out, budget=budget)
         fp = json.loads(final_path.read_text()) if final_path.exists() else {}
-        overrides = fp.get("overrides", [])
-        verdict = result.get("verdict", "none")
-        print(f"  [{name}] judge={verdict}, "
-              f"{len(fp.get('confirmed_nodes', []))} confirmed, "
-              f"{len(overrides)} overrides", flush=True)
-        return {"case": name, "judge_verdict": verdict,
+        removed = fp.get("removed", [])
+        added = fp.get("added", [])
+        print(f"  [{name}] {len(fp.get('confirmed_nodes', []))} confirmed "
+              f"(-{len(removed)}/+{len(added)})", flush=True)
+        return {"case": name,
                 "confirmed": len(fp.get("confirmed_nodes", [])),
-                "overrides": len(overrides)}
+                "removed": len(removed), "added": len(added)}
     except Exception as exc:  # noqa: BLE001
         print(f"  [{name}] EXCEPTION: {exc}", flush=True)
         return {"case": name, "error": str(exc)}
@@ -1498,12 +1532,12 @@ def judge_batch(
     summaries = [results[name] for name in cases if name in results]
     ok = sum(1 for s in summaries if "error" not in s)
     cached = sum(1 for s in summaries if s.get("cached"))
-    overridden = sum(1 for s in summaries
-                     if s.get("judge_verdict") == "confirmed")
+    pruned = sum(s.get("removed", 0) for s in summaries)
+    promoted = sum(s.get("added", 0) for s in summaries)
 
     print(f"\n{'='*50}")
     print(f"Total: {total}  OK: {ok}  Cached: {cached}  "
-          f"Judge overridden: {overridden}")
+          f"Pruned: {pruned}  Promoted: {promoted}")
 
 
 def _gt_services(case_dir: Path) -> tuple[set[str], set[str]]:

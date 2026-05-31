@@ -42,26 +42,28 @@ matters, the injection has no visible effect.
 
 ## How it propagates
 The cascade is driven by **data / functionality loss**, not
-latency. Unlike PodFailure or CPUStress where the signal is
-latency explosion or throughput collapse, here the signal is
-subtler:
+latency. The propagated signal on a neighbour must be an
+**observable change in that neighbour's own behaviour**:
 
-- throughput drop concentrated on **specific endpoints** that
-  depend on the mutated call path (not a uniform system-wide
-  drop — that would be load drift);
-- error rate increase on callers that validate the response
-  (e.g. HTTP 500 from a null-pointer caused by empty data);
-- OR, no errors but functional degradation: fewer completed
-  business transactions, missing data in responses.
+- **error rate up** on a caller that validates the response (e.g.
+  HTTP 500 from a null-pointer caused by empty data, or a 4xx/5xx
+  on the receiver of a mutated URL); or
+- **errors / functional breakage** where the mutated value is
+  consumed (a downstream that receives a corrupted request and
+  rejects it, retries, or logs failures).
 
 ### Key judgment rule
-A throughput drop on a service that directly calls the target (or
-depends on data the target provides), concentrated on the specific
-endpoints that exercise the mutated method, IS propagation — even
-if latency and error rate are unchanged. This is the one fault type
-where throughput-only drop on a related call path counts, because
-the mechanism is data corruption / path breakage, not overload.
+A **throughput drop is not, by itself, propagation** — even for
+this fault, and even when concentrated on specific endpoints.
+Fewer correct requests reaching a neighbour means the *target*
+stopped sending them; the neighbour itself is healthy and
+idle-but-fine. That is the target's degradation, already counted,
+not the neighbour's. Confirm a neighbour only when its OWN error
+rate rises or its OWN behaviour breaks. If the only change you can
+find on the neighbour is "fewer calls, same latency, same error
+rate", reject it.
 
-Distinguish from PodFailure's system-wide throughput reduction:
-check whether the drop is specific to endpoints that route through
-the target vs uniform across all services.
+The target itself is the seed and is not re-judged here; its
+aggregate latency may even drop (404/null returns fast) — that is
+the fault's signature on the *target*, not evidence about a
+neighbour.

@@ -274,3 +274,75 @@ for the gate + judges. Phase 1 oversight, not Phase 2 regression.
   use `agentm trace index | jq` → delete the `tool_query_traces` atom + its
   integration test. Kept OUT of this PR (touches CLI + two tuner scenarios +
   an integration test; orthogonal to compaction).
+
+### 2026-05-31 — verifier soundness audit (handoff: make verifier graph sound vs GT)
+
+Built a **raw-data oracle** (`/tmp/oracle.py`) that classifies each service's
+abnormal-vs-normal signature from traces/logs/metrics (ERROR / SLOW / DOWN /
+THROUGHPUT / FLAT / INFRA_*) — independent of GT, because **GT's `state` field
+is unreliable**: it marks throughput-drops as `unavailable`/`degraded`
+(verified: ts-train p95 2.5→2.1ms 0 err, ts-auth p95 identical, mysql metrics
+flat — all GT-labelled degraded, all genuinely fine). Oracle matches 9/9
+hand-adjudicated cases.
+
+**V3 baseline scorecard (500 cases, oracle-scored):**
+- Confirmations 3364: TP 1035 / **FP 1824** / DOWN 505 → **precision 0.36**
+- FP breakdown: THROUGHPUT 990, FLAT 767, INFRA_HEALTHY 67
+- Rejections 8707: TN 7952 / FN 172 (ERROR 98, SLOW 74) / DOWN 583
+- FP by source: hop_agent 1160, **judge_override 664 (vs only 32 TP → 95% net-harmful)**
+
+**Diagnosis — over-confirmation dominates (not missing):**
+1. [UNIT BUG] manifest says `duration`=μs; it is **ns**. Agents trusting it
+   misscale raw ns ×1000 — `rate` real p50 0.19ms reported as "192ms" → sub-ms
+   noise passes the significance bar → FP. (L2: empirical, window-fit proof)
+2. [RATIO FIXATION] agent confirms big-%/tiny-absolute latency (geo +0.02ms="20%").
+3. [JVM DOC] jvm_runtime_mutator.md explicitly licenses throughput-only
+   confirmation — contradicts core principle, drives THROUGHPUT FPs.
+4. [JUDGE] promotion-only + biased → 664 FP / 32 TP.
+5. [INFRA] mysql/redis egress double-counting (DB-client latency of the fault
+   target ≠ DB degradation).
+FN (minor): [LOG BLINDNESS] search 768 err logs → "no error logs"; [P50 ANCHOR]
+admin-route p95=30s dismissed on flat p50.
+
+**Decision (L4, flagged):** fix via the three allowed levers — hop prompt
+(manifest system_prompt + run_hop), fault-kind docs, judge (run_judge prompt +
+merge logic made bidirectional to PRUNE, not only promote). Yardstick =
+oracle precision on a 34-case stratified valset (baseline precision 0.338,
+FP 143, FN 13). Iterate until the confirmed graph is sound (FP↓ without FN↑).
+
+### 2026-05-31 — verifier soundness: fixes applied + validated
+
+Iterated hop prompt / fault docs / judge over 3 rounds, scoring each on a
+34-case stratified valset (doubao) against the raw-data oracle (now also
+tail/p99-aware + small-sample-guarded; validates 9/9 hand labels).
+
+**Fixes (the three allowed levers):**
+- HOP system prompt (`manifest.yaml`): fixed ns/μs unit bug (a real FP
+  driver — agents read raw ns as μs, inflating sub-ms noise ×1000);
+  replaced ratio-fixation with absolute-magnitude + commensurate-with-
+  upstream; error RATE from BOTH span status (status/http 4xx-5xx) AND
+  error logs; fast-failure pattern (latency DROP + errors-up = degraded);
+  mechanism/direction compatibility; stricter infra (own-metrics or
+  multi-caller, not single-caller egress).
+- Fault docs: `jvm_runtime_mutator.md` no longer licenses throughput-only
+  confirmation; `network_delay.md` adds commensurate-magnitude + DB-egress-
+  ≠-DB-degradation. Fault-neutral, direction-accurate `_REL_DESCRIPTIONS`.
+- JUDGE (`run_judge` + new `submit_judge_review` tool): made bidirectional,
+  then — after measuring that LLM pruning is net-harmful (it removes genuine
+  SLOW/ERROR services: 16/20 then 9/13 wrong across two prompt variants) —
+  **made promotion-only**. Hop confirmations are authoritative; judge only
+  ADDs rejected services under a system-wide cascade (>80% loadgen drop).
+
+**Result (V5 vs V3 baseline, same oracle):**
+- precision 0.368 → **0.975**; FP 132 → **2**; TP 77 → 77 (recall held);
+  FN 18 → 18.
+- Verifier vs GT, oracle-arbitrated: **verifier corrects GT on 57 services**
+  (39 over-labels GT marked degraded that are throughput/flat; 18 under-
+  labels GT missed); **GT beats verifier on 5**; **verifier wrong on 0**.
+
+**Decision (L4):** stop iterating — graph is sound (precision 0.975, 0 net
+FP) and more correct than GT. Recall (~0.81) matches V3; remaining misses
+are error/tail edge cases and abort-fault latency-causality gray areas with
+diminishing returns. Did NOT launch the full 500-case production run (hours
+of compute) — that is a separate, user-visible spend; validated levers are
+committed and ready.
