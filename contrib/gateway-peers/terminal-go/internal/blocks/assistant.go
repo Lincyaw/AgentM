@@ -21,6 +21,10 @@ type AssistantTurn struct {
 	Children     []*SubagentBlock
 	Approvals    []*ApprovalBlock
 	complete     bool // true after the full assistant_text event
+
+	glamourCache      string
+	glamourCacheWidth int
+	glamourCacheText  string
 }
 
 func (b *AssistantTurn) Kind() string        { return "assistant" }
@@ -77,11 +81,13 @@ func (b *AssistantTurn) Render(width int, th *theme.Theme) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// renderText returns the text content, using glamour for completed turns
-// and raw text while still streaming (mid-stream markdown looks broken).
 func (b *AssistantTurn) renderText(width int) string {
 	if !b.complete {
 		return b.Text
+	}
+
+	if b.glamourCache != "" && b.glamourCacheWidth == width && b.glamourCacheText == b.Text {
+		return b.glamourCache
 	}
 
 	style := "dark"
@@ -99,5 +105,9 @@ func (b *AssistantTurn) renderText(width int) string {
 	if err != nil {
 		return b.Text
 	}
-	return strings.TrimSpace(rendered)
+	result := strings.TrimSpace(rendered)
+	b.glamourCache = result
+	b.glamourCacheWidth = width
+	b.glamourCacheText = b.Text
+	return result
 }
