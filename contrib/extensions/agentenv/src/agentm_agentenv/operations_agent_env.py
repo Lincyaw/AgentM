@@ -667,45 +667,107 @@ def _upload_to_pod(gateway_url: str, session_id: str, rel_path: str, payload: by
         resp.read()
 
 
+_BASE_TAG = "main-base"
+
+
 def _seed_sandbox_from_host(session: Any, gateway_url: str, host_dir: str, work_dir: str) -> None:
     """Seed the sandbox ``work_dir`` from ``host_dir``'s git HEAD and baseline it.
 
     Tracked files only (``git archive`` respects ``.gitignore``); the sandbox
     gets the code, never the remote or credentials. A baseline commit inside the
     pod gives :func:`_sync_sandbox_to_host` a precise diff target.
+
+    When ``AGENTM_GIT_BASE_REF`` is set (e.g. ``origin/main``), the sandbox
+    gets a two-commit history: base_ref content as ``main-base``, then HEAD
+    content overlaid as ``pr-changes``.  This lets review/merge agents run
+    ``git diff main-base..HEAD`` to see what the PR changed.
     """
     inside = _run_host_git(host_dir, "rev-parse", "--is-inside-work-tree")
     if inside.returncode != 0:
         raise RuntimeError(
             f"operations_agent_env: sync_cwd requires a git work tree at {host_dir!r}"
         )
-    archive = _run_host_git(host_dir, "archive", "--format=tar.gz", "HEAD")
-    if archive.returncode != 0:
-        raise RuntimeError(
-            "operations_agent_env: sync_cwd seed failed (git archive HEAD): "
-            + archive.stderr.decode(errors="replace").strip()
-        )
     session_id = getattr(session, "session_id", None)
     if not session_id:
         raise RuntimeError("operations_agent_env: sync_cwd seed failed: sandbox has no session id")
-    _upload_to_pod(gateway_url, session_id, _SEED_ARCHIVE_NAME, archive.stdout)
+
+    base_ref = os.environ.get("AGENTM_GIT_BASE_REF")
     ident = " ".join(_SYNC_GIT_IDENT)
-    # Baseline as a TAG, not just HEAD: the agent is free to `git commit` inside
-    # the sandbox (and often does), which would move HEAD and make a
-    # HEAD-relative diff empty. Diffing against the immovable tag captures the
-    # agent's changes whether committed in-pod or left in the work tree.
-    seed_cmd = (
-        f"set -e; cd {work_dir}; "
-        f"tar -xzf {_SEED_ARCHIVE_NAME}; rm -f {_SEED_ARCHIVE_NAME}; "
-        "git init -q; "
-        f"git {ident} add -A; "
-        f"git {ident} commit -q -m wb-baseline --allow-empty; "
-        f"git tag -f {_BASELINE_TAG}"
-    )
-    out, err, code = _pod_exec(session, seed_cmd, work_dir)
-    if code != 0:
-        raise RuntimeError(
-            f"operations_agent_env: sync_cwd seed failed in sandbox (exit {code}): {err or out}"
+
+    if base_ref:
+        base_archive = _run_host_git(host_dir, "archive", "--format=tar.gz", base_ref)
+        if base_archive.returncode != 0:
+            print(
+                f"WARNING: [agent_env_sync] git archive {base_ref} failed, "
+                "falling back to single-stage seed",
+                file=sys.stderr,
+            )
+            base_ref = None
+
+    if base_ref:
+        # Two-stage seed: base_ref → HEAD gives the agent real diff context.
+        _upload_to_pod(gateway_url, session_id, _SEED_ARCHIVE_NAME, base_archive.stdout)
+        base_cmd = (
+            f"set -e; cd {work_dir}; "
+            f"tar -xzf {_SEED_ARCHIVE_NAME}; rm -f {_SEED_ARCHIVE_NAME}; "
+            "git init -q; "
+            f"git {ident} add -A; "
+            f"git {ident} commit -q -m 'main (base)' --allow-empty; "
+            f"git tag -f {_BASE_TAG}"
+        )
+        out, err, code = _pod_exec(session, base_cmd, work_dir)
+        if code != 0:
+            raise RuntimeError(
+                f"operations_agent_env: sync_cwd base seed failed (exit {code}): {err or out}"
+            )
+        head_archive = _run_host_git(host_dir, "archive", "--format=tar.gz", "HEAD")
+        if head_archive.returncode != 0:
+            raise RuntimeError(
+                "operations_agent_env: sync_cwd seed failed (git archive HEAD): "
+                + head_archive.stderr.decode(errors="replace").strip()
+            )
+        _upload_to_pod(gateway_url, session_id, _SEED_ARCHIVE_NAME, head_archive.stdout)
+        overlay_cmd = (
+            f"set -e; cd {work_dir}; "
+            f"tar -xzf {_SEED_ARCHIVE_NAME}; rm -f {_SEED_ARCHIVE_NAME}; "
+            f"git {ident} add -A; "
+            f"git {ident} commit -q -m 'workbuddy PR changes' --allow-empty; "
+            f"git tag -f {_BASELINE_TAG}"
+        )
+        out, err, code = _pod_exec(session, overlay_cmd, work_dir)
+        if code != 0:
+            raise RuntimeError(
+                f"operations_agent_env: sync_cwd overlay seed failed (exit {code}): {err or out}"
+            )
+        print(
+            f"INFO: [agent_env_sync] two-stage seed: {base_ref} → HEAD into {work_dir}",
+            file=sys.stderr,
+        )
+    else:
+        # Single-stage seed (original path, used by dev agents).
+        archive = _run_host_git(host_dir, "archive", "--format=tar.gz", "HEAD")
+        if archive.returncode != 0:
+            raise RuntimeError(
+                "operations_agent_env: sync_cwd seed failed (git archive HEAD): "
+                + archive.stderr.decode(errors="replace").strip()
+            )
+        _upload_to_pod(gateway_url, session_id, _SEED_ARCHIVE_NAME, archive.stdout)
+        seed_cmd = (
+            f"set -e; cd {work_dir}; "
+            f"tar -xzf {_SEED_ARCHIVE_NAME}; rm -f {_SEED_ARCHIVE_NAME}; "
+            "git init -q; "
+            f"git {ident} add -A; "
+            f"git {ident} commit -q -m wb-baseline --allow-empty; "
+            f"git tag -f {_BASELINE_TAG}"
+        )
+        out, err, code = _pod_exec(session, seed_cmd, work_dir)
+        if code != 0:
+            raise RuntimeError(
+                f"operations_agent_env: sync_cwd seed failed in sandbox (exit {code}): {err or out}"
+            )
+        print(
+            f"INFO: [agent_env_sync] seeded sandbox {work_dir} from {host_dir} ({len(archive.stdout)} bytes)",
+            file=sys.stderr,
         )
     # Keep AgentM's own host-side runtime droppings (``.agentm/`` observability,
     # catalog) and our transient seed archive out of the dispatcher's commit:
