@@ -28,20 +28,14 @@ func (b *ThinkingBlock) Render(width int, th *theme.Theme) string {
 	return b.renderExpanded(width, th)
 }
 
-func (b *ThinkingBlock) renderCollapsed(width int, th *theme.Theme) string {
-	header := theme.ThinkingCollapsed + " thinking "
-	// pad with dots to fill width
-	dotsLen := width - len([]rune(header))
-	if dotsLen < 3 {
-		dotsLen = 3
-	}
-	dots := strings.Repeat("·", dotsLen)
-	return th.ThinkingHeader.Render(header + dots)
+func (b *ThinkingBlock) renderCollapsed(_ int, th *theme.Theme) string {
+	label := th.ThinkingLabel.Render(theme.ThinkingGlyph + " Thinking")
+	hint := th.ThinkingHint.Render(" (ctrl+e to expand)")
+	return label + hint
 }
 
-func (b *ThinkingBlock) renderExpanded(width int, th *theme.Theme) string {
-	_ = width
-	header := th.ThinkingHeader.Render(theme.ThinkingExpanded + " thinking")
+func (b *ThinkingBlock) renderExpanded(_ int, th *theme.Theme) string {
+	header := th.ThinkingLabel.Render(theme.ThinkingGlyph + " Thinking...")
 	body := th.ThinkingText.Render("  " + strings.ReplaceAll(b.Text, "\n", "\n  "))
 	return header + "\n" + body
 }

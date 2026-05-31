@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	statusBarHeight   = 3 // 2 content lines + 1 border
+	statusBarHeight   = 1 // single status line
 	doubleCtrlCWindow = 1500 * time.Millisecond
 )
 
@@ -60,6 +60,10 @@ type Model struct {
 	// searchQuery is set while the search overlay is active so
 	// renderTranscript can highlight matches.
 	searchQuery string
+
+	// transcriptMode: when true, all ThinkingBlocks and ToolBlocks
+	// render expanded; when false (default), they render collapsed.
+	transcriptMode bool
 
 	// Wire integration
 	wireClient      *wire.WireClient
@@ -376,6 +380,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keyCtrlE:
 		m.toggleNearestCollapsible()
+		m.transcriptDirty = true
+		return m, nil
+
+	case keyCtrlO:
+		m.transcriptMode = !m.transcriptMode
+		for _, b := range m.transcript {
+			if at, ok := b.(*blocks.AssistantTurn); ok {
+				if at.Thinking != nil {
+					at.Thinking.SetCollapsed(!m.transcriptMode)
+				}
+				for _, t := range at.Tools {
+					t.SetCollapsed(!m.transcriptMode)
+				}
+			}
+		}
 		m.transcriptDirty = true
 		return m, nil
 
@@ -863,10 +882,7 @@ func (m Model) View() string {
 		return "initializing..."
 	}
 
-	// 1. Status bar
-	statusView := m.status.View(m.width, m.theme)
-
-	// 2. Viewport with transcript (only re-render when dirty)
+	// 1. Viewport with transcript (only re-render when dirty)
 	if m.transcriptDirty {
 		m.viewport.SetContent(m.renderTranscript())
 		// cannot clear m.transcriptDirty here because View() is on a value receiver;
@@ -874,7 +890,7 @@ func (m Model) View() string {
 	}
 	vpView := m.viewport.View()
 
-	// 3. Full overlays replace the viewport content
+	// 2. Full overlays replace the viewport content
 	if m.overlay != nil {
 		switch m.overlay.Kind() {
 		case OverlayHelp, OverlayBookmarks, OverlayResend, OverlayCodeSave:
@@ -882,13 +898,16 @@ func (m Model) View() string {
 		}
 	}
 
-	// 4. Toast overlay on viewport (only when no full overlay)
+	// 3. Toast overlay on viewport (only when no full overlay)
 	if m.overlay == nil || m.overlay.Kind() == OverlaySearch {
 		toastView := m.toasts.View(m.width/3, m.theme)
 		if toastView != "" {
 			vpView = overlayBottomRight(vpView, toastView, m.width)
 		}
 	}
+
+	// 4. Status line (1 line, between viewport and input)
+	statusView := m.status.View(m.width, m.theme)
 
 	// 5. Inline overlays (search bar between viewport and input)
 	var inlineView string
@@ -902,8 +921,8 @@ func (m Model) View() string {
 	// 7. Input
 	inputView := m.input.View(m.width, m.theme)
 
-	// 8. Compose vertically
-	parts := []string{statusView, vpView}
+	// 8. Compose vertically: viewport, status, [inline overlay], [suggestions], input
+	parts := []string{vpView, statusView}
 	if inlineView != "" {
 		parts = append(parts, inlineView)
 	}
