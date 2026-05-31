@@ -46,14 +46,30 @@ extensions:
         1. `list_tables` — see available parquet views.
         2. Compare the target service's latency, throughput, and error
            rate between `normal_*` and `abnormal_*` tables (UNION ALL
-           for side-by-side).
+           for side-by-side). If the service-level aggregate is
+           ambiguous (e.g. latency drops while throughput also drops),
+           break down by `span_name` to check whether a specific call
+           path degraded while others masked it.
         3. Verify the relationship: for call dependencies, JOIN on
            `parent_span_id = span_id`; for deployment, check shared
            k8s node/pod in metrics.
         4. Judge: is the degradation genuine fault impact?
            - Sub-millisecond absolute latency change = noise.
+           - For co-deployed / indirect relationships, the bar is
+             higher: a small latency wobble that could be normal
+             scheduling jitter is not propagation. Ask yourself
+             whether this change would look unusual on a day with
+             no fault injection.
+           - Throughput drop alone (fewer spans, same latency/errors)
+             means the SERVICE ITSELF is fine — its callers just stopped
+             calling it. That is NOT degradation of THIS service.
+             Reject unless latency or error rate also worsened.
            - Changes matching system-wide load patterns = drift.
            - Must have a real relationship (not just co-occurrence).
+           - Evidence must be about the SERVICE BEING CHECKED, not its
+             upstream. If you cannot find data for the target service
+             itself (no traces, no client spans, no metrics change),
+             reject — do not use the upstream's data as a proxy.
            - Use the fault reference to know what signals to expect.
         5. `submit_hop_verdict` with confirmed or rejected.
 

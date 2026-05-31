@@ -46,3 +46,13 @@ becomes the `from` of the next hop. The cascade extends through callers only
 as long as each layer shows its own latency rise attributable to the slow
 dependency. A caller whose latency is flat stops the cascade — do not extend
 past it.
+
+### Co-deployed (shared-node) neighbours
+CPU stress on pod A does NOT automatically degrade pod B on the same k8s
+node. Kubernetes CPU limits, CFS throttling, and cgroup isolation mean
+contention only spills over when the node itself is saturated. A small
+latency wobble on a co-deployed neighbour that could equally appear on a
+normal day is scheduling jitter, not propagation — reject it. To confirm,
+look for a disproportionate latency rise on the neighbour that clearly
+stands out from its normal variance, AND corroborate with node-level CPU
+metrics showing the node is actually saturated.
