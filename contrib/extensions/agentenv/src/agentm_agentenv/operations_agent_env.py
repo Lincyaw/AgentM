@@ -387,19 +387,29 @@ class _AgentEnvResourceWriter:
             raise FileNotFoundError(
                 f"agent-env writer cannot read {path!r}: outside {self._work_dir!r}"
             )
-        # Use base64 to avoid the ARL gateway's ~8KB stdout truncation.
+        # The ARL gateway truncates stdout at ~8KB. To read files larger than
+        # that, we base64-encode to a temp file, then read it in chunks.
+        tmp = "/tmp/.agentm_read_buf"
         stdout, stderr, code = await self._run(
-            ["bash", "-c", f"base64 -w0 -- {shlex.quote(abs_path)}"],
+            ["bash", "-c", f"base64 -w0 -- {shlex.quote(abs_path)} > {tmp} && wc -c < {tmp}"],
         )
         if code != 0:
             raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
-        try:
-            return base64.b64decode(stdout)
-        except Exception:
-            stdout2, stderr2, code2 = await self._run(["cat", "--", abs_path])
-            if code2 != 0:
-                raise FileNotFoundError(stderr2.decode("utf-8", "replace") or path)
-            return stdout2
+        total = int(stdout.strip())
+        chunks: list[bytes] = []
+        offset = 0
+        chunk_size = 6000  # well under the 8KB limit
+        while offset < total:
+            stdout2, _, code2 = await self._run(
+                ["bash", "-c", f"dd if={tmp} bs=1 skip={offset} count={chunk_size} 2>/dev/null"],
+            )
+            if code2 != 0 or not stdout2:
+                break
+            chunks.append(stdout2)
+            offset += len(stdout2)
+        await self._run(["rm", "-f", tmp])
+        encoded = b"".join(chunks)
+        return base64.b64decode(encoded)
 
     async def write(
         self,
