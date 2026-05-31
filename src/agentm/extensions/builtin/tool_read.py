@@ -49,9 +49,17 @@ MANIFEST = ExtensionManifest(
 _PARAMETERS: Final = {
     "type": "object",
     "properties": {
-        "path": {"type": "string"},
-        "offset": {"type": "integer", "default": 0},
-        "limit": {"type": "integer", "default": 2000},
+        "path": {"type": "string", "description": "File path to read."},
+        "offset": {
+            "type": "integer",
+            "default": 0,
+            "description": "1-based line number to start reading from. 0 means start from the beginning.",
+        },
+        "limit": {
+            "type": "integer",
+            "default": 2000,
+            "description": "Maximum number of lines to return. Use -1 for no limit.",
+        },
     },
     "required": ["path"],
     "additionalProperties": False,
@@ -108,12 +116,22 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         try:
             data = await file_ops.read_file(path)
-            lines = data.decode("utf-8", errors="replace").splitlines()
+            all_lines = data.decode("utf-8", errors="replace").splitlines()
+            total = len(all_lines)
+            start = max(0, offset)
             if limit < 0:
-                sliced = lines[offset:]
+                sliced = all_lines[start:]
             else:
-                sliced = lines[offset : offset + limit]
-            return _ok("\n".join(sliced))
+                sliced = all_lines[start : start + limit]
+            # Format with line numbers (1-based) like `cat -n`.
+            numbered = [
+                f"{start + i + 1}\t{line}"
+                for i, line in enumerate(sliced)
+            ]
+            header = f"({total} lines total)"
+            if start > 0 or (limit >= 0 and start + limit < total):
+                header = f"(showing lines {start + 1}-{start + len(sliced)} of {total})"
+            return _ok(header + "\n" + "\n".join(numbered))
         except Exception as exc:
             return _error(f"Failed to read {path!r}: {exc}")
 
