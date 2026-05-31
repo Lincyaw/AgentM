@@ -17,9 +17,6 @@ func TestUserTurnRender(t *testing.T) {
 	if out == "" {
 		t.Fatal("expected non-empty render")
 	}
-	if !strings.Contains(out, "you") {
-		t.Errorf("expected attribution label in output, got:\n%s", out)
-	}
 	if !strings.Contains(out, "Hello, agent!") {
 		t.Errorf("expected content in output, got:\n%s", out)
 	}
@@ -57,8 +54,14 @@ func TestThinkingBlockCollapsedExpanded(t *testing.T) {
 	if collapsed == "" {
 		t.Fatal("collapsed render should not be empty")
 	}
-	if !strings.Contains(collapsed, theme.ThinkingCollapsed) {
-		t.Errorf("collapsed render missing glyph %q", theme.ThinkingCollapsed)
+	if !strings.Contains(collapsed, theme.ThinkingGlyph) {
+		t.Errorf("collapsed render missing glyph %q", theme.ThinkingGlyph)
+	}
+	if !strings.Contains(collapsed, "Thinking") {
+		t.Errorf("collapsed render missing 'Thinking' label")
+	}
+	if !strings.Contains(collapsed, "ctrl+e to expand") {
+		t.Errorf("collapsed render missing expand hint")
 	}
 
 	b.SetCollapsed(false)
@@ -66,8 +69,8 @@ func TestThinkingBlockCollapsedExpanded(t *testing.T) {
 	if expanded == "" {
 		t.Fatal("expanded render should not be empty")
 	}
-	if !strings.Contains(expanded, theme.ThinkingExpanded) {
-		t.Errorf("expanded render missing glyph %q", theme.ThinkingExpanded)
+	if !strings.Contains(expanded, theme.ThinkingGlyph) {
+		t.Errorf("expanded render missing glyph %q", theme.ThinkingGlyph)
 	}
 	if !strings.Contains(expanded, "database schema") {
 		t.Errorf("expanded render should contain thinking text")
@@ -98,17 +101,14 @@ func TestToolBlockCollapsedExpanded(t *testing.T) {
 	if !strings.Contains(collapsed, "ls -la /tmp") {
 		t.Errorf("collapsed render should contain command summary")
 	}
-	if !strings.Contains(collapsed, theme.ToolOK) {
-		t.Errorf("collapsed render should contain OK glyph")
+	if !strings.Contains(collapsed, theme.BlackCircle) {
+		t.Errorf("collapsed render should contain dot glyph")
 	}
 
 	b.SetCollapsed(false)
 	expanded := b.Render(testWidth, darkTheme())
 	if expanded == "" {
 		t.Fatal("expanded render should not be empty")
-	}
-	if !strings.Contains(expanded, "result:") {
-		t.Errorf("expanded render should contain result text")
 	}
 
 	if collapsed == expanded {
@@ -120,8 +120,8 @@ func TestToolBlockRunningGlyph(t *testing.T) {
 	b := NewToolBlock("read", map[string]any{"file_path": "/etc/hosts"})
 	// Done is false by default
 	out := b.Render(testWidth, darkTheme())
-	if !strings.Contains(out, theme.ToolRunning) {
-		t.Errorf("running tool should show running glyph, got:\n%s", out)
+	if !strings.Contains(out, theme.BlackCircle) {
+		t.Errorf("running tool should show dot glyph, got:\n%s", out)
 	}
 }
 
@@ -130,8 +130,8 @@ func TestToolBlockErrorGlyph(t *testing.T) {
 	b.Done = true
 	b.OK = false
 	out := b.Render(testWidth, darkTheme())
-	if !strings.Contains(out, theme.ToolError) {
-		t.Errorf("failed tool should show error glyph, got:\n%s", out)
+	if !strings.Contains(out, theme.BlackCircle) {
+		t.Errorf("failed tool should show dot glyph, got:\n%s", out)
 	}
 }
 
@@ -152,7 +152,6 @@ func TestToolBlockEditDiff(t *testing.T) {
 	if !strings.Contains(out, "/src/main.go") {
 		t.Errorf("edit render should contain file path")
 	}
-	// The diff output should contain both old and new strings
 	if !strings.Contains(out, "old") {
 		t.Errorf("edit render should contain old string content")
 	}
@@ -189,22 +188,22 @@ func TestSubagentBlockRender(t *testing.T) {
 	if !strings.Contains(out, "code-review") {
 		t.Errorf("subagent render should contain purpose")
 	}
-	if !strings.Contains(out, theme.ToolRunning) {
-		t.Errorf("running subagent should show running glyph")
+	if !strings.Contains(out, theme.BlackCircle) {
+		t.Errorf("running subagent should show dot glyph")
 	}
 
 	// Done OK
 	b.Done = true
 	out = b.Render(testWidth, darkTheme())
-	if !strings.Contains(out, theme.ToolOK) {
-		t.Errorf("completed subagent should show OK glyph")
+	if !strings.Contains(out, theme.BlackCircle) {
+		t.Errorf("completed subagent should show dot glyph")
 	}
 
 	// Done with error
 	b.Error = "timeout"
 	out = b.Render(testWidth, darkTheme())
-	if !strings.Contains(out, theme.ToolError) {
-		t.Errorf("failed subagent should show error glyph")
+	if !strings.Contains(out, theme.BlackCircle) {
+		t.Errorf("failed subagent should show dot glyph")
 	}
 
 	if b.Kind() != "subagent" {
@@ -275,8 +274,8 @@ func TestAssistantTurnRender(t *testing.T) {
 	if out == "" {
 		t.Fatal("assistant render should not be empty")
 	}
-	if !strings.Contains(out, "assistant") {
-		t.Errorf("assistant render should contain attribution")
+	if !strings.Contains(out, theme.BlackCircle) {
+		t.Errorf("assistant render should contain dot glyph")
 	}
 	if !strings.Contains(out, "result of the analysis") {
 		t.Errorf("assistant render should contain text body")
@@ -299,9 +298,6 @@ func TestAssistantTurnCompleteUsesGlamour(t *testing.T) {
 	if out == "" {
 		t.Fatal("completed assistant render should not be empty")
 	}
-	// Glamour should have processed the markdown -- at minimum the raw
-	// markers should be gone or transformed (glamour adds ANSI codes).
-	// We just verify non-empty output and the text content is present.
 	if !strings.Contains(out, "bold text") {
 		t.Errorf("rendered output should contain 'bold text'")
 	}
@@ -318,7 +314,6 @@ func TestAssistantTurnStreamingUsesRawText(t *testing.T) {
 	if out == "" {
 		t.Fatal("streaming assistant render should not be empty")
 	}
-	// Raw text should appear since we're streaming (no glamour processing)
 	if !strings.Contains(out, "**still streaming**") {
 		t.Errorf("streaming render should contain raw markdown, got:\n%s", out)
 	}

@@ -20,6 +20,7 @@ const (
 	keyDown         = "down"
 	keyPgUp         = "pgup"
 	keyPgDown       = "pgdown"
+	keyCtrlO        = "ctrl+o"
 	keyBracketOpen  = "["
 	keyBracketClose = "]"
 	keyQuestion     = "?"

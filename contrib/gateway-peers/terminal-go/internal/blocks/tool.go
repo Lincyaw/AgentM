@@ -37,14 +37,16 @@ func (b *ToolBlock) Render(width int, th *theme.Theme) string {
 
 func (b *ToolBlock) renderCollapsed(_ int, th *theme.Theme) string {
 	summary := b.summary()
-	glyph := b.statusGlyph()
-	title := fmt.Sprintf("%s %s(%s)  %s", theme.PhaseGlyphMap[theme.PhaseTool], b.Name, summary, glyph)
-	return th.ToolTitle.Render(title)
+	dot := b.dotStyled(th)
+	label := th.ToolTitle.Render(b.Name)
+	if summary != "" {
+		label += "(" + summary + ")"
+	}
+	return dot + " " + label
 }
 
 func (b *ToolBlock) renderExpanded(width int, th *theme.Theme) string {
-	glyph := b.statusGlyph()
-	title := th.ToolTitle.Render(fmt.Sprintf("%s %s  %s", theme.PhaseGlyphMap[theme.PhaseTool], b.Name, glyph))
+	title := b.renderCollapsed(width, th)
 
 	var body string
 	if strings.EqualFold(b.Name, "edit") {
@@ -58,13 +60,25 @@ func (b *ToolBlock) renderExpanded(width int, th *theme.Theme) string {
 	var sb strings.Builder
 	sb.WriteString(title + "\n")
 	if body != "" {
-		sb.WriteString(body)
+		for _, line := range strings.Split(body, "\n") {
+			sb.WriteString("  " + line + "\n")
+		}
 	}
 	if b.Done && b.Result != "" {
 		resultText := util.Truncate(b.Result, 600)
-		sb.WriteString("\n" + th.ToolBody.Render("  result: "+resultText))
+		sb.WriteString("  " + th.ToolBody.Render(resultText) + "\n")
 	}
-	return sb.String()
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+func (b *ToolBlock) dotStyled(th *theme.Theme) string {
+	if !b.Done {
+		return th.AssistantDotDim.Render(theme.BlackCircle)
+	}
+	if b.OK {
+		return th.AssistantDotOK.Render(theme.BlackCircle)
+	}
+	return th.AssistantDotErr.Render(theme.BlackCircle)
 }
 
 func (b *ToolBlock) renderEditDiff(th *theme.Theme) string {
@@ -74,7 +88,7 @@ func (b *ToolBlock) renderEditDiff(th *theme.Theme) string {
 
 	var sb strings.Builder
 	if filePath != "" {
-		sb.WriteString(th.ToolBody.Render("  file: "+filePath) + "\n")
+		sb.WriteString(th.ToolBody.Render("file: "+filePath) + "\n")
 	}
 	if oldStr != "" || newStr != "" {
 		sb.WriteString(util.RenderDiff(oldStr, newStr, th))
@@ -88,7 +102,7 @@ func (b *ToolBlock) renderWritePreview(_ int, th *theme.Theme) string {
 
 	var sb strings.Builder
 	if filePath != "" {
-		sb.WriteString(th.ToolBody.Render("  file: "+filePath) + "\n")
+		sb.WriteString(th.ToolBody.Render("file: "+filePath) + "\n")
 	}
 	if content != "" {
 		preview := util.Truncate(content, 600)
@@ -106,10 +120,10 @@ func (b *ToolBlock) renderGenericBody(_ int, th *theme.Theme) string {
 	}
 	data, err := json.MarshalIndent(b.Args, "  ", "  ")
 	if err != nil {
-		return th.ToolBody.Render("  (args unavailable)")
+		return th.ToolBody.Render("(args unavailable)")
 	}
 	text := util.Truncate(string(data), 600)
-	return th.ToolBody.Render("  " + text)
+	return th.ToolBody.Render(text)
 }
 
 // summary extracts a short description from args based on tool name.
@@ -125,16 +139,6 @@ func (b *ToolBlock) summary() string {
 		s = firstScalarValue(b.Args)
 	}
 	return util.Truncate(s, 48)
-}
-
-func (b *ToolBlock) statusGlyph() string {
-	if !b.Done {
-		return theme.ToolRunning
-	}
-	if b.OK {
-		return theme.ToolOK
-	}
-	return theme.ToolError
 }
 
 func asString(v any) (string, bool) {

@@ -33,28 +33,11 @@ func PhaseGlyph(p Phase) string {
 	return "●"
 }
 
-// Tool lifecycle glyphs.
+// Claude Code style glyphs.
 const (
-	ToolRunning = "⟳"
-	ToolOK      = "✓"
-	ToolError   = "✗"
+	BlackCircle   = "●" // assistant turn marker + tool call marker
+	ThinkingGlyph = "∴" // thinking block header
 )
-
-// Attribution labels.
-const (
-	LabelUser      = "› you"
-	LabelAssistant = "● assistant"
-	LabelSystem    = "system → you"
-)
-
-// Thinking glyphs for collapsed/expanded state.
-const (
-	ThinkingCollapsed = "▸"
-	ThinkingExpanded  = "▾"
-)
-
-// Spine is the left gutter character.
-const Spine = "┃"
 
 // Theme holds all lipgloss styles for rendering blocks and UI components.
 type Theme struct {
@@ -65,20 +48,22 @@ type Theme struct {
 	StatusDim   lipgloss.Style
 	StatusWarn  lipgloss.Style
 
-	// Spine styles for the left gutter per turn type.
-	SpineUser      lipgloss.Style
-	SpineAssistant lipgloss.Style
-	SpineTool      lipgloss.Style
-	SpineSystem    lipgloss.Style
+	// User message style (background color, no label).
+	UserMessageBg lipgloss.Style
 
-	// Attribution line styles.
-	UserAttrib      lipgloss.Style
-	AssistantAttrib lipgloss.Style
-	SystemAttrib    lipgloss.Style
+	// Assistant dot styles.
+	AssistantDot    lipgloss.Style // bold ● glyph
+	AssistantDotDim lipgloss.Style // dim ● for in-progress
+	AssistantDotOK  lipgloss.Style // green ● for completed
+	AssistantDotErr lipgloss.Style // red ● for failed
+
+	// System attribution.
+	SystemAttrib lipgloss.Style
 
 	// Thinking block styles.
-	ThinkingText   lipgloss.Style
-	ThinkingHeader lipgloss.Style
+	ThinkingText  lipgloss.Style
+	ThinkingLabel lipgloss.Style // dim + italic for "∴ Thinking"
+	ThinkingHint  lipgloss.Style // dim for "(ctrl+e to expand)"
 
 	// Tool block styles.
 	ToolTitle lipgloss.Style
@@ -107,13 +92,13 @@ type Theme struct {
 	InputPrompt lipgloss.Style
 
 	// Overlay styles.
-	OverlayBorder     lipgloss.Style // border for centered overlay boxes
-	OverlayTitle      lipgloss.Style // overlay title text
-	OverlayText       lipgloss.Style // normal overlay body text
-	OverlayDim        lipgloss.Style // secondary/hint text in overlays
-	OverlayActive     lipgloss.Style // highlighted item in a list overlay
-	OverlayInput      lipgloss.Style // inline overlay input bar
-	SearchHighlight   lipgloss.Style // matched text highlight in search
+	OverlayBorder   lipgloss.Style // border for centered overlay boxes
+	OverlayTitle    lipgloss.Style // overlay title text
+	OverlayText     lipgloss.Style // normal overlay body text
+	OverlayDim      lipgloss.Style // secondary/hint text in overlays
+	OverlayActive   lipgloss.Style // highlighted item in a list overlay
+	OverlayInput    lipgloss.Style // inline overlay input bar
+	SearchHighlight lipgloss.Style // matched text highlight in search
 }
 
 // DarkTheme returns a theme suited for dark terminal backgrounds.
@@ -132,17 +117,18 @@ func DarkTheme() *Theme {
 		StatusDim:   lipgloss.NewStyle().Foreground(dim),
 		StatusWarn:  lipgloss.NewStyle().Foreground(warn).Bold(true),
 
-		SpineUser:      lipgloss.NewStyle().Foreground(dim),
-		SpineAssistant: lipgloss.NewStyle().Foreground(accent),
-		SpineTool:      lipgloss.NewStyle().Foreground(yellow),
-		SpineSystem:    lipgloss.NewStyle().Foreground(dim),
+		UserMessageBg: lipgloss.NewStyle().Background(lipgloss.Color("#373737")).PaddingRight(1),
 
-		UserAttrib:      lipgloss.NewStyle().Foreground(dim),
-		AssistantAttrib: lipgloss.NewStyle().Foreground(accent).Bold(true),
-		SystemAttrib:    lipgloss.NewStyle().Foreground(dim).Italic(true),
+		AssistantDot:    lipgloss.NewStyle().Bold(true),
+		AssistantDotDim: lipgloss.NewStyle().Faint(true),
+		AssistantDotOK:  lipgloss.NewStyle().Foreground(green),
+		AssistantDotErr: lipgloss.NewStyle().Foreground(red),
 
-		ThinkingText:   lipgloss.NewStyle().Foreground(dim),
-		ThinkingHeader: lipgloss.NewStyle().Foreground(dim),
+		SystemAttrib: lipgloss.NewStyle().Foreground(dim).Italic(true),
+
+		ThinkingText:  lipgloss.NewStyle().Foreground(dim),
+		ThinkingLabel: lipgloss.NewStyle().Foreground(dim).Italic(true),
+		ThinkingHint:  lipgloss.NewStyle().Foreground(dim),
 
 		ToolTitle: lipgloss.NewStyle().Foreground(yellow).Bold(true),
 		ToolBody:  lipgloss.NewStyle().Foreground(dim),
@@ -193,17 +179,18 @@ func LightTheme() *Theme {
 		StatusDim:   lipgloss.NewStyle().Foreground(dim),
 		StatusWarn:  lipgloss.NewStyle().Foreground(warn).Bold(true),
 
-		SpineUser:      lipgloss.NewStyle().Foreground(dim),
-		SpineAssistant: lipgloss.NewStyle().Foreground(accent),
-		SpineTool:      lipgloss.NewStyle().Foreground(yellow),
-		SpineSystem:    lipgloss.NewStyle().Foreground(dim),
+		UserMessageBg: lipgloss.NewStyle().Background(lipgloss.Color("#F0F0F0")).PaddingRight(1),
 
-		UserAttrib:      lipgloss.NewStyle().Foreground(dim),
-		AssistantAttrib: lipgloss.NewStyle().Foreground(accent).Bold(true),
-		SystemAttrib:    lipgloss.NewStyle().Foreground(dim).Italic(true),
+		AssistantDot:    lipgloss.NewStyle().Bold(true),
+		AssistantDotDim: lipgloss.NewStyle().Faint(true),
+		AssistantDotOK:  lipgloss.NewStyle().Foreground(green),
+		AssistantDotErr: lipgloss.NewStyle().Foreground(red),
 
-		ThinkingText:   lipgloss.NewStyle().Foreground(dim),
-		ThinkingHeader: lipgloss.NewStyle().Foreground(dim),
+		SystemAttrib: lipgloss.NewStyle().Foreground(dim).Italic(true),
+
+		ThinkingText:  lipgloss.NewStyle().Foreground(dim),
+		ThinkingLabel: lipgloss.NewStyle().Foreground(dim).Italic(true),
+		ThinkingHint:  lipgloss.NewStyle().Foreground(dim),
 
 		ToolTitle: lipgloss.NewStyle().Foreground(yellow).Bold(true),
 		ToolBody:  lipgloss.NewStyle().Foreground(dim),

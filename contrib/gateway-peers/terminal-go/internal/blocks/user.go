@@ -1,13 +1,11 @@
 package blocks
 
 import (
-	"strings"
-
 	"github.com/AoyangSpace/agentm-terminal/internal/theme"
 	"github.com/AoyangSpace/agentm-terminal/internal/util"
 )
 
-// UserTurn renders a user message with attribution and left spine gutter.
+// UserTurn renders a user message with a background color, no label.
 type UserTurn struct {
 	Content string
 }
@@ -17,18 +15,12 @@ func (b *UserTurn) Collapsed() bool     { return false }
 func (b *UserTurn) SetCollapsed(_ bool) {} // no-op: user turns are always expanded
 
 func (b *UserTurn) Render(width int, th *theme.Theme) string {
-	attrib := th.UserAttrib.Render(theme.LabelUser)
 	content := util.Truncate(b.Content, contentWidth(width)*20)
-
-	var sb strings.Builder
-	sb.WriteString(attrib + "\n")
-	for _, line := range strings.Split(content, "\n") {
-		sb.WriteString("  " + line + "\n")
-	}
-	return strings.TrimRight(sb.String(), "\n")
+	style := th.UserMessageBg.Width(width)
+	return style.Render(content)
 }
 
-// contentWidth returns the usable width after accounting for the indent.
+// contentWidth returns the usable width after accounting for gutter.
 func contentWidth(width int) int {
 	w := width - 2
 	if w < 20 {

@@ -34,61 +34,62 @@ func (b *AssistantTurn) SetComplete() { b.complete = true }
 func (b *AssistantTurn) Complete() bool { return b.complete }
 
 func (b *AssistantTurn) Render(width int, th *theme.Theme) string {
-	attrib := th.AssistantAttrib.Render(theme.LabelAssistant)
-	indent := "  "
-	contentWidth := width - len(indent)
-	if contentWidth < 20 {
-		contentWidth = 20
+	cw := width - 2 // 2 chars for "● " prefix
+	if cw < 20 {
+		cw = 20
 	}
 
 	var sb strings.Builder
-	sb.WriteString(attrib + "\n")
 
 	// Thinking block (if present)
 	if b.Thinking != nil && b.Thinking.Text != "" {
-		sb.WriteString(prefixLines(b.Thinking.Render(contentWidth, th), indent) + "\n")
+		sb.WriteString(b.Thinking.Render(width, th) + "\n")
 	}
 
-	// Main text
+	// Main text with ● prefix on first line
 	if b.Text != "" {
-		rendered := b.renderText(contentWidth)
-		sb.WriteString(prefixLines(rendered, indent) + "\n")
+		rendered := b.renderText(cw)
+		dot := th.AssistantDot.Render(theme.BlackCircle)
+		lines := strings.Split(rendered, "\n")
+		if len(lines) > 0 {
+			sb.WriteString(dot + " " + lines[0] + "\n")
+			for _, line := range lines[1:] {
+				sb.WriteString("  " + line + "\n")
+			}
+		}
 	}
 
 	// Tool blocks
 	for _, tool := range b.Tools {
-		sb.WriteString(prefixLines(tool.Render(contentWidth, th), indent) + "\n")
+		sb.WriteString(tool.Render(width, th) + "\n")
 	}
 
 	// Sub-agent blocks
 	for _, child := range b.Children {
-		sb.WriteString(prefixLines(child.Render(contentWidth, th), indent) + "\n")
+		sb.WriteString(child.Render(width, th) + "\n")
 	}
 
 	// Approval blocks
 	for _, appr := range b.Approvals {
-		sb.WriteString(prefixLines(appr.Render(contentWidth, th), indent) + "\n")
+		sb.WriteString(appr.Render(width, th) + "\n")
 	}
 
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// renderText returns the text content rendered with glamour markdown.
-// During active streaming (TextDirty && !complete), returns raw text to
-// avoid re-rendering partial markdown every flush tick.
+// renderText returns the text content, using glamour for completed turns
+// and raw text while still streaming (mid-stream markdown looks broken).
 func (b *AssistantTurn) renderText(width int) string {
-	if b.TextDirty && !b.complete {
+	if !b.complete {
 		return b.Text
 	}
 
-	style := "dark"
-	if b.GlamourStyle == "light" {
-		style = "light"
-	}
-	r, err := glamour.NewTermRenderer(
+	opts := []glamour.TermRendererOption{
 		glamour.WithWordWrap(width),
-		glamour.WithStandardStyle(style),
-	)
+		glamour.WithAutoStyle(),
+	}
+
+	r, err := glamour.NewTermRenderer(opts...)
 	if err != nil {
 		return b.Text
 	}
@@ -97,13 +98,4 @@ func (b *AssistantTurn) renderText(width int) string {
 		return b.Text
 	}
 	return strings.TrimSpace(rendered)
-}
-
-// prefixLines prepends prefix to every line of s.
-func prefixLines(s, prefix string) string {
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		lines[i] = prefix + line
-	}
-	return strings.Join(lines, "\n")
 }

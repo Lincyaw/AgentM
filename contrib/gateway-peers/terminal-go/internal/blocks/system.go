@@ -16,18 +16,14 @@ func (b *SystemTurn) Kind() string        { return "system" }
 func (b *SystemTurn) Collapsed() bool     { return false }
 func (b *SystemTurn) SetCollapsed(_ bool) {} // no-op
 
-func (b *SystemTurn) Render(width int, th *theme.Theme) string {
-	_ = width
-	label := theme.LabelSystem
+func (b *SystemTurn) Render(_ int, th *theme.Theme) string {
+	label := th.SystemAttrib.Render("system")
 	if b.Source != "" {
-		label += "  (" + b.Source + ")"
+		label += th.ThinkingHint.Render(" (" + b.Source + ")")
 	}
-	attrib := th.SystemAttrib.Render(label)
 
 	var sb strings.Builder
-	sb.WriteString(attrib + "\n")
-	for _, line := range strings.Split(b.Content, "\n") {
-		sb.WriteString("  " + line + "\n")
-	}
-	return strings.TrimRight(sb.String(), "\n")
+	sb.WriteString(label + "\n")
+	sb.WriteString("  " + b.Content)
+	return sb.String()
 }

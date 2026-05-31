@@ -62,6 +62,7 @@ func (h *HelpOverlay) View(width, height int, th *theme.Theme) string {
 			header: "Utilities",
 			keys: [][2]string{
 				{"Ctrl+E", "toggle collapse"},
+				{"Ctrl+O", "expand/collapse all"},
 				{"Ctrl+Y", "copy last reply"},
 				{"Ctrl+B", "bookmark position"},
 				{"Ctrl+G", "bookmark list"},
