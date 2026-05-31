@@ -39,6 +39,13 @@ type Model struct {
 	inFlight  bool
 
 	commands []string
+
+	overlay   Overlay
+	bookmarks []Bookmark
+
+	// searchQuery is set while the search overlay is active so
+	// renderTranscript can highlight matches.
+	searchQuery string
 }
 
 // NewModel creates a new Model with mock data for visual testing.
@@ -193,6 +200,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// If an overlay is active, delegate to it first.
+	if m.overlay != nil {
+		return m.handleOverlayKey(msg)
+	}
+
 	key := msg.String()
 
 	// Global keys that bypass input
@@ -261,6 +273,34 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Overlay activations
+	switch key {
+	case keyCtrlF:
+		m.overlay = NewSearchOverlay(m.transcript)
+		return m, nil
+
+	case keyCtrlB:
+		m.addBookmark()
+		return m, nil
+
+	case keyCtrlG:
+		m.overlay = NewBookmarkOverlay(m.bookmarks)
+		return m, nil
+
+	case keyCtrlR:
+		m.overlay = NewResendOverlay(m.input.History())
+		return m, nil
+
+	case keyCtrlS:
+		o := NewCodeSaveOverlay(m.transcript)
+		if o != nil {
+			m.overlay = o
+		} else {
+			m.toasts.Push("no code blocks found", "warn", 2*time.Second)
+		}
+		return m, nil
+	}
+
 	// Block navigation (only when input is empty and not focused on multiline)
 	if m.input.Text() == "" {
 		switch key {
@@ -269,6 +309,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case keyBracketClose:
 			m.jumpTurn(1)
+			return m, nil
+		case keyQuestion:
+			m.overlay = NewHelpOverlay()
 			return m, nil
 		}
 	}
@@ -291,6 +334,110 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, cmd
+}
+
+func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Esc always closes any overlay
+	if msg.String() == keyEsc {
+		m.closeOverlay()
+		return m, nil
+	}
+
+	updated, cmd, closed := m.overlay.Update(msg)
+	m.overlay = updated
+
+	if closed {
+		// Handle post-close actions depending on overlay type
+		switch o := m.overlay.(type) {
+		case *SearchOverlay:
+			m.searchQuery = ""
+			m.transcriptDirty = true
+
+		case *BookmarkOverlay:
+			m.bookmarks = o.Bookmarks()
+			if target := o.JumpTarget(); target >= 0 && target < len(m.blockLineOffsets) {
+				m.viewport.SetYOffset(m.blockLineOffsets[target])
+			}
+
+		case *ResendOverlay:
+			if o.WantsEdit() {
+				m.input.SetText(o.Chosen())
+			}
+			// If resend was chosen, the cmd already contains InputSubmitted
+
+		case *CodeSaveOverlay:
+			if o.Saved() {
+				m.toasts.Push("saved to "+o.SavedPath(), "info", 3*time.Second)
+			} else if o.Error() != nil {
+				m.toasts.Push("save error: "+o.Error().Error(), "warn", 3*time.Second)
+			}
+		}
+		m.overlay = nil
+		return m, cmd
+	}
+
+	// While search overlay is active, update the highlight query
+	if so, ok := m.overlay.(*SearchOverlay); ok {
+		m.searchQuery = so.Query()
+		m.transcriptDirty = true
+		// Scroll to current match
+		if target := so.CurrentMatchBlock(); target >= 0 && target < len(m.blockLineOffsets) {
+			m.viewport.SetYOffset(m.blockLineOffsets[target])
+		}
+	}
+
+	return m, cmd
+}
+
+func (m *Model) closeOverlay() {
+	if so, ok := m.overlay.(*SearchOverlay); ok {
+		_ = so
+		m.searchQuery = ""
+		m.transcriptDirty = true
+	}
+	m.overlay = nil
+}
+
+func (m *Model) addBookmark() {
+	if len(m.transcript) == 0 {
+		return
+	}
+	// Bookmark the block nearest to current viewport position
+	blockIdx := 0
+	for i, off := range m.blockLineOffsets {
+		if off <= m.viewport.YOffset {
+			blockIdx = i
+		}
+	}
+	// Build label from block content (first 40 chars)
+	label := ""
+	if blockIdx < len(m.transcript) {
+		label = blockLabel(m.transcript[blockIdx])
+	}
+	m.bookmarks = append(m.bookmarks, Bookmark{
+		BlockIndex: blockIdx,
+		Label:      label,
+	})
+	m.toasts.Push("bookmark added", "info", 2*time.Second)
+}
+
+func blockLabel(b blocks.Block) string {
+	var text string
+	switch v := b.(type) {
+	case *blocks.UserTurn:
+		text = v.Content
+	case *blocks.AssistantTurn:
+		text = v.Text
+	case *blocks.SystemTurn:
+		text = v.Content
+	default:
+		text = b.Kind()
+	}
+	text = strings.ReplaceAll(text, "\n", " ")
+	if len(text) > 40 {
+		text = text[:37] + "..."
+	}
+	return text
 }
 
 func (m Model) handleSubmit(msg components.InputSubmitted) (tea.Model, tea.Cmd) {
@@ -429,8 +576,12 @@ func (m Model) viewportHeight() int {
 			sugHeight = 5
 		}
 	}
+	inlineOverlayHeight := 0
+	if m.overlay != nil && m.overlay.Kind() == OverlaySearch {
+		inlineOverlayHeight = 1
+	}
 	inputHeight := m.input.Height()
-	h := m.height - statusBarHeight - inputHeight - sugHeight
+	h := m.height - statusBarHeight - inputHeight - sugHeight - inlineOverlayHeight
 	if h < 1 {
 		h = 1
 	}
@@ -454,20 +605,39 @@ func (m Model) View() string {
 	}
 	vpView := m.viewport.View()
 
-	// 3. Toast overlay on viewport
-	toastView := m.toasts.View(m.width/3, m.theme)
-	if toastView != "" {
-		vpView = overlayBottomRight(vpView, toastView, m.width)
+	// 3. Full overlays replace the viewport content
+	if m.overlay != nil {
+		switch m.overlay.Kind() {
+		case OverlayHelp, OverlayBookmarks, OverlayResend, OverlayCodeSave:
+			vpView = m.overlay.View(m.width, m.viewportHeight(), m.theme)
+		}
 	}
 
-	// 4. Suggestions
+	// 4. Toast overlay on viewport (only when no full overlay)
+	if m.overlay == nil || m.overlay.Kind() == OverlaySearch {
+		toastView := m.toasts.View(m.width/3, m.theme)
+		if toastView != "" {
+			vpView = overlayBottomRight(vpView, toastView, m.width)
+		}
+	}
+
+	// 5. Inline overlays (search bar between viewport and input)
+	var inlineView string
+	if m.overlay != nil && m.overlay.Kind() == OverlaySearch {
+		inlineView = m.overlay.View(m.width, 1, m.theme)
+	}
+
+	// 6. Suggestions
 	sugView := m.suggestions.View(m.width, m.theme)
 
-	// 5. Input
+	// 7. Input
 	inputView := m.input.View(m.width, m.theme)
 
-	// 6. Compose vertically
+	// 8. Compose vertically
 	parts := []string{statusView, vpView}
+	if inlineView != "" {
+		parts = append(parts, inlineView)
+	}
 	if sugView != "" {
 		parts = append(parts, sugView)
 	}
@@ -491,8 +661,36 @@ func (m *Model) renderTranscript() string {
 			linePos++
 		}
 		rendered := b.Render(m.width, m.theme)
+		if m.searchQuery != "" {
+			rendered = highlightMatches(rendered, m.searchQuery, m.theme)
+		}
 		sb.WriteString(rendered)
 		linePos += strings.Count(rendered, "\n") + 1
+	}
+	return sb.String()
+}
+
+// highlightMatches wraps case-insensitive occurrences of query in the
+// theme's SearchHighlight style within rendered text.
+func highlightMatches(text, query string, th *theme.Theme) string {
+	if query == "" {
+		return text
+	}
+	lower := strings.ToLower(text)
+	q := strings.ToLower(query)
+
+	var sb strings.Builder
+	pos := 0
+	for {
+		idx := strings.Index(lower[pos:], q)
+		if idx < 0 {
+			sb.WriteString(text[pos:])
+			break
+		}
+		sb.WriteString(text[pos : pos+idx])
+		matchEnd := pos + idx + len(query)
+		sb.WriteString(th.SearchHighlight.Render(text[pos+idx : matchEnd]))
+		pos = matchEnd
 	}
 	return sb.String()
 }
