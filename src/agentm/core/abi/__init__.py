@@ -4,8 +4,20 @@ Public surface for the kernel layer described in
 `.claude/designs/pluggable-architecture.md` §3. Everything exported here is
 considered stable API for higher layers (runtime, scenarios, presenters).
 
-The kernel is the bottom layer: it does not import from any other AgentM
-module. It exposes:
+The ABI is the type/Protocol foundation the other layers depend on. Its own
+submodules import only stdlib; the package ``__init__`` additionally
+re-exports a few concrete service *types* from ``core/_internal/`` and
+``core/runtime/`` — ``FunctionTool``, ``SessionTelemetry``, ``TraceReader``
+(+ its view dataclasses) — so atoms can name them for annotation without
+importing ``agentm.core.runtime.*`` directly (the §11 atom contract forbids
+that). Where the substrate owns the instance lifecycle (e.g.
+``SessionTelemetry`` via ``api.get_session_telemetry()``), import the type to
+annotate and obtain the live instance through ``ExtensionAPI`` — do not
+construct it yourself. These re-exports stay within the recovery floor
+(``core/abi`` + ``core/lib`` + ``core/runtime`` + stdlib), so they do not
+weaken it.
+
+It exposes:
 
 - Message data model (``messages``)
 - Bare tool contract (``tool``)
