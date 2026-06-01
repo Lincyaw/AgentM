@@ -33,7 +33,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from agentm.extensions import ExtensionManifest
+from agentm.core.abi import ExtensionManifest
 
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
