@@ -1026,7 +1026,28 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
-        # Agent handles git push/PR/labels autonomously — no sync-back needed.
+        # Auto-submit: if the agent made changes but didn't push, do it now.
+        repo = os.environ.get("WORKBUDDY_REPO", "")
+        issue_num = os.environ.get("WORKBUDDY_ISSUE_NUM", "")
+        branch = f"workbuddy/issue-{issue_num}" if issue_num else ""
+        if repo and branch:
+            submit_cmd = (
+                f"cd {work_dir} && "
+                "git status --porcelain | grep -q . && "
+                f'git add -A && git commit -m "resolve issue #{issue_num}" && '
+                f"git push origin {branch} && "
+                f'(gh pr create -R {repo} --title "workbuddy: resolve #{issue_num}" '
+                f'--body "Resolves #{issue_num}" --head {branch} 2>/dev/null || true) && '
+                f"gh issue comment {issue_num} -R {repo} "
+                '--body "Implemented and pushed." && '
+                f"gh issue edit {issue_num} -R {repo} "
+                "--add-label status:reviewing --remove-label status:developing"
+            )
+            try:
+                _pod_exec(session, submit_cmd, work_dir)
+                print(f"INFO: [agent_env_sync] auto-submitted changes for #{issue_num}", file=sys.stderr)
+            except Exception:  # noqa: BLE001
+                print(f"WARNING: [agent_env_sync] auto-submit failed for #{issue_num}", file=sys.stderr)
         try:
             session.delete_sandbox()
         except Exception:  # noqa: BLE001
