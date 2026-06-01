@@ -48,19 +48,19 @@ Downgrade-application semantics flip (design §5.2):
 §11 contract notes:
 
 * Imports are stdlib + ``agentm.core.abi.*`` + ``agentm.extensions`` plus
-  the scenario's pure modules (``schema``, ``updates``, ``judges``) and
-  the store atom module for its module-level ``claim_write_handle``. The
-  store atom is the only sibling atom referenced — and only via a
-  top-level function explicitly designed for the gate's use. The
-  validator's forbidden-prefix list rejects only
-  ``agentm.extensions.builtin.*`` / ``_agentm_contrib__*`` /
-  ``agentm._scenarios.*`` — scenario-local ``agentm_rca_hfsm.*`` is
-  outside that list, so this import is legal.
+  the scenario's pure modules (``schema``, ``updates``, ``judges``) only.
+  The gate imports **no** sibling atom module. The write handle is reached
+  through ``api.get_service('rca.hgraph.claim_write')`` (the store atom
+  publishes the claim function as a service) applied to the token from
+  ``api.get_service('rca.hgraph.write_token')`` — the same service-registry
+  integration every other atom uses, not an import. The
+  ``requires=("rca_hgraph_store",)`` edge declares the load-order
+  dependency explicitly.
 
-* The 4 ``rca.judge.*`` services are looked up by name via
-  ``api.get_service`` at install time and stored on the gate instance.
-  No judge-atom imports — judges are reached only through the service
-  registry, the same way every other atom integrates.
+* The store services and the 4 ``rca.judge.*`` services are looked up by
+  name via ``api.get_service`` at install time and stored on the gate
+  instance. No sibling-atom imports — every dependency is reached only
+  through the service registry, the same way every other atom integrates.
 
 * No ``core.runtime`` / ``core._internal`` imports. Mutable state lives
   on the gate instance, not at module level.
@@ -74,7 +74,6 @@ from typing import Any
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca_hfsm.atoms.rca_hgraph_store import claim_write_handle
 from agentm_rca_hfsm.judges import Judge, JudgeContext, Verdict
 from agentm_rca_hfsm.schema import CheckResult, Hypothesis, Prediction
 from agentm_rca_hfsm.updates import (
@@ -101,7 +100,7 @@ MANIFEST = ExtensionManifest(
         "properties": {},
         "additionalProperties": False,
     },
-    requires=(),
+    requires=("rca_hgraph_store",),
 )
 
 
@@ -688,7 +687,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "rca_falsification_gate: rca.hgraph.write_token is not "
             "published; rca_hgraph_store must install before the gate"
         )
-    write_handle = claim_write_handle(token)
+    claim_write = api.get_service("rca.hgraph.claim_write")
+    if claim_write is None:
+        raise RuntimeError(
+            "rca_falsification_gate: rca.hgraph.claim_write is not "
+            "published; rca_hgraph_store must install before the gate"
+        )
+    write_handle = claim_write(token)
     read_handle = api.get_service("rca.hgraph.read")
     if read_handle is None:
         raise RuntimeError(
