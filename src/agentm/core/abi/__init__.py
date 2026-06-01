@@ -53,6 +53,7 @@ from .events import (
     TurnStartEvent,
 )
 from .loop import AgentLoop, LoopConfig
+from .manifest import ExtensionManifest as ExtensionManifest
 from .presenter import PHASE_GLYPHS, Phase
 from .provider import ProviderConfig, ProviderManifest, ProviderResolver
 from .retry import RetryPolicy
@@ -128,6 +129,8 @@ __all__ = [
     # loop
     "AgentLoop",
     "LoopConfig",
+    # extension manifest (atom-facing declaration record)
+    "ExtensionManifest",
     # presenter view contract
     "PHASE_GLYPHS",
     "Phase",
