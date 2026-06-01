@@ -346,3 +346,22 @@ are error/tail edge cases and abort-fault latency-causality gray areas with
 diminishing returns. Did NOT launch the full 500-case production run (hours
 of compute) — that is a separate, user-visible spend; validated levers are
 committed and ready.
+
+### 2026-06-01 — full 500-case production run (litellm)
+
+Ran the validated fixes on all 500 ops-lite-clean cases. Hops: 341 on
+direct-Ark `doubao` (hit Ark 429 throttling — 77 hops), then switched the
+remaining 159 to `--model litellm` (proxy `Doubao-Seed-2.0-pro`, no
+throttling) per user. Promotion-only judge (litellm): 0 prunes, 0 cascade
+promotions across 500. Scored with the `audit` oracle:
+
+- precision **0.386 → 0.949** (FP 1656 → 49); recall 0.838 → 0.765.
+- verifier-vs-GT FALSE POSITIVES: **1399 → 13** (108×).
+- verifier **corrects GT on 974 services** (863 over-labels + 111 under-
+  labels), wrong on 117 (13 FP + 104 misses) — ~8:1 vs GT.
+- Trustworthiness of "GT missed this" claims: V3 ~16% real → V5 ~90% real.
+
+Recall traded down (V3's high recall was mostly noise: 261 real under-label
+finds buried in 1399 FPs). The 104 verifier-misses (GT right) are the
+remaining recall frontier — error/tail detection in abort/loss/container-
+kill fault types. Run artifacts: /tmp/verifier-v5-full (ephemeral).
