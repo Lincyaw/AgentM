@@ -2,18 +2,22 @@
 
 Owns the per-trace ``HypothesisGraph`` (design §3) and the ``ObservationLog``
 (design §3.2). Publishes a public read handle as the service
-``rca.hgraph.read`` and a one-shot write handle that the future falsification
-gate atom claims via the module-level ``claim_write_handle`` function using a
+``rca.hgraph.read`` and a one-shot write handle that the falsification gate
+atom claims via the ``rca.hgraph.claim_write`` service — the claim function is
+delivered over the service registry (not import-reached) and consumes a
 shared-secret token (design §7.4 — single-writer property).
 
 The token mechanism is the structural reply to "any atom that calls
 ``api.get_service('rca.hgraph.write')`` becomes a writer". Instead, this atom
-publishes a per-install random token via ``rca.hgraph.write_token`` and the
-write handle is only obtainable by calling ``claim_write_handle(token)``
-*once* per token. Each call to :func:`install` mints a fresh token, so
-multiple sessions in the same process each get an independent (token, handle)
-pair; the one-shot rule is per token, not per process. A second claim of the
-same token (or any unknown token) raises ``RuntimeError``.
+publishes a per-install random token via ``rca.hgraph.write_token`` plus the
+claim function via ``rca.hgraph.claim_write``; the write handle is only
+obtainable by calling that claim function with the token *once* per token.
+Each call to :func:`install` mints a fresh token, so multiple sessions in the
+same process each get an independent (token, handle) pair; the one-shot rule
+is per token, not per process. A second claim of the same token (or any
+unknown token) raises ``RuntimeError``. Publishing the claim function as a
+service changes nothing security-wise: the token is already a public service
+and the one-shot claim still enforces single-writer.
 
 §11 single-file contract: stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions.*`` only. The sibling ``schema`` import is a pure-data
@@ -44,7 +48,7 @@ MANIFEST = ExtensionManifest(
     description=(
         "Owns the per-trace HypothesisGraph + ObservationLog and exposes "
         "rca.hgraph.read publicly. The write handle is gated by a one-shot "
-        "token claimed via module-level claim_write_handle()."
+        "token claimed via the rca.hgraph.claim_write service."
     ),
     registers=(),
     config_schema={
@@ -204,7 +208,9 @@ class _WriteHandle:
 # ---------------------------------------------------------------------------
 # Single-writer token registry. Module-level because the gate atom does not
 # import this module (§11 atom-to-atom rule); it reaches the write handle
-# through ``api.get_service('rca.hgraph.write_token')`` + this function.
+# through ``api.get_service('rca.hgraph.write_token')`` for the token and
+# ``api.get_service('rca.hgraph.claim_write')`` for the claim function below,
+# which :func:`install` publishes — no sibling-atom import involved.
 # ---------------------------------------------------------------------------
 
 
@@ -269,3 +275,4 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
     api.set_service("rca.hgraph.read", read_handle)
     api.set_service("rca.hgraph.write_token", token)
+    api.set_service("rca.hgraph.claim_write", claim_write_handle)
