@@ -2,20 +2,18 @@
 
 Example::
 
-    # harness=glm5.1 on Ark, agent=Doubao via .env / OPENAI_* env
-    set -a; . ./.env; set +a
     uv run python -m agentm_rca.eval.replay_fork.cli run \\
         --source-exp agentm-ab100-baseline-0525-0847 \\
         --harness-model ark-glm51 \\
-        --agent-model Doubao-Seed-2.0-pro \\
+        --agent-model litellm \\
         --scenario rca:baseline \\
         --max-depth 3 \\
         --out runs/glm51-replay/results.jsonl
 
-The harness model is a ``~/.agentm/config.toml`` profile (its endpoint /
-key travel in the profile). The agent model is an id resolved against the
-ambient ``OPENAI_*`` env the way the rca eval driver builds its provider,
-so the continuation hits the same endpoint the recorded baseline did.
+Both ``--harness-model`` and ``--agent-model`` are
+``~/.agentm/config.toml`` profile names. The profile carries the
+endpoint, api_key, and model id, so no ambient ``OPENAI_*`` env vars
+are needed (or consulted).
 """
 
 from __future__ import annotations
@@ -66,11 +64,8 @@ def run(
         str, typer.Option("--harness-model", help="config.toml profile for extractor+auditor")
     ] = "ark-glm51",
     agent_model: Annotated[
-        str, typer.Option("--agent-model", help="model id for the continuation agent")
-    ] = "Doubao-Seed-2.0-pro",
-    agent_provider: Annotated[
-        str, typer.Option("--agent-provider", help="provider id for the continuation agent")
-    ] = "openai",
+        str, typer.Option("--agent-model", help="config.toml profile for the continuation agent")
+    ] = "litellm",
     scenario: Annotated[
         str, typer.Option("--scenario", help="scenario for the continuation agent")
     ] = "rca:baseline",
@@ -170,6 +165,18 @@ def run(
         typer.echo(f"# resume: skipping {len(skip_ids)} cases already in {out}")
 
     harness_provider = build_profile_provider(harness_model)
+    agent_provider = build_profile_provider(agent_model)
+
+    # -- Build trigger registry: cadence + on-submission --
+    from llmharness.audit.triggers import TriggerRegistry
+    from llmharness.extensions.trigger_cadence import _CadenceTrigger
+    from llmharness.extensions.trigger_on_submission import _OnSubmissionTrigger
+
+    trigger_registry = TriggerRegistry()
+    trigger_registry.register_trigger(_CadenceTrigger(interval=5))
+    trigger_registry.register_trigger(
+        _OnSubmissionTrigger(tool_names=frozenset({"submit_investigation", "submit_final_report"}))
+    )
 
     # -- Build the fork strategy from CLI flags --
     strategy: ForkStrategy
@@ -185,6 +192,7 @@ def run(
             max_depth=max_depth,
             sidecar_dir=sidecar_dir,
             skip_extractor=skip_extractor,
+            trigger_registry=trigger_registry,
         )
         typer.echo(
             f"# strategy: {strategy.label}\n"
@@ -192,12 +200,14 @@ def run(
             f"base_url={harness_provider[1].get('base_url')}"
         )
 
-    typer.echo(f"# agent:   provider={agent_provider} model={agent_model} scenario={scenario}")
+    typer.echo(
+        f"# agent:   {agent_provider[0]} model={agent_provider[1].get('model')} "
+        f"base_url={agent_provider[1].get('base_url')} scenario={scenario}"
+    )
 
     agent = AgentMAgent(
         scenario=scenario,
-        model=agent_model,
-        provider=agent_provider,
+        provider_tuple=agent_provider,
         max_turns=max_turns,
     )
     source: EvalDbCaseSource | SessionFileCaseSource

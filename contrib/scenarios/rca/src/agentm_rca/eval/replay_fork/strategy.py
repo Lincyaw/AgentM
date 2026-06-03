@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi.messages import AgentMessage
+from llmharness.audit.triggers import TriggerRegistry
 
 from .case_source import ReplayCase
 
@@ -169,6 +170,7 @@ class HarnessStrategy(ForkStrategy):
         cwd: str | None = None,
         sidecar_dir: str | os.PathLike[str] | None = None,
         skip_extractor: bool = False,
+        trigger_registry: TriggerRegistry | None = None,
     ) -> None:
         self._harness_provider = harness_provider
         self._max_depth = max_depth
@@ -177,6 +179,7 @@ class HarnessStrategy(ForkStrategy):
         self._cwd = cwd or os.getcwd()
         self._sidecar_dir = Path(sidecar_dir) if sidecar_dir is not None else None
         self._skip_extractor = skip_extractor
+        self._trigger_registry = trigger_registry
 
     @property
     def label(self) -> str:
@@ -237,6 +240,7 @@ class HarnessStrategy(ForkStrategy):
             max_surfaces_per_node=1,
             out_path=out_path,
             skip_extractor=self._skip_extractor,
+            trigger_registry=self._trigger_registry,
             trace_id=control_id,
         )
 
