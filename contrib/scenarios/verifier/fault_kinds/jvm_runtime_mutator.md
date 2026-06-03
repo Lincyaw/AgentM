@@ -40,6 +40,15 @@ If the mutated method is never exercised during the abnormal
 window, or the mutated value is never consumed by a code path that
 matters, the injection has no visible effect.
 
+## How to observe on a neighbour
+The mutation affects a specific call path, so the signal on a
+caller is concentrated on the endpoint(s) that route through the
+mutated method. The caller's service-wide aggregate may look
+healthy if unaffected endpoints dominate. Always break down by
+`span_name` on the caller to isolate the affected path — check
+both latency changes (fast 404 on the mutated URL) and error rate
+changes (HTTP 4xx/5xx from the corrupted request).
+
 ## How it propagates
 The cascade is driven by **data / functionality loss**, not
 latency. The propagated signal on a neighbour must be an
