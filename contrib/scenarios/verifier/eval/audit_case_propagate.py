@@ -82,7 +82,7 @@ def get_relationships(data_dir: Path) -> list[Rel]:
         "JOIN all_traces parent "
         "  ON child.parent_span_id = parent.span_id "
         "WHERE child.service_name <> parent.service_name "
-        "GROUP BY 1, 2 HAVING COUNT(*) >= 5 "
+        "GROUP BY 1, 2 "
         "ORDER BY cnt DESC"
     ).fetchall()
     for caller, callee, cnt in rows:
@@ -1055,6 +1055,7 @@ def run_batch(
     case_parallel: int = 1,
     limit: int | None = None,
     offset: int = 0,
+    case_filter: set[str] | None = None,
 ) -> list[dict]:
     """Run propagation on multiple cases under *dataset_dir*.
 
@@ -1064,6 +1065,8 @@ def run_batch(
     suitable for diff/analysis across ablation runs.
     """
     cases = sorted(p.name for p in dataset_dir.iterdir() if p.is_dir())
+    if case_filter is not None:
+        cases = [c for c in cases if c in case_filter]
     cases = cases[offset:]
     if limit is not None:
         cases = cases[:limit]
@@ -1153,14 +1156,19 @@ def batch(
     model: Annotated[str | None, typer.Option(help="config.toml profile name")] = None,
     limit: Annotated[int | None, typer.Option(help="max cases to run")] = None,
     offset: Annotated[int, typer.Option(help="skip first N cases")] = 0,
+    cases_file: Annotated[Path | None, typer.Option("--cases-file", help="text file with one case name per line")] = None,
 ) -> None:
     """Run propagation on all cases in a dataset."""
     _set_model(model)
+    case_filter = None
+    if cases_file is not None:
+        case_filter = set(cases_file.read_text().strip().splitlines())
     run_batch(
         dataset_dir.resolve(), run_dir.resolve(),
         budget=budget, parallel=parallel,
         case_parallel=case_parallel,
         limit=limit, offset=offset,
+        case_filter=case_filter,
     )
 
 
@@ -1588,264 +1596,119 @@ def _gt_services(case_dir: Path) -> tuple[set[str], set[str]]:
 def diff(
     dataset_dir: Annotated[Path, typer.Argument(help="dataset with GT labels")],
     run_dir: Annotated[Path, typer.Option("--run-dir", help="verifier run output")],
+    format: Annotated[str, typer.Option(help="table or ndjson")] = "table",
 ) -> None:
-    """Compare verifier findings against GT labels."""
-    summary_path = run_dir / "run_summary.jsonl"
-    if not summary_path.exists():
-        typer.echo("No run_summary.jsonl found — run batch first.")
-        raise typer.Exit(1)
+    """Compare verifier graph against GT per case.
 
-    with open(summary_path) as f:
-        cases = [json.loads(line) for line in f]
+    For each case, classifies every service into one of:
+      agree      — both verifier and GT have it
+      v_only     — verifier confirmed, GT lacks
+      rejected   — GT has it, hop agent evaluated and rejected
+      unreachable — GT has it, verifier never evaluated (not in BFS neighborhood)
 
-    total = new_total = missed_total = match_total = 0
-    diff_rows: list[dict] = []
-
-    for s in cases:
-        name = s["case"]
-        if "error" in s:
-            continue
-        total += 1
-        case_dir = dataset_dir / name
-        gt_inj, gt_prop = _gt_services(case_dir)
-        v_seeds = set(s.get("seeds", []))
-        v_prop = set(s.get("propagated", []))
-
-        new_finds = v_prop - gt_prop - v_seeds
-        missed = gt_prop - v_prop
-
-        row = {
-            "case": name,
-            "gt_inj": sorted(gt_inj), "gt_prop": sorted(gt_prop),
-            "v_seeds": sorted(v_seeds), "v_prop": sorted(v_prop),
-            "new": sorted(new_finds), "missed": sorted(missed),
-        }
-        diff_rows.append(row)
-
-        tag = "MATCH" if (not new_finds and not missed) else ""
-        if new_finds:
-            new_total += len(new_finds)
-            tag = f"NEW +{len(new_finds)}"
-        if missed:
-            missed_total += len(missed)
-            tag += f"  MISSED -{len(missed)}"
-        if not new_finds and not missed:
-            match_total += 1
-
-        typer.echo(f"{name}  {tag}")
-        if new_finds:
-            typer.echo(f"  new:    {sorted(new_finds)}")
-        if missed:
-            typer.echo(f"  missed: {sorted(missed)}")
-
-    typer.echo(f"\n{'='*50}")
-    typer.echo(f"Cases: {total}  Match: {match_total}  "
-               f"New findings: {new_total}  Missed: {missed_total}")
-
-    diff_path = run_dir / "gt_diff.jsonl"
-    with open(diff_path, "w") as f:
-        for row in diff_rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    typer.echo(f"Diff: {diff_path}")
-
-
-# ------------------------------------------------------------------
-# Raw-data oracle — adjudicates verifier vs GT from traces/logs/metrics
-#
-# GT's `state` field is unreliable (it marks throughput-drops as
-# degraded/unavailable), so neither GT nor GT-matching can score the
-# verifier. This oracle classifies each service's abnormal-vs-normal
-# signature directly and is used only as a measurement yardstick — it is
-# NOT part of the verifier runtime (keeping the agent's reasoning and the
-# soundness metric independent).
-# ------------------------------------------------------------------
-
-_ORACLE_NS_MS = 1e6
-_SLOW_FLOOR = 50 * _ORACLE_NS_MS      # 50ms absolute p95 increase floor
-_SLOW_STRONG = 200 * _ORACLE_NS_MS    # 200ms = high-confidence slow
-_ERR_DELTA = 0.05                     # +5 percentage points error rate
-_INFRA_RE = re.compile(
-    r"mysql|mariadb|postgres|redis|mongo|rabbitmq|kafka|memcached|"
-    r"nacos|elasticsearch|zookeeper|consul|etcd", re.I,
-)
-_DEGRADED = {"ERROR", "SLOW", "INFRA_DEGRADED"}
-_NOT_DEGRADED = {"THROUGHPUT", "FLAT", "INFRA_HEALTHY"}
-
-
-def _oracle_sig(conn, svc: str) -> dict:  # noqa: ANN001
-    sig: dict = {}
-    for w in ("normal", "abnormal"):
-        try:
-            r = conn.execute(
-                f"SELECT COUNT(*), quantile_cont(duration,0.95), "
-                f"quantile_cont(duration,0.99), "
-                f"SUM(CASE WHEN \"attr.status_code\"='STATUS_CODE_ERROR' "
-                f"  OR TRY_CAST(\"attr.http.response.status_code\" AS INT)>=500 "
-                f"  THEN 1 ELSE 0 END) "
-                f"FROM {w}_traces WHERE service_name=?", [svc]).fetchone()
-        except Exception:  # noqa: BLE001
-            r = (0, None, None, 0)
-        try:
-            lr = conn.execute(
-                f"SELECT COUNT(*), SUM(CASE WHEN level='ERROR' THEN 1 ELSE 0 END) "
-                f"FROM {w}_logs WHERE service_name=?", [svc]).fetchone()
-        except Exception:  # noqa: BLE001
-            lr = (0, 0)
-        sig[w] = {
-            "spans": r[0] or 0, "p95": r[1], "p99": r[2],
-            "err_spans": r[3] or 0, "logs": lr[0] or 0, "err_logs": lr[1] or 0,
-        }
-    return sig
-
-
-def _oracle_infra_degraded(conn, svc: str) -> bool:  # noqa: ANN001
-    try:
-        rows = conn.execute(
-            "SELECT 'n', AVG(CASE WHEN metric_name LIKE '%cpu%' THEN value END), "
-            "  AVG(CASE WHEN metric_name LIKE '%memory%' THEN value END) "
-            "FROM normal_metrics WHERE service_name=? "
-            "UNION ALL "
-            "SELECT 'a', AVG(CASE WHEN metric_name LIKE '%cpu%' THEN value END), "
-            "  AVG(CASE WHEN metric_name LIKE '%memory%' THEN value END) "
-            "FROM abnormal_metrics WHERE service_name=?", [svc, svc]).fetchall()
-        if len(rows) == 2:
-            nc, nm, ac, am = rows[0][1], rows[0][2], rows[1][1], rows[1][2]
-            if nc and ac and ac > nc * 1.3:
-                return True
-            if nm and am and am > nm * 1.3:
-                return True
-    except Exception:  # noqa: BLE001
-        pass
-    return False
-
-
-def oracle_classify(conn, svc: str) -> str:  # noqa: ANN001
-    """Label one service ERROR/SLOW/DOWN/THROUGHPUT/FLAT/INFRA_* from data."""
-    if _INFRA_RE.search(svc):
-        return "INFRA_DEGRADED" if _oracle_infra_degraded(conn, svc) \
-            else "INFRA_HEALTHY"
-    s = _oracle_sig(conn, svc)
-    n, a = s["normal"], s["abnormal"]
-    n_er = (n["err_logs"] / n["logs"]) if n["logs"] else 0.0
-    a_er = (a["err_logs"] / a["logs"]) if a["logs"] else 0.0
-    n_se = (n["err_spans"] / n["spans"]) if n["spans"] else 0.0
-    a_se = (a["err_spans"] / a["spans"]) if a["spans"] else 0.0
-
-    # Small-sample guard: <20 abnormal spans makes per-span stats noise.
-    if a["spans"] < 20:
-        if n["spans"] >= 50 and a["spans"] < n["spans"] * 0.5:
-            return "DOWN"
-        if a_er - n_er > _ERR_DELTA and a_er > 0.05 and a["logs"] >= 50:
-            return "ERROR"
-        return "FLAT"
-    if (a_er - n_er > _ERR_DELTA and a_er > 0.05) or \
-       (a_se - n_se > _ERR_DELTA and a_se > 0.05):
-        return "ERROR"
-    if n["spans"] >= 50 and a["spans"] < max(5, n["spans"] * 0.02):
-        return "DOWN"
-    if n["p95"] and a["p95"]:
-        d = a["p95"] - n["p95"]
-        if (d > _SLOW_STRONG and a["p95"] > n["p95"] * 1.3) or \
-           (d > _SLOW_FLOOR and a["p95"] > n["p95"] * 1.5):
-            return "SLOW"
-    if n["p99"] and a["p99"] and a["p99"] > n["p99"] * 2 \
-            and a["p99"] - n["p99"] > _SLOW_STRONG and a["p99"] > 500 * _ORACLE_NS_MS:
-        return "SLOW"  # tail: a fraction of requests very slow even if p95 flat
-    if n["spans"] and a["spans"] < n["spans"] * 0.8:
-        if not a["p95"] or not n["p95"] or a["p95"] <= n["p95"] * 1.2:
-            return "THROUGHPUT"
-    return "FLAT"
-
-
-@app.command()
-def audit(
-    dataset_dir: Annotated[Path, typer.Argument(help="dataset with GT labels")],
-    run_dir: Annotated[Path, typer.Option("--run-dir", help="verifier run output")],
-) -> None:
-    """Score the verifier graph for SOUNDNESS against the raw-data oracle.
-
-    Reports confirmation precision / recall (oracle = arbiter, not GT) and
-    a verifier-vs-GT adjudication: on how many services the verifier
-    corrects GT (over/under-labels) vs is itself wrong.
+    Outputs per-case JSONL to <run-dir>/gt_diff.jsonl and prints a summary.
     """
-    import duckdb  # noqa: F401  (ensures the dep is present)
-
     cases = sorted(
         p.name for p in run_dir.iterdir()
         if p.is_dir() and (p / "final_propagation.json").exists()
     )
+
     agg: dict[str, int] = defaultdict(int)
+    svc_agg: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     rows: list[dict] = []
+
     for name in cases:
         cdir = dataset_dir / name
-        if not (cdir / "causal_graph.json").exists():
+        if not cdir.exists():
             continue
         fp = json.loads((run_dir / name / "final_propagation.json").read_text())
         seeds = set(fp.get("seeds", []))
-        ver = set(fp.get("propagated", []))
-        gt_seeds, gt = _gt_services(cdir)
+        v_prop = set(fp.get("propagated", []))
+
+        gt_seeds, gt_prop = _gt_services(cdir)
         seeds |= gt_seeds
-        gt -= seeds
-        ver -= seeds
-        # hop-rejected = every hop target not in the final set
-        rejected: set[str] = set()
+
+        evaluated: set[str] = set()
         avp = run_dir / name / "all_verdicts.json"
         if avp.exists():
-            rejected = {v["to"] for v in json.loads(avp.read_text())}
-        rejected -= ver | seeds
+            evaluated = {v["to"] for v in json.loads(avp.read_text())}
 
-        conn = _duckdb_conn(cdir.resolve())
-        labels = {s: oracle_classify(conn, s) for s in (ver | gt | rejected)}
-        conn.close()
+        agree = v_prop & gt_prop
+        v_only = v_prop - gt_prop
+        gt_only = gt_prop - v_prop
+        rejected = gt_only & evaluated
+        unreachable = gt_only - evaluated
 
-        for s in ver:
-            L = labels[s]
-            agg["TP" if L in _DEGRADED else
-                ("conf_DOWN" if L == "DOWN" else "FP")] += 1
+        row: dict = {
+            "case": name,
+            "seeds": sorted(seeds),
+            "agree": sorted(agree),
+            "v_only": sorted(v_only),
+            "rejected": sorted(rejected),
+            "unreachable": sorted(unreachable),
+        }
+        rows.append(row)
+
+        agg["cases"] += 1
+        agg["agree"] += len(agree)
+        agg["v_only"] += len(v_only)
+        agg["rejected"] += len(rejected)
+        agg["unreachable"] += len(unreachable)
+        if not v_only and not rejected and not unreachable:
+            agg["exact_match"] += 1
+
         for s in rejected:
-            L = labels[s]
-            agg["FN" if L in _DEGRADED else
-                ("rej_DOWN" if L == "DOWN" else "TN")] += 1
-        for s in (ver | gt):
-            L = labels[s]
-            inv, ing = s in ver, s in gt
-            if L == "DOWN":
-                continue
-            deg = L in _DEGRADED
-            if inv and not ing and deg:
-                agg["fix_gt_underlabel"] += 1
-            elif inv and not ing and not deg:
-                agg["verifier_FP"] += 1
-            elif ing and not inv and not deg:
-                agg["fix_gt_overlabel"] += 1
-            elif ing and not inv and deg:
-                agg["verifier_miss"] += 1
-        rows.append({"case": name,
-                     "verifier": sorted(ver), "gt": sorted(gt),
-                     "labels": labels})
+            svc_agg[s]["rejected"] += 1
+        for s in unreachable:
+            svc_agg[s]["unreachable"] += 1
+        for s in v_only:
+            svc_agg[s]["v_only"] += 1
 
-    tp, fp_, fn = agg["TP"], agg["FP"], agg["FN"]
-    prec = tp / (tp + fp_) if (tp + fp_) else 0.0
-    rec = tp / (tp + fn) if (tp + fn) else 0.0
-    typer.echo(f"\nCases: {len(rows)}   (oracle = arbiter, GT is NOT truth)")
-    typer.echo(f"Confirmations: TP={tp} FP={fp_} DOWN={agg['conf_DOWN']}  "
-               f"precision={prec:.3f}")
-    typer.echo(f"Rejections:    FN={fn} TN={agg['TN']} DOWN={agg['rej_DOWN']}  "
-               f"recall={rec:.3f}")
-    typer.echo("\nVerifier vs GT (oracle-arbitrated):")
-    typer.echo(f"  corrects GT over-label (GT had non-degraded): "
-               f"{agg['fix_gt_overlabel']}")
-    typer.echo(f"  corrects GT under-label (GT missed degraded): "
-               f"{agg['fix_gt_underlabel']}")
-    typer.echo(f"  verifier miss (GT right, verifier wrong):     "
-               f"{agg['verifier_miss']}")
-    typer.echo(f"  verifier false positive:                      "
-               f"{agg['verifier_FP']}")
-    out = run_dir / "audit.jsonl"
-    with open(out, "w") as f:
+    diff_path = run_dir / "gt_diff.jsonl"
+    with open(diff_path, "w") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    typer.echo(f"\nPer-service labels: {out}")
+
+    if format == "ndjson":
+        for row in rows:
+            typer.echo(json.dumps(row, ensure_ascii=False))
+        return
+
+    has_diff = [r for r in rows
+                if r["v_only"] or r["rejected"] or r["unreachable"]]
+    for r in has_diff:
+        parts = []
+        if r["rejected"]:
+            parts.append(f"rejected={r['rejected']}")
+        if r["unreachable"]:
+            parts.append(f"unreachable={r['unreachable']}")
+        if r["v_only"]:
+            parts.append(f"v_only={r['v_only']}")
+        typer.echo(f"{r['case']}  {', '.join(parts)}")
+
+    typer.echo(f"\n{'=' * 60}")
+    typer.echo(f"Cases: {agg['cases']}  Exact match: {agg['exact_match']}")
+    typer.echo(f"Services — agree: {agg['agree']}  v_only: {agg['v_only']}  "
+               f"rejected: {agg['rejected']}  unreachable: {agg['unreachable']}")
+
+    top_rejected = sorted(
+        ((s, c["rejected"]) for s, c in svc_agg.items() if c.get("rejected")),
+        key=lambda x: -x[1],
+    )
+    top_unreachable = sorted(
+        ((s, c["unreachable"]) for s, c in svc_agg.items() if c.get("unreachable")),
+        key=lambda x: -x[1],
+    )
+    if top_rejected:
+        typer.echo("\nTop rejected (GT has, hop agent rejected):")
+        for s, n in top_rejected[:15]:
+            typer.echo(f"  {s}: {n}")
+    if top_unreachable:
+        typer.echo("\nTop unreachable (GT has, BFS never reached):")
+        for s, n in top_unreachable[:15]:
+            typer.echo(f"  {s}: {n}")
+
+    typer.echo(f"\nPer-case diff: {diff_path}")
 
 
 if __name__ == "__main__":
