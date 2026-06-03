@@ -1,0 +1,22 @@
+name: terminal_bench
+description: |
+  Scenario for Terminal-Bench evaluation tasks.
+
+  Minimal tool set for autonomous terminal work: bash, file I/O,
+  observability, compaction. No memory or skill loader (ephemeral
+  container, no persistent state).
+
+extensions:
+  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.tool_result_cap
+  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.tool_edit
+  - module: agentm.extensions.builtin.tool_write
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
+  - module: agentm.extensions.builtin.runtime_context
+  - module: agentm.extensions.builtin.llm_compaction
+  - module: agentm.extensions.builtin.read_history
