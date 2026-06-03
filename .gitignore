@@ -50,3 +50,7 @@ datasets/
 
 # llmharness local experiment outputs (audit dumps, eval DBs, per-iter runs)
 contrib/extensions/llmharness/runs/
+runs/
+
+# local eval/benchmark job outputs (terminal_bench harbor runs, litellm batches)
+jobs/
