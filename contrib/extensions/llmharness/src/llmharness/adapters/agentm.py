@@ -80,7 +80,7 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.messages import AgentMessage, ToolCallBlock
+from agentm.core.abi.messages import AgentMessage
 from agentm.extensions import ExtensionManifest
 
 from ..audit import entry_types as _et

@@ -246,7 +246,7 @@ def parse_output(
 
     # For count mode, drop zero-count lines that grep emits.
     if output_mode == "count":
-        lines = [l for l in lines if not l.endswith(":0")]
+        lines = [ln for ln in lines if not ln.endswith(":0")]
 
     truncated = len(lines) > limit
     lines = lines[:limit]
