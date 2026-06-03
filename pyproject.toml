@@ -95,6 +95,10 @@ markers = [
 # top-level pytest must not recurse into them — both define a ``tests``
 # package and the import paths collide.
 addopts = "-m 'not ui' --ignore=contrib/extensions/agentenv --ignore=contrib/extensions/llmharness --ignore=contrib/extensions/mcp_bridge --ignore=contrib/scenarios/rca --ignore=contrib/scenarios/rca_hfsm --ignore=contrib/gateway-peers"
+# Local eval/benchmark output dirs (gitignored, but present in the working
+# tree) carry ``test-*.txt`` verifier dumps that pytest would otherwise
+# collect as stray doctests. Keep collection out of them at any depth.
+norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}", "runs", "jobs"]
 
 [tool.mypy]
 python_version = "3.12"

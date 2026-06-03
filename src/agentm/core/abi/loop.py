@@ -40,8 +40,6 @@ import itertools
 import logging
 import os
 import time
-
-_logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 from typing import Any
 
@@ -107,6 +105,8 @@ from .tool import (
     ToolResult,
     ToolTerminate,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 # --- Config -----------------------------------------------------------------

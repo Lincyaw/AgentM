@@ -22,6 +22,7 @@ from agentm.core.abi.messages import (
     AgentMessage,
     AssistantContent,
     AssistantMessage,
+    ImageContent,
     TextContent,
     ThinkingBlock,
     ToolCallBlock,
@@ -317,10 +318,10 @@ def _payload_to_message(payload: dict[str, Any]) -> AgentMessage | None:
     return None
 
 
-def _deserialize_user_blocks(raw: Any) -> list[TextContent]:
+def _deserialize_user_blocks(raw: Any) -> list[TextContent | ImageContent]:
     if not isinstance(raw, list):
         return []
-    blocks: list[TextContent] = []
+    blocks: list[TextContent | ImageContent] = []
     for item in raw:
         if not isinstance(item, dict):
             continue

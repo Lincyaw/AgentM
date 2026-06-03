@@ -193,7 +193,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         try:
             original = (await writer.read(path)).decode("utf-8", errors="replace")
 
-            if has_lines:
+            if start_line is not None and end_line is not None:
                 result = await _line_range_replace(
                     writer, path, original, int(start_line), int(end_line),
                     new_string, rationale,
@@ -263,7 +263,6 @@ def _find_actual_string(file_content: str, search: str) -> str | None:
         # Map the position in the stripped file back to the original.
         # Walk the original file's lines to find the matching range.
         orig_lines = file_content.split("\n")
-        stripped_lines = stripped_file.split("\n")
         # Find which line in stripped_file the match starts on
         prefix = stripped_file[:idx]
         start_line = prefix.count("\n")
@@ -334,7 +333,7 @@ async def _line_range_replace(
     if new_string and not new_string.endswith("\n"):
         new_string += "\n"
     updated = "".join(before) + new_string + "".join(after)
-    replaced_len = sum(len(l) for l in lines[start - 1 : end])
+    replaced_len = sum(len(ln) for ln in lines[start - 1 : end])
     shrinkage = _check_shrinkage(original, updated, replaced_len, len(new_string))
     if shrinkage:
         return _error(shrinkage)
