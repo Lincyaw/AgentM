@@ -115,6 +115,13 @@ def run(
             ),
         ),
     ] = False,
+    auditor_prompt: Annotated[
+        str | None,
+        typer.Option(
+            "--auditor-prompt",
+            help="auditor prompt variant name (e.g. 'trajectory_coverage') or absolute path",
+        ),
+    ] = None,
 ) -> None:
     """Run the replay-fork experiment over a recorded baseline exp."""
     logging.basicConfig(
@@ -193,6 +200,7 @@ def run(
             sidecar_dir=sidecar_dir,
             skip_extractor=skip_extractor,
             trigger_registry=trigger_registry,
+            auditor_prompt=auditor_prompt,
         )
         typer.echo(
             f"# strategy: {strategy.label}\n"
