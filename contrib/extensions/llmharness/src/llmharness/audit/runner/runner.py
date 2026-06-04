@@ -980,11 +980,12 @@ class HarnessRunner:
 
         if self._skip_extractor:
             # Trajectory-mode: bypass the graph entirely and feed raw
-            # trajectory to the auditor.  Force the trajectory prompt
-            # variant regardless of AuditorSettings.base_prompt (which
-            # defaults to the graph-oriented minimal framing).
+            # trajectory to the auditor.  Use AuditorSettings.base_prompt
+            # when it was explicitly set (non-empty); fall back to the
+            # default trajectory variant otherwise.
+            traj_prompt = self._auditor_settings.base_prompt or None
             firing_extensions = compose_auditor_trajectory_extensions(
-                base_prompt=None,
+                base_prompt=traj_prompt,
                 observability_config=self._auditor_settings.observability_config,
                 trajectory=trajectory_snapshot,
                 continuation_notes=continuation_notes,
