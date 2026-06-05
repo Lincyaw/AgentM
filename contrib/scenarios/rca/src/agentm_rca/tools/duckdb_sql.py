@@ -482,6 +482,7 @@ def _http_request(
     """
     import httpx
 
+    verify = os.environ.get("AGENTM_DUCKDB_TLS_VERIFY", "1") not in ("0", "false", "no")
     resp = httpx.request(
         method,
         url,
@@ -489,6 +490,7 @@ def _http_request(
         params=params,
         json=json_body,
         timeout=timeout,
+        verify=verify,
     )
     return _HttpResponse(resp.status_code, resp.content, text=resp.text)
 
