@@ -16,12 +16,15 @@ prompt and the tool schemas are **identical** in both:
 * **Local mode** (default): reads parquet from a local ``data_dir`` with an
   in-process DuckDB. Requires no network and no ``pyarrow``.
 * **Remote mode**: when an ``endpoint`` is configured, ``list_tables`` and
-  ``query_sql`` become thin HTTP clients against the aegis blob query API
-  (see ``docs/rfc/0001-remote-data-plane-duckdb-over-http.md``). The
-  endpoint must be the gateway / edge-proxy base, never a direct upstream
-  pod. The Arrow IPC response is decoded with ``pyarrow`` and run through
-  the same serialise / id-compact / truncate pipeline, so the agent sees
-  byte-identical output to local mode.
+  ``query_sql`` become thin clients over the rcabench SDK's blob query
+  endpoint (``BlobApi.blob_query_bucket`` →
+  ``POST /api/v2/blob/buckets/{bucket}/query``; see
+  ``docs/rfc/0001-remote-data-plane-duckdb-over-http.md``). The endpoint
+  must be the gateway / edge-proxy base, never a direct upstream pod. The
+  SDK returns already-decoded JSON rows, which run through the same
+  serialise / id-compact / truncate pipeline, so the agent sees output
+  structurally identical to local mode — same rows and values; column key
+  order is alphabetical, as the JSON envelope carries no SQL select order.
 
 Configuration (local)::
 
@@ -44,7 +47,7 @@ Configuration (remote)::
         row_limit: 200
         token_limit: 5000
 
-Remote mode needs the optional ``pyarrow`` dependency
+Remote mode needs the optional ``rcabench`` SDK
 (``uv sync --extra duckdb-remote``); local mode does not import it.
 """
 
@@ -394,12 +397,12 @@ def _scrub(text: str, secrets: tuple[str, ...]) -> str:
 
 
 class _RemoteState:
-    """HTTP client that targets the aegis blob query endpoint.
+    """SDK client that targets the aegis blob query endpoint.
 
     Holds the wire secrets (endpoint, bucket auth context, bearer token)
-    and the per-session dedup cache. The atom never surfaces the endpoint
-    or token; ``handle`` is the only locator the agent sees and it carries
-    no auth material.
+    and the per-session dedup cache, and lazily builds the rcabench
+    ``BlobApi``. The atom never surfaces the endpoint or token; ``handle``
+    is the only locator the agent sees and it carries no auth material.
     """
 
     def __init__(
@@ -421,6 +424,7 @@ class _RemoteState:
         self.row_limit = row_limit
         self.token_limit = token_limit
         self.sql_cache: dict[str, ToolResult] = {}
+        self._blob: Any = None
 
     @property
     def handle(self) -> str:
@@ -432,87 +436,49 @@ class _RemoteState:
     def _secrets(self) -> tuple[str, ...]:
         return (self._endpoint, self._token or "")
 
-    def _headers(self, accept: str) -> dict[str, str]:
-        headers = {"Accept": accept}
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-        return headers
-
     def _selector(self) -> dict[str, Any]:
         if self._keys is not None:
             return {"keys": self._keys}
         return {"prefix": self._prefix or ""}
 
-    def query_url(self) -> str:
-        return f"{self._endpoint}/api/v2/blob/buckets/{self._bucket}/query"
+    def blob(self) -> Any:
+        """Lazily build the rcabench ``BlobApi`` client (imported only here).
+
+        Keeps local mode free of the rcabench SDK: the import happens on the
+        first remote query, never at module load. TLS verification follows
+        ``AGENTM_DUCKDB_TLS_VERIFY`` (set ``0`` for a self-signed endpoint).
+        """
+        if self._blob is not None:
+            return self._blob
+        try:
+            from rcabench.openapi.api.blob_api import (  # type: ignore[import-not-found,import-untyped]
+                BlobApi,
+            )
+            from rcabench.openapi.api_client import (  # type: ignore[import-not-found,import-untyped]
+                ApiClient,
+            )
+            from rcabench.openapi.configuration import (  # type: ignore[import-not-found,import-untyped]
+                Configuration,
+            )
+        except ImportError as exc:  # pragma: no cover - exercised via message, not transport
+            raise RuntimeError(
+                "remote duckdb_sql needs the 'rcabench' SDK; "
+                "install with: uv sync --extra duckdb-remote"
+            ) from exc
+        cfg = Configuration(host=self._endpoint)
+        if self._token:
+            cfg.api_key = {"BearerAuth": self._token}
+            cfg.api_key_prefix = {"BearerAuth": "Bearer"}
+        cfg.verify_ssl = os.environ.get("AGENTM_DUCKDB_TLS_VERIFY", "1") not in (
+            "0",
+            "false",
+            "no",
+        )
+        self._blob = BlobApi(ApiClient(cfg))
+        return self._blob
 
     def scrub(self, text: str) -> str:
         return _scrub(text, self._secrets)
-
-
-class _HttpResponse:
-    """Minimal transport response: status, body bytes, decoded JSON helper."""
-
-    def __init__(self, status_code: int, content: bytes, *, text: str = "") -> None:
-        self.status_code = status_code
-        self.content = content
-        self._text = text or content.decode("utf-8", errors="replace")
-
-    @property
-    def text(self) -> str:
-        return self._text
-
-    def json(self) -> Any:
-        return json.loads(self.content)
-
-
-def _http_request(
-    method: str,
-    url: str,
-    *,
-    headers: dict[str, str],
-    params: dict[str, str] | None = None,
-    json_body: dict[str, Any] | None = None,
-    timeout: float = 60.0,
-) -> _HttpResponse:
-    """Single transport seam (monkeypatched in tests; real impl uses httpx).
-
-    ``httpx`` is already pulled in transitively via litellm, so remote mode
-    adds no HTTP dependency.
-    """
-    import httpx
-
-    verify = os.environ.get("AGENTM_DUCKDB_TLS_VERIFY", "1") not in ("0", "false", "no")
-    resp = httpx.request(
-        method,
-        url,
-        headers=headers,
-        params=params,
-        json=json_body,
-        timeout=timeout,
-        verify=verify,
-    )
-    return _HttpResponse(resp.status_code, resp.content, text=resp.text)
-
-
-def _decode_arrow_rows(payload: bytes) -> tuple[list[dict[str, Any]], list[str]]:
-    """Decode an Arrow IPC stream into ``(rows, column_order)``.
-
-    ``pyarrow`` is imported lazily here so local mode never requires it; a
-    clear error is raised if remote mode is used without the extra.
-    """
-    try:
-        import pyarrow as pa  # noqa: PLC0415
-    except ImportError as exc:  # pragma: no cover - exercised via message, not transport
-        raise RuntimeError(
-            "remote duckdb_sql needs the 'pyarrow' extra; "
-            "install with: uv sync --extra duckdb-remote"
-        ) from exc
-    reader = pa.ipc.open_stream(pa.BufferReader(payload))
-    table = reader.read_all()
-    cols = list(table.column_names)
-    rows = table.to_pylist()
-    return rows, cols
 
 
 def _resolve_remote(config: dict[str, Any]) -> _RemoteState | None:
@@ -613,7 +579,6 @@ def _build_local_handlers(
 # SQL, so there is no separate /schema endpoint. list_tables runs this
 # discovery query over the per-request views through /query and reshapes the
 # flat rows into the local-mode {tables:[...]} payload.
-_ARROW_ACCEPT = "application/vnd.apache.arrow.stream"
 _SCHEMA_DISCOVERY_SQL = (
     "SELECT table_name, column_name, data_type "
     "FROM information_schema.columns "
@@ -621,40 +586,69 @@ _SCHEMA_DISCOVERY_SQL = (
 )
 
 
-def _post_arrow_query(
+def _invoke_blob_query(state: _RemoteState, request_body: dict[str, Any]) -> Any:
+    """The single SDK call seam (monkeypatched in tests).
+
+    Returns the SDK's ``GenericResponseAny`` (``.data`` carries
+    ``{row_count, rows}``); raises ``ApiException`` on a non-2xx response or
+    a transport error on connection failure.
+    """
+    return state.blob().blob_query_bucket(bucket=state._bucket, request_body=request_body)
+
+
+def _remote_error(exc: Exception) -> tuple[str, str | None]:
+    """Extract an agent-facing message (+ optional hint) from a query failure.
+
+    The rcabench SDK raises ``ApiException`` with ``.body`` carrying the
+    server's ``{code, message}`` envelope (a DuckDB binder error for bad SQL)
+    and ``.status`` the HTTP code; transport failures surface as plain
+    exceptions. Duck-typed on ``.body`` / ``.status`` so this module never
+    imports rcabench at scope.
+    """
+    body = getattr(exc, "body", None)
+    status = getattr(exc, "status", None)
+    if isinstance(body, bytes | bytearray):
+        body = body.decode("utf-8", errors="replace")
+    msg: str | None = None
+    if isinstance(body, str) and body:
+        try:
+            msg = json.loads(body).get("message")
+        except (ValueError, AttributeError):
+            msg = body
+    if not msg:
+        msg = f"HTTP {status}: {exc}" if status else str(exc)
+    msg = msg[:500]
+    return msg, _error_hint(msg)
+
+
+def _post_query(
     state: _RemoteState, sql: str, *, err_sql: str | None = None
 ) -> tuple[list[dict[str, Any]], list[str]] | ToolResult:
-    """POST one SQL to the blob /query endpoint and decode the Arrow stream.
+    """Run one SQL through the SDK and return ``(rows, columns)``.
 
-    Returns ``(rows, columns)`` (rows as ``to_pylist`` dicts) or a scrubbed
-    ``ToolResult`` error. The single network seam shared by query_sql and
-    list_tables — there is one server endpoint, /query.
+    The single network seam shared by query_sql and list_tables — there is
+    one server endpoint, /query. On any failure returns a scrubbed
+    ``ToolResult`` error; for a SQL/binder error it also attaches the same
+    recovery hint local mode surfaces.
     """
-    extra: dict[str, Any] = {"sql": err_sql} if err_sql else {}
-    body = {**state._selector(), "sql": sql}
+    request_body = {**state._selector(), "sql": sql}
     try:
-        resp = _http_request(
-            "POST",
-            state.query_url(),
-            headers=state._headers(_ARROW_ACCEPT),
-            json_body=body,
-        )
-    except Exception as exc:  # noqa: BLE001 - network/transport error → tool error
-        return _err(f"query failed: {state.scrub(str(exc))}", **extra)
-    if resp.status_code != 200:
-        return _err(
-            f"query failed: HTTP {resp.status_code}: {state.scrub(resp.text)[:500]}",
-            **extra,
-        )
-    try:
-        return _decode_arrow_rows(resp.content)
-    except Exception as exc:  # noqa: BLE001 - decode error → tool error, never crash
-        return _err(f"query failed: {state.scrub(str(exc))}", **extra)
+        resp = _invoke_blob_query(state, request_body)
+    except Exception as exc:  # noqa: BLE001 - server/transport error → tool error
+        msg, hint = _remote_error(exc)
+        extra: dict[str, Any] = {"sql": err_sql} if err_sql else {}
+        if hint:
+            extra["hint"] = hint
+        return _err(f"query failed: {state.scrub(msg)}", **extra)
+    data = getattr(resp, "data", None) or {}
+    rows = data.get("rows") or []
+    cols = list(rows[0].keys()) if rows else []
+    return rows, cols
 
 
 def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
     async def _list(_: dict[str, Any]) -> ToolResult:
-        fetched = _post_arrow_query(state, _SCHEMA_DISCOVERY_SQL)
+        fetched = _post_query(state, _SCHEMA_DISCOVERY_SQL)
         if isinstance(fetched, ToolResult):
             return fetched
         rows, _cols = fetched
@@ -694,13 +688,13 @@ def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
         if cached is not None:
             return _duplicate_result(sql)
 
-        fetched = _post_arrow_query(
+        fetched = _post_query(
             state, _wrap_with_limit(sql, head, state.row_limit), err_sql=sql
         )
         if isinstance(fetched, ToolResult):
             return fetched
         rows, cols = fetched
-        rows = [dict(zip(cols, _serialize(list(r.values())), strict=False)) for r in rows]
+        rows = [_serialize(r) for r in rows]
         result = _rows_to_result(rows, cols, token_limit=state.token_limit)
         state.sql_cache[cache_key] = result
         return result

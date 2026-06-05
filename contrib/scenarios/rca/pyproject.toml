@@ -15,11 +15,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Remote mode of the duckdb_sql atom: HTTP client (httpx) + Arrow IPC
-# decode (pyarrow) against the aegis blob query endpoint. Local mode
-# imports neither. httpx is usually present transitively (litellm); pin it
-# here so remote mode is self-contained.
-duckdb-remote = ["pyarrow>=23.0.1", "httpx"]
+# Remote mode of the duckdb_sql atom: the rcabench SDK's blob query client
+# (BlobApi.blob_query_bucket) against the aegis blob /query endpoint, which
+# returns decoded JSON rows (no Arrow/pyarrow). Local mode imports none of
+# this — the SDK is loaded lazily on the first remote query.
+duckdb-remote = ["rcabench>=1.3.3"]
 
 [project.entry-points."llm_eval.agents"]
 agentm = "agentm_rca.eval.agent:AgentMAgent"
