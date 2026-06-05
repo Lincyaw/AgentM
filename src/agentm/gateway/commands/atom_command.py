@@ -78,13 +78,18 @@ def discover_mountable_atoms(
         from agentm.extensions.discover import (
             discover_builtin,
             discover_contrib_atoms,
+            discover_home_atoms,
         )
     except ImportError:  # pragma: no cover — SDK missing in tests
         logger.warning("agentm.extensions.discover unavailable; no atoms surfaced")
         return []
 
     catalog: dict[str, _MountableAtom] = {}
-    for entry in (*discover_builtin().values(), *discover_contrib_atoms().values()):
+    for entry in (
+        *discover_builtin().values(),
+        *discover_contrib_atoms().values(),
+        *discover_home_atoms().values(),
+    ):
         manifest = entry.manifest
         if not getattr(manifest, "mountable_via_command", False):
             continue
