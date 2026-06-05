@@ -56,11 +56,14 @@ _EMPTY = UserConfig()
 _cached: UserConfig | None = None
 
 
-def _config_path() -> Path:
+def agentm_home_dir() -> Path:
+    """Return the AgentM home directory: ``$AGENTM_HOME`` or ``~/.agentm``."""
     home = os.environ.get("AGENTM_HOME")
-    if home:
-        return Path(home) / "config.toml"
-    return Path.home() / ".agentm" / "config.toml"
+    return Path(home) if home else Path.home() / ".agentm"
+
+
+def _config_path() -> Path:
+    return agentm_home_dir() / "config.toml"
 
 
 def _parse_profile(key: str, raw: dict[str, Any]) -> ModelProfile | None:

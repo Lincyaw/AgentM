@@ -788,6 +788,7 @@ def list_extensions_cmd(
             help=(
                 "Which discovery source to list: 'builtin' (src/agentm/"
                 "extensions/builtin/), 'contrib' (<repo>/contrib/extensions/),"
+                " 'home' (~/.agentm/contrib/extensions/),"
                 " 'user' (<cwd>/.agentm/atoms/), or 'all'."
             ),
         ),
@@ -817,9 +818,10 @@ def list_extensions_cmd(
     """List discoverable extensions (atoms) by source.
 
     Builtins ship under ``src/agentm/extensions/builtin/``; contrib atoms
-    live at ``<repo>/contrib/extensions/<name>.py``; user atoms are
-    committed by ``api.install_atom`` to ``<cwd>/.agentm/atoms/``. Mount
-    any of them via ``agentm -e <module.path>`` (or stack on top of a
+    live at ``<repo>/contrib/extensions/<name>.py``; home atoms are
+    user-installed at ``~/.agentm/contrib/extensions/<name>.py``; user
+    atoms are committed by ``api.install_atom`` to ``<cwd>/.agentm/atoms/``.
+    Mount any of them via ``agentm -e <module.path>`` (or stack on top of a
     ``--scenario``).
     """
 
@@ -829,10 +831,11 @@ def list_extensions_cmd(
         BuiltinEntry,
         discover_builtin,
         discover_contrib_atoms,
+        discover_home_atoms,
         discover_user_atoms,
     )
 
-    valid_sources = {"all", "builtin", "contrib", "user"}
+    valid_sources = {"all", "builtin", "contrib", "home", "user"}
     if source not in valid_sources:
         raise typer.BadParameter(
             f"--source {source!r}: must be one of {sorted(valid_sources)}"
@@ -848,6 +851,8 @@ def list_extensions_cmd(
             buckets.append(("builtin", discover_builtin()))
         if source in {"all", "contrib"}:
             buckets.append(("contrib", discover_contrib_atoms()))
+        if source in {"all", "home"}:
+            buckets.append(("home", discover_home_atoms()))
         if source in {"all", "user"}:
             buckets.append(("user", discover_user_atoms(Path(cwd))))
     except Exception as exc:
