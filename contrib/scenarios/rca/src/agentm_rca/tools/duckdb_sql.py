@@ -10,7 +10,20 @@ Exposes two atoms:
 * ``query_sql`` — execute a single read-only SQL statement against the
   registered views and return rows as JSON, capped by a token budget.
 
-Configuration::
+The atom runs in one of two modes, selected at install time; the agent's
+prompt and the tool schemas are **identical** in both:
+
+* **Local mode** (default): reads parquet from a local ``data_dir`` with an
+  in-process DuckDB. Requires no network and no ``pyarrow``.
+* **Remote mode**: when an ``endpoint`` is configured, ``list_tables`` and
+  ``query_sql`` become thin HTTP clients against the aegis blob query API
+  (see ``docs/rfc/0001-remote-data-plane-duckdb-over-http.md``). The
+  endpoint must be the gateway / edge-proxy base, never a direct upstream
+  pod. The Arrow IPC response is decoded with ``pyarrow`` and run through
+  the same serialise / id-compact / truncate pipeline, so the agent sees
+  byte-identical output to local mode.
+
+Configuration (local)::
 
     - module: agentm_rca.tools.duckdb_sql
       config:
@@ -18,6 +31,21 @@ Configuration::
         exclude: [conclusion.parquet]    # optional, hides ground truth
         row_limit: 200                   # optional default LIMIT
         token_limit: 5000                # optional response token cap
+
+Configuration (remote)::
+
+    - module: agentm_rca.tools.duckdb_sql
+      config:
+        endpoint: https://aegis.example:8082   # gateway base; or AGENTM_DUCKDB_ENDPOINT
+        bucket: my-bucket                       # or AGENTM_DUCKDB_BUCKET
+        dataset: cases/batch-01KQ.../           # S3 key prefix; or AGENTM_DUCKDB_DATASET
+        # keys: [a.parquet, b.parquet]          # explicit keys instead of a prefix
+        # bearer token via AGENTM_DUCKDB_TOKEN env only (never in config/logs)
+        row_limit: 200
+        token_limit: 5000
+
+Remote mode needs the optional ``pyarrow`` dependency
+(``uv sync --extra duckdb-remote``); local mode does not import it.
 """
 
 from __future__ import annotations
@@ -45,6 +73,11 @@ MANIFEST = ExtensionManifest(
         "type": "object",
         "properties": {
             "data_dir": {"type": "string"},
+            "endpoint": {"type": "string"},
+            "bucket": {"type": "string"},
+            "dataset": {"type": "string"},
+            "prefix": {"type": "string"},
+            "keys": {"type": "array", "items": {"type": "string"}},
             "exclude": {"type": "array", "items": {"type": "string"}},
             "row_limit": {"type": "integer", "minimum": 1},
             "token_limit": {"type": "integer", "minimum": 100},
@@ -129,6 +162,24 @@ def _ok(text: str, *, is_error: bool = False) -> ToolResult:
 
 def _err(msg: str, **extra: Any) -> ToolResult:
     return _ok(json.dumps({"error": msg, **extra}, ensure_ascii=False), is_error=True)
+
+
+def _rows_to_result(
+    rows: list[dict[str, Any]], cols: list[str], *, token_limit: int
+) -> ToolResult:
+    """Shape result rows into the agent-facing ``ToolResult``.
+
+    The single pipeline shared by local and remote ``query_sql`` so both
+    modes emit byte-identical output: id-compaction → JSON body →
+    token-budget truncation.
+    """
+    rows = _compact_ids(rows, cols)
+    body = json.dumps(
+        {"row_count": len(rows), "rows": rows},
+        ensure_ascii=False,
+        default=str,
+    )
+    return _ok(_truncate(body, token_limit=token_limit, rows=rows))
 
 
 def _table_name(filename: str) -> str:
@@ -274,7 +325,237 @@ def _resolve_data_dir(config: dict[str, Any]) -> Path:
     return path
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def _validate_sql(sql_raw: str) -> tuple[str, str] | ToolResult:
+    """Apply the client-side read-only guards shared by both modes.
+
+    Returns ``(normalised_sql, leading_keyword)`` on success or a
+    ``ToolResult`` error to return verbatim. The keyword denylist/allowlist
+    is UX-shaping, not the security boundary — the server enforces read-only
+    independently (defense in depth).
+    """
+    sql_raw = sql_raw.strip()
+    if not sql_raw:
+        return _err("sql is required")
+    sql = sql_raw.rstrip(";").strip()
+    if ";" in sql:
+        return _err("only one statement per call (no ';' inside SQL)")
+    if _WRITE_KEYWORDS.search(sql):
+        return _err("only read-only SELECT/WITH/EXPLAIN/DESCRIBE statements are allowed")
+    head = sql.lstrip().split(None, 1)[0].upper() if sql.lstrip() else ""
+    if head not in {"SELECT", "WITH", "EXPLAIN", "DESCRIBE", "SHOW", "SUMMARIZE"}:
+        return _err(
+            f"unsupported leading keyword: {head!r}; "
+            "use SELECT/WITH/EXPLAIN/DESCRIBE/SHOW/SUMMARIZE"
+        )
+    return sql, head
+
+
+def _duplicate_result(sql: str) -> ToolResult:
+    return _ok(
+        json.dumps(
+            {
+                "_duplicate": True,
+                "_hint": "You already ran this exact query earlier in this "
+                "session and got the same result. Re-read that result from "
+                "your context instead of re-querying. Try a DIFFERENT query "
+                "or move on to submit your report.",
+                "sql": sql,
+            },
+            ensure_ascii=False,
+        ),
+        is_error=True,
+    )
+
+
+def _wrap_with_limit(sql: str, head: str, row_limit: int) -> str:
+    if head in {"EXPLAIN", "DESCRIBE", "SHOW", "SUMMARIZE"}:
+        return sql
+    return f"SELECT * FROM ({sql}) LIMIT {row_limit}"
+
+
+# ---------------------------------------------------------------------------
+# Remote mode — HTTP client against the aegis blob query endpoint.
+# ---------------------------------------------------------------------------
+
+# A bearer token (``AGENTM_DUCKDB_TOKEN``) and any presigned URLs are
+# secrets that must never reach the agent, tool results, error strings, or
+# the observability trace. ``_REDACTED`` is what the agent sees where a
+# remote URL would otherwise appear.
+_REDACTED = "<remote>"
+
+
+def _scrub(text: str, secrets: tuple[str, ...]) -> str:
+    """Strip known secrets from any string headed for an agent/log."""
+    out = text
+    for s in secrets:
+        if s:
+            out = out.replace(s, _REDACTED)
+    return out
+
+
+class _RemoteState:
+    """HTTP client that targets the aegis blob query endpoint.
+
+    Holds the wire secrets (endpoint, bucket auth context, bearer token)
+    and the per-session dedup cache. The atom never surfaces the endpoint
+    or token; ``handle`` is the only locator the agent sees and it carries
+    no auth material.
+    """
+
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        bucket: str,
+        prefix: str | None,
+        keys: list[str] | None,
+        token: str | None,
+        row_limit: int,
+        token_limit: int,
+    ) -> None:
+        self._endpoint = endpoint.rstrip("/")
+        self._bucket = bucket
+        self._prefix = prefix
+        self._keys = keys
+        self._token = token
+        self.row_limit = row_limit
+        self.token_limit = token_limit
+        self.sql_cache: dict[str, ToolResult] = {}
+
+    @property
+    def handle(self) -> str:
+        """Agent-facing, secret-free locator for the dataset."""
+        loc = self._prefix if self._prefix is not None else f"keys[{len(self._keys or [])}]"
+        return f"blob://{self._bucket}/{loc}"
+
+    @property
+    def _secrets(self) -> tuple[str, ...]:
+        return (self._endpoint, self._token or "")
+
+    def _headers(self, accept: str) -> dict[str, str]:
+        headers = {"Accept": accept}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        return headers
+
+    def _selector(self) -> dict[str, Any]:
+        if self._keys is not None:
+            return {"keys": self._keys}
+        return {"prefix": self._prefix or ""}
+
+    def schema_url(self) -> str:
+        return f"{self._endpoint}/api/v2/blob/buckets/{self._bucket}/schema"
+
+    def query_url(self) -> str:
+        return f"{self._endpoint}/api/v2/blob/buckets/{self._bucket}/query"
+
+    def scrub(self, text: str) -> str:
+        return _scrub(text, self._secrets)
+
+
+class _HttpResponse:
+    """Minimal transport response: status, body bytes, decoded JSON helper."""
+
+    def __init__(self, status_code: int, content: bytes, *, text: str = "") -> None:
+        self.status_code = status_code
+        self.content = content
+        self._text = text or content.decode("utf-8", errors="replace")
+
+    @property
+    def text(self) -> str:
+        return self._text
+
+    def json(self) -> Any:
+        return json.loads(self.content)
+
+
+def _http_request(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str],
+    params: dict[str, str] | None = None,
+    json_body: dict[str, Any] | None = None,
+    timeout: float = 60.0,
+) -> _HttpResponse:
+    """Single transport seam (monkeypatched in tests; real impl uses httpx).
+
+    ``httpx`` is already pulled in transitively via litellm, so remote mode
+    adds no HTTP dependency.
+    """
+    import httpx
+
+    resp = httpx.request(
+        method,
+        url,
+        headers=headers,
+        params=params,
+        json=json_body,
+        timeout=timeout,
+    )
+    return _HttpResponse(resp.status_code, resp.content, text=resp.text)
+
+
+def _decode_arrow_rows(payload: bytes) -> tuple[list[dict[str, Any]], list[str]]:
+    """Decode an Arrow IPC stream into ``(rows, column_order)``.
+
+    ``pyarrow`` is imported lazily here so local mode never requires it; a
+    clear error is raised if remote mode is used without the extra.
+    """
+    try:
+        import pyarrow as pa  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - exercised via message, not transport
+        raise RuntimeError(
+            "remote duckdb_sql needs the 'pyarrow' extra; "
+            "install with: uv sync --extra duckdb-remote"
+        ) from exc
+    reader = pa.ipc.open_stream(pa.BufferReader(payload))
+    table = reader.read_all()
+    cols = list(table.column_names)
+    rows = table.to_pylist()
+    return rows, cols
+
+
+def _resolve_remote(config: dict[str, Any]) -> _RemoteState | None:
+    """Build a ``_RemoteState`` iff an endpoint is configured, else ``None``.
+
+    ``None`` means local mode — the caller falls back to ``data_dir``
+    resolution exactly as before.
+    """
+    endpoint = config.get("endpoint") or os.environ.get("AGENTM_DUCKDB_ENDPOINT")
+    if not endpoint:
+        return None
+    bucket = config.get("bucket") or os.environ.get("AGENTM_DUCKDB_BUCKET")
+    if not bucket:
+        raise ValueError(
+            "remote duckdb_sql requires config.bucket or AGENTM_DUCKDB_BUCKET"
+        )
+    keys_raw = config.get("keys")
+    keys = [str(k) for k in keys_raw] if keys_raw else None
+    prefix = (
+        config.get("prefix")
+        or config.get("dataset")
+        or os.environ.get("AGENTM_DUCKDB_DATASET")
+    )
+    if keys is None and prefix is None:
+        raise ValueError(
+            "remote duckdb_sql requires a dataset/prefix (config.dataset, "
+            "config.prefix, AGENTM_DUCKDB_DATASET) or explicit config.keys"
+        )
+    return _RemoteState(
+        endpoint=str(endpoint),
+        bucket=str(bucket),
+        prefix=str(prefix) if prefix is not None else None,
+        keys=keys,
+        token=os.environ.get("AGENTM_DUCKDB_TOKEN"),
+        row_limit=int(config.get("row_limit") or _DEFAULT_ROW_LIMIT),
+        token_limit=int(config.get("token_limit") or _DEFAULT_TOKEN_LIMIT),
+    )
+
+
+def _build_local_handlers(
+    config: dict[str, Any],
+) -> tuple[Any, Any]:
     state = _DuckDBState(
         data_dir=_resolve_data_dir(config),
         exclude=set(config.get("exclude") or []),
@@ -296,45 +577,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         return _ok(payload)
 
     async def _query(args: dict[str, Any]) -> ToolResult:
-        sql_raw = str(args.get("sql", "")).strip()
-        if not sql_raw:
-            return _err("sql is required")
-        sql = sql_raw.rstrip(";").strip()
-        if ";" in sql:
-            return _err("only one statement per call (no ';' inside SQL)")
-        if _WRITE_KEYWORDS.search(sql):
-            return _err("only read-only SELECT/WITH/EXPLAIN/DESCRIBE statements are allowed")
-        head = sql.lstrip().split(None, 1)[0].upper() if sql.lstrip() else ""
-        if head not in {"SELECT", "WITH", "EXPLAIN", "DESCRIBE", "SHOW", "SUMMARIZE"}:
-            return _err(
-                f"unsupported leading keyword: {head!r}; "
-                "use SELECT/WITH/EXPLAIN/DESCRIBE/SHOW/SUMMARIZE"
-            )
+        validated = _validate_sql(str(args.get("sql", "")))
+        if isinstance(validated, ToolResult):
+            return validated
+        sql, head = validated
 
         cache_key = " ".join(sql.split())
         cached = state.sql_cache.get(cache_key)
         if cached is not None:
-            return _ok(
-                json.dumps(
-                    {
-                        "_duplicate": True,
-                        "_hint": "You already ran this exact query earlier in this "
-                        "session and got the same result. Re-read that result from "
-                        "your context instead of re-querying. Try a DIFFERENT query "
-                        "or move on to submit your report.",
-                        "sql": sql,
-                    },
-                    ensure_ascii=False,
-                ),
-                is_error=True,
-            )
+            return _duplicate_result(sql)
 
-        wrapped = (
-            sql
-            if head in {"EXPLAIN", "DESCRIBE", "SHOW", "SUMMARIZE"}
-            else f"SELECT * FROM ({sql}) LIMIT {state.row_limit}"
-        )
-
+        wrapped = _wrap_with_limit(sql, head, state.row_limit)
         try:
             conn = state.connect()
             cur = conn.execute(wrapped)
@@ -350,18 +603,88 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 extra["hint"] = hint
             return _err(f"query failed: {exc}", **extra)
 
-        rows = _compact_ids(rows, cols)
-        body = json.dumps(
-            {
-                "row_count": len(rows),
-                "rows": rows,
-            },
-            ensure_ascii=False,
-            default=str,
-        )
-        result = _ok(_truncate(body, token_limit=state.token_limit, rows=rows))
+        result = _rows_to_result(rows, cols, token_limit=state.token_limit)
         state.sql_cache[cache_key] = result
         return result
+
+    return _list, _query
+
+
+def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
+    async def _list(_: dict[str, Any]) -> ToolResult:
+        try:
+            resp = _http_request(
+                "GET",
+                state.schema_url(),
+                headers=state._headers("application/json"),
+                params={"prefix": state._prefix or ""},
+            )
+        except Exception as exc:  # noqa: BLE001 - network/transport error → tool error
+            return _err(f"list_tables failed: {state.scrub(str(exc))}")
+        if resp.status_code != 200:
+            return _err(
+                f"list_tables failed: HTTP {resp.status_code}: "
+                f"{state.scrub(resp.text)[:500]}"
+            )
+        try:
+            data = resp.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            return _err(f"list_tables failed: bad response: {state.scrub(str(exc))}")
+        payload = json.dumps(
+            {"data_dir": state.handle, "tables": data.get("tables", [])},
+            ensure_ascii=False,
+            default=str,
+            indent=2,
+        )
+        return _ok(payload)
+
+    async def _query(args: dict[str, Any]) -> ToolResult:
+        validated = _validate_sql(str(args.get("sql", "")))
+        if isinstance(validated, ToolResult):
+            return validated
+        sql, head = validated
+
+        cache_key = " ".join(sql.split())
+        cached = state.sql_cache.get(cache_key)
+        if cached is not None:
+            return _duplicate_result(sql)
+
+        wrapped = _wrap_with_limit(sql, head, state.row_limit)
+        body = {**state._selector(), "sql": wrapped}
+        try:
+            resp = _http_request(
+                "POST",
+                state.query_url(),
+                headers=state._headers("application/vnd.apache.arrow.stream"),
+                json_body=body,
+            )
+        except Exception as exc:  # noqa: BLE001 - network/transport error → tool error
+            return _err(f"query failed: {state.scrub(str(exc))}", sql=sql)
+        if resp.status_code != 200:
+            return _err(
+                f"query failed: HTTP {resp.status_code}: "
+                f"{state.scrub(resp.text)[:500]}",
+                sql=sql,
+            )
+        try:
+            rows, cols = _decode_arrow_rows(resp.content)
+        except Exception as exc:  # noqa: BLE001 - decode error → tool error, never crash
+            return _err(f"query failed: {state.scrub(str(exc))}", sql=sql)
+
+        rows = [dict(zip(cols, _serialize(list(r.values())), strict=False)) for r in rows]
+        result = _rows_to_result(rows, cols, token_limit=state.token_limit)
+        state.sql_cache[cache_key] = result
+        return result
+
+    return _list, _query
+
+
+def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    remote = _resolve_remote(config)
+    if remote is not None:
+        _list, _query = _build_remote_handlers(remote)
+    else:
+        _list, _query = _build_local_handlers(config)
 
     api.register_tool(
         FunctionTool(
