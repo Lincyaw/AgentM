@@ -287,13 +287,18 @@ def _discover_flat_atoms(
 
 
 def discover_by_role() -> dict[str, BuiltinEntry]:
-    """Return ``role → BuiltinEntry`` over every builtin + contrib atom.
+    """Return ``role → BuiltinEntry`` over every builtin + contrib + home +
+    entrypoint atom.
 
     Each atom may claim zero or more roles via ``MANIFEST.provides_role``;
     every role string maps to exactly one entry. A second atom claiming a
     role already taken raises :class:`RuntimeError` — the harness expects
     unambiguous resolution at session start, and a silent last-wins would
     let a contrib atom hijack a floor slot without anyone noticing.
+
+    Home atoms (``~/.agentm/contrib/extensions/``) participate in role
+    resolution alongside repo-contrib and entrypoint atoms — the user
+    explicitly installed them, so they are trusted at the same level.
 
     User-discovered atoms (``.agentm/atoms/``) are intentionally excluded:
     a user atom hijacking the floor would mean session boot for that cwd
