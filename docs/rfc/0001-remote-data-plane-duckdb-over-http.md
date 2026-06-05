@@ -161,7 +161,8 @@ exact line.
    │   body {keys[]|prefix, sql}   │   │      query   (path unchanged)     │
    │ presign keys via own S3 creds │   │ resolve id→name→files→presign,    │
    │  → build sources → lib        │   │  build sources → lib              │
-   │ GETschema mirror for tables   │   │ (thin wrapper; UX unchanged)      │
+   │ ONE endpoint; list_tables is  │   │ (thin wrapper; UX unchanged)      │
+   │ a discovery query through it  │   │                                   │
    └──────────────────────────────┘   └──────────────────────────────────┘
 ```
 
@@ -212,8 +213,12 @@ The atom appends `/api/v2/blob/buckets/{bucket}/query` (or
 <token>`. See *Gateway routing & auth* below for why direct-to-blob is forbidden.
 
 - `endpoint` set ⇒ `connect()` is replaced by an HTTP client; `data_dir` optional.
-- `list_tables` → `GET …/schema?prefix=…` reshaped into the existing
-  `{tables:[{table,row_count,columns}]}` payload.
+- **One server endpoint — schema is just a query.** There is no separate
+  `/schema` endpoint; `list_tables` is a discovery query
+  (`SELECT table_name, column_name, data_type FROM information_schema.columns`)
+  sent through the same `/query`, reshaped into the existing
+  `{tables:[{table,columns}]}` payload (row counts dropped; the agent can
+  `count(*)` itself).
 - `query_sql` → `POST …/query` with `{prefix|keys, sql}`. The **client keeps the
   UX-shaping guards** it owns (single-statement, `LIMIT` wrap, token-budget
   truncation, dedup cache); the **lib keeps the security guard** (read-only
@@ -261,13 +266,13 @@ All paths are reached **through the gateway** (`{gw}` = edge-proxy/gateway base,
 e.g. `https://<edge>:8082`), never the upstream pod directly.
 
 ```
+# ONE generic endpoint — list_tables is a discovery query through it, not a 2nd route
 POST {gw}/api/v2/blob/buckets/{bucket}/query     Accept: arrow | json
        body: { "prefix": "cases/…/", "sql": "SELECT … FROM abnormal_traces …" }
         or:  { "keys": ["…/abnormal_traces.parquet", …], "sql": "…" }
        → Arrow IPC stream  (or { row_count, rows:[…] } when Accept: json)
-GET  {gw}/api/v2/blob/buckets/{bucket}/schema?prefix=cases/…/
-       → { tables:[{ table, row_count, columns:[{name,type}] }] }
-# convenience (unchanged path, now lib-backed):
+       list_tables sends sql = SELECT … FROM information_schema.columns
+# convenience (unchanged path, lib-backed; injection keeps its own schema route for the portal):
 POST {gw}/api/v2/injections/{id}/datapack-query   body { "sql": "…" }
 GET  {gw}/api/v2/injections/{id}/datapack-schema
 Auth:  Authorization: Bearer <token>             (gateway verifies via SSO JWKS)
