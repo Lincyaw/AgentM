@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -37,6 +38,10 @@ SYNTHETIC = {
     "load-generator", "load_generator",
 }
 
+# Re-run a hop that returns no verdict, granting extra tool-calls each try.
+HOP_MAX_ATTEMPTS = 3
+HOP_BUDGET_BUMP = 5
+
 
 # ------------------------------------------------------------------
 # Phase 0: relationship graph + injection parsing
@@ -46,6 +51,12 @@ def _duckdb_conn(data_dir: Path):  # noqa: ANN202
     import duckdb
 
     conn = duckdb.connect(":memory:")
+    _cap = os.environ.get("AGENTM_DUCKDB_THREADS")
+    if _cap:
+        try:
+            conn.execute(f"SET threads={max(1, int(_cap))}")
+        except (ValueError, duckdb.Error):
+            pass
     for f in sorted(data_dir.iterdir()):
         if f.is_file() and f.suffix == ".parquet" and f.name != "conclusion.parquet":
             conn.execute(
@@ -487,6 +498,52 @@ def _fault_context(
     return "\n".join(lines)
 
 
+def _read_jsonl_records(path: Path) -> list[dict]:
+    """Tolerantly read a possibly-corrupt observability JSONL.
+
+    Under heavy concurrency the observability writer can interleave large
+    OTLP records — two objects end up on one physical line (a missing
+    ``\\n``) or the tail is truncated mid-write. ``agentm trace`` then
+    refuses to parse the whole file and silently yields nothing, dropping a
+    verdict the hop agent actually submitted. We re-split the raw byte
+    stream with a streaming decoder so concatenated objects are recovered
+    and only the unparseable garbage is dropped.
+    """
+    dec = json.JSONDecoder()
+    raw = path.read_text(errors="ignore")
+    recs: list[dict] = []
+    i, n = 0, len(raw)
+    while i < n:
+        while i < n and raw[i] in " \t\r\n":
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, end = dec.raw_decode(raw, i)
+            if isinstance(obj, dict):
+                recs.append(obj)
+            i = end
+        except json.JSONDecodeError:
+            nl = raw.find("\n", i)
+            if nl == -1:
+                break
+            i = nl + 1
+    return recs
+
+
+def _is_jsonl_clean(path: Path) -> bool:
+    """True iff every non-blank line parses as standalone JSON."""
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    json.loads(line)
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def extract_hop_verdict(
     obs_dir: Path,
     tool: str = "submit_hop_verdict",
@@ -498,6 +555,12 @@ def extract_hop_verdict(
     tool *results* are considered (rejected tool-call arguments are ignored).
     ``tool``/``require_key`` let the same path read the judge review tool
     (``submit_judge_review`` keyed on ``remove``).
+
+    A corrupt obs file (concurrent-write interleaving / truncation) is
+    re-split into a clean temp file first — see ``_read_jsonl_records`` —
+    so a submitted verdict is never lost to an unparseable neighbouring
+    line. The CLI timeout is generous because parsing competes for CPU
+    with the hop agents during a high-concurrency batch.
     """
     base = (
         ["agentm"]
@@ -506,18 +569,33 @@ def extract_hop_verdict(
     )
     best: dict | None = None
     for f in sorted(obs_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime):
+        src = f
+        tmp: str | None = None
+        if not _is_jsonl_clean(f):
+            recs = _read_jsonl_records(f)
+            if not recs:
+                continue
+            fd, tmp = tempfile.mkstemp(suffix=".jsonl", prefix="obs-sane-")
+            with os.fdopen(fd, "w") as out:
+                for r in recs:
+                    out.write(json.dumps(r) + "\n")
+            src = Path(tmp)
         cmd = [
             *base, "trace", "tools",
-            "--file", str(f),
+            "--file", str(src),
             "--tool", tool,
             "--format", "ndjson",
         ]
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30,
+                cmd, capture_output=True, text=True, timeout=120,
             )
         except Exception:  # noqa: BLE001
+            if tmp:
+                Path(tmp).unlink(missing_ok=True)
             continue
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
         if proc.returncode != 0:
             continue
         for line in proc.stdout.splitlines():
@@ -670,22 +748,37 @@ def run_hop(
         if shutil.which("agentm")
         else ["uv", "run", "--no-sync", "agentm"]
     )
-    cmd = [
-        *base, "--scenario", "verifier",
-        "--model", env.get("AGENTM_MODEL", "doubao"),
-        "--cwd", str(hop_dir),
-        "--max-tool-calls", str(budget),
-        "-p", prompt,
-    ]
-
-    with open(hop_dir / "stdout.log", "w") as fout, \
-         open(hop_dir / "stderr.log", "w") as ferr:
-        subprocess.run(
-            cmd, env=env, stdout=fout, stderr=ferr,
-        )
 
     obs_dir = hop_dir / ".agentm" / "observability"
-    verdict = extract_hop_verdict(obs_dir) if obs_dir.exists() else None
+    # One shot is not enough: a hop occasionally ends its turn without
+    # emitting submit_hop_verdict, and a tight tool-call budget makes that
+    # more likely on heavier (multi-fault) prompts. A missing verdict is
+    # recorded "no-result" upstream, which dead-ends the BFS branch and
+    # silently drops the whole downstream chain. Retry with an escalating
+    # budget until a verdict appears; extract picks the newest obs session.
+    verdict: dict | None = None
+    for attempt in range(HOP_MAX_ATTEMPTS):
+        cmd = [
+            *base, "--scenario", "verifier",
+            "--model", env.get("AGENTM_MODEL", "doubao"),
+            "--cwd", str(hop_dir),
+            "--max-tool-calls", str(budget + attempt * HOP_BUDGET_BUMP),
+            "-p", prompt,
+        ]
+        with open(hop_dir / f"stdout.{attempt}.log", "w") as fout, \
+             open(hop_dir / f"stderr.{attempt}.log", "w") as ferr:
+            proc = subprocess.run(
+                cmd, env=env, stdout=fout, stderr=ferr,
+            )
+        verdict = extract_hop_verdict(obs_dir) if obs_dir.exists() else None
+        if verdict:
+            break
+        print(
+            f"    no-result {from_service} -> {to_service} "
+            f"(attempt {attempt + 1}/{HOP_MAX_ATTEMPTS}, "
+            f"exit={proc.returncode}, "
+            f"budget={budget + attempt * HOP_BUDGET_BUMP})"
+        )
     if verdict:
         (hop_dir / "verdict.json").write_text(
             json.dumps(verdict, ensure_ascii=False, indent=2)

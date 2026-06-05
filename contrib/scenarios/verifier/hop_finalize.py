@@ -79,6 +79,12 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
     except ImportError:
         return []
     conn = duckdb.connect(":memory:")
+    _cap = os.environ.get("AGENTM_DUCKDB_THREADS")
+    if _cap:
+        try:
+            conn.execute(f"SET threads={max(1, int(_cap))}")
+        except (ValueError, duckdb.Error):
+            pass
     # Mirror the percentile helpers the query_sql tool registers, so SQL the
     # agent validated there (p50/p90/p95/p99) also passes verdict validation.
     for pct in (("p50", "0.5"), ("p90", "0.9"), ("p95", "0.95"), ("p99", "0.99")):

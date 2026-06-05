@@ -299,6 +299,7 @@ requirements:
       - path: tests/integration/test_rca_baseline_tuner_wiring.py
       - path: tests/unit/extensions/test_scenario_variant_syntax.py
       - path: contrib/scenarios/rca/tests/test_thinkdepth_sql.py
+      - path: contrib/scenarios/rca/tests/test_duckdb_remote.py
       - path: tests/integration/test_sub_agent_lifecycle.py
       - path: tests/integration/test_sub_agent_budgets.py
     docs:
