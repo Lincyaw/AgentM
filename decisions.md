@@ -365,3 +365,40 @@ Recall traded down (V3's high recall was mostly noise: 261 real under-label
 finds buried in 1399 FPs). The 104 verifier-misses (GT right) are the
 remaining recall frontier — error/tail detection in abort/loss/container-
 kill fault types. Run artifacts: /tmp/verifier-v5-full (ephemeral).
+
+## 2026-06-05 — V10 "regression" was harness data loss, not model quality
+
+Investigating an apparent V10 regression vs V9 (frontend/checkout/ts-ui-
+dashboard "lost agree", e.g. otel-demo3-shipping-delay collapsing from a
+4-node chain to just `[shipping]`). Root cause was **not** the model:
+
+- `extract_hop_verdict` shelled out to `agentm trace tools` (30s timeout) and
+  bailed on any unparseable line. Under the 200-concurrent batch the
+  observability writer interleaved large OTLP records (two objects on one
+  line / truncated tail), so the parser returned nothing and a verdict the hop
+  agent **had submitted** was recorded `no-result`, dead-ending the BFS branch
+  and silently dropping the whole downstream chain.
+- Of 162 no-results, **149 were recoverable from disk** (16 confirmed, 133
+  rejected); only ~13 were genuine non-submissions. The confirmed-edge count
+  was **identical V9=V10=738** — the judgment never regressed.
+
+**Decision (L3):** fix the harness, not the prompt. `96ebe551` adds a tolerant
+JSONL reader (`_read_jsonl_records` re-splits with a streaming decoder),
+sanitizes corrupt obs files before parsing, raises the CLI timeout 30s→120s,
+and retries a no-verdict hop with an escalating budget. Re-ran the 14
+data-loss-collapsed cases at LOW concurrency (`AGENTM_DUCKDB_THREADS=2`,
+case-parallel 4 × parallel 4) — **0 retries fired** (the extraction fix alone
+recovered everything) and every collapsed chain came back (shipping-delay
+restored to `[checkout, frontend, frontend-proxy, shipping]` = V9). V9→V10
+lost-agree 56→40; the residual 40 is correct-rejects of GT-over-labeled
+entry/path services + doubao run noise. Net: **V10 judgment ≥ V9.**
+
+**Decision (L2):** the remaining "regression" signal is a GT-agreement metric
+artifact — scoring against GT-propagation penalizes the verifier for correctly
+rejecting GT over-labels (its core value). Confirmed-edge count is the
+load-bearing comparison, not GT-agree. Exported the corrected-final graphs for
+all 277 cases (accept/reject + reasoning + final propagation graph per case)
+and shared via aegis. Deeper root cause (non-atomic obs writer under CPU
+starvation) is core substrate — left to a separate pass; the eval-side
+tolerant reader makes the harness resilient regardless. **Always cap eval
+concurrency; the 200-concurrent run is what corrupted the JSONL.**

@@ -10,10 +10,16 @@ dependencies = [
     "duckdb>=1.4.4",
     "pytz>=2025.1",  # DuckDB AT TIME ZONE / named-zone conversions import pytz at runtime
     "pydantic>=2.11.0",
-    "pyarrow>=23.0.1",
     "tiktoken>=0.12.0",
     "rcabench-platform[sdk,llm-eval]>=0.4.44",
 ]
+
+[project.optional-dependencies]
+# Remote mode of the duckdb_sql atom: the rcabench SDK's blob query client
+# (BlobApi.blob_query_bucket) against the aegis blob /query endpoint, which
+# returns decoded JSON rows (no Arrow/pyarrow). Local mode imports none of
+# this — the SDK is loaded lazily on the first remote query.
+duckdb-remote = ["rcabench>=1.3.3"]
 
 [project.entry-points."llm_eval.agents"]
 agentm = "agentm_rca.eval.agent:AgentMAgent"
