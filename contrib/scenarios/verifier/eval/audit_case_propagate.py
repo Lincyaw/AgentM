@@ -82,7 +82,7 @@ def get_relationships(data_dir: Path) -> list[Rel]:
         "JOIN all_traces parent "
         "  ON child.parent_span_id = parent.span_id "
         "WHERE child.service_name <> parent.service_name "
-        "GROUP BY 1, 2 HAVING COUNT(*) >= 5 "
+        "GROUP BY 1, 2 "
         "ORDER BY cnt DESC"
     ).fetchall()
     for caller, callee, cnt in rows:
@@ -297,14 +297,35 @@ def check_node_degraded(data_dir: Path, node_name: str) -> bool:
     return False
 
 
+# engine_config keys that describe WHERE/WHEN, not the fault's intensity.
+# Everything else (corrupt %, loss %, delay, mutator_config, method, …) is
+# the strength the hop agent needs to judge how much impact to expect.
+_FAULT_BOILERPLATE = {
+    "app", "chaos_type", "namespace", "system", "system_type",
+    "time_offset", "duration",
+}
+
+
+def _fault_params(entry: dict) -> str:
+    """Render one engine_config entry's intensity/config as ``k=v, …``."""
+    return ", ".join(
+        f"{k}={v}" for k, v in entry.items()
+        if k not in _FAULT_BOILERPLATE and v not in (None, "")
+    )
+
+
 def get_injections(data_dir: Path) -> list[dict[str, str]]:
-    """Extract ``[{target, chaos_type}]`` from injection.json."""
+    """Extract ``[{target, chaos_type, params}]`` from injection.json."""
     injection = json.loads((data_dir / "injection.json").read_text())
 
     eng = injection.get("engine_config")
     if isinstance(eng, list) and eng and isinstance(eng[0], dict):
         return [
-            {"target": e["app"], "chaos_type": e.get("chaos_type", "unknown")}
+            {
+                "target": e["app"],
+                "chaos_type": e.get("chaos_type", "unknown"),
+                "params": _fault_params(e),
+            }
             for e in eng
         ]
 
@@ -344,7 +365,7 @@ def get_injections(data_dir: Path) -> list[dict[str, str]]:
         ).value)
     except Exception:
         pass
-    return [{"target": target, "chaos_type": chaos_type}]
+    return [{"target": target, "chaos_type": chaos_type, "params": ""}]
 
 
 def get_target_evidence(data_dir: Path, target: str) -> dict[str, object]:
@@ -431,6 +452,39 @@ _REL_DESCRIPTIONS = {
                         "(database/cache/broker). {to} is uninstrumented: it "
                         "has NO spans of its own — its calls live inside {frm}.",
 }
+
+
+def _fault_context(
+    all_faults: list[tuple[str, str, str]],
+    to_service: str,
+) -> str:
+    """One line for a single fault; a list, with params, when several coexist.
+
+    Two things the hop needs that a bare fault name omits:
+    - **Intensity.** ``corrupt=36`` vs ``corrupt=5`` predict very
+      different blast radii; the params come straight from the
+      injection so the agent can judge how much impact to expect.
+    - **Every coexisting fault.** A node can sit downstream of more
+      than one, each with its own fingerprint (a corruption/loss
+      fault in the latency tail, a data fault in errors). Faults are
+      listed flat with no "primary" — singling one out makes the
+      agent look only for that one's signal and miss the rest.
+    """
+    if len(all_faults) <= 1:
+        fk, tgt, params = all_faults[0]
+        suffix = f" ({params})" if params else ""
+        return f"Fault injected: {fk} on {tgt}{suffix}"
+    lines = [f"Faults injected in this system ({len(all_faults)}):"]
+    for fk, tgt, params in all_faults:
+        suffix = f" ({params})" if params else ""
+        lines.append(f"- {fk} on {tgt}{suffix}")
+    lines.append(
+        f"\n{to_service} may sit downstream of any of these. Each fault's "
+        f"category and intensity predicts a specific fingerprint — read "
+        f"each fault reference below and check for the signal it predicts. "
+        f"Do not assume a single fault is responsible."
+    )
+    return "\n".join(lines)
 
 
 def extract_hop_verdict(
@@ -530,14 +584,23 @@ def run_hop(
     to_service: str,
     rel_type: str,
     fault_kind: str,
-    fault_doc: str,
     injection_target: str,
+    all_faults: list[tuple[str, str, str]],
+    fault_docs: dict[str, str],
     out_dir: Path,
     budget: int,
     is_infra: bool = False,
     upstream_evidence: dict | None = None,
 ) -> dict | None:
-    """Run one hop-agent and return its verdict dict (or None)."""
+    """Run one hop-agent and return its verdict dict (or None).
+
+    *all_faults* is every injected fault as ``(kind, target, params)``;
+    *fault_docs* maps each kind to its reference doc. *fault_kind*/
+    *injection_target* name the fault this edge's BFS branch descended
+    from — used only to order the docs (that fault's reference first);
+    the prompt itself lists every fault flat, since a node downstream of
+    two coexisting faults must be judged against all of them.
+    """
     hop_dir = out_dir / "hops" / f"{from_service}__{to_service}"
     hop_dir.mkdir(parents=True, exist_ok=True)
 
@@ -548,7 +611,7 @@ def run_hop(
         f"Confirmed degraded: **{from_service}**",
         f"Service to check: **{to_service}**",
         f"Relationship: {rel_text}",
-        f"Fault injected: {fault_kind} on {injection_target}",
+        _fault_context(all_faults, to_service),
     ]
     if upstream_evidence:
         ev_text = _format_upstream_evidence(upstream_evidence)
@@ -561,8 +624,16 @@ def run_hop(
                 f"The propagation may manifest differently on the "
                 f"downstream (e.g. errors vs latency vs missing spans)."
             )
-    if fault_doc:
-        parts.append(f"\n## Fault reference ({fault_kind})\n{fault_doc}")
+    # Show every injected fault's doc (primary first, deduped by kind).
+    shown: set[str] = set()
+    ordered = [fault_kind] + [fk for fk, _, _ in all_faults if fk != fault_kind]
+    for fk in ordered:
+        if fk in shown:
+            continue
+        shown.add(fk)
+        doc = fault_docs.get(fk)
+        if doc:
+            parts.append(f"\n## Fault reference ({fk})\n{doc}")
     if is_infra:
         parts.append(
             f"\n## {to_service} is an uninstrumented backing component\n"
@@ -651,7 +722,6 @@ def propagate(
     data_dir: Path,
     injections: list[dict[str, str]],
     neighbor_graph: dict[str, list[tuple[str, str, int]]],
-    fault_doc: str,
     out_dir: Path,
     *,
     budget: int,
@@ -676,6 +746,16 @@ def propagate(
 
     fault_kind = injections[0]["chaos_type"] if injections else "unknown"
     inj_target = injections[0]["target"] if injections else "unknown"
+
+    # The full fault set, handed to every hop. A node downstream of two
+    # coexisting faults must be judged against both — the per-branch
+    # inherited fault below is only a "which seed reached me" hint.
+    all_faults = [
+        (inj["chaos_type"], inj["target"], inj.get("params", ""))
+        for inj in injections
+        if inj.get("target") and inj["target"] not in SYNTHETIC
+    ]
+    fault_docs = {fk: _load_fault_doc(fk) for fk, _, _ in all_faults}
 
     # Per-branch fault context: each node carries the (fault_kind, target)
     # of the seed it descends from, so a hop reached from the NetworkLoss
@@ -774,11 +854,11 @@ def propagate(
                     hop_fk, hop_target = node_fault.get(
                         from_svc, (fault_kind, inj_target)
                     )
-                    hop_doc = _load_fault_doc(hop_fk) or fault_doc
                     fut = pool.submit(
                         run_hop, data_dir,
                         from_svc, to_svc, rel_type,
-                        hop_fk, hop_doc, hop_target,
+                        hop_fk, hop_target,
+                        all_faults, fault_docs,
                         out_dir, budget,
                         to_svc in infra_nodes,
                         node_evidence.get(from_svc),
@@ -921,9 +1001,6 @@ def run_one_case(
     if not injections:
         return {"case": case_name, "error": "no injections"}
 
-    fault_kind = injections[0]["chaos_type"]
-    fault_doc = _load_fault_doc(fault_kind)
-
     rels = get_relationships(data_dir)
     infra_nodes = get_infra_nodes(data_dir)
     rels.extend(get_infra_edges(data_dir, infra_nodes))
@@ -936,14 +1013,16 @@ def run_one_case(
 
     total_edges = sum(len(v) for v in neighbor_graph.values())
     print(f"Injections: {[(i['target'], i['chaos_type']) for i in injections]}")
-    print(f"Fault doc: {'loaded' if fault_doc else 'not found'} "
-          f"({fault_kind})")
+    for inj in injections:
+        fk = inj["chaos_type"]
+        loaded = "loaded" if _load_fault_doc(fk) else "not found"
+        print(f"Fault doc: {loaded} ({fk})")
     print(f"Relationship graph: {total_edges} directed edges "
           f"({len(neighbor_graph)} services)")
     print(f"Infra nodes (metrics-only): {sorted(infra_nodes)}")
 
     result = propagate(
-        data_dir, injections, neighbor_graph, fault_doc, out,
+        data_dir, injections, neighbor_graph, out,
         budget=budget, parallel=parallel,
         infra_nodes=infra_nodes, node_map=node_map,
     )
@@ -972,7 +1051,9 @@ def run_one_case(
 
     return {
         "case": case_name,
-        "fault_kind": fault_kind,
+        "fault_kind": "+".join(
+            dict.fromkeys(i["chaos_type"] for i in injections)
+        ),
         "seeds": seeds,
         "confirmed": confirmed,
         "propagated": propagated,
@@ -999,8 +1080,9 @@ def _read_cached_summary(out_dir: Path, case_name: str) -> dict | None:
     confirmed = trace.get("confirmed_nodes", [])
     return {
         "case": case_name,
-        "fault_kind": report["injections"][0]["fault_kind"]
-        if report.get("injections") else "unknown",
+        "fault_kind": "+".join(
+            dict.fromkeys(i["fault_kind"] for i in report.get("injections", []))
+        ) or "unknown",
         "seeds": seeds,
         "confirmed": confirmed,
         "propagated": [s for s in confirmed if s not in seeds],
@@ -1055,6 +1137,7 @@ def run_batch(
     case_parallel: int = 1,
     limit: int | None = None,
     offset: int = 0,
+    case_filter: set[str] | None = None,
 ) -> list[dict]:
     """Run propagation on multiple cases under *dataset_dir*.
 
@@ -1064,6 +1147,8 @@ def run_batch(
     suitable for diff/analysis across ablation runs.
     """
     cases = sorted(p.name for p in dataset_dir.iterdir() if p.is_dir())
+    if case_filter is not None:
+        cases = [c for c in cases if c in case_filter]
     cases = cases[offset:]
     if limit is not None:
         cases = cases[:limit]
@@ -1153,14 +1238,19 @@ def batch(
     model: Annotated[str | None, typer.Option(help="config.toml profile name")] = None,
     limit: Annotated[int | None, typer.Option(help="max cases to run")] = None,
     offset: Annotated[int, typer.Option(help="skip first N cases")] = 0,
+    cases_file: Annotated[Path | None, typer.Option("--cases-file", help="text file with one case name per line")] = None,
 ) -> None:
     """Run propagation on all cases in a dataset."""
     _set_model(model)
+    case_filter = None
+    if cases_file is not None:
+        case_filter = set(cases_file.read_text().strip().splitlines())
     run_batch(
         dataset_dir.resolve(), run_dir.resolve(),
         budget=budget, parallel=parallel,
         case_parallel=case_parallel,
         limit=limit, offset=offset,
+        case_filter=case_filter,
     )
 
 
@@ -1588,264 +1678,119 @@ def _gt_services(case_dir: Path) -> tuple[set[str], set[str]]:
 def diff(
     dataset_dir: Annotated[Path, typer.Argument(help="dataset with GT labels")],
     run_dir: Annotated[Path, typer.Option("--run-dir", help="verifier run output")],
+    format: Annotated[str, typer.Option(help="table or ndjson")] = "table",
 ) -> None:
-    """Compare verifier findings against GT labels."""
-    summary_path = run_dir / "run_summary.jsonl"
-    if not summary_path.exists():
-        typer.echo("No run_summary.jsonl found — run batch first.")
-        raise typer.Exit(1)
+    """Compare verifier graph against GT per case.
 
-    with open(summary_path) as f:
-        cases = [json.loads(line) for line in f]
+    For each case, classifies every service into one of:
+      agree      — both verifier and GT have it
+      v_only     — verifier confirmed, GT lacks
+      rejected   — GT has it, hop agent evaluated and rejected
+      unreachable — GT has it, verifier never evaluated (not in BFS neighborhood)
 
-    total = new_total = missed_total = match_total = 0
-    diff_rows: list[dict] = []
-
-    for s in cases:
-        name = s["case"]
-        if "error" in s:
-            continue
-        total += 1
-        case_dir = dataset_dir / name
-        gt_inj, gt_prop = _gt_services(case_dir)
-        v_seeds = set(s.get("seeds", []))
-        v_prop = set(s.get("propagated", []))
-
-        new_finds = v_prop - gt_prop - v_seeds
-        missed = gt_prop - v_prop
-
-        row = {
-            "case": name,
-            "gt_inj": sorted(gt_inj), "gt_prop": sorted(gt_prop),
-            "v_seeds": sorted(v_seeds), "v_prop": sorted(v_prop),
-            "new": sorted(new_finds), "missed": sorted(missed),
-        }
-        diff_rows.append(row)
-
-        tag = "MATCH" if (not new_finds and not missed) else ""
-        if new_finds:
-            new_total += len(new_finds)
-            tag = f"NEW +{len(new_finds)}"
-        if missed:
-            missed_total += len(missed)
-            tag += f"  MISSED -{len(missed)}"
-        if not new_finds and not missed:
-            match_total += 1
-
-        typer.echo(f"{name}  {tag}")
-        if new_finds:
-            typer.echo(f"  new:    {sorted(new_finds)}")
-        if missed:
-            typer.echo(f"  missed: {sorted(missed)}")
-
-    typer.echo(f"\n{'='*50}")
-    typer.echo(f"Cases: {total}  Match: {match_total}  "
-               f"New findings: {new_total}  Missed: {missed_total}")
-
-    diff_path = run_dir / "gt_diff.jsonl"
-    with open(diff_path, "w") as f:
-        for row in diff_rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    typer.echo(f"Diff: {diff_path}")
-
-
-# ------------------------------------------------------------------
-# Raw-data oracle — adjudicates verifier vs GT from traces/logs/metrics
-#
-# GT's `state` field is unreliable (it marks throughput-drops as
-# degraded/unavailable), so neither GT nor GT-matching can score the
-# verifier. This oracle classifies each service's abnormal-vs-normal
-# signature directly and is used only as a measurement yardstick — it is
-# NOT part of the verifier runtime (keeping the agent's reasoning and the
-# soundness metric independent).
-# ------------------------------------------------------------------
-
-_ORACLE_NS_MS = 1e6
-_SLOW_FLOOR = 50 * _ORACLE_NS_MS      # 50ms absolute p95 increase floor
-_SLOW_STRONG = 200 * _ORACLE_NS_MS    # 200ms = high-confidence slow
-_ERR_DELTA = 0.05                     # +5 percentage points error rate
-_INFRA_RE = re.compile(
-    r"mysql|mariadb|postgres|redis|mongo|rabbitmq|kafka|memcached|"
-    r"nacos|elasticsearch|zookeeper|consul|etcd", re.I,
-)
-_DEGRADED = {"ERROR", "SLOW", "INFRA_DEGRADED"}
-_NOT_DEGRADED = {"THROUGHPUT", "FLAT", "INFRA_HEALTHY"}
-
-
-def _oracle_sig(conn, svc: str) -> dict:  # noqa: ANN001
-    sig: dict = {}
-    for w in ("normal", "abnormal"):
-        try:
-            r = conn.execute(
-                f"SELECT COUNT(*), quantile_cont(duration,0.95), "
-                f"quantile_cont(duration,0.99), "
-                f"SUM(CASE WHEN \"attr.status_code\"='STATUS_CODE_ERROR' "
-                f"  OR TRY_CAST(\"attr.http.response.status_code\" AS INT)>=500 "
-                f"  THEN 1 ELSE 0 END) "
-                f"FROM {w}_traces WHERE service_name=?", [svc]).fetchone()
-        except Exception:  # noqa: BLE001
-            r = (0, None, None, 0)
-        try:
-            lr = conn.execute(
-                f"SELECT COUNT(*), SUM(CASE WHEN level='ERROR' THEN 1 ELSE 0 END) "
-                f"FROM {w}_logs WHERE service_name=?", [svc]).fetchone()
-        except Exception:  # noqa: BLE001
-            lr = (0, 0)
-        sig[w] = {
-            "spans": r[0] or 0, "p95": r[1], "p99": r[2],
-            "err_spans": r[3] or 0, "logs": lr[0] or 0, "err_logs": lr[1] or 0,
-        }
-    return sig
-
-
-def _oracle_infra_degraded(conn, svc: str) -> bool:  # noqa: ANN001
-    try:
-        rows = conn.execute(
-            "SELECT 'n', AVG(CASE WHEN metric_name LIKE '%cpu%' THEN value END), "
-            "  AVG(CASE WHEN metric_name LIKE '%memory%' THEN value END) "
-            "FROM normal_metrics WHERE service_name=? "
-            "UNION ALL "
-            "SELECT 'a', AVG(CASE WHEN metric_name LIKE '%cpu%' THEN value END), "
-            "  AVG(CASE WHEN metric_name LIKE '%memory%' THEN value END) "
-            "FROM abnormal_metrics WHERE service_name=?", [svc, svc]).fetchall()
-        if len(rows) == 2:
-            nc, nm, ac, am = rows[0][1], rows[0][2], rows[1][1], rows[1][2]
-            if nc and ac and ac > nc * 1.3:
-                return True
-            if nm and am and am > nm * 1.3:
-                return True
-    except Exception:  # noqa: BLE001
-        pass
-    return False
-
-
-def oracle_classify(conn, svc: str) -> str:  # noqa: ANN001
-    """Label one service ERROR/SLOW/DOWN/THROUGHPUT/FLAT/INFRA_* from data."""
-    if _INFRA_RE.search(svc):
-        return "INFRA_DEGRADED" if _oracle_infra_degraded(conn, svc) \
-            else "INFRA_HEALTHY"
-    s = _oracle_sig(conn, svc)
-    n, a = s["normal"], s["abnormal"]
-    n_er = (n["err_logs"] / n["logs"]) if n["logs"] else 0.0
-    a_er = (a["err_logs"] / a["logs"]) if a["logs"] else 0.0
-    n_se = (n["err_spans"] / n["spans"]) if n["spans"] else 0.0
-    a_se = (a["err_spans"] / a["spans"]) if a["spans"] else 0.0
-
-    # Small-sample guard: <20 abnormal spans makes per-span stats noise.
-    if a["spans"] < 20:
-        if n["spans"] >= 50 and a["spans"] < n["spans"] * 0.5:
-            return "DOWN"
-        if a_er - n_er > _ERR_DELTA and a_er > 0.05 and a["logs"] >= 50:
-            return "ERROR"
-        return "FLAT"
-    if (a_er - n_er > _ERR_DELTA and a_er > 0.05) or \
-       (a_se - n_se > _ERR_DELTA and a_se > 0.05):
-        return "ERROR"
-    if n["spans"] >= 50 and a["spans"] < max(5, n["spans"] * 0.02):
-        return "DOWN"
-    if n["p95"] and a["p95"]:
-        d = a["p95"] - n["p95"]
-        if (d > _SLOW_STRONG and a["p95"] > n["p95"] * 1.3) or \
-           (d > _SLOW_FLOOR and a["p95"] > n["p95"] * 1.5):
-            return "SLOW"
-    if n["p99"] and a["p99"] and a["p99"] > n["p99"] * 2 \
-            and a["p99"] - n["p99"] > _SLOW_STRONG and a["p99"] > 500 * _ORACLE_NS_MS:
-        return "SLOW"  # tail: a fraction of requests very slow even if p95 flat
-    if n["spans"] and a["spans"] < n["spans"] * 0.8:
-        if not a["p95"] or not n["p95"] or a["p95"] <= n["p95"] * 1.2:
-            return "THROUGHPUT"
-    return "FLAT"
-
-
-@app.command()
-def audit(
-    dataset_dir: Annotated[Path, typer.Argument(help="dataset with GT labels")],
-    run_dir: Annotated[Path, typer.Option("--run-dir", help="verifier run output")],
-) -> None:
-    """Score the verifier graph for SOUNDNESS against the raw-data oracle.
-
-    Reports confirmation precision / recall (oracle = arbiter, not GT) and
-    a verifier-vs-GT adjudication: on how many services the verifier
-    corrects GT (over/under-labels) vs is itself wrong.
+    Outputs per-case JSONL to <run-dir>/gt_diff.jsonl and prints a summary.
     """
-    import duckdb  # noqa: F401  (ensures the dep is present)
-
     cases = sorted(
         p.name for p in run_dir.iterdir()
         if p.is_dir() and (p / "final_propagation.json").exists()
     )
+
     agg: dict[str, int] = defaultdict(int)
+    svc_agg: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     rows: list[dict] = []
+
     for name in cases:
         cdir = dataset_dir / name
-        if not (cdir / "causal_graph.json").exists():
+        if not cdir.exists():
             continue
         fp = json.loads((run_dir / name / "final_propagation.json").read_text())
         seeds = set(fp.get("seeds", []))
-        ver = set(fp.get("propagated", []))
-        gt_seeds, gt = _gt_services(cdir)
+        v_prop = set(fp.get("propagated", []))
+
+        gt_seeds, gt_prop = _gt_services(cdir)
         seeds |= gt_seeds
-        gt -= seeds
-        ver -= seeds
-        # hop-rejected = every hop target not in the final set
-        rejected: set[str] = set()
+
+        evaluated: set[str] = set()
         avp = run_dir / name / "all_verdicts.json"
         if avp.exists():
-            rejected = {v["to"] for v in json.loads(avp.read_text())}
-        rejected -= ver | seeds
+            evaluated = {v["to"] for v in json.loads(avp.read_text())}
 
-        conn = _duckdb_conn(cdir.resolve())
-        labels = {s: oracle_classify(conn, s) for s in (ver | gt | rejected)}
-        conn.close()
+        agree = v_prop & gt_prop
+        v_only = v_prop - gt_prop
+        gt_only = gt_prop - v_prop
+        rejected = gt_only & evaluated
+        unreachable = gt_only - evaluated
 
-        for s in ver:
-            L = labels[s]
-            agg["TP" if L in _DEGRADED else
-                ("conf_DOWN" if L == "DOWN" else "FP")] += 1
+        row: dict = {
+            "case": name,
+            "seeds": sorted(seeds),
+            "agree": sorted(agree),
+            "v_only": sorted(v_only),
+            "rejected": sorted(rejected),
+            "unreachable": sorted(unreachable),
+        }
+        rows.append(row)
+
+        agg["cases"] += 1
+        agg["agree"] += len(agree)
+        agg["v_only"] += len(v_only)
+        agg["rejected"] += len(rejected)
+        agg["unreachable"] += len(unreachable)
+        if not v_only and not rejected and not unreachable:
+            agg["exact_match"] += 1
+
         for s in rejected:
-            L = labels[s]
-            agg["FN" if L in _DEGRADED else
-                ("rej_DOWN" if L == "DOWN" else "TN")] += 1
-        for s in (ver | gt):
-            L = labels[s]
-            inv, ing = s in ver, s in gt
-            if L == "DOWN":
-                continue
-            deg = L in _DEGRADED
-            if inv and not ing and deg:
-                agg["fix_gt_underlabel"] += 1
-            elif inv and not ing and not deg:
-                agg["verifier_FP"] += 1
-            elif ing and not inv and not deg:
-                agg["fix_gt_overlabel"] += 1
-            elif ing and not inv and deg:
-                agg["verifier_miss"] += 1
-        rows.append({"case": name,
-                     "verifier": sorted(ver), "gt": sorted(gt),
-                     "labels": labels})
+            svc_agg[s]["rejected"] += 1
+        for s in unreachable:
+            svc_agg[s]["unreachable"] += 1
+        for s in v_only:
+            svc_agg[s]["v_only"] += 1
 
-    tp, fp_, fn = agg["TP"], agg["FP"], agg["FN"]
-    prec = tp / (tp + fp_) if (tp + fp_) else 0.0
-    rec = tp / (tp + fn) if (tp + fn) else 0.0
-    typer.echo(f"\nCases: {len(rows)}   (oracle = arbiter, GT is NOT truth)")
-    typer.echo(f"Confirmations: TP={tp} FP={fp_} DOWN={agg['conf_DOWN']}  "
-               f"precision={prec:.3f}")
-    typer.echo(f"Rejections:    FN={fn} TN={agg['TN']} DOWN={agg['rej_DOWN']}  "
-               f"recall={rec:.3f}")
-    typer.echo("\nVerifier vs GT (oracle-arbitrated):")
-    typer.echo(f"  corrects GT over-label (GT had non-degraded): "
-               f"{agg['fix_gt_overlabel']}")
-    typer.echo(f"  corrects GT under-label (GT missed degraded): "
-               f"{agg['fix_gt_underlabel']}")
-    typer.echo(f"  verifier miss (GT right, verifier wrong):     "
-               f"{agg['verifier_miss']}")
-    typer.echo(f"  verifier false positive:                      "
-               f"{agg['verifier_FP']}")
-    out = run_dir / "audit.jsonl"
-    with open(out, "w") as f:
+    diff_path = run_dir / "gt_diff.jsonl"
+    with open(diff_path, "w") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    typer.echo(f"\nPer-service labels: {out}")
+
+    if format == "ndjson":
+        for row in rows:
+            typer.echo(json.dumps(row, ensure_ascii=False))
+        return
+
+    has_diff = [r for r in rows
+                if r["v_only"] or r["rejected"] or r["unreachable"]]
+    for r in has_diff:
+        parts = []
+        if r["rejected"]:
+            parts.append(f"rejected={r['rejected']}")
+        if r["unreachable"]:
+            parts.append(f"unreachable={r['unreachable']}")
+        if r["v_only"]:
+            parts.append(f"v_only={r['v_only']}")
+        typer.echo(f"{r['case']}  {', '.join(parts)}")
+
+    typer.echo(f"\n{'=' * 60}")
+    typer.echo(f"Cases: {agg['cases']}  Exact match: {agg['exact_match']}")
+    typer.echo(f"Services — agree: {agg['agree']}  v_only: {agg['v_only']}  "
+               f"rejected: {agg['rejected']}  unreachable: {agg['unreachable']}")
+
+    top_rejected = sorted(
+        ((s, c["rejected"]) for s, c in svc_agg.items() if c.get("rejected")),
+        key=lambda x: -x[1],
+    )
+    top_unreachable = sorted(
+        ((s, c["unreachable"]) for s, c in svc_agg.items() if c.get("unreachable")),
+        key=lambda x: -x[1],
+    )
+    if top_rejected:
+        typer.echo("\nTop rejected (GT has, hop agent rejected):")
+        for s, n in top_rejected[:15]:
+            typer.echo(f"  {s}: {n}")
+    if top_unreachable:
+        typer.echo("\nTop unreachable (GT has, BFS never reached):")
+        for s, n in top_unreachable[:15]:
+            typer.echo(f"  {s}: {n}")
+
+    typer.echo(f"\nPer-case diff: {diff_path}")
 
 
 if __name__ == "__main__":

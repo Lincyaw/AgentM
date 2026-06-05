@@ -132,37 +132,6 @@ These are discrepancies to investigate, not accuracy metrics. Do NOT
 compute precision/recall treating GT as ground truth — the whole point
 is that GT may be wrong.
 
-### Adjudicating who is right (raw-data oracle)
-
-Because GT is unreliable (it marks throughput-drops as
-`degraded`/`unavailable`), neither GT nor GT-matching can score the
-verifier. Adjudicate each discrepancy directly from the raw data:
-classify a service's abnormal-vs-normal signature into
-`ERROR` (error RATE up, logs + 4xx/5xx) / `SLOW` (p95 **or** p99 up by
-a large absolute amount) / `DOWN` (active→silent, ambiguous) /
-`THROUGHPUT` (fewer spans, latency & error flat → not degraded) /
-`FLAT`. Then:
-
-- verifier confirms a `THROUGHPUT`/`FLAT` service → false positive;
-- verifier rejects an `ERROR`/`SLOW` service → miss;
-- GT has a `THROUGHPUT`/`FLAT` service the verifier dropped → GT
-  over-label the verifier correctly fixed;
-- verifier has an `ERROR`/`SLOW` service GT lacks → GT under-label the
-  verifier correctly found.
-
-Across all 500 ops-lite-clean cases (Doubao Seed 2.0 pro), this lifts
-confirmation precision from **0.39 → 0.95** (false positives 1656 → 49)
-and cuts verifier-vs-GT false positives from **1399 → 13**. The verifier
-**corrects GT on 974 services** (863 over-labels GT marked degraded that
-are actually throughput/flat, + 111 under-labels GT missed) while being
-wrong on 117 (13 false positives + 104 misses) — an ~8:1 correct-to-wrong
-ratio against GT. The remaining gap is recall (0.84 → 0.77): the stricter
-verifier trades a little coverage for trustworthiness (when V3 claimed
-"GT missed this" it was right ~16% of the time; V5 is right ~90%). Note
-the oracle must check **p99**, not just p95: several genuine degradations
-are tail-only (a fraction of requests hit timeouts while p95 is flat).
-Reproduce with `audit <dataset> --run-dir <run>`.
-
 ## Known limitations
 
 - **Infra sinks:** Confirmed infra nodes (mysql, redis, etc.) do not
