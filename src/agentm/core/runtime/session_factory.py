@@ -558,17 +558,21 @@ def _migrate_catalog(cwd: str) -> None:
 async def _prime_contrib_discovery(config: AgentSessionConfig, bus: EventBus) -> None:
     if config.no_extensions:
         return
-    try:
-        discover_mod.discover_contrib_atoms()
-    except Exception as exc:  # noqa: BLE001
-        await bus.emit(
-            DiagnosticEvent.CHANNEL,
-            DiagnosticEvent(
-                level="error",
-                source="auto_discovery",
-                message=f"contrib atom discovery failed: {exc}",
-            ),
-        )
+    for label, discover_fn in [
+        ("contrib", discover_mod.discover_contrib_atoms),
+        ("home", discover_mod.discover_home_atoms),
+    ]:
+        try:
+            discover_fn()
+        except Exception as exc:  # noqa: BLE001
+            await bus.emit(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="error",
+                    source="auto_discovery",
+                    message=f"{label} atom discovery failed: {exc}",
+                ),
+            )
 
 
 async def _resolve_extensions(
@@ -627,6 +631,11 @@ async def _resolve_extensions(
             bus=bus,
             sources=(
                 AtomSource(
+                    label="home",
+                    discover=discover_mod.discover_home_atoms,
+                    skip_label="home atom ",
+                ),
+                AtomSource(
                     label="user",
                     discover=lambda: discover_mod.discover_user_atoms(
                         Path(config.cwd)
@@ -651,6 +660,11 @@ async def _resolve_extensions(
                     label="contrib",
                     discover=discover_mod.discover_contrib_atoms,
                     skip_label="contrib atom ",
+                ),
+                AtomSource(
+                    label="home",
+                    discover=discover_mod.discover_home_atoms,
+                    skip_label="home atom ",
                 ),
                 AtomSource(
                     label="user",

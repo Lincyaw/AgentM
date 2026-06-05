@@ -21,7 +21,10 @@ Path resolution:
        anchor independent of process cwd).
     2. ``<cwd>/contrib/scenarios/<name>/manifest.yaml`` — the original
        behavior; works when ``agentm`` is invoked from a project root.
-    3. ``<agentm-package-root>/contrib/scenarios/<name>/manifest.yaml``
+    3. ``~/.agentm/contrib/scenarios/<name>/manifest.yaml`` (or
+       ``$AGENTM_HOME/contrib/scenarios/…``) — user-installed scenarios
+       that work from pip-installed wheels without a source checkout.
+    4. ``<agentm-package-root>/contrib/scenarios/<name>/manifest.yaml``
        — the worktree directory in editable installs, found by walking
        up from the ``agentm`` package source. Wheel installs without a
        sibling ``contrib/`` simply skip this candidate.
@@ -66,6 +69,17 @@ def _candidate_roots() -> list[Path]:
     if project_root_env:
         roots.append(Path(project_root_env))
     roots.append(Path(os.getcwd()))
+    # Home contrib directory: ~/.agentm/ (or $AGENTM_HOME/).
+    # Scenarios installed here are resolved as
+    # <home>/contrib/scenarios/<name>/manifest.yaml.
+    try:
+        from agentm.core.lib.user_config import agentm_home_dir
+
+        home = agentm_home_dir()
+        if (home / "contrib").is_dir():
+            roots.append(home)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         import agentm  # local import to dodge circular at module load time
 
