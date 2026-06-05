@@ -93,7 +93,7 @@ def _inbound() -> InboundBody:
 async def test_first_call_creates_maps_and_stamps_wire_driver(tmp_path: Path) -> None:
     log: list[tuple[str, str | None]] = []
     mgr, chat_map = _make_manager(tmp_path, log)
-    sess = await mgr.get_or_create("terminal:t1", "general_purpose", _inbound())
+    sess = await mgr.get_or_create("terminal:t1", "local", _inbound())
     assert chat_map.get("terminal:t1") == sess.session_manager.get_session_id()
     assert "wire_driver" in sess.installed
     assert sess.services["session_key"] == "terminal:t1"
@@ -104,8 +104,8 @@ async def test_first_call_creates_maps_and_stamps_wire_driver(tmp_path: Path) ->
 async def test_second_call_returns_same_instance(tmp_path: Path) -> None:
     log: list[tuple[str, str | None]] = []
     mgr, _ = _make_manager(tmp_path, log)
-    a = await mgr.get_or_create("terminal:t1", "general_purpose", _inbound())
-    b = await mgr.get_or_create("terminal:t1", "general_purpose", _inbound())
+    a = await mgr.get_or_create("terminal:t1", "local", _inbound())
+    b = await mgr.get_or_create("terminal:t1", "local", _inbound())
     assert a is b
     assert len(log) == 1  # factory called once
 
@@ -115,13 +115,13 @@ async def test_restart_resumes_by_prior_session_id(tmp_path: Path) -> None:
     # First daemon lifetime: create + map.
     log1: list[tuple[str, str | None]] = []
     mgr1, _ = _make_manager(tmp_path, log1)
-    s1 = await mgr1.get_or_create("terminal:t1", "general_purpose", _inbound())
+    s1 = await mgr1.get_or_create("terminal:t1", "local", _inbound())
     prior_id = s1.session_manager.get_session_id()
 
     # Second daemon lifetime: same map file, fresh manager.
     log2: list[tuple[str, str | None]] = []
     mgr2, _ = _make_manager(tmp_path, log2)
-    s2 = await mgr2.get_or_create("terminal:t1", "general_purpose", _inbound())
+    s2 = await mgr2.get_or_create("terminal:t1", "local", _inbound())
     assert log2 == [("terminal:t1", prior_id)]  # factory got the resume id
     assert s2.resumed_from == prior_id
 
@@ -130,7 +130,7 @@ async def test_restart_resumes_by_prior_session_id(tmp_path: Path) -> None:
 async def test_shutdown_keeps_map_forget_clears_it(tmp_path: Path) -> None:
     log: list[tuple[str, str | None]] = []
     mgr, chat_map = _make_manager(tmp_path, log)
-    await mgr.get_or_create("terminal:t1", "general_purpose", _inbound())
+    await mgr.get_or_create("terminal:t1", "local", _inbound())
     await mgr.shutdown_session("terminal:t1")
     # /new semantics: map entry survives.
     assert chat_map.get("terminal:t1") is not None

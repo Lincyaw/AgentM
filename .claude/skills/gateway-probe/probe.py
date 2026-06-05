@@ -133,7 +133,7 @@ def main() -> int:
     ap.add_argument("--sender-id", default="probe")
     ap.add_argument("--chat-id", default="wire-probe",
                     help="use a FRESH id to force a new session; reuse to hit an existing one")
-    ap.add_argument("--scenario", default="general_purpose")
+    ap.add_argument("--scenario", default="local")
     ap.add_argument("--send", action="append", default=[],
                     help="inbound content to send (repeatable). A non-command triggers an LLM turn.")
     ap.add_argument("--only", action="append", default=[],

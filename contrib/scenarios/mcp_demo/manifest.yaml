@@ -44,7 +44,7 @@ extensions:
   # --- environment ports ---
   - module: agentm.extensions.builtin.operations_local
 
-  # --- file I/O + shell (kept from general_purpose so the agent can
+  # --- file I/O + shell (kept from local so the agent can
   # actually do work with what it fetches) ---
   - module: agentm.extensions.builtin.tool_read
   - module: agentm.extensions.builtin.tool_edit

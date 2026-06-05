@@ -217,7 +217,7 @@ def test_merge_gateway_commands_folds_builtins(tmp_path: Any) -> None:
     try:
         runtime = _GatewayRuntime(
             cwd=".",
-            scenario="general_purpose",
+            scenario="local",
             outbox=outbox,
             chat_map=ChatSessionMap(tmp_path / "m.json"),
             session_factory=lambda *a: None,  # unused by this method

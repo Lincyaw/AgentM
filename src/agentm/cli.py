@@ -1,10 +1,10 @@
 """AgentM CLI (typer-based).
 
-Single runtime: load the ``general_purpose`` scenario by default (a
-curated minimal atom set). A different curated list is opted into via
-``--scenario X``. Subsystems are turned off via ``--no-*`` flags.
-Failures during construction emit diagnostics through the EventBus rather
-than raising; only a missing provider is fatal.
+Single runtime: load the ``local`` scenario by default (a curated minimal
+atom set). A different curated list is opted into via ``--scenario X``.
+Subsystems are turned off via ``--no-*`` flags. Failures during
+construction emit diagnostics through the EventBus rather than raising;
+only a missing provider is fatal.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 # Default scenario when the user does not pass ``--scenario`` and does
 # not opt out via ``--no-extensions``. Module-level constant so it can
 # be patched from tests and referenced by env-var fallthrough below.
-DEFAULT_SCENARIO = "general_purpose"
+DEFAULT_SCENARIO = "local"
 
 _PACKAGE_WALK_DEPTH = 8
 
@@ -570,7 +570,7 @@ def run_cmd(
                 "Opt-in curated extension list. Bare name resolves under "
                 "<cwd>/contrib/scenarios/<name>/manifest.yaml. An absolute "
                 "path is also accepted. When unset, falls back to the "
-                "``general_purpose`` scenario (minimal default tool set)."
+                "``local`` scenario (minimal default tool set)."
             ),
         ),
     ] = None,
