@@ -96,6 +96,170 @@ sandbox between rounds would destroy the agent's local state (working
 tree, build artifacts, installed dependencies) -- equivalent to the
 context loss problem at the infrastructure level.
 
+## 3.6 Formal concepts
+
+Four functions define the control loop. Each is a pluggable interface --
+the first version uses rule-based implementations, but the interface is
+designed so a meta-agent (LLM) can replace any function later.
+
+### Observation function
+
+```
+O(t) = observe(world_state) -> ObservationVector
+```
+
+Observation is the foundation -- you can control only what you can
+observe. Three layers:
+
+| Layer | What | How | When |
+|---|---|---|---|
+| Code | files modified, committed, pushed, lint/test pass | git commands in sandbox / on host | each agent turn end |
+| Collaboration | PR exists, review comment posted, label state, issue state | GitHub API (`gh` CLI) | each agent session end |
+| Behavior | token usage, turn count, tool call patterns, stuck detection (consecutive identical errors) | agentm session metadata | real-time stream |
+
+The behavior layer is critical -- it lets the harness intervene when the
+agent is "alive but unproductive" (e.g., 3 consecutive turns calling the
+same command with the same error).
+
+### Objective function
+
+```
+r = objective(state) -> ConditionVector
+```
+
+Each workflow state has a vector of boolean conditions, not a single
+pass/fail. Split into pre-conditions (entry gate) and post-conditions
+(exit gate):
+
+```python
+# Example: developing state
+precondition_developing = {
+    "has_acceptance_criteria": True,
+    "repo_cloneable": True,
+    "gh_token_valid": True,
+}
+
+postcondition_developing = {
+    "files_modified": True,
+    "committed": True,
+    "pushed": True,
+    "pr_open": True,
+    "issue_commented": True,
+    "label_is": "status:reviewing",
+}
+
+# Example: reviewing state
+precondition_reviewing = {
+    "branch_exists_remote": True,
+    "pr_open": True,
+}
+
+postcondition_reviewing = {
+    "diff_inspected": True,
+    "each_ac_evaluated": True,
+    "review_comment_posted": True,
+    "label_is": "status:merging | status:developing",
+}
+```
+
+Pre-condition failure does not start a new agent -- it resumes the
+previous-stage agent to complete the missing work.
+
+### Feedback function
+
+```
+e(t) = feedback(objective, O(t)) -> Delta
+```
+
+Computes the structured gap between objective and observation. Not
+boolean "failed" but a delta vector:
+
+```python
+def feedback(objective, observation):
+    delta = {}
+    for key, target in objective.items():
+        actual = observation.get(key)
+        if actual != target:
+            delta[key] = {"expected": target, "actual": actual}
+    return delta
+```
+
+The delta is rendered as natural language for the agent:
+
+```
+Post-condition check: files_modified OK, committed OK, pushed FAIL,
+pr_open FAIL.
+Please push branch workbuddy/issue-42 and create a PR.
+```
+
+### Control function
+
+```
+u(t) = control(e(t), history) -> Action
+```
+
+A policy that maps error signal + history to an action. First version is
+rule-based; interface supports LLM meta-agent replacement.
+
+| Error pattern | History | Action |
+|---|---|---|
+| Missing post-conditions | First occurrence | **Resume** same session with delta message |
+| Same error repeating | 2nd-3rd round | **Resume** with hint ("last time you tried X, consider Y") |
+| Same error N rounds | 4th+ round | **Block** -- mark `status:blocked`, wait for human |
+| Pre-condition unmet | -- | **Don't dispatch** -- resume previous-stage agent |
+| Behavior anomaly (stuck) | -- | **Interrupt** + resume with "you seem stuck, try a different approach" |
+
+## 3.7 Closed-loop diagram
+
+```
+        +---------------------------------------------+
+        |         Control Function                    |
+        |  u = control(e, history)                    |
+        |  -> resume / block / interrupt              |
+        +----------+----------------------------------+
+                   | u (resume message)
+                   v
+              +---------+
+     r ------>|  Plant   |------> y (agent actions)
+  (objective) |  (LLM)  |
+              +---------+
+                              |
+                              v
+                   +------------------+
+                   |    Observer      |
+                   | O = observe(y)   |
+                   | code + collab +  |
+                   | behavior layers  |
+                   +--------+---------+
+                            | O(t)
+                            v
+                   +------------------+
+                   | Feedback Function|
+                   | e = r - O(t)     |
+                   +--------+---------+
+                            | e (delta)
+                            +----------> Control Function
+```
+
+## 3.8 Pluggability -- meta-agent interface
+
+Each function (observe, objective, feedback, control) is an interface.
+The first version is rule-based. Future versions can replace any
+function with an LLM call:
+
+- **Observation**: rule-based (git/gh commands) -- unlikely to need LLM
+- **Objective**: rule-based (condition vectors per state) -- could use
+  LLM to generate objectives from free-text issue descriptions
+- **Feedback**: rule-based (delta rendering) -- could use LLM to
+  generate more helpful hints
+- **Control**: rule-based (policy table) -- prime candidate for
+  meta-agent: "given this history of attempts and errors, what should
+  we try next?"
+
+The interface boundary is: each function takes structured input and
+returns structured output. Whether a rule engine or an LLM produces the
+output is transparent to the loop.
+
 ## 4. Post-condition observer
 
 After each agent turn, the controller checks:
