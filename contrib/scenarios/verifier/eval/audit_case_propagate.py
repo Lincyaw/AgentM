@@ -297,14 +297,35 @@ def check_node_degraded(data_dir: Path, node_name: str) -> bool:
     return False
 
 
+# engine_config keys that describe WHERE/WHEN, not the fault's intensity.
+# Everything else (corrupt %, loss %, delay, mutator_config, method, …) is
+# the strength the hop agent needs to judge how much impact to expect.
+_FAULT_BOILERPLATE = {
+    "app", "chaos_type", "namespace", "system", "system_type",
+    "time_offset", "duration",
+}
+
+
+def _fault_params(entry: dict) -> str:
+    """Render one engine_config entry's intensity/config as ``k=v, …``."""
+    return ", ".join(
+        f"{k}={v}" for k, v in entry.items()
+        if k not in _FAULT_BOILERPLATE and v not in (None, "")
+    )
+
+
 def get_injections(data_dir: Path) -> list[dict[str, str]]:
-    """Extract ``[{target, chaos_type}]`` from injection.json."""
+    """Extract ``[{target, chaos_type, params}]`` from injection.json."""
     injection = json.loads((data_dir / "injection.json").read_text())
 
     eng = injection.get("engine_config")
     if isinstance(eng, list) and eng and isinstance(eng[0], dict):
         return [
-            {"target": e["app"], "chaos_type": e.get("chaos_type", "unknown")}
+            {
+                "target": e["app"],
+                "chaos_type": e.get("chaos_type", "unknown"),
+                "params": _fault_params(e),
+            }
             for e in eng
         ]
 
@@ -344,7 +365,7 @@ def get_injections(data_dir: Path) -> list[dict[str, str]]:
         ).value)
     except Exception:
         pass
-    return [{"target": target, "chaos_type": chaos_type}]
+    return [{"target": target, "chaos_type": chaos_type, "params": ""}]
 
 
 def get_target_evidence(data_dir: Path, target: str) -> dict[str, object]:
@@ -431,6 +452,39 @@ _REL_DESCRIPTIONS = {
                         "(database/cache/broker). {to} is uninstrumented: it "
                         "has NO spans of its own — its calls live inside {frm}.",
 }
+
+
+def _fault_context(
+    all_faults: list[tuple[str, str, str]],
+    to_service: str,
+) -> str:
+    """One line for a single fault; a list, with params, when several coexist.
+
+    Two things the hop needs that a bare fault name omits:
+    - **Intensity.** ``corrupt=36`` vs ``corrupt=5`` predict very
+      different blast radii; the params come straight from the
+      injection so the agent can judge how much impact to expect.
+    - **Every coexisting fault.** A node can sit downstream of more
+      than one, each with its own fingerprint (a corruption/loss
+      fault in the latency tail, a data fault in errors). Faults are
+      listed flat with no "primary" — singling one out makes the
+      agent look only for that one's signal and miss the rest.
+    """
+    if len(all_faults) <= 1:
+        fk, tgt, params = all_faults[0]
+        suffix = f" ({params})" if params else ""
+        return f"Fault injected: {fk} on {tgt}{suffix}"
+    lines = [f"Faults injected in this system ({len(all_faults)}):"]
+    for fk, tgt, params in all_faults:
+        suffix = f" ({params})" if params else ""
+        lines.append(f"- {fk} on {tgt}{suffix}")
+    lines.append(
+        f"\n{to_service} may sit downstream of any of these. Each fault's "
+        f"category and intensity predicts a specific fingerprint — read "
+        f"each fault reference below and check for the signal it predicts. "
+        f"Do not assume a single fault is responsible."
+    )
+    return "\n".join(lines)
 
 
 def extract_hop_verdict(
@@ -530,14 +584,23 @@ def run_hop(
     to_service: str,
     rel_type: str,
     fault_kind: str,
-    fault_doc: str,
     injection_target: str,
+    all_faults: list[tuple[str, str, str]],
+    fault_docs: dict[str, str],
     out_dir: Path,
     budget: int,
     is_infra: bool = False,
     upstream_evidence: dict | None = None,
 ) -> dict | None:
-    """Run one hop-agent and return its verdict dict (or None)."""
+    """Run one hop-agent and return its verdict dict (or None).
+
+    *all_faults* is every injected fault as ``(kind, target, params)``;
+    *fault_docs* maps each kind to its reference doc. *fault_kind*/
+    *injection_target* name the fault this edge's BFS branch descended
+    from — used only to order the docs (that fault's reference first);
+    the prompt itself lists every fault flat, since a node downstream of
+    two coexisting faults must be judged against all of them.
+    """
     hop_dir = out_dir / "hops" / f"{from_service}__{to_service}"
     hop_dir.mkdir(parents=True, exist_ok=True)
 
@@ -548,7 +611,7 @@ def run_hop(
         f"Confirmed degraded: **{from_service}**",
         f"Service to check: **{to_service}**",
         f"Relationship: {rel_text}",
-        f"Fault injected: {fault_kind} on {injection_target}",
+        _fault_context(all_faults, to_service),
     ]
     if upstream_evidence:
         ev_text = _format_upstream_evidence(upstream_evidence)
@@ -561,8 +624,16 @@ def run_hop(
                 f"The propagation may manifest differently on the "
                 f"downstream (e.g. errors vs latency vs missing spans)."
             )
-    if fault_doc:
-        parts.append(f"\n## Fault reference ({fault_kind})\n{fault_doc}")
+    # Show every injected fault's doc (primary first, deduped by kind).
+    shown: set[str] = set()
+    ordered = [fault_kind] + [fk for fk, _, _ in all_faults if fk != fault_kind]
+    for fk in ordered:
+        if fk in shown:
+            continue
+        shown.add(fk)
+        doc = fault_docs.get(fk)
+        if doc:
+            parts.append(f"\n## Fault reference ({fk})\n{doc}")
     if is_infra:
         parts.append(
             f"\n## {to_service} is an uninstrumented backing component\n"
@@ -651,7 +722,6 @@ def propagate(
     data_dir: Path,
     injections: list[dict[str, str]],
     neighbor_graph: dict[str, list[tuple[str, str, int]]],
-    fault_doc: str,
     out_dir: Path,
     *,
     budget: int,
@@ -676,6 +746,16 @@ def propagate(
 
     fault_kind = injections[0]["chaos_type"] if injections else "unknown"
     inj_target = injections[0]["target"] if injections else "unknown"
+
+    # The full fault set, handed to every hop. A node downstream of two
+    # coexisting faults must be judged against both — the per-branch
+    # inherited fault below is only a "which seed reached me" hint.
+    all_faults = [
+        (inj["chaos_type"], inj["target"], inj.get("params", ""))
+        for inj in injections
+        if inj.get("target") and inj["target"] not in SYNTHETIC
+    ]
+    fault_docs = {fk: _load_fault_doc(fk) for fk, _, _ in all_faults}
 
     # Per-branch fault context: each node carries the (fault_kind, target)
     # of the seed it descends from, so a hop reached from the NetworkLoss
@@ -774,11 +854,11 @@ def propagate(
                     hop_fk, hop_target = node_fault.get(
                         from_svc, (fault_kind, inj_target)
                     )
-                    hop_doc = _load_fault_doc(hop_fk) or fault_doc
                     fut = pool.submit(
                         run_hop, data_dir,
                         from_svc, to_svc, rel_type,
-                        hop_fk, hop_doc, hop_target,
+                        hop_fk, hop_target,
+                        all_faults, fault_docs,
                         out_dir, budget,
                         to_svc in infra_nodes,
                         node_evidence.get(from_svc),
@@ -921,9 +1001,6 @@ def run_one_case(
     if not injections:
         return {"case": case_name, "error": "no injections"}
 
-    fault_kind = injections[0]["chaos_type"]
-    fault_doc = _load_fault_doc(fault_kind)
-
     rels = get_relationships(data_dir)
     infra_nodes = get_infra_nodes(data_dir)
     rels.extend(get_infra_edges(data_dir, infra_nodes))
@@ -936,14 +1013,16 @@ def run_one_case(
 
     total_edges = sum(len(v) for v in neighbor_graph.values())
     print(f"Injections: {[(i['target'], i['chaos_type']) for i in injections]}")
-    print(f"Fault doc: {'loaded' if fault_doc else 'not found'} "
-          f"({fault_kind})")
+    for inj in injections:
+        fk = inj["chaos_type"]
+        loaded = "loaded" if _load_fault_doc(fk) else "not found"
+        print(f"Fault doc: {loaded} ({fk})")
     print(f"Relationship graph: {total_edges} directed edges "
           f"({len(neighbor_graph)} services)")
     print(f"Infra nodes (metrics-only): {sorted(infra_nodes)}")
 
     result = propagate(
-        data_dir, injections, neighbor_graph, fault_doc, out,
+        data_dir, injections, neighbor_graph, out,
         budget=budget, parallel=parallel,
         infra_nodes=infra_nodes, node_map=node_map,
     )
@@ -972,7 +1051,9 @@ def run_one_case(
 
     return {
         "case": case_name,
-        "fault_kind": fault_kind,
+        "fault_kind": "+".join(
+            dict.fromkeys(i["chaos_type"] for i in injections)
+        ),
         "seeds": seeds,
         "confirmed": confirmed,
         "propagated": propagated,
@@ -999,8 +1080,9 @@ def _read_cached_summary(out_dir: Path, case_name: str) -> dict | None:
     confirmed = trace.get("confirmed_nodes", [])
     return {
         "case": case_name,
-        "fault_kind": report["injections"][0]["fault_kind"]
-        if report.get("injections") else "unknown",
+        "fault_kind": "+".join(
+            dict.fromkeys(i["fault_kind"] for i in report.get("injections", []))
+        ) or "unknown",
         "seeds": seeds,
         "confirmed": confirmed,
         "propagated": [s for s in confirmed if s not in seeds],

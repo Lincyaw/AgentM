@@ -92,20 +92,40 @@ extensions:
         looks flat can hide a tail that spiked; a single data source
         that looks clean can contradict another.
 
-        ## Mechanism & direction must match
-        Confirm only if the fault can actually reach the target through
-        THIS edge. Use the fault reference for the specific mechanism:
-        - Blocking-latency faults (network delay, slow response,
+        ## Match each observed signal to a fault — try them all
+        The system may carry MORE THAN ONE injected fault (every one is
+        listed above with its intensity). A service can be reached by a
+        fault several hops away through its dependency chain — not only
+        by the fault on its immediate upstream. So when you observe a
+        signal on the target (a latency tail, an error spike), test it
+        against EACH injected fault in turn, not only the one this
+        edge's upstream carries. The signal is genuine propagation if
+        ANY injected fault predicts it through a real call path.
+
+        The trap to avoid: seeing a real degradation, checking it
+        against only the nearest upstream's fault, finding that fault
+        doesn't explain it, and discarding the signal — when a
+        DIFFERENT injected fault deeper in the chain is its actual
+        cause. A 4× p99 latency tail is real degradation; if the
+        nearest fault is a data mutation (which predicts errors, not
+        latency) but the system also has a network fault (which
+        predicts exactly that tail), the network fault is the
+        explanation — confirm, don't discard.
+
+        Each fault kind leaves a different fingerprint — read its fault
+        reference for the mechanism and intensity, then match the
+        observed signal to whichever fault fits. The broad directions:
+        - Blocking-latency faults (network delay/loss/corruption,
           CPU/memory/JVM resource) propagate from a slow **callee up to
           its callers**. They do NOT slow a downstream service the
           target merely calls. A small latency bump on a downstream
           leaf is not propagation — reject.
         - Error/abort/unavailability faults propagate **up** as errors:
           callers of the failed service see failures/timeouts.
-        - Data-corruption faults (payload/value/URL mutation, corrupt)
-          propagate **down/along** the corrupted call as errors or
-          functional breakage — look for errors or bad-data handling on
-          the receiver, not just fewer calls.
+        - Data-corruption faults (payload/value/URL mutation) propagate
+          **down/along** the corrupted call as errors or functional
+          breakage — they cause fast failures, NOT latency. Look for
+          errors or bad-data handling on the receiver, not fewer calls.
 
         ## Backing components (mysql, redis, mongo, rabbitmq, …)
         These have no spans of their own. They are degraded only if
