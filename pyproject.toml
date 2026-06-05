@@ -1,6 +1,6 @@
 [project]
 name = "agentm"
-version = "0.1.0"
+version = "0.2.0"
 description = "AgentM - an agent framework"
 readme = "README.md"
 authors = [{ name = "Aoyang Fang", email = "aoyangfang@gmail.com" }]

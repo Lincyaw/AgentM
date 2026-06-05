@@ -1,6 +1,6 @@
 [project]
 name = "agentm-agentenv"
-version = "0.1.0"
+version = "0.2.0"
 description = "AgentM ⟷ ARL agent-env sandbox integration (operations_agent_env atom + agent_env_repo scenario), published as entry-point plugins."
 readme = "README.md"
 requires-python = ">=3.12"
