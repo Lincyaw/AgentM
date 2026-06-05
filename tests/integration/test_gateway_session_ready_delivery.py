@@ -16,7 +16,7 @@ gateway's ``_build_session_factory`` (seed + mount wire_driver), the outbound
 sink the gateway hands to ``SessionManager`` is captured here, and we assert a
 ``session_ready`` body arrives whose ``command_names`` includes ``compact``
 (registered by the ``llm_compaction`` atom, which ships in the
-``general_purpose`` scenario).
+``local`` scenario).
 
 Pre-fix (services + wire_driver stamped *after* ``create()``): no
 ``session_ready`` body is delivered. Post-fix: the creation-time frame arrives
@@ -141,7 +141,7 @@ async def test_gateway_delivers_creation_time_session_ready(tmp_path: Any) -> No
         outbound_sink=_sink,
     )
 
-    sess = await mgr.get_or_create("key-1", "general_purpose", _inbound())
+    sess = await mgr.get_or_create("key-1", "local", _inbound())
     try:
         # session_ready is projected by wire_driver via a SYNC bus handler that
         # schedules the outbound ship with ``loop.create_task`` (see

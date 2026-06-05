@@ -762,7 +762,7 @@ def cli(
     scenario: Annotated[
         str,
         typer.Option("--scenario", envvar="AGENTM_SCENARIO", help="Default scenario."),
-    ] = "general_purpose",
+    ] = "local",
     state_dir: Annotated[
         Path | None,
         typer.Option(

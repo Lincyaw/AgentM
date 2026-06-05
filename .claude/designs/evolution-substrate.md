@@ -102,7 +102,7 @@ Append-only. One record per (task_type × scenario × time_bucket) the indexer a
 ```jsonc
 {
   "indexed_at": "2026-05-02T03:00:00Z",
-  "scenario": "general_purpose",
+  "scenario": "local",
   "task_type": "rca",
   "n_runs": 47,
   "metrics": {
@@ -145,7 +145,7 @@ The binding mechanism between observation and version. Every observability trace
   "timestamp": "2026-05-01T...",
   "fingerprint": {
     "core":     "core@a1b2c3",
-    "scenario": "general_purpose@d4e5f6",
+    "scenario": "local@d4e5f6",
     "atoms": {
       "tool_read":        "tool_read@e5f6",
       "tool_bash":        "tool_bash@7890",
@@ -361,7 +361,7 @@ This forces the agent to seek more evidence before deciding, instead of overfitt
 Scenarios are first-class evolvable artifacts, not just atom containers. The catalog stores them with the same shape as atoms:
 
 ```
-.agentm/catalog/scenarios/general_purpose/<yaml_content_hash>/
+.agentm/catalog/scenarios/local/<yaml_content_hash>/
   recipe.yaml
   manifest.yaml
   metrics.jsonl
@@ -371,7 +371,7 @@ Scenarios are first-class evolvable artifacts, not just atom containers. The cat
 `manifest.yaml` for a scenario records the **dependency closure**:
 
 ```yaml
-name: general_purpose
+name: local
 content_hash: d4e5f6...
 recipe_yaml_hash: ...
 atom_versions:
@@ -382,7 +382,7 @@ parent_hash: ...
 author: agent | human
 ```
 
-The closure hash makes scenarios A/B-able as a unit: "is `general_purpose@d4e5f6` (with `tool_read@e5f6`) better than `general_purpose@d999..` (with `tool_read@e2c1`) on RCA tasks?" — this is the same `compare()` call, but on a scenario.
+The closure hash makes scenarios A/B-able as a unit: "is `local@d4e5f6` (with `tool_read@e5f6`) better than `local@d999..` (with `tool_read@e2c1`) on RCA tasks?" — this is the same `compare()` call, but on a scenario.
 
 `find_best_scenario(metric, task_type)` mines for compositions that dominate. Scenario-level optimization is where compositional gains live: an atom may be marginally worse, but its combination with another atom may unlock a new behavior.
 
@@ -400,7 +400,7 @@ The closure hash makes scenarios A/B-able as a unit: "is `general_purpose@d4e5f6
 | E6 | Agent A in experiment mode for `tool_read`, agent B (or same agent) calls `propose_change("tool_bash", ...)` | Rejected; "another atom in experiment mode: tool_read" |
 | E7 | Agent proposes reactivating a version previously regressed for safety | Blocked with prior decision record cited; agent must use explicit override + rationale |
 | E8 | Active-set fingerprint changes mid-session via reload | New fingerprint recorded as `atom.reload` event; downstream events flagged `mid_session_reload: true`; default `compare()` excludes them |
-| E9 | Scenario `general_purpose@d4e5f6` evaluated against `general_purpose@d999` on identical task distribution | `compare()` works at scenario granularity; can attribute differences to the dependency-closure delta |
+| E9 | Scenario `local@d4e5f6` evaluated against `local@d999` on identical task distribution | `compare()` works at scenario granularity; can attribute differences to the dependency-closure delta |
 | E10 | Agent calls `find_best` with no constraints on a metric where all known versions are inconclusive | Returns `None`; agent receives "no version dominates" — this is the correct answer, not an error |
 
 ---

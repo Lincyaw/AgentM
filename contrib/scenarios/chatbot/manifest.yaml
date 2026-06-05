@@ -3,7 +3,7 @@ description: |
   Conversational-assistant scenario for chat channels (Feishu, terminal,
   …) driven through ``agentm-gateway --scenario chatbot``.
 
-  It is ``general_purpose`` (the minimal coding default) plus an identity
+  It is ``local`` (the minimal default) plus an identity
   layer: the ``persona`` contrib atom reads file-driven character from the
   workspace (SOUL.md / IDENTITY.md / USER.md) and the base prompt frames
   the agent as a chat assistant rather than a one-shot CLI coder. Nothing
@@ -27,7 +27,7 @@ extensions:
   # --- tool-result size cap: spill large outputs to disk ---
   - module: agentm.extensions.builtin.tool_result_cap
 
-  # --- file I/O + shell: same minimal tool floor as general_purpose. ---
+  # --- file I/O + shell: same minimal tool floor as local. ---
   - module: agentm.extensions.builtin.tool_read
   - module: agentm.extensions.builtin.tool_edit
   - module: agentm.extensions.builtin.tool_write
