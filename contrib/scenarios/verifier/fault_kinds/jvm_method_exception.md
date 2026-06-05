@@ -10,6 +10,13 @@ Target spans whose operation name matches the targeted method show
 errors; spans for other methods on the same service look normal.
 Error logs cite the injected exception.
 
+## How to observe on a neighbour
+Because only one method throws, the error signal on a caller is
+concentrated on the specific endpoint that exercises that method.
+The caller's service-wide error rate may look flat if unaffected
+endpoints dominate. Always break down by `span_name` on the caller
+to find the affected call path.
+
 ## How the failure tends to propagate
 In-pod fault scoped to one method — target is the `from`. Cascade
 only reaches callers that exercise the affected method; their

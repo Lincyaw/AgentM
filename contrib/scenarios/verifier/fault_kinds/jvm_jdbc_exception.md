@@ -11,6 +11,13 @@ shows no anomalies of its own (no elevated latency, no error
 codes returned from the DB). Target's inbound spans may fail or
 succeed depending on whether the failed DB call is recoverable.
 
+## How to observe on a neighbour
+Every endpoint on the target that hits the DB path can fail, so
+the signal is broader than single-method faults. On a caller,
+check both service aggregate and per-`span_name` error rates —
+endpoints that avoid the target's DB-backed responses will be
+unaffected.
+
 ## How the failure tends to propagate
 In-pod fault — target (the JVM service) is the `from`, NOT the DB.
 A common mistake is to attribute the edge to the DB; the DB is

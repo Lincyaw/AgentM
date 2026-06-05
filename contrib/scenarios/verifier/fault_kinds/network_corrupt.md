@@ -11,6 +11,14 @@ rule-bearing side. Occasional decode / deserialisation / schema-
 validation errors at the receiver. Error rate is usually below what
 `loss` produces but visible.
 
+## How to observe on a neighbour
+Like network_loss, corruption causes retransmissions that appear as
+**tail-latency spikes** (p99/max). Average latency may look flat.
+Additionally, corrupted payloads that survive TCP checksums can
+cause deserialization errors at the receiver — check error logs for
+decode/schema/parse failures. On a neighbour, always check p99
+latency AND error logs, not just aggregate averages.
+
 ## How the failure tends to propagate
 Link-type fault. Edge: `rule-bearing side → peer`. Cascade tends to
 be modest — most calls succeed — but services that retry aggressively

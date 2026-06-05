@@ -13,6 +13,14 @@ Error rates usually stay flat unless the added delay pushes callers
 past their timeout. The rule physically sits on ONE side of the
 link, recorded as `injection_point.source_service`.
 
+## How to observe on a neighbour
+Network delay adds a fixed latency to every packet, so the signal
+on a caller is a flat latency shift (not just a tail spike). Check
+both average AND p99 — but the shift should be roughly commensurate
+with the configured delay. Break down by `span_name` if the caller
+has mixed endpoints: only call paths that route through the delayed
+service are affected; unrelated endpoints stay flat.
+
 ## How the failure tends to propagate
 This is a link-type fault. Latency cascades **upward**: a slow callee
 makes its synchronous callers block, so they slow too, and so on up
