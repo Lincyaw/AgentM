@@ -66,6 +66,17 @@ def _candidate_roots() -> list[Path]:
     if project_root_env:
         roots.append(Path(project_root_env))
     roots.append(Path(os.getcwd()))
+    # Home contrib directory: ~/.agentm/ (or $AGENTM_HOME/).
+    # Scenarios installed here are resolved as
+    # <home>/contrib/scenarios/<name>/manifest.yaml.
+    try:
+        from agentm.core.lib.user_config import agentm_home_dir
+
+        home = agentm_home_dir()
+        if (home / "contrib").is_dir():
+            roots.append(home)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         import agentm  # local import to dodge circular at module load time
 
