@@ -46,6 +46,12 @@ def _duckdb_conn(data_dir: Path):  # noqa: ANN202
     import duckdb
 
     conn = duckdb.connect(":memory:")
+    _cap = os.environ.get("AGENTM_DUCKDB_THREADS")
+    if _cap:
+        try:
+            conn.execute(f"SET threads={max(1, int(_cap))}")
+        except (ValueError, duckdb.Error):
+            pass
     for f in sorted(data_dir.iterdir()):
         if f.is_file() and f.suffix == ".parquet" and f.name != "conclusion.parquet":
             conn.execute(
