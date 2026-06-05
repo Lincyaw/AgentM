@@ -130,6 +130,7 @@ def run(
     from .judge import RcabenchJudge
     from .providers import build_profile_provider
     from .strategy import (
+        _SUBMISSION_TOOL_NAMES,
         FixedInjectionStrategy,
         ForkStrategy,
         HarnessStrategy,
@@ -175,7 +176,7 @@ def run(
     trigger_registry = TriggerRegistry()
     trigger_registry.register_trigger(_CadenceTrigger(interval=5))
     trigger_registry.register_trigger(
-        _OnSubmissionTrigger(tool_names=frozenset({"submit_investigation", "submit_final_report"}))
+        _OnSubmissionTrigger(tool_names=_SUBMISSION_TOOL_NAMES)
     )
 
     # -- Build the fork strategy from CLI flags --

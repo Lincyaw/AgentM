@@ -1,11 +1,6 @@
 from __future__ import annotations
 
 
-
-
-
-
-
 def test_personas_disabled_skips_resolve_handler() -> None:
     import asyncio
 
