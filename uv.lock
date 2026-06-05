@@ -178,11 +178,15 @@ source = { editable = "contrib/scenarios/rca" }
 dependencies = [
     { name = "agentm" },
     { name = "duckdb" },
-    { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pytz" },
     { name = "rcabench-platform", extra = ["llm-eval", "sdk"] },
     { name = "tiktoken" },
+]
+
+[package.optional-dependencies]
+duckdb-remote = [
+    { name = "pyarrow" },
 ]
 
 [package.dev-dependencies]
@@ -195,12 +199,13 @@ dev = [
 requires-dist = [
     { name = "agentm", editable = "." },
     { name = "duckdb", specifier = ">=1.4.4" },
-    { name = "pyarrow", specifier = ">=23.0.1" },
+    { name = "pyarrow", marker = "extra == 'duckdb-remote'", specifier = ">=23.0.1" },
     { name = "pydantic", specifier = ">=2.11.0" },
     { name = "pytz", specifier = ">=2025.1" },
     { name = "rcabench-platform", extras = ["sdk", "llm-eval"], specifier = ">=0.4.44" },
     { name = "tiktoken", specifier = ">=0.12.0" },
 ]
+provides-extras = ["duckdb-remote"]
 
 [package.metadata.requires-dev]
 dev = [
