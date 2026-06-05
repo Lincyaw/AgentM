@@ -443,9 +443,6 @@ class _RemoteState:
             return {"keys": self._keys}
         return {"prefix": self._prefix or ""}
 
-    def schema_url(self) -> str:
-        return f"{self._endpoint}/api/v2/blob/buckets/{self._bucket}/schema"
-
     def query_url(self) -> str:
         return f"{self._endpoint}/api/v2/blob/buckets/{self._bucket}/query"
 
@@ -610,28 +607,74 @@ def _build_local_handlers(
     return _list, _query
 
 
+# list_tables in remote mode is just a query: the schema IS reachable via
+# SQL, so there is no separate /schema endpoint. list_tables runs this
+# discovery query over the per-request views through /query and reshapes the
+# flat rows into the local-mode {tables:[...]} payload.
+_ARROW_ACCEPT = "application/vnd.apache.arrow.stream"
+_SCHEMA_DISCOVERY_SQL = (
+    "SELECT table_name, column_name, data_type "
+    "FROM information_schema.columns "
+    "ORDER BY table_name, ordinal_position"
+)
+
+
+def _post_arrow_query(
+    state: _RemoteState, sql: str, *, err_sql: str | None = None
+) -> tuple[list[dict[str, Any]], list[str]] | ToolResult:
+    """POST one SQL to the blob /query endpoint and decode the Arrow stream.
+
+    Returns ``(rows, columns)`` (rows as ``to_pylist`` dicts) or a scrubbed
+    ``ToolResult`` error. The single network seam shared by query_sql and
+    list_tables — there is one server endpoint, /query.
+    """
+    extra: dict[str, Any] = {"sql": err_sql} if err_sql else {}
+    body = {**state._selector(), "sql": sql}
+    try:
+        resp = _http_request(
+            "POST",
+            state.query_url(),
+            headers=state._headers(_ARROW_ACCEPT),
+            json_body=body,
+        )
+    except Exception as exc:  # noqa: BLE001 - network/transport error → tool error
+        return _err(f"query failed: {state.scrub(str(exc))}", **extra)
+    if resp.status_code != 200:
+        return _err(
+            f"query failed: HTTP {resp.status_code}: {state.scrub(resp.text)[:500]}",
+            **extra,
+        )
+    try:
+        return _decode_arrow_rows(resp.content)
+    except Exception as exc:  # noqa: BLE001 - decode error → tool error, never crash
+        return _err(f"query failed: {state.scrub(str(exc))}", **extra)
+
+
 def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
     async def _list(_: dict[str, Any]) -> ToolResult:
-        try:
-            resp = _http_request(
-                "GET",
-                state.schema_url(),
-                headers=state._headers("application/json"),
-                params={"prefix": state._prefix or ""},
+        fetched = _post_arrow_query(state, _SCHEMA_DISCOVERY_SQL)
+        if isinstance(fetched, ToolResult):
+            return fetched
+        rows, _cols = fetched
+        # Flat (table_name, column_name, data_type) → grouped tables; order
+        # preserved (server already ORDER BY table_name, ordinal_position).
+        tables: dict[str, list[dict[str, Any]]] = {}
+        order: list[str] = []
+        for r in rows:
+            name = r.get("table_name")
+            if name is None:
+                continue
+            if name not in tables:
+                tables[name] = []
+                order.append(name)
+            tables[name].append(
+                {"name": r.get("column_name"), "type": r.get("data_type")}
             )
-        except Exception as exc:  # noqa: BLE001 - network/transport error → tool error
-            return _err(f"list_tables failed: {state.scrub(str(exc))}")
-        if resp.status_code != 200:
-            return _err(
-                f"list_tables failed: HTTP {resp.status_code}: "
-                f"{state.scrub(resp.text)[:500]}"
-            )
-        try:
-            data = resp.json()
-        except (ValueError, json.JSONDecodeError) as exc:
-            return _err(f"list_tables failed: bad response: {state.scrub(str(exc))}")
         payload = json.dumps(
-            {"data_dir": state.handle, "tables": data.get("tables", [])},
+            {
+                "data_dir": state.handle,
+                "tables": [{"table": t, "columns": tables[t]} for t in order],
+            },
             ensure_ascii=False,
             default=str,
             indent=2,
@@ -649,28 +692,12 @@ def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
         if cached is not None:
             return _duplicate_result(sql)
 
-        wrapped = _wrap_with_limit(sql, head, state.row_limit)
-        body = {**state._selector(), "sql": wrapped}
-        try:
-            resp = _http_request(
-                "POST",
-                state.query_url(),
-                headers=state._headers("application/vnd.apache.arrow.stream"),
-                json_body=body,
-            )
-        except Exception as exc:  # noqa: BLE001 - network/transport error → tool error
-            return _err(f"query failed: {state.scrub(str(exc))}", sql=sql)
-        if resp.status_code != 200:
-            return _err(
-                f"query failed: HTTP {resp.status_code}: "
-                f"{state.scrub(resp.text)[:500]}",
-                sql=sql,
-            )
-        try:
-            rows, cols = _decode_arrow_rows(resp.content)
-        except Exception as exc:  # noqa: BLE001 - decode error → tool error, never crash
-            return _err(f"query failed: {state.scrub(str(exc))}", sql=sql)
-
+        fetched = _post_arrow_query(
+            state, _wrap_with_limit(sql, head, state.row_limit), err_sql=sql
+        )
+        if isinstance(fetched, ToolResult):
+            return fetched
+        rows, cols = fetched
         rows = [dict(zip(cols, _serialize(list(r.values())), strict=False)) for r in rows]
         result = _rows_to_result(rows, cols, token_limit=state.token_limit)
         state.sql_cache[cache_key] = result

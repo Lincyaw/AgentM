@@ -66,6 +66,7 @@ def _install_remote(
     responder: Any,
     captured: _Captured,
     env: dict[str, str] | None = None,
+    cfg: dict[str, Any] | None = None,
 ) -> _Api:
     monkeypatch.setenv("AGENTM_DUCKDB_TOKEN", _TOKEN)
     for k, v in (env or {}).items():
@@ -95,7 +96,7 @@ def _install_remote(
 
     api = _Api()
     # _Api is a structural test double for ExtensionAPI (register_tool only).
-    cfg = {"endpoint": _ENDPOINT, "bucket": _BUCKET, "dataset": _PREFIX}
+    cfg = cfg or {"endpoint": _ENDPOINT, "bucket": _BUCKET, "dataset": _PREFIX}
     duckdb_sql.install(api, cfg)  # type: ignore[arg-type]
     return api
 
@@ -132,38 +133,60 @@ def test_remote_query_request_shape_and_arrow_decode(monkeypatch: Any) -> None:
     assert not result.is_error
 
 
-def test_remote_list_tables_reshapes_schema(monkeypatch: Any) -> None:
+def test_remote_list_tables_via_discovery_query(monkeypatch: Any) -> None:
+    # There is ONE server endpoint (/query). list_tables is a discovery query
+    # over information_schema, reshaped into the local-mode {tables:[...]}.
     captured = _Captured()
-    schema_resp = {
-        "tables": [
-            {
-                "table": "abnormal_traces",
-                "row_count": 4096,
-                "columns": [
-                    {"name": "trace_id", "type": "VARCHAR"},
-                    {"name": "duration", "type": "BIGINT"},
-                ],
-            }
-        ]
-    }
+    discovery_rows = [
+        {"table_name": "abnormal_traces", "column_name": "trace_id", "data_type": "VARCHAR"},
+        {"table_name": "abnormal_traces", "column_name": "duration", "data_type": "BIGINT"},
+        {"table_name": "normal_logs", "column_name": "message", "data_type": "VARCHAR"},
+    ]
 
     def responder(method: str, url: str, body: Any) -> duckdb_sql._HttpResponse:
-        assert method == "GET"
-        return duckdb_sql._HttpResponse(
-            200, json.dumps(schema_resp).encode("utf-8")
-        )
+        assert method == "POST"
+        return duckdb_sql._HttpResponse(200, _arrow_stream(discovery_rows))
 
     api = _install_remote(monkeypatch, responder=responder, captured=captured)
     result = asyncio.run(api.tools["list_tables"].fn({}))
 
     call = captured.calls[-1]
-    assert call["url"] == f"{_ENDPOINT}/api/v2/blob/buckets/{_BUCKET}/schema"
-    assert call["params"] == {"prefix": _PREFIX}
+    assert call["url"] == f"{_ENDPOINT}/api/v2/blob/buckets/{_BUCKET}/query"
+    assert "information_schema.columns" in call["json_body"]["sql"]
+    assert call["json_body"]["prefix"] == _PREFIX
+    assert call["headers"]["Accept"] == "application/vnd.apache.arrow.stream"
 
     payload = json.loads(result.content[0].text)
-    assert payload["tables"] == schema_resp["tables"]
     assert payload["data_dir"] == f"blob://{_BUCKET}/{_PREFIX}"
+    tables = {t["table"]: t["columns"] for t in payload["tables"]}
+    assert tables["abnormal_traces"] == [
+        {"name": "trace_id", "type": "VARCHAR"},
+        {"name": "duration", "type": "BIGINT"},
+    ]
+    assert tables["normal_logs"] == [{"name": "message", "type": "VARCHAR"}]
     assert not result.is_error
+
+
+def test_remote_list_tables_keys_mode_sends_keys(monkeypatch: Any) -> None:
+    # keys-mode selector flows into the /query body for list_tables too.
+    captured = _Captured()
+    keys = ["a/x.parquet", "b/y.parquet"]
+    row = [{"table_name": "x", "column_name": "c", "data_type": "VARCHAR"}]
+
+    def responder(method: str, url: str, body: Any) -> duckdb_sql._HttpResponse:
+        return duckdb_sql._HttpResponse(200, _arrow_stream(row))
+
+    api = _install_remote(
+        monkeypatch,
+        responder=responder,
+        captured=captured,
+        cfg={"endpoint": _ENDPOINT, "bucket": _BUCKET, "keys": keys},
+    )
+    asyncio.run(api.tools["list_tables"].fn({}))
+
+    body = captured.calls[-1]["json_body"]
+    assert body["keys"] == keys
+    assert "prefix" not in body
 
 
 def test_remote_redacts_endpoint_and_token_on_error(monkeypatch: Any) -> None:

@@ -15,9 +15,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Remote mode of the duckdb_sql atom decodes an Arrow IPC stream from the
-# aegis blob query endpoint. Local mode does not import pyarrow.
-duckdb-remote = ["pyarrow>=23.0.1"]
+# Remote mode of the duckdb_sql atom: HTTP client (httpx) + Arrow IPC
+# decode (pyarrow) against the aegis blob query endpoint. Local mode
+# imports neither. httpx is usually present transitively (litellm); pin it
+# here so remote mode is self-contained.
+duckdb-remote = ["pyarrow>=23.0.1", "httpx"]
 
 [project.entry-points."llm_eval.agents"]
 agentm = "agentm_rca.eval.agent:AgentMAgent"
