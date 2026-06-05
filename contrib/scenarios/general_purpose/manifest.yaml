@@ -65,3 +65,8 @@ extensions:
   # reference). Access counter under access_stats.json feeds future
   # evolution heuristics. ---
   - module: agentm.extensions.builtin.memory
+
+  # --- thinking retry: retry when the model emits only thinking blocks
+  # with no text or tool calls (e.g. doubao leaking tool calls into
+  # reasoning_content). ---
+  - module: agentm.extensions.builtin.thinking_retry
