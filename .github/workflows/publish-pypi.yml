@@ -44,27 +44,10 @@ jobs:
 
       - name: Stamp version
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
-          sed -i "s/^version = .*/version = \"${VERSION}\"/" contrib/extensions/agentenv/pyproject.toml
-          echo "=== agentm ==="
+          sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/" pyproject.toml
           grep "^version" pyproject.toml
-          echo "=== agentm-agentenv ==="
-          grep "^version" contrib/extensions/agentenv/pyproject.toml
 
-      - name: Build agentm
-        run: uv build --out-dir dist
-
-      - name: Build agentm-agentenv
-        run: uv build --out-dir "${{ github.workspace }}/dist"
-        working-directory: contrib/extensions/agentenv
-
-      - name: Publish all packages
-        run: uv publish dist/* --trusted-publishing always
-
-      - name: Summary
+      - name: Build and publish
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          echo "Published to PyPI:"
-          echo "  agentm==${VERSION}"
-          echo "  agentm-agentenv==${VERSION}"
+          uv build --out-dir dist
+          uv publish dist/* --trusted-publishing always

@@ -29,12 +29,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Pulls in the ``agentm-agentenv`` plugin distribution, which carries the ARL
-# agent-env SDK dependency (arl-env) AND registers the ``operations_agent_env``
-# atom + ``agent_env_repo`` scenario via entry points. Install with
-# ``uv sync --extra agent-env`` (workspace) or ``pip install agentm[agent-env]``.
+# Pulls in the ARL agent-env SDK so the builtin ``operations_agent_env`` atom
+# can create sandbox sessions. Install with ``uv sync --extra agent-env``
+# (workspace) or ``pip install agentm[agent-env]``.
 agent-env = [
-    "agentm-agentenv",
+    "arl-env>=0.2.0",
 ]
 eval = [
     "duckdb>=1.5.2",
@@ -66,7 +65,6 @@ build-backend = "uv_build"
 # entries are pure manifests with no pyproject.toml and must NOT be picked
 # up as workspace members.
 members = [
-    "contrib/extensions/agentenv",
     "contrib/extensions/llmharness",
     "contrib/extensions/mcp_bridge",
     "contrib/scenarios/rca",
@@ -78,7 +76,6 @@ members = [
 # Resolve the agent-env plugin to the in-workspace member (editable) for dev;
 # a published wheel takes over transparently outside the workspace.
 [tool.uv.sources]
-agentm-agentenv = { workspace = true }
 agentm-terminal = { workspace = true }
 
 [tool.pytest.ini_options]
@@ -94,7 +91,7 @@ markers = [
 # Nested workspace projects own their own tests/ trees and pyproject. The
 # top-level pytest must not recurse into them — both define a ``tests``
 # package and the import paths collide.
-addopts = "-m 'not ui' --ignore=contrib/extensions/agentenv --ignore=contrib/extensions/llmharness --ignore=contrib/extensions/mcp_bridge --ignore=contrib/scenarios/rca --ignore=contrib/scenarios/rca_hfsm --ignore=contrib/gateway-peers"
+addopts = "-m 'not ui' --ignore=contrib/extensions/llmharness --ignore=contrib/extensions/mcp_bridge --ignore=contrib/scenarios/rca --ignore=contrib/scenarios/rca_hfsm --ignore=contrib/gateway-peers"
 # Local eval/benchmark output dirs (gitignored, but present in the working
 # tree) carry ``test-*.txt`` verifier dumps that pytest would otherwise
 # collect as stray doctests. Keep collection out of them at any depth.
