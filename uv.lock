@@ -186,6 +186,7 @@ dependencies = [
 
 [package.optional-dependencies]
 duckdb-remote = [
+    { name = "httpx" },
     { name = "pyarrow" },
 ]
 
@@ -199,6 +200,7 @@ dev = [
 requires-dist = [
     { name = "agentm", editable = "." },
     { name = "duckdb", specifier = ">=1.4.4" },
+    { name = "httpx", marker = "extra == 'duckdb-remote'" },
     { name = "pyarrow", marker = "extra == 'duckdb-remote'", specifier = ">=23.0.1" },
     { name = "pydantic", specifier = ">=2.11.0" },
     { name = "pytz", specifier = ">=2025.1" },
