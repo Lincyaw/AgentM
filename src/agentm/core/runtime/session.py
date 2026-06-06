@@ -269,7 +269,7 @@ class AgentSession:
         max_turns) overrides this via ``resolve_loop_action`` (loop.py:301),
         so a hard ceiling stays hard.
 
-        #177: if a ``terminal=True`` item was drained this round (recorded on
+        #177: if a ``terminal=True`` item was drained (recorded on
         ``_pending_terminate``) and the inbox is now empty, return
         ``Stop(ToolTerminated)`` so a backgrounded ``ToolTerminate`` actually
         ends the loop instead of being swallowed as an ordinary completion.
@@ -278,15 +278,22 @@ class AgentSession:
         del event
         if not self._inbox.is_empty():
             return Step()
-        # #177: a terminal item was drained this round — honour the terminate
-        # intent now that its message has been delivered. Consume the pending
-        # cause so a later round does not re-stop. Non-final ``Stop`` (matching
-        # a foreground ``ToolTerminate``), so an extension handler on the same
+        # #177: a terminal item was drained — honour the terminate intent now
+        # that its message has been delivered. Non-final ``Stop`` (matching a
+        # foreground ``ToolTerminate``), so an extension handler on the same
         # channel may still ``Inject`` over it.
+        #
+        # We do NOT clear ``_pending_terminate`` here. The resolution lattice
+        # (loop.py:298) lets a co-loaded floor's ``Inject`` win over this
+        # ``Stop`` — e.g. ``sub_agent`` injecting while a child is still
+        # running. A foreground terminate survives that because it is the
+        # kernel default, recomputed every turn; a one-shot consumed flag would
+        # be DESTROYED by the override. So we re-assert the same cause on every
+        # boundary and let ``_on_agent_end`` clear it only once the loop has
+        # actually stopped on it — the terminate survives across N turns of a
+        # running child's injects.
         if self._pending_terminate is not None:
-            cause = self._pending_terminate
-            self._pending_terminate = None
-            return Stop(cause)
+            return Stop(self._pending_terminate)
         return None
 
     def _drain_inbox_and_persist(
@@ -949,7 +956,20 @@ class AgentSession:
         self._end_waiters.append(fut)
         return fut
 
-    def _on_agent_end_wake_waiters(self, _event: AgentEndEvent) -> None:
+    def _on_agent_end_wake_waiters(self, event: AgentEndEvent) -> None:
+        # #177: clear the pending backgrounded-terminate ONLY when the loop
+        # actually stopped on that exact cause (identity match against the
+        # event's cause). If the round instead ended on something else — a
+        # ModelEndTurn while ``sub_agent``'s floor kept the loop alive with an
+        # Inject that overrode our Stop — the flag MUST survive so the next
+        # boundary re-asserts it. This is the invariant the keep-alive floor
+        # relies on: a backgrounded terminate is not lost across turns where a
+        # running child keeps injecting.
+        if (
+            self._pending_terminate is not None
+            and event.cause is self._pending_terminate
+        ):
+            self._pending_terminate = None
         waiters = self._end_waiters
         self._end_waiters = []
         for fut in waiters:

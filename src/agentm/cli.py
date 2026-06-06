@@ -526,10 +526,13 @@ async def run(
 
     session = await AgentSession.create(session_config)
     try:
+        # The prompt/tick return value is intentionally discarded: the final
+        # message list is re-fetched AFTER ``idle()`` below so it reflects any
+        # late background completion delivered between agent_end and idle.
         if config.prompt:
-            final = await session.prompt(config.prompt)
+            await session.prompt(config.prompt)
         else:
-            final = await session.tick()
+            await session.tick()
         # #179: a one-shot CLI owns its event loop only for the duration of
         # this coroutine — once it returns, ``asyncio.run`` tears the loop down.
         # An auto-backgrounded tool / child subagent that finishes AFTER the
