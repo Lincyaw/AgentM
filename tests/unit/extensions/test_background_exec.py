@@ -351,6 +351,50 @@ async def test_backgrounded_non_terminate_completion_is_not_terminal() -> None:
     assert completions[0].terminal is False
 
 
+@pytest.mark.asyncio
+async def test_backgrounded_tool_tracks_work_until_completion() -> None:
+    """#179 fail-stop: an auto-backgrounded tool brackets its detached lifetime
+    in ``api.track_background`` so the session counts it as live work until the
+    completion has been posted.
+
+    Without the bracket a one-shot host (``agentm -p``) would see ``idle`` the
+    instant the agent ends its turn — while this tool is still running — and
+    exit, dropping the completion. We assert the inbox work-count is non-zero
+    while the tool runs and back to zero (only) after it finishes.
+    """
+
+    release = asyncio.Event()
+
+    async def slow(_a: dict[str, Any], _s: asyncio.Event | None) -> ToolResult:
+        await release.wait()
+        return ToolResult(content=[TextContent(type="text", text="done")])
+
+    api = _FakeApi()
+    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    wrapped = _BgTool(_FakeTool("slow", slow), mgr)
+
+    ticket = await wrapped.execute({})
+    task_id = _payload(ticket)["task_id"]
+
+    # The tool overran the auto-bg timeout and is detached + still running:
+    # the session must regard this as live background work.
+    assert api.inbox.has_pending_work, (
+        "a still-running backgrounded tool must keep the session non-idle"
+    )
+
+    release.set()
+    async with mgr._registry.lock:
+        state = mgr._registry.get(task_id)
+    assert state is not None
+    await state.task
+
+    # Completion posted AND the work count cleared — only now is the session
+    # allowed to consider itself idle.
+    assert not api.inbox.has_pending_work
+    drained = api.inbox.drain()
+    assert any(i.source == "background" and "done" in str(i.payload) for i in drained)
+
+
 def test_install_registers_companion_tools() -> None:
     """``install`` registers exactly the three companion tools and the
     agent_start + session_shutdown handlers."""
