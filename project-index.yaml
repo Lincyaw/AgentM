@@ -40,11 +40,13 @@ requirements:
     code:
       - path: src/agentm/core/abi/provider.py
       - path: src/agentm/core/abi/__init__.py
-      - path: src/agentm/harness/extension.py
-      - path: src/agentm/llm/anthropic.py
-      - path: src/agentm/llm/openai.py
+      - path: src/agentm/core/lib/user_config.py
+      - path: src/agentm/extensions/builtin/llm_anthropic.py
+      - path: src/agentm/extensions/builtin/llm_openai.py
     tests:
       - path: tests/unit/llm/test_retry_policy.py
+      - path: tests/unit/llm/test_reasoning_passthrough.py
+      - path: tests/unit/core/lib/test_user_config_reasoning.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
     depends_on:

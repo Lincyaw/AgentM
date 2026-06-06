@@ -24,7 +24,11 @@ from agentm.core.abi import LoopConfig
 from agentm.core.abi.events import DiagnosticEvent, EventBus, MessagePersistedEvent
 from agentm.core.abi.session_store import SessionState, SessionStore
 from agentm.core.lib.render import final_summary
-from agentm.core.lib.user_config import ModelProfile, resolve_model_profile
+from agentm.core.lib.user_config import (
+    ModelProfile,
+    apply_reasoning_effort,
+    resolve_model_profile,
+)
 from agentm.core.abi.events import ExtensionInstallEvent
 
 from dataclasses import dataclass, field
@@ -86,6 +90,7 @@ class CliRunConfig:
     max_tool_calls: int | None = None
     atom_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     profile: ModelProfile | None = None
+    reasoning_effort: str | None = None
 
 
 def autoload_dotenv(cwd: Path | None = None) -> None:
@@ -473,13 +478,11 @@ def _build_session_config(
     )
     try:
         if config.profile is not None:
-            provider_spec = provider_registry.build(
-                config.provider, config.profile.to_build_config()
-            )
+            build_config = config.profile.to_build_config()
         else:
-            provider_spec = provider_registry.build(
-                config.provider, {"model": config.model}
-            )
+            build_config = {"model": config.model}
+        apply_reasoning_effort(build_config, config.reasoning_effort)
+        provider_spec = provider_registry.build(config.provider, build_config)
     except KeyError as exc:
         raise typer.BadParameter(str(exc)) from exc
     from agentm.core.runtime.resource_loader import DefaultResourceLoader
@@ -748,6 +751,19 @@ def run_cmd(
             ),
         ),
     ] = None,
+    reasoning_effort: Annotated[
+        str | None,
+        typer.Option(
+            "--reasoning-effort",
+            envvar="AGENTM_REASONING_EFFORT",
+            help=(
+                "Provider reasoning-effort hint (e.g. 'high', 'max'). "
+                "Maps to the OpenAI 'reasoning_effort' param and the "
+                "Anthropic 'output_config.effort' slot. Precedence: this "
+                "flag > AGENTM_REASONING_EFFORT > config.toml profile."
+            ),
+        ),
+    ] = None,
     set_config: Annotated[
         list[str] | None,
         typer.Option(
@@ -826,6 +842,7 @@ def run_cmd(
             max_tool_calls=max_tool_calls,
             atom_config_overrides=_parse_set_overrides(set_config),
             profile=profile,
+            reasoning_effort=reasoning_effort,
         ))
     )
     raise typer.Exit(code=rc)
