@@ -932,33 +932,53 @@ def list_extensions_cmd(
     print(f"\n{total} extension(s) shown.", file=sys.stderr)
 
 
+def _trace_main() -> None:
+    from agentm.cli_trace import main as trace_main
+
+    trace_main()
+
+
+def _gateway_main() -> None:
+    from agentm.gateway.cli import main as gateway_main
+
+    gateway_main()
+
+
+# Subcommands whose own Typer app owns argv parsing, help, and exit codes.
+# The importer is called only when that subcommand is actually dispatched, so
+# the default prompt path and ``agentm --help`` never import the ``trace`` /
+# ``gateway`` dependency closures (gateway pulls in the websockets server).
+# The short-help string mirrors each app's own short help so ``agentm --help``
+# can list the subcommand without importing it.
+_LAZY_SUBCOMMANDS: dict[str, tuple[Any, str]] = {
+    "trace": (
+        _trace_main,
+        "Query an OTLP/JSON session log written by the observability atom.",
+    ),
+    "gateway": (
+        _gateway_main,
+        "Single-process gateway: hold all chat sessions and serve chat clients.",
+    ),
+}
+
+
 def _build_command() -> Any:
-    """Assemble the Click command tree behind the ``agentm`` console script.
+    """Compile the Click command tree for the prompt / ``list-extensions`` path.
 
-    ``trace`` and ``gateway`` are imported here (not at module load) so the
-    default prompt path does not pay for their dependency closure.
-
-    ``trace`` is a true multi-command Typer group, so it mounts directly via
-    ``add_typer`` (``agentm trace <verb> ...``, Typer-native help / exit
-    codes). ``gateway`` is a single-command Typer app: ``add_typer`` would
-    wrap it as a sub-group (``agentm gateway COMMAND``), breaking the
-    documented ``agentm gateway --bind ...`` contract — so its compiled Click
-    command is attached directly to keep the flat ``agentm gateway [OPTIONS]``
-    surface.
+    Only the default prompt runner (root callback) and ``list-extensions`` are
+    real commands here. ``trace`` and ``gateway`` are added as import-free
+    placeholder commands purely so ``agentm --help`` lists them with their
+    short help — they are never executed through this tree. Their real Typer
+    apps are dispatched out of band by :func:`main`, which imports the chosen
+    one lazily; so neither this build nor ``--help`` pays for their dependency
+    closures.
     """
-
-    from agentm.cli_trace import app as trace_app
-    from agentm.gateway.cli import app as gateway_app
 
     import click
 
-    app.add_typer(trace_app, name="trace")
-    # ``app`` carries subcommands (list-extensions / trace), so its compiled
-    # form is a Group; the static return type is the Command base class.
     root = cast(click.Group, typer.main.get_command(app))
-    gateway_command = typer.main.get_command(gateway_app)
-    gateway_command.name = "gateway"
-    root.add_command(gateway_command, "gateway")
+    for name, (_importer, short_help) in _LAZY_SUBCOMMANDS.items():
+        root.add_command(click.Command(name=name, help=short_help), name)
     return root
 
 
@@ -967,11 +987,23 @@ def main() -> None:
 
     * ``agentm`` (no args) — show help with the subcommand list (exit 0).
     * ``agentm -p "prompt" [options]`` — default single-shot prompt runner.
-    * ``agentm {list-extensions,trace,gateway} ...`` — subcommands.
+    * ``agentm {trace,gateway} ...`` — lazily handed to that app (its own argv
+      parsing / help / exit codes); the other subcommand stays unimported.
+    * ``agentm list-extensions ...`` — runs in the compiled command tree.
     """
 
+    argv = sys.argv[1:]
+    if argv and argv[0] in _LAZY_SUBCOMMANDS:
+        sub = argv[0]
+        # Rewrite argv so the subcommand's app sees ``<prog> <sub>`` as prog
+        # name and its own flags as args, matching standalone invocation.
+        sys.argv = [f"{sys.argv[0]} {sub}", *argv[1:]]
+        importer = _LAZY_SUBCOMMANDS[sub][0]
+        importer()
+        return
+
     root = _build_command()
-    if len(sys.argv) == 1:
+    if not argv:
         # Bare ``agentm`` shows help and exits 0 — without this the root
         # callback would fire with an empty prompt and exit 2.
         root(args=["--help"], standalone_mode=True)
