@@ -37,6 +37,7 @@ from agentm.core.abi import (
     Model,
     NoPendingInput,
     TextContent,
+    ToolTerminated,
 )
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ProviderConfig
@@ -468,6 +469,84 @@ async def test_keep_alive_floor_overrides_model_end_turn(tmp_path: Path) -> None
         # model's voluntary end-turn.
         assert "turn-0" in assistant_texts
         assert "turn-1" in assistant_texts
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_terminal_inbox_item_stops_loop_with_tool_terminated(
+    tmp_path: Path,
+) -> None:
+    """#177 fail-stop: a ``terminal=True`` inbox item (a backgrounded
+    ToolTerminate) MUST end the loop with ``ToolTerminated`` once delivered,
+    instead of being kept alive on the non-empty inbox like an ordinary item.
+
+    Reproducer: the model "ends its turn" every turn, but on the first turn we
+    queue a terminal item. Without the patch the keep-alive floor would treat
+    it like any other item — deliver it, and (since the floor sees it as
+    ordinary) the loop would Stop(ModelEndTurn) after delivery. The patch makes
+    the floor return ``Stop(ToolTerminated)`` so the termination is attributed
+    to the terminate intent, never swallowed. We assert BOTH the cause and that
+    the terminal message was actually delivered to the model first.
+    """
+    module_name = f"tests.unit._inbox_terminal_{id(tmp_path)}"
+
+    turn = [0]
+    inbox_handle: list[SessionInbox] = []
+    delivery_turn_saw_terminal: list[bool] = []
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del model, tools, system, signal, thinking
+        idx = turn[0]
+        turn[0] += 1
+        if idx == 0:
+            # Queue a terminal background completion mid-turn.
+            inbox_handle[0].push(
+                InboxItem(
+                    source="background",
+                    payload="terminal bg result",
+                    terminal=True,
+                )
+            )
+        else:
+            # The delivery turn must see the terminal note in context.
+            delivery_turn_saw_terminal.append(
+                any("terminal bg result" in t for t in _texts(messages, "user"))
+            )
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text=f"turn-{idx}")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    causes: list[Any] = []
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        inbox_handle.append(session.inbox)
+        session.bus.on(AgentEndEvent.CHANNEL, lambda e: causes.append(e.cause))
+
+        await session.prompt("start")
+
+        # The terminal item was delivered on the second turn...
+        assert delivery_turn_saw_terminal == [True]
+        # ...and the run ended attributed to the terminate intent, not
+        # ModelEndTurn / a runaway keep-alive.
+        assert any(isinstance(c, ToolTerminated) for c in causes), causes
+        # Exactly two turns ran: the originating turn + the delivery turn. A
+        # third would mean the floor failed to stop.
+        assert turn[0] == 2, f"expected 2 turns, got {turn[0]}"
     finally:
         await session.shutdown()
         sys.modules.pop(module_name, None)

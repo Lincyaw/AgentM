@@ -51,6 +51,7 @@ from agentm.core.abi import (
     Stop,
     TextContent,
     Tool,
+    ToolTerminated,
     TurnObservation,
 )
 from agentm.core.abi.events import (
@@ -176,6 +177,15 @@ class AgentSession:
         # concurrently with an in-flight prompt to deliver injected work).
         self._prompt_lock: asyncio.Lock = asyncio.Lock()
 
+        # #177: terminate-from-background. A backgrounded tool whose detached
+        # completion is a ``ToolTerminate`` posts a ``terminal=True`` inbox
+        # item. The ``context`` drain seam records the terminate cause here; the
+        # keep-alive floor consumes it at the next turn boundary and returns
+        # ``Stop(ToolTerminated)`` so the loop ends after delivering the
+        # terminal tool's final result, instead of keeping the agent alive on
+        # the (now empty) inbox. ``None`` between fires.
+        self._pending_terminate: ToolTerminated | None = None
+
         # Real-time persistence: the loop emits MessagePersistedEvent for
         # every durable addition (assistant turn / tool_result / injected
         # message). Routing each event through the SessionManager here —
@@ -245,18 +255,32 @@ class AgentSession:
 
     def _on_decide_inbox_keep_alive(
         self, event: DecideTurnActionEvent
-    ) -> Step | None:
+    ) -> Step | Stop | None:
         """Keep the loop alive while the inbox holds undrained items.
 
         Returning ``Step()`` defers to the next turn, whose ``context``
         handler drains the inbox. A ``final=True`` default (budget / signal /
         max_turns) overrides this via ``resolve_loop_action`` (loop.py:301),
         so a hard ceiling stays hard.
+
+        #177: if a ``terminal=True`` item was drained this round (recorded on
+        ``_pending_terminate``) and the inbox is now empty, return
+        ``Stop(ToolTerminated)`` so a backgrounded ``ToolTerminate`` actually
+        ends the loop instead of being swallowed as an ordinary completion.
         """
 
         del event
         if not self._inbox.is_empty():
             return Step()
+        # #177: a terminal item was drained this round — honour the terminate
+        # intent now that its message has been delivered. Consume the pending
+        # cause so a later round does not re-stop. Non-final ``Stop`` (matching
+        # a foreground ``ToolTerminate``), so an extension handler on the same
+        # channel may still ``Inject`` over it.
+        if self._pending_terminate is not None:
+            cause = self._pending_terminate
+            self._pending_terminate = None
+            return Stop(cause)
         return None
 
     def _drain_inbox_and_persist(
@@ -276,6 +300,16 @@ class AgentSession:
             rendered = render_item(item)
             self._session_manager.append_message(rendered)
             messages.append(rendered)
+            # #177: a terminal item carries a terminate intent. Record it so
+            # the keep-alive floor (this turn's ``decide_turn_action``) stops
+            # the loop after the message above has been delivered to the model.
+            # ``source`` is recorded in the cause for trace attribution; a
+            # background-produced terminate has no foreground tool_name.
+            if item.terminal:
+                self._pending_terminate = ToolTerminated(
+                    tool_name=f"background:{item.source}",
+                    reason="terminate-from-background",
+                )
 
     def _drain_inbox_on_early_return(self, reason: str) -> None:
         """Drain (discard) the inbox after a pre-context-event early return.

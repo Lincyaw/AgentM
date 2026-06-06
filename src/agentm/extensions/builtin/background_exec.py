@@ -437,12 +437,11 @@ class _BgManager:
         state.outcome = (
             outcome if isinstance(outcome, ToolOutcome) else ToolContinue(result=outcome)
         )
-        # Terminal-from-background simplification (step 3): a backgrounded tool
-        # that ultimately returns ToolTerminate is injected as an ordinary
-        # completion — the terminate intent does NOT stop the loop here.
-        # TODO(#177): route a backgrounded ToolTerminate through loop
-        # termination (likely via a new InboxItem.terminal flag or a dedicated
-        # source so the driver/floor respects the terminate intent).
+        # #177: a backgrounded tool that ultimately returns ToolTerminate
+        # carries a terminate intent. ``_post_completion`` posts the completion
+        # with ``terminal=True`` so the runtime drain seam routes it through
+        # loop termination (Stop(ToolTerminated)) once the message has been
+        # delivered, instead of swallowing the intent as an ordinary completion.
         state.status = _COMPLETED
         self._finalize(state)
 
@@ -481,11 +480,18 @@ class _BgManager:
         if state.read:
             return
         state.read = True
+        # #177: a backgrounded ToolTerminate posts terminal=True so the runtime
+        # stops the loop after delivering this completion. Any other terminal
+        # transition (completed / error / cancelled) is an ordinary completion.
+        terminal = state.status == _COMPLETED and isinstance(
+            state.outcome, ToolTerminate
+        )
         try:
             self._api.post_inbox(
                 source="background",
                 payload=_completion_note(state),
                 dedup_key=f"bg-complete-{state.task_id}",
+                terminal=terminal,
             )
         except ExtensionStaleError:
             return

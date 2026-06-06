@@ -525,6 +525,7 @@ class _ExtensionAPIImpl:
         source: str,
         payload: Any,
         dedup_key: str | None = None,
+        terminal: bool = False,
     ) -> None:
         """Push an item onto the session inbox — the generic producer entry.
 
@@ -532,12 +533,19 @@ class _ExtensionAPIImpl:
         ``context`` handler drains the inbox at the next turn boundary and
         renders each item per its ``source``, so a posted item surfaces on the
         very next turn. ``dedup_key`` makes a later same-key push replace the
-        earlier undrained item in place (no stacking). See
-        ``.claude/designs/session-inbox.md`` (step-3 design decisions).
+        earlier undrained item in place (no stacking). ``terminal=True`` marks
+        a terminate intent the runtime drain seam routes through loop
+        termination (#177). See ``.claude/designs/session-inbox.md`` (step-3
+        design decisions).
         """
         self._assert_active()
         self._inbox.push(
-            InboxItem(source=source, payload=payload, dedup_key=dedup_key)
+            InboxItem(
+                source=source,
+                payload=payload,
+                dedup_key=dedup_key,
+                terminal=terminal,
+            )
         )
 
     def send_user_message(self, content: str | list[Any]) -> None:

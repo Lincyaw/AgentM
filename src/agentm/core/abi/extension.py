@@ -375,6 +375,7 @@ class ExtensionAPI(Protocol):
         source: str,
         payload: Any,
         dedup_key: str | None = None,
+        terminal: bool = False,
     ) -> None:
         """Push an item onto the session inbox — the generic producer entry.
 
@@ -386,6 +387,13 @@ class ExtensionAPI(Protocol):
         stable ``dedup_key``: a later push with the same key replaces the
         earlier item in place rather than stacking (e.g. a background ticker's
         rolling status line).
+
+        ``terminal=True`` carries a *terminate intent* into the loop (#177): a
+        backgrounded tool whose detached completion is a
+        :class:`ToolTerminate` posts with ``terminal=True`` so the runtime stops
+        the loop (``ToolTerminated``) once the item is delivered, rather than
+        keeping the agent alive on the non-empty inbox. The message still lands
+        in the conversation first.
 
         :meth:`send_user_message` is the ``source="user"`` sugar over this; new
         producers (``background_exec``, ``monitor``, the future ``sub_agent``
