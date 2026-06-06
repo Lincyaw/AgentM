@@ -2,8 +2,8 @@
 
 The connecting process's uid is read from the kernel (no token, no
 trust in client-supplied identity claims) and matched against an
-allow-list. Linux uses ``SO_PEERCRED``; macOS / *BSD use
-``os.getpeereid``.
+allow-list. Linux uses ``SO_PEERCRED``; macOS / *BSD bind libc
+``getpeereid(2)`` via ctypes (CPython has no ``os.getpeereid``).
 
 Design rationale (``.claude/designs/client-server-architecture.md``
 §5, §6): a Unix-socket gateway on a trusted host doesn't need bearer
@@ -15,8 +15,9 @@ mode by design (defense-in-depth tokens are a v2 follow-up).
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import ctypes.util
 import logging
-import os
 import socket
 import struct
 import sys
@@ -30,12 +31,38 @@ _UCRED_FMT = "3i"
 _UCRED_SIZE = struct.calcsize(_UCRED_FMT)
 
 
+def _libc_getpeereid(fd: int) -> int | None:
+    """Read peer uid via libc ``getpeereid(2)`` (macOS / *BSD).
+
+    CPython's stdlib has no ``os.getpeereid``, so we bind the C symbol
+    directly. Returns ``None`` if the symbol is missing or the call fails.
+    """
+    libc_name = ctypes.util.find_library("c")
+    try:
+        libc = ctypes.CDLL(libc_name or "libc.so.6", use_errno=True)
+        getpeereid = libc.getpeereid
+    except (OSError, AttributeError):
+        return None
+    # uid_t / gid_t are 32-bit unsigned on macOS and the BSDs.
+    getpeereid.argtypes = [
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_uint32),
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    getpeereid.restype = ctypes.c_int
+    uid = ctypes.c_uint32()
+    gid = ctypes.c_uint32()
+    if getpeereid(fd, ctypes.byref(uid), ctypes.byref(gid)) != 0:
+        return None
+    return int(uid.value)
+
+
 def _peer_uid(sock: Any) -> int | None:
     """Return the connecting process's uid, or ``None`` on failure.
 
-    Linux: ``SO_PEERCRED`` (kernel-vouched). macOS / *BSD: ``getpeereid``.
-    Wrapped in try/except OSError so an unsupported platform / closed
-    socket simply yields ``None`` instead of crashing the handshake.
+    Linux: ``SO_PEERCRED`` (kernel-vouched). macOS / *BSD: libc
+    ``getpeereid``. Wrapped so an unsupported platform / closed socket
+    simply yields ``None`` instead of crashing the handshake.
     """
     if sys.platform.startswith("linux"):
         try:
@@ -47,15 +74,11 @@ def _peer_uid(sock: Any) -> int | None:
         except struct.error:
             return None
         return int(uid)
-    # macOS / *BSD fallback.
-    getpeereid = getattr(os, "getpeereid", None)
-    if getpeereid is None:
-        return None
+    # macOS / *BSD: kernel-vouched peer uid via libc getpeereid(2).
     try:
-        uid, _gid = getpeereid(sock.fileno())
+        return _libc_getpeereid(sock.fileno())
     except OSError:
         return None
-    return int(uid)
 
 
 class UnixPeerCredAuthenticator:
