@@ -283,6 +283,7 @@ class AtomReloader:
             "synthetic"
             if module_path.startswith(discover_mod.USER_ATOM_MODULE_PREFIX)
             or module_path.startswith(discover_mod.CONTRIB_ATOM_MODULE_PREFIX)
+            or module_path.startswith(discover_mod.HOME_ATOM_MODULE_PREFIX)
             else "module"
         )
         atom = LoadedAtom(

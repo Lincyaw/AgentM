@@ -27,7 +27,7 @@ def test_v2_round_trip_is_idempotent() -> None:
         kind="inbound",
         ts=1748400000.42,
         session_key="terminal:t1",
-        scenario="general_purpose",
+        scenario="local",
         body={"channel": "terminal", "chat_id": "t1", "content": "hi"},
     )
     frame = encode(env)
@@ -35,7 +35,7 @@ def test_v2_round_trip_is_idempotent() -> None:
     assert rest == b""
     assert encode(decoded) == frame
     assert decoded.session_key == "terminal:t1"
-    assert decoded.scenario == "general_purpose"
+    assert decoded.scenario == "local"
 
 
 def test_minimal_envelope_omits_none_conditionals() -> None:

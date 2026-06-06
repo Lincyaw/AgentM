@@ -558,17 +558,21 @@ def _migrate_catalog(cwd: str) -> None:
 async def _prime_contrib_discovery(config: AgentSessionConfig, bus: EventBus) -> None:
     if config.no_extensions:
         return
-    try:
-        discover_mod.discover_contrib_atoms()
-    except Exception as exc:  # noqa: BLE001
-        await bus.emit(
-            DiagnosticEvent.CHANNEL,
-            DiagnosticEvent(
-                level="error",
-                source="auto_discovery",
-                message=f"contrib atom discovery failed: {exc}",
-            ),
-        )
+    for label, discover_fn in [
+        ("contrib", discover_mod.discover_contrib_atoms),
+        ("home", discover_mod.discover_home_atoms),
+    ]:
+        try:
+            discover_fn()
+        except Exception as exc:  # noqa: BLE001
+            await bus.emit(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="error",
+                    source="auto_discovery",
+                    message=f"{label} atom discovery failed: {exc}",
+                ),
+            )
 
 
 async def _resolve_extensions(
@@ -627,6 +631,11 @@ async def _resolve_extensions(
             bus=bus,
             sources=(
                 AtomSource(
+                    label="home",
+                    discover=discover_mod.discover_home_atoms,
+                    skip_label="home atom ",
+                ),
+                AtomSource(
                     label="user",
                     discover=lambda: discover_mod.discover_user_atoms(
                         Path(config.cwd)
@@ -653,6 +662,11 @@ async def _resolve_extensions(
                     skip_label="contrib atom ",
                 ),
                 AtomSource(
+                    label="home",
+                    discover=discover_mod.discover_home_atoms,
+                    skip_label="home atom ",
+                ),
+                AtomSource(
                     label="user",
                     discover=lambda: discover_mod.discover_user_atoms(
                         Path(config.cwd)
@@ -668,7 +682,11 @@ async def _resolve_extensions(
                 break
 
     if not config.no_extensions and not config.extensions and config.extra_extensions:
-        to_load.extend(config.extra_extensions)
+        existing_modules = {m for m, _ in to_load}
+        for module_path, ext_cfg in config.extra_extensions:
+            if module_path not in existing_modules:
+                to_load.append((module_path, ext_cfg))
+                existing_modules.add(module_path)
     if not config.no_extensions:
         loaded_modules = {module_path for module_path, _cfg in to_load}
         # The sub-agent runtime injects inherited prompt text via the

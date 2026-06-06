@@ -102,7 +102,7 @@ attributes, status`.
     include_handler_records: true                       # default
 ```
 
-Loaded **first** in `general_purpose.yaml` so it observes every subsequent
+Loaded **first** in `local/manifest.yaml` so it observes every subsequent
 extension's install. Observability cannot observe its own install start
 (the observer is attached *during* its install) — minor and acceptable.
 

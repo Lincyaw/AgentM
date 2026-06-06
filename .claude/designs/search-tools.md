@@ -10,7 +10,7 @@ Three new tool atoms — `grep`, `find`, `ls` — implemented as deterministic s
 
 ## Motivation
 
-AgentM's `general_purpose` scenario currently has `read`, `bash`, `edit`, `write` — but no first-class search. Models route around the gap by shelling out (`bash` with `find . -name ...` / `grep -r`), which is fragile (no `.gitignore`, no truncation, no structured output) and floods the bash tool's audit trail. Pi proves that splitting search into typed tools with their own truncation rules dramatically improves the model's behavior on large repos.
+AgentM's `local` scenario currently has `read`, `bash`, `edit`, `write` — but no first-class search. Models route around the gap by shelling out (`bash` with `find . -name ...` / `grep -r`), which is fragile (no `.gitignore`, no truncation, no structured output) and floods the bash tool's audit trail. Pi proves that splitting search into typed tools with their own truncation rules dramatically improves the model's behavior on large repos.
 
 ## Design Details
 
@@ -169,7 +169,7 @@ Truncate via `truncate_head(...)` after the entry-count limit is applied.
 
 ### Default-scenario integration
 
-Update `extensions/scenarios/general_purpose.yaml` (existing file) to load the three new atoms:
+Update `contrib/scenarios/local/manifest.yaml` (existing file) to load the three new atoms:
 
 ```yaml
 extensions:

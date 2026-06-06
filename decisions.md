@@ -120,7 +120,7 @@ between sessions. L4 entries also get the `[flagged]` prefix.
 
 - **Default-scenario opt-in by default** (L2: user request + convention check).
   User asked: "加了这个插件之后应该所有的都要有记录". Default
-  `contrib/scenarios/general_purpose/manifest.yaml` now lists
+  `contrib/scenarios/local/manifest.yaml` now lists
   `agentm.extensions.builtin.otel_tracing` uncommented. SDK is in the
   `otel` extra; if not installed the atom logs a notice and no-ops so
   the session still boots — matches the repo's "opinionated defaults
@@ -250,7 +250,7 @@ for the gate + judges. Phase 1 oversight, not Phase 2 regression.
 ## 2026-05-28 — compaction overhaul
 
 - **Deleted `micro_compact`; `llm_compaction` is the sole engine, now mounted
-  in `general_purpose` + `chatbot`** (L3: north-star + user direction). The
+  in `local` + `chatbot`** (L3: north-star + user direction). The
   default scenarios previously mounted no compaction engine at all, so no
   auto-compaction ran. micro_compact was a no-LLM toy (§7 example); its only
   unique capability was a zero-LLM fallback we don't need.

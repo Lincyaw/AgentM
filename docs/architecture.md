@@ -121,8 +121,8 @@ src/agentm/
 │   │   ├── scenario.py      # TrajectoryAnalysisScenario
 │   │   ├── answer_schemas.py  # AnalyzeAnswer, CritiqueAnswer
 │   │   └── output.py        # AnalysisReport
-│   └── general_purpose/     # General Purpose scenario
-│       ├── scenario.py      # GeneralPurposeScenario
+│   └── local/               # Local (default) scenario
+│       ├── scenario.py      # LocalScenario
 │       └── answer_schemas.py  # GeneralAnswer
 │
 ├── tools/                   # Tool implementations
@@ -250,7 +250,7 @@ This is the single canonical entry point. Here is the full construction flow:
 build_agent_system(scenario_name, scenario_config, system_config)
 │
 ├── 1. discover() — register all built-in scenarios
-│     (rca, trajectory_analysis, general_purpose)
+│     (rca, trajectory_analysis, local)
 │
 ├── 2. get_scenario(name) — look up Scenario implementation
 │

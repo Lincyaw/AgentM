@@ -42,15 +42,6 @@ required; if both are set, ``image`` wins (managed pool path):
 - ``timeout``       — Per-step timeout seconds; ``None`` means no timeout
 - ``idle_timeout_seconds`` — Sandbox idle TTL on the gateway (legacy path only;
                       ManagedSession handles idle policy server-side).
-- ``sync_cwd``      — When true (default false), seed the sandbox ``work_dir``
-                      from the host cwd's git HEAD before the run and sync the
-                      agent's diff back to the host cwd on shutdown. Lets an
-                      upstream dispatcher (e.g. workbuddy) hand the agent a real
-                      repo to edit and recover the diff for commit/push *without*
-                      putting any VCS credentials inside the sandbox. The host
-                      cwd must be a git work tree.
-- ``host_workspace`` — Host directory to seed from / sync back to (default:
-                      ``os.getcwd()``, which is the dispatcher-provided ``--cwd``).
 
 §11 single-file contract: only stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions.*`` + ``arl`` (optional 3rd-party). No atom-to-atom imports.
@@ -63,7 +54,6 @@ import base64
 import json
 import os
 import shlex
-import subprocess
 import sys
 import urllib.request
 from collections.abc import Callable
@@ -103,8 +93,6 @@ MANIFEST = ExtensionManifest(
             "work_dir": {"type": "string"},
             "timeout": {"type": ["number", "null"]},
             "idle_timeout_seconds": {"type": ["integer", "null"]},
-            "sync_cwd": {"type": "boolean"},
-            "host_workspace": {"type": "string"},
         },
         "additionalProperties": False,
     },
@@ -605,60 +593,6 @@ def _sh_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-# --- cwd↔sandbox workspace sync (opt-in via ``sync_cwd``) -------------------
-#
-# Closes the dispatcher gap where an agent edits the sandbox ``work_dir`` but
-# the dispatcher publishes from a host working tree the pod never touches. The
-# pod stays credential-free: the host clones (with its creds), we seed the pod
-# from the host's committed tree, and we apply the agent's diff back to the host
-# so the dispatcher's own commit/push path ships it.
-_SEED_ARCHIVE_NAME = ".wb_seed.tar.gz"
-_BASELINE_TAG = "wb-baseline"
-_SYNC_GIT_IDENT = ("-c", "user.email=workbuddy@local", "-c", "user.name=workbuddy")
-
-
-def _exclude_host_paths(host_dir: str, patterns: tuple[str, ...]) -> None:
-    """Append ``patterns`` to the host work tree's ``.git/info/exclude``.
-
-    Local-only ignore: never committed, never touches the repo's tracked
-    ``.gitignore``. Best-effort — failures just mean the dispatcher might
-    commit a stray file; not worth aborting the run.
-    """
-    located = _run_host_git(host_dir, "rev-parse", "--git-path", "info/exclude")
-    if located.returncode != 0:
-        return
-    exclude_path = located.stdout.decode().strip()
-    if not exclude_path:
-        return
-    if not os.path.isabs(exclude_path):
-        exclude_path = os.path.join(host_dir, exclude_path)
-    try:
-        existing = ""
-        if os.path.exists(exclude_path):
-            with open(exclude_path, encoding="utf-8") as fh:
-                existing = fh.read()
-        missing = [p for p in patterns if p not in existing]
-        if not missing:
-            return
-        os.makedirs(os.path.dirname(exclude_path), exist_ok=True)
-        with open(exclude_path, "a", encoding="utf-8") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            fh.write("# added by operations_agent_env sync_cwd\n")
-            fh.write("\n".join(missing) + "\n")
-    except OSError as exc:
-        print(f"WARNING: [agent_env_sync] could not update git exclude: {exc}", file=sys.stderr)
-
-
-def _run_host_git(host_dir: str, *args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(  # noqa: S603,S607
-        ["git", "-C", host_dir, *args],
-        input=stdin,
-        capture_output=True,
-        check=False,
-    )
-
-
 def _pod_exec(session: Any, cmd: str, work_dir: str) -> tuple[str, str, int]:
     """Run ``bash -lc cmd`` in the sandbox; return (stdout, stderr, exit_code)."""
     resp = session.execute([{"name": "wb_workspace_sync", "command": ["bash", "-lc", cmd], "work_dir": work_dir}])
@@ -679,167 +613,6 @@ def _upload_to_pod(gateway_url: str, session_id: str, rel_path: str, payload: by
     )
     with urllib.request.urlopen(req, timeout=300) as resp:  # noqa: S310
         resp.read()
-
-
-_BASE_TAG = "main-base"
-
-
-def _seed_sandbox_from_host(session: Any, gateway_url: str, host_dir: str, work_dir: str) -> None:
-    """Seed the sandbox ``work_dir`` from ``host_dir``'s git HEAD and baseline it.
-
-    Tracked files only (``git archive`` respects ``.gitignore``); the sandbox
-    gets the code, never the remote or credentials. A baseline commit inside the
-    pod gives :func:`_sync_sandbox_to_host` a precise diff target.
-
-    When ``AGENTM_GIT_BASE_REF`` is set (e.g. ``origin/main``), the sandbox
-    gets a two-commit history: base_ref content as ``main-base``, then HEAD
-    content overlaid as ``pr-changes``.  This lets review/merge agents run
-    ``git diff main-base..HEAD`` to see what the PR changed.
-    """
-    inside = _run_host_git(host_dir, "rev-parse", "--is-inside-work-tree")
-    if inside.returncode != 0:
-        raise RuntimeError(
-            f"operations_agent_env: sync_cwd requires a git work tree at {host_dir!r}"
-        )
-    session_id = getattr(session, "session_id", None)
-    if not session_id:
-        raise RuntimeError("operations_agent_env: sync_cwd seed failed: sandbox has no session id")
-
-    base_ref = os.environ.get("AGENTM_GIT_BASE_REF")
-    ident = " ".join(_SYNC_GIT_IDENT)
-    print(f"INFO: [agent_env_sync] AGENTM_GIT_BASE_REF={base_ref!r} host_dir={host_dir!r}", file=sys.stderr)
-
-    if base_ref:
-        base_archive = _run_host_git(host_dir, "archive", "--format=tar.gz", base_ref)
-        if base_archive.returncode != 0:
-            print(
-                f"WARNING: [agent_env_sync] git archive {base_ref} failed, "
-                "falling back to single-stage seed",
-                file=sys.stderr,
-            )
-            base_ref = None
-
-    # Exclude .agentm/ from sandbox git so uploaded skills and observability
-    # data don't pollute the sync-back diff (which uses git diff --cached).
-    _SANDBOX_GITIGNORE = "echo '.agentm/' >> .gitignore; "
-
-    if base_ref:
-        # Two-stage seed: base_ref → HEAD gives the agent real diff context.
-        _upload_to_pod(gateway_url, session_id, _SEED_ARCHIVE_NAME, base_archive.stdout)
-        base_cmd = (
-            f"set -e; cd {work_dir}; "
-            f"tar -xzf {_SEED_ARCHIVE_NAME}; rm -f {_SEED_ARCHIVE_NAME}; "
-            "git init -q; "
-            + _SANDBOX_GITIGNORE +
-            f"git {ident} add -A; "
-            f"git {ident} commit -q -m 'main (base)' --allow-empty; "
-            f"git tag -f {_BASE_TAG}"
-        )
-        out, err, code = _pod_exec(session, base_cmd, work_dir)
-        if code != 0:
-            raise RuntimeError(
-                f"operations_agent_env: sync_cwd base seed failed (exit {code}): {err or out}"
-            )
-        head_archive = _run_host_git(host_dir, "archive", "--format=tar.gz", "HEAD")
-        if head_archive.returncode != 0:
-            raise RuntimeError(
-                "operations_agent_env: sync_cwd seed failed (git archive HEAD): "
-                + head_archive.stderr.decode(errors="replace").strip()
-            )
-        _upload_to_pod(gateway_url, session_id, _SEED_ARCHIVE_NAME, head_archive.stdout)
-        overlay_cmd = (
-            f"set -e; cd {work_dir}; "
-            f"tar -xzf {_SEED_ARCHIVE_NAME}; rm -f {_SEED_ARCHIVE_NAME}; "
-            f"git {ident} add -A; "
-            f"git {ident} commit -q -m 'workbuddy PR changes' --allow-empty; "
-            f"git tag -f {_BASELINE_TAG}"
-        )
-        out, err, code = _pod_exec(session, overlay_cmd, work_dir)
-        if code != 0:
-            raise RuntimeError(
-                f"operations_agent_env: sync_cwd overlay seed failed (exit {code}): {err or out}"
-            )
-        print(
-            f"INFO: [agent_env_sync] two-stage seed: {base_ref} → HEAD into {work_dir}",
-            file=sys.stderr,
-        )
-    else:
-        # Single-stage seed (original path, used by dev agents).
-        archive = _run_host_git(host_dir, "archive", "--format=tar.gz", "HEAD")
-        if archive.returncode != 0:
-            raise RuntimeError(
-                "operations_agent_env: sync_cwd seed failed (git archive HEAD): "
-                + archive.stderr.decode(errors="replace").strip()
-            )
-        _upload_to_pod(gateway_url, session_id, _SEED_ARCHIVE_NAME, archive.stdout)
-        seed_cmd = (
-            f"set -e; cd {work_dir}; "
-            f"tar -xzf {_SEED_ARCHIVE_NAME}; rm -f {_SEED_ARCHIVE_NAME}; "
-            "git init -q; "
-            + _SANDBOX_GITIGNORE +
-            f"git {ident} add -A; "
-            f"git {ident} commit -q -m wb-baseline --allow-empty; "
-            f"git tag -f {_BASELINE_TAG}"
-        )
-        out, err, code = _pod_exec(session, seed_cmd, work_dir)
-        if code != 0:
-            raise RuntimeError(
-                f"operations_agent_env: sync_cwd seed failed in sandbox (exit {code}): {err or out}"
-            )
-        print(
-            f"INFO: [agent_env_sync] seeded sandbox {work_dir} from {host_dir} ({len(archive.stdout)} bytes)",
-            file=sys.stderr,
-        )
-    # Keep AgentM's own host-side runtime droppings (``.agentm/`` observability,
-    # catalog) and our transient seed archive out of the dispatcher's commit:
-    # they are written into the host cwd but are not part of the repo. A local
-    # ``.git/info/exclude`` entry is non-invasive (never committed, never
-    # touches the repo's tracked ``.gitignore``).
-    _exclude_host_paths(host_dir, (".agentm/", _SEED_ARCHIVE_NAME))
-
-
-def _sync_sandbox_to_host(session: Any, host_dir: str, work_dir: str) -> None:
-    """Apply the agent's sandbox diff (vs the seed baseline) back onto ``host_dir``.
-
-    Best-effort and idempotent: an empty diff (e.g. a review agent that changed
-    nothing) is a no-op. Runs at shutdown, before the sandbox is deleted, so the
-    dispatcher's subsequent commit/push sees the changes in its work tree.
-    """
-    ident = " ".join(_SYNC_GIT_IDENT)
-    diff_cmd = (
-        f"cd {work_dir} 2>/dev/null || exit 0; "
-        "git rev-parse --git-dir >/dev/null 2>&1 || exit 0; "
-        f"git {ident} add -A; "
-        # Diff against the immovable baseline tag, not HEAD: the agent may have
-        # committed inside the sandbox, which would move HEAD and hide its work.
-        f"git diff --cached --binary {_BASELINE_TAG} | base64 -w0"
-    )
-    out, err, code = _pod_exec(session, diff_cmd, work_dir)
-    if code != 0:
-        print(f"ERROR: [agent_env_sync] sandbox diff failed (exit {code}): {err}", file=sys.stderr)
-        return
-    encoded = out.strip()
-    if not encoded:
-        return
-    try:
-        patch = base64.b64decode(encoded)
-    except ValueError as exc:  # binascii.Error is a ValueError subclass
-        print(f"ERROR: [agent_env_sync] could not decode sandbox patch: {exc}", file=sys.stderr)
-        return
-    if not patch.strip():
-        return
-    applied = _run_host_git(host_dir, "apply", "--binary", "--whitespace=nowarn", stdin=patch)
-    if applied.returncode != 0:
-        print(
-            "ERROR: [agent_env_sync] git apply failed on host work tree "
-            f"{host_dir}: {applied.stderr.decode(errors='replace').strip()}",
-            file=sys.stderr,
-        )
-        return
-    print(
-        f"INFO: [agent_env_sync] applied {len(patch)} bytes of sandbox changes to {host_dir}",
-        file=sys.stderr,
-    )
 
 
 def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
@@ -875,6 +648,13 @@ def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
         raise RuntimeError(
             f"operations_agent_env: git clone failed (exit {code}): {err or out}"
         )
+    # Exclude .agentm/ so uploaded skills and observability data don't get
+    # committed by the agent's `git add -A`.
+    _pod_exec(
+        session,
+        f"echo '.agentm/' >> {work_dir}/.gitignore",
+        work_dir,
+    )
     print(f"INFO: [agent_env_sync] cloned {repo} into {work_dir}", file=sys.stderr)
 
 
@@ -967,7 +747,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     timeout_value: float | None = float(timeout) if isinstance(timeout, (int, float)) else None
     idle = config.get("idle_timeout_seconds")
     idle_value: int | None = int(idle) if isinstance(idle, int) else None
-
     session: Any
     if image:
         # Managed pool path: the server creates and scales the pool from
@@ -1023,28 +802,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
-        # Auto-submit: if the agent made changes but didn't push, do it now.
-        repo = os.environ.get("WORKBUDDY_REPO", "")
-        issue_num = os.environ.get("WORKBUDDY_ISSUE_NUM", "")
-        branch = f"workbuddy/issue-{issue_num}" if issue_num else ""
-        if repo and branch:
-            submit_cmd = (
-                f"cd {work_dir} && "
-                "git status --porcelain | grep -q . && "
-                f'git add -A && git commit -m "resolve issue #{issue_num}" && '
-                f"git push origin {branch} && "
-                f'(gh pr create -R {repo} --title "workbuddy: resolve #{issue_num}" '
-                f'--body "Resolves #{issue_num}" --head {branch} 2>/dev/null || true) && '
-                f"gh issue comment {issue_num} -R {repo} "
-                '--body "Implemented and pushed." && '
-                f"gh issue edit {issue_num} -R {repo} "
-                "--add-label status:reviewing --remove-label status:developing"
-            )
-            try:
-                _pod_exec(session, submit_cmd, work_dir)
-                print(f"INFO: [agent_env_sync] auto-submitted changes for #{issue_num}", file=sys.stderr)
-            except Exception:  # noqa: BLE001
-                print(f"WARNING: [agent_env_sync] auto-submit failed for #{issue_num}", file=sys.stderr)
         try:
             session.delete_sandbox()
         except Exception:  # noqa: BLE001
