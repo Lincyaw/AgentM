@@ -222,8 +222,9 @@ long-turn agent never finds a pile of stale status lines.
   driver) — in step 3 the agent stays informed by being active or by calling
   `wait_background`. `cancel_background` is the first caller of
   `BackgroundTaskRegistry.cancel`.
-- **render_item** gains `source="background"` (synthetic tool_result / system-reminder
-  note); other sources stay NotImplemented.
+- **render_item** handles all four sources: `"user"` (plain `UserMessage`),
+  `"background"` / `"monitor"` / `"subagent"` (`<system-reminder source="...">`-wrapped
+  `UserMessage`). Any other source raises `NotImplementedError`.
 
 ### `monitor` — agent-defined subscriptions and wakeups
 
@@ -280,14 +281,16 @@ loading the same atoms, so `background_exec` + `monitor` apply recursively.
 
 ## Implementation order
 
-1. **Spine** (step 1, this iteration): `SessionInbox` + per-turn drain handler
+1. **Spine** (step 1): `SessionInbox` + per-turn drain handler
    (runtime-owned, on `decide_turn_action`, with the generalized "non-empty ⇒ Inject"
    floor); single driver; `prompt`/`tick` collapse to push + drive; `send_user_message`
-   becomes an `inbox.push` wrapper; delete `pending_user_messages`. **Does not touch
-   `sub_agent`** — its existing floor coexists (both handlers' `Inject` returns
-   concatenate, `core/abi/loop.py:317`); generalized cleanup is step 2.
+   becomes an `inbox.push` wrapper; delete `pending_user_messages`. **Done.**
 2. Extract `sub_agent`'s registry + completion-injection into `core.lib`; re-seat
    `sub_agent` on it; route findings through the inbox and delete its bespoke floor.
-3. `background_exec` (auto-background + ticker) on the shared substrate.
-4. `monitor` (schedule_wakeup / create_monitor) on the inbox.
+   **Done** — `sub_agent` now posts via `post_inbox(source="subagent")`.
+3. `background_exec` (auto-background + ticker) on the shared substrate. **Done** —
+   `extensions/builtin/background_exec.py` posts via `post_inbox(source="background")`.
+4. `monitor` (schedule_wakeup / create_monitor) on the inbox. **Done** —
+   `extensions/builtin/monitor.py` posts via `post_inbox(source="monitor")`.
 5. Long-lived host driver loop + interrupt-and-resume; validate on one channel first.
+   **Deferred** — lands with the gateway.
