@@ -683,6 +683,14 @@ class _BgManager:
                 if state.task in still_running:
                     state.abort_signal.set()
             await asyncio.gather(*still_running, return_exceptions=True)
+        # #179 nit: ``_watch``'s ``finally`` is the normal bracket-exit, but a
+        # task cancelled BEFORE its body first executes never runs that
+        # ``finally`` and would leak the work counter. Exit any still-held
+        # bracket here — ``_exit_work_tracking`` is idempotent (it nulls the
+        # stored bracket), so a task that already exited in its own ``finally``
+        # is a no-op. Guarantees the "exit always runs" invariant on shutdown.
+        for state in states:
+            self._exit_work_tracking(state)
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:

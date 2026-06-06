@@ -552,6 +552,116 @@ async def test_terminal_inbox_item_stops_loop_with_tool_terminated(
         sys.modules.pop(module_name, None)
 
 
+@pytest.mark.asyncio
+async def test_backgrounded_terminate_survives_injecting_floor(
+    tmp_path: Path,
+) -> None:
+    """#177 fail-stop (review MAJOR): a backgrounded ``ToolTerminate`` MUST
+    survive a co-loaded floor that ``Inject``s over the keep-alive ``Stop``.
+
+    Reproduces the sub_agent-child interaction: while a child is ``_RUNNING``,
+    sub_agent's ``decide_turn_action`` floor returns ``Inject(<pending>)``,
+    which the resolution lattice (loop.py:298) ranks ABOVE the #177
+    ``Stop(ToolTerminated)``. The original code nulled ``_pending_terminate``
+    inside the keep-alive handler BEFORE the lattice picked the Inject winner,
+    so the terminate intent was permanently destroyed — the loop ran forever on
+    the injecting floor and NEVER ended on ``ToolTerminated``.
+
+    Here a stand-in floor injects for the first two boundaries after the
+    terminal item lands, then stops (mimicking the child finishing). The fix
+    re-asserts the same cause on every boundary and clears it only on the
+    matching ``agent_end``, so the loop ultimately stops on ``ToolTerminated``
+    once the injecting floor steps aside. Without the fix the cause is gone
+    after turn 1 and no ``ToolTerminated`` ever appears.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._inbox_terminal_inject_{id(tmp_path)}"
+
+    turn = [0]
+    inbox_handle: list[SessionInbox] = []
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del messages, model, tools, system, signal, thinking
+        idx = turn[0]
+        turn[0] += 1
+        if idx == 0:
+            inbox_handle[0].push(
+                InboxItem(
+                    source="background",
+                    payload="terminal bg result",
+                    terminal=True,
+                )
+            )
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text=f"turn-{idx}")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    # Stand-in for sub_agent's still-running-child floor: inject a pending
+    # notice for a bounded number of boundaries (the "child is running" window),
+    # then step aside. Registered on the SAME channel as the runtime keep-alive
+    # floor so it co-participates in resolve_loop_action.
+    from agentm.core.abi import DecideTurnActionEvent, Inject, UserMessage
+
+    inject_budget = [2]
+
+    def _injecting_floor(_event: DecideTurnActionEvent) -> Inject | None:
+        # Only contend once the terminal item has been observed (turn >= 1),
+        # mirroring a child that is running while the terminate is pending.
+        if turn[0] >= 1 and inject_budget[0] > 0:
+            inject_budget[0] -= 1
+            return Inject(
+                messages=[
+                    UserMessage(
+                        role="user",
+                        content=[
+                            TextContent(
+                                type="text", text="<subagent_pending/>"
+                            )
+                        ],
+                        timestamp=0.0,
+                    )
+                ]
+            )
+        return None
+
+    causes: list[Any] = []
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        inbox_handle.append(session.inbox)
+        # Higher priority so it is dispatched alongside the keep-alive floor;
+        # both returns feed the same resolve_loop_action batch.
+        session.bus.on(
+            DecideTurnActionEvent.CHANNEL, _injecting_floor, priority=400
+        )
+        session.bus.on(AgentEndEvent.CHANNEL, lambda e: causes.append(e.cause))
+
+        await _aio.wait_for(session.prompt("start"), timeout=5.0)
+
+        # The loop ultimately ended on the terminate intent — NOT stranded
+        # forever under the injecting floor.
+        assert any(isinstance(c, ToolTerminated) for c in causes), causes
+        # The injecting floor really did override the Stop first (its budget was
+        # consumed), proving the lattice path was exercised, not bypassed.
+        assert inject_budget[0] == 0, "injecting floor never contended"
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
 # ---------------------------------------------------------------------------
 # Step-5 fail-stop coverage: persistent driver + prompt/tick sugar + interrupt
 # ---------------------------------------------------------------------------
