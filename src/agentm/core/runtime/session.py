@@ -646,7 +646,7 @@ class AgentSession:
         tracked work and does not change that rule.
         """
 
-        clock = asyncio.get_event_loop().time
+        clock = asyncio.get_running_loop().time
         deadline = None if timeout is None else clock() + timeout
 
         while not self._closed:

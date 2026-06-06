@@ -183,6 +183,10 @@ class SessionInbox:
         try:
             await asyncio.wait_for(self._no_pending_work.wait(), timeout)
         except TimeoutError:
+            # Return the ACTUAL gate state, not a flat False: if the last unit
+            # finished exactly at the deadline boundary the gate is already set,
+            # and reporting True avoids a boundary race. Do not "simplify" this
+            # to ``return False``.
             return self._no_pending_work.is_set()
         return True
 
