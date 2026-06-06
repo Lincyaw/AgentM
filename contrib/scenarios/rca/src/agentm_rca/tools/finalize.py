@@ -213,6 +213,11 @@ _EVIDENCE_SCHEMA: dict[str, Any] = {
     "required": ["kind", "sql", "claim"],
 }
 
+# Mirrors ``rcabench_platform...FaultKind`` (``[k.value for k in FaultKind]``).
+# Hand-listed rather than derived so this module stays import-light — it does
+# NOT pull rcabench_platform at import time (see the lazy import in
+# ``install``). Drift against the platform enum is locked by
+# ``tests/test_finalize_contract.py::test_fault_kind_enum_matches_platform``.
 _FAULT_KIND_ENUM: list[str] = [
     "pod_failure",
     "pod_unavailable",

@@ -24,7 +24,12 @@ MANIFEST = ExtensionManifest(
     ),
 )
 
-_STATUSES = (
+# Suggested (not enforced) status vocabulary surfaced in the tool
+# descriptions. Status is free-text + LLM-decided — the line between e.g.
+# "refined" and "investigating", or "inconclusive" and "rejected", is a
+# judgment call we let the model phrase, so these are hints, not a validated
+# enum (no preset enums for subjective dimensions).
+_SUGGESTED_STATUSES = (
     "formed",
     "investigating",
     "confirmed",
@@ -80,8 +85,6 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         evidence_summary: str | None,
         parent_id: str | None,
     ) -> ToolResult:
-        if status not in _STATUSES:
-            return _err(f"status must be one of {_STATUSES}")
         payload = {
             "id": hid,
             "status": status,
@@ -212,16 +215,17 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         FunctionTool(
             name="update_hypothesis",
             description=(
-                "Create or update a working hypothesis. Status must be one of "
-                f"{list(_STATUSES)}. Use this to record what you currently "
-                "believe and why — keep evidence_summary terse."
+                "Create or update a working hypothesis. Status is free-text — "
+                f"common values: {list(_SUGGESTED_STATUSES)}, but use whatever "
+                "phrasing fits. Use this to record what you currently believe "
+                "and why — keep evidence_summary terse."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
                     "description": {"type": "string"},
-                    "status": {"type": "string", "enum": list(_STATUSES)},
+                    "status": {"type": "string"},
                     "evidence_summary": {"type": ["string", "null"]},
                     "parent_id": {"type": ["string", "null"]},
                 },
@@ -258,7 +262,10 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
                     "id": {"type": ["string", "null"]},
                     "status": {
                         "type": ["string", "null"],
-                        "enum": [*_STATUSES, "removed", None],
+                        "description": (
+                            "Optional free-text status filter (e.g. "
+                            "'confirmed', 'removed')."
+                        ),
                     },
                     "limit": {"type": "integer", "minimum": 1},
                 },
