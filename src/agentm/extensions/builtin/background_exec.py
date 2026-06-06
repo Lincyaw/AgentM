@@ -38,6 +38,7 @@ import asyncio
 import json
 import time
 import uuid
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -161,6 +162,12 @@ class _BgTask(BackgroundTask):
     # task's own ``abort_signal`` (see ``_BgTool.execute``). Cancelled once the
     # task is terminal so it never outlives the work it was guarding.
     forwarder: asyncio.Task[Any] | None = None
+    # #179: the entered ``api.track_background`` bracket. Entered synchronously
+    # in ``background`` (before the ticket returns) so a one-shot host never
+    # sees a momentary "idle" while the watcher task is being scheduled; exited
+    # once the completion has been posted (``_watch`` finally). ``None`` when
+    # tracking was skipped (atom reloaded mid-dispatch).
+    work_bracket: AbstractContextManager[None] | None = None
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
@@ -397,6 +404,19 @@ class _BgManager:
             abort_signal=abort_signal,
             forwarder=forwarder,
         )
+        # #179: enter the work-tracking bracket NOW, synchronously, before the
+        # watcher task is scheduled and the ticket returns — so a one-shot host
+        # (``agentm -p``) regards this detached tool as live work the instant it
+        # is backgrounded, with no window where it could mistake the session for
+        # idle. ``_watch`` exits the bracket once the completion has posted. A
+        # mid-dispatch atom reload (ExtensionStaleError) skips tracking — the
+        # inbox is gone, there is nothing to keep alive for.
+        try:
+            bracket = self._api.track_background()
+            bracket.__enter__()
+            state.work_bracket = bracket
+        except ExtensionStaleError:
+            state.work_bracket = None
         # Watch completion + drive the ticker from one wrapper task so the
         # original tool task stays exactly what the inner tool returned.
         state.task = asyncio.create_task(self._watch(state, task))
@@ -419,32 +439,59 @@ class _BgManager:
         state: _BgTask,
         inner: asyncio.Task[ToolResult | ToolOutcome],
     ) -> None:
-        """Await the inner tool task, record its outcome, post completion."""
+        """Await the inner tool task, record its outcome, post completion.
+
+        #179: the work-tracking bracket is ENTERED in :meth:`background`
+        (synchronously, before the ticket returns) so a one-shot host never
+        sees a momentary "idle" while this detached task is being scheduled.
+        It is EXITED here in ``finally`` once the completion has been posted, so
+        the session stays non-idle until the result has actually landed in the
+        inbox. The bracket exit always runs, so the count cannot leak.
+        """
 
         try:
-            outcome = await inner
-        except asyncio.CancelledError:
-            state.status = _CANCELLED
+            try:
+                outcome = await inner
+            except asyncio.CancelledError:
+                state.status = _CANCELLED
+                self._finalize(state)
+                return
+            except Exception as exc:  # noqa: BLE001
+                state.status = _ERROR
+                state.error = str(exc) or exc.__class__.__name__
+                self._finalize(state)
+                return
+            # Normalize a bare ToolResult to ToolContinue so downstream
+            # rendering has one shape (the kernel does the same for foreground
+            # returns).
+            state.outcome = (
+                outcome
+                if isinstance(outcome, ToolOutcome)
+                else ToolContinue(result=outcome)
+            )
+            # #177: a backgrounded tool that ultimately returns ToolTerminate
+            # carries a terminate intent. ``_post_completion`` posts the
+            # completion with ``terminal=True`` so the runtime drain seam routes
+            # it through loop termination (Stop(ToolTerminated)) once the message
+            # has been delivered, instead of swallowing the intent as an ordinary
+            # completion.
+            state.status = _COMPLETED
             self._finalize(state)
+        finally:
+            self._exit_work_tracking(state)
+
+    def _exit_work_tracking(self, state: _BgTask) -> None:
+        """Exit the #179 work-tracking bracket entered in :meth:`background`.
+
+        Idempotent: clears the stored bracket so a double ``_watch`` finally (it
+        cannot happen, but defensively) does not double-decrement the counter.
+        """
+
+        bracket = state.work_bracket
+        if bracket is None:
             return
-        except Exception as exc:  # noqa: BLE001
-            state.status = _ERROR
-            state.error = str(exc) or exc.__class__.__name__
-            self._finalize(state)
-            return
-        # Normalize a bare ToolResult to ToolContinue so downstream rendering
-        # has one shape (the kernel does the same for foreground returns).
-        state.outcome = (
-            outcome if isinstance(outcome, ToolOutcome) else ToolContinue(result=outcome)
-        )
-        # Terminal-from-background simplification (step 3): a backgrounded tool
-        # that ultimately returns ToolTerminate is injected as an ordinary
-        # completion — the terminate intent does NOT stop the loop here.
-        # TODO(#177): route a backgrounded ToolTerminate through loop
-        # termination (likely via a new InboxItem.terminal flag or a dedicated
-        # source so the driver/floor respects the terminate intent).
-        state.status = _COMPLETED
-        self._finalize(state)
+        state.work_bracket = None
+        bracket.__exit__(None, None, None)
 
     def _finalize(self, state: _BgTask) -> None:
         """Tear down per-task helpers and post the terminal completion.
@@ -481,11 +528,18 @@ class _BgManager:
         if state.read:
             return
         state.read = True
+        # #177: a backgrounded ToolTerminate posts terminal=True so the runtime
+        # stops the loop after delivering this completion. Any other terminal
+        # transition (completed / error / cancelled) is an ordinary completion.
+        terminal = state.status == _COMPLETED and isinstance(
+            state.outcome, ToolTerminate
+        )
         try:
             self._api.post_inbox(
                 source="background",
                 payload=_completion_note(state),
                 dedup_key=f"bg-complete-{state.task_id}",
+                terminal=terminal,
             )
         except ExtensionStaleError:
             return
@@ -629,6 +683,14 @@ class _BgManager:
                 if state.task in still_running:
                     state.abort_signal.set()
             await asyncio.gather(*still_running, return_exceptions=True)
+        # #179 nit: ``_watch``'s ``finally`` is the normal bracket-exit, but a
+        # task cancelled BEFORE its body first executes never runs that
+        # ``finally`` and would leak the work counter. Exit any still-held
+        # bracket here — ``_exit_work_tracking`` is idempotent (it nulls the
+        # stored bracket), so a task that already exited in its own ``finally``
+        # is a no-op. Guarantees the "exit always runs" invariant on shutdown.
+        for state in states:
+            self._exit_work_tracking(state)
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:

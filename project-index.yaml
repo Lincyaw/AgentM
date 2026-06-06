@@ -610,6 +610,13 @@ requirements:
       (``context`` drain + ``decide_turn_action`` keep-alive floor) that
       generalize the legacy per-atom completion-injection paths. Concurrent
       ``prompt`` callers FIFO-serialize through an ``asyncio.Lock``.
+      ``AgentSession.idle()`` blocks until the session is truly at rest —
+      driver parked, inbox empty, and no tracked detached background unit
+      still running — so a one-shot host (``agentm -p``) waits out a late
+      background/subagent completion instead of dropping it onto a dead event
+      loop (#179). Producers bracket their detached unit with
+      ``ExtensionAPI.track_background``; recurring signals (monitor / ticker)
+      deliberately do not track.
     priority: P0
     status: implemented
     confidence: confirmed
@@ -617,6 +624,7 @@ requirements:
       - path: src/agentm/core/runtime/session_inbox.py
       - path: src/agentm/core/runtime/session.py
       - path: src/agentm/core/lib/shutdown.py
+      - path: src/agentm/cli.py
     tests:
       - path: tests/unit/core/test_session_inbox.py
     docs:
@@ -672,11 +680,16 @@ requirements:
     title: Builtin monitor atom — agent-defined wakeups + channel subscriptions
     description: >
       The ``monitor`` atom exposes ``schedule_wakeup`` (one-shot timer →
-      inbox push at now+delay) and ``create_monitor`` (bus channel
-      subscription → inbox push on each fire under a stable dedup_key).
-      ``create_monitor`` refuses kernel-control channels at the call site
-      (denylist of channels like ``context`` / ``decide_turn_action`` that
-      would create an unbreakable inbox/loop spin). Per-session in-memory
+      inbox push at now+delay) and ``create_monitor`` in two
+      mutually-exclusive forms: a bus channel subscription (``watch`` →
+      inbox push on each fire) and a recurring condition poll (``condition``
+      → re-post the free-text predicate every ``poll_interval`` seconds so
+      the agent re-evaluates and cancels when satisfied; #178). Both fire
+      under a stable dedup_key. ``create_monitor`` refuses kernel-control
+      channels at the call site (denylist of channels like ``context`` /
+      ``decide_turn_action`` that would create an unbreakable inbox/loop
+      spin) and clamps a condition ``poll_interval`` up to a configured floor
+      so the agent cannot wedge a tight re-poll spin. Per-session in-memory
       state only; a restart regenerates monitors via re-prompting.
     priority: P0
     status: implemented

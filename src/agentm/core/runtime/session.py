@@ -51,6 +51,7 @@ from agentm.core.abi import (
     Stop,
     TextContent,
     Tool,
+    ToolTerminated,
     TurnObservation,
 )
 from agentm.core.abi.events import (
@@ -161,6 +162,12 @@ class AgentSession:
         self._closed: bool = False
         self._signal: asyncio.Event = asyncio.Event()
         self._in_run: bool = False
+        # #179: SET while the driver is parked on ``wait_nonempty`` (idle, no
+        # round in flight); CLEARED the instant it wakes to run a round. A
+        # one-shot host (``agentm -p``) reads this in :meth:`idle` to tell
+        # "agent truly at rest" from "between turns". Starts cleared — the
+        # driver sets it on its first park.
+        self._parked: asyncio.Event = asyncio.Event()
         # One-shot waiters subscribed by ``prompt``/``tick`` for the next
         # ``agent_end``. The handler set below fulfills each future once and
         # drops them, so a follow-up prompt subscribes a fresh waiter.
@@ -175,6 +182,15 @@ class AgentSession:
         # atom semantics need to fire a synthetic ``decide_turn_action``
         # concurrently with an in-flight prompt to deliver injected work).
         self._prompt_lock: asyncio.Lock = asyncio.Lock()
+
+        # #177: terminate-from-background. A backgrounded tool whose detached
+        # completion is a ``ToolTerminate`` posts a ``terminal=True`` inbox
+        # item. The ``context`` drain seam records the terminate cause here; the
+        # keep-alive floor consumes it at the next turn boundary and returns
+        # ``Stop(ToolTerminated)`` so the loop ends after delivering the
+        # terminal tool's final result, instead of keeping the agent alive on
+        # the (now empty) inbox. ``None`` between fires.
+        self._pending_terminate: ToolTerminated | None = None
 
         # Real-time persistence: the loop emits MessagePersistedEvent for
         # every durable addition (assistant turn / tool_result / injected
@@ -245,18 +261,39 @@ class AgentSession:
 
     def _on_decide_inbox_keep_alive(
         self, event: DecideTurnActionEvent
-    ) -> Step | None:
+    ) -> Step | Stop | None:
         """Keep the loop alive while the inbox holds undrained items.
 
         Returning ``Step()`` defers to the next turn, whose ``context``
         handler drains the inbox. A ``final=True`` default (budget / signal /
         max_turns) overrides this via ``resolve_loop_action`` (loop.py:301),
         so a hard ceiling stays hard.
+
+        #177: if a ``terminal=True`` item was drained (recorded on
+        ``_pending_terminate``) and the inbox is now empty, return
+        ``Stop(ToolTerminated)`` so a backgrounded ``ToolTerminate`` actually
+        ends the loop instead of being swallowed as an ordinary completion.
         """
 
         del event
         if not self._inbox.is_empty():
             return Step()
+        # #177: a terminal item was drained — honour the terminate intent now
+        # that its message has been delivered. Non-final ``Stop`` (matching a
+        # foreground ``ToolTerminate``), so an extension handler on the same
+        # channel may still ``Inject`` over it.
+        #
+        # We do NOT clear ``_pending_terminate`` here. The resolution lattice
+        # (loop.py:298) lets a co-loaded floor's ``Inject`` win over this
+        # ``Stop`` — e.g. ``sub_agent`` injecting while a child is still
+        # running. A foreground terminate survives that because it is the
+        # kernel default, recomputed every turn; a one-shot consumed flag would
+        # be DESTROYED by the override. So we re-assert the same cause on every
+        # boundary and let ``_on_agent_end`` clear it only once the loop has
+        # actually stopped on it — the terminate survives across N turns of a
+        # running child's injects.
+        if self._pending_terminate is not None:
+            return Stop(self._pending_terminate)
         return None
 
     def _drain_inbox_and_persist(
@@ -276,6 +313,16 @@ class AgentSession:
             rendered = render_item(item)
             self._session_manager.append_message(rendered)
             messages.append(rendered)
+            # #177: a terminal item carries a terminate intent. Record it so
+            # the keep-alive floor (this turn's ``decide_turn_action``) stops
+            # the loop after the message above has been delivered to the model.
+            # ``source`` is recorded in the cause for trace attribution; a
+            # background-produced terminate has no foreground tool_name.
+            if item.terminal:
+                self._pending_terminate = ToolTerminated(
+                    tool_name=f"background:{item.source}",
+                    reason="terminate-from-background",
+                )
 
     def _drain_inbox_on_early_return(self, reason: str) -> None:
         """Drain (discard) the inbox after a pre-context-event early return.
@@ -565,6 +612,47 @@ class AgentSession:
                     forwarder.cancel()
             return self._session_manager.get_messages()
 
+    async def idle(self) -> None:
+        """Block until the session is truly at rest (#179).
+
+        "At rest" means three conditions hold *together*: the driver is parked
+        (no round in flight), the inbox is empty (nothing waiting to be drained
+        on the next turn), and no tracked background unit is still running (an
+        auto-backgrounded tool or child subagent that could post a LATE
+        completion). A one-shot host (``agentm -p``) awaits this BEFORE exiting
+        so a completion that lands after the agent's last turn is delivered into
+        a still-running loop rather than dropped onto a dead process.
+
+        The three signals can flip independently, so we re-check after each
+        wait: a background unit may finish and post a completion (waking the
+        driver for one more round) just as we observed "parked". The loop
+        settles once a parked observation coincides with an empty inbox and no
+        pending work — at which point nothing can produce another inbox item
+        without an external ``push`` (which a one-shot host no longer issues).
+
+        Returns immediately (and stays returned) once ``shutdown`` has flipped
+        ``_closed``; a closed session is, by definition, not going to run more
+        rounds.
+        """
+
+        while not self._closed:
+            await self._inbox.wait_no_pending_work()
+            await self._parked.wait()
+            if self._closed:
+                return
+            # Re-read under the (single-threaded) event loop: if a unit posted
+            # between the two waits the inbox is non-empty / work is back, so we
+            # loop and let the driver run that round before re-parking.
+            if (
+                self._inbox.is_empty()
+                and not self._inbox.has_pending_work
+                and self._parked.is_set()
+            ):
+                return
+            # Yield so the driver can pick up the pending item / a finishing
+            # unit can flip its accounting before we re-evaluate.
+            await asyncio.sleep(0)
+
     def _spawn_signal_forwarder(
         self, external: asyncio.Event | None
     ) -> asyncio.Task[None] | None:
@@ -730,11 +818,17 @@ class AgentSession:
         """
 
         while not self._closed:
+            # #179: parked = idle, blocked on the next item. SET before the
+            # wait so a concurrent ``idle()`` sees rest; CLEARED the instant we
+            # wake so ``idle()`` never mistakes an about-to-run round for rest.
+            self._parked.set()
             try:
                 await self._inbox.wait_nonempty()
             except asyncio.CancelledError:
+                self._parked.clear()
                 self._fail_end_waiters(asyncio.CancelledError())
                 return
+            self._parked.clear()
             if self._closed:
                 return
             try:
@@ -862,7 +956,20 @@ class AgentSession:
         self._end_waiters.append(fut)
         return fut
 
-    def _on_agent_end_wake_waiters(self, _event: AgentEndEvent) -> None:
+    def _on_agent_end_wake_waiters(self, event: AgentEndEvent) -> None:
+        # #177: clear the pending backgrounded-terminate ONLY when the loop
+        # actually stopped on that exact cause (identity match against the
+        # event's cause). If the round instead ended on something else — a
+        # ModelEndTurn while ``sub_agent``'s floor kept the loop alive with an
+        # Inject that overrode our Stop — the flag MUST survive so the next
+        # boundary re-asserts it. This is the invariant the keep-alive floor
+        # relies on: a backgrounded terminate is not lost across turns where a
+        # running child keeps injecting.
+        if (
+            self._pending_terminate is not None
+            and event.cause is self._pending_terminate
+        ):
+            self._pending_terminate = None
         waiters = self._end_waiters
         self._end_waiters = []
         for fut in waiters:

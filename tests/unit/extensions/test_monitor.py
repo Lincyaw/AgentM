@@ -282,7 +282,14 @@ async def test_post_inbox_stale_does_not_crash_wakeup() -> None:
     unretrieved exception."""
 
     class _StaleApi(_FakeApi):
-        def post_inbox(self, *, source: str, payload: Any, dedup_key: Any = None) -> None:
+        def post_inbox(
+            self,
+            *,
+            source: str,
+            payload: Any,
+            dedup_key: Any = None,
+            terminal: bool = False,
+        ) -> None:
             raise ExtensionStaleError("reloaded mid-flight")
 
     api = _StaleApi()
@@ -305,7 +312,14 @@ async def test_post_inbox_stale_does_not_crash_channel_handler() -> None:
     sees a stale api must not propagate the exception into the bus dispatch."""
 
     class _StaleApi(_FakeApi):
-        def post_inbox(self, *, source: str, payload: Any, dedup_key: Any = None) -> None:
+        def post_inbox(
+            self,
+            *,
+            source: str,
+            payload: Any,
+            dedup_key: Any = None,
+            terminal: bool = False,
+        ) -> None:
             raise ExtensionStaleError("reloaded mid-flight")
 
     api = _StaleApi()
@@ -386,15 +400,160 @@ async def test_create_monitor_refuses_kernel_control_channels() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_monitor_condition_form_refused() -> None:
-    """Condition-polling is deferred; the agent gets a tool-error result, not
-    a silent no-op."""
+async def test_create_monitor_condition_form_polls_inbox() -> None:
+    """#178 fail-stop: the condition form starts a recurring poll that re-posts
+    the free-text predicate as a ``source="monitor"`` item with
+    ``kind="condition"`` and a stable ``monitor-cond-{id}`` dedup_key.
+
+    Without the polling implementation ``create_monitor`` returned a tool-error
+    refusal and NO inbox item ever appeared. Here we assert a real item lands.
+
+    The poll period is driven to ~0 by a small floor so the test does not sleep
+    a real interval; we then cancel to stop the metronome.
+    """
+
+    api = _FakeApi()
+    mgr = _MonitorManager(
+        api=cast(ExtensionAPI, api), condition_poll_min_seconds=0.01
+    )
+    res = await mgr.create_monitor(
+        {"condition": "queue is drained", "poll_interval": 0.01, "note": "n"}
+    )
+    assert not res.is_error
+    payload = _payload(res)
+    monitor_id = payload["monitor_id"]
+    assert payload["kind"] == "condition"
+    assert payload["status"] == "active"
+    assert payload["condition"] == "queue is drained"
+
+    # Let at least one poll fire, then stop the metronome.
+    item = None
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        drained = api.inbox.drain()
+        if drained:
+            item = drained[-1]
+            break
+    await mgr.cancel_monitor({"monitor_id": monitor_id})
+    assert item is not None, "condition poll never posted an inbox item"
+    assert item.source == "monitor"
+    assert item.dedup_key == f"monitor-cond-{monitor_id}"
+    assert isinstance(item.payload, dict)
+    assert item.payload["kind"] == "condition"
+    assert item.payload["condition"] == "queue is drained"
+    assert item.payload["monitor_id"] == monitor_id
+    assert item.payload["note"] == "n"
+
+
+@pytest.mark.asyncio
+async def test_create_monitor_rejects_both_and_neither() -> None:
+    """#178 guard: ``watch`` and ``condition`` are mutually exclusive; passing
+    both, or neither, returns a tool-error so the agent sees the misuse — never
+    a silent no-op or a half-registered monitor."""
 
     api = _FakeApi()
     mgr = _manager(api)
-    res = await mgr.create_monitor({"condition": "x == 1"})
-    assert res.is_error
-    assert "not implemented" in _payload(res)["error"]
+
+    both = await mgr.create_monitor({"watch": "tool_call", "condition": "x"})
+    assert both.is_error
+    assert not mgr._monitors
+
+    neither = await mgr.create_monitor({})
+    assert neither.is_error
+    assert not mgr._monitors
+
+
+@pytest.mark.asyncio
+async def test_condition_poll_interval_clamped_to_floor() -> None:
+    """#178 fail-stop: a per-call ``poll_interval`` below the configured floor is
+    clamped UP so the agent cannot wedge the session into a tight re-poll spin.
+
+    Without the clamp a near-0 interval would busy-spin posting every loop tick.
+    """
+
+    api = _FakeApi()
+    mgr = _MonitorManager(
+        api=cast(ExtensionAPI, api), condition_poll_min_seconds=5.0
+    )
+    res = await mgr.create_monitor({"condition": "x", "poll_interval": 0.001})
+    monitor_id = _payload(res)["monitor_id"]
+    assert _payload(res)["poll_interval"] == 5.0
+    state = mgr._monitors[monitor_id]
+    assert state.poll_interval == 5.0
+    await mgr.cancel_monitor({"monitor_id": monitor_id})
+
+
+@pytest.mark.asyncio
+async def test_condition_monitor_cancel_stops_metronome() -> None:
+    """#178 fail-stop: ``cancel_monitor`` on a condition monitor cancels ONLY
+    its own task and posts no further items — the per-monitor cancel discipline
+    (never a shared kernel signal)."""
+
+    api = _FakeApi()
+    mgr = _MonitorManager(
+        api=cast(ExtensionAPI, api), condition_poll_min_seconds=0.01
+    )
+    res = await mgr.create_monitor({"condition": "x", "poll_interval": 0.01})
+    monitor_id = _payload(res)["monitor_id"]
+    state = mgr._monitors[monitor_id]
+
+    await mgr.cancel_monitor({"monitor_id": monitor_id})
+    assert state.status == "cancelled"
+
+    # Let the cancellation propagate, then confirm the metronome is dead: no
+    # further inbox items across several poll periods.
+    api.inbox.drain()
+    await asyncio.sleep(0.1)
+    assert api.inbox.drain() == [], "cancelled condition monitor kept posting"
+    assert state.task is not None and state.task.done()
+
+
+@pytest.mark.asyncio
+async def test_condition_monitor_shutdown_cancels_task() -> None:
+    """#178 fail-stop: ``on_session_shutdown`` cancels a live condition poll so
+    no detached task survives the session (same lifecycle as wakeup)."""
+
+    api = _FakeApi()
+    mgr = _MonitorManager(
+        api=cast(ExtensionAPI, api),
+        condition_poll_min_seconds=0.01,
+        shutdown_grace_seconds=0.05,
+    )
+    res = await mgr.create_monitor({"condition": "x", "poll_interval": 60.0})
+    monitor_id = _payload(res)["monitor_id"]
+    state = mgr._monitors[monitor_id]
+
+    await mgr.on_session_shutdown(SessionShutdownEvent(cwd="."))
+    assert state.task is not None
+    assert state.task.done()
+
+
+@pytest.mark.asyncio
+async def test_condition_poll_stale_does_not_crash() -> None:
+    """#178 fail-stop: a detached condition poll whose ``post_inbox`` raises
+    ``ExtensionStaleError`` (atom reloaded mid-flight) stops gracefully — no
+    unretrieved task exception."""
+
+    class _StaleApi(_FakeApi):
+        def post_inbox(
+            self,
+            *,
+            source: str,
+            payload: Any,
+            dedup_key: Any = None,
+            terminal: bool = False,
+        ) -> None:
+            raise ExtensionStaleError("reloaded mid-flight")
+
+    api = _StaleApi()
+    mgr = _MonitorManager(
+        api=cast(ExtensionAPI, api), condition_poll_min_seconds=0.01
+    )
+    res = await mgr.create_monitor({"condition": "x", "poll_interval": 0.01})
+    monitor_id = _payload(res)["monitor_id"]
+    state = mgr._monitors[monitor_id]
+    assert state.task is not None
+    await state.task  # must return, not raise
 
 
 def test_install_registers_tools_and_shutdown_handler() -> None:
