@@ -1572,3 +1572,77 @@ async def test_idle_returns_immediately_when_already_at_rest(
     finally:
         await session.shutdown()
         sys.modules.pop(module_name, None)
+
+
+# ---------------------------------------------------------------------------
+# #201: bounded idle(timeout=...) — leaked tracked work cannot hang one-shot CLI
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_idle_timeout_returns_on_leaked_tracked_work(tmp_path: Path) -> None:
+    """#201 fail-stop: a tracked background unit that is started but NEVER
+    finished (a leaked ``track_background`` counter, or a genuinely stuck /
+    never-terminating background tool) must NOT hang ``idle()`` forever. With a
+    bound it returns ``False`` in bounded time so the one-shot CLI can warn and
+    exit rather than wedge.
+
+    The whole test is wrapped in a real ``asyncio.wait_for`` so a regression to
+    the unbounded behaviour fails the test (timeout) instead of hanging CI.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._idle_timeout_leak_{id(tmp_path)}"
+    try:
+        session = await _make_session(tmp_path, module_name, _stream_text("ok"))
+        await session.prompt("hi")
+
+        # Leak: mark work live and never finish it (the unbounded ``idle()``
+        # would block here forever).
+        session.inbox.note_work_started()
+        assert session.inbox.has_pending_work
+
+        async def _bounded() -> bool:
+            return await session.idle(timeout=0.05)
+
+        # The outer wait_for is the safety net: if ``idle`` ignored its bound
+        # this raises (test fails) instead of hanging the suite.
+        at_rest = await _aio.wait_for(_bounded(), timeout=2.0)
+        assert at_rest is False, "bounded idle must report not-at-rest on a leak"
+        # The bound did not corrupt accounting: the leaked counter is still live
+        # and the gate is still closed (a later finish would still flip it).
+        assert session.inbox.has_pending_work
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_idle_timeout_returns_true_when_work_finishes_in_time(
+    tmp_path: Path,
+) -> None:
+    """#201 guard: the bound does not break the healthy path — a tracked unit
+    that finishes within the timeout still lets ``idle(timeout=...)`` reach rest
+    and return ``True`` (no false "timed out" on normal completion)."""
+    import asyncio as _aio
+
+    module_name = f"tests.unit._idle_timeout_ok_{id(tmp_path)}"
+    try:
+        session = await _make_session(tmp_path, module_name, _stream_text("ok"))
+        await session.prompt("hi")
+
+        session.inbox.note_work_started()
+
+        async def _finish_soon() -> None:
+            await _aio.sleep(0.02)
+            session.inbox.note_work_finished()
+
+        unit = _aio.create_task(_finish_soon())
+        at_rest = await _aio.wait_for(session.idle(timeout=2.0), timeout=3.0)
+        await unit
+        assert at_rest is True
+        assert session.inbox.is_empty()
+        assert not session.inbox.has_pending_work
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)

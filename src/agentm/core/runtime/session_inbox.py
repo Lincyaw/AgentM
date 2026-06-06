@@ -160,10 +160,31 @@ class SessionInbox:
 
         return self._pending_work > 0
 
-    async def wait_no_pending_work(self) -> None:
-        """Block until every tracked background unit has finished (#179)."""
+    async def wait_no_pending_work(self, timeout: float | None = None) -> bool:
+        """Block until every tracked background unit has finished (#179).
 
-        await self._no_pending_work.wait()
+        With ``timeout=None`` (default) this waits unbounded — the original
+        #179 semantics. With a positive ``timeout`` it waits at most that long
+        and returns ``False`` if the bound tripped while work was still live;
+        ``True`` means the no-pending-work gate is (now) open. The bound is the
+        #201 defense-in-depth: a leaked ``note_work_started`` (never matched by
+        a finish) or a genuinely stuck background unit can no longer hang the
+        wait forever.
+
+        Cancelling the inner ``Event.wait`` on timeout is safe: ``Event.wait``
+        removes its own future from the event's waiter set on cancellation, so
+        the gate's state and the ``_pending_work`` counter are untouched — a
+        later ``note_work_finished`` still flips the gate correctly.
+        """
+
+        if timeout is None:
+            await self._no_pending_work.wait()
+            return True
+        try:
+            await asyncio.wait_for(self._no_pending_work.wait(), timeout)
+        except TimeoutError:
+            return self._no_pending_work.is_set()
+        return True
 
     def kick(self) -> None:
         """Wake :meth:`wait_nonempty` without enqueuing an item.
