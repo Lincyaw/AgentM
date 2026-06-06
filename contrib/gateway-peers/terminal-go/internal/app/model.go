@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -639,6 +640,16 @@ func (m Model) handleSubmit(msg components.InputSubmitted) (tea.Model, tea.Cmd) 
 			m.sendToGateway("/new")
 			return m, nil
 		}
+		if text == "/dump" || strings.HasPrefix(text, "/dump ") {
+			path := strings.TrimSpace(strings.TrimPrefix(text, "/dump"))
+			written, err := m.dumpScreen(path)
+			if err != nil {
+				m.toasts.Push("dump failed: "+err.Error(), "error", 4*time.Second)
+			} else {
+				m.toasts.Push("screen dumped to "+written, "info", 3*time.Second)
+			}
+			return m, nil
+		}
 		// All other slash commands are forwarded to the gateway
 	}
 
@@ -780,6 +791,23 @@ func (m *Model) jumpTurn(delta int) {
 		}
 		m.viewport.GotoBottom()
 	}
+}
+
+// dumpScreen writes the current rendered frame to a file so the gateway
+// agent (via its tui_snapshot tool) can see exactly what the user sees.
+// An empty path resolves to $AGENTM_TUI_DUMP, then the /tmp default —
+// matching the tui_snapshot atom's resolution order.
+func (m Model) dumpScreen(path string) (string, error) {
+	if path == "" {
+		path = os.Getenv("AGENTM_TUI_DUMP")
+	}
+	if path == "" {
+		path = "/tmp/agentm-tui-dump.txt"
+	}
+	if err := os.WriteFile(path, []byte(m.View()), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func (m *Model) sendToGateway(content string) {
