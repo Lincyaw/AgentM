@@ -2,7 +2,7 @@
 
 Discovered by ``rcabench-platform``'s ``llm_eval.agents`` entry point and
 invoked via ``rca llm-eval run --agent agentm``. Bridges the
-``incident + data_dir -> CausalGraph JSON`` contract to an in-process
+``incident + data_dir -> AgentRCAOutput JSON`` contract to an in-process
 ``AgentSession`` running the local ``rca`` scenario.
 
 Two pieces of glue do the work:
@@ -118,12 +118,11 @@ def _build_provider(
         base_url = os.environ.get("OPENAI_BASE_URL")
         if base_url:
             cfg["base_url"] = base_url
-            # PR #95 (8b8231e) made ``name`` mandatory whenever
-            # ``base_url`` is non-canonical, to prevent two custom
-            # endpoints from clobbering each other under the bare
+            # A non-canonical ``base_url`` requires a distinct ``name`` so two
+            # custom endpoints can't clobber each other under the bare
             # ``openai`` registry slot. Honor an explicit override via
-            # ``AGENTM_PROVIDER_NAME`` and otherwise derive a stable
-            # slug from the base host so eval rollouts don't crash.
+            # ``AGENTM_PROVIDER_NAME`` and otherwise derive a stable slug from
+            # the base host so eval rollouts don't crash.
             cfg["name"] = os.environ.get(
                 "AGENTM_PROVIDER_NAME"
             ) or _provider_name_from_base_url(base_url)
@@ -385,11 +384,11 @@ class AgentMAgent(BaseAgent):
             for node_header in experiment.header["nodes"]
         ]
         metadata["intervention_mode"] = "fork_tree"
-        # The ``chained_fork`` key name is RETAINED for backward compat with
-        # existing dashboards / parsers, but its schema CHANGED: it now holds
-        # a fork-tree shape (``nodes`` list with parent links + paths), not
-        # the old linear ``segments`` list. Downstream consumers should
-        # switch on ``intervention_mode == "fork_tree"`` and read ``nodes``.
+        # The ``chained_fork`` key name is kept for backward compat with
+        # existing dashboards / parsers, but holds a fork-tree shape
+        # (``nodes`` list with parent links + paths), not a linear
+        # ``segments`` list. Downstream consumers should switch on
+        # ``intervention_mode == "fork_tree"`` and read ``nodes``.
         metadata["chained_fork"] = tree_meta
         return AgentResult(
             response=root_run.result.response,

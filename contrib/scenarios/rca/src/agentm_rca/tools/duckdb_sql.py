@@ -646,6 +646,12 @@ def _post_query(
     return rows, cols
 
 
+# Remote mode deliberately omits the local-mode hardening: the aegis
+# ``/query`` server pre-registers the same p50/p90/p95/p99 percentile macros
+# (so the tool-description promise that they are "predefined" holds in both
+# modes) and bounds its own DuckDB worker pool centrally, so the per-process
+# ``AGENTM_DUCKDB_THREADS`` cap is a no-op here — the agent carries zero
+# DuckDB footprint.
 def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
     async def _list(_: dict[str, Any]) -> ToolResult:
         fetched = _post_query(state, _SCHEMA_DISCOVERY_SQL)

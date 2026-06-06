@@ -46,8 +46,16 @@ __all__ = [
 # Turn selectors: backbone -> fork index
 # ---------------------------------------------------------------------------
 
+#: The tool names that terminate an RCA investigation. The orchestrator
+#: submits with ``submit_final_report`` (see ``tools/finalize.py``);
+#: ``submit_investigation`` is the legacy name kept so recordings made before
+#: the rename still resolve. Single source of truth — ``cli.py`` reuses this
+#: same set when wiring the on-submission trigger.
+_SUBMISSION_TOOL_NAMES = frozenset({"submit_final_report", "submit_investigation"})
+
+
 def _find_submission_turn(messages: list[AgentMessage]) -> int:
-    """Index of the last assistant message containing ``submit_investigation``.
+    """Index of the last assistant message that calls a submission tool.
 
     Scans backward so we find the *last* submission call (the final answer).
     Returns the index of that message, so callers can slice with
@@ -66,11 +74,11 @@ def _find_submission_turn(messages: list[AgentMessage]) -> int:
         for block in content:
             # Dataclass ToolCallBlock: has .name attribute
             name = getattr(block, "name", None)
-            if name == "submit_investigation":
+            if name in _SUBMISSION_TOOL_NAMES:
                 return i
             # Dict-style block (rehydrated JSON)
             if isinstance(block, dict):
-                if block.get("name") == "submit_investigation":
+                if block.get("name") in _SUBMISSION_TOOL_NAMES:
                     return i
                 # Fallback: check for root_causes in arguments/input
                 args = block.get("input") or block.get("arguments")
@@ -80,12 +88,12 @@ def _find_submission_turn(messages: list[AgentMessage]) -> int:
     return max(len(messages) - 1, 0)
 
 
-#: Turn selector: fork just before the agent's final ``submit_investigation``.
+#: Turn selector: fork just before the agent's final submission call.
 TurnSelector = Callable[[list[AgentMessage]], int]
 
 
 def before_submission(messages: list[AgentMessage]) -> int:
-    """Fork just before the agent's final ``submit_investigation`` call."""
+    """Fork just before the agent's final submission-tool call."""
     return _find_submission_turn(messages)
 
 
