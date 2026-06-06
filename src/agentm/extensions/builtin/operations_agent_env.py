@@ -967,9 +967,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     timeout_value: float | None = float(timeout) if isinstance(timeout, (int, float)) else None
     idle = config.get("idle_timeout_seconds")
     idle_value: int | None = int(idle) if isinstance(idle, int) else None
-    sync_cwd = bool(config.get("sync_cwd"))
-    host_workspace = config.get("host_workspace")
-    host_dir = host_workspace if isinstance(host_workspace, str) and host_workspace else os.getcwd()
 
     session: Any
     if image:
