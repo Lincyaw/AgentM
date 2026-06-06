@@ -398,8 +398,7 @@ def discover_home_atoms() -> dict[str, BuiltinEntry]:
 def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
     """Atoms published by any installed distribution via the ``agentm.atoms``
     entry-point group — the canonical "publish a plugin as a pip package" path
-    (mirrors the ``agentm.subcommands`` group consumed in ``cli.py`` and the
-    ``agentm.scenarios`` group in ``loader.py``):
+    (mirrors the ``agentm.scenarios`` group in ``loader.py``):
 
         [project.entry-points."agentm.atoms"]
         my_atom = "my_pkg.my_atom"   # importable module exposing MANIFEST + install

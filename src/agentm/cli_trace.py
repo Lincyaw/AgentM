@@ -12,7 +12,8 @@ Contract (stable across minor versions):
   is for humans. Default switches by TTY.
 * Exit codes follow the cli-design skill table (0/2/3/4/7).
 
-Mounted as a builtin subcommand by ``agentm.cli._BUILTIN_SUBCOMMANDS``.
+Dispatched as the ``agentm trace`` subcommand by ``agentm.cli.main`` (which
+lazily hands argv to ``main`` below so the prompt path never imports this).
 """
 
 from __future__ import annotations
@@ -1301,7 +1302,7 @@ def index_cmd(
 
 
 # ---------------------------------------------------------------------------
-# Entry point — wired into ``agentm.cli._BUILTIN_SUBCOMMANDS``.
+# Entry point — lazily dispatched by ``agentm.cli.main`` for ``agentm trace``.
 # ---------------------------------------------------------------------------
 
 
