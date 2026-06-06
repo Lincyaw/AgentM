@@ -30,9 +30,9 @@ from agentm.core.abi.messages import (
     ToolResultMessage,
     UserMessage,
 )
-from agentm.core.runtime.trace_reader import TraceReader
+from agentm.core.abi import TraceReader
 
-from .trajectory import openai_chat_to_agentm
+from .trajectory import _REPLAY_TS, openai_chat_to_agentm
 
 _logger = logging.getLogger(__name__)
 
@@ -277,8 +277,12 @@ class SessionFileCaseSource:
 # deserializer lives in ``core.runtime.session_manager._deserialize_payload``
 # but that is a private API.  We reimplement the subset needed here so the
 # scenario package stays at the public ABI boundary.
-
-_REPLAY_TS = 0.0
+#
+# This is a DIFFERENT wire shape from ``trajectory.openai_chat_to_agentm``
+# (OpenAI chat-completion: ``{tool_calls:[{function:{arguments: json-str}}]}``),
+# so the two parsers are intentionally distinct front-ends; they share only
+# the output ABI block constructors and the ``_REPLAY_TS`` constant (imported
+# from ``trajectory`` to keep one definition).
 
 
 def _records_to_messages(records: list[dict[str, Any]]) -> list[AgentMessage]:

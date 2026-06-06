@@ -51,10 +51,6 @@ def _make_telemetry_parquet(tmp: Path, name: str) -> Path:
     return path
 
 
-
-
-
-
 def test_label_leakage_guard_blocks_conclusion_parquet(tmp_path: Path) -> None:
     # The allow-list ("log|trace|metric") explicitly excludes
     # conclusion.parquet — the file that holds the ground-truth fault. A
@@ -70,8 +66,6 @@ def test_label_leakage_guard_blocks_conclusion_parquet(tmp_path: Path) -> None:
     payload = json.loads(result.content[0].text)
     assert "Access denied" in payload["error"]
     assert result.is_error
-
-
 
 
 def test_list_tables_skips_non_telemetry_files(tmp_path: Path) -> None:
