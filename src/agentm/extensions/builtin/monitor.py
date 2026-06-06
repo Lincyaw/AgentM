@@ -14,14 +14,23 @@ What it exposes (all four are tools the agent calls):
   each fire post a ``source="monitor"`` item with ``payload.kind="channel"``
   under a stable ``dedup_key`` so repeated fires REPLACE the prior undrained
   item rather than stacking (same discipline as the step-3 ticker).
+* :func:`create_monitor(condition, poll_interval=…, note=None)` — recurring
+  condition poll (#178). Every ``poll_interval`` seconds it posts a
+  ``source="monitor"`` item with ``payload.kind="condition"`` carrying the
+  free-text ``condition`` so the AGENT re-evaluates it at the turn boundary
+  and cancels the monitor once satisfied. The atom is not an evaluator (it has
+  no LLM); it is the metronome that keeps re-surfacing the predicate. Same
+  ``dedup_key`` replace + per-monitor cancel + stale-guard discipline as the
+  channel form.
 * :func:`list_monitors` — every live monitor's id / kind / watch / status.
 * :func:`cancel_monitor(monitor_id)` — cancels the wakeup task or unsubscribes
   the channel handler. Idempotent (unknown id → tool-error result).
 
-**MVP scope (per plan).** ``create_monitor`` supports bus-channel subscriptions
-only — condition-polling is deferred and the ``condition`` argument returns a
-tool-error ``ToolResult`` so the agent sees the refusal explicitly (no
-``NotImplementedError`` is raised through the tool surface).
+**Scope.** ``create_monitor`` supports two mutually-exclusive forms: a
+bus-channel subscription (``watch``) and a recurring condition poll
+(``condition``). Passing both, or neither, returns a tool-error ``ToolResult``
+so the agent sees the misuse explicitly (no ``NotImplementedError`` reaches the
+tool surface).
 
 Architecture: a single :class:`_MonitorManager` owns the per-session in-memory
 state (the registry of live monitors, the asyncio tasks, the channel
@@ -64,15 +73,19 @@ _Status = Literal["pending", "fired", "active", "cancelled"]
 
 _KIND_WAKEUP: Literal["wakeup"] = "wakeup"
 _KIND_CHANNEL: Literal["channel"] = "channel"
-# ``_KIND_CONDITION`` constant deliberately not declared until the
-# condition-polling form lands (see plan); the type alias keeps "condition"
-# only as a forward-compatible literal for the defense branch.
+_KIND_CONDITION: Literal["condition"] = "condition"
 _Kind = Literal["wakeup", "channel", "condition"]
 
 # Default for the silenced channel-fire event summary cap. The atom exposes a
 # ``event_summary_max_chars`` config knob so a scenario can widen it without
 # touching the atom.
 _DEFAULT_EVENT_SUMMARY_MAX = 200
+
+# Default seconds between condition-poll fires (#178). A scenario can widen the
+# floor via ``condition_poll_min_seconds``; the per-call ``poll_interval`` is
+# clamped to it so the agent cannot wedge the session into a tight re-poll spin.
+_DEFAULT_CONDITION_POLL = 30.0
+_DEFAULT_CONDITION_POLL_MIN = 5.0
 
 # Channels the agent MUST NOT subscribe to via ``create_monitor`` — every fire
 # would post to the session inbox, the inbox-non-empty floor would keep the
@@ -165,6 +178,17 @@ MANIFEST = ExtensionManifest(
                     f"embedded in the inbox payload (default {_DEFAULT_EVENT_SUMMARY_MAX})."
                 ),
             },
+            "condition_poll_min_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "default": _DEFAULT_CONDITION_POLL_MIN,
+                "description": (
+                    "Floor for a condition monitor's poll_interval — a per-call "
+                    "interval below this is clamped up so the agent cannot wedge "
+                    f"the session into a tight re-poll spin (default "
+                    f"{_DEFAULT_CONDITION_POLL_MIN:g})."
+                ),
+            },
         },
         "additionalProperties": False,
     },
@@ -189,7 +213,9 @@ class _Monitor:
     watch: str | None = None  # channel name (kind="channel"); None for wakeup
     note: str | None = None
     delay: float | None = None  # wakeup only
-    task: asyncio.Task[Any] | None = None  # wakeup's asyncio.sleep task
+    condition: str | None = None  # free-text predicate (kind="condition")
+    poll_interval: float | None = None  # condition poll period (kind="condition")
+    task: asyncio.Task[Any] | None = None  # wakeup sleep / condition poll task
     unsubscribe: Unsubscribe | None = None  # channel's bus unsubscribe
 
 
@@ -226,6 +252,10 @@ def _monitor_view(state: _Monitor) -> dict[str, Any]:
         view["watch"] = state.watch
     if state.delay is not None:
         view["delay"] = state.delay
+    if state.condition is not None:
+        view["condition"] = state.condition
+    if state.poll_interval is not None:
+        view["poll_interval"] = state.poll_interval
     if state.note is not None:
         view["note"] = state.note
     return view
@@ -246,11 +276,13 @@ class _MonitorManager:
         api: ExtensionAPI,
         shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
         event_summary_max_chars: int = _DEFAULT_EVENT_SUMMARY_MAX,
+        condition_poll_min_seconds: float = _DEFAULT_CONDITION_POLL_MIN,
     ) -> None:
         self._api = api
         self._monitors: dict[str, _Monitor] = {}
         self._shutdown_grace_seconds = shutdown_grace_seconds
         self._event_summary_max_chars = event_summary_max_chars
+        self._condition_poll_min_seconds = condition_poll_min_seconds
         # Set in on_session_shutdown so any in-flight wakeup that wakes mid-
         # shutdown sees it and exits without trying to register / push.
         self._shutting_down = False
@@ -335,28 +367,141 @@ class _MonitorManager:
             # we hold is stale. Stop gracefully (no unretrieved exception).
             return
 
-    async def create_monitor(self, args: dict[str, Any]) -> ToolResult:
-        """Subscribe to a bus channel; on each fire post to the inbox.
+    async def _create_condition_monitor(
+        self, args: dict[str, Any], condition: Any
+    ) -> ToolResult:
+        """Start a recurring condition-poll monitor (#178).
 
-        MVP supports bus-channel form only. The (deferred) condition-polling
-        branch returns a tool-error result rather than silently doing nothing,
-        so the agent gets explicit feedback that the form is not yet supported.
-        Tracked as #178; re-introduce ``_KIND_CONDITION`` when it lands.
+        The atom cannot evaluate free-text; the AGENT does, at the turn
+        boundary. This task is the metronome: every ``poll_interval`` seconds it
+        re-posts the predicate so the agent re-checks and cancels when satisfied.
+        Same per-monitor cancel + stale-guard discipline as the wakeup/channel
+        forms — it spawns its OWN task and NEVER touches a shared kernel signal.
         """
 
+        if not isinstance(condition, str) or not condition.strip():
+            return _tool_result(
+                {"error": "condition must be a non-empty free-text predicate (str)"},
+                is_error=True,
+            )
+        raw_interval = args.get("poll_interval", _DEFAULT_CONDITION_POLL)
+        try:
+            poll_interval = float(raw_interval)
+        except (TypeError, ValueError):
+            return _tool_result(
+                {"error": "poll_interval must be a number (seconds)"},
+                is_error=True,
+            )
+        if poll_interval <= 0:
+            return _tool_result(
+                {"error": "poll_interval must be positive"}, is_error=True
+            )
+        # Clamp up to the configured floor so the agent can't wedge a spin.
+        poll_interval = max(poll_interval, self._condition_poll_min_seconds)
+        if self._shutting_down:
+            return _tool_result(
+                {"error": "session is shutting down; monitor refused"},
+                is_error=True,
+            )
+        note = args.get("note")
+        note_str: str | None = str(note) if note is not None else None
+
+        monitor_id = uuid.uuid4().hex
+        state = _Monitor(
+            monitor_id=monitor_id,
+            kind=_KIND_CONDITION,
+            status=_ACTIVE,
+            note=note_str,
+            condition=condition,
+            poll_interval=poll_interval,
+        )
+        state.task = asyncio.create_task(self._condition_runner(state))
+        self._monitors[monitor_id] = state
+        return _tool_result(
+            {
+                "monitor_id": monitor_id,
+                "kind": _KIND_CONDITION,
+                "condition": condition,
+                "poll_interval": poll_interval,
+                "status": _ACTIVE,
+            }
+        )
+
+    async def _condition_runner(self, state: _Monitor) -> None:
+        """Re-post the condition every ``poll_interval`` seconds until cancelled.
+
+        Unlike the one-shot wakeup, a condition monitor stays ``_ACTIVE`` across
+        fires — only ``cancel_monitor`` / shutdown stops it (the agent cancels
+        once the predicate holds). Each fire reuses one ``dedup_key`` so a
+        stuck-in-a-long-turn agent never finds a pile of stale poll lines. The
+        ``post_inbox`` is wrapped in :class:`ExtensionStaleError` so a mid-flight
+        atom reload stops this detached task gracefully.
+        """
+
+        interval = state.poll_interval or _DEFAULT_CONDITION_POLL
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                if state.status == _CANCELLED:
+                    return
+                payload = {
+                    "kind": _KIND_CONDITION,
+                    "monitor_id": state.monitor_id,
+                    "condition": state.condition,
+                    "note": state.note,
+                    "poll_interval": interval,
+                }
+                self._api.post_inbox(
+                    source="monitor",
+                    payload=payload,
+                    dedup_key=f"monitor-cond-{state.monitor_id}",
+                )
+        except asyncio.CancelledError:
+            # cancel_monitor or shutdown asked us to stop.
+            return
+        except ExtensionStaleError:
+            # Atom reloaded while this detached poll was sleeping: the inbox we
+            # hold is stale. Stop gracefully (no unretrieved exception).
+            return
+
+    async def create_monitor(self, args: dict[str, Any]) -> ToolResult:
+        """Subscribe to a bus channel, OR start a recurring condition poll.
+
+        Two mutually-exclusive forms:
+
+        * ``watch`` — subscribe to a bus channel; each fire posts to the inbox.
+        * ``condition`` — recurring poll (#178): every ``poll_interval`` seconds
+          re-post the free-text predicate so the AGENT re-evaluates it and
+          cancels the monitor once satisfied. The atom is the metronome, not the
+          evaluator.
+
+        Passing both or neither is a misuse and returns a tool-error.
+        """
+
+        watch = args.get("watch")
         condition = args.get("condition")
-        if condition is not None:
+        if watch is not None and condition is not None:
             return _tool_result(
                 {
                     "error": (
-                        "condition-polling form of create_monitor is not "
-                        "implemented (MVP supports bus-channel subscription "
-                        "only — use the 'watch' argument with a channel name)"
-                    ),
+                        "create_monitor takes EITHER 'watch' (bus channel) OR "
+                        "'condition' (recurring poll), not both"
+                    )
                 },
                 is_error=True,
             )
-        watch = args.get("watch")
+        if condition is not None:
+            return await self._create_condition_monitor(args, condition)
+        if watch is None:
+            return _tool_result(
+                {
+                    "error": (
+                        "create_monitor needs a 'watch' (bus channel name) or a "
+                        "'condition' (free-text predicate to poll)"
+                    )
+                },
+                is_error=True,
+            )
         if not isinstance(watch, str) or not watch:
             return _tool_result(
                 {"error": "watch must be a non-empty bus channel name (str)"},
@@ -461,7 +606,10 @@ class _MonitorManager:
                 {"monitor_id": monitor_id, "status": state.status}
             )
         state.status = _CANCELLED
-        if state.kind == _KIND_WAKEUP and state.task is not None:
+        # Wakeup + condition monitors own an asyncio.Task; channels own an
+        # unsubscribe callable. Either way we stop ONLY this monitor's handle —
+        # never a shared session/kernel signal (step-3 Major 2).
+        if state.kind in (_KIND_WAKEUP, _KIND_CONDITION) and state.task is not None:
             if not state.task.done():
                 state.task.cancel()
         elif state.kind == _KIND_CHANNEL and state.unsubscribe is not None:
@@ -476,7 +624,7 @@ class _MonitorManager:
     # --- lifecycle ---------------------------------------------------------
 
     async def on_session_shutdown(self, _event: SessionShutdownEvent) -> None:
-        """Cancel every wakeup task and clear every channel subscription.
+        """Cancel every task (wakeup + condition) and clear every channel sub.
 
         Mirrors ``background_exec.on_session_shutdown``: set the shutdown flag
         first (so any in-flight ``schedule_wakeup`` / ``create_monitor`` racing
@@ -493,7 +641,12 @@ class _MonitorManager:
                 # shutdown; do not rewrite the bookkeeping.
                 continue
             state.status = _CANCELLED
-            if state.kind == _KIND_WAKEUP and state.task is not None:
+            # Wakeup AND condition monitors own an asyncio.Task; cancel both so
+            # no detached poll survives the session. Channels own an unsubscribe.
+            if (
+                state.kind in (_KIND_WAKEUP, _KIND_CONDITION)
+                and state.task is not None
+            ):
                 if not state.task.done():
                     state.task.cancel()
                     wakeup_tasks.append(state.task)
@@ -518,6 +671,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         ),
         event_summary_max_chars=int(
             config.get("event_summary_max_chars", _DEFAULT_EVENT_SUMMARY_MAX)
+        ),
+        condition_poll_min_seconds=float(
+            config.get("condition_poll_min_seconds", _DEFAULT_CONDITION_POLL_MIN)
         ),
     )
     api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
