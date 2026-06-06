@@ -612,8 +612,8 @@ class AgentSession:
                     forwarder.cancel()
             return self._session_manager.get_messages()
 
-    async def idle(self) -> None:
-        """Block until the session is truly at rest (#179).
+    async def idle(self, timeout: float | None = None) -> bool:
+        """Block until the session is truly at rest (#179), bounded (#201).
 
         "At rest" means three conditions hold *together*: the driver is parked
         (no round in flight), the inbox is empty (nothing waiting to be drained
@@ -630,16 +630,44 @@ class AgentSession:
         pending work — at which point nothing can produce another inbox item
         without an external ``push`` (which a one-shot host no longer issues).
 
-        Returns immediately (and stays returned) once ``shutdown`` has flipped
-        ``_closed``; a closed session is, by definition, not going to run more
-        rounds.
+        Returns ``True`` once at rest (or ``_closed`` — a closed session is, by
+        definition, not going to run more rounds). With ``timeout=None``
+        (default) the wait is unbounded, preserving the original #179
+        semantics. With a positive ``timeout`` the *total* wait is bounded: if
+        the deadline passes before the session reaches rest this returns
+        ``False`` WITHOUT raising, leaving the caller (the one-shot CLI) to log
+        a warning and exit anyway. This is the #201 defense-in-depth — a leaked
+        ``track_background`` counter or a genuinely stuck background unit turns
+        a silent permanent hang into a recoverable, observable warning.
+
+        Note (design invariant kept): recurring signals (monitor condition
+        polls, tickers) deliberately do NOT count as pending work, so they
+        never hold ``idle`` open; the timeout only bounds the wait on *finite*
+        tracked work and does not change that rule.
         """
 
+        clock = asyncio.get_event_loop().time
+        deadline = None if timeout is None else clock() + timeout
+
         while not self._closed:
-            await self._inbox.wait_no_pending_work()
-            await self._parked.wait()
+            remaining = None if deadline is None else deadline - clock()
+            if remaining is not None and remaining <= 0:
+                return False
+            if not await self._inbox.wait_no_pending_work(remaining):
+                # Bound tripped while a tracked unit was still live.
+                return False
+            remaining = None if deadline is None else deadline - clock()
+            if remaining is not None and remaining <= 0:
+                return False
+            try:
+                if remaining is None:
+                    await self._parked.wait()
+                else:
+                    await asyncio.wait_for(self._parked.wait(), remaining)
+            except TimeoutError:
+                return False
             if self._closed:
-                return
+                return True
             # Re-read under the (single-threaded) event loop: if a unit posted
             # between the two waits the inbox is non-empty / work is back, so we
             # loop and let the driver run that round before re-parking.
@@ -648,10 +676,11 @@ class AgentSession:
                 and not self._inbox.has_pending_work
                 and self._parked.is_set()
             ):
-                return
+                return True
             # Yield so the driver can pick up the pending item / a finishing
             # unit can flip its accounting before we re-evaluate.
             await asyncio.sleep(0)
+        return True
 
     def _spawn_signal_forwarder(
         self, external: asyncio.Event | None

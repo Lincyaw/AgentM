@@ -35,6 +35,15 @@ from dataclasses import dataclass, field
 # be patched from tests and referenced by env-var fallthrough below.
 DEFAULT_SCENARIO = "local"
 
+# #201: defense-in-depth bound on the one-shot ``idle()`` wait. The unbounded
+# wait makes one-shot exit hinge entirely on ``track_background`` accounting
+# being perfect; a leaked counter or a stuck background tool would hang
+# ``agentm -p`` silently forever. This generous ceiling (well above any normal
+# late-completion window — late completions land in seconds, not minutes)
+# converts that into a visible warning + clean exit. Long-lived hosts (gateway
+# / worker / TUI) own their loop and never call ``idle()``.
+ONESHOT_IDLE_TIMEOUT_SECONDS = 120.0
+
 _PACKAGE_WALK_DEPTH = 8
 
 
@@ -555,7 +564,17 @@ async def run(
         # empty, no tracked background unit running) so the persistent driver
         # delivers any late completion first. Long-lived hosts (gateway / worker
         # / feishu / TUI) keep their own loop alive and never call this.
-        await session.idle()
+        # #201: bound the wait so a leaked ``track_background`` counter or a
+        # stuck background unit cannot hang the one-shot CLI forever. On trip we
+        # warn and exit anyway (still exit 0 for an otherwise-completed prompt);
+        # any work that finishes after this point will not be delivered.
+        if not await session.idle(timeout=ONESHOT_IDLE_TIMEOUT_SECONDS):
+            print(
+                "WARNING: timed out waiting for background work to finish after "
+                f"{ONESHOT_IDLE_TIMEOUT_SECONDS:.0f}s; exiting anyway. Any "
+                "late background completion will not be delivered.",
+                file=sys.stderr,
+            )
         final = session.session_manager.get_messages()
         cost_service = session.get_service("cost_query")
         provider_name = session.model.provider if session.model is not None else None
