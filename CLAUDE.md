@@ -36,10 +36,17 @@ mechanism; every policy is a replaceable atom. Boundary contract in
   base_url = "https://ark.cn-beijing.volces.com/api/v3"
   api_key = "..."
   context_window = 131072
+  reasoning_effort = "high"          # → OpenAI reasoning_effort / Anthropic output_config.effort
+
+  [models.doubao.extra_body]         # escape hatch, forwarded verbatim to create(extra_body=)
+  thinking = { type = "enabled" }    # provider-specific thinking toggle, future params, etc.
   ```
   Select a profile with `agentm --model doubao`; if `default_model` is set,
-  no env vars are needed for the default provider/model/key. Run
-  `<cli> --help` for flags.
+  no env vars are needed for the default provider/model/key. The
+  `reasoning_effort` convenience knob also has a CLI flag
+  `--reasoning-effort` and env `AGENTM_REASONING_EFFORT` (precedence: flag >
+  env > config.toml profile); it maps into `extra_body` per provider, any
+  user-set `extra_body` key winning. Run `<cli> --help` for flags.
 - Optional extra: `uv sync --extra agent-env` installs `arl-env` for the
   `operations_agent_env` atom (ARL-sandboxed Operations).
 
