@@ -38,6 +38,20 @@ DEFAULT_SCENARIO = "local"
 _PACKAGE_WALK_DEPTH = 8
 
 
+# Single command tree for the ``agentm`` console script. The default prompt
+# runner is the root callback (``run_cmd``); ``list-extensions`` is a sibling
+# command; ``trace`` and ``gateway`` are mounted from their own Typer apps.
+# ``trace`` / ``gateway`` live in the same ``agentm`` package and dependency
+# closure as this module, so they compose as ordinary subcommands — there is
+# no vendor-SDK isolation reason to dispatch them out of band. (The peer CLIs
+# ``agentm-terminal`` / ``agentm-feishu`` are the genuinely isolated binaries;
+# they ship their own console scripts and are not ``agentm`` subcommands.)
+app = typer.Typer(
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+
+
 @dataclass
 class CliRunConfig:
     """Resolved CLI flags for session construction.
@@ -547,7 +561,9 @@ async def run(
     return 1 if diagnostic_state["error_seen"] else 0
 
 
+@app.callback(invoke_without_command=True)
 def run_cmd(
+    ctx: typer.Context,
     prompt: Annotated[
         str,
         typer.Option(
@@ -718,6 +734,12 @@ def run_cmd(
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
+    # When a subcommand (``trace`` / ``gateway`` / ``list-extensions``) is
+    # being dispatched, this root callback fires first but must defer to the
+    # subcommand rather than treat its absent ``--prompt`` as an error.
+    if ctx.invoked_subcommand is not None:
+        return
+
     # ``.env`` must load BEFORE provider/model resolution: if the user
     # only set AGENTM_PROVIDER / AGENTM_MODEL in ``.env`` (not in the
     # shell), ``_resolve_provider_model_cwd`` would otherwise read an
@@ -780,6 +802,7 @@ def run_cmd(
 _run = run
 
 
+@app.command(name="list-extensions")
 def list_extensions_cmd(
     source: Annotated[
         str,
@@ -909,133 +932,47 @@ def list_extensions_cmd(
     print(f"\n{total} extension(s) shown.", file=sys.stderr)
 
 
-def _trace_subcommand() -> None:
-    """Hand-off to the ``agentm trace`` typer app (see ``cli_trace``).
+def _build_command() -> Any:
+    """Assemble the Click command tree behind the ``agentm`` console script.
 
-    Marked ``__agentm_owns_argv__`` so the main dispatcher invokes us
-    directly instead of wrapping with ``typer.run`` (which would try to
-    parse ``trace``'s args against this zero-arg shim's signature).
+    ``trace`` and ``gateway`` are imported here (not at module load) so the
+    default prompt path does not pay for their dependency closure.
+
+    ``trace`` is a true multi-command Typer group, so it mounts directly via
+    ``add_typer`` (``agentm trace <verb> ...``, Typer-native help / exit
+    codes). ``gateway`` is a single-command Typer app: ``add_typer`` would
+    wrap it as a sub-group (``agentm gateway COMMAND``), breaking the
+    documented ``agentm gateway --bind ...`` contract — so its compiled Click
+    command is attached directly to keep the flat ``agentm gateway [OPTIONS]``
+    surface.
     """
 
-    from agentm.cli_trace import main as trace_main
+    from agentm.cli_trace import app as trace_app
+    from agentm.gateway.cli import app as gateway_app
 
-    trace_main()
+    import click
 
-
-_trace_subcommand.__agentm_owns_argv__ = True  # type: ignore[attr-defined]
-
-
-def _gateway_subcommand() -> None:
-    """Hand-off to the ``agentm gateway`` typer app (see ``gateway.cli``).
-
-    Single-process gateway: holds all chat sessions in memory and serves
-    chat-client peers over the v2 wire protocol. Owns its own argv like
-    ``trace`` so its options parse against the gateway app, not this shim.
-    """
-
-    from agentm.gateway.cli import main as gateway_main
-
-    gateway_main()
-
-
-_gateway_subcommand.__agentm_owns_argv__ = True  # type: ignore[attr-defined]
-
-
-_BUILTIN_SUBCOMMANDS: dict[str, Any] = {
-    "list-extensions": list_extensions_cmd,
-    "trace": _trace_subcommand,
-    "gateway": _gateway_subcommand,
-}
-
-
-def _discover_external_subcommands() -> dict[str, Any]:
-    """Scan ``importlib.metadata`` entry points for additional subcommands.
-
-    A contrib package registers itself via::
-
-        [project.entry-points."agentm.subcommands"]
-        myverb = "my_pkg.cli:main"
-
-    Returns ``name → EntryPoint``; the EP is lazily ``.load()``-ed only
-    when the user actually invokes the subcommand, so ``agentm --help``
-    and the default prompt path stay fast.
-    """
-
-    from importlib.metadata import entry_points
-
-    out: dict[str, Any] = {}
-    try:
-        eps = entry_points(group="agentm.subcommands")
-    except Exception:
-        return out
-    for ep in eps:
-        if ep.name in _BUILTIN_SUBCOMMANDS:
-            print(
-                f"WARNING: external subcommand {ep.name!r} from "
-                f"{ep.value!r} shadowed by builtin",
-                file=sys.stderr,
-            )
-            continue
-        out[ep.name] = ep
-    return out
-
-
-def _print_subcommand_help(external: dict[str, Any]) -> None:
-    names = sorted([*_BUILTIN_SUBCOMMANDS.keys(), *external.keys()])
-    if not names:
-        return
-    print("\nSubcommands:", file=sys.stderr)
-    for name in names:
-        if name in _BUILTIN_SUBCOMMANDS:
-            origin = "builtin"
-        else:
-            origin = external[name].value
-        print(f"  agentm {name:24s}  [{origin}]", file=sys.stderr)
-    print(
-        "\nRun `agentm <subcommand> --help` for subcommand options.",
-        file=sys.stderr,
-    )
+    app.add_typer(trace_app, name="trace")
+    # ``app`` carries subcommands (list-extensions / trace), so its compiled
+    # form is a Group; the static return type is the Command base class.
+    root = cast(click.Group, typer.main.get_command(app))
+    gateway_command = typer.main.get_command(gateway_app)
+    gateway_command.name = "gateway"
+    root.add_command(gateway_command, "gateway")
+    return root
 
 
 def main() -> None:
     """Entry point referenced by the ``agentm`` console script.
 
-    Dispatch order:
-
-    1. ``agentm`` (no args) — show help + subcommand list.
-    2. ``agentm <subcommand> [args...]`` — builtin introspection
-       (``list-extensions``) or any subcommand registered via the
-       ``agentm.subcommands`` entry-point group (contrib clients like
-       ``gateway`` / ``worker`` / ``terminal`` / ``feishu``).
-    3. ``agentm -p "prompt" [options]`` — single-shot prompt runner.
+    * ``agentm`` (no args) — show help with the subcommand list (exit 0).
+    * ``agentm -p "prompt" [options]`` — default single-shot prompt runner.
+    * ``agentm {list-extensions,trace,gateway} ...`` — subcommands.
     """
 
-    argv = sys.argv[1:]
-    external = _discover_external_subcommands()
-
-    if not argv or argv[0] in {"--help", "-h"}:
-        sys.argv = [sys.argv[0], "--help"]
-        try:
-            typer.run(run_cmd)
-        except SystemExit:
-            _print_subcommand_help(external)
-            raise
-        return
-
-    if argv:
-        sub = argv[0]
-        if sub in _BUILTIN_SUBCOMMANDS:
-            sys.argv = [f"{sys.argv[0]} {sub}", *argv[1:]]
-            target = _BUILTIN_SUBCOMMANDS[sub]
-            if getattr(target, "__agentm_owns_argv__", False):
-                target()
-            else:
-                typer.run(target)
-            return
-        if sub in external:
-            target = external[sub].load()
-            sys.argv = [f"{sys.argv[0]} {sub}", *argv[1:]]
-            target()
-            return
-
-    typer.run(run_cmd)
+    root = _build_command()
+    if len(sys.argv) == 1:
+        # Bare ``agentm`` shows help and exits 0 — without this the root
+        # callback would fire with an empty prompt and exit 2.
+        root(args=["--help"], standalone_mode=True)
+    root()
