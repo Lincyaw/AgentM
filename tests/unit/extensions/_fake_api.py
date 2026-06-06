@@ -40,10 +40,20 @@ class FakeExtensionAPI:
         self._handlers: dict[str, list[Any]] = {}
 
     def post_inbox(
-        self, *, source: str, payload: Any, dedup_key: str | None = None
+        self,
+        *,
+        source: str,
+        payload: Any,
+        dedup_key: str | None = None,
+        terminal: bool = False,
     ) -> None:
         self.inbox.push(
-            InboxItem(source=source, payload=payload, dedup_key=dedup_key)
+            InboxItem(
+                source=source,
+                payload=payload,
+                dedup_key=dedup_key,
+                terminal=terminal,
+            )
         )
 
     def register_tool(self, tool: Any) -> None:

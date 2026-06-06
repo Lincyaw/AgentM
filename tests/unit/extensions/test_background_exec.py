@@ -282,9 +282,14 @@ async def test_wrap_tools_skips_companions_and_denylist() -> None:
 
 
 @pytest.mark.asyncio
-async def test_backgrounded_terminate_injected_as_completion() -> None:
-    """Step-3 simplification: a backgrounded tool returning ToolTerminate is
-    injected as an ordinary completion (does NOT stop the loop yet)."""
+async def test_backgrounded_terminate_posts_terminal_inbox_item() -> None:
+    """#177: a backgrounded tool returning ToolTerminate posts its completion
+    with ``terminal=True`` so the runtime drain seam can route it through loop
+    termination — NOT swallowed as an ordinary completion.
+
+    Fail-stop: without the patch the completion lands as an ordinary
+    ``terminal=False`` background item and the terminate intent is lost.
+    """
 
     release = asyncio.Event()
 
@@ -310,7 +315,40 @@ async def test_backgrounded_terminate_injected_as_completion() -> None:
     assert state.status == "completed"
     assert isinstance(state.outcome, ToolTerminate)
     drained = api.inbox.drain()
-    assert any(i.source == "background" and "bg terminal" in str(i.payload) for i in drained)
+    terminal_items = [
+        i for i in drained if i.source == "background" and "bg terminal" in str(i.payload)
+    ]
+    assert len(terminal_items) == 1
+    assert terminal_items[0].terminal is True
+
+
+@pytest.mark.asyncio
+async def test_backgrounded_non_terminate_completion_is_not_terminal() -> None:
+    """#177 guard: an ordinary backgrounded completion stays ``terminal=False``
+    so only a genuine ToolTerminate ends the loop."""
+
+    release = asyncio.Event()
+
+    async def slow(_a: dict[str, Any], _s: asyncio.Event | None) -> ToolResult:
+        await release.wait()
+        return ToolResult(content=[TextContent(type="text", text="ok")])
+
+    api = _FakeApi()
+    mgr = _manager(api, timeout=0.01, heartbeat_interval=1000.0)
+    wrapped = _BgTool(_FakeTool("slow", slow), mgr)
+
+    ticket = await wrapped.execute({})
+    task_id = _payload(ticket)["task_id"]
+    release.set()
+    async with mgr._registry.lock:
+        state = mgr._registry.get(task_id)
+    assert state is not None
+    await state.task
+
+    drained = api.inbox.drain()
+    completions = [i for i in drained if i.source == "background" and "ok" in str(i.payload)]
+    assert len(completions) == 1
+    assert completions[0].terminal is False
 
 
 def test_install_registers_companion_tools() -> None:
@@ -570,7 +608,14 @@ async def test_post_inbox_stale_does_not_crash_watcher() -> None:
         return ToolResult(content=[TextContent(type="text", text="late")])
 
     class _StaleApi(_FakeApi):
-        def post_inbox(self, *, source: str, payload: Any, dedup_key: Any = None) -> None:
+        def post_inbox(
+            self,
+            *,
+            source: str,
+            payload: Any,
+            dedup_key: Any = None,
+            terminal: bool = False,
+        ) -> None:
             raise ExtensionStaleError("reloaded mid-flight")
 
     api = _StaleApi()

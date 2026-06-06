@@ -50,11 +50,20 @@ class InboxItem:
     supersedes its own prior, not-yet-drained item sets ``dedup_key``: a
     later ``push`` with the same key replaces the earlier item in place
     rather than stacking (e.g. a ticker's "still running" status line).
+
+    ``terminal`` carries a *terminate intent* into the loop (#177). A
+    backgrounded tool that ultimately returns :class:`ToolTerminate` posts its
+    completion with ``terminal=True``; the runtime drain seam records that and
+    the keep-alive floor stops the loop with ``ToolTerminated`` once the item
+    has been delivered, instead of keeping the agent alive on the non-empty
+    inbox. The message still lands in the conversation first (so the agent sees
+    the terminal tool's final result) — only the *next* turn boundary stops.
     """
 
     source: InboxSource
     payload: Any
     dedup_key: str | None = None
+    terminal: bool = False
 
 
 class SessionInbox:
