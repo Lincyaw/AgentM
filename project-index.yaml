@@ -672,11 +672,16 @@ requirements:
     title: Builtin monitor atom — agent-defined wakeups + channel subscriptions
     description: >
       The ``monitor`` atom exposes ``schedule_wakeup`` (one-shot timer →
-      inbox push at now+delay) and ``create_monitor`` (bus channel
-      subscription → inbox push on each fire under a stable dedup_key).
-      ``create_monitor`` refuses kernel-control channels at the call site
-      (denylist of channels like ``context`` / ``decide_turn_action`` that
-      would create an unbreakable inbox/loop spin). Per-session in-memory
+      inbox push at now+delay) and ``create_monitor`` in two
+      mutually-exclusive forms: a bus channel subscription (``watch`` →
+      inbox push on each fire) and a recurring condition poll (``condition``
+      → re-post the free-text predicate every ``poll_interval`` seconds so
+      the agent re-evaluates and cancels when satisfied; #178). Both fire
+      under a stable dedup_key. ``create_monitor`` refuses kernel-control
+      channels at the call site (denylist of channels like ``context`` /
+      ``decide_turn_action`` that would create an unbreakable inbox/loop
+      spin) and clamps a condition ``poll_interval`` up to a configured floor
+      so the agent cannot wedge a tight re-poll spin. Per-session in-memory
       state only; a restart regenerates monitors via re-prompting.
     priority: P0
     status: implemented
