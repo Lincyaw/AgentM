@@ -379,6 +379,8 @@ class AnthropicStreamFn:
     base_url: str | None = None
     default_headers: Mapping[str, str] | None = None
     thinking_budgets: Mapping[str, int] | None = None
+    reasoning_effort: str | None = None
+    extra_body: dict[str, Any] | None = None
     retry_policy: RetryPolicy | None = None
     client: AsyncAnthropic | None = None
     clock: Callable[[], float] = time.time
@@ -469,6 +471,12 @@ class AnthropicStreamFn:
                 "type": "enabled",
                 "budget_tokens": self.thinking_budgets[thinking],
             }
+
+        extra = dict(self.extra_body or {})
+        if self.reasoning_effort is not None:
+            extra.setdefault("output_config", {"effort": self.reasoning_effort})
+        if extra:
+            body["extra_body"] = extra
 
         state = _StreamState()
         aborted = False
@@ -678,6 +686,8 @@ def install(api: Any, config: dict[str, Any]) -> None:
         base_url=base_url,
         default_headers=default_headers,
         thinking_budgets=config.get("thinking_budgets"),
+        reasoning_effort=config.get("reasoning_effort"),
+        extra_body=config.get("extra_body"),
         retry_policy=api.get_service("retry_policy"),
     )
     # Optional model-spec overrides; defaults handled in ``_build_model``.

@@ -228,11 +228,12 @@ def _build_authenticator(spec: BindSpec) -> Authenticator:
 
 
 def _build_session_factory(
-    *, provider: str, model: str, profile: Any | None
+    *, provider: str, model: str, profile: Any | None, reasoning_effort: str | None = None
 ) -> Callable[[str, str, str | None, str | None, dict[str, Any]], Awaitable[Any]]:
     from typing import cast as _cast
 
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.lib.user_config import apply_reasoning_effort
     from agentm.core.abi import EventBus
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.runtime.session import AgentSession
@@ -254,11 +255,11 @@ def _build_session_factory(
             cwd=cwd, resume=resume, continue_recent=False, session_store=store
         )
         if profile is not None:
-            provider_spec = DEFAULT_PROVIDER_REGISTRY.build(
-                provider, profile.to_build_config()
-            )
+            build_config = profile.to_build_config()
         else:
-            provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider, {"model": model})
+            build_config = {"model": model}
+        apply_reasoning_effort(build_config, reasoning_effort)
+        provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider, build_config)
         config = AgentSessionConfig(
             cwd=cwd,
             provider=provider_spec,
@@ -775,6 +776,10 @@ def cli(
         str | None, typer.Option("--provider", envvar="AGENTM_PROVIDER")
     ] = None,
     model: Annotated[str | None, typer.Option("--model", envvar="AGENTM_MODEL")] = None,
+    reasoning_effort: Annotated[
+        str | None,
+        typer.Option("--reasoning-effort", envvar="AGENTM_REASONING_EFFORT"),
+    ] = None,
     log_level: Annotated[
         str, typer.Option("--log-level", envvar="AGENTM_LOG_LEVEL")
     ] = "INFO",
@@ -853,6 +858,7 @@ def cli(
                 state_dir=state_dir,
                 provider_flag=provider,
                 model_flag=model,
+                reasoning_effort=reasoning_effort,
                 bind=bind,
                 bind_token_file=str(bind_token_file) if bind_token_file else None,
                 bind_allow_anonymous=bind_allow_anonymous,
@@ -883,6 +889,7 @@ async def _arun(
     state_dir: Path | None,
     provider_flag: str | None,
     model_flag: str | None,
+    reasoning_effort: str | None,
     bind: str | None,
     bind_token_file: str | None,
     bind_allow_anonymous: bool,
@@ -954,7 +961,10 @@ async def _arun(
         if prof is None:  # pragma: no cover — caller validates
             raise ValueError(f"no model profile {model_name!r}")
         return _build_session_factory(
-            provider=provider_flag or prof.provider, model=prof.model, profile=prof
+            provider=provider_flag or prof.provider,
+            model=prof.model,
+            profile=prof,
+            reasoning_effort=reasoning_effort,
         )
 
     from agentm.core.lib.user_config import load_user_config
@@ -968,7 +978,10 @@ async def _arun(
         outbox=outbox,
         chat_map=chat_map,
         session_factory=_build_session_factory(
-            provider=resolved_provider, model=resolved_model, profile=profile
+            provider=resolved_provider,
+            model=resolved_model,
+            profile=profile,
+            reasoning_effort=reasoning_effort,
         ),
         command_router=CommandRouter(registry=command_registry),
         approval_policy=approval_policy,

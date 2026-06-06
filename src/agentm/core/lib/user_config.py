@@ -27,6 +27,8 @@ class ModelProfile:
     api_key: str | None = None
     context_window: int | None = None
     max_output_tokens: int | None = None
+    reasoning_effort: str | None = None
+    extra_body: dict[str, Any] | None = None
 
     def to_build_config(self) -> dict[str, Any]:
         """Build the config dict for ``ProviderRegistry.build()``."""
@@ -41,6 +43,10 @@ class ModelProfile:
             config["context_window"] = self.context_window
         if self.max_output_tokens:
             config["max_output_tokens"] = self.max_output_tokens
+        if self.reasoning_effort:
+            config["reasoning_effort"] = self.reasoning_effort
+        if self.extra_body:
+            config["extra_body"] = self.extra_body
         return config
 
 
@@ -83,6 +89,8 @@ def _parse_profile(key: str, raw: dict[str, Any]) -> ModelProfile | None:
     api_key = raw.get("api_key")
     context_window = raw.get("context_window")
     max_output_tokens = raw.get("max_output_tokens")
+    reasoning_effort = raw.get("reasoning_effort")
+    extra_body = raw.get("extra_body")
 
     return ModelProfile(
         provider=provider,
@@ -94,6 +102,10 @@ def _parse_profile(key: str, raw: dict[str, Any]) -> ModelProfile | None:
         max_output_tokens=(
             int(max_output_tokens) if max_output_tokens is not None else None
         ),
+        reasoning_effort=(
+            reasoning_effort if isinstance(reasoning_effort, str) else None
+        ),
+        extra_body=extra_body if isinstance(extra_body, dict) else None,
     )
 
 
@@ -155,6 +167,24 @@ def resolve_model_profile(model_name: str | None) -> ModelProfile | None:
             return None
         model_name = config.default_model
     return config.models.get(model_name.lower())
+
+
+def apply_reasoning_effort(
+    build_config: dict[str, Any], cli_flag: str | None
+) -> dict[str, Any]:
+    """Apply reasoning-effort precedence: CLI flag > env > config.toml profile.
+
+    Mutates and returns *build_config*. When no effort is resolved, any value
+    already present from the profile is left untouched.
+    """
+    effort = (
+        cli_flag
+        or os.environ.get("AGENTM_REASONING_EFFORT")
+        or build_config.get("reasoning_effort")
+    )
+    if effort:
+        build_config["reasoning_effort"] = effort
+    return build_config
 
 
 def _reset_cache() -> None:

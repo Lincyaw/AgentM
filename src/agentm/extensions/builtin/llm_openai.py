@@ -475,6 +475,8 @@ class OpenAIStreamFn:
     client: AsyncOpenAI | None = None
     clock: Callable[[], float] = time.time
     thinking_round_trip: Literal["drop", "system_note", "raise"] = "drop"
+    reasoning_effort: str | None = None
+    extra_body: dict[str, Any] | None = None
     events: EventBus | None = None
     _reported_thinking_drop: bool = field(default=False, init=False)
 
@@ -574,6 +576,12 @@ class OpenAIStreamFn:
         }
         if tools:
             body["tools"] = _to_openai_tools(tools)
+
+        extra = dict(self.extra_body or {})
+        if self.reasoning_effort is not None:
+            extra.setdefault("reasoning_effort", self.reasoning_effort)
+        if extra:
+            body["extra_body"] = extra
 
         state = _StreamState()
         aborted = False
@@ -794,6 +802,8 @@ def install(api: Any, config: dict[str, Any]) -> None:
         verify_ssl=verify_ssl,
         retry_policy=retry_policy,
         thinking_round_trip=config.get("thinking_round_trip", "drop"),
+        reasoning_effort=config.get("reasoning_effort"),
+        extra_body=config.get("extra_body"),
         events=getattr(api, "events", None),
     )
 
