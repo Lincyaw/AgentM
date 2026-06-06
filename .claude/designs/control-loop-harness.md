@@ -1,6 +1,9 @@
 # Control-Loop Harness
 
-Status: proposed
+Status: **core loop implemented** in workbuddy `internal/control/` (Objective,
+Observer/GHObserver, Feedback, Controller.Decide with Resume/Block/Complete +
+stuck detection, Run loop, agent_bridge); migration steps 4-6 not yet done
+(remove legacy auto-submit/RESULT parsing, extend sandbox lifecycle)
 Owner: workbuddy orchestration layer + AgentM session resume
 
 Reaches into: `.github/workbuddy/` (agent prompts, workflow config),
@@ -406,7 +409,11 @@ AgentM provides the mechanisms the harness relies on:
   the agent's trace for richer diagnostics, but the primary feedback
   loop uses only external ground truth (git, GitHub API).
 
-No new atoms, no new ExtensionAPI surface, no core changes.
+No new atoms, no new ExtensionAPI surface, no core changes required for the
+external workbuddy control loop. (AgentM's existing mechanisms --
+`DecideTurnActionEvent` + `Inject` + `TurnEndEvent.messages` + `SessionInbox`
+-- are sufficient for atoms to implement turn-level control loops internally
+without any new core surface.)
 
 ## 11. Migration path
 
