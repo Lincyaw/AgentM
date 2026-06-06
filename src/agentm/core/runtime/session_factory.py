@@ -682,7 +682,11 @@ async def _resolve_extensions(
                 break
 
     if not config.no_extensions and not config.extensions and config.extra_extensions:
-        to_load.extend(config.extra_extensions)
+        existing_modules = {m for m, _ in to_load}
+        for module_path, ext_cfg in config.extra_extensions:
+            if module_path not in existing_modules:
+                to_load.append((module_path, ext_cfg))
+                existing_modules.add(module_path)
     if not config.no_extensions:
         loaded_modules = {module_path for module_path, _cfg in to_load}
         # The sub-agent runtime injects inherited prompt text via the
