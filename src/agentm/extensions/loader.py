@@ -134,7 +134,7 @@ def _resolve_scenario_entrypoint(name: str) -> Path | None:
     """Resolve a scenario *name* to an on-disk ``manifest.yaml`` via an
     installed package's ``agentm.scenarios`` entry point.
 
-    Convention (mirrors the ``agentm.subcommands`` / ``agentm.atoms`` groups):
+    Convention (mirrors the ``agentm.atoms`` group):
 
         [project.entry-points."agentm.scenarios"]
         my_scenario = "my_pkg.scenarios.my_scenario"   # package holding manifest.yaml
