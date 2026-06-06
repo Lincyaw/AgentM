@@ -70,3 +70,9 @@ extensions:
   # with no text or tool calls (e.g. doubao leaking tool calls into
   # reasoning_content). ---
   - module: agentm.extensions.builtin.thinking_retry
+
+  # --- self-debug: read the terminal client's screen dump (written on
+  # /dump) so the agent can see the TUI the user sees. Pairs with the
+  # ``self-debug`` skill, which also covers reading one's own and
+  # historical traces via the ``agentm trace`` CLI over ``bash``. ---
+  - module: agentm.extensions.builtin.tui_snapshot
