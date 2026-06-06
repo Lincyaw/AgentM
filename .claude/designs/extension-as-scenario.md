@@ -28,7 +28,7 @@
 ### 1.1 Atom vs. scenario, concretely
 
 ```yaml
-# src/agentm/extensions/scenarios/general_purpose.yaml — a scenario is data
+# src/agentm/extensions/scenarios/local.yaml — a scenario is data
 extensions:
   - module: agentm.extensions.builtin.tool_read
   - module: agentm.extensions.builtin.tool_bash
@@ -328,7 +328,7 @@ Live under `src/agentm/extensions/scenarios/<name>.yaml`. Each lists the atoms t
 
 | Scenario YAML | Composes |
 |---|---|
-| `general_purpose.yaml` | `tool_read` + `tool_bash` + `tool_edit` + `tool_write` + `system_prompt`(generic coding) |
+| `local.yaml` | `tool_read` + `tool_bash` + `tool_edit` + `tool_write` + `system_prompt`(generic coding) |
 | `rca.yaml` | `tool_read` + `tool_hypothesis_store` + `system_prompt`(RCA framing) + `permission`(deny mutating tools) |
 | `trajectory_analysis.yaml` | `tool_read` + `tool_trajectory_loader` + `system_prompt`(analyst framing) |
 | `plan_mode.yaml` | `tool_submit_plan` + `system_prompt`(plan-mode framing) + `permission`(deny mutations) |
@@ -413,7 +413,7 @@ src/agentm/
 │   │   └── sub_agent.py
 │   │
 │   ├── scenarios/              ← scenario recipes (YAML data, not code)
-│   │   ├── general_purpose.yaml
+│   │   ├── local.yaml
 │   │   ├── rca.yaml
 │   │   ├── trajectory_analysis.yaml
 │   │   └── plan_mode.yaml
@@ -428,7 +428,7 @@ src/agentm/
 **Deleted in this migration** (the old tree disappears entirely):
 - `src/agentm/core/tool.py` (legacy `@tool` decorator producing langchain-flavored tools)
 - The former `agentm.harness/` package in its entirety (Stage 4-6 of pluggable-architecture §10 collapse-into-core, 2026-05-11). Substrate impls moved to `agentm.core.runtime/`; legacy middleware/scenario/worker_factory/permission/tool_filter/cost_budget/agent_memory modules were re-implemented as atoms under `agentm.extensions.builtin/`.
-- `src/agentm/scenarios/` (re-implemented as `extensions/builtin/{general_purpose,rca,trajectory_analysis}/`)
+- `src/agentm/scenarios/` (re-implemented as `extensions/builtin/{local,rca,trajectory_analysis}/`)
 - `src/agentm/tools/` (legacy tool modules; new tools live next to their scenarios or inside `extensions/builtin/`)
 - `src/agentm/agents/`, `src/agentm/builder.py` (replaced by `AgentSession.create`)
 - `src/agentm/core/trajectory.py` (replaced by `extensions/builtin/trajectory.py`)
@@ -471,7 +471,7 @@ Each atom is independent (only depends on `core/kernel/`, `core/operations.py`, 
 - **Group B (context atoms)**: turn_reminder, system_prompt, file_mutation_queue, llm_compaction, trajectory
 - **Group C (multi-agent atom)**: sub_agent
 - **Group D1 (tool atoms)** — depends on A0: tool_read, tool_bash, tool_edit, tool_write, tool_hypothesis_store, tool_trajectory_loader, tool_submit_plan
-- **Group D2 (scenario recipes + loader)** — depends on A, B, D1: 4 YAML files (general_purpose, rca, trajectory_analysis, plan_mode) + `extensions/loader.py` (`load_scenario`)
+- **Group D2 (scenario recipes + loader)** — depends on A, B, D1: 4 YAML files (local, rca, trajectory_analysis, plan_mode) + `extensions/loader.py` (`load_scenario`)
 
 ### Phase 2.5 — Legacy deletion (single sweep)
 
@@ -530,7 +530,7 @@ Provider re-use: a child session is constructed with `provider=parent.provider` 
 
 ### 10b.6 FileOperations / BashOperations ports
 
-To honour `pluggable-architecture.md` §3.2 (acceptance scenario 2 — bash over SSH), the `general_purpose` scenario's `read`/`bash`/`edit`/`write` tools must NOT call `subprocess`/`pathlib` directly. Instead:
+To honour `pluggable-architecture.md` §3.2 (acceptance scenario 2 — bash over SSH), the `local` scenario's `read`/`bash`/`edit`/`write` tools must NOT call `subprocess`/`pathlib` directly. Instead:
 
 ```python
 # src/agentm/core/abi/operations.py  — Protocols (atom + runtime import)

@@ -35,6 +35,13 @@ CONTRIB_ATOM_MODULE_PREFIX = "_agentm_contrib__"
 so reload paths can tell research-line extras apart from agent-installed
 tier-1 atoms."""
 
+HOME_ATOM_MODULE_PREFIX = "_agentm_home__"
+"""Synthetic module-name prefix for atoms discovered under
+``~/.agentm/contrib/extensions/<name>.py`` (or ``$AGENTM_HOME/contrib/
+extensions/``). Distinct from the contrib prefix (source-checkout) and
+the user-atom prefix (agent-installed) so reload paths can distinguish
+home-installed extensions from both."""
+
 USER_ATOM_MODULE_PREFIX = "_agentm_user_atom__"
 """Synthetic module-name prefix shared with :class:`AtomReloader`. Atoms
 auto-discovered from ``<cwd>/.agentm/atoms/`` are imported under
@@ -280,13 +287,18 @@ def _discover_flat_atoms(
 
 
 def discover_by_role() -> dict[str, BuiltinEntry]:
-    """Return ``role → BuiltinEntry`` over every builtin + contrib atom.
+    """Return ``role → BuiltinEntry`` over every builtin + contrib + home +
+    entrypoint atom.
 
     Each atom may claim zero or more roles via ``MANIFEST.provides_role``;
     every role string maps to exactly one entry. A second atom claiming a
     role already taken raises :class:`RuntimeError` — the harness expects
     unambiguous resolution at session start, and a silent last-wins would
     let a contrib atom hijack a floor slot without anyone noticing.
+
+    Home atoms (``~/.agentm/contrib/extensions/``) participate in role
+    resolution alongside repo-contrib and entrypoint atoms — the user
+    explicitly installed them, so they are trusted at the same level.
 
     User-discovered atoms (``.agentm/atoms/``) are intentionally excluded:
     a user atom hijacking the floor would mean session boot for that cwd
@@ -298,6 +310,7 @@ def discover_by_role() -> dict[str, BuiltinEntry]:
     sources: tuple[dict[str, BuiltinEntry], ...] = (
         discover_builtin(),
         discover_contrib_atoms(),
+        discover_home_atoms(),
         discover_entrypoint_atoms(),
     )
     for source in sources:
@@ -361,6 +374,24 @@ def discover_contrib_atoms() -> dict[str, BuiltinEntry]:
         repo_root / "contrib" / "extensions",
         module_prefix=CONTRIB_ATOM_MODULE_PREFIX,
         label="contrib atom",
+    )
+
+
+def discover_home_atoms() -> dict[str, BuiltinEntry]:
+    """Extensions installed by the user into ``~/.agentm/contrib/extensions/``.
+
+    Works like :func:`discover_contrib_atoms` but reads from the global home
+    directory instead of the source checkout, so it works from pip-installed
+    wheels. Users drop ``<name>.py`` files (each exporting ``MANIFEST`` +
+    ``install``) into ``~/.agentm/contrib/extensions/`` and they auto-discover.
+    """
+
+    from agentm.core.lib.user_config import agentm_home_dir
+
+    return _discover_flat_atoms(
+        agentm_home_dir() / "contrib" / "extensions",
+        module_prefix=HOME_ATOM_MODULE_PREFIX,
+        label="home atom",
     )
 
 
@@ -433,11 +464,13 @@ def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
 __all__ = [
     "BuiltinEntry",
     "CONTRIB_ATOM_MODULE_PREFIX",
+    "HOME_ATOM_MODULE_PREFIX",
     "USER_ATOM_MODULE_PREFIX",
     "discover_builtin",
     "discover_by_role",
     "discover_contrib_atoms",
     "discover_entrypoint_atoms",
+    "discover_home_atoms",
     "discover_user_atoms",
     "last_discovery_failures",
     "reset_cache",

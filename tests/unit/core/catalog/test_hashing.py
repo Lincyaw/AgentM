@@ -27,12 +27,12 @@ def test_hash_distinguishes_whitespace_difference() -> None:
 def test_active_set_fingerprint_includes_all_loaded_atoms() -> None:
     fingerprint = compute_active_set_fingerprint(
         {"tool_read": "abc123def456", "tool_bash": "fed654cba321"},
-        scenario="general_purpose@aaaabbbbcccc",
+        scenario="local@aaaabbbbcccc",
         core_hash="111122223333",
     )
 
     assert fingerprint["core"] == "core@111122223333"
-    assert fingerprint["scenario"] == "general_purpose@aaaabbbbcccc"
+    assert fingerprint["scenario"] == "local@aaaabbbbcccc"
     assert fingerprint["atoms"] == {
         "tool_bash": "tool_bash@fed654cba321",
         "tool_read": "tool_read@abc123def456",

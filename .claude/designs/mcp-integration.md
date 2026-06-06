@@ -20,7 +20,7 @@ The bridge takes an **install-time snapshot** of each server's tool set and free
 - **No new ABI.** The `Tool` protocol (`core/abi/tool.py`) already matches MCP's call shape: `name / description / parameters(JSON Schema) / async execute(args)`. Nothing in `core/` changes.
 - **No MCP server side.** AgentM is the *client*. Exposing AgentM's own tools as an MCP server is a separate, later design.
 - **No prompts / resources / sampling in v0.** Just tools. The other MCP primitives can be added as additional atoms (`mcp_prompts`, `mcp_resources`) without re-touching the bridge.
-- **No `general_purpose` enrollment.** The default scenario stays MCP-free. Users opt in.
+- **No `local` enrollment.** The default scenario stays MCP-free. Users opt in.
 - **No runtime tool-set tracking.** Servers that push `tools/list_changed` mid-session are not honored; the user must restart the session to pick up the new set.
 
 ## 3. Pluggability decision: install-time snapshot
@@ -151,5 +151,5 @@ Rationale: MCP servers are external processes whose behavior AgentM cannot audit
 ## 10. Rollout
 
 1. Land `contrib/extensions/mcp_bridge/` as draft; `--extension contrib.extensions.mcp_bridge` mounts it on top of any scenario.
-2. Add `contrib/scenarios/mcp_demo/manifest.yaml` composing `general_purpose` + the bridge with a stdio filesystem server for smoke-testing.
+2. Add `contrib/scenarios/mcp_demo/manifest.yaml` composing `local` + the bridge with a stdio filesystem server for smoke-testing.
 3. After v0 stabilises, revisit prompts/resources atoms and the inverse direction.

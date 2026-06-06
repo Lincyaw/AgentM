@@ -30,7 +30,7 @@ validator rejects any extension that imports `core.runtime.*` or
 
 ```mermaid
 flowchart LR
-    SC["--scenario rca<br/>(or default: general_purpose)"] --> L["loader.load_scenario(name)"]
+    SC["--scenario rca<br/>(or default: local)"] --> L["loader.load_scenario(name)"]
     EX["--extension &lt;dotted&gt;[:JSON]<br/>(repeatable, appended)"] --> R
     UA["&lt;cwd&gt;/.agentm/atoms/*.py<br/>(user atoms, layered on top)"] --> R
     L --> R["resolve &amp; topo-sort by MANIFEST.requires"]
@@ -73,8 +73,8 @@ subsystems are reached only via `ExtensionAPI` services.
 ## Scenario: a YAML composition of extensions
 
 ```yaml
-# contrib/scenarios/general_purpose/manifest.yaml
-name: general_purpose
+# contrib/scenarios/local/manifest.yaml
+name: local
 extensions:
   - module: agentm.extensions.builtin.operations_local
   - module: agentm.extensions.builtin.tool_read
@@ -123,7 +123,7 @@ its default injection.
 
 ## Enabling: from CLI to a running session
 
-The default scenario is `general_purpose` — no flag needed:
+The default scenario is `local` — no flag needed:
 
 ```bash
 uv run agentm -p "list files in src/"
@@ -176,10 +176,9 @@ agentm list-extensions          # every auto-discoverable atom, with its
 agentm --help                   # full flag list (--scenario, --extension,
                                 # --resume, --continue, --tools, ...)
 
-ls contrib/scenarios/           # shipped scenarios: general_purpose,
-                                # agent_env, chatbot, format_fix,
-                                # mcp_demo, rca, rca_hfsm, auditor,
-                                # verifier
+ls contrib/scenarios/           # shipped scenarios: local, sandbox,
+                                # chatbot, format_fix, mcp_demo,
+                                # rca, rca_hfsm, terminal_bench
 ```
 
 Beyond the one-shot prompt, `agentm` has two subcommands: `agentm gateway`
@@ -251,7 +250,7 @@ from agentm.extensions.loader import load_scenario
 
 session = await AgentSession.create(AgentSessionConfig(
     cwd=".",
-    extensions=load_scenario("general_purpose"),
+    extensions=load_scenario("local"),
     provider=("agentm.extensions.builtin.llm_anthropic",
               {"model": "claude-sonnet-4-6"}),
 ))

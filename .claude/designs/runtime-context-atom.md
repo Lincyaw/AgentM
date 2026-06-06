@@ -135,7 +135,7 @@ prompt its content lands. To put runtime facts at the top, list
 `runtime_context` **after** `system_prompt` (and any other prompt-prepending
 atom). Both atoms prepend; the last one to fire wins the top slot.
 
-Other scenarios (`general_purpose`, `plan_mode`, `rca`, `trajectory_analysis`)
+Other scenarios (`local`, `plan_mode`, `rca`, `trajectory_analysis`)
 should add the same line. The atom is a no-op for callers that don't list it,
 so adoption is opt-in per scenario.
 

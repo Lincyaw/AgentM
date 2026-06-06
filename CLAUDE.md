@@ -11,7 +11,7 @@ mechanism; every policy is a replaceable atom. Boundary contract in
 
 ## CLI
 
-- `agentm -p "<prompt>"` — one-shot prompt (default scenario `general_purpose`).
+- `agentm -p "<prompt>"` — one-shot prompt (default scenario `local`).
 - `agentm` (no args) — show help and subcommand list.
 - `agentm trace …` — query the OTLP/JSON session log
   (`messages` · `turns` · `tools` · `chats` · `info` · `index`); preferred
@@ -71,7 +71,7 @@ children (`purpose` distinguishes `root` / `cognitive_audit_extractor` /
 
 ## Repo exploration
 
-- `agentm list-extensions [--source builtin|contrib|user|all] [--filter X]`
+- `agentm list-extensions [--source builtin|contrib|home|user|all] [--filter X]`
 - `ls contrib/scenarios/` — names usable as `--scenario <name>`
 - `ls src/agentm/extensions/builtin/` — builtin atoms (one file per atom)
 - `ls contrib/extensions/` — third-party atoms (flat files auto-discover;
@@ -84,7 +84,7 @@ children (`purpose` distinguishes `root` / `cognitive_audit_extractor` /
 
 ```
 presenters: agentm.cli  /  embedded SDK
-atoms:      src/agentm/extensions/builtin/  +  contrib/extensions/
+atoms:      src/agentm/extensions/builtin/  +  contrib/extensions/  +  ~/.agentm/contrib/extensions/
 substrate:  agentm.core/  (abi · runtime · lib — write-protected)
 ```
 
@@ -99,9 +99,13 @@ substrate:  agentm.core/  (abi · runtime · lib — write-protected)
   exports `MANIFEST` + `install(api, config)`. §11 contract: no
   atom-to-atom imports, no `core.runtime.*`, no `core._internal`.
 - **Scenario**: YAML at `contrib/scenarios/<name>/manifest.yaml`, selected
-  via `--scenario <name>`. Default is `general_purpose`.
+  via `--scenario <name>`. Default is `local`.
 - **contrib/extensions/**: flat `<name>.py` auto-discovers; nested packages
   mount via `--extension <dotted.path>` and are **not** scenarios.
+- **Home contrib**: `~/.agentm/contrib/extensions/<name>.py` and
+  `~/.agentm/contrib/scenarios/<name>/manifest.yaml` — user-installed
+  atoms and scenarios that work from pip-installed wheels (similar to
+  Claude Code plugins). Respects `$AGENTM_HOME` override.
 
 ## Design docs (`.claude/`)
 
