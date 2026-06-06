@@ -37,6 +37,7 @@ from agentm.core.abi import (
     Model,
     NoPendingInput,
     TextContent,
+    ToolTerminated,
 )
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ProviderConfig
@@ -468,6 +469,194 @@ async def test_keep_alive_floor_overrides_model_end_turn(tmp_path: Path) -> None
         # model's voluntary end-turn.
         assert "turn-0" in assistant_texts
         assert "turn-1" in assistant_texts
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_terminal_inbox_item_stops_loop_with_tool_terminated(
+    tmp_path: Path,
+) -> None:
+    """#177 fail-stop: a ``terminal=True`` inbox item (a backgrounded
+    ToolTerminate) MUST end the loop with ``ToolTerminated`` once delivered,
+    instead of being kept alive on the non-empty inbox like an ordinary item.
+
+    Reproducer: the model "ends its turn" every turn, but on the first turn we
+    queue a terminal item. Without the patch the keep-alive floor would treat
+    it like any other item — deliver it, and (since the floor sees it as
+    ordinary) the loop would Stop(ModelEndTurn) after delivery. The patch makes
+    the floor return ``Stop(ToolTerminated)`` so the termination is attributed
+    to the terminate intent, never swallowed. We assert BOTH the cause and that
+    the terminal message was actually delivered to the model first.
+    """
+    module_name = f"tests.unit._inbox_terminal_{id(tmp_path)}"
+
+    turn = [0]
+    inbox_handle: list[SessionInbox] = []
+    delivery_turn_saw_terminal: list[bool] = []
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del model, tools, system, signal, thinking
+        idx = turn[0]
+        turn[0] += 1
+        if idx == 0:
+            # Queue a terminal background completion mid-turn.
+            inbox_handle[0].push(
+                InboxItem(
+                    source="background",
+                    payload="terminal bg result",
+                    terminal=True,
+                )
+            )
+        else:
+            # The delivery turn must see the terminal note in context.
+            delivery_turn_saw_terminal.append(
+                any("terminal bg result" in t for t in _texts(messages, "user"))
+            )
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text=f"turn-{idx}")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    causes: list[Any] = []
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        inbox_handle.append(session.inbox)
+        session.bus.on(AgentEndEvent.CHANNEL, lambda e: causes.append(e.cause))
+
+        await session.prompt("start")
+
+        # The terminal item was delivered on the second turn...
+        assert delivery_turn_saw_terminal == [True]
+        # ...and the run ended attributed to the terminate intent, not
+        # ModelEndTurn / a runaway keep-alive.
+        assert any(isinstance(c, ToolTerminated) for c in causes), causes
+        # Exactly two turns ran: the originating turn + the delivery turn. A
+        # third would mean the floor failed to stop.
+        assert turn[0] == 2, f"expected 2 turns, got {turn[0]}"
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_backgrounded_terminate_survives_injecting_floor(
+    tmp_path: Path,
+) -> None:
+    """#177 fail-stop (review MAJOR): a backgrounded ``ToolTerminate`` MUST
+    survive a co-loaded floor that ``Inject``s over the keep-alive ``Stop``.
+
+    Reproduces the sub_agent-child interaction: while a child is ``_RUNNING``,
+    sub_agent's ``decide_turn_action`` floor returns ``Inject(<pending>)``,
+    which the resolution lattice (loop.py:298) ranks ABOVE the #177
+    ``Stop(ToolTerminated)``. The original code nulled ``_pending_terminate``
+    inside the keep-alive handler BEFORE the lattice picked the Inject winner,
+    so the terminate intent was permanently destroyed — the loop ran forever on
+    the injecting floor and NEVER ended on ``ToolTerminated``.
+
+    Here a stand-in floor injects for the first two boundaries after the
+    terminal item lands, then stops (mimicking the child finishing). The fix
+    re-asserts the same cause on every boundary and clears it only on the
+    matching ``agent_end``, so the loop ultimately stops on ``ToolTerminated``
+    once the injecting floor steps aside. Without the fix the cause is gone
+    after turn 1 and no ``ToolTerminated`` ever appears.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._inbox_terminal_inject_{id(tmp_path)}"
+
+    turn = [0]
+    inbox_handle: list[SessionInbox] = []
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del messages, model, tools, system, signal, thinking
+        idx = turn[0]
+        turn[0] += 1
+        if idx == 0:
+            inbox_handle[0].push(
+                InboxItem(
+                    source="background",
+                    payload="terminal bg result",
+                    terminal=True,
+                )
+            )
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text=f"turn-{idx}")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    # Stand-in for sub_agent's still-running-child floor: inject a pending
+    # notice for a bounded number of boundaries (the "child is running" window),
+    # then step aside. Registered on the SAME channel as the runtime keep-alive
+    # floor so it co-participates in resolve_loop_action.
+    from agentm.core.abi import DecideTurnActionEvent, Inject, UserMessage
+
+    inject_budget = [2]
+
+    def _injecting_floor(_event: DecideTurnActionEvent) -> Inject | None:
+        # Only contend once the terminal item has been observed (turn >= 1),
+        # mirroring a child that is running while the terminate is pending.
+        if turn[0] >= 1 and inject_budget[0] > 0:
+            inject_budget[0] -= 1
+            return Inject(
+                messages=[
+                    UserMessage(
+                        role="user",
+                        content=[
+                            TextContent(
+                                type="text", text="<subagent_pending/>"
+                            )
+                        ],
+                        timestamp=0.0,
+                    )
+                ]
+            )
+        return None
+
+    causes: list[Any] = []
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        inbox_handle.append(session.inbox)
+        # Higher priority so it is dispatched alongside the keep-alive floor;
+        # both returns feed the same resolve_loop_action batch.
+        session.bus.on(
+            DecideTurnActionEvent.CHANNEL, _injecting_floor, priority=400
+        )
+        session.bus.on(AgentEndEvent.CHANNEL, lambda e: causes.append(e.cause))
+
+        await _aio.wait_for(session.prompt("start"), timeout=5.0)
+
+        # The loop ultimately ended on the terminate intent — NOT stranded
+        # forever under the injecting floor.
+        assert any(isinstance(c, ToolTerminated) for c in causes), causes
+        # The injecting floor really did override the Stop first (its budget was
+        # consumed), proving the lattice path was exercised, not bypassed.
+        assert inject_budget[0] == 0, "injecting floor never contended"
     finally:
         await session.shutdown()
         sys.modules.pop(module_name, None)
@@ -1230,3 +1419,156 @@ async def test_concurrent_prompts_serialize_no_stale_data(tmp_path: Path) -> Non
         await session.shutdown()
         sys.modules.pop(module_name, None)
 
+
+
+# ---------------------------------------------------------------------------
+# #179: idle() — one-shot host waits out late background completions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inbox_pending_work_gates_idle_event() -> None:
+    """#179 fail-stop (unit): the background-work counter blocks
+    ``wait_no_pending_work`` while work is live and releases it only when the
+    count returns to zero — and an over-finish cannot falsely release it.
+
+    Without this gate ``idle()`` has no signal for "a detached unit is still
+    running" and would let a one-shot host exit mid-task."""
+
+    import asyncio as _aio
+
+    inbox = SessionInbox()
+    # Starts idle: no work outstanding ⇒ wait returns immediately.
+    assert not inbox.has_pending_work
+    await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.5)
+
+    inbox.note_work_started()
+    assert inbox.has_pending_work
+    with pytest.raises(_aio.TimeoutError):
+        await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.05)
+
+    inbox.note_work_started()  # two units live
+    inbox.note_work_finished()  # one done — still gated
+    assert inbox.has_pending_work
+    with pytest.raises(_aio.TimeoutError):
+        await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.05)
+
+    inbox.note_work_finished()  # last done — gate opens
+    assert not inbox.has_pending_work
+    await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.5)
+
+    # Over-finish (would be a producer bug) is clamped, not negative, and does
+    # not corrupt the gate.
+    inbox.note_work_finished()
+    assert not inbox.has_pending_work
+    await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_idle_waits_for_late_background_completion(tmp_path: Path) -> None:
+    """#179 fail-stop (session): a backgrounded unit that finishes AFTER the
+    agent's turn ended must have its completion DELIVERED into a driver round
+    before ``idle()`` returns — the exact drop the one-shot CLI suffered.
+
+    Reproducer mirrors the one-shot CLI flow: ``prompt`` returns at agent_end
+    while a tracked background unit is still running. The unit later posts a
+    ``source="background"`` completion and finishes. ``idle()`` must:
+      1. NOT return while the unit is live (work outstanding), and
+      2. NOT return until the posted completion has been drained into a round
+         (the delivery turn ran).
+
+    Without ``idle`` (the pre-patch CLI) the process would exit at step (0),
+    dropping the completion. We assert a delivery turn actually saw the late
+    completion text and that ``idle`` only returned afterwards.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._idle_late_bg_{id(tmp_path)}"
+
+    turn = [0]
+    delivery_saw_completion: list[bool] = []
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del model, tools, system, signal, thinking
+        idx = turn[0]
+        turn[0] += 1
+        if idx > 0:
+            delivery_saw_completion.append(
+                any("late bg done" in t for t in _texts(messages, "user"))
+            )
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text=f"turn-{idx}")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        inbox = session.inbox
+
+        # Simulate a producer that brackets a detached unit: mark work live
+        # NOW (as background_exec/sub_agent do at dispatch), then post its
+        # completion + finish after a short delay — strictly AFTER prompt()
+        # returns at agent_end.
+        inbox.note_work_started()
+
+        async def _late_unit() -> None:
+            await _aio.sleep(0.05)
+            inbox.push(
+                InboxItem(source="background", payload="late bg done")
+            )
+            inbox.note_work_finished()
+
+        unit = _aio.create_task(_late_unit())
+
+        # The agent's only turn ends here; prompt returns while work is live.
+        await session.prompt("start")
+        assert inbox.has_pending_work, (
+            "background unit should still be live at agent_end"
+        )
+
+        # The one-shot host now waits to be idle before exiting.
+        await _aio.wait_for(session.idle(), timeout=3.0)
+        await unit
+
+        # idle() only returned after the late completion was delivered into a
+        # round (a delivery turn ran and saw the completion text), and the
+        # session is genuinely at rest.
+        assert delivery_saw_completion == [True], delivery_saw_completion
+        assert inbox.is_empty()
+        assert not inbox.has_pending_work
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_idle_returns_immediately_when_already_at_rest(
+    tmp_path: Path,
+) -> None:
+    """#179 guard: with no background work and an empty inbox, ``idle()``
+    returns promptly (the common case — no overrunning tools), so a one-shot
+    host with nothing detached is not held open."""
+    import asyncio as _aio
+
+    module_name = f"tests.unit._idle_at_rest_{id(tmp_path)}"
+    try:
+        session = await _make_session(tmp_path, module_name, _stream_text("ok"))
+        await session.prompt("hi")
+        await _aio.wait_for(session.idle(), timeout=2.0)
+        assert session.inbox.is_empty()
+        assert not session.inbox.has_pending_work
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)

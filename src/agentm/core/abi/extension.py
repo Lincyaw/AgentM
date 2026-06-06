@@ -14,6 +14,7 @@ MUST NOT import anything from ``agentm.core.runtime``.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -375,6 +376,7 @@ class ExtensionAPI(Protocol):
         source: str,
         payload: Any,
         dedup_key: str | None = None,
+        terminal: bool = False,
     ) -> None:
         """Push an item onto the session inbox — the generic producer entry.
 
@@ -387,10 +389,38 @@ class ExtensionAPI(Protocol):
         earlier item in place rather than stacking (e.g. a background ticker's
         rolling status line).
 
+        ``terminal=True`` carries a *terminate intent* into the loop (#177): a
+        backgrounded tool whose detached completion is a
+        :class:`ToolTerminate` posts with ``terminal=True`` so the runtime stops
+        the loop (``ToolTerminated``) once the item is delivered, rather than
+        keeping the agent alive on the non-empty inbox. The message still lands
+        in the conversation first.
+
         :meth:`send_user_message` is the ``source="user"`` sugar over this; new
         producers (``background_exec``, ``monitor``, the future ``sub_agent``
         rewrite) post through ``post_inbox`` directly. See
         ``.claude/designs/session-inbox.md`` (step-3 design decisions).
+        """
+        ...
+
+    def track_background(self) -> AbstractContextManager[None]:
+        """Bracket a detached background unit so the host can wait it out (#179).
+
+        A producer that runs work in an ``asyncio.Task`` outliving the agent's
+        turn (auto-backgrounded tools, child subagent sessions) wraps the unit's
+        lifetime in this context manager::
+
+            with api.track_background():
+                await self._watch(state, task)
+
+        While any tracked unit is live the session is **not idle**: a one-shot
+        host (``agentm -p``) blocks in :meth:`AgentSession.idle` until every
+        tracked unit finishes, so a late completion is never dropped for lack of
+        an event loop. Recurring signals (monitor wakeups / condition polls /
+        tickers) deliberately do NOT track — they are not work to drain before
+        exit and would keep a one-shot host alive forever. The pairing is
+        structural (``__exit__`` always decrements), so an exception in the unit
+        cannot leak the count.
         """
         ...
 

@@ -12,9 +12,10 @@ atoms never import from this module. The §11 validator forbids
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -525,6 +526,7 @@ class _ExtensionAPIImpl:
         source: str,
         payload: Any,
         dedup_key: str | None = None,
+        terminal: bool = False,
     ) -> None:
         """Push an item onto the session inbox — the generic producer entry.
 
@@ -532,13 +534,40 @@ class _ExtensionAPIImpl:
         ``context`` handler drains the inbox at the next turn boundary and
         renders each item per its ``source``, so a posted item surfaces on the
         very next turn. ``dedup_key`` makes a later same-key push replace the
-        earlier undrained item in place (no stacking). See
-        ``.claude/designs/session-inbox.md`` (step-3 design decisions).
+        earlier undrained item in place (no stacking). ``terminal=True`` marks
+        a terminate intent the runtime drain seam routes through loop
+        termination (#177). See ``.claude/designs/session-inbox.md`` (step-3
+        design decisions).
         """
         self._assert_active()
         self._inbox.push(
-            InboxItem(source=source, payload=payload, dedup_key=dedup_key)
+            InboxItem(
+                source=source,
+                payload=payload,
+                dedup_key=dedup_key,
+                terminal=terminal,
+            )
         )
+
+    @contextlib.contextmanager
+    def track_background(self) -> Iterator[None]:
+        """Bracket a detached background unit so the host can wait it out (#179).
+
+        Thin wrapper over the inbox's background-work counter. ``__enter__``
+        increments (the session is now non-idle); ``__exit__`` ALWAYS
+        decrements, even if the bracketed coroutine raised — so a failing
+        background unit cannot leak the count and wedge a one-shot host into
+        never exiting. Staleness is checked on enter only; if the atom reloaded
+        between enter and exit the decrement still runs against the (same) inbox
+        object the count was taken on, keeping the books balanced.
+        """
+
+        self._assert_active()
+        self._inbox.note_work_started()
+        try:
+            yield
+        finally:
+            self._inbox.note_work_finished()
 
     def send_user_message(self, content: str | list[Any]) -> None:
         """Push a user message onto the session inbox for the next turn.

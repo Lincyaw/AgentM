@@ -20,6 +20,8 @@ atoms don't touch those; the integration-test layer covers the full API.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from typing import Any
 
 from agentm.core.runtime.session_inbox import InboxItem, SessionInbox
@@ -40,11 +42,33 @@ class FakeExtensionAPI:
         self._handlers: dict[str, list[Any]] = {}
 
     def post_inbox(
-        self, *, source: str, payload: Any, dedup_key: str | None = None
+        self,
+        *,
+        source: str,
+        payload: Any,
+        dedup_key: str | None = None,
+        terminal: bool = False,
     ) -> None:
         self.inbox.push(
-            InboxItem(source=source, payload=payload, dedup_key=dedup_key)
+            InboxItem(
+                source=source,
+                payload=payload,
+                dedup_key=dedup_key,
+                terminal=terminal,
+            )
         )
+
+    @contextlib.contextmanager
+    def track_background(self) -> Iterator[None]:
+        """Bracket a detached unit against the real inbox's work counter (#179)
+        so producer tests can assert the count rises during the unit's run and
+        returns to zero after it finishes."""
+
+        self.inbox.note_work_started()
+        try:
+            yield
+        finally:
+            self.inbox.note_work_finished()
 
     def register_tool(self, tool: Any) -> None:
         self.tools.append(tool)

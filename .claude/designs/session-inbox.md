@@ -1,6 +1,6 @@
 # Session Inbox — One Entry Point for Everything That Reaches the Loop
 
-Status: **accepted (2026-05-28); steps 1-4 implemented — SessionInbox spine, sub_agent findings routed through the inbox, background_exec, monitor; step 5 (long-lived-host driver + interrupt-and-resume) lands with the gateway**
+Status: **accepted (2026-05-28); steps 1-5 implemented — SessionInbox spine, sub_agent findings routed through the inbox, background_exec, monitor (incl. condition-polling #178), persistent driver + interrupt-and-resume; follow-ups #177 (terminate-from-background) and #179 (one-shot CLI idle keep-alive) closed**
 Owner: kernel + orchestration
 
 Reaches into: `core/abi/loop.py` (the `decide_turn_action`/`Inject` drain seam),
@@ -211,11 +211,12 @@ long-turn agent never finds a pile of stale status lines.
   timeout and return normally — **no behaviour change; existing tool tests must stay
   green** — only an overrun returns the ticket. Optional `denylist` config (default
   empty) excludes tools that must never background.
-- **Terminal tools (simplified for step 3).** A foreground completion (<timeout)
-  returning `ToolTerminate` works unchanged. A *backgrounded* tool that ultimately
-  returns `ToolTerminate` is, in step 3, injected as an ordinary completion (the
-  terminate intent does not stop the loop yet); terminate-from-background is handled
-  once the step-5 driver exists. A TODO, not a silent drop.
+- **Terminal tools.** A foreground completion (<timeout) returning `ToolTerminate`
+  works unchanged. A *backgrounded* tool that ultimately returns `ToolTerminate`
+  posts its completion with `InboxItem.terminal=True` (#177): the `context` drain
+  seam records the terminate cause and the keep-alive floor returns
+  `Stop(ToolTerminated)` once the message is delivered — symmetric with a
+  foreground terminate, never a silent drop.
 - **Completion + idle boundary.** Completion and ticker items
   `post_inbox(source="background")`; while the agent is actively taking turns the
   step-1 `context` drain injects them. **Idle auto-wakeup is step 5** (the persistent
@@ -293,4 +294,9 @@ loading the same atoms, so `background_exec` + `monitor` apply recursively.
 4. `monitor` (schedule_wakeup / create_monitor) on the inbox. **Done** —
    `extensions/builtin/monitor.py` posts via `post_inbox(source="monitor")`.
 5. Long-lived host driver loop + interrupt-and-resume; validate on one channel first.
-   **Deferred** — lands with the gateway.
+   **Done** — the persistent driver + `prompt`/`tick` sugar + interrupt landed
+   with #176. Follow-ups closed: terminate-from-background routes through
+   `Stop(ToolTerminated)` via `InboxItem.terminal` (#177); `create_monitor`
+   gained the condition-polling form (#178); the one-shot `agentm -p` CLI waits
+   `AgentSession.idle()` (driver parked + inbox empty + no tracked background
+   unit) before exiting so late completions are delivered, not dropped (#179).
