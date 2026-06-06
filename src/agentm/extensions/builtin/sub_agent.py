@@ -12,6 +12,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 import uuid
@@ -636,6 +637,24 @@ class _ChildTaskManager:
             )
 
     async def _run_child(
+        self, *, state: _ChildTask, initial_prompt: str
+    ) -> list[Any] | None:
+        # #179: a child session is detached background work whose finding posts
+        # to the parent inbox AFTER the parent's turn may have ended. Bracket
+        # the whole run so a one-shot host (``agentm -p``) stays alive until the
+        # finding has landed, rather than exiting on the parent's last turn and
+        # dropping the child's result. The bracket ALWAYS exits (every branch
+        # below finalizes), so the count cannot leak.
+        try:
+            bracket = self._api.track_background()
+        except ExtensionStaleError:
+            bracket = contextlib.nullcontext()
+        with bracket:
+            return await self._run_child_inner(
+                state=state, initial_prompt=initial_prompt
+            )
+
+    async def _run_child_inner(
         self, *, state: _ChildTask, initial_prompt: str
     ) -> list[Any] | None:
         next_prompt: str | None = initial_prompt

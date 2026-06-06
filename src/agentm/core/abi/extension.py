@@ -14,6 +14,7 @@ MUST NOT import anything from ``agentm.core.runtime``.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -399,6 +400,27 @@ class ExtensionAPI(Protocol):
         producers (``background_exec``, ``monitor``, the future ``sub_agent``
         rewrite) post through ``post_inbox`` directly. See
         ``.claude/designs/session-inbox.md`` (step-3 design decisions).
+        """
+        ...
+
+    def track_background(self) -> AbstractContextManager[None]:
+        """Bracket a detached background unit so the host can wait it out (#179).
+
+        A producer that runs work in an ``asyncio.Task`` outliving the agent's
+        turn (auto-backgrounded tools, child subagent sessions) wraps the unit's
+        lifetime in this context manager::
+
+            with api.track_background():
+                await self._watch(state, task)
+
+        While any tracked unit is live the session is **not idle**: a one-shot
+        host (``agentm -p``) blocks in :meth:`AgentSession.idle` until every
+        tracked unit finishes, so a late completion is never dropped for lack of
+        an event loop. Recurring signals (monitor wakeups / condition polls /
+        tickers) deliberately do NOT track — they are not work to drain before
+        exit and would keep a one-shot host alive forever. The pairing is
+        structural (``__exit__`` always decrements), so an exception in the unit
+        cannot leak the count.
         """
         ...
 

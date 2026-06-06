@@ -78,6 +78,20 @@ class SessionInbox:
     def __init__(self) -> None:
         self._items: list[InboxItem] = []
         self._nonempty = asyncio.Event()
+        # #179: outstanding detached background work (auto-backgrounded tools,
+        # child subagent sessions) that can still post a LATE inbox item after
+        # the agent has ended its turn. A one-shot host (``agentm -p``) must NOT
+        # exit while this is non-zero, or the late completion is dropped with no
+        # event loop to receive it. Producers bracket their detached unit with
+        # ``note_work_started`` / ``note_work_finished`` (via
+        # ``ExtensionAPI.track_background``). ``_no_pending_work`` is SET while
+        # the count is zero so ``wait_idle`` can block until the last unit ends.
+        # Recurring signals (monitor wakeups / condition polls / tickers) do
+        # NOT count — they are not work to drain before exit, and counting them
+        # would keep a one-shot host alive forever.
+        self._pending_work = 0
+        self._no_pending_work = asyncio.Event()
+        self._no_pending_work.set()
 
     def push(self, item: InboxItem) -> None:
         """Enqueue ``item``. With a ``dedup_key``, replace the same-key
@@ -114,6 +128,42 @@ class SessionInbox:
         """
 
         await self._nonempty.wait()
+
+    def note_work_started(self) -> None:
+        """Record one detached background unit as live (#179).
+
+        Clears the no-pending-work gate so ``wait_idle`` blocks until the
+        matching :meth:`note_work_finished`. Idempotent only in the accounting
+        sense — each call MUST be paired with exactly one finish (use
+        ``ExtensionAPI.track_background`` so the pairing is structural).
+        """
+
+        self._pending_work += 1
+        self._no_pending_work.clear()
+
+    def note_work_finished(self) -> None:
+        """Record one detached background unit as terminal (#179).
+
+        Sets the gate once the count returns to zero. Never drops below zero:
+        an over-finish (which would indicate a producer bug) is clamped so the
+        gate cannot be falsely set while real work is still live.
+        """
+
+        if self._pending_work > 0:
+            self._pending_work -= 1
+        if self._pending_work == 0:
+            self._no_pending_work.set()
+
+    @property
+    def has_pending_work(self) -> bool:
+        """True while at least one detached background unit is live (#179)."""
+
+        return self._pending_work > 0
+
+    async def wait_no_pending_work(self) -> None:
+        """Block until every tracked background unit has finished (#179)."""
+
+        await self._no_pending_work.wait()
 
     def kick(self) -> None:
         """Wake :meth:`wait_nonempty` without enqueuing an item.

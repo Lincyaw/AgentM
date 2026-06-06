@@ -1309,3 +1309,156 @@ async def test_concurrent_prompts_serialize_no_stale_data(tmp_path: Path) -> Non
         await session.shutdown()
         sys.modules.pop(module_name, None)
 
+
+
+# ---------------------------------------------------------------------------
+# #179: idle() — one-shot host waits out late background completions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inbox_pending_work_gates_idle_event() -> None:
+    """#179 fail-stop (unit): the background-work counter blocks
+    ``wait_no_pending_work`` while work is live and releases it only when the
+    count returns to zero — and an over-finish cannot falsely release it.
+
+    Without this gate ``idle()`` has no signal for "a detached unit is still
+    running" and would let a one-shot host exit mid-task."""
+
+    import asyncio as _aio
+
+    inbox = SessionInbox()
+    # Starts idle: no work outstanding ⇒ wait returns immediately.
+    assert not inbox.has_pending_work
+    await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.5)
+
+    inbox.note_work_started()
+    assert inbox.has_pending_work
+    with pytest.raises(_aio.TimeoutError):
+        await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.05)
+
+    inbox.note_work_started()  # two units live
+    inbox.note_work_finished()  # one done — still gated
+    assert inbox.has_pending_work
+    with pytest.raises(_aio.TimeoutError):
+        await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.05)
+
+    inbox.note_work_finished()  # last done — gate opens
+    assert not inbox.has_pending_work
+    await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.5)
+
+    # Over-finish (would be a producer bug) is clamped, not negative, and does
+    # not corrupt the gate.
+    inbox.note_work_finished()
+    assert not inbox.has_pending_work
+    await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_idle_waits_for_late_background_completion(tmp_path: Path) -> None:
+    """#179 fail-stop (session): a backgrounded unit that finishes AFTER the
+    agent's turn ended must have its completion DELIVERED into a driver round
+    before ``idle()`` returns — the exact drop the one-shot CLI suffered.
+
+    Reproducer mirrors the one-shot CLI flow: ``prompt`` returns at agent_end
+    while a tracked background unit is still running. The unit later posts a
+    ``source="background"`` completion and finishes. ``idle()`` must:
+      1. NOT return while the unit is live (work outstanding), and
+      2. NOT return until the posted completion has been drained into a round
+         (the delivery turn ran).
+
+    Without ``idle`` (the pre-patch CLI) the process would exit at step (0),
+    dropping the completion. We assert a delivery turn actually saw the late
+    completion text and that ``idle`` only returned afterwards.
+    """
+    import asyncio as _aio
+
+    module_name = f"tests.unit._idle_late_bg_{id(tmp_path)}"
+
+    turn = [0]
+    delivery_saw_completion: list[bool] = []
+
+    async def stream_fn(
+        *,
+        messages: list[Any],
+        model: Model,
+        tools: list[Any],
+        system: str | None = None,
+        signal: Any = None,
+        thinking: str = "off",
+    ) -> AsyncIterator[Any]:
+        del model, tools, system, signal, thinking
+        idx = turn[0]
+        turn[0] += 1
+        if idx > 0:
+            delivery_saw_completion.append(
+                any("late bg done" in t for t in _texts(messages, "user"))
+            )
+        yield MessageEnd(
+            message=AssistantMessage(
+                role="assistant",
+                content=[TextContent(type="text", text=f"turn-{idx}")],
+                timestamp=0.0,
+                stop_reason="end_turn",
+            )
+        )
+
+    try:
+        session = await _make_session(tmp_path, module_name, stream_fn)
+        inbox = session.inbox
+
+        # Simulate a producer that brackets a detached unit: mark work live
+        # NOW (as background_exec/sub_agent do at dispatch), then post its
+        # completion + finish after a short delay — strictly AFTER prompt()
+        # returns at agent_end.
+        inbox.note_work_started()
+
+        async def _late_unit() -> None:
+            await _aio.sleep(0.05)
+            inbox.push(
+                InboxItem(source="background", payload="late bg done")
+            )
+            inbox.note_work_finished()
+
+        unit = _aio.create_task(_late_unit())
+
+        # The agent's only turn ends here; prompt returns while work is live.
+        await session.prompt("start")
+        assert inbox.has_pending_work, (
+            "background unit should still be live at agent_end"
+        )
+
+        # The one-shot host now waits to be idle before exiting.
+        await _aio.wait_for(session.idle(), timeout=3.0)
+        await unit
+
+        # idle() only returned after the late completion was delivered into a
+        # round (a delivery turn ran and saw the completion text), and the
+        # session is genuinely at rest.
+        assert delivery_saw_completion == [True], delivery_saw_completion
+        assert inbox.is_empty()
+        assert not inbox.has_pending_work
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)
+
+
+@pytest.mark.asyncio
+async def test_idle_returns_immediately_when_already_at_rest(
+    tmp_path: Path,
+) -> None:
+    """#179 guard: with no background work and an empty inbox, ``idle()``
+    returns promptly (the common case — no overrunning tools), so a one-shot
+    host with nothing detached is not held open."""
+    import asyncio as _aio
+
+    module_name = f"tests.unit._idle_at_rest_{id(tmp_path)}"
+    try:
+        session = await _make_session(tmp_path, module_name, _stream_text("ok"))
+        await session.prompt("hi")
+        await _aio.wait_for(session.idle(), timeout=2.0)
+        assert session.inbox.is_empty()
+        assert not session.inbox.has_pending_work
+    finally:
+        await session.shutdown()
+        sys.modules.pop(module_name, None)

@@ -530,6 +530,16 @@ async def run(
             final = await session.prompt(config.prompt)
         else:
             final = await session.tick()
+        # #179: a one-shot CLI owns its event loop only for the duration of
+        # this coroutine — once it returns, ``asyncio.run`` tears the loop down.
+        # An auto-backgrounded tool / child subagent that finishes AFTER the
+        # agent's last turn would post its completion into a dead loop and be
+        # lost. Wait for the session to be truly idle (driver parked, inbox
+        # empty, no tracked background unit running) so the persistent driver
+        # delivers any late completion first. Long-lived hosts (gateway / worker
+        # / feishu / TUI) keep their own loop alive and never call this.
+        await session.idle()
+        final = session.session_manager.get_messages()
         cost_service = session.get_service("cost_query")
         provider_name = session.model.provider if session.model is not None else None
         if not config.quiet:
