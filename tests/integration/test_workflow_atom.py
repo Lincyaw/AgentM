@@ -1,18 +1,20 @@
-"""Fail-stop integration test for the ``workflow`` atom.
+"""Fail-stop integration tests for the ``workflow`` atom.
 
-Per ``CLAUDE.md`` testing philosophy: only the position where the atom's
-value proposition fails when broken. For ``workflow`` that position is the
-**journal-resume contract** (design §3.3): a re-run of a workflow must return
-the cached ``agent()`` result *without re-spawning* a child session. If the
-hash key drifts or the journal lookup misfires, the whole "resume only the
-new/changed calls" property is gone and a workflow becomes non-idempotent.
+Per ``CLAUDE.md`` testing philosophy: only the positions where the atom's
+value proposition fails when broken.
 
-The test drives a tiny JS script through ``agent()`` then ``parallel()``,
-runs it twice in the same session, and asserts the second run spawns zero new
-child sessions while returning the same results.
+1. **Journal-resume idempotence** (design §3.3): a re-run must return the
+   cached ``agent()`` result *without re-spawning*. The disk-backed lookup is
+   asserted directly (fresh ``_Journal``, empty in-memory cache) so a
+   regression in ``list_artifacts``/``read`` can't hide behind the cache.
+2. **Budget total/remaining**: the configured ceiling must back
+   ``budget.remaining()``, not just raw ``spent``.
+3. **pipeline staged flow**: each item flows through all stages (the real
+   multi-stage primitive, not a parallel alias).
+4. **Curated namespace**: the script cannot reach ``open`` (guardrail).
 
-Skips cleanly when the optional QuickJS engine is not installed — the atom
-gate is exercised separately by the unit-level import-gate path.
+A stub echo provider stands in for the LLM so child sessions are real but
+deterministic.
 """
 
 from __future__ import annotations
@@ -39,11 +41,6 @@ from agentm.core.abi.messages import AssistantMessage, Usage
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 from agentm.extensions.builtin.workflow import _Journal
-
-
-quickjs = pytest.importorskip(
-    "quickjs", reason="workflow atom needs the optional QuickJS engine"
-)
 
 
 _PROVIDER_MODULE = "agentm._tests.workflow_echo_provider"
@@ -135,29 +132,32 @@ def _tool(session: AgentSession, name: str) -> Any:
     raise AssertionError(f"missing tool {name}")
 
 
-_SCRIPT = """
-const a = agent("alpha");
-const rest = parallel([{prompt: "beta"}, {prompt: "gamma"}]);
-JSON.stringify([a, rest[0], rest[1]]);
-"""
-
-
-@pytest.mark.asyncio
-async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
+async def _make_session(tmp_path: Path) -> AgentSession:
     _git_init(tmp_path)
     provider_module = _install_echo_provider()
-    session = await AgentSession.create(
+    return await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),
             provider=(provider_module, {}),
             extensions=[
                 ("agentm.extensions.builtin.operations_local", {}),
                 ("agentm.extensions.builtin.artifact_store", {}),
-                ("agentm.extensions.builtin.workflow", {}),
+                ("agentm.extensions.builtin.workflow", {"budget_tokens": 100}),
             ],
         )
     )
 
+
+_RESUME_SCRIPT = """
+a = await agent("alpha")
+rest = await parallel([agent("beta"), agent("gamma")])
+return [a, rest[0], rest[1]]
+"""
+
+
+@pytest.mark.asyncio
+async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
+    session = await _make_session(tmp_path)
     spawned: list[str] = []
     session.bus.on(
         ChildSessionStartEvent.CHANNEL,
@@ -167,7 +167,7 @@ async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
     try:
         tool = _tool(session, "workflow")
 
-        first = await tool.execute({"script": _SCRIPT})
+        first = await tool.execute({"script": _RESUME_SCRIPT})
         assert not first.is_error, first.content[0].text
         # alpha + beta + gamma = three distinct prompts -> three children.
         assert len(spawned) == 3
@@ -179,20 +179,22 @@ async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
         # Budget aggregated across the three children (5+7 tokens each).
         assert first.extras["budget"]["spent"] == 36
 
-        # The load-bearing resume path is the DISK lookup with an EMPTY
-        # in-memory cache: a fresh _Journal against the same artifact_store
-        # must resolve the first run's keys (list_artifacts -> read). The
-        # per-execute _WorkflowRun already builds a fresh _Journal, but assert
-        # the disk path directly so a regression in list_artifacts/read can't
-        # hide behind an in-process cache.
+        # Load-bearing resume path: a fresh _Journal (empty in-memory cache)
+        # must resolve the first run's key from artifact_store on DISK
+        # (list_artifacts -> read), not just from an in-process cache.
         store = session.get_service("artifact_store")
         assert store is not None
         cold = _Journal(store=store)
-        cached_alpha = await cold.lookup(_Journal.key("alpha", {}))
+        cached_alpha = await cold.lookup(
+            _Journal.key(
+                "alpha",
+                {"scenario": None, "isolation": None, "tool_allowlist": None},
+            )
+        )
         assert cached_alpha is not None and "echo:alpha" in cached_alpha
 
         spawned.clear()
-        second = await tool.execute({"script": _SCRIPT})
+        second = await tool.execute({"script": _RESUME_SCRIPT})
         assert not second.is_error, second.content[0].text
         # Journal resume: every agent() call hits the cache -> no new spawns.
         assert spawned == []
@@ -203,29 +205,17 @@ async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
 
 
 _BUDGET_SCRIPT = """
-agent("one");
-JSON.stringify(budget());
+await agent("one")
+return {"total": budget.total, "spent": budget.spent(), "remaining": budget.remaining()}
 """
 
 
 @pytest.mark.asyncio
 async def test_workflow_budget_total_and_remaining(tmp_path: Path) -> None:
-    """budget().total / .remaining are live when a ceiling is configured —
-    guards the BudgetService contract beyond raw `spent`."""
+    """budget.total / .remaining() are live when a ceiling is configured —
+    guards the BudgetService contract beyond raw ``spent``."""
 
-    _git_init(tmp_path)
-    provider_module = _install_echo_provider()
-    session = await AgentSession.create(
-        AgentSessionConfig(
-            cwd=str(tmp_path),
-            provider=(provider_module, {}),
-            extensions=[
-                ("agentm.extensions.builtin.operations_local", {}),
-                ("agentm.extensions.builtin.artifact_store", {}),
-                ("agentm.extensions.builtin.workflow", {"budget_tokens": 100}),
-            ],
-        )
-    )
+    session = await _make_session(tmp_path)
     try:
         tool = _tool(session, "workflow")
         result = await tool.execute({"script": _BUDGET_SCRIPT})
@@ -235,5 +225,61 @@ async def test_workflow_budget_total_and_remaining(tmp_path: Path) -> None:
         assert snap["spent"] == 12
         assert snap["total"] == 100
         assert snap["remaining"] == 88
+    finally:
+        await session.shutdown()
+
+
+_PIPELINE_SCRIPT = """
+def upper(s):
+    return s.upper()
+
+async def echo_again(s):
+    return await agent(s)
+
+# two stages per item: async agent stage, then a sync transform stage.
+results = await pipeline(args["items"], echo_again, lambda r: upper(r))
+return results
+"""
+
+
+@pytest.mark.asyncio
+async def test_workflow_pipeline_runs_each_item_through_stages(
+    tmp_path: Path,
+) -> None:
+    """pipeline threads every item through every stage (real multi-stage
+    primitive). Two items x (async agent stage + sync transform stage)."""
+
+    session = await _make_session(tmp_path)
+    try:
+        tool = _tool(session, "workflow")
+        result = await tool.execute(
+            {"script": _PIPELINE_SCRIPT, "args": {"items": ["x", "y"]}}
+        )
+        assert not result.is_error, result.content[0].text
+        out = json.loads(result.content[0].text)
+        # each item: agent("x") -> "echo:x" -> upper -> "ECHO:X"
+        assert out == ["ECHO:X", "ECHO:Y"]
+        assert result.extras["agents_spawned"] == 2
+    finally:
+        await session.shutdown()
+
+
+_GUARDRAIL_SCRIPT = """
+return open("/etc/passwd").read()
+"""
+
+
+@pytest.mark.asyncio
+async def test_workflow_curated_namespace_blocks_open(tmp_path: Path) -> None:
+    """The curated namespace omits ``open`` — an honest script reaching for the
+    filesystem fails as a script error rather than reading host files. (A
+    guardrail, not a security wall; see the atom docstring.)"""
+
+    session = await _make_session(tmp_path)
+    try:
+        tool = _tool(session, "workflow")
+        result = await tool.execute({"script": _GUARDRAIL_SCRIPT})
+        assert result.is_error
+        assert "workflow script error" in result.content[0].text
     finally:
         await session.shutdown()
