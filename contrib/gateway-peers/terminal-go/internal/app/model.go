@@ -384,6 +384,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keyCtrlL:
 		m.transcript = nil
+		m.clearFocus()
 		m.transcriptDirty = true
 		m.viewport.SetContent("")
 		m.viewport.GotoTop()
@@ -408,16 +409,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		m.transcriptDirty = true
-		return m, nil
-
-	case keyAltUp:
-		m.moveFocus(-1)
-		m.transcriptDirty = true
-		return m, nil
-
-	case keyAltDown:
-		m.moveFocus(1)
 		m.transcriptDirty = true
 		return m, nil
 
@@ -523,6 +514,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if o := m.viewOverlayForFocused(); o != nil {
 				m.overlay = o
 			}
+			return m, nil
+		case keyAltUp:
+			m.moveFocus(-1)
+			m.transcriptDirty = true
+			return m, nil
+		case keyAltDown:
+			m.moveFocus(1)
+			m.transcriptDirty = true
 			return m, nil
 		}
 	}
@@ -638,15 +637,13 @@ func blockLabel(b blocks.Block) string {
 	case *blocks.UserTurn:
 		text = v.Content
 	case *blocks.AssistantTurn:
-		// Use the first TextBlock's content as label.
+		// Use the first TextBlock's content as label. A tool-only turn (no
+		// TextBlock segment) yields an empty label, matching prior behavior.
 		for _, seg := range v.Segments {
 			if tb, ok := seg.(*blocks.TextBlock); ok {
 				text = tb.Text
 				break
 			}
-		}
-		if text == "" {
-			text = "assistant"
 		}
 	case *blocks.SystemTurn:
 		text = v.Content
@@ -670,6 +667,7 @@ func (m Model) handleSubmit(msg components.InputSubmitted) (tea.Model, tea.Cmd) 
 		if text == "/clear" {
 			m.transcript = nil
 			m.activeTurn = nil
+			m.clearFocus()
 			m.transcriptDirty = true
 			if m.ready {
 				m.viewport.SetContent("")
@@ -792,6 +790,16 @@ func (m *Model) focusableBlocks() []blocks.Focusable {
 		}
 	}
 	return result
+}
+
+// clearFocus drops the current block focus, releasing the focused flag on the
+// underlying block. Used by transcript-clearing paths so a later 'v' doesn't
+// open an overlay for a block that no longer exists.
+func (m *Model) clearFocus() {
+	if m.focused != nil {
+		m.focused.SetFocused(false)
+		m.focused = nil
+	}
 }
 
 // toggleFocused toggles the collapse state of the focused block. If no block

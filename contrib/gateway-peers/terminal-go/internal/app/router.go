@@ -169,14 +169,17 @@ func (r *Router) toolResult(m *Model, body map[string]any, meta map[string]any) 
 
 func (r *Router) assistantText(m *Model, body map[string]any, _ map[string]any) {
 	turn := r.ensureActiveTurn(m)
-	if content, ok := body["content"].(string); ok {
-		// Set the content on the last TextBlock, or create one if none exists.
-		tb := turn.LastTextBlock()
-		if tb == nil {
-			tb = &blocks.TextBlock{GlamourStyle: m.glamourStyle}
+	// The gateway emits assistant_text once with the FULL concatenated message
+	// text. If the turn already streamed one or more TextBlock segments, trust
+	// those deltas (overwriting the last with the full text would duplicate
+	// earlier segments and break chronological order around interleaved tools).
+	// Only synthesize a TextBlock when none was streamed.
+	if turn.LastTextBlock() == nil {
+		if content, ok := body["content"].(string); ok {
+			tb := &blocks.TextBlock{GlamourStyle: m.glamourStyle}
+			tb.Text = content
 			turn.AppendSegment(tb)
 		}
-		tb.Text = content
 	}
 	turn.SetComplete()
 	m.activeTurn = nil
