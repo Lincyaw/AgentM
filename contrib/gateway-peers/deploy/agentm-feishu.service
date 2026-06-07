@@ -1,0 +1,53 @@
+# agentm-feishu.service — the Feishu (Lark) chat-client daemon.
+#
+# Install alongside agentm-gateway.service (same install path; see README.md).
+# Run it as the SAME User=/Group= as the gateway: the gateway's unix socket
+# accepts only the gateway's own uid by default, so a mismatched user is
+# refused (feishu exits 7, EXIT_CONNECT).
+#
+# USER-UNIT VARIANT: as with the gateway, drop User=/Group=, install under
+# ~/.config/systemd/user/, and point --connect/AGENTM_SOCKET at unix://%t/agentm/gw.sock.
+
+[Unit]
+Description=AgentM Feishu chat client
+Documentation=file:///REPLACE/with/path/to/AgentM/contrib/gateway-peers/feishu/README.md
+# Loose coupling: start the gateway first if it isn't up, but DON'T hard-require
+# it. Thanks to Phase 1 auto-reconnect, the feishu client tolerates the gateway
+# being briefly down or restarting (it re-dials, same peer_name ⇒ outbox
+# replay). `Wants` (not `Requires`) means a gateway restart does NOT cascade
+# into a feishu restart.
+After=agentm-gateway.service
+Wants=agentm-gateway.service
+
+[Service]
+Type=simple
+
+# MUST match agentm-gateway.service's User/Group (see header).
+User=REPLACE_WITH_SERVICE_USER
+Group=REPLACE_WITH_SERVICE_GROUP
+
+WorkingDirectory=/REPLACE/with/path/to/AgentM
+
+# LARK_APP_ID / LARK_APP_SECRET (and AGENTM_*) come from the repo .env — NEVER
+# inline secrets in this unit. Leading `-` makes a missing file non-fatal at
+# unit level (the client will still error out itself if creds are absent).
+EnvironmentFile=-/REPLACE/with/path/to/AgentM/.env
+
+# Connect to the gateway's pinned socket. Must equal the gateway unit's
+# AGENTM_SOCKET / --bind path.
+Environment=AGENTM_SOCKET=unix:///run/agentm/gw.sock
+
+# `--package agentm-feishu` is required because the feishu peer is a uv
+# workspace member NOT installed into the root venv by a plain `uv sync`.
+# (Alternative: run `uv sync --all-packages` once and use plain
+# `uv run agentm-feishu` — see README + update.sh.)
+# --scenario defaults to `chatbot` in code, so do NOT pass it here.
+ExecStart=uv run --package agentm-feishu agentm-feishu --connect unix:///run/agentm/gw.sock
+
+Restart=always
+RestartSec=2
+
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
