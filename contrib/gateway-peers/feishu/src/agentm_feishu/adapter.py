@@ -785,27 +785,22 @@ def _markdown_card(text: str, *, buttons: list[_ButtonLike]) -> dict[str, Any]:
     """Construct a Lark schema-2.0 interactive card.
 
     Body is one ``markdown`` element so Chinese, code fences, lists, and
-    inline formatting render. A non-empty ``buttons`` list appends an
-    ``action`` block; each button's ``value`` round-trips through Lark's
-    ``cardAction`` callback as the typed ``button_value``.
+    inline formatting render. Each button in ``buttons`` is appended as a
+    standalone ``button`` element — schema 2.0 dropped the 1.0 ``action``/
+    ``actions`` container (it rejects ``tag: action`` with ErrCode 200861).
+    Each button's ``value`` round-trips through Lark's ``cardAction``
+    callback as the typed ``button_value``.
     """
     elements: list[dict[str, Any]] = [
         {"tag": "markdown", "content": text or "*(empty)*"}
     ]
-    if buttons:
+    for btn in buttons:
         elements.append(
             {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": btn.label},
-                        "type": _BUTTON_STYLE_MAP.get(btn.style, "default"),
-                        "name": btn.label.lower(),
-                        "value": {"button_value": btn.value},
-                    }
-                    for btn in buttons
-                ],
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": btn.label},
+                "type": _BUTTON_STYLE_MAP.get(btn.style, "default"),
+                "value": {"button_value": btn.value},
             }
         )
     return {"schema": "2.0", "body": {"elements": elements}}
@@ -854,19 +849,16 @@ def _live_card(turn: _LiveTurn) -> dict[str, Any]:
     # buttons' ``button_value``). Once the turn finalizes or is interrupted
     # the button is dropped — a retired card must not invite another abort.
     if not turn.finalized and not turn.interrupted:
+        # Schema 2.0: a standalone ``button`` element (the 1.0 ``action``
+        # container is rejected with ErrCode 200861). ``element_id`` rides on
+        # the button itself so partial card updates can target it.
         elements.append(
             {
-                "tag": "action",
+                "tag": "button",
                 "element_id": "stop",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": _STOP_LABEL},
-                        "type": "danger",
-                        "name": "interrupt",
-                        "value": {"control": _INTERRUPT_CONTROL},
-                    }
-                ],
+                "text": {"tag": "plain_text", "content": _STOP_LABEL},
+                "type": "danger",
+                "value": {"control": _INTERRUPT_CONTROL},
             }
         )
     if turn.body:
