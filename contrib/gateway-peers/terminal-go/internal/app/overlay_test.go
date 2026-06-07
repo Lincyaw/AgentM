@@ -12,6 +12,13 @@ import (
 
 func testTheme() *theme.Theme { return theme.DarkTheme() }
 
+// assistantWithText is a helper that creates an AssistantTurn with a single
+// TextBlock segment, mirroring the new Segments model.
+func assistantWithText(text string) *blocks.AssistantTurn {
+	tb := &blocks.TextBlock{Text: text}
+	return &blocks.AssistantTurn{Segments: []blocks.Block{tb}}
+}
+
 func keyMsg(s string) tea.KeyMsg {
 	// Map simple key strings to KeyMsg
 	switch s {
@@ -88,7 +95,7 @@ func TestSearchOverlayKind(t *testing.T) {
 func TestSearchOverlayFindsMatches(t *testing.T) {
 	transcript := []blocks.Block{
 		&blocks.UserTurn{Content: "hello world"},
-		&blocks.AssistantTurn{Text: "Hello back to you"},
+		assistantWithText("Hello back to you"),
 	}
 	s := NewSearchOverlay(transcript)
 
@@ -281,7 +288,7 @@ func TestResendOverlayTabEdits(t *testing.T) {
 
 func TestCodeSaveOverlayKind(t *testing.T) {
 	transcript := []blocks.Block{
-		&blocks.AssistantTurn{Text: "```go\npackage main\n```"},
+		assistantWithText("```go\npackage main\n```"),
 	}
 	c := NewCodeSaveOverlay(transcript)
 	if c == nil {
@@ -294,7 +301,7 @@ func TestCodeSaveOverlayKind(t *testing.T) {
 
 func TestCodeSaveOverlayNilWithoutCodeBlocks(t *testing.T) {
 	transcript := []blocks.Block{
-		&blocks.AssistantTurn{Text: "just plain text"},
+		assistantWithText("just plain text"),
 	}
 	c := NewCodeSaveOverlay(transcript)
 	if c != nil {
@@ -305,7 +312,7 @@ func TestCodeSaveOverlayNilWithoutCodeBlocks(t *testing.T) {
 func TestCodeSaveOverlayDetectsBlocks(t *testing.T) {
 	text := "Here:\n```go\nfunc main() {}\n```\nAnd:\n```python\nprint('hi')\n```"
 	transcript := []blocks.Block{
-		&blocks.AssistantTurn{Text: text},
+		assistantWithText(text),
 	}
 	c := NewCodeSaveOverlay(transcript)
 	if c == nil {
@@ -329,7 +336,7 @@ func TestCodeSaveOverlayDetectsBlocks(t *testing.T) {
 func TestCodeSaveOverlaySingleBlockSkipsSelection(t *testing.T) {
 	text := "```bash\necho hello\n```"
 	transcript := []blocks.Block{
-		&blocks.AssistantTurn{Text: text},
+		assistantWithText(text),
 	}
 	c := NewCodeSaveOverlay(transcript)
 	if c == nil {
@@ -343,7 +350,7 @@ func TestCodeSaveOverlaySingleBlockSkipsSelection(t *testing.T) {
 func TestCodeSaveOverlayEscCloses(t *testing.T) {
 	text := "```go\nfunc main() {}\n```"
 	transcript := []blocks.Block{
-		&blocks.AssistantTurn{Text: text},
+		assistantWithText(text),
 	}
 	c := NewCodeSaveOverlay(transcript)
 	_, _, closed := c.Update(keyMsg("esc"))
@@ -422,7 +429,7 @@ func TestBlockPlainText(t *testing.T) {
 		t.Errorf("unexpected plain text for UserTurn")
 	}
 
-	a := &blocks.AssistantTurn{Text: "assistant text"}
+	a := assistantWithText("assistant text")
 	pt := blockPlainText(a)
 	if !strings.Contains(pt, "assistant text") {
 		t.Errorf("expected 'assistant text' in plain text, got %q", pt)

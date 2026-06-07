@@ -9,6 +9,11 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/util"
 )
 
+const (
+	inlineTruncLimit  = 2000
+	summaryTruncLimit = 48
+)
+
 // ToolBlock renders a tool invocation with name, args summary, and result.
 type ToolBlock struct {
 	Name      string
@@ -17,6 +22,7 @@ type ToolBlock struct {
 	OK        bool
 	Done      bool // false while the tool is still running
 	collapsed bool
+	focused   bool
 }
 
 // NewToolBlock creates a ToolBlock in collapsed, running state.
@@ -28,11 +34,23 @@ func (b *ToolBlock) Kind() string        { return "tool" }
 func (b *ToolBlock) Collapsed() bool     { return b.collapsed }
 func (b *ToolBlock) SetCollapsed(c bool) { b.collapsed = c }
 
+// Focused reports whether this block has keyboard focus.
+func (b *ToolBlock) Focused() bool { return b.focused }
+
+// SetFocused sets the keyboard focus state.
+func (b *ToolBlock) SetFocused(f bool) { b.focused = f }
+
 func (b *ToolBlock) Render(width int, th *theme.Theme) string {
+	var result string
 	if b.collapsed {
-		return b.renderCollapsed(width, th)
+		result = b.renderCollapsed(width, th)
+	} else {
+		result = b.renderExpanded(width, th)
 	}
-	return b.renderExpanded(width, th)
+	if b.focused {
+		return applyFocusBar(result, th)
+	}
+	return result
 }
 
 func (b *ToolBlock) renderCollapsed(_ int, th *theme.Theme) string {
@@ -65,8 +83,11 @@ func (b *ToolBlock) renderExpanded(width int, th *theme.Theme) string {
 		}
 	}
 	if b.Done && b.Result != "" {
-		resultText := util.Truncate(b.Result, 600)
+		resultText, truncated := truncateWithHint(b.Result, inlineTruncLimit)
 		sb.WriteString("  " + th.ToolBody.Render(resultText) + "\n")
+		if truncated {
+			sb.WriteString("  " + th.ToolBody.Render(" … (press v for full)") + "\n")
+		}
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
@@ -105,10 +126,13 @@ func (b *ToolBlock) renderWritePreview(_ int, th *theme.Theme) string {
 		sb.WriteString(th.ToolBody.Render("file: "+filePath) + "\n")
 	}
 	if content != "" {
-		preview := util.Truncate(content, 600)
+		preview, truncated := truncateWithHint(content, inlineTruncLimit)
 		lines := strings.Split(preview, "\n")
 		for _, line := range lines {
 			sb.WriteString(th.DiffAdd.Render("+ "+line) + "\n")
+		}
+		if truncated {
+			sb.WriteString(th.ToolBody.Render(" … (press v for full)") + "\n")
 		}
 	}
 	return strings.TrimRight(sb.String(), "\n")
@@ -122,8 +146,12 @@ func (b *ToolBlock) renderGenericBody(_ int, th *theme.Theme) string {
 	if err != nil {
 		return th.ToolBody.Render("(args unavailable)")
 	}
-	text := util.Truncate(string(data), 600)
-	return th.ToolBody.Render(text)
+	text, truncated := truncateWithHint(string(data), inlineTruncLimit)
+	result := th.ToolBody.Render(text)
+	if truncated {
+		result += "\n" + th.ToolBody.Render(" … (press v for full)")
+	}
+	return result
 }
 
 // summary extracts a short description from args based on tool name.
@@ -138,7 +166,59 @@ func (b *ToolBlock) summary() string {
 	default:
 		s = firstScalarValue(b.Args)
 	}
-	return util.Truncate(s, 48)
+	return util.Truncate(s, summaryTruncLimit)
+}
+
+// FullContent returns the complete untruncated content suitable for the view overlay.
+// For generic tools it returns pretty-printed args + result; for write it returns content + result.
+func (b *ToolBlock) FullContent() string {
+	var sb strings.Builder
+
+	if strings.EqualFold(b.Name, "edit") {
+		oldStr, _ := asString(b.Args["old_string"])
+		newStr, _ := asString(b.Args["new_string"])
+		filePath, _ := asString(b.Args["file_path"])
+		if filePath != "" {
+			sb.WriteString("file: " + filePath + "\n\n")
+		}
+		sb.WriteString("--- old ---\n")
+		sb.WriteString(oldStr)
+		sb.WriteString("\n+++ new +++\n")
+		sb.WriteString(newStr)
+	} else if strings.EqualFold(b.Name, "write") {
+		filePath, _ := asString(b.Args["file_path"])
+		content, _ := asString(b.Args["content"])
+		if filePath != "" {
+			sb.WriteString("file: " + filePath + "\n\n")
+		}
+		sb.WriteString(content)
+	} else {
+		if len(b.Args) > 0 {
+			data, err := json.MarshalIndent(b.Args, "", "  ")
+			if err == nil {
+				sb.WriteString("args:\n")
+				sb.WriteString(string(data))
+			}
+		}
+	}
+
+	if b.Result != "" {
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString("result:\n")
+		sb.WriteString(b.Result)
+	}
+	return sb.String()
+}
+
+// truncateWithHint truncates s to limit runes and returns whether truncation occurred.
+func truncateWithHint(s string, limit int) (string, bool) {
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s, false
+	}
+	return string(runes[:limit]), true
 }
 
 func asString(v any) (string, bool) {
