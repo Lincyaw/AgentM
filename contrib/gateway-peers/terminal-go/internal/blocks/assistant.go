@@ -3,111 +3,90 @@ package blocks
 import (
 	"strings"
 
-	"github.com/charmbracelet/glamour"
-
 	"github.com/AoyangSpace/agentm-terminal/internal/theme"
 )
 
 // AssistantTurn is a composite block representing a full assistant response.
-// It aggregates thinking, markdown text, tool calls, sub-agent invocations,
-// and approval prompts into a single renderable unit.
+// Segments holds ThinkingBlock, TextBlock, and ToolBlock items in the
+// chronological order they arrived during streaming. Children and Approvals
+// are always rendered after all Segments.
 type AssistantTurn struct {
-	Thinking     *ThinkingBlock
-	Text         string // markdown source
-	TextDirty    bool   // true while text is still being streamed
-	ThinkDirty   bool   // true while thinking is still being streamed
-	GlamourStyle string // "dark", "light", or "" (defaults to auto)
-	Tools        []*ToolBlock
-	Children     []*SubagentBlock
-	Approvals    []*ApprovalBlock
-	complete     bool // true after the full assistant_text event
+	Segments  []Block // *ThinkingBlock, *TextBlock, *ToolBlock in arrival order
+	Children  []*SubagentBlock
+	Approvals []*ApprovalBlock
+	complete  bool
 
-	glamourCache      string
-	glamourCacheWidth int
-	glamourCacheText  string
+	// GlamourStyle is forwarded to each new TextBlock created during streaming.
+	GlamourStyle string
+
+	// openText and openThinking track the segment currently being streamed.
+	// They are set to nil when a new segment type starts.
+	openText     *TextBlock
+	openThinking *ThinkingBlock
 }
 
 func (b *AssistantTurn) Kind() string        { return "assistant" }
 func (b *AssistantTurn) Collapsed() bool     { return false }
-func (b *AssistantTurn) SetCollapsed(_ bool) {} // no-op: assistant turns don't collapse as a whole
+func (b *AssistantTurn) SetCollapsed(_ bool) {}
 
-// SetComplete marks the turn as finished (no longer streaming).
-func (b *AssistantTurn) SetComplete() { b.complete = true }
+// SetComplete marks the turn as finished and flushes glamour on all text segments.
+func (b *AssistantTurn) SetComplete() {
+	b.complete = true
+	for _, seg := range b.Segments {
+		if tb, ok := seg.(*TextBlock); ok {
+			tb.SetComplete()
+		}
+	}
+}
 
 // Complete reports whether the assistant turn has finished streaming.
 func (b *AssistantTurn) Complete() bool { return b.complete }
 
-func (b *AssistantTurn) Render(width int, th *theme.Theme) string {
-	cw := width - 2 // 2 chars for "● " prefix
-	if cw < 20 {
-		cw = 20
-	}
+// OpenText returns the currently open (streaming) TextBlock, or nil.
+func (b *AssistantTurn) OpenText() *TextBlock { return b.openText }
 
+// OpenThinking returns the currently open (streaming) ThinkingBlock, or nil.
+func (b *AssistantTurn) OpenThinking() *ThinkingBlock { return b.openThinking }
+
+// SetOpenText replaces the open text pointer.
+func (b *AssistantTurn) SetOpenText(tb *TextBlock) { b.openText = tb }
+
+// SetOpenThinking replaces the open thinking pointer.
+func (b *AssistantTurn) SetOpenThinking(th *ThinkingBlock) { b.openThinking = th }
+
+// AppendSegment appends a block to the segment list.
+func (b *AssistantTurn) AppendSegment(seg Block) { b.Segments = append(b.Segments, seg) }
+
+// LastTextBlock returns the last *TextBlock in Segments, or nil if none exists.
+func (b *AssistantTurn) LastTextBlock() *TextBlock {
+	for i := len(b.Segments) - 1; i >= 0; i-- {
+		if tb, ok := b.Segments[i].(*TextBlock); ok {
+			return tb
+		}
+	}
+	return nil
+}
+
+func (b *AssistantTurn) Render(width int, th *theme.Theme) string {
 	var sb strings.Builder
 
-	// Thinking block (if present)
-	if b.Thinking != nil && b.Thinking.Text != "" {
-		sb.WriteString(b.Thinking.Render(width, th) + "\n")
-	}
-
-	// Main text with ● prefix on first line
-	if b.Text != "" {
-		rendered := b.renderText(cw)
-		dot := th.AssistantDot.Render(theme.BlackCircle)
-		lines := strings.Split(rendered, "\n")
-		if len(lines) > 0 {
-			sb.WriteString(dot + " " + lines[0] + "\n")
-			for _, line := range lines[1:] {
-				sb.WriteString("  " + line + "\n")
-			}
+	// Chronological segments: ThinkingBlock, TextBlock, ToolBlock
+	for _, seg := range b.Segments {
+		rendered := seg.Render(width, th)
+		if rendered != "" {
+			sb.WriteString(rendered + "\n")
 		}
 	}
 
-	// Tool blocks
-	for _, tool := range b.Tools {
-		sb.WriteString(tool.Render(width, th) + "\n")
-	}
-
-	// Sub-agent blocks
+	// Sub-agent blocks after all segments
 	for _, child := range b.Children {
 		sb.WriteString(child.Render(width, th) + "\n")
 	}
 
-	// Approval blocks
+	// Approval blocks after sub-agents
 	for _, appr := range b.Approvals {
 		sb.WriteString(appr.Render(width, th) + "\n")
 	}
 
 	return strings.TrimRight(sb.String(), "\n")
-}
-
-func (b *AssistantTurn) renderText(width int) string {
-	if !b.complete {
-		return b.Text
-	}
-
-	if b.glamourCache != "" && b.glamourCacheWidth == width && b.glamourCacheText == b.Text {
-		return b.glamourCache
-	}
-
-	style := "dark"
-	if b.GlamourStyle == "light" {
-		style = "light"
-	}
-	r, err := glamour.NewTermRenderer(
-		glamour.WithWordWrap(width),
-		glamour.WithStandardStyle(style),
-	)
-	if err != nil {
-		return b.Text
-	}
-	rendered, err := r.Render(b.Text)
-	if err != nil {
-		return b.Text
-	}
-	result := strings.TrimSpace(rendered)
-	b.glamourCache = result
-	b.glamourCacheWidth = width
-	b.glamourCacheText = b.Text
-	return result
 }

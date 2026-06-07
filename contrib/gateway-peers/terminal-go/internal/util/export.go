@@ -19,7 +19,7 @@ type ExportOptions struct {
 
 // ExportBlock represents one block in the transcript for export.
 type ExportBlock struct {
-	Kind    string            // "user", "assistant", "system", "tool", "subagent", "thinking"
+	Kind    string // "user", "assistant", "system", "tool", "subagent", "thinking"
 	Content string
 	Meta    map[string]string // extra metadata (tool name, source, purpose, etc.)
 }

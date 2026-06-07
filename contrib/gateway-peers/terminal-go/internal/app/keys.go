@@ -24,4 +24,7 @@ const (
 	keyBracketOpen  = "["
 	keyBracketClose = "]"
 	keyQuestion     = "?"
+	keyAltUp        = "alt+up"
+	keyAltDown      = "alt+down"
+	keyV            = "v"
 )

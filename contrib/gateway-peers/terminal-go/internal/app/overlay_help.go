@@ -36,6 +36,7 @@ func (h *HelpOverlay) View(width, height int, th *theme.Theme) string {
 			header: "Navigation",
 			keys: [][2]string{
 				{"[ / ]", "prev / next turn"},
+				{"Alt+↑/↓", "focus prev / next block"},
 				{"PgUp/PgDn", "scroll viewport"},
 				{"Ctrl+F", "search transcript"},
 			},
@@ -61,7 +62,8 @@ func (h *HelpOverlay) View(width, height int, th *theme.Theme) string {
 		{
 			header: "Utilities",
 			keys: [][2]string{
-				{"Ctrl+E", "toggle collapse"},
+				{"Ctrl+E", "toggle focused block"},
+				{"v", "view full content overlay"},
 				{"Ctrl+O", "expand/collapse all"},
 				{"Ctrl+Y", "copy last reply"},
 				{"Ctrl+B", "bookmark position"},

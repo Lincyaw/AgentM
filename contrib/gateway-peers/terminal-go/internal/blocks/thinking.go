@@ -10,6 +10,7 @@ import (
 type ThinkingBlock struct {
 	Text      string
 	collapsed bool
+	focused   bool
 }
 
 // NewThinkingBlock creates a ThinkingBlock that starts collapsed.
@@ -21,11 +22,23 @@ func (b *ThinkingBlock) Kind() string        { return "thinking" }
 func (b *ThinkingBlock) Collapsed() bool     { return b.collapsed }
 func (b *ThinkingBlock) SetCollapsed(c bool) { b.collapsed = c }
 
+// Focused reports whether this block has keyboard focus.
+func (b *ThinkingBlock) Focused() bool { return b.focused }
+
+// SetFocused sets the keyboard focus state.
+func (b *ThinkingBlock) SetFocused(f bool) { b.focused = f }
+
 func (b *ThinkingBlock) Render(width int, th *theme.Theme) string {
+	var result string
 	if b.collapsed {
-		return b.renderCollapsed(width, th)
+		result = b.renderCollapsed(width, th)
+	} else {
+		result = b.renderExpanded(width, th)
 	}
-	return b.renderExpanded(width, th)
+	if b.focused {
+		return applyFocusBar(result, th)
+	}
+	return result
 }
 
 func (b *ThinkingBlock) renderCollapsed(_ int, th *theme.Theme) string {
@@ -38,4 +51,19 @@ func (b *ThinkingBlock) renderExpanded(_ int, th *theme.Theme) string {
 	header := th.ThinkingLabel.Render(theme.ThinkingGlyph + " Thinking...")
 	body := th.ThinkingText.Render("  " + strings.ReplaceAll(b.Text, "\n", "\n  "))
 	return header + "\n" + body
+}
+
+// applyFocusBar prefixes every line of text with the FocusBarGlyph styled with FocusBar.
+func applyFocusBar(text string, th *theme.Theme) string {
+	bar := th.FocusBar.Render(theme.FocusBarGlyph)
+	lines := strings.Split(text, "\n")
+	var sb strings.Builder
+	for i, line := range lines {
+		sb.WriteString(bar)
+		sb.WriteString(line)
+		if i < len(lines)-1 {
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
 }

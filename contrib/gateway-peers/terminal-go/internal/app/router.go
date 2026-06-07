@@ -93,8 +93,13 @@ func (r *Router) turnStart(m *Model, _ map[string]any, _ map[string]any) {
 func (r *Router) streamText(m *Model, body map[string]any, _ map[string]any) {
 	turn := r.ensureActiveTurn(m)
 	if content, ok := body["content"].(string); ok {
-		turn.Text += content
-		turn.TextDirty = true
+		if turn.OpenText() == nil {
+			tb := &blocks.TextBlock{GlamourStyle: m.glamourStyle}
+			turn.AppendSegment(tb)
+			turn.SetOpenText(tb)
+			turn.SetOpenThinking(nil)
+		}
+		turn.OpenText().Text += content
 	}
 	sm := m.status.GetModel()
 	sm.Phase = theme.PhaseStreaming
@@ -103,12 +108,14 @@ func (r *Router) streamText(m *Model, body map[string]any, _ map[string]any) {
 
 func (r *Router) streamThinking(m *Model, body map[string]any, _ map[string]any) {
 	turn := r.ensureActiveTurn(m)
-	if turn.Thinking == nil {
-		turn.Thinking = blocks.NewThinkingBlock()
-	}
 	if content, ok := body["content"].(string); ok {
-		turn.Thinking.Text += content
-		turn.ThinkDirty = true
+		if turn.OpenThinking() == nil {
+			tb := blocks.NewThinkingBlock()
+			turn.AppendSegment(tb)
+			turn.SetOpenThinking(tb)
+			turn.SetOpenText(nil)
+		}
+		turn.OpenThinking().Text += content
 	}
 	sm := m.status.GetModel()
 	sm.Phase = theme.PhaseThinking
@@ -128,7 +135,10 @@ func (r *Router) toolCall(m *Model, _ map[string]any, meta map[string]any) {
 	}
 
 	tb := blocks.NewToolBlock(name, args)
-	turn.Tools = append(turn.Tools, tb)
+	turn.AppendSegment(tb)
+	// Close any open streaming segments so the next think/text starts fresh.
+	turn.SetOpenText(nil)
+	turn.SetOpenThinking(nil)
 
 	if callID, ok := meta["tool_call_id"].(string); ok && callID != "" {
 		m.toolRegistry[callID] = tb
@@ -159,10 +169,18 @@ func (r *Router) toolResult(m *Model, body map[string]any, meta map[string]any) 
 
 func (r *Router) assistantText(m *Model, body map[string]any, _ map[string]any) {
 	turn := r.ensureActiveTurn(m)
-	if content, ok := body["content"].(string); ok {
-		turn.Text = content
+	// The gateway emits assistant_text once with the FULL concatenated message
+	// text. If the turn already streamed one or more TextBlock segments, trust
+	// those deltas (overwriting the last with the full text would duplicate
+	// earlier segments and break chronological order around interleaved tools).
+	// Only synthesize a TextBlock when none was streamed.
+	if turn.LastTextBlock() == nil {
+		if content, ok := body["content"].(string); ok {
+			tb := &blocks.TextBlock{GlamourStyle: m.glamourStyle}
+			tb.Text = content
+			turn.AppendSegment(tb)
+		}
 	}
-	turn.TextDirty = false
 	turn.SetComplete()
 	m.activeTurn = nil
 	sm := m.status.GetModel()
