@@ -712,6 +712,7 @@ def _render_gateway_unit(plan: _SystemdPlan) -> str:
 
 
 def _render_feishu_unit(plan: _SystemdPlan) -> str:
+    import shlex
     import textwrap
 
     assert plan.feishu_bin is not None  # caller guards; only render when present
@@ -723,7 +724,10 @@ def _render_feishu_unit(plan: _SystemdPlan) -> str:
     # chatbot scenario in code. Wants/After (not Requires) keep the coupling
     # loose: a gateway restart does NOT cascade-restart feishu, which relies on
     # its auto-reconnect + outbox replay instead.
-    exec_start = f"{plan.feishu_bin} --connect {plan.socket_url}"
+    exec_start = " ".join(
+        shlex.quote(tok)
+        for tok in [plan.feishu_bin, "--connect", plan.socket_url]
+    )
     return textwrap.dedent(f"""\
         [Unit]
         Description=AgentM Feishu/Lark chat client
@@ -789,6 +793,7 @@ def _baked_gateway_argv() -> tuple[list[str], str]:
 
 def _build_systemd_plan() -> _SystemdPlan:
     """Resolve a full :class:`_SystemdPlan` from the live invocation/env."""
+    import shlex
     import shutil
 
     agentm_bin = shutil.which("agentm")
@@ -809,6 +814,9 @@ def _build_systemd_plan() -> _SystemdPlan:
         run_as = None
 
     cleaned, workspace = _baked_gateway_argv()
+    workspace_path = Path(workspace).expanduser()
+    env_file = workspace_path / ".env"
+
     # Both units MUST agree on the socket: force --bind to the pinned value
     # (drop any --bind the operator passed so it cannot diverge from feishu).
     flags: list[str] = []
@@ -823,11 +831,19 @@ def _build_systemd_plan() -> _SystemdPlan:
         if arg.startswith("--bind="):
             continue
         flags.append(arg)
-    flags = ["--bind", socket_url, *flags]
-    gateway_exec_start = f"{agentm_bin} gateway {' '.join(flags)}".rstrip()
-
-    workspace_path = Path(workspace).expanduser()
-    env_file = workspace_path / ".env"
+    # Re-add --cwd: _baked_gateway_argv() strips it out (to derive the
+    # workspace), but the gateway resolves its session cwd + state-dir from
+    # --cwd, NOT from the unit's WorkingDirectory. Without this the installed
+    # unit would run sessions under the install-time cwd while its
+    # EnvironmentFile pointed at <workspace>/.env — defeating onboard. Keep
+    # ExecStart (--cwd), WorkingDirectory, and EnvironmentFile all on the same
+    # workspace.
+    flags = ["--bind", socket_url, "--cwd", str(workspace_path), *flags]
+    # shlex.quote each token: a workspace path with a space or a multi-word
+    # --scenario value must not be re-split by systemd's whitespace tokenizer.
+    gateway_exec_start = " ".join(
+        shlex.quote(tok) for tok in [agentm_bin, "gateway", *flags]
+    )
 
     bin_dir = str(Path(agentm_bin).resolve().parent)
     path_env = f"{bin_dir}:/usr/local/bin:/usr/bin:/bin"
@@ -838,7 +854,7 @@ def _build_systemd_plan() -> _SystemdPlan:
         socket_url=socket_url,
         gateway_exec_start=gateway_exec_start,
         env_file=env_file,
-        working_dir=Path.cwd(),
+        working_dir=workspace_path,
         path_env=path_env,
         run_as=run_as,
         feishu_bin=_resolve_feishu_bin(agentm_bin),

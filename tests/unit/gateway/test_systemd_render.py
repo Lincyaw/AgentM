@@ -16,6 +16,7 @@ import pytest
 from agentm.gateway import cli as gw_cli
 from agentm.gateway.cli import (
     _SystemdPlan,
+    _build_systemd_plan,
     _render_feishu_unit,
     _render_gateway_unit,
     _systemd_action,
@@ -131,3 +132,58 @@ def test_install_skips_feishu_unit_when_bin_unresolved(
     assert enable_calls, "expected an enable systemctl call"
     assert all("agentm-feishu.service" not in c for c in enable_calls)
     assert any("agentm-gateway.service" in c for c in enable_calls)
+
+
+def test_build_plan_bakes_cwd_into_exec_and_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--cwd must survive into the gateway ExecStart, WorkingDirectory, and the
+    EnvironmentFile, all on the same workspace. _baked_gateway_argv() strips
+    --cwd to derive the workspace, so _build_systemd_plan must re-add it — the
+    gateway resolves its session cwd + state-dir from --cwd, not from the unit's
+    WorkingDirectory."""
+    import os
+    import shutil
+    import sys
+
+    ws = "/srv/agent workspace"  # a space exercises the shlex.quote path too
+    monkeypatch.setattr(
+        sys, "argv", ["agentm gateway", "--cwd", ws, "--scenario", "chatbot"]
+    )
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/venv/bin/{name}")
+
+    plan = _build_systemd_plan()
+
+    # --cwd round-trips into ExecStart (quoted because of the space).
+    assert "--cwd" in plan.gateway_exec_start
+    assert "'/srv/agent workspace'" in plan.gateway_exec_start
+    # WorkingDirectory and EnvironmentFile agree on the same workspace.
+    assert plan.working_dir == Path(ws)
+    assert plan.env_file == Path(ws) / ".env"
+    # The rendered gateway unit references <ws>/.env.
+    gw = _render_gateway_unit(plan)
+    assert f"EnvironmentFile=-{Path(ws) / '.env'}" in gw
+    # The forced --bind socket survives and pairs with feishu.
+    assert plan.socket_url in plan.gateway_exec_start
+
+
+def test_build_plan_defaults_workspace_to_cwd_when_no_cwd_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no --cwd, the workspace falls back to the current dir (unchanged
+    behavior), and --cwd is still baked so ExecStart is explicit."""
+    import os
+    import shutil
+    import sys
+
+    monkeypatch.setattr(sys, "argv", ["agentm gateway"])
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/venv/bin/{name}")
+    monkeypatch.chdir(tmp_path)
+
+    plan = _build_systemd_plan()
+
+    assert plan.working_dir == tmp_path
+    assert plan.env_file == tmp_path / ".env"
+    assert f"--cwd {tmp_path}" in plan.gateway_exec_start
