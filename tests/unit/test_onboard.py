@@ -13,7 +13,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentm.core.lib import user_config
-from agentm.onboard import configure_feishu, configure_model, ensure_workspace, seed_persona
+from agentm.core.lib.frontmatter import parse_frontmatter
+from agentm.onboard import (
+    BUNDLED_SKILLS,
+    _repo_root,
+    configure_feishu,
+    configure_model,
+    ensure_workspace,
+    install_bundled_skills,
+    seed_persona,
+)
 
 
 def test_model_profile_round_trips_through_load_user_config(
@@ -115,3 +124,101 @@ def test_seed_persona_does_not_clobber_existing(tmp_path: Path) -> None:
 
     assert workspace / "SOUL.md" not in written
     assert (workspace / "SOUL.md").read_text(encoding="utf-8") == "# custom soul\n"
+
+
+# --------------------------------------------------------------------------
+# Bundled skills
+# --------------------------------------------------------------------------
+
+
+def _make_fake_repo(root: Path) -> None:
+    """Create a minimal fake repo tree containing each BUNDLED_SKILLS entry."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text("[project]\nname = 'fake'\n", encoding="utf-8")
+    for rel in BUNDLED_SKILLS:
+        skill_dir = root / rel
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_name = Path(rel).name
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {skill_name}\ndescription: test\n---\n# {skill_name}\n",
+            encoding="utf-8",
+        )
+
+
+def test_install_bundled_skills_copies_all(tmp_path: Path, monkeypatch) -> None:
+    fake_repo = tmp_path / "repo"
+    fake_home = tmp_path / "home"
+    _make_fake_repo(fake_repo)
+
+    import agentm.onboard as onboard_mod
+
+    monkeypatch.setattr(onboard_mod, "_repo_root", lambda: fake_repo)
+    monkeypatch.setattr(onboard_mod, "agentm_home_dir", lambda: fake_home)
+
+    written = install_bundled_skills()
+
+    assert len(written) == len(BUNDLED_SKILLS)
+    for rel in BUNDLED_SKILLS:
+        dest = fake_home / "skills" / Path(rel).name / "SKILL.md"
+        assert dest.is_file(), f"expected {dest} to exist"
+
+
+def test_install_bundled_skills_idempotent(tmp_path: Path, monkeypatch) -> None:
+    fake_repo = tmp_path / "repo"
+    fake_home = tmp_path / "home"
+    _make_fake_repo(fake_repo)
+
+    import agentm.onboard as onboard_mod
+
+    monkeypatch.setattr(onboard_mod, "_repo_root", lambda: fake_repo)
+    monkeypatch.setattr(onboard_mod, "agentm_home_dir", lambda: fake_home)
+
+    install_bundled_skills()
+    second = install_bundled_skills()  # no overwrite
+    assert second == [], "second call without overwrite must return []"
+
+
+def test_install_bundled_skills_overwrite_refreshes(tmp_path: Path, monkeypatch) -> None:
+    fake_repo = tmp_path / "repo"
+    fake_home = tmp_path / "home"
+    _make_fake_repo(fake_repo)
+
+    import agentm.onboard as onboard_mod
+
+    monkeypatch.setattr(onboard_mod, "_repo_root", lambda: fake_repo)
+    monkeypatch.setattr(onboard_mod, "agentm_home_dir", lambda: fake_home)
+
+    install_bundled_skills()
+
+    # Mutate one installed file to verify overwrite replaces it.
+    first_skill = fake_home / "skills" / Path(BUNDLED_SKILLS[0]).name / "SKILL.md"
+    first_skill.write_text("# stale\n", encoding="utf-8")
+
+    refreshed = install_bundled_skills(overwrite=True)
+    assert len(refreshed) == len(BUNDLED_SKILLS)
+    # Content should be back to the fake-repo original, not "stale".
+    assert "stale" not in first_skill.read_text(encoding="utf-8")
+
+
+def test_repo_root_finds_real_repo() -> None:
+    # Positive assertion: running from an editable install the real checkout
+    # is on disk and _repo_root() must find it.
+    root = _repo_root()
+    assert root is not None, "_repo_root() returned None in editable install"
+    assert (root / ".claude" / "skills").is_dir()
+
+
+def test_bundled_skills_guard(tmp_path: Path) -> None:
+    """Fail-stop: every BUNDLED_SKILLS entry must exist with a valid SKILL.md
+    and its frontmatter name must match the parent directory name."""
+    root = _repo_root()
+    assert root is not None, "real repo root must be locatable"
+    for rel in BUNDLED_SKILLS:
+        skill_md = root / rel / "SKILL.md"
+        assert skill_md.is_file(), f"SKILL.md missing for bundled skill {rel!r}"
+        meta, _ = parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+        expected_name = Path(rel).name
+        assert meta.get("name") == expected_name, (
+            f"{skill_md}: frontmatter name={meta.get('name')!r}, "
+            f"expected {expected_name!r}"
+        )

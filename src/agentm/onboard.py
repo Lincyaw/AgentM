@@ -1,6 +1,6 @@
 """Interactive bootstrap for a fresh AgentM install (``agentm onboard``).
 
-Walks the user through four sections and writes their answers to the exact
+Walks the user through five sections and writes their answers to the exact
 files the runtime already reads:
 
 1. Model / provider / key  -> ``$AGENTM_HOME/config.toml`` (read by
@@ -9,7 +9,9 @@ files the runtime already reads:
 2. Workspace path          -> created with its ``.agentm/`` subdir.
 3. Persona                 -> ``<workspace>/SOUL.md`` + ``IDENTITY.md`` in the
    same markdown skeleton the ``persona`` contrib atom seeds.
-4. Feishu credentials      -> ``<workspace>/.env`` with ``LARK_APP_ID`` /
+4. Bundled skills          -> ``~/.agentm/skills/`` (self-awareness / self-debug
+   skills discoverable by every scenario and deploy form).
+5. Feishu credentials      -> ``<workspace>/.env`` with ``LARK_APP_ID`` /
    ``LARK_APP_SECRET`` / ``LARK_ALLOW_FROM`` (read by the Feishu client process
    via ``autoload_dotenv``; it does **not** read ``config.toml``).
 
@@ -22,6 +24,7 @@ contract does not apply) and it never touches ``core.runtime.*``.
 
 from __future__ import annotations
 
+import shutil
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -212,7 +215,66 @@ def configure_feishu(
 
 
 # --------------------------------------------------------------------------
-# Section 5: systemd services
+# Section: bundled skills -> ~/.agentm/skills
+# --------------------------------------------------------------------------
+
+# Curated repo skills copied into ~/.agentm/skills so skill_loader discovers
+# them in every scenario and every deploy form. Each entry is a repo-relative
+# skill directory; its basename is the skill name (skill_loader requires
+# name == parent dir). Source of truth for what onboard installs — keep in
+# sync with the actual dirs (a guard test asserts each exists with a SKILL.md).
+BUNDLED_SKILLS = (
+    ".claude/skills/deployment-awareness",
+    ".claude/skills/self-debug",
+    ".claude/skills/trace-analysis",
+)
+
+
+def _repo_root() -> Path | None:
+    """Locate the source checkout that holds the bundled skills.
+
+    onboard ships inside the ``agentm`` package; under an editable install
+    (``uv sync``) ``__file__`` lives in ``<repo>/src/agentm/``, so walk up
+    until a parent holds both ``pyproject.toml`` and ``.claude/skills``.
+    Returns None for a pip-wheel install where the source tree isn't on disk.
+    """
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file() and (
+            parent / ".claude" / "skills"
+        ).is_dir():
+            return parent
+    return None
+
+
+def install_bundled_skills(*, overwrite: bool = False) -> list[Path]:
+    """Copy curated repo skills into ``~/.agentm/skills/<name>``.
+
+    Idempotent: an existing ``<name>`` dir is kept intact unless *overwrite*.
+    Returns the destination dirs actually written. Returns ``[]`` (the caller
+    reports it) when the source checkout can't be located.
+    """
+    root = _repo_root()
+    if root is None:
+        return []
+    dest_root = agentm_home_dir() / "skills"
+    dest_root.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for rel in BUNDLED_SKILLS:
+        src = root / rel
+        if not (src / "SKILL.md").is_file():
+            continue
+        dest = dest_root / Path(rel).name
+        if dest.exists():
+            if not overwrite:
+                continue
+            shutil.rmtree(dest)
+        shutil.copytree(src, dest)
+        written.append(dest)
+    return written
+
+
+# --------------------------------------------------------------------------
+# Section: systemd services
 # --------------------------------------------------------------------------
 
 
@@ -332,8 +394,37 @@ def run_onboard() -> None:
     else:
         typer.echo("  kept existing persona files.")
 
-    # --- Section 4: Feishu (optional) ---
-    typer.echo("\n== 4. Feishu / Lark bot (optional) ==")
+    # --- Section 4: bundled skills ---
+    typer.echo("\n== 4. Skills ==")
+    skills_written: list[Path] = []
+    if _repo_root() is None:
+        typer.echo(
+            "  source checkout not found (pip-wheel install?) — skipping "
+            "bundled-skill copy. Drop SKILL.md dirs under "
+            f"{agentm_home_dir() / 'skills'} manually if you want them."
+        )
+    elif typer.confirm(
+        f"Copy {len(BUNDLED_SKILLS)} self-debug skills into ~/.agentm/skills "
+        "so they're discoverable everywhere?",
+        default=True,
+    ):
+        dest_root = agentm_home_dir() / "skills"
+        present = [r for r in BUNDLED_SKILLS if (dest_root / Path(r).name).exists()]
+        overwrite = False
+        if present:
+            overwrite = typer.confirm(
+                f"{len(present)} already present; overwrite them?", default=False
+            )
+        skills_written = install_bundled_skills(overwrite=overwrite)
+        for p in skills_written:
+            typer.echo(f"  copied {p.name} -> {p}")
+        if not skills_written:
+            typer.echo("  nothing new copied (all present, or none found).")
+    else:
+        typer.echo("  skipped.")
+
+    # --- Section 5: Feishu (optional) ---
+    typer.echo("\n== 5. Feishu / Lark bot (optional) ==")
     env_path: Path | None = None
     if typer.confirm("Set up a Feishu/Lark bot?", default=False):
         existing_env = _parse_env(workspace / ".env")
@@ -359,8 +450,8 @@ def run_onboard() -> None:
     else:
         typer.echo("  skipped.")
 
-    # --- Section 5: systemd services (optional) ---
-    typer.echo("\n== 5. systemd services (optional) ==")
+    # --- Section 6: systemd services (optional) ---
+    typer.echo("\n== 6. systemd services (optional) ==")
     if typer.confirm(
         "Set up systemd services now (auto-restart + start on boot)?",
         default=False,
@@ -376,6 +467,11 @@ def run_onboard() -> None:
     if persona_paths:
         typer.echo(
             f"  persona:   {', '.join(p.name for p in persona_paths)} in {workspace}"
+        )
+    if skills_written:
+        typer.echo(
+            f"  skills:    {', '.join(p.name for p in skills_written)} "
+            f"-> {agentm_home_dir() / 'skills'}"
         )
     if env_path is not None:
         typer.echo(f"  feishu:    {env_path}")
