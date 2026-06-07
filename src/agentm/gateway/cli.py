@@ -706,6 +706,7 @@ def _render_gateway_unit(plan: _SystemdPlan) -> str:
         ExecStart={plan.gateway_exec_start}
         Restart=always
         RestartSec=2
+        TimeoutStopSec=10
 
         [Install]
         WantedBy={wanted_by}
@@ -743,6 +744,7 @@ def _render_feishu_unit(plan: _SystemdPlan) -> str:
         ExecStart={exec_start}
         Restart=always
         RestartSec=3
+        TimeoutStopSec=10
 
         [Install]
         WantedBy={wanted_by}
