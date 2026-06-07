@@ -605,6 +605,9 @@ class _GatewayRuntime:
 
         async def forget_chat_mapping() -> None:
             self._sessions.forget(session_key)
+            # Tear down the per-session command cache alongside the chat map,
+            # so a long-lived multi-chat gateway doesn't accumulate stale sets.
+            self._session_commands.pop(session_key, None)
 
         def get_route_stats() -> dict[str, Any]:
             return {
