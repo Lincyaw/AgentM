@@ -289,10 +289,11 @@ func TestRouterUsageAccumulates(t *testing.T) {
 
 	r := &Router{}
 	r.Dispatch(m, map[string]any{
-		"input_tokens":  float64(100),
-		"output_tokens": float64(50),
-		"cost":          0.05,
-		"metadata":      map[string]any{"kind": "usage"},
+		"metadata": map[string]any{
+			"kind":          "usage",
+			"input_tokens":  float64(100),
+			"output_tokens": float64(50),
+		},
 	})
 
 	sm := m.status.GetModel()
@@ -313,9 +314,11 @@ func TestRouterUsageDerivesContext(t *testing.T) {
 
 	r := &Router{}
 	r.Dispatch(m, map[string]any{
-		"input_tokens":  float64(10000),
-		"output_tokens": float64(2000),
-		"metadata":      map[string]any{"kind": "usage"},
+		"metadata": map[string]any{
+			"kind":          "usage",
+			"input_tokens":  float64(10000),
+			"output_tokens": float64(2000),
+		},
 	})
 
 	sm := m.status.GetModel()
@@ -326,9 +329,11 @@ func TestRouterUsageDerivesContext(t *testing.T) {
 	// A second call within the same turn (larger prompt) replaces the
 	// occupancy figure rather than summing it.
 	r.Dispatch(m, map[string]any{
-		"input_tokens":  float64(15000),
-		"output_tokens": float64(500),
-		"metadata":      map[string]any{"kind": "usage"},
+		"metadata": map[string]any{
+			"kind":          "usage",
+			"input_tokens":  float64(15000),
+			"output_tokens": float64(500),
+		},
 	})
 	sm = m.status.GetModel()
 	if sm.CtxUsed != 15500 {
