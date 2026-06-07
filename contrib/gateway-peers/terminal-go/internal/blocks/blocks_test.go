@@ -259,14 +259,17 @@ func TestAssistantTurnRender(t *testing.T) {
 	tool.OK = true
 	tool.Result = "ok"
 
+	// TextBlock that is not yet complete simulates streaming (raw text, no glamour).
+	textSeg := &TextBlock{
+		Text:         "Here is the result of the analysis.",
+		GlamourStyle: "dark",
+	}
+
 	child := &SubagentBlock{Purpose: "lint-check", Done: true}
 
 	b := &AssistantTurn{
-		Thinking:     thinking,
-		Text:         "Here is the result of the analysis.",
 		GlamourStyle: "dark",
-		TextDirty:    true, // simulate streaming so we get raw text (glamour adds escapes)
-		Tools:        []*ToolBlock{tool},
+		Segments:     []Block{thinking, tool, textSeg},
 		Children:     []*SubagentBlock{child},
 	}
 
@@ -286,12 +289,16 @@ func TestAssistantTurnRender(t *testing.T) {
 }
 
 func TestAssistantTurnCompleteUsesGlamour(t *testing.T) {
+	textSeg := &TextBlock{Text: "**bold text** and `code`"}
 	b := &AssistantTurn{
-		Text: "**bold text** and `code`",
+		Segments: []Block{textSeg},
 	}
 	b.SetComplete()
 	if !b.Complete() {
 		t.Fatal("expected complete=true")
+	}
+	if !textSeg.Complete() {
+		t.Fatal("expected TextBlock to be marked complete by SetComplete")
 	}
 
 	out := b.Render(testWidth, darkTheme())
@@ -304,11 +311,11 @@ func TestAssistantTurnCompleteUsesGlamour(t *testing.T) {
 }
 
 func TestAssistantTurnStreamingUsesRawText(t *testing.T) {
-	b := &AssistantTurn{
-		Text:      "**still streaming**",
-		TextDirty: true,
-	}
+	textSeg := &TextBlock{Text: "**still streaming**"}
 	// Not complete -- streaming mode
+	b := &AssistantTurn{
+		Segments: []Block{textSeg},
+	}
 
 	out := b.Render(testWidth, darkTheme())
 	if out == "" {
@@ -316,6 +323,90 @@ func TestAssistantTurnStreamingUsesRawText(t *testing.T) {
 	}
 	if !strings.Contains(out, "**still streaming**") {
 		t.Errorf("streaming render should contain raw markdown, got:\n%s", out)
+	}
+}
+
+func TestAssistantTurnSegmentOrder(t *testing.T) {
+	// Verify that segments are rendered in the order they were added.
+	think := NewThinkingBlock()
+	think.Text = "thinking first"
+	think.SetCollapsed(false)
+
+	tool := NewToolBlock("bash", map[string]any{"command": "ls"})
+	tool.Done = true
+	tool.OK = true
+
+	text := &TextBlock{Text: "text last"}
+
+	b := &AssistantTurn{
+		Segments: []Block{think, tool, text},
+	}
+
+	out := b.Render(testWidth, darkTheme())
+	thinkPos := strings.Index(out, "thinking first")
+	toolPos := strings.Index(out, "bash")
+	textPos := strings.Index(out, "text last")
+
+	if thinkPos < 0 || toolPos < 0 || textPos < 0 {
+		t.Fatalf("missing segment content in render: think=%d tool=%d text=%d\n%s",
+			thinkPos, toolPos, textPos, out)
+	}
+	if !(thinkPos < toolPos && toolPos < textPos) {
+		t.Errorf("segments rendered out of order: think=%d tool=%d text=%d", thinkPos, toolPos, textPos)
+	}
+}
+
+func TestThinkingBlockFocused(t *testing.T) {
+	b := NewThinkingBlock()
+	b.Text = "some reasoning"
+	if b.Focused() {
+		t.Error("new ThinkingBlock should not be focused")
+	}
+	b.SetFocused(true)
+	if !b.Focused() {
+		t.Error("expected focused=true")
+	}
+
+	// Focused render should differ from unfocused.
+	b.SetCollapsed(false)
+	focused := b.Render(testWidth, darkTheme())
+	b.SetFocused(false)
+	unfocused := b.Render(testWidth, darkTheme())
+	if focused == unfocused {
+		t.Error("focused and unfocused renders should differ")
+	}
+	if !strings.Contains(focused, theme.FocusBarGlyph) {
+		t.Errorf("focused render should contain FocusBarGlyph %q", theme.FocusBarGlyph)
+	}
+}
+
+func TestToolBlockFocused(t *testing.T) {
+	b := NewToolBlock("bash", map[string]any{"command": "ls"})
+	if b.Focused() {
+		t.Error("new ToolBlock should not be focused")
+	}
+	b.SetFocused(true)
+	focused := b.Render(testWidth, darkTheme())
+	b.SetFocused(false)
+	unfocused := b.Render(testWidth, darkTheme())
+	if focused == unfocused {
+		t.Error("focused and unfocused renders should differ")
+	}
+	if !strings.Contains(focused, theme.FocusBarGlyph) {
+		t.Errorf("focused render should contain FocusBarGlyph")
+	}
+}
+
+func TestApprovalBlockFocused(t *testing.T) {
+	b := NewApprovalBlock("proceed?", []Button{
+		{Label: "Yes", Value: "yes"},
+	})
+	b.SetFocused(true)
+	focused := b.Render(testWidth, darkTheme())
+	b.SetFocused(false)
+	unfocused := b.Render(testWidth, darkTheme())
+	if focused == unfocused {
+		t.Error("focused and unfocused renders should differ")
 	}
 }
 
@@ -338,6 +429,12 @@ func TestBlockInterface(t *testing.T) {
 	var _ Block = &SubagentBlock{}
 	var _ Block = &ApprovalBlock{}
 	var _ Block = &AssistantTurn{}
+	var _ Block = &TextBlock{}
+
+	// Verify Focusable interface
+	var _ Focusable = &ThinkingBlock{}
+	var _ Focusable = &ToolBlock{}
+	var _ Focusable = &ApprovalBlock{}
 }
 
 func TestTruncateUTF8Safe(t *testing.T) {

@@ -18,6 +18,7 @@ const (
 	OverlayBookmarks             // Ctrl+G bookmark list
 	OverlayResend                // Ctrl+R reverse-i-search
 	OverlayCodeSave              // Ctrl+S code block save
+	OverlayView                  // v  full-content view of focused block
 )
 
 // Overlay is a transient UI mode that temporarily takes over key handling

@@ -20,6 +20,7 @@ type ApprovalBlock struct {
 	Content   string
 	Buttons   []Button
 	collapsed bool
+	focused   bool
 }
 
 // NewApprovalBlock creates an ApprovalBlock in collapsed state.
@@ -31,11 +32,23 @@ func (b *ApprovalBlock) Kind() string        { return "approval" }
 func (b *ApprovalBlock) Collapsed() bool     { return b.collapsed }
 func (b *ApprovalBlock) SetCollapsed(c bool) { b.collapsed = c }
 
+// Focused reports whether this block has keyboard focus.
+func (b *ApprovalBlock) Focused() bool { return b.focused }
+
+// SetFocused sets the keyboard focus state.
+func (b *ApprovalBlock) SetFocused(f bool) { b.focused = f }
+
 func (b *ApprovalBlock) Render(width int, th *theme.Theme) string {
+	var result string
 	if b.collapsed {
-		return b.renderCollapsed(width, th)
+		result = b.renderCollapsed(width, th)
+	} else {
+		result = b.renderExpanded(width, th)
 	}
-	return b.renderExpanded(width, th)
+	if b.focused {
+		return applyFocusBar(result, th)
+	}
+	return result
 }
 
 func (b *ApprovalBlock) renderCollapsed(_ int, th *theme.Theme) string {

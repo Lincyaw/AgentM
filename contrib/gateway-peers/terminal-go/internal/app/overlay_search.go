@@ -150,17 +150,21 @@ func blockPlainText(b blocks.Block) string {
 		return v.Content
 	case *blocks.AssistantTurn:
 		var sb strings.Builder
-		if v.Thinking != nil {
-			sb.WriteString(v.Thinking.Text)
-			sb.WriteByte('\n')
-		}
-		sb.WriteString(v.Text)
-		for _, t := range v.Tools {
-			sb.WriteString("\n")
-			sb.WriteString(t.Name)
-			if t.Result != "" {
-				sb.WriteString(" ")
-				sb.WriteString(t.Result)
+		for _, seg := range v.Segments {
+			switch s := seg.(type) {
+			case *blocks.ThinkingBlock:
+				sb.WriteString(s.Text)
+				sb.WriteByte('\n')
+			case *blocks.TextBlock:
+				sb.WriteString(s.Text)
+				sb.WriteByte('\n')
+			case *blocks.ToolBlock:
+				sb.WriteString(s.Name)
+				if s.Result != "" {
+					sb.WriteString(" ")
+					sb.WriteString(s.Result)
+				}
+				sb.WriteByte('\n')
 			}
 		}
 		return sb.String()
