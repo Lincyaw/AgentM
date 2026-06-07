@@ -102,6 +102,16 @@ tool list after extensions install, which can starve an extension that requires
 its tools at install time (e.g. `file_mutation_queue` requires `edit`/`write`).
 Slimming is the scenario's job, not the allowlist's.
 
+## Companion skill
+
+The atom bundles a `workflow-orchestration` SKILL.md (under
+`builtin/_workflow_skill/`, a data dir builtin discovery ignores) and publishes
+it to `skill_loader` via `ResourcesDiscoverEvent` — so the model gets
+when-to-use / how-to-use guidance (the decision rule vs. turn-by-turn, the SDK
+surface, worker-tooling notes, the anti-hallucination / adversarial-verify
+reminder) wherever the workflow tool is active, with no per-scenario wiring.
+Workers (`purpose=workflow`) skip the publish along with the tool registration.
+
 ## Net-new components (small)
 
 1. **`workflow.py` atom + curated-namespace runner.** `register_tool("workflow")`
