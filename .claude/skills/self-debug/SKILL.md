@@ -24,6 +24,12 @@ truth for your own actions; the conversation is a lossy view of it.
 
 ## See the UI (tui_snapshot)
 
+> Scope: `tui_snapshot` exists **only for the terminal client**. A
+> chat-channel deployment (e.g. Feishu/Lark over the gateway) has no TUI
+> frame and no such tool — skip this section there and rely on the trace
+> surfaces below. See the `deployment-awareness` skill for what your
+> deployment actually exposes.
+
 The terminal client renders a frame the agent never sees directly. When
 the user runs **`/dump`** in the client, that frame is written to a file
 (`$AGENTM_TUI_DUMP`, default `/tmp/agentm-tui-dump.txt`). Read it with the

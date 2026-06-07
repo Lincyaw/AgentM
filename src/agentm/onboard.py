@@ -246,6 +246,11 @@ def _repo_root() -> Path | None:
     return None
 
 
+def _skills_dir() -> Path:
+    """The ``~/.agentm/skills`` dir skill_loader treats as the user default."""
+    return agentm_home_dir() / "skills"
+
+
 def install_bundled_skills(*, overwrite: bool = False) -> list[Path]:
     """Copy curated repo skills into ``~/.agentm/skills/<name>``.
 
@@ -256,7 +261,7 @@ def install_bundled_skills(*, overwrite: bool = False) -> list[Path]:
     root = _repo_root()
     if root is None:
         return []
-    dest_root = agentm_home_dir() / "skills"
+    dest_root = _skills_dir()
     dest_root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for rel in BUNDLED_SKILLS:
@@ -401,14 +406,14 @@ def run_onboard() -> None:
         typer.echo(
             "  source checkout not found (pip-wheel install?) — skipping "
             "bundled-skill copy. Drop SKILL.md dirs under "
-            f"{agentm_home_dir() / 'skills'} manually if you want them."
+            f"{_skills_dir()} manually if you want them."
         )
     elif typer.confirm(
         f"Copy {len(BUNDLED_SKILLS)} self-debug skills into ~/.agentm/skills "
         "so they're discoverable everywhere?",
         default=True,
     ):
-        dest_root = agentm_home_dir() / "skills"
+        dest_root = _skills_dir()
         present = [r for r in BUNDLED_SKILLS if (dest_root / Path(r).name).exists()]
         overwrite = False
         if present:
@@ -471,7 +476,7 @@ def run_onboard() -> None:
     if skills_written:
         typer.echo(
             f"  skills:    {', '.join(p.name for p in skills_written)} "
-            f"-> {agentm_home_dir() / 'skills'}"
+            f"-> {_skills_dir()}"
         )
     if env_path is not None:
         typer.echo(f"  feishu:    {env_path}")
