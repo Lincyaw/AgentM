@@ -307,10 +307,12 @@ def cli(
             envvar="AGENTM_SCENARIO",
             help=(
                 "Scenario the gateway builds new sessions in (sent on the "
-                "first message per chat). Default: gateway default."
+                "first message per chat). Defaults to 'chatbot' — the "
+                "conversational persona+memory composition built for chat "
+                "channels. Override with this flag or AGENTM_SCENARIO."
             ),
         ),
-    ] = None,
+    ] = "chatbot",
     session_scope: Annotated[
         str,
         typer.Option(
