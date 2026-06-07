@@ -15,11 +15,15 @@ Two dispatch modes:
   message and falls through to the normal session-prompt path. The
   *expanded* text reaches the LLM; the original ``/foo …`` does not.
 
-Unknown commands are rejected with a user-visible reply. This is
-deliberate — silently forwarding ``/foo`` to the model when the user
-clearly intended a command is the kind of failure mode that exposes
-private prompts. The router prefers a polite "no such command" over
-"the LLM has no idea what you meant either."
+A slash command unknown to the gateway registry is *not* rejected by the
+router — it returns ``None`` so the gateway can forward the raw ``/...``
+text to the session, where the in-session ``slash_commands`` atom
+dispatches session-registered commands (``/compact`` etc). Only a name
+unknown to *both* layers gets a user-visible "no such command" reply
+(emitted by the gateway, which holds the per-session known-command set).
+Surfacing that diagnostic when neither layer owns the name is deliberate —
+silently forwarding ``/foo`` to the model when the user clearly intended a
+command is the kind of failure mode that exposes private prompts.
 
 The :class:`CommandContext` facade is intentionally narrow. Handlers
 should never receive a gateway object directly; they get the few
@@ -155,6 +159,13 @@ class CommandContext:
     """Shut down the current session and set the ChatSessionMap entry to
     ``session_id`` so the next inbound message resumes from that
     session's transcript."""
+
+    list_session_commands: Callable[[], list[str]] = lambda: []
+    """Returns the bare names of commands registered *inside* this chat's
+    session (dispatched by the in-session ``slash_commands`` atom, e.g.
+    ``compact``). These never appear in the gateway registry, so ``/help``
+    folds them in separately. Empty until the session's ``session_ready``
+    frame has been seen, or for contexts with no session knowledge."""
 
     def reply(self, text: str, **meta: Any) -> OutboundBody:
         """Build a plain ``assistant_text`` outbound back to this chat."""

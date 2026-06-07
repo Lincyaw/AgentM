@@ -47,10 +47,12 @@ from agentm.gateway.auth import (
 )
 from agentm.gateway.chat_session_map import ChatSessionMap
 from agentm.gateway.commands import (
+    UNKNOWN_REPLY,
     CommandContext,
     CommandInbound,
     CommandRouter,
     discover_commands,
+    parse_invocation,
 )
 from agentm.gateway.outbox import SqliteInbox, SqliteOutbox
 from agentm.gateway.peer import PeerSession
@@ -353,6 +355,13 @@ class _GatewayRuntime:
         # (§3.4). Drives outbound routing so a reply reaches only the chat
         # client that owns the conversation.
         self._peer_channels: dict[str, str] = {}
+        # session_key -> the bare command names the session registered
+        # (``compact`` etc), learned from each session_ready frame as it
+        # passes through the outbound sink. Lets _run_command tell a known
+        # session command (forward to the session) from one unknown to both
+        # layers (surface an "unknown command" diagnostic), and lets /help
+        # list session commands the gateway registry doesn't know about.
+        self._session_commands: dict[str, set[str]] = {}
 
     def attach_server(self, server: WireServer) -> None:
         self._server = server
@@ -379,6 +388,11 @@ class _GatewayRuntime:
         meta = body.get("metadata")
         kind = str((meta or {}).get("kind") or "assistant_text")
         if kind == "session_ready" and isinstance(meta, dict):
+            # Record the session-registered command names BEFORE merging the
+            # gateway builtins in — these are the names dispatched inside the
+            # session by the slash_commands floor atom (compact, ...).
+            if session_key is not None:
+                self._remember_session_commands(session_key, meta)
             # Fold the gateway's own builtin commands (/new, /status,
             # /model, ...) into the session_ready command list so chat clients
             # surface them in autocomplete. They are routed by the gateway, not
@@ -419,6 +433,22 @@ class _GatewayRuntime:
                     self._outbox.enqueue, peer.peer_id, env
                 )
             peer.send_q.put(env, outbox_id)
+
+    def _remember_session_commands(
+        self, session_key: str, meta: dict[str, Any]
+    ) -> None:
+        """Cache the bare command names a session_ready frame carries, keyed
+        by session. These are the session-registered commands (dispatched by
+        the in-session slash_commands atom); the gateway uses them to forward
+        a ``/compact``-style inbound to the session instead of rejecting it,
+        and to list them under ``/help``. Namespaced names (``ns:name``) are
+        skipped — they are not bare ``/name`` invocations."""
+        names = meta.get("command_names")
+        if not isinstance(names, list):
+            return
+        self._session_commands[session_key] = {
+            n for n in names if isinstance(n, str) and ":" not in n
+        }
 
     def _merge_gateway_commands(self, meta: dict[str, Any]) -> None:
         """Fold the gateway's top-level command names (builtins like /model,
@@ -518,7 +548,26 @@ class _GatewayRuntime:
         )
         result = await self._command_router.try_dispatch(msg, ctx)
         if result is None:
-            # Parsed as not-a-command after all; treat as a normal prompt.
+            # try_dispatch returns None for two cases: (a) not a slash command
+            # at all, or (b) a slash command the GATEWAY registry doesn't own.
+            # Case (b) is the common one for session-registered commands like
+            # /compact — those are dispatched INSIDE the session by the
+            # slash_commands floor atom, which hooks the session's "input"
+            # event. So forward the raw /... text to the session prompt path:
+            # the session seam runs it. Only when the name is unknown to BOTH
+            # the gateway AND the session (per-session set learned from the
+            # session_ready frame) do we surface the "unknown command"
+            # diagnostic — otherwise a genuine session command would be
+            # wrongly rejected. If we have no session-command knowledge yet
+            # (e.g. the session_ready frame hasn't arrived), we forward
+            # optimistically rather than reject; a truly-unknown name then
+            # reaches the model as text (acceptable v1 tradeoff).
+            inv = parse_invocation(msg)
+            if inv is not None and inv.name and inv.namespace is None:
+                known = self._session_commands.get(session_key)
+                if known is not None and inv.name not in known:
+                    await self._emit_unknown_command(session_key, body, inv.raw)
+                    return
             await self._prompt_session(session_key, None, body)
             return
         for out in result.outbound:
@@ -580,6 +629,9 @@ class _GatewayRuntime:
             await self._sessions.shutdown_session(session_key)
             self._sessions.set_chat_mapping(session_key, target_sid)
 
+        def list_session_commands() -> list[str]:
+            return sorted(self._session_commands.get(session_key, set()))
+
         return CommandContext(
             session_key=session_key,
             channel=body.channel,
@@ -595,6 +647,7 @@ class _GatewayRuntime:
             switch_model=switch_model,
             cwd=self._cwd,
             resume_session=resume_session,
+            list_session_commands=list_session_commands,
         )
 
     async def _switch_model(self, session_key: str, name: str) -> tuple[bool, str]:
@@ -617,6 +670,24 @@ class _GatewayRuntime:
         await self._sessions.shutdown_session(session_key)
         self._sessions.forget(session_key)
         return (True, key)
+
+    async def _emit_unknown_command(
+        self, session_key: str, body: InboundBody, raw: str
+    ) -> None:
+        """Surface the "no such command" diagnostic for a slash command that
+        is unknown to both the gateway registry and the session's registered
+        set. Mirrors the reply the router used to emit before unknown-command
+        routing moved into the gateway."""
+        await self._emit_outbound(
+            {
+                "channel": body.channel,
+                "chat_id": body.chat_id,
+                "content": UNKNOWN_REPLY.format(raw=raw),
+                "thread_id": body.thread_id,
+                "metadata": {"kind": "diagnostic_error"},
+                "_session_key": session_key,
+            }
+        )
 
     async def _send_error(
         self, session_key: str, body: InboundBody, exc: Exception

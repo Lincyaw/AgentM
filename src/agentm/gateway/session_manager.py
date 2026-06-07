@@ -142,8 +142,22 @@ class SessionManager:
         self._factory = factory
 
     def session_id(self, session_key: str) -> str | None:
+        """Resolve the session id for ``session_key``.
+
+        Prefer a live in-memory session's id; fall back to the persisted
+        ChatSessionMap entry when none is live. The fallback matters after a
+        gateway restart: ``self._sessions`` is empty and a slash COMMAND
+        (unlike a normal message) never calls :meth:`get_or_create`, so
+        ``/context`` would otherwise report "no active session" even though
+        the conversation has persisted history. The chat->session mapping
+        survives restarts (``get_or_create`` reads it as ``prior_session_id``),
+        so it can resolve the trace file without first sending a message.
+        Returns ``None`` only when neither a live session nor a map entry
+        exists."""
         sess = self._sessions.get(session_key)
-        return _extract_session_id(sess) if sess is not None else None
+        if sess is not None:
+            return _extract_session_id(sess)
+        return self._chat_map.get(session_key)
 
     async def shutdown_session(self, session_key: str) -> None:
         """Tear down the in-memory session. Call :meth:`forget` afterwards
