@@ -386,6 +386,116 @@ def test_md_safe_degrades_images_to_text() -> None:
     assert adapter_mod._md_safe("no image") == "no image"
 
 
+class _Mention:
+    """Mirrors the lark ``Mention`` fields the adapter reads."""
+
+    def __init__(
+        self, *, key: str, open_id: str | None, name: str | None = None
+    ) -> None:
+        self.key = key
+        self.open_id = open_id
+        self.name = name
+
+
+class _InboundMsg:
+    """Minimal stand-in for lark's ``InboundMessage`` (only the fields
+    ``_on_message`` reads via getattr)."""
+
+    def __init__(
+        self,
+        *,
+        content_text: str,
+        mentions: list[_Mention] | None = None,
+        sender_id: str = "ou_user",
+        chat_id: str = "oc_grp",
+        message_id: str = "om_1",
+    ) -> None:
+        self.content_text = content_text
+        self.mentions = mentions or []
+        self.sender_id = sender_id
+        self.chat_id = chat_id
+        self.message_id = message_id
+
+
+_BOT_OID = "ou_bot"
+
+
+def _make_mention_adapter() -> tuple[FeishuAdapter, _FakeWireClient]:
+    """Adapter wired with a bot identity + recording wire client. ``_main_loop``
+    stays None so ``_on_message`` skips the (loop-bound) ack reaction."""
+    cfg = FeishuConfig(app_id="x", app_secret="y", channel_name="feishu",
+                       allow_from=["*"])
+    adapter = FeishuAdapter(client=object(), config=cfg)  # type: ignore[arg-type]
+    bot = type("Bot", (), {"open_id": _BOT_OID})()
+    adapter._channel = type("Ch", (), {"_bot": bot})()
+    client = _FakeWireClient()
+    adapter._client = client  # type: ignore[assignment]
+    return adapter, client
+
+
+@pytest.mark.asyncio
+async def test_group_bot_mention_stripped_yields_clean_command() -> None:
+    """Fail-stop: a group message leading with the bot's @-mention must forward
+    a CLEAN slash command (``/compact``), not ``@AgentM /compact`` — otherwise
+    the gateway never classifies it as a command."""
+    adapter, client = _make_mention_adapter()
+    await adapter._on_message(
+        _InboundMsg(
+            content_text="@AgentM /compact",
+            mentions=[_Mention(key="@_user_1", open_id=_BOT_OID, name="AgentM")],
+        )
+    )
+    assert _last_inbound(client)["content"] == "/compact"
+
+
+@pytest.mark.asyncio
+async def test_group_bot_mention_stripped_from_normal_prompt() -> None:
+    """A normal mentioned message forwards the bare text (no mention noise)."""
+    adapter, client = _make_mention_adapter()
+    await adapter._on_message(
+        _InboundMsg(
+            content_text="@AgentM hello there",
+            mentions=[_Mention(key="@_user_1", open_id=_BOT_OID, name="AgentM")],
+        )
+    )
+    assert _last_inbound(client)["content"] == "hello there"
+
+
+@pytest.mark.asyncio
+async def test_group_unnamed_bot_placeholder_stripped() -> None:
+    """When Lark leaves the raw ``@_user_N`` placeholder (no display name), the
+    bot's leading placeholder is still stripped to a clean command."""
+    adapter, client = _make_mention_adapter()
+    await adapter._on_message(
+        _InboundMsg(
+            content_text="@_user_1 /help",
+            mentions=[_Mention(key="@_user_1", open_id=_BOT_OID, name=None)],
+        )
+    )
+    assert _last_inbound(client)["content"] == "/help"
+
+
+@pytest.mark.asyncio
+async def test_other_user_mention_not_stripped() -> None:
+    """A leading mention of ANOTHER user (not the bot) is left untouched."""
+    adapter, client = _make_mention_adapter()
+    await adapter._on_message(
+        _InboundMsg(
+            content_text="@Alice please run /compact",
+            mentions=[_Mention(key="@_user_1", open_id="ou_alice", name="Alice")],
+        )
+    )
+    assert _last_inbound(client)["content"] == "@Alice please run /compact"
+
+
+@pytest.mark.asyncio
+async def test_p2p_no_mention_passes_through_unchanged() -> None:
+    """p2p (direct) chats carry no mention; content must pass through exactly."""
+    adapter, client = _make_mention_adapter()
+    await adapter._on_message(_InboundMsg(content_text="/compact", mentions=[]))
+    assert _last_inbound(client)["content"] == "/compact"
+
+
 @pytest.mark.asyncio
 async def test_approval_is_a_standalone_card(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter, channel = _make_adapter(monkeypatch)
