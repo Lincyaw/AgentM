@@ -153,7 +153,13 @@ class WireServer:
         if self._stopped:
             return
         self._stopped = True
-        await self._transport.close()
+        # Cancel per-peer connection + delivery tasks FIRST. Each read loop's
+        # finally then closes its writer, so the listening socket is left with
+        # no live connections. Otherwise transport.close()'s wait_closed()
+        # (py3.12 waits for active connections to finish) blocks forever on a
+        # peer whose read loop never returns on its own — e.g. an
+        # auto-reconnecting client — hanging `systemctl stop` until
+        # TimeoutStopSec SIGKILLs the process.
         for task in list(self._delivery_tasks.values()):
             task.cancel()
         for task in list(self._conn_tasks):
@@ -164,6 +170,7 @@ class WireServer:
                 await task
         self._delivery_tasks.clear()
         self._conn_tasks.clear()
+        await self._transport.close()
 
     @property
     def registry(self) -> PeerRegistry:

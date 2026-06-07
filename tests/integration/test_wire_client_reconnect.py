@@ -160,3 +160,38 @@ async def test_reconnecting_client_survives_gateway_restart(tmp_path: Path) -> N
         await _drop_gateway(server)
         outbox.close()
         inbox.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_returns_promptly_with_a_live_peer(tmp_path: Path) -> None:
+    """server.stop() must not hang when a peer is still connected. It cancels
+    the per-peer connection tasks (closing their sockets) BEFORE awaiting the
+    listener's wait_closed() — otherwise (py3.12) wait_closed waits for the
+    live connection to finish on its own, which an auto-reconnecting client
+    never does, hanging `systemctl stop` until TimeoutStopSec SIGKILLs it.
+    """
+    sock = str(tmp_path / "gw.sock")
+    outbox = SqliteOutbox(str(tmp_path / "ob.sqlite"))
+    inbox = SqliteInbox(str(tmp_path / "ib.sqlite"))
+    seen_peers: list[str] = []
+    server = await _make_server(sock, outbox, inbox, seen_peers)
+    client = WireClient(transport=UnixClientTransport(sock), peer_name="live1")
+    await client.connect()
+    try:
+        # Force a handshake the server registers, so a live peer is connected.
+        await client.send_inbound(
+            {"channel": "terminal", "chat_id": "t1", "content": "hi"},
+            session_key="terminal:t1",
+        )
+        for _ in range(100):
+            if seen_peers:
+                break
+            await asyncio.sleep(0.02)
+        assert seen_peers == ["live1"], "peer never registered"
+        # Peer is still connected (its read loop is alive). stop() must still
+        # complete well within the timeout — the regression would hang here.
+        await asyncio.wait_for(server.stop(), timeout=5)
+    finally:
+        await client.close()
+        outbox.close()
+        inbox.close()
