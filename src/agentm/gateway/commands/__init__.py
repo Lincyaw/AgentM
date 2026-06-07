@@ -16,10 +16,11 @@ from .protocol import (
     parse_invocation,
 )
 from .registry import CommandRegistry, discover_commands
-from .router import CommandRouter
+from .router import UNKNOWN_REPLY, CommandRouter
 
 
 __all__ = [
+    "UNKNOWN_REPLY",
     "CommandContext",
     "CommandHandler",
     "CommandInbound",

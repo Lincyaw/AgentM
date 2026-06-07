@@ -25,9 +25,15 @@ fresh conversation — they should type `/new`.
 
 ## 2. First Principles
 
-1. **Slash commands never reach the LLM.** Unknown commands are
-   rejected, not forwarded. The cost of "user typo accidentally sends
-   private prompt to model" is too high.
+1. **Slash commands never reach the LLM as commands.** A command the
+   *gateway* registry doesn't own is forwarded to the session, where the
+   in-session `slash_commands` atom dispatches session-registered commands
+   (`/compact` etc). Only a name unknown to *both* layers is rejected with a
+   user-visible reply rather than forwarded — the gateway makes that call
+   using a per-session known-command set learned from the `session_ready`
+   frame. The cost of "user typo accidentally sends private prompt to model"
+   is too high to forward a name nobody owns; but a real session command
+   must reach its dispatcher, not be rejected at the gateway.
 2. **One protocol, four handler kinds.** Commands come from four
    sources (builtin control, markdown prompt, skill, atom), but the
    dispatcher sees a single `CommandHandler` Protocol. The router is
@@ -112,7 +118,11 @@ Namespace separator is `:`, exactly one (`/skill:feishu-cli foo bar`
 Edge cases:
 
 - `/` alone → invalid; reply with "Type `/help` for commands."
-- `/unknown` → invalid; same reply. **No fallback to LLM.**
+- `/unknown` → if the gateway registry doesn't own the name, the router
+  returns `None` and the gateway forwards the raw text to the session so a
+  session-registered command can run. Only if the name is unknown to the
+  session too does the gateway reply "no such command" — **no fallback to
+  the LLM for a name nobody owns.**
 - `//literal/path` → not a command (first character is `/` but second
   is `/`; treated as user text). Cheap to disambiguate without
   surprising file-path users.
@@ -163,7 +173,15 @@ async def _dispatch(self, msg: InboundMessage) -> None:
     if msg.content.startswith("/") and not msg.content.startswith("//"):
         result = await self._command_router.try_dispatch(msg, ctx=...)
         if result is None:
-            await self._publish_unknown_command(msg)
+            # No GATEWAY handler owns this name. If it is a known SESSION
+            # command (per-session set learned from session_ready) — or we
+            # have no session knowledge yet — forward the raw /... text to
+            # the session so its slash_commands atom can dispatch it. Only a
+            # name unknown to BOTH layers gets the "unknown command" reply.
+            if known_to_session_or_unknown_set(msg):
+                await self._prompt_session(msg)        # session dispatches it
+            else:
+                await self._publish_unknown_command(msg)
             return
         for out in result.outbound:
             await self._bus.publish_outbound(out)
@@ -180,8 +198,11 @@ async def _dispatch(self, msg: InboundMessage) -> None:
 
 Two invariants:
 
-1. `result is None` (unknown command) terminates with a user-visible
-   error reply; the message never reaches the LLM.
+1. `result is None` means no gateway handler owns the name. The gateway
+   forwards it to the session (so a session-registered command runs) unless
+   the name is unknown to the session too, in which case it terminates with
+   a user-visible "unknown command" reply. A name nobody owns never reaches
+   the LLM silently as a command.
 2. `result.expanded_prompt is not None` means it is a prompt command;
    the gateway re-enters the normal path with rewritten content. The
    session sees the expanded text as if the user had typed it.
@@ -345,12 +366,19 @@ skill (5)
 atom (2, disabled by config)
   /atom:install <name> [config-json]
   /atom:list           installed atoms in this session
+
+session (1)
+  /compact
 ```
 
 Grouping by source makes provenance immediately legible. Disabled
 groups (e.g. `atom` if `commands.atoms.enabled: false`) are still
 shown with a `(disabled by config)` note so users understand why the
-command does not work.
+command does not work. The `session` group lists commands registered
+*inside* the session (dispatched by the in-session `slash_commands`
+atom, e.g. `/compact`) — the gateway learns their bare names from the
+`session_ready` frame and folds them in here so they are discoverable;
+they carry no gateway-side summary.
 
 ---
 
@@ -362,7 +390,7 @@ command does not work.
 | Skill activation | `Skill` tool + `/<skill-name>` | `SkillCommand` + the existing `skill_loader` atom |
 | Plugin namespace | `/plugin:command` | Same shape |
 | Builtin control | hardcoded | `commands/builtins/*.py`, registered like atoms |
-| Unknown command | reject | reject (same) |
+| Unknown command | reject | forward to session if a session-registered command owns it; reject only when unknown to both gateway and session |
 | Kernel mutation | `Skill` tool + plugin system (opaque) | `AtomCommand` over MANIFEST-opt-in atoms with runtime overlay (transparent and auditable) |
 
 The biggest divergence is `/atom:*`. Claude Code conflates "skill" and
