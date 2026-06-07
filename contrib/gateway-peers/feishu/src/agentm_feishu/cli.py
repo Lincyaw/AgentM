@@ -30,6 +30,7 @@ Examples::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import signal
@@ -427,6 +428,10 @@ async def _arun(
     if check_config:
         return EXIT_OK
 
+    # Generated ONCE per process and reused on every reconnect (the wire
+    # client never regenerates it), so a re-dial replays this peer's outbox.
+    # A stable/configurable peer_name for cross-PROCESS restart continuity is
+    # a separate future improvement.
     peer_name = f"feishu-{uuid.uuid4().hex[:8]}"
     stop_event = asyncio.Event()
     exit_code = EXIT_OK
@@ -509,10 +514,19 @@ async def _arun(
 
     adapter_task = asyncio.create_task(adapter.start(), name="feishu-adapter")
     stop_task = asyncio.create_task(stop_event.wait(), name="feishu-stop")
+    # Reconnect supervisor: the Feishu adapter (long-poll) and this wire leg
+    # are independent tasks. We already connected above, so the supervisor
+    # runs reconnect-only (connect_first=False) — only the *gateway* link
+    # re-dials on a drop (same peer_name → outbox replay); the adapter stays
+    # alive across gateway restarts. The supervisor returns only on close()
+    # or raises AuthError if a reconnect handshake is fatally rejected.
+    reconnect_task = asyncio.create_task(
+        client.run_reconnecting(connect_first=False), name="feishu-reconnect"
+    )
 
     try:
         done, pending = await asyncio.wait(
-            [adapter_task, stop_task],
+            [adapter_task, stop_task, reconnect_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
         if adapter_task in done and adapter_task.exception() is not None:
@@ -524,6 +538,23 @@ async def _arun(
                 "check --app-id / --app-secret and Feishu app status",
             )
             return EXIT_AUTH
+        if reconnect_task in done and reconnect_task.exception() is not None:
+            reconnect_exc = reconnect_task.exception()
+            assert reconnect_exc is not None
+            if isinstance(reconnect_exc, AuthError):
+                _err(
+                    "auth-failed",
+                    f"gateway rejected reconnect (code={reconnect_exc.code!r})",
+                    "verify --bind-allow-uid on the gateway covers this uid",
+                )
+                return EXIT_AUTH
+            _err(
+                "gateway-error",
+                f"reconnect supervisor failed: "
+                f"{reconnect_exc.__class__.__name__}: {reconnect_exc}",
+                "check the gateway state and logs",
+            )
+            return EXIT_GENERIC
         for t in pending:
             t.cancel()
     finally:
@@ -532,6 +563,8 @@ async def _arun(
         except Exception:  # noqa: BLE001
             log.exception("adapter.stop raised")
         await client.close()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await reconnect_task
 
     if sigint_seen:
         return EXIT_SIGINT
