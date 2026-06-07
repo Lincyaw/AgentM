@@ -196,10 +196,12 @@ func (r *Router) agentEnd(m *Model) {
 	m.status.Update(sm)
 }
 
-func (r *Router) usage(m *Model, body map[string]any, _ map[string]any) {
+func (r *Router) usage(m *Model, _ map[string]any, meta map[string]any) {
 	sm := m.status.GetModel()
-	tokIn, _ := toInt(body["input_tokens"])
-	tokOut, _ := toInt(body["output_tokens"])
+	// Structured fields ride in metadata (the wire driver folds every
+	// projector key except `content` into body.metadata), not body top-level.
+	tokIn, _ := toInt(meta["input_tokens"])
+	tokOut, _ := toInt(meta["output_tokens"])
 	sm.TokensIn += tokIn
 	sm.TokensOut += tokOut
 
