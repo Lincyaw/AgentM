@@ -8,15 +8,13 @@ single tool call and only the final result returns to the model's context.
 
 Because the script is model-generated it is **untrusted**, so it runs inside
 a QuickJS isolate (a capability sandbox — nothing host-side is reachable
-unless we inject it). We inject seven primitives bound to *already-existing*
+unless we inject it). We inject six primitives bound to *already-existing*
 APIs:
 
 - ``agent(prompt, opts)`` — :meth:`ExtensionAPI.spawn_child_session` →
   ``child.prompt`` → last ``AssistantMessage`` text → ``child.shutdown``.
-- ``parallel(thunks)`` — barrier fan-out via ``asyncio.gather`` + a
-  ``Semaphore`` cap.
-- ``pipeline(items, ...stageNames)`` — per-item staged map over the same cap
-  (no global barrier between stages of distinct items).
+- ``parallel(specs)`` — fan-out a list of ``{prompt, opts}`` over a
+  ``Semaphore`` cap via ``asyncio.gather``, returning results in order.
 - ``log(msg)`` — emit a ``WorkflowPhaseEvent`` on the parent bus.
 - ``phase(name)`` — same, marking a named phase.
 - ``budget()`` — read aggregated child token spend
@@ -48,15 +46,62 @@ import contextlib
 import hashlib
 import json
 import os
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Final, Literal
+from typing import Any, ClassVar, Final, Literal, Protocol, TypedDict, TypeVar
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.events import Event, TurnEndEvent
+from agentm.core.abi.events import Event, EventBus, TurnEndEvent
 from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
-from agentm.core.abi.messages import AssistantMessage
+from agentm.core.abi.messages import AgentMessage, AssistantMessage
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
+
+_T = TypeVar("_T")
+
+
+# ``Any`` is used deliberately only for genuinely arbitrary decoded-JSON values
+# (script opts / args / tool params) and the untyped ``quickjs`` module. Every
+# host-side object reached through ``ExtensionAPI`` is given a real type or a
+# minimal structural ``Protocol`` below.
+
+
+class _ChildSession(Protocol):
+    """The slice of a spawned child session this atom drives.
+
+    ``spawn_child_session`` is typed ``-> Any`` in the ABI (so the §11 import
+    allow-list need not pull in ``core.runtime``); this Protocol re-types the
+    handful of members we actually use, structurally."""
+
+    bus: EventBus
+
+    async def prompt(self, message: str) -> list[AgentMessage]: ...
+    async def shutdown(self) -> None: ...
+
+
+class _ArtifactStore(Protocol):
+    """The ``artifact_store`` service surface used for the resume journal."""
+
+    async def list_artifacts(self, args: dict[str, Any]) -> ToolResult: ...
+    async def read(self, args: dict[str, Any]) -> ToolResult: ...
+    async def write_artifact(
+        self,
+        *,
+        kind: str,
+        title: str,
+        body: str,
+        tags: list[str] | None = None,
+    ) -> dict[str, str]: ...
+
+
+class BudgetSnapshot(TypedDict):
+    """What ``budget()`` returns to the script (JSON-serialised)."""
+
+    spent: int
+    input_tokens: int
+    output_tokens: int
+    total: int | None
+    remaining: int | None
 
 
 MANIFEST = ExtensionManifest(
@@ -157,13 +202,8 @@ globalThis.agent = function (prompt, opts) {
   return JSON.parse(__host_agent(JSON.stringify(spec)));
 };
 globalThis.parallel = function (specs) {
-  // specs: array of {prompt, opts}; returns array of results, barrier-joined.
+  // specs: array of {prompt, opts}; returns array of results in order.
   return JSON.parse(__host_parallel(JSON.stringify(specs || [])));
-};
-globalThis.pipeline = function (items, opts) {
-  // items: array of {prompt, opts}; mapped over the same concurrency cap
-  // without a per-stage global barrier.
-  return JSON.parse(__host_pipeline(JSON.stringify({ items: items || [], opts: opts || {} })));
 };
 globalThis.log = function (msg) { __host_log(String(msg)); };
 globalThis.phase = function (name) { __host_phase(String(name)); };
@@ -203,12 +243,15 @@ class _BudgetService:
     total_budget_tokens: int | None = None
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    def attach(self, child: Any) -> None:
-        """Subscribe to ``turn_end`` on the child's own bus."""
+    def attach(self, child: _ChildSession) -> None:
+        """Subscribe to ``turn_end`` on the child's own bus.
 
-        bus = getattr(child, "bus", None)
-        if bus is None:
-            return
+        Accesses ``child.bus`` directly — the same child-session contract
+        ``sub_agent`` relies on. We do **not** defensively swallow a missing
+        bus: a configured ``budget_tokens`` ceiling backs ``loop-until-budget``
+        scripts, so a silently-zero aggregator (ceiling never trips, spend
+        runs away) is worse than failing loudly if the child contract breaks.
+        """
 
         async def _on_turn_end(event: TurnEndEvent) -> None:
             usage = getattr(event.message, "usage", None)
@@ -218,9 +261,9 @@ class _BudgetService:
                 self.input_tokens += int(getattr(usage, "input_tokens", 0) or 0)
                 self.output_tokens += int(getattr(usage, "output_tokens", 0) or 0)
 
-        bus.on(TurnEndEvent.CHANNEL, _on_turn_end)
+        child.bus.on(TurnEndEvent.CHANNEL, _on_turn_end)
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self) -> BudgetSnapshot:
         spent = self.input_tokens + self.output_tokens
         remaining: int | None = None
         if self.total_budget_tokens is not None:
@@ -248,7 +291,7 @@ class _Journal:
     wrong granularity (design §3.3).
     """
 
-    store: Any | None
+    store: _ArtifactStore | None
     _cache: dict[str, str] = field(default_factory=dict)
 
     @staticmethod
@@ -370,7 +413,7 @@ class _WorkflowRun:
             tool_allowlist=tool_allowlist if isinstance(tool_allowlist, list) else None,
             purpose="workflow",
         )
-        child = await self.api.spawn_child_session(config)
+        child: _ChildSession = await self.api.spawn_child_session(config)
         self.budget.attach(child)
         try:
             messages = await child.prompt(prompt)
@@ -391,18 +434,8 @@ class _WorkflowRun:
         ]
         return list(await asyncio.gather(*tasks))
 
-    async def run_pipeline(
-        self, items: list[dict[str, Any]], opts: dict[str, Any]
-    ) -> list[str]:
-        # No per-stage global barrier: each item flows independently, the
-        # Semaphore alone caps concurrency. With a single implicit stage this
-        # is equivalent to parallel(); the distinction matters once a script
-        # composes staged thunks, which is scheduling policy only.
-        del opts
-        return await self.run_parallel(items)
 
-
-def _final_assistant_text(messages: list[Any]) -> str:
+def _final_assistant_text(messages: list[AgentMessage]) -> str:
     """Last assistant message's joined text blocks (the ``tool_eval_run``
     extraction recipe: last text block wins)."""
 
@@ -449,11 +482,11 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
             "type": "string",
             "description": (
                 "JavaScript orchestration script. Has access to: "
-                "agent(prompt, opts), parallel([{prompt,opts}]), "
-                "pipeline([{prompt,opts}], opts), log(msg), phase(name), "
-                "budget(), args(). Return a value (string or JSON-able) as the "
-                "last expression — it becomes the tool result. Math.random / "
-                "Date.now / argless new Date() are disabled."
+                "agent(prompt, opts), parallel([{prompt,opts}]), log(msg), "
+                "phase(name), budget(), args(). Return a value (string or "
+                "JSON-able) as the last expression — it becomes the tool "
+                "result. Math.random / Date.now / argless new Date() are "
+                "disabled."
             ),
         },
         "args": {
@@ -526,7 +559,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             ctx.set_memory_limit(128 * 1024 * 1024)
             ctx.set_max_stack_size(1024 * 1024)
 
-        def _call_async(coro: Any) -> Any:
+        def _call_async(coro: Coroutine[object, object, _T]) -> _T:
             fut = asyncio.run_coroutine_threadsafe(coro, run.loop)
             return fut.result()
 
@@ -544,22 +577,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             result = _call_async(run.run_parallel(list(specs)))
             return json.dumps(result, ensure_ascii=False)
 
-        def _host_pipeline(payload_json: str) -> str:
-            payload = json.loads(payload_json)
-            result = _call_async(
-                run.run_pipeline(
-                    list(payload.get("items") or []),
-                    dict(payload.get("opts") or {}),
-                )
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        def _emit_phase(kind: str, text: str) -> None:
+        def _emit_phase(kind: Literal["phase", "log"], text: str) -> None:
             with contextlib.suppress(Exception):
                 _call_async(
                     api.events.emit(
                         WorkflowPhaseEvent.CHANNEL,
-                        WorkflowPhaseEvent(kind=kind, text=text),  # type: ignore[arg-type]
+                        WorkflowPhaseEvent(kind=kind, text=text),
                     )
                 )
 
@@ -571,21 +594,22 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             _emit_phase("phase", name)
             return ""
 
-        def _host_budget(_unused: str) -> str:
+        # budget()/args() take no JS args, but QuickJS add_callable requires a
+        # scalar signature, so the JS wrappers pass '' and we accept+ignore it.
+        def _host_budget(_arg: str) -> str:
             return json.dumps(run.budget.snapshot(), ensure_ascii=False)
 
-        def _host_args(_unused: str) -> str:
+        def _host_args(_arg: str) -> str:
             return json.dumps(run.args_payload, ensure_ascii=False)
 
         ctx.add_callable("__host_agent", _host_agent)
         ctx.add_callable("__host_parallel", _host_parallel)
-        ctx.add_callable("__host_pipeline", _host_pipeline)
         ctx.add_callable("__host_log", _host_log)
         ctx.add_callable("__host_phase", _host_phase)
         ctx.add_callable("__host_budget", _host_budget)
         ctx.add_callable("__host_args", _host_args)
 
-        def _run_script() -> Any:
+        def _run_script() -> object:
             ctx.eval(_JS_BOOTSTRAP)
             return ctx.eval(script)
 
@@ -641,7 +665,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
 
 
-def _coerce_js_result(raw: Any) -> str:
+def _coerce_js_result(raw: object) -> str:
     if isinstance(raw, str):
         return raw
     if raw is None:

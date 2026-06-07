@@ -61,10 +61,10 @@ extra**, the same treatment as `arl-env` for `operations_agent_env`.
 | Primitive | Built from | Status |
 |---|---|---|
 | `agent(prompt, opts)` | `spawn_child_session(cfg)` → `child.prompt(msg)` → last `AssistantMessage.text` → `child.shutdown()` | reuse (identical in `tool_eval_run` + `sub_agent`) |
-| `parallel(thunks)` (barrier) | `asyncio.gather` + `Semaphore` + `api.track_background()` bracket | reuse |
-| `pipeline(items, ...stages)` (no barrier) | per-item `asyncio.Task` over the same bracket | reuse (scheduling policy only) |
+| `parallel(specs)` | `asyncio.gather` + `Semaphore` + `api.track_background()` bracket | reuse |
+| `pipeline(items, ...stages)` (no barrier) | per-item `asyncio.Task` over the same bracket | **deferred** — not in v1 (see §Out of scope) |
 | `opts.schema` (structured output) | `agentm.core.lib.pydantic_to_openai_tool_schema` + forced StructuredOutput tool on child | reuse |
-| `opts.isolation` (worker sandbox) | include `operations_agent_env` in child `extensions` list | reuse (`child_config["extensions"]` already accepts it) |
+| `opts.isolation` (worker sandbox) | include `operations_agent_env` in child `extensions` list, guarded by a runtime `list_atoms()` availability check | reuse + soft-dep guard (see §11/boundary) |
 | events → TUI | `api.events.emit("workflow_phase", WorkflowPhaseEvent(...))`, event type defined in the atom | reuse (`emit(channel: str, event: Any)` generic overload; OTLP/observer captures generically) |
 | child lifecycle / background / inbox | `sub_agent`'s `_run_child` / `track_background` / `post_inbox` | reuse |
 
@@ -115,9 +115,31 @@ in the runtime.
   imports** — it reaches `sub_agent` / `artifact_store` capability via
   `api.get_service` and `api.spawn_child_session`, never by importing the module.
 - The quickjs sandbox is never handed anything from `core.runtime.*`; host
-  functions close over `api` but expose only the seven primitives to JS.
+  functions close over `api` but expose only the six primitives to JS.
 - Worker isolation policy (`operations_agent_env`) is selected by listing the
   atom in the child's `extensions`, not by a privileged config field.
+- **`operations_agent_env` is a *soft* dependency, by design.** It is NOT in
+  `MANIFEST.requires` — that would force every workflow user to pull the
+  agent-env extra + a K8s gateway, when most workflows never request
+  `isolation: "agent_env"`. Enforcement is therefore a **runtime
+  availability guard** (`list_atoms()` → clear error if the script asks for
+  agent-env isolation but the atom is not loaded), not the §11 validator. The
+  atom stores only the dotted module path and **derives** the bare atom name at
+  runtime (`rsplit`), because a bare-name string literal would trip the
+  §11.4.D4 peer-literal check and read as an *undeclared hard* dependency. This
+  derive-to-stay-soft pattern is deliberate and recorded here so it is
+  reviewable design, not a buried trick — and so the next atom does not
+  cargo-cult `rsplit` to smuggle a genuine hard dependency past D4. A
+  first-class `MANIFEST.optional_requires` (or `soft:` register tag) would let
+  the soft intent be *declared* rather than *inferred from a missing literal*;
+  that is a substrate change, deferred.
+- **Cross-child budget aggregation reaches `child.bus` directly** (the same
+  child-session contract `sub_agent` relies on), because child `TurnEndEvent`s
+  do not bubble to the parent bus. `spawn_child_session` is typed `-> Any`, so
+  `.bus` is a duck-typed reach with no guaranteeing port; we access it directly
+  (no defensive `getattr`/swallow) so a broken child contract fails loudly
+  rather than silently zeroing the budget ceiling. If cross-child token
+  observation is reused, promote it to a documented child-observation port.
 
 ## Decisions / rejected
 
@@ -137,5 +159,12 @@ in the runtime.
   route is racy under parallel runs). If a workflow needs per-worker env, that is
   the one change touching the substrate (`AgentSessionConfig` + route through
   `spawn_child_session`). Deferred until a real need appears.
+- **`pipeline(items, ...stages)`** — deferred. v1 ships `parallel` only. A
+  real no-barrier staged pipeline needs the script to express stages as JS
+  callbacks the host invokes per item across the boundary; shipping it as a
+  thin alias of `parallel` (no stage args, identical behaviour) would be a
+  false affordance, so it is left out until the staged semantics are built
+  properly. The concept (pipeline ≠ parallel: streaming vs. barrier) stays part
+  of this design; only the v1 implementation is scoped to `parallel`.
 - Cross-session (non-tree) resume, nested workflows beyond one level,
   binary artifacts — deferred.
