@@ -70,7 +70,9 @@ def test_user_mode_unit_uses_runtime_specifier_and_no_user() -> None:
     assert "unix://%t/agentm/gw.sock" in gw
     assert "WantedBy=default.target" in gw
     assert "User=" not in gw
-    assert "RuntimeDirectory=" not in gw  # %t is already per-user
+    # RuntimeDirectory=agentm is required even for user units so systemd
+    # creates %t/agentm/ before the gateway binds its socket there.
+    assert "RuntimeDirectory=agentm" in gw
 
 
 def test_gateway_and_feishu_share_the_same_socket() -> None:
@@ -215,3 +217,6 @@ def test_build_plan_absolutizes_relative_cwd_and_stays_user(
     # The WorkingDirectory line is absolute (no relative path → no bad setting).
     assert f"WorkingDirectory={(tmp_path / 'work').resolve()}" in gw
     assert "WantedBy=default.target" in gw  # user target, not multi-user
+    # RuntimeDirectory must be present even for user units, or systemd won't
+    # create %t/agentm/ and the gateway's socket bind() fails (exit 1).
+    assert "RuntimeDirectory=agentm" in gw

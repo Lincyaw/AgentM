@@ -684,11 +684,12 @@ def _render_gateway_unit(plan: _SystemdPlan) -> str:
     user_lines = ""
     if plan.system and plan.run_as:
         user_lines = f"User={plan.run_as}\nGroup={plan.run_as}\n"
-    runtime_lines = ""
-    if plan.system:
-        # system units have no login session, so pin an absolute socket under
-        # /run/agentm that systemd creates/cleans via RuntimeDirectory.
-        runtime_lines = "RuntimeDirectory=agentm\nRuntimeDirectoryMode=0750\n"
+    # The socket lives under <runtime>/agentm/ — systemd must create that
+    # subdir before ExecStart, or the gateway's bind() fails with FileNotFound
+    # (exit 1). RuntimeDirectory=agentm creates %t/agentm for user units (=
+    # $XDG_RUNTIME_DIR/agentm) and /run/agentm for system units, matching the
+    # pinned socket in both modes.
+    runtime_lines = "RuntimeDirectory=agentm\nRuntimeDirectoryMode=0750\n"
     wanted_by = "multi-user.target" if plan.system else "default.target"
     return textwrap.dedent(f"""\
         [Unit]
