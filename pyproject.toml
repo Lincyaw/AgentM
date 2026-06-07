@@ -42,14 +42,6 @@ agent-env = [
 eval = [
     "duckdb>=1.5.2",
 ]
-# Pulls in the QuickJS engine so the builtin ``workflow`` atom can run
-# LLM-authored orchestration scripts in an isolated sandbox. Install with
-# ``uv sync --extra workflow`` (workspace) or ``pip install agentm[workflow]``.
-# ``quickjs-ng`` is the maintained drop-in fork of the archived ``quickjs``
-# package; both expose ``import quickjs``.
-workflow = [
-    "quickjs-ng>=0.9.0",
-]
 terminal = [
     "agentm-terminal",
 ]

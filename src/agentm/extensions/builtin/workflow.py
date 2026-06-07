@@ -1,52 +1,57 @@
-"""``workflow`` atom — run an LLM-authored JavaScript orchestration script.
+"""``workflow`` atom — run an LLM-authored Python orchestration script.
 
 See ``.claude/designs/dynamic-workflow.md``. A *dynamic workflow* is a
-model-authored JS script that orchestrates many child agent sessions
+model-authored script that orchestrates many child agent sessions
 deterministically. The model writes the control flow (loops, branches,
 fan-out, budget-driven scaling) as code at runtime; this atom runs it as a
 single tool call and only the final result returns to the model's context.
 
-Because the script is model-generated it is **untrusted**, so it runs inside
-a QuickJS isolate (a capability sandbox — nothing host-side is reachable
-unless we inject it). We inject six primitives bound to *already-existing*
-APIs:
+The script is plain ``async`` Python, run as a coroutine on the host event
+loop with a **curated namespace** that exposes only an orchestration SDK —
+bound to *already-existing* APIs:
 
-- ``agent(prompt, opts)`` — :meth:`ExtensionAPI.spawn_child_session` →
-  ``child.prompt`` → last ``AssistantMessage`` text → ``child.shutdown``.
-- ``parallel(specs)`` — fan-out a list of ``{prompt, opts}`` over a
-  ``Semaphore`` cap via ``asyncio.gather``, returning results in order.
-- ``log(msg)`` — emit a ``WorkflowPhaseEvent`` on the parent bus.
-- ``phase(name)`` — same, marking a named phase.
-- ``budget()`` — read aggregated child token spend
-  (:class:`_BudgetService`).
-- ``args()`` — the caller-supplied ``args`` payload.
+- ``agent(prompt, *, scenario=, isolation=, tool_allowlist=)`` —
+  :meth:`ExtensionAPI.spawn_child_session` → ``child.prompt`` → last
+  ``AssistantMessage`` text → ``child.shutdown``. Returns the text.
+- ``parallel(aws)`` — ``await parallel([agent(p) for p in ...])``;
+  ``asyncio.gather`` over the awaitables (each ``agent`` self-limits via a
+  shared ``Semaphore``).
+- ``pipeline(items, *stages)`` — run each item through ``stages`` (sync or
+  async callables) independently, **no cross-item barrier**: item A may be in
+  stage 2 while item B is still in stage 1.
+- ``budget`` — a read-only view: ``budget.total`` / ``budget.spent()`` /
+  ``budget.remaining()`` over aggregated child token spend.
+- ``args`` — the caller-supplied ``args`` dict.
+- ``log(msg)`` / ``phase(name)`` — fire-and-forget ``WorkflowPhaseEvent`` on
+  the parent bus.
 
-Every wall-clock / entropy source a script can reach (``Math.random``,
-``Date.now``, argless ``new Date()``, ``performance.now``) is stripped inside
-a bootstrap IIFE — the original ``Date`` is captured in a closure and never
-re-exposed as a global — so the workflow-local journal key
-``hash(prompt, opts)`` stays sound across replays.
-
-Worker isolation (``opts.isolation == "agent_env"``) is a *soft, optional*
-dependency on the ``operations_agent_env`` atom: guarded at spawn time, not
-declared in ``MANIFEST.requires`` (which would force every workflow user to
-pull in the agent-env extra + K8s gateway).
+**Capability surface, not a sandbox.** The script runs at the *same authority*
+as the agent that wrote it (which can already call ``bash`` / ``install_atom``
+etc.), so this is not a security boundary. The curated ``__builtins__`` (data
+ops only — no ``open`` / ``__import__`` / ``eval``) is a guardrail that keeps
+honest scripts on the SDK and off the filesystem, not an escape-proof wall;
+hard isolation, when needed, is the worker ``operations_agent_env`` sandbox or
+a process boundary — the same answer as for ``bash``. Determinism for the
+resume journal is achieved by *not injecting* ``time`` / ``random`` rather than
+by interception.
 
 §11 single-file contract: stdlib + ``agentm.core.abi.*`` +
-``agentm.core.lib.*`` + ``agentm.extensions.*`` + ``quickjs`` (optional
-3rd-party). No atom-to-atom imports — ``artifact_store`` is reached via
-``api.get_service`` and worker child sessions via
+``agentm.extensions.*``. No atom-to-atom imports — ``artifact_store`` is
+reached via ``api.get_service`` and worker child sessions via
 ``api.spawn_child_session``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import builtins as _builtins
 import contextlib
 import hashlib
+import inspect
 import json
 import os
-from collections.abc import Coroutine
+import textwrap
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Final, Literal, Protocol, TypedDict, TypeVar
 
@@ -60,10 +65,10 @@ from agentm.extensions import ExtensionManifest
 _T = TypeVar("_T")
 
 
-# ``Any`` is used deliberately only for genuinely arbitrary decoded-JSON values
-# (script opts / args / tool params) and the untyped ``quickjs`` module. Every
-# host-side object reached through ``ExtensionAPI`` is given a real type or a
-# minimal structural ``Protocol`` below.
+# ``Any`` is used deliberately only for genuinely arbitrary script values
+# (the ``args`` payload, decoded-JSON tool params, the pipeline item / result
+# types). Every host-side object reached through ``ExtensionAPI`` is given a
+# real type or a minimal structural ``Protocol`` below.
 
 
 class _ChildSession(Protocol):
@@ -95,7 +100,7 @@ class _ArtifactStore(Protocol):
 
 
 class BudgetSnapshot(TypedDict):
-    """What ``budget()`` returns to the script (JSON-serialised)."""
+    """Aggregated child token spend (also returned in the tool ``extras``)."""
 
     spent: int
     input_tokens: int
@@ -107,10 +112,10 @@ class BudgetSnapshot(TypedDict):
 MANIFEST = ExtensionManifest(
     name="workflow",
     description=(
-        "Run an LLM-authored JavaScript orchestration script in a QuickJS "
-        "isolate that fans out deterministic child agent sessions via the "
-        "agent/parallel/pipeline primitives. Only the final result returns "
-        "to the model's context."
+        "Run an LLM-authored async Python orchestration script in a curated "
+        "namespace that fans out deterministic child agent sessions via the "
+        "agent/parallel/pipeline primitives. Only the final result returns to "
+        "the model's context."
     ),
     registers=(
         "tool:workflow",
@@ -123,9 +128,9 @@ MANIFEST = ExtensionManifest(
             "max_agents": {"type": "integer", "minimum": 1},
             "wall_clock_timeout_s": {"type": ["number", "null"], "minimum": 0},
             "default_scenario": {"type": ["string", "null"]},
-            # Hard token ceiling for one workflow run; backs budget().total /
-            # .remaining so a script can scale depth (loop-until-budget). Null
-            # ⇒ no ceiling (budget().remaining stays null, spend still tracked).
+            # Hard token ceiling for one workflow run; backs budget.total /
+            # budget.remaining() so a script can scale depth (loop-until-budget).
+            # Null ⇒ no ceiling (remaining stays None, spend still tracked).
             "budget_tokens": {"type": ["integer", "null"], "minimum": 1},
         },
         "additionalProperties": False,
@@ -144,72 +149,37 @@ _ARTIFACT_STORE_SERVICE: Final[str] = "artifact_store"
 # child sessions across the whole workflow run.
 _AGENT_COUNT_BACKSTOP: Final[int] = 1000
 
-# Worker-isolation atom (opts.isolation == "agent_env"). Soft/optional
-# dependency: NOT in MANIFEST.requires (that would force every workflow user
-# to load agent-env + the arl extra). Enforcement is the runtime availability
-# guard in _spawn_and_drive, not the §11 validator. The module path is what
-# goes into the child's extension list; the bare atom name (for the loaded-set
-# check) is DERIVED from it rather than written as a literal — a bare-name
-# literal would read as an undeclared hard dependency to the D4 contract check.
+# Worker-isolation atom (``isolation="agent_env"``). Soft/optional dependency:
+# NOT in MANIFEST.requires (that would force every workflow user to load
+# agent-env + the arl extra). Enforcement is the runtime availability guard in
+# ``_WorkflowRun._spawn_and_drive``, not the §11 validator. The module path is
+# what goes into the child's extension list; the bare atom name (for the
+# loaded-set check) is DERIVED from it rather than written as a literal — a
+# bare-name literal would read as an undeclared hard dependency to the D4
+# contract check.
 _AGENT_ENV_ATOM_MODULE: Final[str] = (
     "agentm.extensions.builtin.operations_agent_env"
 )
 _AGENT_ENV_ATOM: Final[str] = _AGENT_ENV_ATOM_MODULE.rsplit(".", 1)[-1]
 
-# JS bootstrap: strip the three nondeterministic globals that would break
-# replay-determinism of the journal key, then install ergonomic wrappers
-# that marshal scalars-only across the boundary (QuickJS add_callable only
-# round-trips int/float/str/bool — see dynamic-workflow.md). Strings on the
-# wire, JSON on both sides.
-_JS_BOOTSTRAP = r"""
-// --- strip nondeterministic sources (journal-key soundness) ---
-// Done inside an IIFE so the captured original Date never leaks to a global
-// (a leaked __OrigDate would be an open back door to wall-clock, defeating
-// the whole strip). Every wall-clock / entropy source a script could reach
-// is closed: Math.random, Date.now, argless new Date(), performance.now.
-(function () {
-  var OrigDate = Date;
-  var D = function (y, mo, d, h, mi, s, ms) {
-    if (arguments.length === 0) {
-      throw new Error('argless Date() disabled in workflow sandbox');
-    }
-    // Forward explicit args (deterministic): construct from the originals.
-    return new (Function.prototype.bind.apply(
-      OrigDate, [null].concat(Array.prototype.slice.call(arguments))
-    ))();
-  };
-  D.now = function () { throw new Error('Date.now() disabled in workflow sandbox'); };
-  D.parse = OrigDate.parse;
-  D.UTC = OrigDate.UTC;
-  D.prototype = OrigDate.prototype;
-  globalThis.Date = D;
-  globalThis.Math.random = function () {
-    throw new Error('Math.random() disabled in workflow sandbox');
-  };
-  if (typeof globalThis.performance !== 'undefined') {
-    try {
-      globalThis.performance.now = function () {
-        throw new Error('performance.now() disabled in workflow sandbox');
-      };
-    } catch (e) {}
-    try { delete globalThis.performance; } catch (e) {}
-  }
-})();
 
-// --- primitive wrappers (delegate to injected __host_* callables) ---
-globalThis.agent = function (prompt, opts) {
-  const spec = { prompt: prompt, opts: opts || {} };
-  return JSON.parse(__host_agent(JSON.stringify(spec)));
-};
-globalThis.parallel = function (specs) {
-  // specs: array of {prompt, opts}; returns array of results in order.
-  return JSON.parse(__host_parallel(JSON.stringify(specs || [])));
-};
-globalThis.log = function (msg) { __host_log(String(msg)); };
-globalThis.phase = function (name) { __host_phase(String(name)); };
-globalThis.budget = function () { return JSON.parse(__host_budget('')); };
-globalThis.args = function () { return JSON.parse(__host_args('')); };
-"""
+# Curated builtins handed to the script: data-manipulation only. This is a
+# guardrail (keeps honest scripts on the SDK + off the filesystem), NOT an
+# escape-proof sandbox — see the module docstring. ``open`` / ``__import__`` /
+# ``eval`` / ``exec`` / ``compile`` / ``input`` / ``getattr`` etc. are omitted.
+# ``time`` / ``random`` are likewise not provided, keeping the journal key
+# replay-deterministic.
+_SAFE_BUILTIN_NAMES: Final[tuple[str, ...]] = (
+    "abs", "all", "any", "bool", "dict", "divmod", "enumerate", "filter",
+    "float", "frozenset", "int", "isinstance", "issubclass", "len", "list",
+    "map", "max", "min", "next", "range", "repr", "reversed", "round", "set",
+    "slice", "sorted", "str", "sum", "tuple", "zip",
+    "Exception", "ValueError", "KeyError", "IndexError", "TypeError",
+    "RuntimeError", "StopIteration",
+)
+_SAFE_BUILTINS: Final[dict[str, Any]] = {
+    name: getattr(_builtins, name) for name in _SAFE_BUILTIN_NAMES
+}
 
 
 @dataclass(slots=True)
@@ -275,6 +245,26 @@ class _BudgetService:
             "total": self.total_budget_tokens,
             "remaining": remaining,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _Budget:
+    """Read-only ``budget`` view injected into the script."""
+
+    _svc: _BudgetService
+
+    @property
+    def total(self) -> int | None:
+        return self._svc.total_budget_tokens
+
+    def spent(self) -> int:
+        return self._svc.input_tokens + self._svc.output_tokens
+
+    def remaining(self) -> int | None:
+        total = self._svc.total_budget_tokens
+        if total is None:
+            return None
+        return max(0, total - self.spent())
 
 
 @dataclass(slots=True)
@@ -347,21 +337,41 @@ def _default_concurrency() -> int:
 
 @dataclass(slots=True)
 class _WorkflowRun:
-    """One ``workflow`` tool invocation: owns the journal, budget aggregator,
-    concurrency cap and lifetime backstop for a single script run."""
+    """One ``workflow`` tool invocation. Owns the journal, budget aggregator,
+    concurrency cap and lifetime backstop, and exposes the orchestration SDK
+    (``agent`` / ``parallel`` / ``pipeline`` / ``log`` / ``phase``) that gets
+    injected — bound to this run — into the script namespace."""
 
     api: ExtensionAPI
     journal: _Journal
-    budget: _BudgetService
+    budget_svc: _BudgetService
     semaphore: asyncio.Semaphore
-    loop: asyncio.AbstractEventLoop
     default_scenario: str | None = None
     max_agents: int = _AGENT_COUNT_BACKSTOP
     agents_spawned: int = 0
     args_payload: dict[str, Any] = field(default_factory=dict)
     _agent_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _bg_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
 
-    async def _run_one_agent(self, prompt: str, opts: dict[str, Any]) -> str:
+    # --- SDK injected into the script namespace -------------------------------
+
+    async def agent(
+        self,
+        prompt: str,
+        *,
+        scenario: str | None = None,
+        isolation: str | None = None,
+        tool_allowlist: list[str] | None = None,
+    ) -> str:
+        """Spawn one child agent session, drive it to a final reply, return its
+        text. Journaled by ``hash(prompt, opts)`` — a re-run resumes from cache
+        without re-spawning."""
+
+        opts: dict[str, Any] = {
+            "scenario": scenario,
+            "isolation": isolation,
+            "tool_allowlist": tool_allowlist,
+        }
         key = _Journal.key(prompt, opts)
         cached = await self.journal.lookup(key)
         if cached is not None:
@@ -376,63 +386,103 @@ class _WorkflowRun:
             self.agents_spawned += 1
 
         async with self.semaphore:
-            result = await self._spawn_and_drive(prompt, opts)
+            result = await self._spawn_and_drive(
+                prompt, scenario, isolation, tool_allowlist
+            )
 
         await self.journal.record(key, result)
         return result
 
-    async def _spawn_and_drive(self, prompt: str, opts: dict[str, Any]) -> str:
-        scenario = opts.get("scenario") or self.default_scenario
+    async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
+        """Barrier fan-out: await every awaitable, return results in order.
+        Each ``agent`` self-limits via the shared Semaphore, so this is a thin
+        ``gather``."""
+
+        return list(await asyncio.gather(*aws))
+
+    async def pipeline(
+        self,
+        items: list[Any],
+        *stages: Callable[[Any], Any],
+    ) -> list[Any]:
+        """Run each item through ``stages`` independently — **no cross-item
+        barrier**. Item A may be in stage 2 while item B is still in stage 1;
+        wall-clock is the slowest single-item chain, not the sum of per-stage
+        maxima. Stages may be sync or async callables."""
+
+        async def _chain(item: Any) -> Any:
+            cur: Any = item
+            for stage in stages:
+                cur = stage(cur)
+                if inspect.isawaitable(cur):
+                    cur = await cur
+            return cur
+
+        return list(await asyncio.gather(*(_chain(it) for it in items)))
+
+    def log(self, msg: object) -> None:
+        self._emit_phase("log", str(msg))
+
+    def phase(self, name: object) -> None:
+        self._emit_phase("phase", str(name))
+
+    # --- internals -----------------------------------------------------------
+
+    def _emit_phase(self, kind: Literal["phase", "log"], text: str) -> None:
+        # Fire-and-forget: schedule the emit on the running loop and hold a
+        # reference so it is not GC'd mid-flight.
+        with contextlib.suppress(RuntimeError):
+            task = asyncio.create_task(
+                self.api.events.emit(
+                    WorkflowPhaseEvent.CHANNEL,
+                    WorkflowPhaseEvent(kind=kind, text=text),
+                )
+            )
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+
+    async def _spawn_and_drive(
+        self,
+        prompt: str,
+        scenario: str | None,
+        isolation: str | None,
+        tool_allowlist: list[str] | None,
+    ) -> str:
         extensions: list[tuple[str, dict[str, Any]]] = []
-        # opts.isolation selects the worker sandbox by listing the
+        # isolation="agent_env" selects the worker sandbox by listing the
         # operations_agent_env atom in the child's extensions (policy by
-        # composition, never a privileged config field). This is a *soft,
-        # optional* dependency — declaring it in MANIFEST.requires would force
-        # every workflow user to load agent-env (which needs the arl-env extra
-        # + a K8s gateway). So we guard here instead: if the script asks for
-        # agent_env isolation but the atom is not loaded in this scenario, fail
-        # at the agent() call with a clear message rather than spawning a child
-        # with a bogus extension entry that errors deep in child setup.
-        if opts.get("isolation") == "agent_env":
+        # composition, never a privileged config field). Soft, optional
+        # dependency — guarded here rather than declared in MANIFEST.requires
+        # (which would force every workflow user to load agent-env + the arl
+        # extra + a K8s gateway). Fail at the agent() call with a clear message
+        # rather than spawning a child with a bogus extension entry.
+        if isolation == "agent_env":
             available = {atom.name for atom in self.api.list_atoms()}
             if _AGENT_ENV_ATOM not in available:
                 raise RuntimeError(
-                    f"workflow: opts.isolation='agent_env' requires the "
+                    f"workflow: isolation='agent_env' requires the "
                     f"{_AGENT_ENV_ATOM!r} atom to be loaded in this scenario, "
                     f"but it is not present. Add it to the scenario (and "
-                    f"install the 'agent-env' extra) or drop the isolation opt."
+                    f"install the 'agent-env' extra) or drop the isolation arg."
                 )
             extensions.append((_AGENT_ENV_ATOM_MODULE, {}))
-        tool_allowlist = opts.get("tool_allowlist")
 
         config = AgentSessionConfig(
             cwd=self.api.cwd,
             provider=None,  # inherit parent's provider (spawn auto-wires it)
-            scenario=scenario,
+            scenario=scenario or self.default_scenario,
             extra_extensions=extensions,
-            tool_allowlist=tool_allowlist if isinstance(tool_allowlist, list) else None,
+            tool_allowlist=tool_allowlist,
             purpose="workflow",
         )
         child: _ChildSession = await self.api.spawn_child_session(config)
-        self.budget.attach(child)
+        self.budget_svc.attach(child)
         try:
             messages = await child.prompt(prompt)
             return _final_assistant_text(messages)
         finally:
             with contextlib.suppress(Exception):
                 await child.shutdown()
-
-    async def run_parallel(self, specs: list[dict[str, Any]]) -> list[str]:
-        tasks = [
-            asyncio.create_task(
-                self._run_one_agent(
-                    str(spec.get("prompt", "")),
-                    dict(spec.get("opts") or {}),
-                )
-            )
-            for spec in specs
-        ]
-        return list(await asyncio.gather(*tasks))
 
 
 def _final_assistant_text(messages: list[AgentMessage]) -> str:
@@ -456,23 +506,42 @@ def _error(message: str) -> ToolResult:
     )
 
 
-def _load_quickjs() -> Any:
-    """Import the optional QuickJS engine, raising a clear actionable error.
-
-    ``quickjs`` (PetterS, archived) and ``quickjs-ng`` (maintained fork) are
-    drop-in: both expose ``import quickjs``. The import is deferred to tool
-    invocation so the atom *loads* cleanly without the engine and unrelated
-    tests stay green.
-    """
-
+def _coerce_result(raw: object) -> str:
+    if isinstance(raw, str):
+        return raw
+    if raw is None:
+        return ""
     try:
-        import quickjs  # type: ignore[import-not-found]
-    except ImportError as exc:  # pragma: no cover - engine-absent surface
-        raise RuntimeError(
-            "the 'workflow' tool requires a QuickJS engine. Install with: "
-            "uv sync --extra workflow  (pulls in 'quickjs-ng')."
-        ) from exc
-    return quickjs
+        return json.dumps(raw, ensure_ascii=False, default=str)
+    except TypeError:
+        return str(raw)
+
+
+def _build_namespace(run: _WorkflowRun) -> dict[str, Any]:
+    """The curated globals the script runs against — only the SDK + safe
+    builtins. No ``import``, no ``open``, no ``time`` / ``random``."""
+
+    return {
+        "__builtins__": _SAFE_BUILTINS,
+        "agent": run.agent,
+        "parallel": run.parallel,
+        "pipeline": run.pipeline,
+        "budget": _Budget(run.budget_svc),
+        "args": run.args_payload,
+        "log": run.log,
+        "phase": run.phase,
+    }
+
+
+async def _run_user_script(script: str, ns: dict[str, Any]) -> object:
+    """Compile the script as the body of an ``async def`` and await it, so the
+    script can ``await agent(...)`` / ``parallel(...)`` directly. ``return`` in
+    the script becomes the workflow result."""
+
+    src = "async def __workflow__():\n" + textwrap.indent(script, "    ")
+    code = compile(src, "<workflow-script>", "exec")
+    exec(code, ns)  # noqa: S102 - curated namespace; same authority as the agent
+    return await ns["__workflow__"]()
 
 
 _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
@@ -481,17 +550,19 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
         "script": {
             "type": "string",
             "description": (
-                "JavaScript orchestration script. Has access to: "
-                "agent(prompt, opts), parallel([{prompt,opts}]), log(msg), "
-                "phase(name), budget(), args(). Return a value (string or "
-                "JSON-able) as the last expression — it becomes the tool "
-                "result. Math.random / Date.now / argless new Date() are "
-                "disabled."
+                "Async Python orchestration script. Available names: "
+                "agent(prompt, *, scenario=, isolation=, tool_allowlist=) "
+                "(awaitable -> str), parallel(list_of_awaitables) -> list, "
+                "pipeline(items, *stages) -> list, budget (.total / .spent() / "
+                ".remaining()), args (dict), log(msg), phase(name). Use await "
+                "for agent / parallel / pipeline. `return <value>` becomes the "
+                "tool result. Only data-manipulation builtins are available — "
+                "no import / open / time / random."
             ),
         },
         "args": {
             "type": "object",
-            "description": "Arbitrary JSON payload exposed to the script via args().",
+            "description": "Arbitrary JSON payload exposed to the script as args.",
             "additionalProperties": True,
         },
     },
@@ -533,88 +604,21 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     async def _run_workflow(args: dict[str, Any]) -> ToolResult:
         script = args.get("script")
         if not isinstance(script, str) or not script.strip():
-            return _error("workflow: 'script' (a JS string) is required")
-        try:
-            quickjs = _load_quickjs()
-        except RuntimeError as exc:
-            return _error(str(exc))
+            return _error("workflow: 'script' (a Python string) is required")
 
         run = _WorkflowRun(
             api=api,
             journal=_Journal(store=api.get_service(_ARTIFACT_STORE_SERVICE)),
-            budget=_BudgetService(total_budget_tokens=budget_tokens),
+            budget_svc=_BudgetService(total_budget_tokens=budget_tokens),
             semaphore=asyncio.Semaphore(concurrency),
-            loop=asyncio.get_running_loop(),
             default_scenario=default_scenario,
             max_agents=max_agents,
             args_payload=dict(args.get("args") or {}),
         )
+        ns = _build_namespace(run)
 
-        # Build the isolated context and inject the host callbacks. add_callable
-        # callbacks are synchronous; to call into the async host APIs we
-        # re-enter the captured loop and block the *worker* thread (not the
-        # host loop) on the future.
-        ctx = quickjs.Context()
-        with contextlib.suppress(Exception):
-            ctx.set_memory_limit(128 * 1024 * 1024)
-            ctx.set_max_stack_size(1024 * 1024)
-
-        def _call_async(coro: Coroutine[object, object, _T]) -> _T:
-            fut = asyncio.run_coroutine_threadsafe(coro, run.loop)
-            return fut.result()
-
-        def _host_agent(spec_json: str) -> str:
-            spec = json.loads(spec_json)
-            result = _call_async(
-                run._run_one_agent(
-                    str(spec.get("prompt", "")), dict(spec.get("opts") or {})
-                )
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        def _host_parallel(specs_json: str) -> str:
-            specs = json.loads(specs_json)
-            result = _call_async(run.run_parallel(list(specs)))
-            return json.dumps(result, ensure_ascii=False)
-
-        def _emit_phase(kind: Literal["phase", "log"], text: str) -> None:
-            with contextlib.suppress(Exception):
-                _call_async(
-                    api.events.emit(
-                        WorkflowPhaseEvent.CHANNEL,
-                        WorkflowPhaseEvent(kind=kind, text=text),
-                    )
-                )
-
-        def _host_log(msg: str) -> str:
-            _emit_phase("log", msg)
-            return ""
-
-        def _host_phase(name: str) -> str:
-            _emit_phase("phase", name)
-            return ""
-
-        # budget()/args() take no JS args, but QuickJS add_callable requires a
-        # scalar signature, so the JS wrappers pass '' and we accept+ignore it.
-        def _host_budget(_arg: str) -> str:
-            return json.dumps(run.budget.snapshot(), ensure_ascii=False)
-
-        def _host_args(_arg: str) -> str:
-            return json.dumps(run.args_payload, ensure_ascii=False)
-
-        ctx.add_callable("__host_agent", _host_agent)
-        ctx.add_callable("__host_parallel", _host_parallel)
-        ctx.add_callable("__host_log", _host_log)
-        ctx.add_callable("__host_phase", _host_phase)
-        ctx.add_callable("__host_budget", _host_budget)
-        ctx.add_callable("__host_args", _host_args)
-
-        def _run_script() -> object:
-            ctx.eval(_JS_BOOTSTRAP)
-            return ctx.eval(script)
-
-        # Keep a one-shot host alive until the whole detached run (and any
-        # late inbox post from a child) drains — matches sub_agent discipline.
+        # Keep a one-shot host alive until the whole detached run (and any late
+        # inbox post from a child) drains — matches sub_agent discipline.
         try:
             bracket = api.track_background()
         except ExtensionStaleError:
@@ -624,24 +628,25 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             try:
                 if wall_clock_timeout is not None:
                     raw = await asyncio.wait_for(
-                        asyncio.to_thread(_run_script), timeout=wall_clock_timeout
+                        _run_user_script(script, ns), timeout=wall_clock_timeout
                     )
                 else:
-                    raw = await asyncio.to_thread(_run_script)
+                    raw = await _run_user_script(script, ns)
             except asyncio.TimeoutError:
                 return _error(
                     f"workflow: script exceeded wall-clock budget "
                     f"({wall_clock_timeout}s)"
                 )
-            except Exception as exc:  # JS errors surface as the tool error
-                return _error(f"workflow script error: {exc}")
+            except Exception as exc:  # script errors surface as the tool error
+                return _error(
+                    f"workflow script error: {type(exc).__name__}: {exc}"
+                )
 
-        result_text = _coerce_js_result(raw)
         return ToolResult(
-            content=[TextContent(type="text", text=result_text)],
+            content=[TextContent(type="text", text=_coerce_result(raw))],
             extras={
                 "agents_spawned": run.agents_spawned,
-                "budget": run.budget.snapshot(),
+                "budget": run.budget_svc.snapshot(),
             },
         )
 
@@ -649,28 +654,17 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         FunctionTool(
             name="workflow",
             description=(
-                "Run an LLM-authored JavaScript orchestration script that fans "
-                "out deterministic child agent sessions. Use for parallel "
-                "verify/judge/sweep harnesses where you author the control flow "
-                "as code rather than turn-by-turn. Primitives: agent, parallel, "
-                "pipeline, log, phase, budget, args. The script runs in an "
-                "isolated sandbox (no fs/net/shell); Math.random/Date.now are "
-                "disabled. agent() results are journaled by hash(prompt,opts) so "
-                "re-running a workflow resumes from cache."
+                "Run an LLM-authored async Python orchestration script that "
+                "fans out deterministic child agent sessions. Use for parallel "
+                "verify / judge / sweep harnesses where you author the control "
+                "flow as code rather than turn-by-turn. Names: agent, parallel, "
+                "pipeline, budget, args, log, phase. The script runs in a "
+                "curated namespace (data builtins only; no import / open / time "
+                "/ random). agent() results are journaled by hash(prompt, args) "
+                "so re-running a workflow resumes from cache."
             ),
             parameters=_WORKFLOW_TOOL_PARAMS,
             fn=_run_workflow,
             metadata={"workflow": True},
         )
     )
-
-
-def _coerce_js_result(raw: object) -> str:
-    if isinstance(raw, str):
-        return raw
-    if raw is None:
-        return ""
-    try:
-        return json.dumps(raw, ensure_ascii=False)
-    except TypeError:
-        return str(raw)
