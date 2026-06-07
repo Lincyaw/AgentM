@@ -12,7 +12,11 @@ bound to *already-existing* APIs:
 
 - ``agent(prompt, *, scenario=, isolation=, tool_allowlist=)`` —
   :meth:`ExtensionAPI.spawn_child_session` → ``child.prompt`` → last
-  ``AssistantMessage`` text → ``child.shutdown``. Returns the text.
+  ``AssistantMessage`` text → ``child.shutdown``. Returns the text. A worker
+  defaults to the **orchestrator's own scenario** (a clean reload of that
+  curated atom set), not an auto-discovery of every builtin — so workers are
+  slim and never carry the ``workflow`` tool themselves (anti-recursion is also
+  enforced at install time via the ``purpose`` marker).
 - ``parallel(aws)`` — ``await parallel([agent(p) for p in ...])``;
   ``asyncio.gather`` over the awaitables (each ``agent`` self-limits via a
   shared ``Semaphore``).
@@ -144,6 +148,12 @@ MANIFEST = ExtensionManifest(
 
 # Name of the service that backs the workflow-local resume journal.
 _ARTIFACT_STORE_SERVICE: Final[str] = "artifact_store"
+
+# ``purpose`` stamped on every worker child session. Doubles as the
+# anti-recursion marker: a session with this purpose does not register the
+# ``workflow`` tool (a worker cannot spawn its own workflow), so even when a
+# worker auto-discovers all builtins it never gets a recursive workflow tool.
+_WORKER_PURPOSE: Final[str] = "workflow"
 
 # Lifetime backstop: a runaway script cannot spawn more than this many
 # child sessions across the whole workflow run.
@@ -470,10 +480,16 @@ class _WorkflowRun:
         config = AgentSessionConfig(
             cwd=self.api.cwd,
             provider=None,  # inherit parent's provider (spawn auto-wires it)
-            scenario=scenario or self.default_scenario,
+            # Default the worker to the orchestrator's own scenario (a clean
+            # reload of that curated atom set) rather than letting scenario=None
+            # auto-discover ALL builtins — which would hand every worker the
+            # full heavy toolset (bash/install_atom/…) and, on strict providers,
+            # break tool-call grammar generation. Explicit arg > atom config >
+            # parent scenario.
+            scenario=scenario or self.default_scenario or self.api.scenario,
             extra_extensions=extensions,
             tool_allowlist=tool_allowlist,
-            purpose="workflow",
+            purpose=_WORKER_PURPOSE,
         )
         child: _ChildSession = await self.api.spawn_child_session(config)
         self.budget_svc.attach(child)
@@ -572,6 +588,12 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    # Anti-recursion: a worker child session (spawned with purpose=workflow)
+    # must not itself get the workflow tool, or a script could spawn workflows
+    # without bound. Workers auto-discovering all builtins still hit this guard.
+    if api.purpose == _WORKER_PURPOSE:
+        return
+
     max_concurrency = config.get("max_concurrency")
     concurrency = (
         int(max_concurrency)
