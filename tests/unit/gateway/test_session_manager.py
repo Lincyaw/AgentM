@@ -137,3 +137,35 @@ async def test_shutdown_keeps_map_forget_clears_it(tmp_path: Path) -> None:
     # /end semantics: forget clears it.
     mgr.forget("terminal:t1")
     assert chat_map.get("terminal:t1") is None
+
+
+@pytest.mark.asyncio
+async def test_session_id_prefers_live_session(tmp_path: Path) -> None:
+    log: list[tuple[str, str | None]] = []
+    mgr, _ = _make_manager(tmp_path, log)
+    sess = await mgr.get_or_create("terminal:t1", "local", _inbound())
+    assert mgr.session_id("terminal:t1") == sess.session_manager.get_session_id()
+
+
+def test_session_id_falls_back_to_chat_map(tmp_path: Path) -> None:
+    # After a restart there is no live session, but the persisted chat map
+    # still points at the prior session id. /context (via session_id) must
+    # resolve that id rather than report "no active session".
+    chat_map = ChatSessionMap(tmp_path / "map.json")
+    chat_map.set("terminal:t1", "sid-persisted")
+
+    async def _sink(body: dict) -> None:
+        return None
+
+    async def _factory(*a: Any) -> Any:
+        raise AssertionError("session_id must not create a session")
+
+    mgr = SessionManager(
+        cwd=str(tmp_path),
+        chat_map=chat_map,
+        session_factory=_factory,
+        outbound_sink=_sink,
+    )
+    assert mgr.session_id("terminal:t1") == "sid-persisted"
+    # Neither live nor mapped -> None.
+    assert mgr.session_id("terminal:unknown") is None

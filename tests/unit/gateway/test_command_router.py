@@ -88,13 +88,28 @@ async def test_help_replies_locally() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_command_rejected_not_forwarded() -> None:
+async def test_unknown_gateway_command_returns_none_for_forwarding() -> None:
+    # A name the gateway registry doesn't own now returns None (not a
+    # diagnostic): the gateway forwards such a command to the session so the
+    # in-session slash_commands atom can dispatch session-registered commands
+    # like /compact. Unknown-to-both feedback moved into the gateway, which
+    # holds the per-session known-command set.
     reg = _registry(HelpCommand())
     router = CommandRouter(registry=reg)
     result = await router.try_dispatch(_inbound("/nope"), _ctx(_Calls(), reg))
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_bare_slash_still_hints_at_gateway() -> None:
+    # A bare "/" must NOT return None (which would forward it to the session);
+    # the gateway answers it with a "type /help" hint.
+    reg = _registry(HelpCommand())
+    router = CommandRouter(registry=reg)
+    result = await router.try_dispatch(_inbound("/"), _ctx(_Calls(), reg))
     assert result is not None
-    assert result.expanded_prompt is None  # never reaches the LLM
-    assert result.outbound[0].metadata.get("kind") == "diagnostic_error"
+    assert result.expanded_prompt is None
+    assert "help" in result.outbound[0].content.lower()
 
 
 @pytest.mark.asyncio
@@ -235,3 +250,16 @@ def test_merge_gateway_commands_folds_builtins(tmp_path: Any) -> None:
         assert not any(":" in n for n in names)  # no namespaced /atom:* entries
     finally:
         outbox.close()
+
+
+def test_help_lists_session_commands() -> None:
+    # /help must surface session-registered commands (e.g. /compact) so users
+    # can discover them, not just the gateway builtins.
+    from agentm.gateway.commands.builtins.help import HelpCommand, _format_help
+
+    body = _format_help([HelpCommand()], ["compact"])
+    assert "session" in body
+    assert "/compact" in body
+    # A session name that collides with a gateway builtin is not double-listed.
+    body2 = _format_help([HelpCommand()], ["help"])
+    assert body2.count("/help") == 1
