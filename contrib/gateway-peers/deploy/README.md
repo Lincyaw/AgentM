@@ -9,10 +9,36 @@ Files in this directory:
 
 | File | Purpose |
 |---|---|
-| `agentm-gateway.service` | systemd unit for the gateway daemon |
-| `agentm-feishu.service`  | systemd unit for the Feishu client daemon |
+| `install.sh`             | **auto-install** — detect paths/user/uv, render + install + enable both units |
+| `agentm-gateway.service` | reference systemd unit template (placeholders; `install.sh` renders its own) |
+| `agentm-feishu.service`  | reference systemd unit template |
 | `update.sh`              | pull latest code + restart only what changed |
 | `README.md`              | this file |
+
+## Quick install (recommended)
+
+One command — it detects the repo path, the running user, the `uv` binary, and
+the repo `.env`, renders both unit files with those real values, installs them,
+and enables + starts them. No manual placeholder editing.
+
+```sh
+# as root → system units in /etc/systemd/system:
+sudo ./contrib/gateway-peers/deploy/install.sh
+
+# or as a normal user → user units in ~/.config/systemd/user:
+./contrib/gateway-peers/deploy/install.sh
+#   then, so they survive logout / start on boot:
+sudo loginctl enable-linger "$(whoami)"
+```
+
+Flags: `--system` / `--user` force the mode, `--run-as NAME` sets the account
+the system services run as (default: the invoking user), `--no-start` installs
+and enables without starting. Re-running is idempotent (re-renders + reloads).
+
+Credentials still come from the repo `.env` (`LARK_APP_ID` / `LARK_APP_SECRET`
+for Feishu, model creds for the gateway) — run `agentm onboard` or create
+`.env` first; `install.sh` warns if it's missing. The manual steps below are
+only needed if you'd rather edit the `.service` templates by hand.
 
 ## Architecture in one breath
 
