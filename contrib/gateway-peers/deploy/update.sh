@@ -44,8 +44,9 @@ for arg in "$@"; do
   esac
 done
 
-# `sudo` for system units; override to "" if you manage user units yourself.
-SUDO="${SUDO-sudo}"
+# Units are user units (installed by `agentm gateway --install-systemd`), so
+# restarts go through `systemctl --user` (no sudo).
+SCTL=(systemctl --user)
 
 echo "==> Repo root: ${REPO_ROOT}"
 BEFORE="$(git rev-parse --short HEAD)"
@@ -77,8 +78,8 @@ else
   echo "==> feishu client left running (auto-reconnects + outbox replay)."
 fi
 
-echo "==> ${SUDO} systemctl restart ${SERVICES[*]}"
-${SUDO} systemctl restart "${SERVICES[@]}"
+echo "==> ${SCTL[*]} restart ${SERVICES[*]}"
+"${SCTL[@]}" restart "${SERVICES[@]}"
 
 echo "==> Done. ${BEFORE} -> ${AFTER}. Restarted: ${SERVICES[*]}"
-echo "    Tail logs with:  journalctl -u agentm-gateway -f"
+echo "    Tail logs with:  journalctl --user -u agentm-gateway -f"

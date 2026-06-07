@@ -803,18 +803,21 @@ def _build_systemd_plan() -> _SystemdPlan:
             "the venv (`uv run agentm gateway --install-systemd`)."
         )
 
-    system = os.geteuid() == 0
-    if system:
-        unit_dir = Path("/etc/systemd/system")
-        socket_url = "unix:///run/agentm/gw.sock"
-        run_as = os.environ.get("SUDO_USER") or os.environ.get("USER") or "root"
-    else:
-        unit_dir = Path.home() / ".config" / "systemd" / "user"
-        socket_url = "unix://%t/agentm/gw.sock"
-        run_as = None
+    # User units only — `~/.config/systemd/user` + `systemctl --user`. We do
+    # not install system units even when run as root (one less moving part; a
+    # root user manager works the same via `systemctl --user`). %t expands to
+    # the per-user runtime dir at start.
+    system = False
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    socket_url = "unix://%t/agentm/gw.sock"
+    run_as = None
 
     cleaned, workspace = _baked_gateway_argv()
-    workspace_path = Path(workspace).expanduser()
+    # Absolutize: systemd rejects a relative WorkingDirectory / EnvironmentFile
+    # ("bad unit file setting"), and a relative --cwd baked into ExecStart would
+    # resolve against the unit's WorkingDirectory at runtime. resolve() also
+    # canonicalizes ~/.. so all three references agree on one absolute path.
+    workspace_path = Path(workspace).expanduser().resolve()
     env_file = workspace_path / ".env"
 
     # Both units MUST agree on the socket: force --bind to the pinned value
@@ -866,13 +869,13 @@ def _systemctl(plan: _SystemdPlan) -> list[str]:
 
 
 def _systemd_action(*, install: bool) -> None:
-    """Install or uninstall the gateway + feishu systemd units.
+    """Install or uninstall the gateway + feishu systemd USER units.
 
-    System units (root) land in ``/etc/systemd/system`` with ``User=`` and a
-    pinned ``/run/agentm/gw.sock``; user units land in
-    ``~/.config/systemd/user`` with a ``%t/agentm/gw.sock`` socket. Both units
-    share the same socket (gateway ``--bind`` == feishu ``--connect``). The
-    feishu unit is skipped (with a note) when ``agentm-feishu`` is not on PATH.
+    Always user units (``~/.config/systemd/user`` + ``systemctl --user``, socket
+    ``%t/agentm/gw.sock``) — we do not install system units even as root. Both
+    units share the same socket (gateway ``--bind`` == feishu ``--connect``).
+    The feishu unit is skipped (with a note) when ``agentm-feishu`` is not on
+    PATH (run ``uv sync --all-packages``).
     """
     import subprocess
 
@@ -1029,9 +1032,8 @@ def cli(
         typer.Option(
             "--install-systemd",
             help=(
-                "Install systemd units for the gateway AND feishu client "
-                "(system units as root, else user units), enable + start "
-                "them, then exit."
+                "Install systemd USER units for the gateway AND feishu client "
+                "(~/.config/systemd/user), enable + start them, then exit."
             ),
         ),
     ] = False,

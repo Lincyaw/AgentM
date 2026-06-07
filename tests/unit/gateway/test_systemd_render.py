@@ -187,3 +187,31 @@ def test_build_plan_defaults_workspace_to_cwd_when_no_cwd_flag(
     assert plan.working_dir == tmp_path
     assert plan.env_file == tmp_path / ".env"
     assert f"--cwd {tmp_path}" in plan.gateway_exec_start
+
+
+def test_build_plan_absolutizes_relative_cwd_and_stays_user(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A relative --cwd must be absolutized — systemd rejects a relative
+    WorkingDirectory ('bad unit file setting'). And even as root we install
+    USER units, never system units."""
+    import os
+    import shutil
+    import sys
+
+    (tmp_path / "work").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["agentm gateway", "--cwd", "work"])
+    monkeypatch.setattr(os, "geteuid", lambda: 0)  # even root → user units
+    monkeypatch.setattr(shutil, "which", lambda name: f"/venv/bin/{name}")
+
+    plan = _build_systemd_plan()
+
+    assert not plan.system  # user units only, even as root
+    assert plan.working_dir.is_absolute()
+    assert plan.working_dir == (tmp_path / "work").resolve()
+    assert plan.run_as is None
+    gw = _render_gateway_unit(plan)
+    # The WorkingDirectory line is absolute (no relative path → no bad setting).
+    assert f"WorkingDirectory={(tmp_path / 'work').resolve()}" in gw
+    assert "WantedBy=default.target" in gw  # user target, not multi-user
