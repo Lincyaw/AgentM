@@ -559,7 +559,14 @@ def messages_cmd(
     ] = None,
     entry_type: Annotated[
         list[str] | None,
-        typer.Option("--type", help="Filter by SessionEntry.type (repeatable)."),
+        typer.Option(
+            "--type",
+            help=(
+                "Filter by SessionEntry.type (repeatable). "
+                "Default: 'message' (standard messages only). "
+                "Pass '--type all' to include every entry type."
+            ),
+        ),
     ] = None,
     hide_thinking: Annotated[
         bool,
@@ -599,7 +606,12 @@ def messages_cmd(
     try:
         chosen_fmt = _resolve_format(fmt, sink)
         roles = set(role or [])
-        types = set(entry_type or [])
+        if entry_type is None:
+            types = {"message"}
+        elif entry_type == ["all"]:
+            types = set()
+        else:
+            types = set(entry_type)
         color = _color_enabled(sink, no_color)
 
         def _filtered() -> Iterator[dict[str, Any]]:
