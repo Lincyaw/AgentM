@@ -6,7 +6,6 @@ import (
 
 	"github.com/AoyangSpace/agentm-terminal/internal/blocks"
 	"github.com/AoyangSpace/agentm-terminal/internal/theme"
-	"github.com/AoyangSpace/agentm-terminal/internal/util"
 )
 
 // Router dispatches wire outbound events to Model state mutations.
@@ -210,19 +209,6 @@ func (r *Router) usage(m *Model, body map[string]any, _ map[string]any) {
 	// usage event's input+output reflects current window occupancy.
 	if tokIn+tokOut > 0 {
 		sm.CtxUsed = tokIn + tokOut
-	}
-
-	// Cost: the wire carries token counts only. Prefer authoritative cost
-	// fields if a future gateway sends them, else price client-side.
-	if cost, ok := toFloat(body["cost"]); ok {
-		sm.CostTurn = cost
-	} else {
-		sm.CostTurn += util.EstimateCost(sm.Model, tokIn, tokOut)
-	}
-	if sessionCost, ok := toFloat(body["session_cost"]); ok {
-		sm.CostSession = sessionCost
-	} else {
-		sm.CostSession += util.EstimateCost(sm.Model, tokIn, tokOut)
 	}
 
 	elapsed := time.Since(m.turnStartTime)
