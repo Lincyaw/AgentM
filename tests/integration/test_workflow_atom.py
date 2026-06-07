@@ -17,6 +17,7 @@ gate is exercised separately by the unit-level import-gate path.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import types
@@ -37,6 +38,7 @@ from agentm.core.abi.extension import ProviderConfig
 from agentm.core.abi.messages import AssistantMessage, Usage
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
+from agentm.extensions.builtin.workflow import _Journal
 
 
 quickjs = pytest.importorskip(
@@ -177,6 +179,18 @@ async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
         # Budget aggregated across the three children (5+7 tokens each).
         assert first.extras["budget"]["spent"] == 36
 
+        # The load-bearing resume path is the DISK lookup with an EMPTY
+        # in-memory cache: a fresh _Journal against the same artifact_store
+        # must resolve the first run's keys (list_artifacts -> read). The
+        # per-execute _WorkflowRun already builds a fresh _Journal, but assert
+        # the disk path directly so a regression in list_artifacts/read can't
+        # hide behind an in-process cache.
+        store = session.get_service("artifact_store")
+        assert store is not None
+        cold = _Journal(store=store)
+        cached_alpha = await cold.lookup(_Journal.key("alpha", {}))
+        assert cached_alpha is not None and "echo:alpha" in cached_alpha
+
         spawned.clear()
         second = await tool.execute({"script": _SCRIPT})
         assert not second.is_error, second.content[0].text
@@ -184,5 +198,42 @@ async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
         assert spawned == []
         assert second.extras["agents_spawned"] == 0
         assert second.content[0].text == first_text
+    finally:
+        await session.shutdown()
+
+
+_BUDGET_SCRIPT = """
+agent("one");
+JSON.stringify(budget());
+"""
+
+
+@pytest.mark.asyncio
+async def test_workflow_budget_total_and_remaining(tmp_path: Path) -> None:
+    """budget().total / .remaining are live when a ceiling is configured —
+    guards the BudgetService contract beyond raw `spent`."""
+
+    _git_init(tmp_path)
+    provider_module = _install_echo_provider()
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            provider=(provider_module, {}),
+            extensions=[
+                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.artifact_store", {}),
+                ("agentm.extensions.builtin.workflow", {"budget_tokens": 100}),
+            ],
+        )
+    )
+    try:
+        tool = _tool(session, "workflow")
+        result = await tool.execute({"script": _BUDGET_SCRIPT})
+        assert not result.is_error, result.content[0].text
+        snap = json.loads(result.content[0].text)
+        # one child: 5 input + 7 output = 12 spent; total 100 -> remaining 88.
+        assert snap["spent"] == 12
+        assert snap["total"] == 100
+        assert snap["remaining"] == 88
     finally:
         await session.shutdown()
