@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -792,7 +793,7 @@ def _markdown_card(text: str, *, buttons: list[_ButtonLike]) -> dict[str, Any]:
     callback as the typed ``button_value``.
     """
     elements: list[dict[str, Any]] = [
-        {"tag": "markdown", "content": text or "*(empty)*"}
+        {"tag": "markdown", "content": _md_safe(text) or "*(empty)*"}
     ]
     for btn in buttons:
         elements.append(
@@ -809,6 +810,18 @@ def _markdown_card(text: str, *, buttons: list[_ButtonLike]) -> dict[str, Any]:
 _STEP_ICON: dict[str, str] = {"running": "⏳", "ok": "✅", "fail": "❌"}
 
 
+# Lark renders card images ONLY from uploaded img_keys; a markdown image whose
+# src is a bare filename or URL (e.g. agent output containing
+# ``![x](lark_login.png)``) is rejected as an invalid image key and crashes the
+# WHOLE card (ErrCode 200570). Degrade any markdown image to its alt text (or
+# the src if alt is empty) so free-form agent / tool text can never poison a card.
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]*)\)")
+
+
+def _md_safe(text: str) -> str:
+    return _MD_IMAGE_RE.sub(lambda m: m.group(1) or m.group(2) or "", text)
+
+
 def _steps_markdown(steps: list[_Step]) -> str:
     lines: list[str] = []
     for step in steps:
@@ -816,7 +829,7 @@ def _steps_markdown(steps: list[_Step]) -> str:
         if step.summary:
             line += f" · {step.summary}"
         lines.append(line)
-    return "\n".join(lines)
+    return _md_safe("\n".join(lines))
 
 
 def _activity_markdown(turn: _LiveTurn) -> str:
@@ -864,7 +877,7 @@ def _live_card(turn: _LiveTurn) -> dict[str, Any]:
     if turn.body:
         elements.append({"tag": "hr", "element_id": "sep"})
         elements.append(
-            {"tag": "markdown", "element_id": "body", "content": turn.body}
+            {"tag": "markdown", "element_id": "body", "content": _md_safe(turn.body)}
         )
     if turn.steps:
         elements.append(

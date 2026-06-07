@@ -356,6 +356,37 @@ async def test_interrupt_marks_card_and_drops_stop_button(
 
 
 @pytest.mark.asyncio
+async def test_markdown_image_in_reply_does_not_poison_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A markdown image in agent text must be neutralized before it reaches a
+    card — Lark rejects a non-img_key image and crashes the WHOLE card
+    (ErrCode 200570 invalid image keys). The body must carry no `![...](...)`."""
+    adapter, channel = _make_adapter(monkeypatch)
+    chat = "oc_1"
+    for env in [
+        _outbound(chat, "turn_start", meta={"turn_id": "t1"}),
+        _outbound(chat, "assistant_text", content="see ![shot](lark_login.png) done"),
+        _outbound(chat, "agent_end", meta={"cause": "WaitForUser"}),
+    ]:
+        await adapter.handle_outbound(env)
+    await asyncio.sleep(0.05)
+    body = _element(_last_card(channel), "body")
+    assert body is not None
+    assert "![" not in body["content"]
+    assert "lark_login.png" not in body["content"] or "](" not in body["content"]
+    # the alt text survives as plain text
+    assert "shot" in body["content"]
+
+
+def test_md_safe_degrades_images_to_text() -> None:
+    assert "![" not in adapter_mod._md_safe("a ![x](k.png) b")
+    assert adapter_mod._md_safe("a ![x](k.png) b") == "a x b"
+    assert adapter_mod._md_safe("![](only.png)") == "only.png"
+    assert adapter_mod._md_safe("no image") == "no image"
+
+
+@pytest.mark.asyncio
 async def test_approval_is_a_standalone_card(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter, channel = _make_adapter(monkeypatch)
     env = _outbound(
