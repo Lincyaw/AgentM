@@ -6,6 +6,7 @@ import (
 
 	"github.com/AoyangSpace/agentm-terminal/internal/blocks"
 	"github.com/AoyangSpace/agentm-terminal/internal/theme"
+	"github.com/AoyangSpace/agentm-terminal/internal/util"
 )
 
 // Router dispatches wire outbound events to Model state mutations.
@@ -198,18 +199,32 @@ func (r *Router) agentEnd(m *Model) {
 
 func (r *Router) usage(m *Model, body map[string]any, _ map[string]any) {
 	sm := m.status.GetModel()
-	if tokIn, ok := toInt(body["input_tokens"]); ok {
-		sm.TokensIn += tokIn
+	tokIn, _ := toInt(body["input_tokens"])
+	tokOut, _ := toInt(body["output_tokens"])
+	sm.TokensIn += tokIn
+	sm.TokensOut += tokOut
+
+	// Context occupancy: the wire carries no ctx_used on normal turns, so
+	// derive it from the prompt size. Within one user turn each successive
+	// LLM call has a larger prompt (tool loop grows context), so the latest
+	// usage event's input+output reflects current window occupancy.
+	if tokIn+tokOut > 0 {
+		sm.CtxUsed = tokIn + tokOut
 	}
-	if tokOut, ok := toInt(body["output_tokens"]); ok {
-		sm.TokensOut += tokOut
-	}
+
+	// Cost: the wire carries token counts only. Prefer authoritative cost
+	// fields if a future gateway sends them, else price client-side.
 	if cost, ok := toFloat(body["cost"]); ok {
 		sm.CostTurn = cost
+	} else {
+		sm.CostTurn += util.EstimateCost(sm.Model, tokIn, tokOut)
 	}
 	if sessionCost, ok := toFloat(body["session_cost"]); ok {
 		sm.CostSession = sessionCost
+	} else {
+		sm.CostSession += util.EstimateCost(sm.Model, tokIn, tokOut)
 	}
+
 	elapsed := time.Since(m.turnStartTime)
 	if elapsed.Seconds() > 0 && sm.TokensOut > 0 {
 		sm.TokPerSec = float64(sm.TokensOut) / elapsed.Seconds()
