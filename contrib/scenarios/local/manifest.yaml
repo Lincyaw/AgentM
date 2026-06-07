@@ -76,3 +76,12 @@ extensions:
   # ``self-debug`` skill, which also covers reading one's own and
   # historical traces via the ``agentm trace`` CLI over ``bash``. ---
   - module: agentm.extensions.builtin.tui_snapshot
+
+  # --- auto-background long tools: a foreground tool call that overruns
+  # ``timeout`` is moved to the background (the turn gets an immediate
+  # ticket; the real result returns later via the SessionInbox), so a slow
+  # build / network call never blocks the conversation. Companion tools
+  # check_background / wait_background / cancel_background poll or cancel it. ---
+  - module: agentm.extensions.builtin.background_exec
+    config:
+      timeout: 120
