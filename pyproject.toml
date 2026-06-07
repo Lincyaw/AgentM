@@ -13,6 +13,10 @@ dependencies = [
     "pathspec>=1.0.4",
     "typer>=0.25.1",
     "python-dotenv>=1.0",
+    # ``tomllib`` is read-only stdlib; ``tomli-w`` is the writer used by
+    # ``agentm onboard`` to merge model profiles into ``config.toml`` while
+    # preserving existing tables.
+    "tomli-w>=1.0",
     # Substrate dependency: the ``observability`` atom writes per-session
     # OTLP/JSON ndjson via the SDK's standard processors + encoders. The
     # ``otlp_export`` atom (opt-in) additionally fans spans + logs out

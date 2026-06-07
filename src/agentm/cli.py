@@ -999,6 +999,20 @@ def _gateway_main() -> None:
 # ``gateway`` dependency closures (gateway pulls in the websockets server).
 # The short-help string mirrors each app's own short help so ``agentm --help``
 # can list the subcommand without importing it.
+@app.command(name="onboard")
+def onboard_cmd() -> None:
+    """Interactively bootstrap a fresh install.
+
+    Walks four sections — model/provider/key (-> ``$AGENTM_HOME/config.toml``),
+    workspace path, persona (SOUL.md / IDENTITY.md), and optional Feishu
+    credentials (-> ``<workspace>/.env``) — confirming before overwriting any
+    existing value, so re-running is safe.
+    """
+    from agentm.onboard import run_onboard
+
+    run_onboard()
+
+
 _LAZY_SUBCOMMANDS: dict[str, tuple[Any, str]] = {
     "trace": (
         _trace_main,
