@@ -20,6 +20,7 @@ full. Document drift first; collapse later if a loader feature lands.
 | `manifest.harness.sync.opinions10.yaml`  | sync  | 10                 | 10             | true           | false            | Opinions-only at 10-turn cadence; chained-fork intervention experiments.               |
 | `manifest.harness.sync.extractor5.yaml`  | sync  | 5                  | 5              | false          | false            | Extractor-only variant (no auditor side channel).                                      |
 | `manifest.harness.live.yaml`             | sync  | 5                  | 5              | (default true) | (default true)   | `harness.sync` + `live_inspector` WebSocket — single-case live viewing in aegis-ui.   |
+| `manifest.baseline.briefed.yaml`         | —     | —                  | —              | —              | —                | `baseline` with system-prompt pre-briefing on auditor reminders; for replay-fork A/B. |
 
 When adding a new variant, update this table. Chained-fork mode (the
 current intervention pipeline — see `README.md`'s

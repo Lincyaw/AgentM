@@ -179,6 +179,7 @@ class HarnessStrategy(ForkStrategy):
         sidecar_dir: str | os.PathLike[str] | None = None,
         skip_extractor: bool = False,
         trigger_registry: TriggerRegistry | None = None,
+        auditor_prompt: str | None = None,
     ) -> None:
         self._harness_provider = harness_provider
         self._max_depth = max_depth
@@ -188,6 +189,7 @@ class HarnessStrategy(ForkStrategy):
         self._sidecar_dir = Path(sidecar_dir) if sidecar_dir is not None else None
         self._skip_extractor = skip_extractor
         self._trigger_registry = trigger_registry
+        self._auditor_prompt = auditor_prompt
 
     @property
     def label(self) -> str:
@@ -236,12 +238,23 @@ class HarnessStrategy(ForkStrategy):
         if self._sidecar_dir is not None:
             out_path = self._sidecar_dir / f"{case.case_id}.chained.jsonl"
 
+        auditor_settings = AuditorSettings.default()
+        if self._auditor_prompt is not None:
+            from llmharness import load_auditor_prompt
+
+            auditor_settings = AuditorSettings(
+                base_prompt=load_auditor_prompt(self._auditor_prompt),
+                observability_config=auditor_settings.observability_config,
+                summary_threshold=auditor_settings.summary_threshold,
+                tools=auditor_settings.tools,
+            )
+
         experiment = await run_fork_tree_experiment(
             session_factory=factory,
             cwd=self._cwd,
             provider=self._harness_provider,
             extractor_settings=ExtractorSettings.default(),
-            auditor_settings=AuditorSettings.default(),
+            auditor_settings=auditor_settings,
             extractor_interval=self._extractor_interval,
             audit_interval=self._audit_interval,
             max_depth=self._max_depth,
