@@ -52,6 +52,16 @@ _BUTTON_STYLE_MAP: dict[str, str] = {
 # progress; there is deliberately no generic "正在回答" state.
 _STATUS_THINKING = "🤔 思考中…"
 _STATUS_DONE = "✅ 完成"
+_STATUS_INTERRUPTED = "⏹ 已中断"
+
+# Label / action value for the in-place "stop" button shown on a live,
+# in-progress turn card. The button round-trips ``{"control": "interrupt"}``
+# (NOT ``button_value``), so ``_on_card_action`` can distinguish it from an
+# approval button and forward it as an interrupt control verb. Clicking it
+# aborts the in-flight turn server-side (kernel abort signal) while preserving
+# context; the user's next message is then acted on immediately.
+_STOP_LABEL = "⏹ 停止"
+_INTERRUPT_CONTROL = "interrupt"
 
 # How many recent tool steps the activity line shows at once.
 _ACTIVITY_TAIL = 2
@@ -181,6 +191,7 @@ class _LiveTurn:
     saw_lifecycle: bool = False
     agent_ended: bool = False
     finalized: bool = False
+    interrupted: bool = False
     last_render: float = 0.0
     pending: bool = False
     flush_task: asyncio.Task[Any] | None = None
@@ -337,11 +348,23 @@ class FeishuAdapter:
     async def _on_card_action(self, event: Any) -> None:
         value = getattr(event.action, "value", None) or {}
         button_value: str | None = None
+        control: str | None = None
         if isinstance(value, dict):
-            raw = value.get("button_value")
-            if raw is not None:
-                button_value = str(raw)
-        if not button_value:
+            # Two disjoint card-button vocabularies share this callback:
+            #   - approval cards carry ``button_value`` (a conversational
+            #     answer the agent is waiting on);
+            #   - the live-turn stop button carries ``control`` (an out-of-band
+            #     verb, currently only ``interrupt``).
+            # ``control`` wins if both are somehow present so an interrupt is
+            # never misrouted as an approval reply.
+            raw_control = value.get("control")
+            if raw_control is not None:
+                control = str(raw_control)
+            else:
+                raw = value.get("button_value")
+                if raw is not None:
+                    button_value = str(raw)
+        if not button_value and not control:
             return
         operator = getattr(event, "operator", None)
         sender = (
@@ -351,6 +374,18 @@ class FeishuAdapter:
         )
         chat_id = getattr(event, "chat_id", "") or ""
         if not self._is_allowed(str(sender)):
+            return
+        if control == _INTERRUPT_CONTROL:
+            # Reflect the interrupt on the live card right away so the user
+            # sees it took effect, then forward the control verb so the
+            # gateway aborts the in-flight turn (context preserved).
+            await self._mark_interrupted(str(chat_id))
+            await self._forward_inbound(
+                sender_id=str(sender),
+                chat_id=str(chat_id),
+                content="[interrupt]",
+                control=_INTERRUPT_CONTROL,
+            )
             return
         await self._forward_inbound(
             sender_id=str(sender),
@@ -365,7 +400,8 @@ class FeishuAdapter:
         sender_id: str,
         chat_id: str,
         content: str,
-        button_value: str | None,
+        button_value: str | None = None,
+        control: str | None = None,
     ) -> None:
         session_key = self._session_key(chat_id, sender_id)
         body: dict[str, Any] = {
@@ -376,6 +412,10 @@ class FeishuAdapter:
         }
         if button_value is not None:
             body["button_value"] = button_value
+        if control is not None:
+            # Out-of-band control verb (e.g. ``interrupt``) parsed by
+            # ``InboundBody.control`` server-side; not a conversational turn.
+            body["control"] = control
         scenario = None
         if session_key not in self._scenario_sent:
             scenario = self._config.scenario
@@ -555,6 +595,21 @@ class FeishuAdapter:
         await self._clear_pending_acks(turn.chat_id)
         await self._maybe_render(turn, force=True)
         self._live.pop(turn.chat_id, None)
+
+    async def _mark_interrupted(self, chat_id: str) -> None:
+        """Flag the chat's live turn as interrupted and repaint its card.
+
+        Best-effort UX feedback for a 停止 click: if a live (non-finalized)
+        turn exists, set its activity line to "已中断" so the user sees the
+        interrupt registered. The server-side abort then ends the turn (the
+        trailing assistant_text / agent_end finalizes the card as usual). A
+        no-op if nothing is running, mirroring ``sess.interrupt()``.
+        """
+        turn = self._live.get(chat_id)
+        if turn is None or turn.finalized:
+            return
+        turn.interrupted = True
+        await self._maybe_render(turn, force=True)
 
     async def _maybe_render(self, turn: _LiveTurn, *, force: bool = False) -> None:
         """Render now, or schedule a trailing flush, respecting the throttle."""
@@ -772,7 +827,9 @@ def _steps_markdown(steps: list[_Step]) -> str:
 def _activity_markdown(turn: _LiveTurn) -> str:
     """The live activity line: the latest 1-2 operations (or 思考中 / 完成)."""
     if turn.finalized:
-        return _STATUS_DONE
+        return _STATUS_INTERRUPTED if turn.interrupted else _STATUS_DONE
+    if turn.interrupted:
+        return _STATUS_INTERRUPTED
     if turn.steps:
         return _steps_markdown(turn.steps[-_ACTIVITY_TAIL:])
     return _STATUS_THINKING
@@ -791,6 +848,27 @@ def _live_card(turn: _LiveTurn) -> dict[str, Any]:
     elements: list[dict[str, Any]] = [
         {"tag": "markdown", "element_id": "status", "content": _activity_markdown(turn)}
     ]
+    # While the run is in flight (not finalized, not already interrupted),
+    # carry a stop button so the user can abort the turn like Ctrl-C. Its
+    # click round-trips ``{"control": "interrupt"}`` (distinct from approval
+    # buttons' ``button_value``). Once the turn finalizes or is interrupted
+    # the button is dropped — a retired card must not invite another abort.
+    if not turn.finalized and not turn.interrupted:
+        elements.append(
+            {
+                "tag": "action",
+                "element_id": "stop",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": _STOP_LABEL},
+                        "type": "danger",
+                        "name": "interrupt",
+                        "value": {"control": _INTERRUPT_CONTROL},
+                    }
+                ],
+            }
+        )
     if turn.body:
         elements.append({"tag": "hr", "element_id": "sep"})
         elements.append(

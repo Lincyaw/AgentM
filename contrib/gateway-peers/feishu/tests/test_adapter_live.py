@@ -14,7 +14,7 @@ import pytest
 
 import agentm_feishu.adapter as adapter_mod
 from agentm_feishu.adapter import FeishuAdapter, FeishuConfig
-from agentm.gateway.wire import KIND_OUTBOUND, WIRE_VERSION, Envelope
+from agentm.gateway.wire import KIND_INBOUND, KIND_OUTBOUND, WIRE_VERSION, Envelope
 
 
 class _SendResult:
@@ -238,6 +238,121 @@ async def test_noise_kinds_emit_nothing(monkeypatch: pytest.MonkeyPatch) -> None
         await adapter.handle_outbound(_outbound("oc_1", kind))
     assert channel.sends == []
     assert channel.updates == []
+
+
+class _FakeWireClient:
+    """Records inbound envelopes the adapter forwards (the observable wire)."""
+
+    def __init__(self) -> None:
+        self.sent: list[Envelope] = []
+
+    async def send(self, env: Envelope) -> None:
+        self.sent.append(env)
+
+
+class _CardAction:
+    """Mirrors the lark cardAction event shape ``_on_card_action`` reads."""
+
+    def __init__(self, *, value: dict[str, Any], chat_id: str, sender: str) -> None:
+        self.action = type("A", (), {"value": value})()
+        self.chat_id = chat_id
+        self.operator = type("O", (), {"open_id": sender})()
+
+
+def _last_inbound(client: _FakeWireClient) -> dict[str, Any]:
+    env = client.sent[-1]
+    assert env.kind == KIND_INBOUND
+    assert isinstance(env.body, dict)
+    return env.body
+
+
+@pytest.mark.asyncio
+async def test_stop_button_click_forwards_interrupt_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fail-stop property: a 停止 click must reach the gateway as an
+    out-of-band ``control="interrupt"`` verb (so ``InboundBody.control`` fires
+    and the running turn is aborted), NOT as a conversational button_value."""
+    adapter, _channel = _make_adapter(monkeypatch)
+    client = _FakeWireClient()
+    adapter._client = client  # type: ignore[assignment]
+
+    event = _CardAction(
+        value={"control": "interrupt"}, chat_id="oc_1", sender="ou_user"
+    )
+    await adapter._on_card_action(event)
+
+    body = _last_inbound(client)
+    assert body["control"] == "interrupt"
+    assert "button_value" not in body  # an interrupt is never an approval reply
+
+
+@pytest.mark.asyncio
+async def test_approval_button_click_forwards_button_value_not_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approval buttons must keep round-tripping ``button_value`` and never
+    leak a ``control`` verb — the two card vocabularies stay disjoint."""
+    adapter, _channel = _make_adapter(monkeypatch)
+    client = _FakeWireClient()
+    adapter._client = client  # type: ignore[assignment]
+
+    event = _CardAction(
+        value={"button_value": "a:approve"}, chat_id="oc_1", sender="ou_user"
+    )
+    await adapter._on_card_action(event)
+
+    body = _last_inbound(client)
+    assert body["button_value"] == "a:approve"
+    assert "control" not in body
+
+
+@pytest.mark.asyncio
+async def test_live_card_carries_stop_button_until_finalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-progress turn card shows the stop button; once finalized it is
+    dropped so a retired card cannot invite a second abort."""
+    adapter, channel = _make_adapter(monkeypatch)
+    chat = "oc_1"
+    await adapter.handle_outbound(_outbound(chat, "turn_start", meta={"turn_id": "t1"}))
+
+    # In-flight: the stop action is present and round-trips a control verb.
+    live = channel.sends[-1][1]["card"]
+    stop = _element(live, "stop")
+    assert stop is not None
+    assert stop["actions"][0]["value"] == {"control": "interrupt"}
+
+    # After the run completes, the stop button is gone from the final card.
+    for env in [
+        _outbound(chat, "agent_end", meta={"cause": "WaitForUser"}),
+        _outbound(chat, "assistant_text", content="done"),
+    ]:
+        await adapter.handle_outbound(env)
+    await asyncio.sleep(0.05)
+    assert _element(_last_card(channel), "stop") is None
+
+
+@pytest.mark.asyncio
+async def test_interrupt_marks_card_and_drops_stop_button(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hitting 停止 repaints the live card to the 已中断 state and removes the
+    stop button immediately, before the server-side abort lands."""
+    adapter, channel = _make_adapter(monkeypatch)
+    client = _FakeWireClient()
+    adapter._client = client  # type: ignore[assignment]
+    chat = "oc_1"
+    await adapter.handle_outbound(_outbound(chat, "turn_start", meta={"turn_id": "t1"}))
+
+    await adapter._on_card_action(
+        _CardAction(value={"control": "interrupt"}, chat_id=chat, sender="ou_user")
+    )
+
+    final = _last_card(channel)
+    status = _element(final, "status")
+    assert status is not None and status["content"] == adapter_mod._STATUS_INTERRUPTED
+    assert _element(final, "stop") is None
 
 
 @pytest.mark.asyncio
