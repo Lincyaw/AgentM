@@ -177,6 +177,98 @@ func TestRouterAssistantTextCompletesTurn(t *testing.T) {
 	}
 }
 
+func TestRouterAssistantTextPreservesInterleavedSegments(t *testing.T) {
+	m := newTestModel()
+	m.transcript = nil
+
+	r := &Router{}
+	r.Dispatch(m, map[string]any{
+		"metadata": map[string]any{"kind": "turn_start"},
+	})
+	// First text segment "A".
+	r.Dispatch(m, map[string]any{
+		"content":  "A",
+		"metadata": map[string]any{"kind": "stream_text"},
+	})
+	// A tool call closes the open text segment.
+	r.Dispatch(m, map[string]any{
+		"metadata": map[string]any{
+			"kind":         "tool_call",
+			"name":         "Read",
+			"tool_call_id": "tc_1",
+			"args":         map[string]any{"file_path": "/tmp/x"},
+		},
+	})
+	r.Dispatch(m, map[string]any{
+		"content": "contents",
+		"metadata": map[string]any{
+			"kind":         "tool_result",
+			"tool_call_id": "tc_1",
+			"ok":           true,
+		},
+	})
+	// Second text segment "B".
+	r.Dispatch(m, map[string]any{
+		"content":  "B",
+		"metadata": map[string]any{"kind": "stream_text"},
+	})
+	// Final assistant_text carries the FULL concatenated text "A\nB".
+	r.Dispatch(m, map[string]any{
+		"content":  "A\nB",
+		"metadata": map[string]any{"kind": "assistant_text"},
+	})
+
+	if m.activeTurn != nil {
+		t.Error("activeTurn should be nil after assistant_text")
+	}
+	at, ok := m.transcript[len(m.transcript)-1].(*blocks.AssistantTurn)
+	if !ok {
+		t.Fatal("last transcript entry should be AssistantTurn")
+	}
+	if !at.Complete() {
+		t.Error("turn should be marked complete")
+	}
+
+	// Expect exactly two TextBlock segments, "A" before the tool and "B" after,
+	// neither rewritten to the full "A\nB".
+	var texts []string
+	var toolSeen bool
+	var toolBeforeFirstText, toolBetween bool
+	for _, seg := range at.Segments {
+		switch s := seg.(type) {
+		case *blocks.TextBlock:
+			if !toolSeen && len(texts) == 0 {
+				// first text, tool not yet seen -> ok (A is before tool)
+			}
+			if toolSeen && len(texts) == 1 {
+				toolBetween = true // tool appeared between the two texts
+			}
+			texts = append(texts, s.Text)
+		case *blocks.ToolBlock:
+			toolSeen = true
+			if len(texts) == 0 {
+				toolBeforeFirstText = true
+			}
+		}
+	}
+
+	if len(texts) != 2 {
+		t.Fatalf("expected exactly 2 TextBlock segments, got %d: %v", len(texts), texts)
+	}
+	if texts[0] != "A" {
+		t.Errorf("first text = %q, want %q", texts[0], "A")
+	}
+	if texts[1] != "B" {
+		t.Errorf("second text = %q, want %q", texts[1], "B")
+	}
+	if toolBeforeFirstText {
+		t.Error("tool should come after the first text segment, not before")
+	}
+	if !toolBetween {
+		t.Error("tool should appear chronologically between the two text segments")
+	}
+}
+
 func TestRouterAgentEndClearsInFlight(t *testing.T) {
 	m := newTestModel()
 	m.inFlight = true

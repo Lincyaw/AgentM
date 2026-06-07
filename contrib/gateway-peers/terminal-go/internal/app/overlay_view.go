@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -126,30 +127,7 @@ func (v *ViewOverlay) View(width, height int, th *theme.Theme) string {
 
 func formatScrollInfo(line, total, pct int) string {
 	return strings.Join([]string{
-		"line " + itoa(line) + "/" + itoa(total),
-		"(" + itoa(pct) + "%)",
+		"line " + strconv.Itoa(line) + "/" + strconv.Itoa(total),
+		"(" + strconv.Itoa(pct) + "%)",
 	}, " ")
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
 }
