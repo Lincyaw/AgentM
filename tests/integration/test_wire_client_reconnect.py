@@ -143,9 +143,12 @@ async def test_reconnecting_client_survives_gateway_restart(tmp_path: Path) -> N
             "reconnecting client never received the durable frame enqueued "
             f"during the gateway-restart gap; delivered={[e.id for e in delivered]!r}"
         )
-        # Reconnect reused the same peer identity (replay precondition).
+        # Same-peer-name reuse is proven *transitively* by assertion (b): the
+        # outbox is keyed by peer_name, so the gap frame replays only if the
+        # reconnect hello reused ``peer_name``. This extra check just confirms
+        # no *other* peer identity leaked into the inbound path along the way.
         assert seen_peers == [peer_name], (
-            f"expected one stable peer_name across reconnect, got {seen_peers!r}"
+            f"unexpected extra peer identity on the inbound path: {seen_peers!r}"
         )
         # The replayed durable row drained (acked on successful delivery).
         assert await asyncio.to_thread(outbox.pending_count, peer_name) == 0
