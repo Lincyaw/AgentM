@@ -321,7 +321,7 @@ async def test_live_card_carries_stop_button_until_finalize(
     live = channel.sends[-1][1]["card"]
     stop = _element(live, "stop")
     assert stop is not None
-    assert stop["actions"][0]["value"] == {"control": "interrupt"}
+    assert stop["value"] == {"control": "interrupt"}
 
     # After the run completes, the stop button is gone from the final card.
     for env in [
@@ -368,5 +368,5 @@ async def test_approval_is_a_standalone_card(monkeypatch: pytest.MonkeyPatch) ->
     assert len(channel.sends) == 1
     card = channel.sends[0][1]["card"]
     tags = [el["tag"] for el in card["body"]["elements"]]
-    assert "action" in tags  # carries the interactive buttons
+    assert "button" in tags  # schema-2.0 standalone button element
     assert adapter._live == {}  # approval does not open a live turn
