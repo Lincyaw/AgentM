@@ -53,11 +53,16 @@ func TestRouterStreamTextAppendsContent(t *testing.T) {
 	if m.activeTurn == nil {
 		t.Fatal("expected activeTurn")
 	}
-	if m.activeTurn.Text != "hello world" {
-		t.Errorf("text = %q, want %q", m.activeTurn.Text, "hello world")
+	tb := m.activeTurn.OpenText()
+	if tb == nil {
+		t.Fatal("expected open TextBlock")
 	}
-	if !m.activeTurn.TextDirty {
-		t.Error("expected TextDirty to be true during streaming")
+	if tb.Text != "hello world" {
+		t.Errorf("text = %q, want %q", tb.Text, "hello world")
+	}
+	// During streaming the block is not yet complete.
+	if tb.Complete() {
+		t.Error("expected TextBlock not complete during streaming")
 	}
 }
 
@@ -74,11 +79,16 @@ func TestRouterStreamThinkingCreatesBlock(t *testing.T) {
 		"metadata": map[string]any{"kind": "stream_thinking"},
 	})
 
-	if m.activeTurn.Thinking == nil {
+	tb := m.activeTurn.OpenThinking()
+	if tb == nil {
 		t.Fatal("expected thinking block to be created")
 	}
-	if m.activeTurn.Thinking.Text != "reasoning..." {
-		t.Errorf("thinking text = %q, want %q", m.activeTurn.Thinking.Text, "reasoning...")
+	if tb.Text != "reasoning..." {
+		t.Errorf("thinking text = %q, want %q", tb.Text, "reasoning...")
+	}
+	// Should have one segment: the ThinkingBlock.
+	if len(m.activeTurn.Segments) != 1 {
+		t.Errorf("expected 1 segment, got %d", len(m.activeTurn.Segments))
 	}
 }
 
@@ -99,10 +109,14 @@ func TestRouterToolCallAndResult(t *testing.T) {
 		},
 	})
 
-	if len(m.activeTurn.Tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(m.activeTurn.Tools))
+	// ToolBlock should be in Segments.
+	if len(m.activeTurn.Segments) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(m.activeTurn.Segments))
 	}
-	tb := m.activeTurn.Tools[0]
+	tb, ok := m.activeTurn.Segments[0].(*blocks.ToolBlock)
+	if !ok {
+		t.Fatal("expected segment to be *ToolBlock")
+	}
 	if tb.Name != "Read" {
 		t.Errorf("tool name = %q, want Read", tb.Name)
 	}
@@ -150,8 +164,13 @@ func TestRouterAssistantTextCompletesTurn(t *testing.T) {
 	if !ok {
 		t.Fatal("last transcript entry should be AssistantTurn")
 	}
-	if at.Text != "final answer" {
-		t.Errorf("text = %q, want %q", at.Text, "final answer")
+	// The final text should be in the last TextBlock segment.
+	tb := at.LastTextBlock()
+	if tb == nil {
+		t.Fatal("expected a TextBlock segment")
+	}
+	if tb.Text != "final answer" {
+		t.Errorf("text = %q, want %q", tb.Text, "final answer")
 	}
 	if !at.Complete() {
 		t.Error("turn should be marked complete")
@@ -405,14 +424,37 @@ func TestRouterFullTurnLifecycle(t *testing.T) {
 	if !at.Complete() {
 		t.Error("turn should be complete")
 	}
-	if at.Thinking == nil {
-		t.Error("should have thinking block")
+
+	// Verify the segments contain a ThinkingBlock, ToolBlock, and TextBlock.
+	var hasThinking, hasTool, hasText bool
+	for _, seg := range at.Segments {
+		switch seg.(type) {
+		case *blocks.ThinkingBlock:
+			hasThinking = true
+		case *blocks.ToolBlock:
+			hasTool = true
+		case *blocks.TextBlock:
+			hasText = true
+		}
 	}
-	if len(at.Tools) != 1 {
-		t.Errorf("should have 1 tool, got %d", len(at.Tools))
+	if !hasThinking {
+		t.Error("should have thinking segment")
 	}
-	if at.Text != "Here are the files." {
-		t.Errorf("text = %q", at.Text)
+	if !hasTool {
+		t.Error("should have tool segment")
+	}
+	if !hasText {
+		t.Error("should have text segment")
+	}
+
+	tb := at.LastTextBlock()
+	if tb == nil || tb.Text != "Here are the files." {
+		t.Errorf("text = %q", func() string {
+			if tb == nil {
+				return "<nil>"
+			}
+			return tb.Text
+		}())
 	}
 	if m.inFlight {
 		t.Error("inFlight should be false")

@@ -16,3 +16,11 @@ type Block interface {
 	// Render produces the styled string representation at the given terminal width.
 	Render(width int, th *theme.Theme) string
 }
+
+// Focusable is implemented by blocks that can receive keyboard focus for
+// expand/collapse and view-overlay operations.
+type Focusable interface {
+	Block
+	Focused() bool
+	SetFocused(bool)
+}

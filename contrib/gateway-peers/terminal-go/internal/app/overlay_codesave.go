@@ -45,11 +45,23 @@ func NewCodeSaveOverlay(transcript []blocks.Block) *CodeSaveOverlay {
 			break
 		}
 	}
-	if lastAssistant == nil || lastAssistant.Text == "" {
+	if lastAssistant == nil {
 		return nil
 	}
 
-	matches := fencedCodeRe.FindAllStringSubmatch(lastAssistant.Text, -1)
+	// Collect all text from TextBlock segments.
+	var textParts []string
+	for _, seg := range lastAssistant.Segments {
+		if tb, ok := seg.(*blocks.TextBlock); ok && tb.Text != "" {
+			textParts = append(textParts, tb.Text)
+		}
+	}
+	combinedText := strings.Join(textParts, "\n")
+	if combinedText == "" {
+		return nil
+	}
+
+	matches := fencedCodeRe.FindAllStringSubmatch(combinedText, -1)
 	if len(matches) == 0 {
 		return nil
 	}

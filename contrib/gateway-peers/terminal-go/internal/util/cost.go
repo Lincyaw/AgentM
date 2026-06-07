@@ -12,13 +12,13 @@ type ModelPricing struct {
 var knownPricing = map[string]ModelPricing{
 	"doubao":                     {InputPerM: 0.5, OutputPerM: 1.5},
 	"doubao-seed-2-0-pro-260215": {InputPerM: 0.5, OutputPerM: 1.5},
-	"gpt-4o":                    {InputPerM: 2.5, OutputPerM: 10.0},
-	"gpt-4o-mini":               {InputPerM: 0.15, OutputPerM: 0.6},
-	"claude-3-5-sonnet":         {InputPerM: 3.0, OutputPerM: 15.0},
-	"claude-3-opus":             {InputPerM: 15.0, OutputPerM: 75.0},
-	"claude-3-haiku":            {InputPerM: 0.25, OutputPerM: 1.25},
-	"glm-5.1":                   {InputPerM: 1.0, OutputPerM: 4.0},
-	"deepseek-chat":             {InputPerM: 0.27, OutputPerM: 1.1},
+	"gpt-4o":                     {InputPerM: 2.5, OutputPerM: 10.0},
+	"gpt-4o-mini":                {InputPerM: 0.15, OutputPerM: 0.6},
+	"claude-3-5-sonnet":          {InputPerM: 3.0, OutputPerM: 15.0},
+	"claude-3-opus":              {InputPerM: 15.0, OutputPerM: 75.0},
+	"claude-3-haiku":             {InputPerM: 0.25, OutputPerM: 1.25},
+	"glm-5.1":                    {InputPerM: 1.0, OutputPerM: 4.0},
+	"deepseek-chat":              {InputPerM: 0.27, OutputPerM: 1.1},
 }
 
 // DefaultPricing is used when the model is unknown.

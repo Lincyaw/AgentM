@@ -11,18 +11,18 @@ type Phase string
 const (
 	PhaseIdle      Phase = "idle"
 	PhaseThinking  Phase = "thinking"
-	PhaseStreaming  Phase = "streaming"
+	PhaseStreaming Phase = "streaming"
 	PhaseTool      Phase = "tool"
 	PhaseSubagent  Phase = "subagent"
 )
 
 // PhaseGlyphMap maps each phase to its display glyph.
 var PhaseGlyphMap = map[Phase]string{
-	PhaseIdle:     "●",
-	PhaseThinking: "◐",
+	PhaseIdle:      "●",
+	PhaseThinking:  "◐",
 	PhaseStreaming: "◑",
-	PhaseTool:     "⚙",
-	PhaseSubagent: "⌥",
+	PhaseTool:      "⚙",
+	PhaseSubagent:  "⌥",
 }
 
 // PhaseGlyph returns the glyph for a given phase (function form for callers).
@@ -37,6 +37,7 @@ func PhaseGlyph(p Phase) string {
 const (
 	BlackCircle   = "●" // assistant turn marker + tool call marker
 	ThinkingGlyph = "∴" // thinking block header
+	FocusBarGlyph = "▌" // left bar glyph used to mark focused blocks
 )
 
 // Theme holds all lipgloss styles for rendering blocks and UI components.
@@ -99,6 +100,9 @@ type Theme struct {
 	OverlayActive   lipgloss.Style // highlighted item in a list overlay
 	OverlayInput    lipgloss.Style // inline overlay input bar
 	SearchHighlight lipgloss.Style // matched text highlight in search
+
+	// FocusBar is applied to the ▌ glyph prefixing each line of the focused block.
+	FocusBar lipgloss.Style
 }
 
 // DarkTheme returns a theme suited for dark terminal backgrounds.
@@ -160,6 +164,7 @@ func DarkTheme() *Theme {
 		OverlayActive:   lipgloss.NewStyle().Foreground(accent).Bold(true),
 		OverlayInput:    lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Background(lipgloss.Color("#1F2937")),
 		SearchHighlight: lipgloss.NewStyle().Background(lipgloss.Color("#FBBF24")).Foreground(lipgloss.Color("#1F2937")),
+		FocusBar:        lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA")).Bold(true),
 	}
 }
 
@@ -222,6 +227,7 @@ func LightTheme() *Theme {
 		OverlayActive:   lipgloss.NewStyle().Foreground(accent).Bold(true),
 		OverlayInput:    lipgloss.NewStyle().Foreground(lipgloss.Color("#374151")).Background(lipgloss.Color("#F3F4F6")),
 		SearchHighlight: lipgloss.NewStyle().Background(lipgloss.Color("#FBBF24")).Foreground(lipgloss.Color("#1F2937")),
+		FocusBar:        lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true),
 	}
 }
 

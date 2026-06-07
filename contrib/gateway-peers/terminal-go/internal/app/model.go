@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/blocks"
@@ -65,6 +65,10 @@ type Model struct {
 	// transcriptMode: when true, all ThinkingBlocks and ToolBlocks
 	// render expanded; when false (default), they render collapsed.
 	transcriptMode bool
+
+	// focused is the collapsible block currently selected by the cursor.
+	// May be nil if no focus has been set yet.
+	focused blocks.Focusable
 
 	// Wire integration
 	wireClient      *wire.WireClient
@@ -165,13 +169,7 @@ func buildMockTranscript(themeName string) []blocks.Block {
 	tool1.OK = true
 	tool1.Result = "# ABI protocols for the pluggable architecture\nfrom .protocols import ..."
 
-	child1 := &blocks.SubagentBlock{
-		Purpose: "analyze test coverage for core module",
-		Done:    true,
-	}
-
-	assistant1 := &blocks.AssistantTurn{
-		Thinking:     thinking1,
+	text1 := &blocks.TextBlock{
 		GlamourStyle: glamourStyle,
 		Text: "The codebase follows a layered architecture:\n\n" +
 			"**Core** (`src/agentm/core/`) -- The runtime substrate. Contains the ABI protocols, " +
@@ -182,12 +180,21 @@ func buildMockTranscript(themeName string) []blocks.Block {
 			"communicate with the runtime only through ExtensionAPI services.\n\n" +
 			"**Scenarios** (`contrib/scenarios/`) -- YAML-driven configurations that compose atoms " +
 			"into complete agent personas. Selected via `--scenario <name>`.",
-		Tools:    []*blocks.ToolBlock{tool1},
-		Children: []*blocks.SubagentBlock{child1},
+	}
+
+	child1 := &blocks.SubagentBlock{
+		Purpose: "analyze test coverage for core module",
+		Done:    true,
+	}
+
+	assistant1 := &blocks.AssistantTurn{
+		GlamourStyle: glamourStyle,
+		Segments:     []blocks.Block{thinking1, tool1, text1},
+		Children:     []*blocks.SubagentBlock{child1},
 	}
 	assistant1.SetComplete()
 
-	assistant2 := &blocks.AssistantTurn{
+	text2 := &blocks.TextBlock{
 		GlamourStyle: glamourStyle,
 		Text: "Tests focus on **fail-stop positions** -- invariants whose violation would cause " +
 			"silent corruption rather than visible errors. The key test categories are:\n\n" +
@@ -197,6 +204,11 @@ func buildMockTranscript(themeName string) []blocks.Block {
 			"4. Catalog freeze idempotence\n" +
 			"5. Extension contract validation (section 11)\n\n" +
 			"Run `uv run pytest --tb=short` for the full suite. Markers `ui` and `slow` are opt-in.",
+	}
+
+	assistant2 := &blocks.AssistantTurn{
+		GlamourStyle: glamourStyle,
+		Segments:     []blocks.Block{text2},
 	}
 	assistant2.SetComplete()
 
@@ -378,7 +390,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case keyCtrlE:
-		m.toggleNearestCollapsible()
+		m.toggleFocused()
 		m.transcriptDirty = true
 		return m, nil
 
@@ -386,14 +398,26 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.transcriptMode = !m.transcriptMode
 		for _, b := range m.transcript {
 			if at, ok := b.(*blocks.AssistantTurn); ok {
-				if at.Thinking != nil {
-					at.Thinking.SetCollapsed(!m.transcriptMode)
-				}
-				for _, t := range at.Tools {
-					t.SetCollapsed(!m.transcriptMode)
+				for _, seg := range at.Segments {
+					if tb, ok := seg.(*blocks.ThinkingBlock); ok {
+						tb.SetCollapsed(!m.transcriptMode)
+					}
+					if tb, ok := seg.(*blocks.ToolBlock); ok {
+						tb.SetCollapsed(!m.transcriptMode)
+					}
 				}
 			}
 		}
+		m.transcriptDirty = true
+		return m, nil
+
+	case keyAltUp:
+		m.moveFocus(-1)
+		m.transcriptDirty = true
+		return m, nil
+
+	case keyAltDown:
+		m.moveFocus(1)
 		m.transcriptDirty = true
 		return m, nil
 
@@ -494,6 +518,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case keyQuestion:
 			m.overlay = NewHelpOverlay()
+			return m, nil
+		case keyV:
+			if o := m.viewOverlayForFocused(); o != nil {
+				m.overlay = o
+			}
 			return m, nil
 		}
 	}
@@ -609,7 +638,16 @@ func blockLabel(b blocks.Block) string {
 	case *blocks.UserTurn:
 		text = v.Content
 	case *blocks.AssistantTurn:
-		text = v.Text
+		// Use the first TextBlock's content as label.
+		for _, seg := range v.Segments {
+			if tb, ok := seg.(*blocks.TextBlock); ok {
+				text = tb.Text
+				break
+			}
+		}
+		if text == "" {
+			text = "assistant"
+		}
 	case *blocks.SystemTurn:
 		text = v.Content
 	default:
@@ -670,8 +708,13 @@ func (m Model) handleSubmit(msg components.InputSubmitted) (tea.Model, tea.Cmd) 
 		m.sendToGateway(text)
 	} else {
 		// Mock mode: add a mock assistant response
+		mockText := &blocks.TextBlock{
+			GlamourStyle: m.glamourStyle,
+			Text:         "(mock response to: " + text + ")",
+		}
 		mockAssistant := &blocks.AssistantTurn{
-			Text: "(mock response to: " + text + ")",
+			GlamourStyle: m.glamourStyle,
+			Segments:     []blocks.Block{mockText},
 		}
 		mockAssistant.SetComplete()
 		m.transcript = append(m.transcript, mockAssistant)
@@ -729,29 +772,137 @@ func (m *Model) updateSuggestions(prefix string) {
 	m.suggestions.Populate(matches)
 }
 
-func (m *Model) toggleNearestCollapsible() {
-	// Toggle the last collapsible block in the transcript
-	for i := len(m.transcript) - 1; i >= 0; i-- {
-		b := m.transcript[i]
-		// Check children of AssistantTurn first
-		if at, ok := b.(*blocks.AssistantTurn); ok {
-			// Check thinking
-			if at.Thinking != nil {
-				at.Thinking.SetCollapsed(!at.Thinking.Collapsed())
+// focusableBlocks returns all focusable blocks in render order by walking
+// the transcript. For each AssistantTurn it yields *ThinkingBlock and
+// *ToolBlock segments (in order) then its Approvals.
+func (m *Model) focusableBlocks() []blocks.Focusable {
+	var result []blocks.Focusable
+	for _, b := range m.transcript {
+		at, ok := b.(*blocks.AssistantTurn)
+		if !ok {
+			continue
+		}
+		for _, seg := range at.Segments {
+			if f, ok := seg.(blocks.Focusable); ok {
+				result = append(result, f)
+			}
+		}
+		for _, appr := range at.Approvals {
+			result = append(result, appr)
+		}
+	}
+	return result
+}
+
+// toggleFocused toggles the collapse state of the focused block. If no block
+// is focused, it sets focus to the last focusable block and expands it.
+func (m *Model) toggleFocused() {
+	if m.focused == nil {
+		// Fall back to the last focusable block.
+		all := m.focusableBlocks()
+		if len(all) == 0 {
+			return
+		}
+		f := all[len(all)-1]
+		f.SetFocused(true)
+		m.focused = f
+		f.SetCollapsed(false)
+		m.scrollToFocused()
+		return
+	}
+	m.focused.SetCollapsed(!m.focused.Collapsed())
+}
+
+// moveFocus moves keyboard focus by delta steps (+1 = next, -1 = prev).
+func (m *Model) moveFocus(delta int) {
+	all := m.focusableBlocks()
+	if len(all) == 0 {
+		return
+	}
+
+	// Find current index.
+	cur := -1
+	if m.focused != nil {
+		for i, f := range all {
+			if f == m.focused {
+				cur = i
+				break
+			}
+		}
+	}
+
+	// Clear old focus.
+	if cur >= 0 {
+		all[cur].SetFocused(false)
+	}
+
+	// Compute next.
+	var next int
+	if cur < 0 {
+		if delta < 0 {
+			next = len(all) - 1
+		} else {
+			next = 0
+		}
+	} else {
+		next = cur + delta
+		if next < 0 {
+			next = 0
+		}
+		if next >= len(all) {
+			next = len(all) - 1
+		}
+	}
+
+	all[next].SetFocused(true)
+	m.focused = all[next]
+	m.scrollToFocused()
+}
+
+// scrollToFocused scrolls the viewport so the AssistantTurn containing the
+// focused block is visible. We scroll to AssistantTurn granularity since
+// blockLineOffsets is indexed by transcript position.
+func (m *Model) scrollToFocused() {
+	if m.focused == nil || !m.ready {
+		return
+	}
+	for i, b := range m.transcript {
+		at, ok := b.(*blocks.AssistantTurn)
+		if !ok {
+			continue
+		}
+		for _, seg := range at.Segments {
+			if seg == m.focused {
+				if i < len(m.blockLineOffsets) {
+					m.viewport.SetYOffset(m.blockLineOffsets[i])
+				}
 				return
 			}
-			// Check tools
-			for j := len(at.Tools) - 1; j >= 0; j-- {
-				at.Tools[j].SetCollapsed(!at.Tools[j].Collapsed())
-				return
-			}
-			// Check approvals
-			for j := len(at.Approvals) - 1; j >= 0; j-- {
-				at.Approvals[j].SetCollapsed(!at.Approvals[j].Collapsed())
+		}
+		for _, appr := range at.Approvals {
+			if appr == m.focused {
+				if i < len(m.blockLineOffsets) {
+					m.viewport.SetYOffset(m.blockLineOffsets[i])
+				}
 				return
 			}
 		}
 	}
+}
+
+// viewOverlayForFocused returns a ViewOverlay for the focused block, or nil
+// if no suitable focused block exists.
+func (m *Model) viewOverlayForFocused() *ViewOverlay {
+	if m.focused == nil {
+		return nil
+	}
+	switch f := m.focused.(type) {
+	case *blocks.ToolBlock:
+		return NewViewOverlay(f.Name, f.FullContent())
+	case *blocks.ThinkingBlock:
+		return NewViewOverlay("Thinking", f.Text)
+	}
+	return nil
 }
 
 func (m *Model) jumpTurn(delta int) {
@@ -913,7 +1064,7 @@ func (m Model) View() string {
 	// 2. Full overlays replace the viewport content
 	if m.overlay != nil {
 		switch m.overlay.Kind() {
-		case OverlayHelp, OverlayBookmarks, OverlayResend, OverlayCodeSave:
+		case OverlayHelp, OverlayBookmarks, OverlayResend, OverlayCodeSave, OverlayView:
 			vpView = m.overlay.View(m.width, m.viewportHeight(), m.theme)
 		}
 	}
