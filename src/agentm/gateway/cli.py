@@ -645,41 +645,151 @@ class _GatewayRuntime:
 
 
 # -------- systemd integration ------------------------------------------
+#
+# A single mechanism installs BOTH the gateway and the Feishu client as
+# systemd units (system-wide when run as root, per-user otherwise). The
+# render step is a pure function (resolved inputs -> unit text) so tests can
+# assert on the rendered strings without touching real systemd or system
+# dirs; the install step writes the files and drives ``systemctl``.
 
-_UNIT_NAME = "agentm-gateway"
+_GATEWAY_UNIT = "agentm-gateway"
+_FEISHU_UNIT = "agentm-feishu"
 
 
-def _systemd_action(*, install: bool) -> None:
-    """Install or uninstall a systemd user unit for the gateway.
+@dataclass(frozen=True)
+class _SystemdPlan:
+    """Everything the render/install steps need, fully resolved up front.
 
-    Install reconstructs the current ``agentm gateway …`` invocation
-    (minus ``--install-systemd`` itself) from ``sys.argv`` and bakes it
-    into ``ExecStart``. The unit inherits the current environment via an
-    ``EnvironmentFile`` pointing at ``~/.config/agentm/gateway.env``.
+    ``system`` selects system units (``/etc/systemd/system``, ``User=``,
+    ``/run/agentm`` socket) vs user units (``~/.config/systemd/user``,
+    ``%t/agentm`` socket, no ``User=``). ``feishu_bin`` is ``None`` when the
+    ``agentm-feishu`` entry point cannot be resolved — the feishu unit is
+    then skipped (the gateway unit is still rendered/installed).
     """
-    import shutil
-    import subprocess
+
+    system: bool
+    unit_dir: Path
+    socket_url: str
+    gateway_exec_start: str
+    env_file: Path
+    working_dir: Path
+    path_env: str
+    run_as: str | None
+    feishu_bin: str | None
+
+
+def _render_gateway_unit(plan: _SystemdPlan) -> str:
     import textwrap
 
-    unit_dir = Path.home() / ".config" / "systemd" / "user"
-    unit_path = unit_dir / f"{_UNIT_NAME}.service"
+    user_lines = ""
+    if plan.system and plan.run_as:
+        user_lines = f"User={plan.run_as}\nGroup={plan.run_as}\n"
+    runtime_lines = ""
+    if plan.system:
+        # system units have no login session, so pin an absolute socket under
+        # /run/agentm that systemd creates/cleans via RuntimeDirectory.
+        runtime_lines = "RuntimeDirectory=agentm\nRuntimeDirectoryMode=0750\n"
+    wanted_by = "multi-user.target" if plan.system else "default.target"
+    return textwrap.dedent(f"""\
+        [Unit]
+        Description=AgentM gateway (single-process chat session host)
+        After=network-online.target
+        Wants=network-online.target
 
-    if not install:
-        subprocess.run(
-            ["systemctl", "--user", "stop", _UNIT_NAME],
-            check=False,
-        )
-        subprocess.run(
-            ["systemctl", "--user", "disable", _UNIT_NAME],
-            check=False,
-        )
-        if unit_path.exists():
-            unit_path.unlink()
-            subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
-            sys.stdout.write(f"Removed {unit_path}\n")
-        else:
-            sys.stdout.write(f"{unit_path} does not exist, nothing to remove.\n")
-        return
+        [Service]
+        Type=simple
+        {user_lines}WorkingDirectory={plan.working_dir}
+        EnvironmentFile=-{plan.env_file}
+        {runtime_lines}Environment=AGENTM_SOCKET={plan.socket_url}
+        Environment=PATH={plan.path_env}
+        ExecStart={plan.gateway_exec_start}
+        Restart=always
+        RestartSec=2
+
+        [Install]
+        WantedBy={wanted_by}
+    """)
+
+
+def _render_feishu_unit(plan: _SystemdPlan) -> str:
+    import textwrap
+
+    assert plan.feishu_bin is not None  # caller guards; only render when present
+    user_lines = ""
+    if plan.system and plan.run_as:
+        user_lines = f"User={plan.run_as}\nGroup={plan.run_as}\n"
+    wanted_by = "multi-user.target" if plan.system else "default.target"
+    # --scenario is intentionally omitted; the feishu client defaults to the
+    # chatbot scenario in code. Wants/After (not Requires) keep the coupling
+    # loose: a gateway restart does NOT cascade-restart feishu, which relies on
+    # its auto-reconnect + outbox replay instead.
+    exec_start = f"{plan.feishu_bin} --connect {plan.socket_url}"
+    return textwrap.dedent(f"""\
+        [Unit]
+        Description=AgentM Feishu/Lark chat client
+        After={_GATEWAY_UNIT}.service
+        Wants={_GATEWAY_UNIT}.service
+
+        [Service]
+        Type=simple
+        {user_lines}WorkingDirectory={plan.working_dir}
+        EnvironmentFile=-{plan.env_file}
+        Environment=PATH={plan.path_env}
+        ExecStart={exec_start}
+        Restart=always
+        RestartSec=3
+
+        [Install]
+        WantedBy={wanted_by}
+    """)
+
+
+def _resolve_feishu_bin(agentm_bin: str) -> str | None:
+    """Find ``agentm-feishu``: $PATH first, else next to the ``agentm`` bin."""
+    import shutil
+
+    found = shutil.which("agentm-feishu")
+    if found:
+        return found
+    sibling = Path(agentm_bin).resolve().parent / "agentm-feishu"
+    return str(sibling) if sibling.exists() else None
+
+
+def _baked_gateway_argv() -> tuple[list[str], str]:
+    """Return (gateway-flags, workspace) from the current invocation.
+
+    Strips the systemd flags. ``sys.argv[0]`` is ``"agentm gateway"`` (merged
+    by the main CLI dispatcher); the rest are the gateway flags. The workspace
+    is the ``--cwd`` value if present, else the current dir.
+    """
+    cleaned: list[str] = []
+    workspace = str(Path.cwd())
+    argv = sys.argv[1:]
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("--install-systemd", "--uninstall-systemd"):
+            i += 1
+            continue
+        if arg == "--cwd":
+            if i + 1 < len(argv):
+                workspace = argv[i + 1]
+                i += 2
+            else:
+                i += 1
+            continue
+        if arg.startswith("--cwd="):
+            workspace = arg.split("=", 1)[1]
+            i += 1
+            continue
+        cleaned.append(arg)
+        i += 1
+    return cleaned, workspace
+
+
+def _build_systemd_plan() -> _SystemdPlan:
+    """Resolve a full :class:`_SystemdPlan` from the live invocation/env."""
+    import shutil
 
     agentm_bin = shutil.which("agentm")
     if agentm_bin is None:
@@ -688,59 +798,131 @@ def _systemd_action(*, install: bool) -> None:
             "the venv (`uv run agentm gateway --install-systemd`)."
         )
 
-    argv = sys.argv[:]
-    cleaned: list[str] = []
-    for arg in argv:
-        if arg in ("--install-systemd", "--uninstall-systemd"):
+    system = os.geteuid() == 0
+    if system:
+        unit_dir = Path("/etc/systemd/system")
+        socket_url = "unix:///run/agentm/gw.sock"
+        run_as = os.environ.get("SUDO_USER") or os.environ.get("USER") or "root"
+    else:
+        unit_dir = Path.home() / ".config" / "systemd" / "user"
+        socket_url = "unix://%t/agentm/gw.sock"
+        run_as = None
+
+    cleaned, workspace = _baked_gateway_argv()
+    # Both units MUST agree on the socket: force --bind to the pinned value
+    # (drop any --bind the operator passed so it cannot diverge from feishu).
+    flags: list[str] = []
+    skip_next = False
+    for arg in cleaned:
+        if skip_next:
+            skip_next = False
             continue
-        cleaned.append(arg)
-    # sys.argv[0] is "agentm gateway" (merged by the main CLI dispatcher);
-    # the remaining elements are the gateway flags.  Reconstruct a clean
-    # command line using the resolved binary path.
-    exec_start = f"{agentm_bin} gateway {' '.join(cleaned[1:])}"
+        if arg == "--bind":
+            skip_next = True
+            continue
+        if arg.startswith("--bind="):
+            continue
+        flags.append(arg)
+    flags = ["--bind", socket_url, *flags]
+    gateway_exec_start = f"{agentm_bin} gateway {' '.join(flags)}".rstrip()
 
-    env_dir = Path.home() / ".config" / "agentm"
-    env_file = env_dir / "gateway.env"
+    workspace_path = Path(workspace).expanduser()
+    env_file = workspace_path / ".env"
 
-    unit = textwrap.dedent(f"""\
-        [Unit]
-        Description=AgentM Gateway
-        After=network.target
+    bin_dir = str(Path(agentm_bin).resolve().parent)
+    path_env = f"{bin_dir}:/usr/local/bin:/usr/bin:/bin"
 
-        [Service]
-        Type=simple
-        ExecStart={exec_start}
-        Restart=on-failure
-        RestartSec=3
-        EnvironmentFile=-{env_file}
-        WorkingDirectory={Path.cwd()}
+    return _SystemdPlan(
+        system=system,
+        unit_dir=unit_dir,
+        socket_url=socket_url,
+        gateway_exec_start=gateway_exec_start,
+        env_file=env_file,
+        working_dir=Path.cwd(),
+        path_env=path_env,
+        run_as=run_as,
+        feishu_bin=_resolve_feishu_bin(agentm_bin),
+    )
 
-        [Install]
-        WantedBy=default.target
-    """)
 
-    unit_dir.mkdir(parents=True, exist_ok=True)
-    unit_path.write_text(unit, encoding="utf-8")
-    sys.stdout.write(f"Wrote {unit_path}\n")
+def _systemctl(plan: _SystemdPlan) -> list[str]:
+    return ["systemctl"] if plan.system else ["systemctl", "--user"]
 
-    if not env_file.exists():
-        env_dir.mkdir(parents=True, exist_ok=True)
-        env_file.write_text(
-            "# Environment variables for agentm-gateway.\n"
-            "# e.g. AGENTM_MODEL=doubao\n",
-            encoding="utf-8",
+
+def _systemd_action(*, install: bool) -> None:
+    """Install or uninstall the gateway + feishu systemd units.
+
+    System units (root) land in ``/etc/systemd/system`` with ``User=`` and a
+    pinned ``/run/agentm/gw.sock``; user units land in
+    ``~/.config/systemd/user`` with a ``%t/agentm/gw.sock`` socket. Both units
+    share the same socket (gateway ``--bind`` == feishu ``--connect``). The
+    feishu unit is skipped (with a note) when ``agentm-feishu`` is not on PATH.
+    """
+    import subprocess
+
+    plan = _build_systemd_plan()
+    sctl = _systemctl(plan)
+    units = [f"{_GATEWAY_UNIT}.service", f"{_FEISHU_UNIT}.service"]
+
+    if not install:
+        for unit in units:
+            subprocess.run([*sctl, "stop", unit], check=False)
+            subprocess.run([*sctl, "disable", unit], check=False)
+        removed = False
+        for unit in units:
+            path = plan.unit_dir / unit
+            if path.exists():
+                path.unlink()
+                sys.stdout.write(f"Removed {path}\n")
+                removed = True
+        if removed:
+            subprocess.run([*sctl, "daemon-reload"], check=False)
+        else:
+            sys.stdout.write(
+                f"No agentm units in {plan.unit_dir}, nothing to remove.\n"
+            )
+        return
+
+    plan.unit_dir.mkdir(parents=True, exist_ok=True)
+    gateway_path = plan.unit_dir / f"{_GATEWAY_UNIT}.service"
+    gateway_path.write_text(_render_gateway_unit(plan), encoding="utf-8")
+    sys.stdout.write(f"Wrote {gateway_path}\n")
+
+    enable_units = [f"{_GATEWAY_UNIT}.service"]
+    if plan.feishu_bin is not None:
+        feishu_path = plan.unit_dir / f"{_FEISHU_UNIT}.service"
+        feishu_path.write_text(_render_feishu_unit(plan), encoding="utf-8")
+        sys.stdout.write(f"Wrote {feishu_path}\n")
+        enable_units.append(f"{_FEISHU_UNIT}.service")
+    else:
+        sys.stdout.write(
+            "NOTE: agentm-feishu not found; skipping the feishu unit. Run "
+            "`uv sync --all-packages` then re-run --install-systemd to add it.\n"
         )
-        sys.stdout.write(f"Created {env_file} (edit to add API keys / env vars)\n")
 
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "--user", "enable", "--now", _UNIT_NAME], check=True)
+    if not plan.env_file.exists():
+        sys.stdout.write(
+            f"NOTE: {plan.env_file} is missing — the feishu client needs "
+            "LARK_APP_ID / LARK_APP_SECRET there (and model creds for the "
+            "gateway). Run `agentm onboard` or create it, then restart.\n"
+        )
+
+    subprocess.run([*sctl, "daemon-reload"], check=True)
+    subprocess.run([*sctl, "enable", "--now", *enable_units], check=True)
+
+    j = "journalctl --user" if not plan.system else "journalctl"
     sys.stdout.write(
-        f"\n{_UNIT_NAME} is running. Useful commands:\n"
-        f"  journalctl --user -u {_UNIT_NAME} -f    # follow logs\n"
-        f"  systemctl --user status {_UNIT_NAME}     # check status\n"
-        f"  systemctl --user restart {_UNIT_NAME}    # restart\n"
+        f"\nInstalled and started: {', '.join(enable_units)}\n"
+        f"  {j} -u {_GATEWAY_UNIT} -f    # follow gateway logs\n"
+        f"  {' '.join(sctl)} status {_GATEWAY_UNIT}\n"
+        f"  contrib/gateway-peers/deploy/update.sh   # pull latest + restart\n"
         f"  agentm gateway --uninstall-systemd       # remove\n"
     )
+    if not plan.system:
+        sys.stdout.write(
+            "NOTE: user units stop at logout unless lingering is enabled:\n"
+            f"  sudo loginctl enable-linger {os.environ.get('USER', '$USER')}\n"
+        )
 
 
 # -------- typer app ----------------------------------------------------
@@ -830,14 +1012,18 @@ def cli(
         bool,
         typer.Option(
             "--install-systemd",
-            help="Generate a systemd user unit, enable and start it, then exit.",
+            help=(
+                "Install systemd units for the gateway AND feishu client "
+                "(system units as root, else user units), enable + start "
+                "them, then exit."
+            ),
         ),
     ] = False,
     uninstall_systemd: Annotated[
         bool,
         typer.Option(
             "--uninstall-systemd",
-            help="Stop, disable and remove the systemd user unit, then exit.",
+            help="Stop, disable and remove the agentm systemd units, then exit.",
         ),
     ] = False,
 ) -> None:
