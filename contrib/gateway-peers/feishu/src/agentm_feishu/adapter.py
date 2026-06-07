@@ -117,6 +117,56 @@ def _result_message_id(result: Any) -> str | None:
     return None
 
 
+# Matches a single ``@_user_N`` mention placeholder (the form Lark embeds when
+# a mention has no resolvable display name).
+_MENTION_PLACEHOLDER_RE = re.compile(r"@_user_\d+")
+
+
+def _strip_leading_bot_mention(
+    content: str, mentions: Any, bot_open_id: str | None
+) -> str:
+    """Remove a leading @-mention of THE BOT from inbound group-chat text.
+
+    In group chats Lark prefixes the bot's received text with the mention the
+    user typed. The lark channel renders ``content_text`` with placeholders
+    resolved to ``@{display_name}`` (or leaves the raw ``@_user_N`` key when a
+    mention has no name), so a command like ``/compact`` arrives as
+    ``"@AgentM /compact"`` and no longer begins with a clean ``/``.
+
+    We only strip a *leading* mention that resolves to the bot — mentions of
+    other users, and mid-message mentions, are left untouched. In p2p chats
+    there is no mention (``mentions`` empty), so ``content`` is returned
+    unchanged.
+
+    ``mentions`` is the lark ``InboundMessage.mentions`` list; each item
+    carries ``open_id``, ``key`` (the ``@_user_N`` placeholder) and ``name``.
+    """
+    if not content:
+        return content
+    stripped = content.lstrip()
+    for m in mentions or []:
+        open_id = getattr(m, "open_id", None)
+        if not bot_open_id or open_id != bot_open_id:
+            continue
+        # Try every rendered form the bot mention could take, longest first so
+        # an ``@name`` match isn't pre-empted by a bare placeholder.
+        key = getattr(m, "key", None) or ""
+        name = getattr(m, "name", None) or ""
+        candidates = [c for c in (key, f"@{name}" if name else "") if c]
+        candidates.sort(key=len, reverse=True)
+        for token in candidates:
+            if stripped.startswith(token):
+                return stripped[len(token) :].lstrip()
+        # Bot mention present but its rendered token wasn't found at the head
+        # (e.g. an unnamed placeholder Lark didn't inline): drop any leading
+        # ``@_user_N`` placeholder as a fallback.
+        match = _MENTION_PLACEHOLDER_RE.match(stripped)
+        if match:
+            return stripped[match.end() :].lstrip()
+        break
+    return content
+
+
 def _pretty_tool(name: str) -> str:
     """Trim an MCP-style ``a__b__tool`` name to its final segment."""
     return name.rsplit("__", 1)[-1] if "__" in name else name
@@ -317,6 +367,11 @@ class FeishuAdapter:
         message_id = getattr(msg, "message_id", None)
         chat_id = getattr(msg, "chat_id", "") or ""
         content = getattr(msg, "content_text", "") or ""
+        # Group chats prefix the bot's text with the user's @-mention; strip it
+        # so a leading slash command (and normal prompts) parse like p2p.
+        content = _strip_leading_bot_mention(
+            content, getattr(msg, "mentions", None), self._bot_open_id()
+        )
         log.info(
             "[feishu] rx chat=%s sender=%s msg_id=%s text=%r",
             chat_id,
@@ -753,9 +808,12 @@ class FeishuAdapter:
 
     # -- helpers -------------------------------------------------------
 
-    def _is_self(self, sender_id: str) -> bool:
+    def _bot_open_id(self) -> str | None:
         bot = getattr(self._channel, "_bot", None) if self._channel else None
-        bot_oid = getattr(bot, "open_id", None) if bot else None
+        return getattr(bot, "open_id", None) if bot else None
+
+    def _is_self(self, sender_id: str) -> bool:
+        bot_oid = self._bot_open_id()
         return bool(bot_oid and sender_id == bot_oid)
 
     def _is_allowed(self, sender_id: str) -> bool:
