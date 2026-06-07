@@ -38,7 +38,7 @@ func (s *StatusBar) Update(m StatusModel) { s.model = m }
 func (s *StatusBar) GetModel() StatusModel { return s.model }
 
 // View renders the single-line status bar at the given width.
-// Format: model . context_pct% . $cost . session_key [. elapsed . tok/s]
+// Format: model · context_pct% · session_key [· elapsed · tok/s]
 func (s *StatusBar) View(width int, th *theme.Theme) string {
 	m := s.model
 	if m.CtxTotal <= 0 {
@@ -56,13 +56,6 @@ func (s *StatusBar) View(width int, th *theme.Theme) string {
 		pct := float64(m.CtxUsed) / float64(m.CtxTotal) * 100
 		parts = append(parts, fmt.Sprintf("%d%%", int(pct)))
 	}
-
-	// Cost
-	costStr := fmt.Sprintf("$%.2f", m.CostSession)
-	if m.BudgetWarn {
-		costStr = th.StatusWarn.Render(costStr)
-	}
-	parts = append(parts, costStr)
 
 	// Session key
 	if m.SessionKey != "" {

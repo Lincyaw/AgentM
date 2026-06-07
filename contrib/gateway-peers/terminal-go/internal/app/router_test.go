@@ -304,10 +304,10 @@ func TestRouterUsageAccumulates(t *testing.T) {
 	}
 }
 
-// The wire usage event carries token counts only — no ctx_used, no cost.
-// The client must derive context occupancy from the prompt size and price
-// the tokens itself, otherwise the status bar shows 0% / $0.00 forever.
-func TestRouterUsageDerivesContextAndCost(t *testing.T) {
+// The wire usage event carries token counts only — no ctx_used. The client
+// must derive context occupancy from the prompt size, otherwise the status
+// bar shows 0% context forever.
+func TestRouterUsageDerivesContext(t *testing.T) {
 	m := newTestModel()
 	m.status.Update(components.StatusModel{Phase: theme.PhaseStreaming, Model: "doubao"})
 
@@ -321,12 +321,6 @@ func TestRouterUsageDerivesContextAndCost(t *testing.T) {
 	sm := m.status.GetModel()
 	if sm.CtxUsed != 12000 {
 		t.Errorf("CtxUsed = %d, want 12000 (input+output of latest call)", sm.CtxUsed)
-	}
-	if sm.CostSession <= 0 {
-		t.Errorf("CostSession = %f, want > 0 (priced client-side)", sm.CostSession)
-	}
-	if sm.CostTurn <= 0 {
-		t.Errorf("CostTurn = %f, want > 0 (priced client-side)", sm.CostTurn)
 	}
 
 	// A second call within the same turn (larger prompt) replaces the
