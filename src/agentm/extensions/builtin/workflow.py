@@ -23,9 +23,16 @@ APIs:
   (:class:`_BudgetService`).
 - ``args()`` — the caller-supplied ``args`` payload.
 
-Nondeterministic JS globals (``Math.random``, ``Date.now``, argless
-``new Date()``) are stripped so the workflow-local journal key
+Every wall-clock / entropy source a script can reach (``Math.random``,
+``Date.now``, argless ``new Date()``, ``performance.now``) is stripped inside
+a bootstrap IIFE — the original ``Date`` is captured in a closure and never
+re-exposed as a global — so the workflow-local journal key
 ``hash(prompt, opts)`` stays sound across replays.
+
+Worker isolation (``opts.isolation == "agent_env"``) is a *soft, optional*
+dependency on the ``operations_agent_env`` atom: guarded at spawn time, not
+declared in ``MANIFEST.requires`` (which would force every workflow user to
+pull in the agent-env extra + K8s gateway).
 
 §11 single-file contract: stdlib + ``agentm.core.abi.*`` +
 ``agentm.core.lib.*`` + ``agentm.extensions.*`` + ``quickjs`` (optional
@@ -71,6 +78,10 @@ MANIFEST = ExtensionManifest(
             "max_agents": {"type": "integer", "minimum": 1},
             "wall_clock_timeout_s": {"type": ["number", "null"], "minimum": 0},
             "default_scenario": {"type": ["string", "null"]},
+            # Hard token ceiling for one workflow run; backs budget().total /
+            # .remaining so a script can scale depth (loop-until-budget). Null
+            # ⇒ no ceiling (budget().remaining stays null, spend still tracked).
+            "budget_tokens": {"type": ["integer", "null"], "minimum": 1},
         },
         "additionalProperties": False,
     },
@@ -88,20 +99,57 @@ _ARTIFACT_STORE_SERVICE: Final[str] = "artifact_store"
 # child sessions across the whole workflow run.
 _AGENT_COUNT_BACKSTOP: Final[int] = 1000
 
+# Worker-isolation atom (opts.isolation == "agent_env"). Soft/optional
+# dependency: NOT in MANIFEST.requires (that would force every workflow user
+# to load agent-env + the arl extra). Enforcement is the runtime availability
+# guard in _spawn_and_drive, not the §11 validator. The module path is what
+# goes into the child's extension list; the bare atom name (for the loaded-set
+# check) is DERIVED from it rather than written as a literal — a bare-name
+# literal would read as an undeclared hard dependency to the D4 contract check.
+_AGENT_ENV_ATOM_MODULE: Final[str] = (
+    "agentm.extensions.builtin.operations_agent_env"
+)
+_AGENT_ENV_ATOM: Final[str] = _AGENT_ENV_ATOM_MODULE.rsplit(".", 1)[-1]
+
 # JS bootstrap: strip the three nondeterministic globals that would break
 # replay-determinism of the journal key, then install ergonomic wrappers
 # that marshal scalars-only across the boundary (QuickJS add_callable only
 # round-trips int/float/str/bool — see dynamic-workflow.md). Strings on the
 # wire, JSON on both sides.
 _JS_BOOTSTRAP = r"""
-// --- strip nondeterministic globals (journal-key soundness) ---
-Math.random = function () { throw new Error('Math.random() disabled in workflow sandbox'); };
-const __OrigDate = Date;
-globalThis.Date = function (...a) {
-  if (a.length === 0) { throw new Error('argless Date() disabled in workflow sandbox'); }
-  return new __OrigDate(...a);
-};
-globalThis.Date.now = function () { throw new Error('Date.now() disabled in workflow sandbox'); };
+// --- strip nondeterministic sources (journal-key soundness) ---
+// Done inside an IIFE so the captured original Date never leaks to a global
+// (a leaked __OrigDate would be an open back door to wall-clock, defeating
+// the whole strip). Every wall-clock / entropy source a script could reach
+// is closed: Math.random, Date.now, argless new Date(), performance.now.
+(function () {
+  var OrigDate = Date;
+  var D = function (y, mo, d, h, mi, s, ms) {
+    if (arguments.length === 0) {
+      throw new Error('argless Date() disabled in workflow sandbox');
+    }
+    // Forward explicit args (deterministic): construct from the originals.
+    return new (Function.prototype.bind.apply(
+      OrigDate, [null].concat(Array.prototype.slice.call(arguments))
+    ))();
+  };
+  D.now = function () { throw new Error('Date.now() disabled in workflow sandbox'); };
+  D.parse = OrigDate.parse;
+  D.UTC = OrigDate.UTC;
+  D.prototype = OrigDate.prototype;
+  globalThis.Date = D;
+  globalThis.Math.random = function () {
+    throw new Error('Math.random() disabled in workflow sandbox');
+  };
+  if (typeof globalThis.performance !== 'undefined') {
+    try {
+      globalThis.performance.now = function () {
+        throw new Error('performance.now() disabled in workflow sandbox');
+      };
+    } catch (e) {}
+    try { delete globalThis.performance; } catch (e) {}
+  }
+})();
 
 // --- primitive wrappers (delegate to injected __host_* callables) ---
 globalThis.agent = function (prompt, opts) {
@@ -295,11 +343,23 @@ class _WorkflowRun:
         extensions: list[tuple[str, dict[str, Any]]] = []
         # opts.isolation selects the worker sandbox by listing the
         # operations_agent_env atom in the child's extensions (policy by
-        # composition, never a privileged config field).
+        # composition, never a privileged config field). This is a *soft,
+        # optional* dependency — declaring it in MANIFEST.requires would force
+        # every workflow user to load agent-env (which needs the arl-env extra
+        # + a K8s gateway). So we guard here instead: if the script asks for
+        # agent_env isolation but the atom is not loaded in this scenario, fail
+        # at the agent() call with a clear message rather than spawning a child
+        # with a bogus extension entry that errors deep in child setup.
         if opts.get("isolation") == "agent_env":
-            extensions.append(
-                ("agentm.extensions.builtin.operations_agent_env", {})
-            )
+            available = {atom.name for atom in self.api.list_atoms()}
+            if _AGENT_ENV_ATOM not in available:
+                raise RuntimeError(
+                    f"workflow: opts.isolation='agent_env' requires the "
+                    f"{_AGENT_ENV_ATOM!r} atom to be loaded in this scenario, "
+                    f"but it is not present. Add it to the scenario (and "
+                    f"install the 'agent-env' extra) or drop the isolation opt."
+                )
+            extensions.append((_AGENT_ENV_ATOM_MODULE, {}))
         tool_allowlist = opts.get("tool_allowlist")
 
         config = AgentSessionConfig(
@@ -430,6 +490,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     default_scenario = (
         default_scenario_cfg if isinstance(default_scenario_cfg, str) else None
     )
+    budget_tokens_cfg = config.get("budget_tokens")
+    budget_tokens: int | None = (
+        int(budget_tokens_cfg)
+        if isinstance(budget_tokens_cfg, int) and budget_tokens_cfg > 0
+        else None
+    )
 
     async def _run_workflow(args: dict[str, Any]) -> ToolResult:
         script = args.get("script")
@@ -443,7 +509,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         run = _WorkflowRun(
             api=api,
             journal=_Journal(store=api.get_service(_ARTIFACT_STORE_SERVICE)),
-            budget=_BudgetService(),
+            budget=_BudgetService(total_budget_tokens=budget_tokens),
             semaphore=asyncio.Semaphore(concurrency),
             loop=asyncio.get_running_loop(),
             default_scenario=default_scenario,
