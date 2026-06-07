@@ -210,8 +210,12 @@ class WireClient:
         full jitter, reset to base after each successful reconnect. An
         :class:`AuthError` on *reconnect* is non-retryable and re-raised —
         except a transient ``duplicate_peer`` (the prior session is still
-        deregistering), which is retried within the backoff schedule until
-        the cap is reached, then surfaced.
+        deregistering), which is retried within the backoff schedule only
+        until the backoff reaches ``backoff_cap`` — i.e. a bounded window of
+        roughly ``log2(backoff_cap/backoff_base)`` attempts (~4 over ~7.5s at
+        the 0.5s/5s defaults), after which it is surfaced as fatal. If a
+        gateway's deregistration can lag longer than that under load, raise
+        ``backoff_cap``.
 
         ``on_connect(is_initial)`` fires after every successful (re)connect —
         the peer can use it to resume any per-connection work. It is awaited;
