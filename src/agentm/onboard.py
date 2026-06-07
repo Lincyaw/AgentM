@@ -212,6 +212,39 @@ def configure_feishu(
 
 
 # --------------------------------------------------------------------------
+# Section 5: systemd services
+# --------------------------------------------------------------------------
+
+
+def install_systemd_services(workspace: Path) -> int:
+    """Install the gateway + feishu systemd units for *workspace*.
+
+    Reuses the single mechanism in ``agentm gateway --install-systemd`` by
+    invoking it as a subprocess with ``--cwd <workspace>``: that bakes
+    ``--cwd`` into the gateway ExecStart and points both units'
+    ``EnvironmentFile`` at ``<workspace>/.env`` (where onboard wrote the
+    Feishu + model credentials). Keeping one code path means onboard and the
+    direct CLI invocation render identical units. Returns the subprocess exit
+    code.
+    """
+    import shutil
+    import subprocess
+
+    agentm_bin = shutil.which("agentm")
+    cmd = (
+        [agentm_bin] if agentm_bin else ["uv", "run", "agentm"]
+    ) + ["gateway", "--cwd", str(workspace), "--install-systemd"]
+    typer.echo(f"  running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        typer.echo(
+            f"  systemd setup exited with code {result.returncode}; "
+            "you can re-run `agentm gateway --install-systemd` later."
+        )
+    return result.returncode
+
+
+# --------------------------------------------------------------------------
 # Interactive driver
 # --------------------------------------------------------------------------
 
@@ -326,6 +359,16 @@ def run_onboard() -> None:
     else:
         typer.echo("  skipped.")
 
+    # --- Section 5: systemd services (optional) ---
+    typer.echo("\n== 5. systemd services (optional) ==")
+    if typer.confirm(
+        "Set up systemd services now (auto-restart + start on boot)?",
+        default=False,
+    ):
+        install_systemd_services(workspace)
+    else:
+        typer.echo("  skipped.")
+
     # --- Final summary ---
     typer.echo("\n== Summary ==")
     if config_path is not None:
@@ -338,6 +381,7 @@ def run_onboard() -> None:
         typer.echo(f"  feishu:    {env_path}")
     typer.echo(f"  workspace: {workspace}")
     typer.echo(
-        "\nNext: run `agentm gateway` from the workspace, or deploy a chat "
-        "client per contrib/gateway-peers/deploy/README.md."
+        "\nNext: run `agentm gateway` from the workspace, or install the "
+        "managed services with `agentm gateway --install-systemd` "
+        "(see contrib/gateway-peers/deploy/README.md)."
     )
