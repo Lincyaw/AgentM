@@ -73,6 +73,11 @@ agentm gateway --uninstall-systemd          # user units
 
 It stops, disables, and removes both units, then `daemon-reload`s.
 
+> **Upgrading from the old gateway-only unit?** Earlier installs used
+> `EnvironmentFile=~/.config/agentm/gateway.env`; the workspace `.env` is now
+> the single source. That old file is no longer referenced — you can delete it
+> after moving any vars into `<workspace>/.env`.
+
 ## Architecture in one breath
 
 The **gateway** holds all chat sessions in memory and serves chat-client peers
