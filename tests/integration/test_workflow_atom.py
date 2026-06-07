@@ -264,6 +264,32 @@ async def test_workflow_pipeline_runs_each_item_through_stages(
         await session.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_workflow_tool_absent_in_worker_session(tmp_path: Path) -> None:
+    """Anti-recursion: a session spawned as a workflow worker (purpose=workflow)
+    must NOT register the workflow tool, even though the atom is loaded — else a
+    worker could spawn unbounded nested workflows."""
+
+    _git_init(tmp_path)
+    provider_module = _install_echo_provider()
+    worker = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(tmp_path),
+            provider=(provider_module, {}),
+            extensions=[
+                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.artifact_store", {}),
+                ("agentm.extensions.builtin.workflow", {}),
+            ],
+            purpose="workflow",
+        )
+    )
+    try:
+        assert "workflow" not in {t.name for t in worker.tools}
+    finally:
+        await worker.shutdown()
+
+
 _GUARDRAIL_SCRIPT = """
 return open("/etc/passwd").read()
 """
