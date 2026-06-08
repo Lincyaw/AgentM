@@ -513,20 +513,6 @@ class AgentSession:
             )
 
     @property
-    def tool_renderers(self) -> dict[str, Any]:
-        return {
-            name.removeprefix("tool:"): renderer
-            for name, renderer in self._renderers.items()
-            if name.startswith("tool:")
-        }
-
-    def find_tool(self, name: str) -> Tool | None:
-        for tool in self._tools:
-            if tool.name == name:
-                return tool
-        return None
-
-    @property
     def session_id(self) -> str:
         """Stable random id assigned at ``create``. Appears in
         :class:`ChildSessionStartEvent` / :class:`ChildSessionEndEvent`

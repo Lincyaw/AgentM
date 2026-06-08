@@ -37,14 +37,17 @@ harness event from ``agentm.core.abi.events``.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import TraceReader
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import SessionReadyEvent
 from agentm.core.abi.extension import ExtensionAPI
+from agentm.extensions import ExtensionManifest
+
+logger = logging.getLogger(__name__)
 
 
 MANIFEST = ExtensionManifest(
@@ -118,9 +121,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 auto_rollback=auto_rollback,
                 cooldown_seconds=cooldown_seconds,
             )
-        except Exception:  # noqa: BLE001
-            # Watcher must never break a session start. Swallow + skip;
-            # any diagnostics live in the activations.jsonl audit trail.
+        except Exception as exc:  # noqa: BLE001
+            # Watcher must never break a session start.
+            logger.warning("guard_watch: _on_ready failed: %s", exc)
             return
 
     api.on(SessionReadyEvent.CHANNEL, _on_ready)

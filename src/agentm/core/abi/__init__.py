@@ -122,20 +122,38 @@ from agentm.core._internal.tools import FunctionTool  # noqa: E402
 # established service-facade pattern (cf. ``FunctionTool`` above) and lets
 # the §11 validator stay strict about atoms importing
 # ``agentm.core.runtime.*`` directly.
-from agentm.core.runtime.otel_export import SessionTelemetry  # noqa: E402
-
+#
 # ``TraceReader`` is the canonical reader API for the OTLP/JSON event log
 # (`.claude/designs/single-event-log.md` PR-G). Atoms cannot import
 # ``core.runtime.*`` directly under §11, so we re-export the read-only
 # surface — class + dataclass views + the ``attr`` helper — through the
 # ABI. The runtime impl stays in ``core.runtime.trace_reader``.
-from agentm.core.runtime.trace_reader import (  # noqa: E402
-    LogRecord,
-    SessionIdentity,
-    Span,
-    TraceReader,
-    attr,
-)
+#
+# Both are imported lazily via ``__getattr__`` to break a circular import
+# chain: ``agentm.extensions`` -> ``core.abi`` -> ``core.runtime.*`` ->
+# ``agentm.extensions`` (see audit finding 1). TYPE_CHECKING keeps static
+# analysers happy; __getattr__ resolves them at runtime on first access.
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agentm.core.runtime.otel_export import SessionTelemetry as SessionTelemetry
+    from agentm.core.runtime.trace_reader import (
+        LogRecord as LogRecord,
+        SessionIdentity as SessionIdentity,
+        Span as Span,
+        TraceReader as TraceReader,
+        attr as attr,
+    )
+
+
+def __getattr__(name: str) -> object:
+    if name == "SessionTelemetry":
+        from agentm.core.runtime.otel_export import SessionTelemetry
+        return SessionTelemetry
+    if name in ("LogRecord", "SessionIdentity", "Span", "TraceReader", "attr"):
+        from agentm.core.runtime import trace_reader as _tr
+        return getattr(_tr, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     # loop

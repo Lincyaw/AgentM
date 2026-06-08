@@ -63,23 +63,9 @@ def atom_decisions_path(
 # same ``_layout`` module while keeping their respective conventions.
 
 
-def resolve_root(root: Path) -> Path:
-    """Return the catalog root as an absolute Path, creating it if needed."""
-
-    resolved = Path(root).expanduser().resolve()
-    resolved.mkdir(parents=True, exist_ok=True)
-    return resolved
-
-
 def atoms_root(root: Path) -> Path:
     """Return the atoms directory under a catalog root (not a cwd)."""
 
     return Path(root) / "atoms"
 
 
-def _from_catalog_root(catalog_root_path: Path) -> Path:
-    """Translate a catalog-root path back into the cwd-style ``root`` accepted
-    by the freeze/indexer-flavoured helpers (``catalog_root(root=cwd)``)."""
-
-    catalog_root_path = Path(catalog_root_path)
-    return catalog_root_path.parent.parent
