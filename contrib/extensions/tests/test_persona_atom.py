@@ -1,4 +1,4 @@
-"""Coverage for the ``persona`` contrib atom.
+"""Coverage for the ``persona`` builtin atom.
 
 The atom's value is a single contract: user-authored identity files on
 disk become the cache-stable head of the system prompt, in order, while a
@@ -15,7 +15,7 @@ from typing import Any, cast
 
 import pytest
 
-from contrib.extensions import persona as persona_atom
+from agentm.extensions.builtin import persona as persona_atom
 from agentm.core.abi.events import BeforeAgentStartEvent
 
 
