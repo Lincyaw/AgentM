@@ -27,12 +27,11 @@ from agentm.extensions import discover
 
 def _load_atom() -> Any:
     """Load ``turn_reminder`` through the same discovery seam the runtime
-    uses — under its real synthetic module name ``_agentm_contrib__turn_reminder``
-    — rather than reaching into ``contrib/`` by filesystem path."""
+    uses — as a builtin atom under ``agentm.extensions.builtin``."""
 
-    entry = discover.discover_contrib_atoms().get("turn_reminder")
+    entry = discover.discover_builtin().get("turn_reminder")
     if entry is None:
-        pytest.skip("turn_reminder contrib atom not discoverable in this layout")
+        pytest.skip("turn_reminder builtin atom not discoverable in this layout")
     return importlib.import_module(entry.module_path)
 
 

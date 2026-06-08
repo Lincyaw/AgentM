@@ -8,7 +8,7 @@ description: Root-cause analysis over parquet observability data via DuckDB SQL.
 # extend AgentSessionConfig with a child-env field).
 extensions:
   # --- environment ports: register the local-FS / asyncio-bash Operations
-  # bundle. Must be listed first because ``tool_read`` (below) and sub_agent
+  # bundle. Must be listed first because ``file_tools`` (below) and sub_agent
   # children consume ``api.get_operations()``. ---
   - module: agentm.extensions.builtin.operations_local
 
@@ -31,7 +31,7 @@ extensions:
     config:
       include_defaults: false
       inherit_claude: false
-  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.file_tools
     # ``read`` is exposed only to drill into the diagnose-sql / rca-worker
     # SKILL.md body files. Lock the path scope so the agent cannot reach
     # ground-truth labels co-located with eval data
@@ -66,12 +66,12 @@ extensions:
         # ``contrib/scenarios/rca/skills/`` directory via
         # ``ResourcesDiscoverEvent``; ``skill_loader`` (builtin) reads
         # that hook and injects the diagnose-sql / rca-worker-guide
-        # SKILL.md content into the critic's system prompt. ``tool_read``
+        # SKILL.md content into the critic's system prompt. ``file_tools``
         # lets the critic drill into the skill body files
         # (correlation.md, traces.md, ...).
         - worker_skills
         - skill_loader
-        - tool_read
+        - file_tools
         # ``worker_finalize`` registers ``return_response`` — the only
         # sanctioned worker-termination tool. Without it, the critic
         # loops on query_sql until its budget runs out and ``final_text``
@@ -90,7 +90,7 @@ extensions:
           module: agentm_rca.worker_skills
         skill_loader:
           module: agentm.extensions.builtin.skill_loader
-        tool_read:
-          module: agentm.extensions.builtin.tool_read
+        file_tools:
+          module: agentm.extensions.builtin.file_tools
         worker_finalize:
           module: agentm_rca.tools.worker_finalize

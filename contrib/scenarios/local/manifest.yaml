@@ -26,15 +26,13 @@ extensions:
   # --- file I/O: read whole files; edit by exact-match replace;
   # write whole files. ls/find/grep are intentionally absent —
   # delegated to ``bash`` so the agent composes shell commands. ---
-  - module: agentm.extensions.builtin.tool_read
-  - module: agentm.extensions.builtin.tool_edit
-  - module: agentm.extensions.builtin.tool_write
+  - module: agentm.extensions.builtin.file_tools
 
   # --- shell execution: subsumes ls / find / grep / arbitrary scripts. ---
   - module: agentm.extensions.builtin.tool_bash
 
   # --- observability: every turn lands in the JSONL trace store so
-  # ``tool_query_traces`` (loaded by evolution/tuner scenarios) can
+  # ``query_traces`` (loaded by evolution/tuner scenarios) can
   # mine production traces later. ---
   - module: agentm.extensions.builtin.observability
 

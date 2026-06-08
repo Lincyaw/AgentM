@@ -183,7 +183,7 @@ async def _create_tuner_session(
 
                 ("agentm.extensions.builtin.operations_local", {}),
                 (
-                    "agentm.extensions.builtin.tool_query_traces",
+                    "agentm.extensions.builtin.query_tools",
                     {},
                 ),
                 (
@@ -309,7 +309,7 @@ async def test_tier2_activate_is_deferred(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_tool_write_rejects_constitution_path(tmp_path: Path) -> None:
-    """End-to-end: ``tool_write`` invokes ResourceWriter; ResourceWriter
+    """End-to-end: ``write`` tool invokes ResourceWriter; ResourceWriter
     refuses constitution paths. Asserts no file is created."""
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -327,7 +327,7 @@ async def test_tool_write_rejects_constitution_path(tmp_path: Path) -> None:
 
                 ("agentm.extensions.builtin.operations_local", {}),
 
-                ("agentm.extensions.builtin.tool_write", {})],
+                ("agentm.extensions.builtin.file_tools", {})],
         )
     )
     try:
@@ -501,7 +501,7 @@ async def test_end_to_end_loop_activates_known_good_replacement(
             provider=(provider_module, {}),
             extensions=scenario_extensions
             + [
-                ("agentm.extensions.builtin.tool_query_traces", {}),
+                ("agentm.extensions.builtin.query_tools", {}),
                 (
                     "agentm.extensions.builtin.tool_eval_run",
                     {

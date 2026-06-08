@@ -148,7 +148,7 @@ async def test_G3_constitution_rejects_tool_edit(tmp_path: Path) -> None:
     original_cwd = Path.cwd()
     os.chdir(tmp_path)
 
-    session = await _create_session(tmp_path, ("agentm.extensions.builtin.tool_edit", {}))
+    session = await _create_session(tmp_path, ("agentm.extensions.builtin.file_tools", {}))
     try:
         # Simulate a prior read so the read-before-edit gate passes and
         # the constitution guard is the one that rejects the edit.
