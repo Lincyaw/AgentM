@@ -18,8 +18,9 @@ description: |
   No sync-back needed — the agent pushes its own changes.
 
 extensions:
-  - module: agentm.extensions.builtin.operations_agent_env
+  - module: agentm.extensions.builtin.operations
     config:
+      backend: agent_env
       work_dir: /workspace
 
   - module: agentm.extensions.builtin.file_tools

@@ -70,7 +70,7 @@ MANIFEST = ExtensionManifest(
         "additionalProperties": False,
     },
     affects=("event:decide_turn_action",),
-    requires=("operations_local",),
+    requires=("operations",),
     api_version=1,
     tier=1,
 )

@@ -34,7 +34,7 @@ as the agent that wrote it (which can already call ``bash`` / ``install_atom``
 etc.), so this is not a security boundary. The curated ``__builtins__`` (data
 ops only — no ``open`` / ``__import__`` / ``eval``) is a guardrail that keeps
 honest scripts on the SDK and off the filesystem, not an escape-proof wall;
-hard isolation, when needed, is the worker ``operations_agent_env`` sandbox or
+hard isolation, when needed, is the worker ``operations`` (agent_env backend) sandbox or
 a process boundary — the same answer as for ``bash``. Determinism for the
 resume journal is achieved by *not injecting* ``time`` / ``random`` rather than
 by interception.
@@ -172,7 +172,7 @@ _AGENT_COUNT_BACKSTOP: Final[int] = 1000
 # bare-name literal would read as an undeclared hard dependency to the D4
 # contract check.
 _AGENT_ENV_ATOM_MODULE: Final[str] = (
-    "agentm.extensions.builtin.operations_agent_env"
+    "agentm.extensions.builtin.operations"
 )
 _AGENT_ENV_ATOM: Final[str] = _AGENT_ENV_ATOM_MODULE.rsplit(".", 1)[-1]
 
@@ -464,7 +464,7 @@ class _WorkflowRun:
     ) -> str:
         extensions: list[tuple[str, dict[str, Any]]] = []
         # isolation="agent_env" selects the worker sandbox by listing the
-        # operations_agent_env atom in the child's extensions (policy by
+        # operations atom (agent_env backend) in the child's extensions (policy by
         # composition, never a privileged config field). Soft, optional
         # dependency — guarded here rather than declared in MANIFEST.requires
         # (which would force every workflow user to load agent-env + the arl

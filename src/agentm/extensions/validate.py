@@ -793,6 +793,14 @@ def _classify_import(
         # Without the dot, ``agentm.core.runtime`` would also reject the
         # legitimate ``agentm.core.runtime_helpers``-style sibling names.
         if imported == bare or imported.startswith(bare + "."):
+            # Underscore-prefixed subpackages within builtin/ are private
+            # implementation details (e.g. ``_operations/``), not auto-discovered
+            # atoms. An atom importing from its own private subpackage is not
+            # atom-to-atom coupling — skip the check.
+            if bare == "agentm.extensions.builtin":
+                suffix = imported[len(bare) + 1:]
+                if suffix.startswith("_"):
+                    continue
             return [
                 ValidationIssue(
                     module_path=module_path,

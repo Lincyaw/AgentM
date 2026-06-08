@@ -8,7 +8,7 @@ SERVICE_KEY constant (cross-atom import).
 Why this exists in ``audit/`` rather than ``core``:
 - The constants are llmharness-internal coordinates, not part of any
   public API. They describe how the audit subsystem composes itself out
-  of SDK-builtin atoms (observability/operations_local/system_prompt)
+  of SDK-builtin atoms (observability/operations/system_prompt)
   plus the extractor atom's service key.
 """
 
@@ -28,7 +28,7 @@ EXTRACTOR_TOOLS_MODULE: Final[str] = "llmharness.audit.extractor.atom"
 # A host-side rename of any of these surfaces here first.
 SYSTEM_PROMPT_MODULE: Final[str] = "agentm.extensions.builtin.system_prompt"
 OBSERVABILITY_MODULE: Final[str] = "agentm.extensions.builtin.observability"
-OPERATIONS_MODULE: Final[str] = "agentm.extensions.builtin.operations_local"
+OPERATIONS_MODULE: Final[str] = "agentm.extensions.builtin.operations"
 
 # Optional atoms mounted on the extractor child only when
 # ``extractor_tool_call_budget`` is set. Both are SDK builtins.

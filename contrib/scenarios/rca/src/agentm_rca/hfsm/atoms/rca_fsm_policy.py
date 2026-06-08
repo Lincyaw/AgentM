@@ -259,7 +259,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return
         tools = api.tools
         # Keep tools the FSM lists; also keep tools the FSM does not know
-        # about (operations_local primitives, sub_agent.dispatch_agent,
+        # about (operations primitives, sub_agent.dispatch_agent,
         # observability tools) so the scenario remains composable.
         # Filtering is intentionally conservative — the prompt is the
         # primary guidance channel; the visibility filter is the structural

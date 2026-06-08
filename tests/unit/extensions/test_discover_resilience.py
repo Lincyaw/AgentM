@@ -12,7 +12,7 @@ This test drops a syntactically broken Python file into
 ``discover_builtin``, and asserts:
 
 * Discovery returns a non-empty dict that still contains other real
-  atoms (e.g. ``operations_local``).
+  atoms (e.g. ``operations``).
 * The broken atom shows up in ``last_discovery_failures()`` with its
   module path and the captured exception.
 * A second call to ``discover_builtin`` is cache-served (does not
@@ -46,7 +46,7 @@ def test_broken_atom_does_not_break_catalog(tmp_path: Any) -> None:
         entries = discover_builtin()
 
         # Other real atoms still loaded.
-        assert "operations_local" in entries, (
+        assert "operations" in entries, (
             "broken atom denied unrelated atoms — substrate axiom violated"
         )
         # Broken atom did not appear in the entries dict.

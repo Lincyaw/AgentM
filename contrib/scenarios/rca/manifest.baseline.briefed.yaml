@@ -13,7 +13,9 @@ description: |
 task_class: rca_baseline
 
 extensions:
-  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
   - module: agentm_rca.tools.thinkdepth_sql
   - module: agentm_rca.tools.finalize
   - module: agentm.extensions.builtin.observability

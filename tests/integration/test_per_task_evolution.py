@@ -181,7 +181,7 @@ async def _create_tuner_session(
             provider=(provider_module, {}),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 (
                     "agentm.extensions.builtin.query_tools",
                     {},
@@ -236,7 +236,7 @@ async def test_tier2_activate_is_deferred(tmp_path: Path) -> None:
             provider=(provider_module, {}),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 ("agentm.extensions.builtin.permission", {}),
                 ("contrib.extensions.changespec_validators", {}),
                 (
@@ -325,7 +325,7 @@ async def test_tool_write_rejects_constitution_path(tmp_path: Path) -> None:
             provider=(provider_module, {}),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
 
                 ("agentm.extensions.builtin.file_tools", {})],
         )
@@ -397,7 +397,7 @@ async def test_end_to_end_loop_activates_known_good_replacement(
     (scenario_dir / "tool_normalize_json.py").write_text(weak_atom, encoding="utf-8")
     (scenario_dir / "manifest.yaml").write_text(
         "name: format_fix\ntask_class: format_fix\nextensions:\n"
-        "  - module: agentm.extensions.builtin.operations_local\n"
+        "  - module: agentm.extensions.builtin.operations\n"
         "  - local: tool_normalize_json\n",
         encoding="utf-8",
     )

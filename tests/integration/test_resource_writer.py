@@ -120,7 +120,7 @@ async def _create_session(tmp_path: Path, *extensions: tuple[str, dict[str, Any]
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 *extensions,
             ],
             provider=(provider_module, {}),

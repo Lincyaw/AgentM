@@ -49,7 +49,7 @@ calls instead of routing through ``api.get_resource_writer()``. The reason
 is that ``.agentm/decisions/<scenario>/`` is **operator-host state**, not
 agent-output state: the operator inspects evidence on the host filesystem
 where the trace JSONL also lives. When this scenario runs with a
-sandbox-backed writer (e.g. ``operations_agent_env``), routing through it
+sandbox-backed writer (e.g. ``operations`` with ``backend: agent_env``), routing through it
 would either (a) push decisions/ into the sandbox where the operator
 can't see them, or (b) get refused as a host-path write. Neither is the
 right semantic — decisions/ must always land on host. This atom is the

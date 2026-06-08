@@ -42,7 +42,9 @@ description: |
 
 extensions:
   # --- environment ports ---
-  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
 
   # --- file I/O + shell (kept from local so the agent can
   # actually do work with what it fetches) ---

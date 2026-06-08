@@ -122,7 +122,7 @@ def _materialize_scenario(tmp_path: Path) -> Path:
     (scenario_dir / "tiny_atom.py").write_text(atom_src, encoding="utf-8")
     (scenario_dir / "manifest.yaml").write_text(
         "name: mad_test\nextensions:\n"
-        "  - module: agentm.extensions.builtin.operations_local\n"
+        "  - module: agentm.extensions.builtin.operations\n"
         "  - local: tiny_atom\n",
         encoding="utf-8",
     )

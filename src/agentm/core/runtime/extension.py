@@ -762,7 +762,7 @@ class _ExtensionAPIImpl:
             raise RuntimeError(
                 "no atom registered Operations; the active scenario manifest "
                 "must list an atom that calls api.register_operations(...) "
-                "(default: agentm.extensions.builtin.operations_local)"
+                "(default: agentm.extensions.builtin.operations)"
             )
         return bundle
 

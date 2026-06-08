@@ -22,7 +22,9 @@ extensions:
   # --- environment ports: local-FS / asyncio-bash Operations bundle.
   # Listed first so tool atoms calling ``api.get_operations()`` at install
   # see a registered bundle. ---
-  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
 
   # --- tool-result size cap: spill large outputs to disk ---
   - module: agentm.extensions.builtin.tool_result_cap

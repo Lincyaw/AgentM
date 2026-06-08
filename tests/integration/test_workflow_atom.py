@@ -140,7 +140,7 @@ async def _make_session(tmp_path: Path) -> AgentSession:
             cwd=str(tmp_path),
             provider=(provider_module, {}),
             extensions=[
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 ("agentm.extensions.builtin.artifact_store", {}),
                 ("agentm.extensions.builtin.workflow", {"budget_tokens": 100}),
             ],
@@ -277,7 +277,7 @@ async def test_workflow_tool_absent_in_worker_session(tmp_path: Path) -> None:
             cwd=str(tmp_path),
             provider=(provider_module, {}),
             extensions=[
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 ("agentm.extensions.builtin.artifact_store", {}),
                 ("agentm.extensions.builtin.workflow", {}),
             ],

@@ -1,4 +1,4 @@
-"""Tests for the ``operations_local`` builtin atom and the related
+"""Tests for the ``operations`` builtin atom (local backend) and the related
 ``register_operations`` / freeze-time-assertion contract added in the
 Stage 1 collapse-harness-into-core plan.
 """
@@ -113,7 +113,7 @@ def install(api, config):
         config = AgentSessionConfig(
             cwd=str(tmp_path),
             # explicit empty extensions list — auto-discover would otherwise
-            # pull in the entire builtin catalog (including operations_local)
+            # pull in the entire builtin catalog (including operations)
             # and mask the freeze-time check we want to assert.
             no_extensions=True,
             provider=("_stub_provider_no_ops", {}),

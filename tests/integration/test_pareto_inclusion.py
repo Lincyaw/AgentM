@@ -159,7 +159,7 @@ async def test_pareto_inclusion_retains_niche_winner(tmp_path: Path) -> None:
             provider=(provider_module, {}),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 (
                     "agentm.extensions.builtin.query_tools",
                     {"default_scenario": scenario},

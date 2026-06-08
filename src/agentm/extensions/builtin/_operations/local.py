@@ -1,46 +1,21 @@
-"""Builtin ``operations_local`` atom.
+"""Local-stdlib implementations of ``FileOperations`` and ``BashOperations``.
 
-Registers the default :class:`agentm.core.abi.operations.Operations`
-bundle: local-stdlib file I/O and ``asyncio``-subprocess shell exec.
-See ``.claude/designs/pluggable-architecture.md`` §3.2 — Operations are
-a pluggability axis like any other; the substrate no longer instantiates
-a default bundle, so every scenario manifest that uses tool atoms must
-list this atom (or an alternate ``operations_*`` atom such as an SSH /
-sandbox / in-memory implementation).
-
-§11 single-file contract: only stdlib + ``agentm.core.abi.*`` +
-``agentm.extensions.*`` + ``agentm.core.abi.extension`` imports. No
-atom-to-atom imports.
+Moved from the former ``operations_local`` builtin atom. Provides
+:func:`install_local` for use by the unified ``operations`` atom entry point.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import stat as stat_module
 from collections.abc import Callable
 from pathlib import Path
 from signal import SIGKILL
 from typing import Any
 
-from agentm.core.abi.operations import ExecResult
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
-
-
-MANIFEST = ExtensionManifest(
-    name="operations_local",
-    description=(
-        "Registers the default local-FS / asyncio-subprocess Operations "
-        "bundle. Listed first in every scenario that uses file/bash tools."
-    ),
-    registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
-    requires=(),
-)
+from agentm.core.abi.operations import ExecResult, FileStat
 
 
 class LocalFileOperations:
@@ -77,11 +52,34 @@ class LocalFileOperations:
     async def is_dir(self, path: str) -> bool:
         return await asyncio.to_thread(self._resolve(path).is_dir)
 
+    async def is_file(self, path: str) -> bool:
+        return await asyncio.to_thread(self._resolve(path).is_file)
+
     async def list_dir(self, path: str) -> list[str]:
         def _list_dir() -> list[str]:
             return sorted(entry.name for entry in self._resolve(path).iterdir())
 
         return await asyncio.to_thread(_list_dir)
+
+    async def stat(self, path: str) -> FileStat:
+        def _stat() -> FileStat:
+            s = self._resolve(path).stat()
+            return FileStat(
+                size=s.st_size,
+                mtime_ns=s.st_mtime_ns,
+                is_file=stat_module.S_ISREG(s.st_mode),
+                is_dir=stat_module.S_ISDIR(s.st_mode),
+            )
+
+        return await asyncio.to_thread(_stat)
+
+    async def write_file(self, path: str, data: bytes) -> None:
+        resolved = self._resolve(path)
+        await asyncio.to_thread(resolved.write_bytes, data)
+
+    async def makedirs(self, path: str, exist_ok: bool = True) -> None:
+        resolved = self._resolve(path)
+        await asyncio.to_thread(resolved.mkdir, parents=True, exist_ok=exist_ok)
 
 
 class LocalBashOperations:
@@ -179,7 +177,7 @@ class LocalBashOperations:
             return
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install_local(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config
     api.register_operations(
         file=LocalFileOperations(cwd=api.cwd),

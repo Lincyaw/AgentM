@@ -183,7 +183,7 @@ async def test_stop_counter_persists_across_session_restart(
             provider=(provider_module, {}),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",
