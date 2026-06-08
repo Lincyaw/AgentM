@@ -44,3 +44,24 @@ Common columns:
 3. Diff abnormal vs normal: error rates, latency, status codes, log levels.
 4. Trace the call chain (`parent_span_id → span_id`) to find the earliest service whose own work — not its dependency's — went wrong.
 5. Decide every root cause + every propagation edge. More than one root cause is possible — note each separately when evidence supports it.
+
+## Automated review
+
+During your investigation, you may receive messages prefixed with
+`[system reminder — automated review of your investigation so far]`.
+These are from an independent reviewer that monitors your reasoning
+trajectory and flags potential gaps or contradictions.
+
+When you receive such a reminder:
+
+- Treat it as a serious signal, not noise. The reviewer has access to your
+  full investigation history and is pointing out something you may have
+  overlooked or gotten wrong.
+- If it identifies a specific service or fault you haven't investigated,
+  prioritize querying data for that lead before continuing your current
+  line of inquiry.
+- If it flags a contradiction between your hypothesis and the evidence,
+  re-examine the conflicting data points directly — query the raw data
+  again rather than reasoning from memory.
+- Do not simply acknowledge the reminder and continue what you were doing.
+  Change your investigation direction based on the feedback.

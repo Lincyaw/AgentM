@@ -1,54 +1,15 @@
-name: rca:baseline
+name: rca:baseline.briefed
 description: |
-  ThinkDepthAI-parity baseline. Tracks upstream ThinkDepthAI exactly:
-
-    * Prompt = RCA_ANALYSIS_SP (prompts/investigator.md, verbatim).
-    * Tools  = the four tools from ThinkDepthAI:
-                 query_parquet_files, get_schema,
-                 list_tables_in_directory, think_tool.
-    * No hypothesis-management tools, no skill loader, no
-      worker-style tooling — those are AgentM-rca-specific extras
-      that would diverge from the reference implementation.
-
-  Used as the strict A/B comparison floor against the multi-agent rca
-  scenario. Any uplift the production rca scenario shows on the same
-  evals must be attributable to its extra atoms or topology, not to
-  prompt or tool drift in this baseline.
-
-# task_class drives session.fingerprint.task_meta.task_class so production
-# traces are filterable by ``query_traces(task_class="rca_baseline")``
-# — load-bearing for the GEPA tuner under tuner/.
 task_class: rca_baseline
 
 extensions:
   - module: agentm.extensions.builtin.operations
     config:
       backend: local
-  # The single tool surface — four tools whose names, signatures, and
-  # behavior mirror ThinkDepthAI's ``QueryParquetFilesToolkit`` plus
-  # ``think_tool``. AGENTM_RCA_DATA_DIR is set per-case by the eval
-  # adapter, so bare filenames like ``abnormal_traces.parquet`` resolve
-  # against the case directory the same way the reference implementation
-  # behaves under ThinkDepthAI's runtime.
   - module: agentm_rca.tools.thinkdepth_sql
-
-  # Required by the rcabench-platform eval contract: the agent must call
-  # ``submit_final_report`` to return a validated AgentRCAOutput payload.
-  # ThinkDepthAI does this with a separate synthesizer LLM step; we keep
-  # it as one tool to stay inside AgentM's single-loop runtime.
   - module: agentm_rca.tools.finalize
-
-  # Observability tracks tool calls + LLM turns into the JSONL trace
-  # store; doesn't add any tool surface visible to the model. Required
-  # for post-hoc analysis. (artifact_store is intentionally NOT loaded —
-  # ThinkDepthAI has no equivalent shared note-taking surface, so adding
-  # the four ``artifact_*`` tools would diverge from the reference.)
   - module: agentm.extensions.builtin.observability
   - module: contrib.extensions.rcabench_contract
-
-  # Inject investigator.md verbatim. ``rcabench_contract`` appends the
-  # vendor contract / submit_final_report schema below the prompt at
-  # ``before_agent_start``.
   - module: agentm_rca.prompt_loader
     config:
       prompt: investigator.md
