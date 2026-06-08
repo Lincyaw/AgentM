@@ -627,7 +627,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # non-merge decisions the list is either empty (first activation)
         # or a 1-element list with the prior candidate; for ``merge`` it
         # is the validated >=2 parents from args. Readers
-        # (``tool_query_candidates``) accept both shapes for back-compat
+        # (``query_candidates``) accept both shapes for back-compat
         # with pre-B-4 fixtures.
         if decision == "merge":
             parent_ids: list[str] = list(merge_parent_ids)
@@ -810,7 +810,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # B-8: cross-task transfer. After a successful atom_source
         # ``activate``, plant a non-activating candidate in each sibling
         # scenario's candidates/ directory. The sibling's tuner will see
-        # it via tool_query_candidates and decide independently whether
+        # it via query_candidates and decide independently whether
         # to eval + activate. We only transfer atom_source because
         # system_prompt and manifest changes are scenario-shape and
         # don't carry cleanly. We don't write to the destination's

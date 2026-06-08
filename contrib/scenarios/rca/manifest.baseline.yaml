@@ -16,7 +16,7 @@ description: |
   prompt or tool drift in this baseline.
 
 # task_class drives session.fingerprint.task_meta.task_class so production
-# traces are filterable by ``tool_query_traces(task_class="rca_baseline")``
+# traces are filterable by ``query_traces(task_class="rca_baseline")``
 # — load-bearing for the GEPA tuner under tuner/.
 task_class: rca_baseline
 

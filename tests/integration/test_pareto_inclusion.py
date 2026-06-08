@@ -10,10 +10,10 @@ the search degenerates to greedy and loses the property that motivates
 moving to Phase 2 in the first place. A regression here silently turns
 an illumination algorithm into a (worse-performing) hill climb.
 
-The test exercises ``tool_query_candidates`` directly — driving via the
+The test exercises ``query_candidates`` directly — driving via the
 agent loop is unnecessary because the inclusion logic lives in
 ``tool_propose_change._prune_dominated_candidates`` /
-``tool_query_candidates._compute_win_tasks``, which share the same
+``query_tools._compute_win_tasks``, which share the same
 strict-argmax-by-task definition. We validate by constructing a pool
 on disk and asserting both sides of the contract: the niche winner is
 on the frontier, and the pool size > 1.
@@ -161,7 +161,7 @@ async def test_pareto_inclusion_retains_niche_winner(tmp_path: Path) -> None:
 
                 ("agentm.extensions.builtin.operations_local", {}),
                 (
-                    "agentm.extensions.builtin.tool_query_candidates",
+                    "agentm.extensions.builtin.query_tools",
                     {"default_scenario": scenario},
                 ),
             ],

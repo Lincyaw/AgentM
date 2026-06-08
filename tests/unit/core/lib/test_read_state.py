@@ -1,4 +1,4 @@
-"""Unit tests for the read-file state module used by tool_read -> tool_edit."""
+"""Unit tests for the read-file state module used by read -> edit (file_tools)."""
 
 from __future__ import annotations
 

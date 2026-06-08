@@ -1,13 +1,13 @@
 """Shared read-file state for read-before-edit coordination.
 
-After a successful read, ``tool_read`` calls :func:`record_read` so that
-``tool_edit`` can later call :func:`get_read_state` to decide whether the
-file was fully or only partially read.  The module-level ``_state`` dict
-is per-process, which is fine since each AgentM session runs in its own
-process.
+After a successful read, the ``read`` tool calls :func:`record_read` so
+that the ``edit`` tool can later call :func:`get_read_state` to decide
+whether the file was fully or only partially read.  The module-level
+``_state`` dict is per-process, which is fine since each AgentM session
+runs in its own process.
 
 Aligned with Claude Code's ``readFileState`` — tracks mtime and a content
-hash so ``tool_edit`` can detect files modified between read and edit.
+hash so the ``edit`` tool can detect files modified between read and edit.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def record_read(
     mtime_ns: int = 0,
     content_hash: str = "",
 ) -> None:
-    """Record that *path* was read.  Called by ``tool_read``."""
+    """Record that *path* was read.  Called by the ``read`` tool."""
     normalized = os.path.normpath(path)
     _state[normalized] = FileReadState(
         total_lines=total_lines,

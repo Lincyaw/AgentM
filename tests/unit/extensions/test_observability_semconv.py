@@ -1,7 +1,7 @@
 """Semconv contract for the rewritten observability atom.
 
 These tests exist to lock the on-disk shape readers (session_manager,
-catalog indexer, tool_query_traces, llmharness CLI, rca graders) depend
+catalog indexer, query_traces, llmharness CLI, rca graders) depend
 on. They drive a real ``observability.install`` against a real
 ``ExtensionAPI`` + ``EventBus`` and emit a synthetic LLM turn + a
 synthetic tool call, then parse the resulting OTLP/JSON ndjson file
