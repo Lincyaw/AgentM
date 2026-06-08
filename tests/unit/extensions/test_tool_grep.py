@@ -1,4 +1,4 @@
-"""Unit tests for the ``tool_grep`` contrib extension.
+"""Unit tests for the grep tool (merged into file_tools).
 
 Tests cover command building, output parsing, and end-to-end execution
 against real files via ``tmp_path``.
@@ -7,40 +7,82 @@ against real files via ``tmp_path``.
 from __future__ import annotations
 
 import asyncio
-import os
+import subprocess
 import textwrap
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-# --- Import the module under test ------------------------------------------
-# The extension is a single file; we import its public helpers directly.
-from agentm.extensions.contrib.tool_grep import (
-    build_command,
+from agentm.core.abi.operations import ExecResult
+from agentm.extensions.builtin.file_tools import (
+    build_grep_or_rg_command,
     build_grep_command,
     build_rg_command,
-    parse_output,
+    parse_grep_output,
     relativize_paths,
-    install,
 )
+from agentm.extensions.builtin import file_tools
 
 
 # ---------------------------------------------------------------------------
-# Minimal fake API (mirrors _fake_api.FakeExtensionAPI)
+# Minimal fake API with local BashOperations
 # ---------------------------------------------------------------------------
+
+class _LocalBashOps:
+    """Runs commands locally via subprocess."""
+
+    async def exec(
+        self,
+        cmd: str,
+        *,
+        cwd: str,
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+        on_data: Any = None,
+        signal: Any = None,
+    ) -> ExecResult:
+        try:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                timeout=timeout,
+                cwd=cwd,
+            )
+            return ExecResult(
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+                exit_code=proc.returncode,
+                timed_out=False,
+            )
+        except subprocess.TimeoutExpired:
+            return ExecResult(stdout=b"", stderr=b"", exit_code=-1, timed_out=True)
+
+
+class _FakeOperations:
+    def __init__(self) -> None:
+        self.bash = _LocalBashOps()
+
 
 class _FakeApi:
     def __init__(self, cwd: str) -> None:
         self.cwd = cwd
         self.tools: dict[str, Any] = {}
+        self._ops = _FakeOperations()
 
     def register_tool(self, t: Any) -> None:
         self.tools[t.name] = t
 
+    def get_operations(self) -> _FakeOperations:
+        return self._ops
+
+    def get_resource_writer(self) -> Any:
+        raise NotImplementedError("grep tests don't need writer")
+
 
 def _install(api: _FakeApi, **config: Any) -> None:
-    install(api, dict(config))  # type: ignore[arg-type]
+    file_tools.install(api, {"require_read": False, **config})  # type: ignore[arg-type]
 
 
 def _run(api: _FakeApi, args: dict[str, Any]) -> tuple[str, bool]:
@@ -71,13 +113,11 @@ class TestBuildRgCommand:
         assert "-n" not in cmd
 
     def test_case_insensitive(self) -> None:
-        cmd = build_rg_command("todo", "/src", case_insensitive=True)
+        cmd = build_rg_command("TODO", "/src", case_insensitive=True)
         assert "-i" in cmd
 
     def test_glob_filter(self) -> None:
-        cmd = build_rg_command("TODO", "/src", glob="*.py")
-        idx = cmd.index("--glob")
-        # There are multiple --glob entries (exclusions + filter); find ours.
+        cmd = build_rg_command("TODO", "/src", glob_filter="*.py")
         glob_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--glob"]
         assert "*.py" in glob_args
 
@@ -125,7 +165,7 @@ class TestBuildGrepCommand:
         assert "-i" in cmd
 
     def test_glob_as_include(self) -> None:
-        cmd = build_grep_command("TODO", "/src", glob="*.py")
+        cmd = build_grep_command("TODO", "/src", glob_filter="*.py")
         idx = cmd.index("--include")
         assert cmd[idx + 1] == "*.py"
 
@@ -140,11 +180,11 @@ class TestBuildGrepCommand:
 
 class TestBuildCommand:
     def test_selects_rg_when_forced(self) -> None:
-        cmd = build_command("TODO", "/src", use_ripgrep=True)
+        cmd = build_grep_or_rg_command("TODO", "/src", use_ripgrep=True)
         assert cmd[0] == "rg"
 
     def test_selects_grep_when_forced(self) -> None:
-        cmd = build_command("TODO", "/src", use_ripgrep=False)
+        cmd = build_grep_or_rg_command("TODO", "/src", use_ripgrep=False)
         assert cmd[0] == "grep"
 
 
@@ -171,29 +211,27 @@ class TestRelativizePaths:
 
 class TestParseOutput:
     def test_empty_output(self) -> None:
-        result = parse_output("", base_path="/x", output_mode="content", limit=250)
+        result = parse_grep_output("", base_path="/x", output_mode="content", limit=250)
         assert result == "No matches found."
 
     def test_whitespace_only(self) -> None:
-        result = parse_output("   \n  ", base_path="/x", output_mode="content", limit=250)
+        result = parse_grep_output("   \n  ", base_path="/x", output_mode="content", limit=250)
         assert result == "No matches found."
 
     def test_content_mode(self) -> None:
         raw = "/x/foo.py:10:hello world\n/x/bar.py:20:hello again"
-        result = parse_output(raw, base_path="/x", output_mode="content", limit=250)
+        result = parse_grep_output(raw, base_path="/x", output_mode="content", limit=250)
         assert "foo.py:10:hello world" in result
         assert "bar.py:20:hello again" in result
 
     def test_limit_truncation(self) -> None:
         raw = "\n".join(f"/x/f.py:{i}:line{i}" for i in range(10))
-        result = parse_output(raw, base_path="/x", output_mode="content", limit=3)
-        lines = [l for l in result.split("\n") if l.strip()]
-        # 3 content lines + 1 truncation notice
+        result = parse_grep_output(raw, base_path="/x", output_mode="content", limit=3)
         assert "[Results truncated at 3 lines]" in result
 
     def test_count_mode_drops_zeros(self) -> None:
         raw = "/x/a.py:5\n/x/b.py:0\n/x/c.py:3"
-        result = parse_output(raw, base_path="/x", output_mode="count", limit=250)
+        result = parse_grep_output(raw, base_path="/x", output_mode="count", limit=250)
         assert "a.py:5" in result
         assert "b.py:0" not in result
         assert "c.py:3" in result
@@ -269,7 +307,6 @@ class TestEndToEnd:
             "glob": "*.json",
         })
         assert not is_err
-        # JSON file has no TODO, so expect no match.
         assert "No matches found" in text
 
     def test_files_with_matches_mode(self, project: Path) -> None:
@@ -282,7 +319,6 @@ class TestEndToEnd:
         })
         assert not is_err
         assert "main.py" in text
-        # util.py has no TODO
         assert "util.py" not in text
 
     def test_count_mode(self, project: Path) -> None:
@@ -294,7 +330,6 @@ class TestEndToEnd:
             "output_mode": "count",
         })
         assert not is_err
-        # main.py has 2 TODOs
         assert "main.py" in text
 
     def test_result_limiting(self, project: Path) -> None:
@@ -326,7 +361,6 @@ class TestEndToEnd:
             "path": str(project / "src"),
         })
         assert not is_err
-        # Output should not contain the absolute tmp_path prefix.
         assert str(project / "src") not in text
 
     def test_nonexistent_path(self, project: Path) -> None:
@@ -365,8 +399,5 @@ class TestEndToEnd:
             "context_lines": 1,
         })
         assert not is_err
-        # With context, surrounding lines should appear.
-        # The exact format depends on grep vs rg, but there should be
-        # more lines than just the match.
-        lines = [l for l in text.splitlines() if l.strip()]
+        lines = [ln for ln in text.splitlines() if ln.strip()]
         assert len(lines) > 1

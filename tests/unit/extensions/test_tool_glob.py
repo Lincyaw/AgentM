@@ -1,37 +1,81 @@
-"""Unit tests for the ``tool_glob`` contrib atom.
+"""Unit tests for the glob tool (merged into file_tools).
 
-Tests exercise the core ``_glob_files`` helper and the async tool
-execution path via a minimal fake API, matching the patterns used by
-existing builtin tool tests.
+Tests exercise the async tool execution path via a minimal fake API with
+a local BashOperations backend, matching the patterns used by existing
+builtin tool tests.
 """
 
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 from typing import Any
 
-from agentm.extensions.contrib import tool_glob
-from agentm.extensions.contrib.tool_glob import _glob_files
+from agentm.core.abi.operations import ExecResult
+from agentm.extensions.builtin import file_tools
 
 
 # ---------------------------------------------------------------------------
 # Minimal fake ExtensionAPI — just enough for install()
 # ---------------------------------------------------------------------------
 
+class _LocalBashOps:
+    """Runs commands locally via subprocess — suitable for tmp_path tests."""
+
+    async def exec(
+        self,
+        cmd: str,
+        *,
+        cwd: str,
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+        on_data: Any = None,
+        signal: Any = None,
+    ) -> ExecResult:
+        try:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                timeout=timeout,
+                cwd=cwd,
+            )
+            return ExecResult(
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+                exit_code=proc.returncode,
+                timed_out=False,
+            )
+        except subprocess.TimeoutExpired:
+            return ExecResult(stdout=b"", stderr=b"", exit_code=-1, timed_out=True)
+
+
+class _FakeOperations:
+    def __init__(self) -> None:
+        self.bash = _LocalBashOps()
+
+
 class _FakeApi:
-    """Covers the ExtensionAPI surface that tool_glob.install touches."""
+    """Covers the ExtensionAPI surface that file_tools.install touches."""
 
     def __init__(self, cwd: str) -> None:
         self.cwd = cwd
         self.tools: dict[str, Any] = {}
+        self._ops = _FakeOperations()
 
     def register_tool(self, t: Any) -> None:
         self.tools[t.name] = t
 
+    def get_operations(self) -> _FakeOperations:
+        return self._ops
+
+    def get_resource_writer(self) -> Any:
+        raise NotImplementedError("glob tests don't need writer")
+
 
 def _install(api: _FakeApi) -> None:
-    tool_glob.install(api, {})  # type: ignore[arg-type]
+    file_tools.install(api, {"require_read": False})  # type: ignore[arg-type]
 
 
 def _run(api: _FakeApi, **kwargs: Any) -> tuple[str, bool]:
@@ -40,107 +84,7 @@ def _run(api: _FakeApi, **kwargs: Any) -> tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# _glob_files unit tests
-# ---------------------------------------------------------------------------
-
-def test_basic_star_pattern(tmp_path: Path) -> None:
-    (tmp_path / "foo.py").write_text("x")
-    (tmp_path / "bar.py").write_text("x")
-    (tmp_path / "readme.md").write_text("x")
-
-    files, truncated = _glob_files("*.py", str(tmp_path), 100)
-    assert not truncated
-    assert files == ["bar.py", "foo.py"]
-
-
-def test_recursive_double_star(tmp_path: Path) -> None:
-    sub = tmp_path / "pkg" / "sub"
-    sub.mkdir(parents=True)
-    (tmp_path / "top.py").write_text("x")
-    (sub / "deep.py").write_text("x")
-
-    files, truncated = _glob_files("**/*.py", str(tmp_path), 100)
-    assert not truncated
-    assert "top.py" in files
-    expected_deep = str(Path("pkg") / "sub" / "deep.py")
-    assert expected_deep in files
-
-
-def test_no_matches_returns_empty(tmp_path: Path) -> None:
-    (tmp_path / "file.txt").write_text("x")
-
-    files, truncated = _glob_files("*.rs", str(tmp_path), 100)
-    assert not truncated
-    assert files == []
-
-
-def test_limit_truncation(tmp_path: Path) -> None:
-    for i in range(10):
-        (tmp_path / f"file_{i:02d}.py").write_text("x")
-
-    files, truncated = _glob_files("*.py", str(tmp_path), 5)
-    assert truncated
-    assert len(files) == 5
-    # Results are sorted alphabetically
-    assert files == [f"file_{i:02d}.py" for i in range(5)]
-
-
-def test_relative_path_output(tmp_path: Path) -> None:
-    nested = tmp_path / "a" / "b"
-    nested.mkdir(parents=True)
-    (nested / "c.txt").write_text("x")
-
-    files, truncated = _glob_files("**/*.txt", str(tmp_path), 100)
-    assert not truncated
-    for f in files:
-        assert not f.startswith("/"), f"Expected relative path, got {f!r}"
-
-
-def test_skip_git_directory(tmp_path: Path) -> None:
-    git_dir = tmp_path / ".git" / "objects"
-    git_dir.mkdir(parents=True)
-    (git_dir / "pack.idx").write_text("x")
-    (tmp_path / "main.py").write_text("x")
-
-    files, _ = _glob_files("**/*", str(tmp_path), 100)
-    assert "main.py" in files
-    assert all(".git" not in f for f in files)
-
-
-def test_skip_node_modules(tmp_path: Path) -> None:
-    nm = tmp_path / "node_modules" / "pkg"
-    nm.mkdir(parents=True)
-    (nm / "index.js").write_text("x")
-    (tmp_path / "app.js").write_text("x")
-
-    files, _ = _glob_files("**/*.js", str(tmp_path), 100)
-    assert "app.js" in files
-    assert all("node_modules" not in f for f in files)
-
-
-def test_skip_pycache(tmp_path: Path) -> None:
-    cache = tmp_path / "__pycache__"
-    cache.mkdir()
-    (cache / "mod.cpython-312.pyc").write_text("x")
-    (tmp_path / "mod.py").write_text("x")
-
-    files, _ = _glob_files("**/*", str(tmp_path), 100)
-    assert "mod.py" in files
-    assert all("__pycache__" not in f for f in files)
-
-
-def test_directories_excluded(tmp_path: Path) -> None:
-    """Only regular files appear in results, not directory names."""
-    d = tmp_path / "subdir"
-    d.mkdir()
-    (d / "inner.py").write_text("x")
-
-    files, _ = _glob_files("*", str(tmp_path), 100)
-    assert "subdir" not in files
-
-
-# ---------------------------------------------------------------------------
-# End-to-end tool execution via fake API
+# End-to-end tool execution via fake API + real filesystem
 # ---------------------------------------------------------------------------
 
 def test_tool_install_registers_glob(tmp_path: Path) -> None:
@@ -205,3 +149,62 @@ def test_tool_execute_custom_path(tmp_path: Path) -> None:
     assert not is_err
     assert "lib.py" in text
     assert "top.py" not in text
+
+
+def test_skip_git_directory(tmp_path: Path) -> None:
+    git_dir = tmp_path / ".git" / "objects"
+    git_dir.mkdir(parents=True)
+    (git_dir / "pack.idx").write_text("x")
+    (tmp_path / "main.py").write_text("x")
+
+    api = _FakeApi(str(tmp_path))
+    _install(api)
+
+    text, is_err = _run(api, pattern="*")
+    assert not is_err
+    assert "main.py" in text
+    assert ".git" not in text
+
+
+def test_skip_node_modules(tmp_path: Path) -> None:
+    nm = tmp_path / "node_modules" / "pkg"
+    nm.mkdir(parents=True)
+    (nm / "index.js").write_text("x")
+    (tmp_path / "app.js").write_text("x")
+
+    api = _FakeApi(str(tmp_path))
+    _install(api)
+
+    text, is_err = _run(api, pattern="*.js")
+    assert not is_err
+    assert "app.js" in text
+    assert "node_modules" not in text
+
+
+def test_skip_pycache(tmp_path: Path) -> None:
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    (cache / "mod.cpython-312.pyc").write_text("x")
+    (tmp_path / "mod.py").write_text("x")
+
+    api = _FakeApi(str(tmp_path))
+    _install(api)
+
+    text, is_err = _run(api, pattern="*")
+    assert not is_err
+    assert "mod.py" in text
+    assert "__pycache__" not in text
+
+
+def test_relative_path_output(tmp_path: Path) -> None:
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    (nested / "c.txt").write_text("x")
+
+    api = _FakeApi(str(tmp_path))
+    _install(api)
+
+    text, is_err = _run(api, pattern="*.txt")
+    assert not is_err
+    for line in text.splitlines():
+        assert not line.startswith("/"), f"Expected relative path, got {line!r}"

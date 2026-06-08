@@ -325,12 +325,7 @@ requirements:
       - path: src/agentm/core/abi/resource.py
       - path: src/agentm/extensions/builtin/operations_local.py
       - path: src/agentm/harness/resource_writer.py
-      - path: src/agentm/extensions/builtin/tool_read.py
-      - path: src/agentm/extensions/builtin/tool_write.py
-      - path: src/agentm/extensions/builtin/tool_edit.py
-      - path: src/agentm/extensions/builtin/tool_grep.py
-      - path: src/agentm/extensions/builtin/tool_find.py
-      - path: src/agentm/extensions/builtin/tool_ls.py
+      - path: src/agentm/extensions/builtin/file_tools.py
     tests:
       - path: tests/unit/extensions/test_file_tool_io_seams.py
       - path: tests/unit/extensions/test_tool_read_path_gate.py
@@ -560,9 +555,7 @@ requirements:
       - path: src/agentm/core/abi/loop.py
       - path: src/agentm/core/abi/tool.py
       - path: src/agentm/core/_internal/tools.py
-      - path: src/agentm/extensions/builtin/tool_grep.py
-      - path: src/agentm/extensions/builtin/tool_ls.py
-      - path: src/agentm/extensions/builtin/tool_find.py
+      - path: src/agentm/extensions/builtin/file_tools.py
       - path: src/agentm/extensions/builtin/file_mutation_queue.py
     tests:
       - path: tests/unit/core/abi/test_decide_turn_action.py
