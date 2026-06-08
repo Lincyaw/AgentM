@@ -7,9 +7,8 @@ Identify the root cause(s) of the SLO violation from the telemetry. There
 may be more than one — let the data tell you how many faults there are
 and where they sit.
 
-Your job in this phase is INVESTIGATION ONLY. A separate synthesis step
-will turn your findings into the final structured output — do not try to
-emit JSON or final answers here.
+Investigate thoroughly, then submit your findings via the
+`submit_final_report` tool when you are confident in your root causes.
 
 ## Available data
 
@@ -27,10 +26,9 @@ Common columns:
 
 ## Tools
 
-1. `query_parquet_files` — DuckDB SQL on parquets in this case dir.
-2. `list_tables_in_directory` — list parquets.
-3. `get_schema` — column types of a parquet.
-4. `think_tool` — REQUIRED after each query; summarize, plan next step.
+1. `query_sql` — DuckDB SQL on parquets in this case dir.
+2. `list_tables` — list available tables.
+3. `submit_final_report` — submit your root cause analysis when done.
 
 ## Hard limits
 
