@@ -34,7 +34,7 @@ from agentm.core.abi.extension import ExtensionAPI
 
 _RCA_ROOT = Path(__file__).resolve().parent.parent.parent
 _PROMPTS_DIR = _RCA_ROOT / "prompts"
-_AGENTS_DIR = _RCA_ROOT / "agents"
+_AGENTS_DIR = _PROMPTS_DIR / "agents"
 
 
 # ---------------------------------------------------------------------------
