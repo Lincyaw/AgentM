@@ -46,8 +46,27 @@ dependencies = [
 agent-env = [
     { name = "arl-env" },
 ]
+all-contrib = [
+    { name = "agentm-mcp-bridge" },
+    { name = "agentm-rca" },
+    { name = "agentm-rca-hfsm" },
+    { name = "agentm-terminal" },
+    { name = "llmharness" },
+]
 eval = [
     { name = "duckdb" },
+]
+llmharness = [
+    { name = "llmharness" },
+]
+mcp = [
+    { name = "agentm-mcp-bridge" },
+]
+rca = [
+    { name = "agentm-rca" },
+]
+rca-hfsm = [
+    { name = "agentm-rca-hfsm" },
 ]
 terminal = [
     { name = "agentm-terminal" },
@@ -66,10 +85,19 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agentm-mcp-bridge", marker = "extra == 'all-contrib'", editable = "contrib/extensions/mcp_bridge" },
+    { name = "agentm-mcp-bridge", marker = "extra == 'mcp'", editable = "contrib/extensions/mcp_bridge" },
+    { name = "agentm-rca", marker = "extra == 'all-contrib'", editable = "contrib/scenarios/rca" },
+    { name = "agentm-rca", marker = "extra == 'rca'", editable = "contrib/scenarios/rca" },
+    { name = "agentm-rca-hfsm", marker = "extra == 'all-contrib'", editable = "contrib/scenarios/rca_hfsm" },
+    { name = "agentm-rca-hfsm", marker = "extra == 'rca-hfsm'", editable = "contrib/scenarios/rca_hfsm" },
+    { name = "agentm-terminal", marker = "extra == 'all-contrib'", editable = "contrib/gateway-peers/terminal" },
     { name = "agentm-terminal", marker = "extra == 'terminal'", editable = "contrib/gateway-peers/terminal" },
     { name = "anthropic", specifier = ">=0.86.0" },
     { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.2.0" },
     { name = "duckdb", marker = "extra == 'eval'", specifier = ">=1.5.2" },
+    { name = "llmharness", marker = "extra == 'all-contrib'", editable = "contrib/extensions/llmharness" },
+    { name = "llmharness", marker = "extra == 'llmharness'", editable = "contrib/extensions/llmharness" },
     { name = "openai", specifier = ">=1.50.0" },
     { name = "opentelemetry-api", specifier = ">=1.30.0" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.30.0" },
@@ -82,7 +110,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.25.1" },
     { name = "websockets", specifier = ">=12.0" },
 ]
-provides-extras = ["agent-env", "eval", "terminal"]
+provides-extras = ["agent-env", "eval", "terminal", "rca", "rca-hfsm", "llmharness", "mcp", "all-contrib"]
 
 [package.metadata.requires-dev]
 dev = [

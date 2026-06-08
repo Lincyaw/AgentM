@@ -1,27 +1,27 @@
-"""Contrib ``memory_lifecycle`` atom — session lifecycle hooks for memory.
+"""Builtin ``memory_lifecycle`` atom -- session lifecycle hooks for memory.
 
 Bridges the gap between the ``memory`` atom (which stores typed frontmatter
 files under ``.agentm/memory/``) and the session lifecycle, providing:
 
-1. **Auto-extract** (``TurnEndEvent``, POST priority) — regex heuristics
+1. **Auto-extract** (``TurnEndEvent``, POST priority) -- regex heuristics
    detect memory-worthy facts in user messages (preferences, identity,
    corrections, decisions, project facts). Writes through
    ``ResourceWriter`` with no LLM call, keeping cost zero for most turns.
 
-2. **Pre-compact sink** (``BeforeCompactEvent``) — before compaction
+2. **Pre-compact sink** (``BeforeCompactEvent``) -- before compaction
    discards messages, re-scan the buffer for uncaptured facts using the
    same heuristics. Safety net so auto-extract misses don't become
    permanent losses.
 
-3. **Per-turn prefetch** (``ContextEvent``, NORMAL priority) — substring
+3. **Per-turn prefetch** (``ContextEvent``, NORMAL priority) -- substring
    search against memory file names + descriptions, inject matching bodies
    into the last user message so the LLM sees relevant past facts without
    calling ``memory_read``.
 
-The atom is purely event-driven — no tools, invisible to the user/LLM.
+The atom is purely event-driven -- no tools, invisible to the user/LLM.
 Reads go through ``api.get_operations().file``; writes go through
 ``api.get_resource_writer()`` (matching the ``memory`` atom's contract).
-§11-compliant: no ``core.runtime.*`` or atom-to-atom imports.
+S11-compliant: no ``core.runtime.*`` or atom-to-atom imports.
 """
 
 from __future__ import annotations
@@ -359,7 +359,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Module-level helpers (not closures — stateless)
+# Module-level helpers (not closures -- stateless)
 # ---------------------------------------------------------------------------
 
 
