@@ -261,7 +261,10 @@ async def run_evolution_loop(
 
         # Step 5: Distill
         _logger.info("Distilling failure patterns...")
-        skill = await distill_skill(reports=reports, provider_tuple=provider_tuple)
+        skill = await distill_skill(
+            reports=reports, provider_tuple=provider_tuple,
+            skill_output_dir=skill_output_dir,
+        )
 
         if skill is None:
             _logger.info("Could not distill a skill. Stopping.")
@@ -272,14 +275,30 @@ async def run_evolution_loop(
             ))
             break
 
-        _logger.info("Distilled: %s (pattern=%s, freq=%d)",
-                     skill.name, skill.pattern_category, skill.pattern_frequency)
+        _logger.info("Distilled: %s action=%s (pattern=%s, freq=%d)",
+                     skill.name, skill.action, skill.pattern_category, skill.pattern_frequency)
 
-        # Install skill
+        # Handle retire
+        if skill.action == "retire":
+            retire_dir = Path(skill_output_dir) / skill.name
+            if (retire_dir / "SKILL.md").exists():
+                (retire_dir / "SKILL.md").unlink()
+                if retire_dir.exists():
+                    retire_dir.rmdir()
+                _logger.info("Retired skill: %s (%s)", skill.name, skill.reason)
+            result.iterations.append(IterationResult(
+                iteration=iteration + 1, skill=skill,
+                baseline_accuracy=result.initial_accuracy,
+                skill_accuracy=baseline_acc,
+                accepted=True, reports=reports,
+            ))
+            continue
+
+        # Install skill (create or update)
         skill_dir = Path(skill_output_dir) / skill.name
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(skill.content)
-        _logger.info("Wrote skill: %s", skill_dir / "SKILL.md")
+        _logger.info("Wrote skill (%s): %s", skill.action, skill_dir / "SKILL.md")
 
         # Step 6: Backtest with skill on test set
         skill_exp = f"{exp_id_prefix}-skill-{iteration}"
