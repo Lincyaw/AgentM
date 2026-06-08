@@ -58,6 +58,7 @@ MANIFEST = ExtensionManifest(
         "type": "object",
         "properties": {
             "warn_within": {"type": "integer", "minimum": 1, "default": 5},
+            "finalize_tool": {"type": "string", "default": ""},
         },
         "additionalProperties": False,
     },
@@ -67,6 +68,7 @@ MANIFEST = ExtensionManifest(
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     warn_within = int(config.get("warn_within", 5))
+    finalize_tool = config.get("finalize_tool", "")
 
     # Per-run counters. ``turn_index`` is authoritative from ``turn_start``;
     # ``tool_calls_used`` mirrors the loop's own counter (both reset per run).
@@ -107,7 +109,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if not triggered:
             return
 
-        text = _format_warning(turns_left, tools_left)
+        text = _format_warning(turns_left, tools_left, finalize_tool)
         _append_to_last_message(event.messages, text, state)
 
     api.on(AgentStartEvent.CHANNEL, _on_agent_start)
@@ -116,25 +118,30 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.on(BeforeSendToLlmEvent.CHANNEL, _before_send)
 
 
-def _format_warning(turns_left: int | None, tools_left: int | None) -> str:
+def _format_warning(
+    turns_left: int | None, tools_left: int | None, finalize_tool: str = "",
+) -> str:
     parts: list[str] = []
     if turns_left is not None:
         parts.append(f"{max(turns_left, 0)} turn(s)")
     if tools_left is not None:
         parts.append(f"{max(tools_left, 0)} tool call(s)")
     budget = " and ".join(parts)
+    tool_hint = (
+        f" Call `{finalize_tool}` NOW." if finalize_tool
+        else " Submit your final response NOW (e.g. via the response/finalize tool)."
+    )
     last = (turns_left is not None and turns_left <= 1) or (
         tools_left is not None and tools_left <= 1
     )
     if last:
         return (
             f"[budget] This is effectively your LAST step ({budget} left before a "
-            "hard stop with no chance to summarize). Submit your final response "
-            "NOW (e.g. via the response/finalize tool)."
+            f"hard stop with no chance to summarize).{tool_hint}"
         )
     return (
         f"[budget] Only {budget} remaining before a hard stop (no chance to "
-        "summarize). Start wrapping up and prepare to submit your final response."
+        f"summarize). Start wrapping up.{tool_hint}"
     )
 
 
