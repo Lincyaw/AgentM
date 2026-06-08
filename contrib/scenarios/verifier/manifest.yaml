@@ -16,7 +16,7 @@ extensions:
   - local: hop_finalize
   - module: agentm.extensions.builtin.observability
 
-  - module: _agentm_contrib__turn_reminder
+  - module: agentm.extensions.builtin.turn_reminder
     config:
       warn_within: 5
 

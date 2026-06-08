@@ -1,21 +1,16 @@
-"""Contrib ``persona`` atom (flat-file, auto-discovered as
-``_agentm_contrib__persona``).
-
-Opt-in — it lives in ``contrib/`` rather than the minimal builtin set
-because curated identity is a scenario policy (the ``chatbot`` scenario),
-not a universal capability every agent needs.
+"""Builtin ``persona`` atom.
 
 File-driven identity layer for conversational scenarios. Reads a small,
 ordered set of user-authored markdown files from the workspace (by
-default ``SOUL.md`` — voice/personality, ``IDENTITY.md`` — who the bot
-is, ``USER.md`` — who it is talking to) and prepends their contents to
+default ``SOUL.md`` -- voice/personality, ``IDENTITY.md`` -- who the bot
+is, ``USER.md`` -- who it is talking to) and prepends their contents to
 the system prompt. The agent's character is then edited by changing
 files on disk, not by rewriting scenario YAML.
 
 Sibling to the ``memory`` atom one axis over: ``memory`` carries *facts*
 that evolve at runtime; ``persona`` carries the *stable identity* the
 operator curates. Both land in the system prompt (the cache-stable
-prefix), so per-turn KV/prefix caching is preserved — nothing here
+prefix), so per-turn KV/prefix caching is preserved -- nothing here
 touches the volatile message tail. (Note the contribution mechanism
 differs: see the ``before_agent_start`` handler below for why this atom
 *returns* its replacement rather than only mutating ``event.system``.)
