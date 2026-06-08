@@ -6,7 +6,7 @@ extensions:
   - module: agentm.extensions.builtin.operations
     config:
       backend: local
-  - module: agentm_rca.tools.thinkdepth_sql
+  - module: agentm_rca.tools.duckdb_sql
   - module: agentm_rca.tools.finalize
   - module: agentm.extensions.builtin.observability
   - module: contrib.extensions.rcabench_contract
