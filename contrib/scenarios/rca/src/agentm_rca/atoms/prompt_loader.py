@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import datetime as _dt
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
@@ -32,8 +31,9 @@ from agentm.core.abi.events import (
 from agentm.core.abi.extension import ExtensionAPI
 
 
-_RCA_ROOT = Path(__file__).resolve().parent.parent.parent
-_PROMPTS_DIR = _RCA_ROOT / "prompts"
+from agentm_rca import SCENARIO_ROOT
+
+_PROMPTS_DIR = SCENARIO_ROOT / "prompts"
 _AGENTS_DIR = _PROMPTS_DIR / "agents"
 
 

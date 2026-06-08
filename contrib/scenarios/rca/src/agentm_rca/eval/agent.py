@@ -8,7 +8,7 @@ invoked via ``rca llm-eval run --agent agentm``. Bridges the
 Two pieces of glue do the work:
 
 * The orchestrator's ``submit_final_report`` tool in
-  :mod:`agentm_rca.tools.finalize` validates against the rcabench-platform
+  :mod:`agentm_rca.atoms.finalize` validates against the rcabench-platform
   ``AgentRCAOutput`` contract and emits the model's
   ``model_dump_json(by_alias=True)`` as its tool result. The adapter
   subscribes to ``tool_result`` on the session bus and parses that
