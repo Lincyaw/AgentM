@@ -55,13 +55,13 @@ def _extract_gt_services(data_dir: str) -> tuple[list[str], list[str]]:
     injected_apps: list[str] = []
     fault_types: list[str] = []
     if injection_path.exists():
-        with open(injection_path) as f:
+        with open(injection_path, encoding="utf-8") as f:
             injection = json.load(f)
         injected_apps = [e["app"] for e in injection.get("engine_config_summary", [])]
         fault_types = [e.get("chaos_type", "unknown") for e in injection.get("engine_config_summary", [])]
 
     if not injected_apps and causal_graph_path.exists():
-        with open(causal_graph_path) as f:
+        with open(causal_graph_path, encoding="utf-8") as f:
             cg = json.load(f)
         for node in cg.get("root_causes", cg.get("nodes", [])):
             component = node.get("component", "")
@@ -91,7 +91,7 @@ def _build_trajectory_snapshot(trajectory_path: str) -> list[dict[str, Any]]:
 
     turns: list[dict[str, Any]] = []
     try:
-        for line in open(path):
+        for line in open(path, encoding="utf-8"):
             line = line.strip()
             if not line:
                 continue
