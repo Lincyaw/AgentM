@@ -20,6 +20,7 @@ resolution-markers = [
 members = [
     "agentm",
     "agentm-feishu",
+    "agentm-harbor",
     "agentm-mcp-bridge",
     "agentm-rca",
     "agentm-terminal",
@@ -59,7 +60,7 @@ eval = [
     { name = "duckdb" },
 ]
 harbor = [
-    { name = "harbor" },
+    { name = "agentm-harbor" },
 ]
 llmharness = [
     { name = "llmharness" },
@@ -87,6 +88,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agentm-harbor", marker = "extra == 'harbor'", editable = "contrib/scenarios/harbor" },
     { name = "agentm-mcp-bridge", marker = "extra == 'all-contrib'", editable = "contrib/extensions/mcp_bridge" },
     { name = "agentm-mcp-bridge", marker = "extra == 'mcp'", editable = "contrib/extensions/mcp_bridge" },
     { name = "agentm-rca", marker = "extra == 'all-contrib'", editable = "contrib/scenarios/rca" },
@@ -96,7 +98,6 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.86.0" },
     { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.2.0" },
     { name = "duckdb", marker = "extra == 'eval'", specifier = ">=1.5.2" },
-    { name = "harbor", marker = "extra == 'harbor'", specifier = ">=0.1.0" },
     { name = "llmharness", marker = "extra == 'all-contrib'", editable = "contrib/extensions/llmharness" },
     { name = "llmharness", marker = "extra == 'llmharness'", editable = "contrib/extensions/llmharness" },
     { name = "openai", specifier = ">=1.50.0" },
@@ -155,6 +156,17 @@ requires-dist = [
     { name = "typer", specifier = ">=0.25.1" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "agentm-harbor"
+version = "0.1.0"
+source = { editable = "contrib/scenarios/harbor" }
+dependencies = [
+    { name = "harbor" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "harbor", specifier = ">=0.1.0" }]
 
 [[package]]
 name = "agentm-mcp-bridge"
