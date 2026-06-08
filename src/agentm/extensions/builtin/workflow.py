@@ -57,14 +57,12 @@ import os
 import textwrap
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, ClassVar, Final, Literal, Protocol, TypedDict, TypeVar
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.events import (
     Event,
     EventBus,
-    ResourcesDiscoverEvent,
     TurnEndEvent,
 )
 from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
@@ -160,11 +158,6 @@ _ARTIFACT_STORE_SERVICE: Final[str] = "artifact_store"
 # ``workflow`` tool (a worker cannot spawn its own workflow), so even when a
 # worker auto-discovers all builtins it never gets a recursive workflow tool.
 _WORKER_PURPOSE: Final[str] = "workflow"
-
-# Companion usage skill bundled next to the atom (a data dir, not a .py module,
-# so builtin discovery ignores it). Published to skill_loader via
-# ResourcesDiscoverEvent so the guidance loads wherever the workflow tool is.
-_SKILLS_DIR: Final[str] = str(Path(__file__).resolve().parent / "_workflow_skill")
 
 # Lifetime backstop: a runaway script cannot spawn more than this many
 # child sessions across the whole workflow run.
@@ -604,13 +597,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # without bound. Workers auto-discovering all builtins still hit this guard.
     if api.purpose == _WORKER_PURPOSE:
         return
-
-    # Publish the bundled usage skill to skill_loader (documented hook). Loads
-    # the workflow-orchestration guidance wherever this atom is active.
-    def _contribute_skills(_event: ResourcesDiscoverEvent) -> dict[str, Any]:
-        return {"skill_paths": [_SKILLS_DIR]}
-
-    api.on(ResourcesDiscoverEvent.CHANNEL, _contribute_skills)
 
     max_concurrency = config.get("max_concurrency")
     concurrency = (
