@@ -82,7 +82,7 @@ def _run_eval(
 
     try:
         cmd = [
-            "uv", "run", "--no-sync", "rca", "llm-eval", "run", rendered_path,
+            "uv", "run", "rca", "llm-eval", "run", rendered_path,
             "-a", "agentm",
             "--ak", f"scenario={scenario}",
             "--ak", f"max_turns={max_turns}",
