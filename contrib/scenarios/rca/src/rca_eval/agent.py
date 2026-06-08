@@ -97,6 +97,22 @@ def _env_bool(name: str, *, default: bool) -> bool:
     return raw.strip().lower() not in {"false", "0", "no", "off", ""}
 
 
+def _try_resolve_profile(model: str) -> tuple[str, dict[str, Any]] | None:
+    """Attempt to resolve ``model`` as a ``~/.agentm/config.toml`` profile."""
+    try:
+        from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+        from agentm.core.lib.user_config import resolve_model_profile
+
+        profile = resolve_model_profile(model)
+        if profile is None:
+            return None
+        return DEFAULT_PROVIDER_REGISTRY.build(
+            profile.provider, profile.to_build_config()
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _build_provider(
     provider: str, model: str
 ) -> tuple[str, dict[str, Any]]:
@@ -223,6 +239,10 @@ class AgentMAgent(BaseAgent):
         self._provider_tuple = provider_tuple
         if provider_tuple is not None:
             self._model = provider_tuple[1].get("model", self._model)
+        elif provider_tuple is None and model:
+            self._provider_tuple = _try_resolve_profile(model)
+            if self._provider_tuple is not None:
+                self._model = self._provider_tuple[1].get("model", self._model)
         self._exp_id = exp_id
         self._max_turns = _coerce_max_turns(max_turns, _DEFAULT_MAX_TURNS)
         self._chained_fork = _coerce_bool(chained_fork, default=False)
