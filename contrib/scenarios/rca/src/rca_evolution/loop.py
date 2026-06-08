@@ -59,6 +59,8 @@ def _run_eval(
     scenario: str,
     concurrency: int,
     limit: int | None = None,
+    max_turns: int = 50,
+    extra_ak: dict[str, str] | None = None,
     env_override: dict[str, str] | None = None,
 ) -> None:
     """Shell out to ``rca llm-eval run``.
@@ -83,9 +85,12 @@ def _run_eval(
             "uv", "run", "--no-sync", "rca", "llm-eval", "run", rendered_path,
             "-a", "agentm",
             "--ak", f"scenario={scenario}",
+            "--ak", f"max_turns={max_turns}",
             "-n", str(concurrency),
             "--exp-id", exp_id,
         ]
+        for k, v in (extra_ak or {}).items():
+            cmd.extend(["--ak", f"{k}={v}"])
         if limit is not None:
             cmd.extend(["-l", str(limit)])
 
@@ -190,13 +195,15 @@ async def run_evolution_loop(
 
     result = EvolutionResult()
 
+    eval_ak = {"model": model_profile}
+
     # Step 1: Baseline on test set
     baseline_exp = f"{exp_id_prefix}-baseline"
     _logger.info("=== Step 1: baseline eval on test set (exp=%s) ===", baseline_exp)
     _run_eval(
         config_path=eval_config, exp_id=baseline_exp,
         scenario=scenario, concurrency=concurrency,
-        limit=test_limit, env_override=eval_env,
+        limit=test_limit, extra_ak=eval_ak, env_override=eval_env,
     )
     baseline_results = _query_results(db_path, baseline_exp)
     baseline_acc = _accuracy(baseline_results)
@@ -215,7 +222,7 @@ async def run_evolution_loop(
         _run_eval(
             config_path=eval_config, exp_id=train_exp,
             scenario=scenario, concurrency=concurrency,
-            limit=train_limit, env_override=eval_env,
+            limit=train_limit, extra_ak=eval_ak, env_override=eval_env,
         )
         train_results = _query_results(db_path, train_exp)
         train_acc = _accuracy(train_results)
@@ -306,7 +313,7 @@ async def run_evolution_loop(
         _run_eval(
             config_path=eval_config, exp_id=skill_exp,
             scenario=scenario, concurrency=concurrency,
-            limit=test_limit, env_override=eval_env,
+            limit=test_limit, extra_ak=eval_ak, env_override=eval_env,
         )
         skill_results = _query_results(db_path, skill_exp)
         skill_acc = _accuracy(skill_results)

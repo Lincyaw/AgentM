@@ -1,16 +1,14 @@
 """Seed ``DatasetSample`` rows from a local ``data.jsonl`` file.
 
 ``rcabench-platform``'s llm-eval pipeline pulls samples from a SQL
-``data`` table keyed by ``(dataset, source)``. Our dataset ships as a
-JSONL file under ``/home/ddq/AoyangSpace/dataset/rca``, so we one-shot it
-into the configured DB before the first eval run. Idempotent — re-runs
-update existing rows in place rather than duplicating.
+``data`` table keyed by ``(dataset, source)``. The dataset JSONL is
+one-shot into the configured DB before the first eval run. Idempotent —
+re-runs update existing rows in place rather than duplicating.
 
 Invocation::
 
     uv run python -m rca_eval.seed_dataset \\
-        --jsonl /home/ddq/AoyangSpace/dataset/rca/data.jsonl \\
-        --dataset rca-openrca2-lite
+        --jsonl <path-to>/data.jsonl --dataset rca-openrca2-lite
 
 The DB URL is read from ``LLM_EVAL_DB_URL`` (or ``UTU_DB_URL``) — set
 either via ``.env`` or the shell.
