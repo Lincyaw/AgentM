@@ -1,4 +1,4 @@
-"""``turn_reminder`` — budget-aware, cache-friendly runway warnings.
+"""Builtin ``turn_reminder`` atom -- budget-aware, cache-friendly runway warnings.
 
 Pairs with the ``loop_budget`` atom. As the agent approaches the loop's
 ``max_turns`` / ``max_tool_calls`` cap, this atom injects a short reminder so
@@ -6,14 +6,14 @@ the model can wrap up and submit a final response instead of being
 hard-stopped mid-thought (``MaxTurnsExhausted`` / ``BudgetExhausted`` give it
 no chance to summarize).
 
-Cache discipline — the whole point of *where* we inject:
+Cache discipline -- the whole point of *where* we inject:
 
 * The reminder is appended to the **end of the last message** in the
   send-list, never to the system prompt. Touching the system prompt would
   shift the very front of the context and invalidate the entire KV / prefix
   cache every turn. The last message is the freshest, not-yet-cached tail, so
   appending there keeps the cached prefix (system + all prior messages)
-  byte-identical → maximum cache hit.
+  byte-identical -- maximum cache hit.
 * We only ever append to the *current* last message and never rewrite a
   message that was already sent, so each reminder freezes into the prefix
   verbatim once sent and stays cache-stable on later turns.
@@ -88,7 +88,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         cfg = api.session.get_loop_config()
         max_turns = cfg.max_turns
         max_tool_calls = cfg.max_tool_calls
-        # No cap on either axis ⇒ nothing to warn about.
+        # No cap on either axis => nothing to warn about.
         if max_turns is None and max_tool_calls is None:
             return
 
@@ -141,13 +141,13 @@ def _format_warning(turns_left: int | None, tools_left: int | None) -> str:
 def _append_to_last_message(
     messages: list[Any], text: str, state: dict[str, int]
 ) -> None:
-    """Append ``text`` to the tail of the last message — never the system
-    prompt — so the cached prefix stays byte-identical.
+    """Append ``text`` to the tail of the last message -- never the system
+    prompt -- so the cached prefix stays byte-identical.
 
     ``UserMessage`` takes a trailing text block directly. A
     ``ToolResultMessage`` may only hold ``ToolResultBlock``s, so the text is
     appended inside the last tool-result block's content (a shape Anthropic
-    serialises as tool_result + text in the same user turn — keeping role
+    serialises as tool_result + text in the same user turn -- keeping role
     alternation valid; a standalone trailing user message would not). Other /
     empty tails are skipped.
     """

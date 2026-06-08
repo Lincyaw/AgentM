@@ -63,8 +63,8 @@ extensions:
   # from the workspace. ``defaults`` seed preset starter content into a
   # fresh workspace on first run (absent files only — never clobbers the
   # agent's own edits). Edit the files to change character; the next turn
-  # re-reads them. Flat-file contrib atom, auto-discovered. ---
-  - module: _agentm_contrib__persona
+  # re-reads them. ---
+  - module: agentm.extensions.builtin.persona
     config:
       defaults:
         SOUL.md: |
@@ -105,7 +105,7 @@ extensions:
   - module: agentm.extensions.builtin.memory
 
   # --- memory lifecycle: auto-extract, pre-compact sink, per-turn prefetch ---
-  - module: _agentm_contrib__memory_lifecycle
+  - module: agentm.extensions.builtin.memory_lifecycle
 
   # --- auto-background long tools: a foreground tool call that overruns
   # ``timeout`` is moved to the background (the turn gets an immediate

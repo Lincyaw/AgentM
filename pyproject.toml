@@ -45,6 +45,17 @@ eval = [
 terminal = [
     "agentm-terminal",
 ]
+rca = ["agentm-rca"]
+rca-hfsm = ["agentm-rca-hfsm"]
+llmharness = ["llmharness"]
+mcp = ["agentm-mcp-bridge"]
+all-contrib = [
+    "agentm-rca",
+    "agentm-rca-hfsm",
+    "llmharness",
+    "agentm-mcp-bridge",
+    "agentm-terminal",
+]
 
 [dependency-groups]
 dev = [
@@ -83,6 +94,10 @@ members = [
 # a published wheel takes over transparently outside the workspace.
 [tool.uv.sources]
 agentm-terminal = { workspace = true }
+agentm-rca = { workspace = true }
+agentm-rca-hfsm = { workspace = true }
+llmharness = { workspace = true }
+agentm-mcp-bridge = { workspace = true }
 
 [tool.pytest.ini_options]
 # UI tests exercise the Textual TUI; they pass but don't map to any
