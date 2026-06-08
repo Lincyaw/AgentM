@@ -164,7 +164,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     async def _list_memory_files() -> list[Path]:
         try:
             names = await file_ops.list_dir(str(base_path))
-        except Exception:
+        except Exception as exc:
+            logger.warning("memory_lifecycle: failed to list %s: %s", base_path, exc)
             return []
         out: list[Path] = []
         for entry in names:
@@ -195,8 +196,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         rel = _to_cwd_relative(base_path / "MEMORY.md")
         try:
             await writer.write(rel, body.encode("utf-8"), rationale="memory_lifecycle_index_rebuild")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("memory_lifecycle: index rebuild write failed: %s", exc)
 
     async def _load_index_entries() -> list[tuple[str, str, str, Path]]:
         """Return [(name, type, description, path), ...] from memory files."""

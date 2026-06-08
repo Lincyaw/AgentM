@@ -38,16 +38,19 @@ restarts and can be mined by future evolution/query atoms.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from pathlib import Path
 from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.lib.frontmatter import parse_frontmatter
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.lib.frontmatter import parse_frontmatter
+from agentm.extensions import ExtensionManifest
+
+logger = logging.getLogger(__name__)
 
 
 MANIFEST = ExtensionManifest(
@@ -374,7 +377,8 @@ def _serialize_memory(mem_type: str, name: str, description: str, content: str) 
 async def _list_memory_files(file_ops: Any, base: Path) -> list[Path]:
     try:
         names = await file_ops.list_dir(str(base))
-    except Exception:
+    except Exception as exc:
+        logger.warning("memory: failed to list %s: %s", base, exc)
         return []
     out: list[Path] = []
     for entry in names:
@@ -403,7 +407,8 @@ async def _build_index_block(file_ops: Any, base: Path, max_lines: int) -> str:
         if not await file_ops.access(str(index_path)):
             return ""
         raw = await file_ops.read_file(str(index_path))
-    except Exception:
+    except Exception as exc:
+        logger.warning("memory: failed to read index %s: %s", index_path, exc)
         return ""
     text = raw.decode("utf-8", errors="replace").strip()
     if not text:

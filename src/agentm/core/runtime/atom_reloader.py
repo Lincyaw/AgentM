@@ -47,9 +47,7 @@ from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core._internal.catalog.manifest import is_constitution_path
 from agentm.core.runtime.catalog import _layout
 from agentm.core.abi import BusPriority, EventBus, Tool
-from agentm.extensions import ExtensionManifest
-from agentm.extensions import discover as discover_mod
-from agentm.extensions import validate as validate_mod
+from agentm.core.abi.manifest import ExtensionManifest
 from agentm.core.abi.events import (
     ApiRegisterEvent,
     BeforeInstallAtomEvent,
@@ -279,6 +277,8 @@ class AtomReloader:
         module_file = getattr(module, "__file__", None)
         file_path = Path(module_file).resolve() if module_file else Path(".")
         manifest = _module_manifest(module)
+        from agentm.extensions import discover as discover_mod
+
         import_kind: Literal["module", "synthetic"] = (
             "synthetic"
             if module_path.startswith(discover_mod.USER_ATOM_MODULE_PREFIX)
@@ -397,6 +397,8 @@ class AtomReloader:
                 raise RuntimeError(
                     f"MANIFEST.name {manifest.name!r} does not match atom name {name!r}"
                 )
+            from agentm.extensions import validate as validate_mod
+
             known = set(self._loaded_by_name)
             if not require_manifest:
                 known = known | {name}
@@ -500,7 +502,9 @@ class AtomReloader:
         )
         self._apis[atom.module_path]._owner_name = atom.module_path
         self._restore_handler_positions(atom.module_path, positions)
-        discover_mod.reset_cache()
+        from agentm.extensions import discover as _disc
+
+        _disc.reset_cache()
 
     def _capture_handler_positions(self, owner: str) -> dict[str, int]:
         """Record, per channel, the index of ``owner``'s first handler so a
@@ -932,6 +936,8 @@ class AtomReloader:
                 file_created=False,
                 error=f"atom {name!r} is already loaded; use reload_atom to replace it",
             )
+
+        from agentm.extensions import discover as discover_mod
 
         ext_cfg = dict(config or {})
         module_path = f"{discover_mod.USER_ATOM_MODULE_PREFIX}{name}"

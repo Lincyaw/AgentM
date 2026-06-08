@@ -47,12 +47,3 @@ def get_missing_session_cwd_issue(
         session_cwd=session_cwd,
         fallback_cwd=fallback_cwd,
     )
-
-
-def assert_session_cwd_exists(
-    session_manager: SessionCwdSource,
-    fallback_cwd: str,
-) -> None:
-    issue = get_missing_session_cwd_issue(session_manager, fallback_cwd)
-    if issue is not None:
-        raise MissingSessionCwdError(issue)

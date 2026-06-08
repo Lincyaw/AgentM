@@ -79,7 +79,6 @@ __all__ = [
     "setup_process_telemetry",
     "setup_session_telemetry",
     "shutdown_process_telemetry",
-    "span_attr",
 ]
 
 from agentm.core.lib.observability_dir import resolve_observability_dir  # noqa: E402
@@ -127,20 +126,6 @@ def otlp_unwrap(value: Any) -> Any:
     if "arrayValue" in value:
         return [otlp_unwrap(v) for v in value["arrayValue"].get("values", []) or []]
     return value
-
-
-def span_attr(span: dict[str, Any], key: str) -> Any:
-    """Look up a single attribute value on an OTLP span / log record dict.
-
-    Returns ``None`` when the key is absent. The OTLP attribute list is a
-    sequence of ``{"key", "value": <tagged-union>}`` pairs; we walk it
-    linearly because span attribute counts are small (a few dozen at
-    most) and a per-span dict cache would cost more than it saves.
-    """
-    for attr in span.get("attributes", []) or []:
-        if attr.get("key") == key:
-            return otlp_unwrap(attr.get("value"))
-    return None
 
 
 def iter_spans(line: dict[str, Any]) -> "list[dict[str, Any]]":

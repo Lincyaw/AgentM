@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
@@ -14,9 +13,8 @@ from agentm.core.abi.messages import (
     ToolCallBlock,
     ToolResultBlock,
     ToolResultMessage,
-    Usage,
 )
-from agentm.core.abi.tool import TOOL_RESULT_FORMAT_METADATA_KEY, Tool, ToolResult
+from agentm.core.abi.tool import TOOL_RESULT_FORMAT_METADATA_KEY, ToolResult
 
 RESULT_FORMAT_METADATA_KEY = TOOL_RESULT_FORMAT_METADATA_KEY
 
@@ -46,14 +44,6 @@ class FinalReport:
 
 def assistant_text(msg: AssistantMessage) -> str:
     return "\n".join(block.text for block in msg.content if isinstance(block, TextContent))
-
-
-def tool_call_text(call: ToolCallBlock) -> str:
-    try:
-        args = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
-    except TypeError:
-        args = str(call.arguments)
-    return f"{call.name}({args})"
 
 
 def tool_result_text(
@@ -114,38 +104,6 @@ def final_summary(messages: Iterable[AgentMessage]) -> FinalReport:
     )
 
 
-def usage_report_from_usage(usage: Usage) -> UsageReport:
-    return UsageReport(
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        cache_read=usage.cache_read,
-        cache_write=usage.cache_write,
-        assistant_turns=1,
-    )
-
-
-def tool_result_format(
-    tool_name: str,
-    text: str,
-    *,
-    tool: Tool | None = None,
-    renderers: Mapping[str, ToolResultRenderer] | None = None,
-) -> str:
-    if renderers is not None and tool_name in renderers:
-        return "text"
-    metadata = getattr(tool, "metadata", None)
-    if isinstance(metadata, Mapping):
-        result_format = metadata.get(RESULT_FORMAT_METADATA_KEY)
-        if isinstance(result_format, str) and result_format:
-            return result_format
-    stripped = text.lstrip()
-    if stripped.startswith("--- ") or stripped.startswith("+++ "):
-        return "diff"
-    if "```" in text or "# " in text or "- " in text:
-        return "markdown"
-    return "text"
-
-
 def _tool_result_content(
     result: ToolResult | ToolResultBlock | ToolResultMessage,
 ) -> list[Any]:
@@ -167,9 +125,6 @@ __all__ = [
     "UsageReport",
     "assistant_text",
     "final_summary",
-    "tool_call_text",
-    "tool_result_format",
     "tool_result_text",
-    "usage_report_from_usage",
     "usage_summary",
 ]

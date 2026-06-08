@@ -20,7 +20,6 @@ from agentm.core.abi.roles import (
     SUB_AGENT_RUNTIME,
     SYSTEM_PROMPT_PROVIDER,
 )
-from agentm.extensions import discover as discover_mod
 from agentm.core.runtime.atom_reloader import AtomReloader
 from agentm.core.runtime.atom_sandbox import apply_atom_source_overrides
 from agentm.core.runtime.command_dispatcher import HarnessCommandDispatcher
@@ -68,6 +67,7 @@ def default_child_provider_factory(parent_provider: Any) -> tuple[str, dict[str,
     """
 
     from agentm.core.abi.roles import PARENT_PROVIDER_CONFIG_KEY, PROVIDER_INHERITOR
+    from agentm.extensions import discover as discover_mod
 
     entry = discover_mod.discover_by_role().get(PROVIDER_INHERITOR)
     if entry is None:
@@ -125,6 +125,8 @@ def apply_child_session_contributions(
 async def create_agent_session(
     session_cls: type[Any], config: AgentSessionConfig
 ) -> Any:
+    from agentm.extensions import discover as discover_mod
+
     bus = config.bus if config.bus is not None else EventBus()
     session_manager: SessionManager = (
         config.session_manager
@@ -558,6 +560,8 @@ def _migrate_catalog(cwd: str) -> None:
 async def _prime_contrib_discovery(config: AgentSessionConfig, bus: EventBus) -> None:
     if config.no_extensions:
         return
+    from agentm.extensions import discover as discover_mod
+
     for label, discover_fn in [
         ("contrib", discover_mod.discover_contrib_atoms),
         ("home", discover_mod.discover_home_atoms),
@@ -578,6 +582,8 @@ async def _prime_contrib_discovery(config: AgentSessionConfig, bus: EventBus) ->
 async def _resolve_extensions(
     config: AgentSessionConfig, bus: EventBus
 ) -> list[tuple[str, dict[str, Any]]]:
+    from agentm.extensions import discover as discover_mod
+
     roles = discover_mod.discover_by_role()
 
     def _role_module(role: str) -> str:

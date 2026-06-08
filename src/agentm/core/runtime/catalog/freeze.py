@@ -9,9 +9,8 @@ from pathlib import Path
 
 from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core.abi import EventBus
+from agentm.core.abi.manifest import ExtensionManifest
 from agentm.core.abi.resource import ResourceWriter, WriteResult
-from agentm.extensions import ExtensionManifest
-from agentm.extensions.discover import discover_builtin
 from agentm.core.runtime.catalog import _layout
 
 _INDEXER_SESSION_ID = "catalog-freeze"
@@ -63,6 +62,8 @@ def _resolve_atom_source_path(name: str, *, root: Path) -> Path:
     candidate = root / "src" / "agentm" / "extensions" / "builtin" / f"{name}.py"
     if candidate.is_file():
         return candidate.resolve()
+
+    from agentm.extensions.discover import discover_builtin
 
     entry = discover_builtin().get(name)
     if entry is not None:
