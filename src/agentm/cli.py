@@ -1037,12 +1037,15 @@ def _build_command() -> Any:
     closures.
     """
 
-    import click
-
-    root = cast(click.Group, typer.main.get_command(app))
     for name, (_importer, short_help) in _LAZY_SUBCOMMANDS.items():
-        root.add_command(click.Command(name=name, help=short_help), name)
-    return root
+
+        def _placeholder() -> None:
+            raise RuntimeError("dispatched out of band")
+
+        _placeholder.__doc__ = short_help
+        app.command(name=name, hidden=False)(_placeholder)
+
+    return typer.main.get_command(app)
 
 
 def main() -> None:

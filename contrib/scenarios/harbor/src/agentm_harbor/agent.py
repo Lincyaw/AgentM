@@ -1,0 +1,213 @@
+"""Harbor agent adapter — installs agentm from PyPI and runs it."""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import tempfile
+
+from harbor.agents.installed.base import (
+    BaseInstalledAgent,
+    CliFlag,
+    with_prompt_template,
+)
+from harbor.environments.base import BaseEnvironment
+from harbor.models.agent.context import AgentContext
+from harbor.models.trial.paths import EnvironmentPaths
+
+SCENARIO_MANIFEST = """\
+name: harbor_bench
+description: |
+  Minimal tool set for Harbor benchmark evaluation.
+  Bash, file I/O, observability, compaction.
+  No memory or skill loader (ephemeral container).
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm.extensions.builtin.tool_result_cap
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
+  - module: agentm.extensions.builtin.runtime_context
+  - module: agentm.extensions.builtin.llm_compaction
+  - module: agentm.extensions.builtin.read_history
+"""
+
+_SCENARIO_DIR = "/tmp/agentm_scenario"
+
+
+class AgentMAgent(BaseInstalledAgent):
+
+    CLI_FLAGS = [
+        CliFlag(
+            "max_turns",
+            cli="--max-turns",
+            type="int",
+            env_fallback="AGENTM_MAX_TURNS",
+        ),
+        CliFlag(
+            "max_tool_calls",
+            cli="--max-tool-calls",
+            type="int",
+            env_fallback="AGENTM_MAX_TOOL_CALLS",
+        ),
+        CliFlag(
+            "reasoning_effort",
+            cli="--reasoning-effort",
+            type="str",
+            env_fallback="AGENTM_REASONING_EFFORT",
+        ),
+    ]
+
+    @staticmethod
+    def name() -> str:
+        return "agentm"
+
+    def get_version_command(self) -> str | None:
+        return "agentm --help 2>&1 | head -1 || true"
+
+    async def install(self, environment: BaseEnvironment) -> None:
+        await self.exec_as_root(
+            environment,
+            command=(
+                "apt-get update -qq && "
+                "DEBIAN_FRONTEND=noninteractive "
+                "apt-get install -y -qq python3 python3-pip python3-venv curl git"
+            ),
+        )
+
+        version_spec = f"=={self._version}" if self._version else ""
+        await self.exec_as_agent(
+            environment,
+            command=(
+                "curl -LsSf https://astral.sh/uv/install.sh | sh && "
+                'export PATH="$HOME/.local/bin:$PATH" && '
+                f"uv tool install agentm{version_spec} && "
+                "agentm --help > /dev/null"
+            ),
+        )
+
+        await self.exec_as_agent(
+            environment,
+            command=f"mkdir -p {_SCENARIO_DIR}",
+        )
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            f.write(SCENARIO_MANIFEST)
+            local_manifest = f.name
+        try:
+            await environment.upload_file(
+                local_manifest, f"{_SCENARIO_DIR}/manifest.yaml"
+            )
+        finally:
+            os.unlink(local_manifest)
+
+    def _build_env(self) -> dict[str, str]:
+        env: dict[str, str] = {}
+        for key in (
+            "AGENTM_API_KEY",
+            "AGENTM_PROVIDER",
+            "AGENTM_MODEL",
+            "AGENTM_BASE_URL",
+            "AGENTM_REASONING_EFFORT",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+        ):
+            val = self._get_env(key)
+            if val:
+                env[key] = val
+        return env
+
+    def _build_model_args(self) -> str:
+        if not self.model_name:
+            return ""
+        return f"--model {shlex.quote(self.model_name)}"
+
+    @with_prompt_template
+    async def run(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+    ) -> None:
+        escaped = shlex.quote(instruction)
+        env = self._build_env()
+        model_args = self._build_model_args()
+        cli_flags = self.build_cli_flags()
+        extra = f" {cli_flags}" if cli_flags else ""
+        agent_dir = EnvironmentPaths.agent_dir
+
+        await self.exec_as_agent(
+            environment,
+            command=f"mkdir -p {agent_dir}",
+            env=env,
+        )
+
+        try:
+            await self.exec_as_agent(
+                environment,
+                command=(
+                    'export PATH="$HOME/.local/bin:$PATH"; '
+                    f"agentm -p {escaped}"
+                    f" {model_args}"
+                    f" --scenario {_SCENARIO_DIR}"
+                    f"{extra}"
+                    f" 2>&1 | tee {agent_dir / 'agentm-trace.jsonl'}"
+                    "; exit 0"
+                ),
+                env=env,
+            )
+        finally:
+            try:
+                await self.exec_as_agent(
+                    environment,
+                    command=(
+                        f"cp -r .agentm/observability/ "
+                        f"{agent_dir}/observability/ 2>/dev/null || true"
+                    ),
+                )
+            except Exception:
+                pass
+
+    def populate_context_post_run(self, context: AgentContext) -> None:
+        obs_dir = self.logs_dir / "observability"
+        if not obs_dir.exists():
+            obs_dir = self.logs_dir
+
+        total_input = 0
+        total_output = 0
+        total_cache = 0
+
+        for jsonl_file in obs_dir.rglob("*.jsonl"):
+            try:
+                for line in jsonl_file.read_text().splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if event.get("kind") == "turn.summary":
+                        attrs = event.get("attributes", {})
+                        if not isinstance(attrs, dict):
+                            continue
+                        total_input += attrs.get("input_tokens", 0)
+                        total_output += attrs.get("output_tokens", 0)
+                        total_cache += attrs.get("cache_read", 0)
+                        total_cache += attrs.get("cache_write", 0)
+            except OSError:
+                continue
+
+        context.n_input_tokens = total_input
+        context.n_output_tokens = total_output
+        context.n_cache_tokens = total_cache
