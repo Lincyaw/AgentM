@@ -1,7 +1,8 @@
-"""Observe step: GT-aware divergence analysis on failed RCA cases.
+"""Observe step: spawn an observer agent that investigates a failed RCA case.
 
-Reads a failed case's trajectory + GT, uses an AgentM session to identify
-where the agent diverged from the correct investigation path.
+The observer gets tools to inspect the trajectory (get_turn,
+get_trajectory_summary, get_gt_info) and submits structured findings
+via submit_divergence_report.
 """
 
 from __future__ import annotations
@@ -32,26 +33,32 @@ class DivergenceReport:
     divergence_points: list[DivergencePoint] = field(default_factory=list)
     key_lesson: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "correct": self.correct,
+            "root_causes_gt": self.root_causes_gt,
+            "root_causes_agent": self.root_causes_agent,
+            "divergence_points": [
+                {"turn_index": dp.turn_index, "description": dp.description,
+                 "should_have_done": dp.should_have_done, "category": dp.category}
+                for dp in self.divergence_points
+            ],
+            "key_lesson": self.key_lesson,
+        }
+
 
 def _extract_gt_services(data_dir: str) -> tuple[list[str], list[str]]:
-    """Extract GT root cause services from injection.json + causal_graph.json."""
-    data_path = Path(data_dir)
-    injection_path = data_path / "injection.json"
-    causal_graph_path = data_path / "causal_graph.json"
+    injection_path = Path(data_dir) / "injection.json"
+    causal_graph_path = Path(data_dir) / "causal_graph.json"
 
     injected_apps: list[str] = []
+    fault_types: list[str] = []
     if injection_path.exists():
         with open(injection_path) as f:
             injection = json.load(f)
-        injected_apps = [
-            e["app"] for e in injection.get("engine_config_summary", [])
-        ]
-        fault_types = [
-            e.get("chaos_type", "unknown")
-            for e in injection.get("engine_config_summary", [])
-        ]
-    else:
-        fault_types = []
+        injected_apps = [e["app"] for e in injection.get("engine_config_summary", [])]
+        fault_types = [e.get("chaos_type", "unknown") for e in injection.get("engine_config_summary", [])]
 
     if not injected_apps and causal_graph_path.exists():
         with open(causal_graph_path) as f:
@@ -76,14 +83,13 @@ def _extract_agent_services(response: str) -> list[str]:
     ]
 
 
-def _load_trajectory_summary(trajectory_path: str, max_chars: int = 30000) -> str:
-    """Load OTLP JSONL and produce a condensed summary of tool calls."""
+def _build_trajectory_snapshot(trajectory_path: str) -> list[dict[str, Any]]:
+    """Parse OTLP JSONL into a list of turn dicts for get_turn."""
     path = Path(trajectory_path)
     if not path.exists():
-        return "(trajectory file not found)"
+        return []
 
-    parts: list[str] = []
-    turn = 0
+    turns: list[dict[str, Any]] = []
     try:
         for line in open(path):
             line = line.strip()
@@ -91,61 +97,46 @@ def _load_trajectory_summary(trajectory_path: str, max_chars: int = 30000) -> st
                 continue
             try:
                 rec = json.loads(line)
+                if isinstance(rec, dict):
+                    turns.append(rec)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(rec, dict):
-                continue
-
-            rtype = rec.get("type", "")
-            if rtype == "tool_call":
-                name = rec.get("name", "?")
-                args = rec.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        pass
-                args_s = json.dumps(args, ensure_ascii=False)
-                if len(args_s) > 400:
-                    args_s = args_s[:400] + "..."
-                parts.append(f"[T{turn}] CALL {name}({args_s})")
-            elif rtype == "tool_result":
-                name = rec.get("name", "?")
-                result = str(rec.get("result", ""))
-                if len(result) > 200:
-                    result = result[:200] + "..."
-                parts.append(f"[T{turn}] RESULT({name}): {result}")
-                turn += 1
     except OSError:
-        return "(could not read trajectory)"
-
-    text = "\n".join(parts)
-    if len(text) > max_chars:
-        text = text[:max_chars] + "\n... (truncated)"
-    return text if text else "(empty trajectory)"
+        pass
+    return turns
 
 
-_ANALYSIS_PROMPT = """\
-You are an expert RCA evaluator. Analyze this failed investigation.
+def _build_trajectory_summary(snapshot: list[dict[str, Any]]) -> str:
+    """Condensed overview of tool calls for get_trajectory_summary."""
+    parts: list[str] = []
+    turn = 0
+    for rec in snapshot:
+        rtype = rec.get("type", rec.get("name", ""))
+        if "tool_call" in rtype.lower() or rtype == "tool_call":
+            name = rec.get("name", rec.get("body", {}).get("name", "?"))
+            parts.append(f"[T{turn}] CALL {name}")
+        elif "tool_result" in rtype.lower() or rtype == "tool_result":
+            turn += 1
+        elif "assistant" in rtype.lower():
+            parts.append(f"[T{turn}] ASSISTANT message")
+    return "\n".join(parts) if parts else "(could not parse trajectory)"
 
-## Ground Truth
-Correct root cause services: {gt_services}
-Fault types: {fault_types}
 
-## Agent's Conclusion
-Agent identified: {agent_services}
+_OBSERVER_PROMPT = """\
+You are an expert RCA evaluator. An RCA agent investigated a microservice \
+incident and got the WRONG answer.
 
-## Trajectory
-{trajectory}
+Your job: use the tools to understand what went wrong.
 
-## Task
-Identify WHERE the investigation went wrong. For each divergence point:
-1. What the agent did
-2. What it should have done
-3. Category (missed_metric, red_herring, premature_conclusion, wrong_service_focus, insufficient_evidence, correlation_confusion, ignored_anomaly)
+## Workflow
+1. Call ``get_gt_info`` to see the correct root causes and the agent's conclusion.
+2. Call ``get_trajectory_summary`` to get an overview of all tool calls.
+3. Call ``get_turn`` on specific turns to drill into what the agent did.
+4. Once you understand where and why the agent diverged, call \
+``submit_divergence_report`` with your findings.
 
-Respond as JSON:
-{{"divergence_points": [{{"turn_index": 0, "description": "...", "should_have_done": "...", "category": "..."}}], "key_lesson": "one sentence"}}
+Focus on identifying the EARLIEST point where the investigation went off \
+track, and categorize each divergence point.
 """
 
 
@@ -157,9 +148,10 @@ async def observe_case(
     trajectory_path: str,
     provider_tuple: tuple[str, dict[str, Any]],
 ) -> DivergenceReport:
-    """Analyze one failed case using an AgentM session."""
+    """Spawn an observer agent session to analyze one failed case."""
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.abi.loop import LoopConfig
+    from agentm.core.abi.messages import AssistantMessage, ToolCallBlock
     from agentm.core.runtime.session import AgentSession
     from agentm.core.runtime.session_factory import create_agent_session
 
@@ -177,46 +169,54 @@ async def observe_case(
             key_lesson="Correct.",
         )
 
-    trajectory = _load_trajectory_summary(trajectory_path)
-    prompt = _ANALYSIS_PROMPT.format(
-        gt_services=", ".join(gt_services),
-        fault_types=", ".join(fault_types),
-        agent_services=", ".join(agent_services) or "(none)",
-        trajectory=trajectory,
-    )
+    snapshot = _build_trajectory_snapshot(trajectory_path)
+    summary = _build_trajectory_summary(snapshot)
+
+    gt_info = {
+        "correct_root_causes": gt_services,
+        "fault_types": fault_types,
+        "agent_concluded": agent_services or "(agent submitted nothing)",
+    }
 
     config = AgentSessionConfig(
         cwd=data_dir,
         provider=provider_tuple,
         scenario="local",
-        loop_config=LoopConfig(max_turns=2),
+        loop_config=LoopConfig(max_turns=15),
+        extra_extensions=[
+            ("agentm_rca.evolution.observer_atom", {
+                "trajectory_snapshot": snapshot,
+                "gt_info": gt_info,
+                "trajectory_summary": summary,
+            }),
+        ],
     )
+
     session = await create_agent_session(AgentSession, config)
     try:
-        messages = await session.prompt(prompt)
-        text = ""
-        from agentm.core.abi.messages import AssistantMessage, TextContent
-        for msg in messages:
-            if isinstance(msg, AssistantMessage):
-                text += "".join(
-                    b.text for b in msg.content if isinstance(b, TextContent)
-                )
+        messages = await session.prompt(_OBSERVER_PROMPT)
     finally:
         await session.shutdown()
 
-    try:
-        # Extract JSON from response (may be wrapped in markdown)
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        analysis = json.loads(text.strip())
-    except (json.JSONDecodeError, IndexError):
-        _logger.warning("Could not parse observer output for %s", case_id)
-        analysis = {
-            "divergence_points": [{"turn_index": 0, "description": "analysis failed", "should_have_done": "unknown", "category": "analysis_failed"}],
-            "key_lesson": "Could not analyze.",
-        }
+    # Extract submit_divergence_report args from messages
+    report_args: dict[str, Any] | None = None
+    for msg in reversed(messages):
+        if isinstance(msg, AssistantMessage):
+            for block in msg.content:
+                if isinstance(block, ToolCallBlock) and block.name == "submit_divergence_report":
+                    report_args = block.arguments
+                    break
+            if report_args:
+                break
+
+    if report_args is None:
+        _logger.warning("Observer did not submit report for %s", case_id)
+        return DivergenceReport(
+            case_id=case_id, correct=False,
+            root_causes_gt=gt_services, root_causes_agent=agent_services,
+            divergence_points=[DivergencePoint(0, "observer did not submit", "unknown", "analysis_failed")],
+            key_lesson="Observer failed to submit report.",
+        )
 
     return DivergenceReport(
         case_id=case_id, correct=False,
@@ -228,7 +228,7 @@ async def observe_case(
                 should_have_done=dp.get("should_have_done", ""),
                 category=dp.get("category", "unknown"),
             )
-            for dp in analysis.get("divergence_points", [])
+            for dp in report_args.get("divergence_points", [])
         ],
-        key_lesson=analysis.get("key_lesson", ""),
+        key_lesson=report_args.get("key_lesson", ""),
     )

@@ -1,0 +1,37 @@
+"""§11 atom: distiller tools for the evolution skill-synthesis agent.
+
+Registers browse_reports, get_report_summary, and submit_skill.
+All data is passed via config at install time.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from agentm.extensions import ExtensionManifest
+from agentm.core.abi.extension import ExtensionAPI
+
+from agentm_rca.evolution.distiller_tools import (
+    build_browse_reports_tool,
+    build_get_report_summary_tool,
+    build_submit_skill_tool,
+)
+
+MANIFEST = ExtensionManifest(
+    name="evolution_distiller",
+    description="Distiller tools for self-evolution skill synthesis.",
+    registers=(
+        "tool:browse_reports",
+        "tool:get_report_summary",
+        "tool:submit_skill",
+    ),
+)
+
+
+async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    reports = config.get("reports", [])
+    summary = config.get("report_summary", "(no summary)")
+
+    api.register_tool(build_browse_reports_tool(reports))
+    api.register_tool(build_get_report_summary_tool(summary))
+    api.register_tool(build_submit_skill_tool())
