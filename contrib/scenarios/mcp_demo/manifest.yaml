@@ -46,9 +46,7 @@ extensions:
 
   # --- file I/O + shell (kept from local so the agent can
   # actually do work with what it fetches) ---
-  - module: agentm.extensions.builtin.tool_read
-  - module: agentm.extensions.builtin.tool_edit
-  - module: agentm.extensions.builtin.tool_write
+  - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
 
   # --- observability ---

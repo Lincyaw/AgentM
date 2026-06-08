@@ -28,9 +28,7 @@ extensions:
   - module: agentm.extensions.builtin.tool_result_cap
 
   # --- file I/O + shell: same minimal tool floor as local. ---
-  - module: agentm.extensions.builtin.tool_read
-  - module: agentm.extensions.builtin.tool_edit
-  - module: agentm.extensions.builtin.tool_write
+  - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
 
   # --- observability: every turn lands in the JSONL trace store. ---

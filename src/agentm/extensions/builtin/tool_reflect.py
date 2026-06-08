@@ -76,7 +76,7 @@ _PARAMETERS: Final[dict[str, Any]] = {
             "type": "array",
             "description": (
                 "List of TraceSummary records (e.g. as returned by "
-                "tool_query_traces). Each entry should at minimum carry "
+                "query_traces). Each entry should at minimum carry "
                 "trace_id, task_id, stop_reason, and optionally path."
             ),
             "items": {"type": "object"},
@@ -341,7 +341,7 @@ def _gather_recent_feedback(
     """Project the recent eval-run task records into the list of
     ``module_feedback`` entries fingered against ``target_module``.
 
-    Mirrors ``tool_query_module_feedback`` (B-5) but scoped to a single
+    Mirrors ``query_module_feedback`` (B-5) but scoped to a single
     module so the returned list is directly usable in the prompt block.
     Most-recent runs first; capped at ``_RECENT_FEEDBACK_CAP`` upstream.
     """

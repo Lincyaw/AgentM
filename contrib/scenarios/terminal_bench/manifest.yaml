@@ -9,9 +9,7 @@ description: |
 extensions:
   - module: agentm.extensions.builtin.operations_local
   - module: agentm.extensions.builtin.tool_result_cap
-  - module: agentm.extensions.builtin.tool_read
-  - module: agentm.extensions.builtin.tool_edit
-  - module: agentm.extensions.builtin.tool_write
+  - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.system_prompt
