@@ -35,7 +35,7 @@ extensions:
     config:
       backend: local
   # --- baseline tool surface (kept verbatim from manifest.baseline.yaml) ---
-  - module: agentm_rca.tools.thinkdepth_sql
+  - module: agentm_rca.tools.duckdb_sql
   - module: agentm_rca.tools.finalize
   - module: agentm.extensions.builtin.observability
   - module: contrib.extensions.rcabench_contract

@@ -7,19 +7,9 @@ description: Root-cause analysis over parquet observability data via DuckDB SQL.
 # ``contrib/scenarios/rca/`` that pre-sets the env from the task YAML (or
 # extend AgentSessionConfig with a child-env field).
 extensions:
-  # --- environment ports: register the local-FS / asyncio-bash Operations
-  # bundle. Must be listed first because ``file_tools`` (below) and sub_agent
-  # children consume ``api.get_operations()``. ---
   - module: agentm.extensions.builtin.operations
     config:
       backend: local
-
-  # Orchestrator-side: the lead investigator now does the investigation
-  # itself (single-critic flow). Earlier 3-persona dispatch caused error
-  # cascades — biased subagent verdicts steered the orchestrator and the
-  # role distinction (scout / deep_analyze / verify) was too thin to be
-  # worth the routing overhead. The orchestrator carries the data tools
-  # directly and only delegates ONE thing: adversarial review by `critic`.
   - module: agentm_rca.tools.hypothesis_tools
   - module: agentm_rca.tools.duckdb_sql
     config:
@@ -33,15 +23,6 @@ extensions:
     config:
       include_defaults: false
       inherit_claude: false
-  - module: agentm.extensions.builtin.file_tools
-    # ``read`` is exposed only to drill into the diagnose-sql / rca-worker
-    # SKILL.md body files. Lock the path scope so the agent cannot reach
-    # ground-truth labels co-located with eval data
-    # (``dataset/<case>/label.txt``, ``injection.json``, ``causal_graph.json``)
-    # via ``read("/abs/path/...")`` and shortcut the eval.
-    config:
-      allow_globs:
-        - contrib/scenarios/rca/skills/**
   - module: contrib.extensions.rcabench_contract
 
   # Multi-agent wiring. ``prompt_loader`` (shared with rca:baseline) loads
@@ -64,16 +45,8 @@ extensions:
         - duckdb_sql
         - artifact_store
         - observability
-        # Critic-only skills: ``worker_skills`` publishes the
-        # ``contrib/scenarios/rca/skills/`` directory via
-        # ``ResourcesDiscoverEvent``; ``skill_loader`` (builtin) reads
-        # that hook and injects the diagnose-sql / rca-worker-guide
-        # SKILL.md content into the critic's system prompt. ``file_tools``
-        # lets the critic drill into the skill body files
-        # (correlation.md, traces.md, ...).
         - worker_skills
         - skill_loader
-        - file_tools
         # ``worker_finalize`` registers ``return_response`` — the only
         # sanctioned worker-termination tool. Without it, the critic
         # loops on query_sql until its budget runs out and ``final_text``
@@ -92,7 +65,5 @@ extensions:
           module: agentm_rca.worker_skills
         skill_loader:
           module: agentm.extensions.builtin.skill_loader
-        file_tools:
-          module: agentm.extensions.builtin.file_tools
         worker_finalize:
           module: agentm_rca.tools.worker_finalize
