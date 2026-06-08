@@ -1,6 +1,6 @@
 """Termination protocol for RCA sub-agent workers.
 
-Companion to :mod:`agentm_rca.atoms.finalize` (which terminates the
+Companion to :mod:`agentm_rca.finalize` (which terminates the
 orchestrator). Workers in this scenario kept burning their full budget on
 ``query_sql`` calls without ever emitting a final assistant text turn —
 ``wait_subagent`` then surfaced ``final_text: null`` to the orchestrator,
