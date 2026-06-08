@@ -17,7 +17,7 @@ extensions:
   - module: agentm_rca.tools.duckdb_sql
   - module: agentm_rca.tools.finalize
   - module: agentm.extensions.builtin.observability
-  - module: contrib.extensions.rcabench_contract
+  - module: agentm_rca.rcabench_contract
   - module: agentm_rca.prompt_loader
     config:
       prompt: investigator.md
