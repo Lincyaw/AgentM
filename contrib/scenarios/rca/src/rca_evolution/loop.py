@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentm_rca.evolution.distiller import DistilledSkill, distill_skill
-from agentm_rca.evolution.observer import DivergenceReport, observe_case
+from rca_evolution.distiller import DistilledSkill, distill_skill
+from rca_evolution.observer import DivergenceReport, observe_case
 
 _logger = logging.getLogger(__name__)
 

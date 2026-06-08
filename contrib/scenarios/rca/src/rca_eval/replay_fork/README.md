@@ -58,7 +58,7 @@ has flattened `evaluation.v2` into `evaluation` (renamed `evaluate`, dropped
 
 ```bash
 set -a; . ./.env; set +a   # agent (Doubao) endpoint from OPENAI_* / .env
-uv run python -m agentm_rca.eval.replay_fork.cli run ...
+uv run python -m rca_eval.replay_fork.cli run ...
 ```
 
 The agent (continuation) model resolves through the ambient `OPENAI_*` env
@@ -69,7 +69,7 @@ profile whose endpoint/key travel in the profile — independent of `.env`.
 ## Usage
 
 ```bash
-uv run --no-sync python -m agentm_rca.eval.replay_fork.cli run \
+uv run --no-sync python -m rca_eval.replay_fork.cli run \
     --source-exp agentm-ab100-baseline-0525-0847 \
     --db /home/ddq/AoyangSpace/AgentM/eval.db \
     --harness-model ark-glm51 \

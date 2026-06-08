@@ -2,7 +2,7 @@
 
 Example::
 
-    uv run python -m agentm_rca.eval.replay_fork.cli run \\
+    uv run python -m rca_eval.replay_fork.cli run \\
         --source-exp agentm-ab100-baseline-0525-0847 \\
         --harness-model ark-glm51 \\
         --agent-model litellm \\
@@ -130,7 +130,7 @@ def run(
 
     import json as _json
 
-    from agentm_rca.eval.agent import AgentMAgent
+    from rca_eval.agent import AgentMAgent
 
     from .case_source import EvalDbCaseSource, SessionFileCaseSource
     from .driver import JsonlResultSink, ReplayForkDriver

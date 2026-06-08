@@ -22,7 +22,7 @@ dependencies = [
 duckdb-remote = ["rcabench>=1.3.3"]
 
 [project.entry-points."llm_eval.agents"]
-agentm = "agentm_rca.eval.agent:AgentMAgent"
+agentm = "rca_eval.agent:AgentMAgent"
 
 [dependency-groups]
 dev = [
