@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,11 +57,18 @@ async def _run_case(
     """Run one RCA case through AgentM and return the result."""
     from agentm_rca.eval.agent import AgentMAgent
 
-    agent = AgentMAgent(scenario=scenario, provider_tuple=provider_tuple)
+    agent = AgentMAgent(
+        scenario=scenario,
+        provider_tuple=provider_tuple,
+        max_turns=50,
+    )
     try:
-        result = await agent.run(
-            incident="Investigate the root cause of the SLO violation.",
-            data_dir=data_dir,
+        result = await asyncio.wait_for(
+            agent.run(
+                incident="Investigate the root cause of the SLO violation.",
+                data_dir=data_dir,
+            ),
+            timeout=300,
         )
         response = result.response
         metadata = result.metadata or {}
@@ -116,32 +124,143 @@ async def _run_case(
         )
 
 
+async def _run_case_subprocess(
+    case_id: str,
+    data_dir: str,
+    scenario: str,
+    provider_tuple: tuple[str, dict[str, Any]],
+) -> CaseResult:
+    """Run one case in a subprocess to isolate env vars."""
+    import subprocess as _sp
+
+    provider_module, provider_config = provider_tuple
+    script = f"""
+import asyncio, json, os, sys
+os.environ["AGENTM_RCA_DATA_DIR"] = {data_dir!r}
+os.environ["OPENAI_BASE_URL"] = {provider_config.get("base_url", "")!r}
+os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "dummy")
+
+from agentm_rca.eval.agent import AgentMAgent
+async def run():
+    agent = AgentMAgent(
+        scenario={scenario!r},
+        provider_tuple=({provider_module!r}, {json.dumps(provider_config)}),
+        max_turns=50,
+    )
+    result = await agent.run(
+        incident="Investigate the root cause of the SLO violation.",
+        data_dir={data_dir!r},
+    )
+    out = {{
+        "response": result.response,
+        "metadata": result.metadata or {{}},
+        "trace_id": result.trace_id or "",
+    }}
+    print(json.dumps(out))
+
+asyncio.run(run())
+"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=os.getcwd(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+    except asyncio.TimeoutError:
+        proc.kill()
+        _logger.error("Case %s timed out (300s)", case_id)
+        return CaseResult(
+            case_id=case_id,
+            response=json.dumps({"root_causes": [], "propagation": []}),
+            correct=False,
+            data_dir=data_dir,
+        )
+
+    if proc.returncode != 0:
+        _logger.error("Case %s subprocess failed: %s", case_id, stderr.decode()[-500:])
+        return CaseResult(
+            case_id=case_id,
+            response=json.dumps({"root_causes": [], "propagation": []}),
+            correct=False,
+            data_dir=data_dir,
+        )
+
+    try:
+        out = json.loads(stdout.decode().strip().split("\n")[-1])
+        response = out["response"]
+        metadata = out.get("metadata", {})
+    except Exception as exc:
+        _logger.error("Case %s bad output: %s", case_id, exc)
+        return CaseResult(
+            case_id=case_id,
+            response=json.dumps({"root_causes": [], "propagation": []}),
+            correct=False,
+            data_dir=data_dir,
+        )
+
+    trajectory_path = ""
+    session_log_id = metadata.get("session_log_id", "")
+    if session_log_id:
+        trajectory_path = os.path.join(
+            os.getcwd(), ".agentm", "observability", f"{session_log_id}.jsonl"
+        )
+
+    causal_graph_path = Path(data_dir) / "causal_graph.json"
+    injection_path = Path(data_dir) / "injection.json"
+    correct = False
+    if causal_graph_path.exists() and injection_path.exists():
+        with open(injection_path) as f:
+            injection = json.load(f)
+        injected_apps = {
+            e["app"].lower() for e in injection.get("engine_config_summary", [])
+        }
+        try:
+            resp_data = json.loads(response)
+            agent_services = {
+                rc.get("service", "").lower()
+                for rc in resp_data.get("root_causes", [])
+                if isinstance(rc, dict) and rc.get("service")
+            }
+            correct = bool(injected_apps) and injected_apps.issubset(agent_services)
+        except (json.JSONDecodeError, TypeError):
+            correct = False
+
+    return CaseResult(
+        case_id=case_id,
+        response=response,
+        correct=correct,
+        data_dir=data_dir,
+        trajectory_path=trajectory_path,
+    )
+
+
 async def _run_cases(
     case_ids: list[str],
     data_root: str,
     scenario: str,
     provider_tuple: tuple[str, dict[str, Any]],
-    concurrency: int = 3,
+    concurrency: int = 10,
 ) -> list[CaseResult]:
-    """Run multiple cases with bounded concurrency."""
+    """Run multiple cases in parallel subprocesses."""
     semaphore = asyncio.Semaphore(concurrency)
-    results: list[CaseResult] = []
 
-    async def _bounded_run(case_id: str) -> CaseResult:
+    async def _bounded(case_id: str) -> CaseResult:
         async with semaphore:
             data_dir = os.path.join(data_root, case_id)
             _logger.info("Running case: %s", case_id)
-            result = await _run_case(case_id, data_dir, scenario, provider_tuple)
+            result = await _run_case_subprocess(
+                case_id, data_dir, scenario, provider_tuple
+            )
             _logger.info(
-                "Case %s: %s",
-                case_id,
+                "Case %s: %s", case_id,
                 "CORRECT" if result.correct else "INCORRECT",
             )
             return result
 
-    tasks = [_bounded_run(cid) for cid in case_ids]
-    results = await asyncio.gather(*tasks)
-    return list(results)
+    tasks = [_bounded(cid) for cid in case_ids]
+    return list(await asyncio.gather(*tasks))
 
 
 async def _observe_failures(
@@ -188,11 +307,9 @@ async def run_evolution_loop(
     data_root: str,
     skill_output_dir: str,
     scenario: str = "rca:baseline",
-    model: str = "DeepSeek-V4-pro",
-    base_url: str = "http://100.114.89.62:8088/v1",
-    api_key: str = "sk-DLbuXPx8tzeb29atiigWEIXoU9P0xkh_2amQNqJHpMk",
+    model_profile: str = "litellm-dsv4flash-nothink",
     max_iterations: int = 3,
-    concurrency: int = 3,
+    concurrency: int = 10,
 ) -> EvolutionResult:
     """Run the full self-evolution loop.
 
@@ -209,28 +326,29 @@ async def run_evolution_loop(
         data_root: Path to datasets/ops-lite/cases/.
         skill_output_dir: Where to write evolved skills.
         scenario: Which scenario variant to use for eval.
-        model: LLM model name for analysis.
-        base_url: LLM endpoint URL.
-        api_key: LLM API key.
+        model_profile: Name of a ~/.agentm/config.toml model profile.
         max_iterations: Maximum evolution iterations.
         concurrency: Max concurrent case runs.
 
     Returns:
         EvolutionResult with iteration details and accepted skills.
     """
-    from agentm_rca.eval.agent import _build_provider
+    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.lib.user_config import resolve_model_profile
+
+    profile = resolve_model_profile(model_profile)
+    if profile is None:
+        raise ValueError(f"no ~/.agentm/config.toml profile named {model_profile!r}")
+    provider_tuple = DEFAULT_PROVIDER_REGISTRY.build(
+        profile.provider, profile.to_build_config()
+    )
+    provider_module, provider_cfg = provider_tuple
 
     provider_config = {
-        "base_url": base_url,
-        "api_key": api_key,
-        "model": model,
+        "base_url": provider_cfg.get("base_url", ""),
+        "api_key": provider_cfg.get("api_key", ""),
+        "model": provider_cfg.get("model", model_profile),
     }
-
-    # Build provider tuple for running the agent
-    # Set env vars so _build_provider can find them
-    os.environ["OPENAI_BASE_URL"] = base_url
-    os.environ["OPENAI_API_KEY"] = api_key
-    provider_tuple = _build_provider("openai", model)
 
     result = EvolutionResult()
 
