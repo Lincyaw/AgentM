@@ -181,9 +181,9 @@ async def observe_case(
     config = AgentSessionConfig(
         cwd=data_dir,
         provider=provider_tuple,
-        scenario="local",
         loop_config=LoopConfig(max_turns=15),
-        extra_extensions=[
+        extensions=[
+            ("agentm.extensions.builtin.operations", {"backend": "local"}),
             ("agentm_rca.evolution.observer_atom", {
                 "trajectory_snapshot": snapshot,
                 "gt_info": gt_info,

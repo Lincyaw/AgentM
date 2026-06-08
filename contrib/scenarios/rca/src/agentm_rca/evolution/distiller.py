@@ -111,8 +111,13 @@ async def distill_skill(
     from agentm.core.runtime.session import AgentSession
     from agentm.core.runtime.session_factory import create_agent_session
 
-    failed = [r for r in reports if not r.correct]
+    failed = [
+        r for r in reports
+        if not r.correct
+        and not all(dp.category == "analysis_failed" for dp in r.divergence_points)
+    ]
     if not failed:
+        _logger.info("No usable failure reports (all correct or analysis_failed).")
         return None
 
     cats: Counter[str] = Counter()
@@ -137,9 +142,9 @@ async def distill_skill(
     config = AgentSessionConfig(
         cwd=".",
         provider=provider_tuple,
-        scenario="local",
         loop_config=LoopConfig(max_turns=10),
-        extra_extensions=[
+        extensions=[
+            ("agentm.extensions.builtin.operations", {"backend": "local"}),
             ("agentm_rca.evolution.distiller_atom", {
                 "reports": report_dicts,
                 "report_summary": summary,
