@@ -19,7 +19,6 @@ members = [
     "agentm-feishu",
     "agentm-mcp-bridge",
     "agentm-rca",
-    "agentm-rca-hfsm",
     "agentm-terminal",
     "llmharness",
 ]
@@ -185,29 +184,6 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.12.0" },
 ]
 provides-extras = ["duckdb-remote"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.23" },
-]
-
-[[package]]
-name = "agentm-rca-hfsm"
-version = "0.1.0"
-source = { editable = "contrib/scenarios/rca_hfsm" }
-dependencies = [
-    { name = "agentm" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "agentm", editable = "." }]
 
 [package.metadata.requires-dev]
 dev = [
