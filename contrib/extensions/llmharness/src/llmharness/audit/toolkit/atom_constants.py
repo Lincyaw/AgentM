@@ -31,12 +31,9 @@ OBSERVABILITY_MODULE: Final[str] = "agentm.extensions.builtin.observability"
 OPERATIONS_MODULE: Final[str] = "agentm.extensions.builtin.operations_local"
 
 # Optional atoms mounted on the extractor child only when
-# ``extractor_tool_call_budget`` is set. ``loop_budget`` is an SDK
-# builtin; ``turn_reminder`` is a sibling contrib atom — a soft
-# dependency, so the budget path fails at child freeze (opaque
-# ExtensionLoadError) if it is renamed or removed.
+# ``extractor_tool_call_budget`` is set. Both are SDK builtins.
 LOOP_BUDGET_MODULE: Final[str] = "agentm.extensions.builtin.loop_budget"
-TURN_REMINDER_MODULE: Final[str] = "contrib.extensions.turn_reminder"
+TURN_REMINDER_MODULE: Final[str] = "agentm.extensions.builtin.turn_reminder"
 
 __all__ = [
     "EXTRACTOR_STATE_SERVICE_KEY",

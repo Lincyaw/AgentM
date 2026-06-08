@@ -1,4 +1,4 @@
-"""Unit tests for the ``tool_write`` builtin atom's safety gates.
+"""Unit tests for the ``file_tools`` write tool's safety gates.
 
 Verifies the Claude-Code-aligned read-before-write contract:
 - New files can be written without prior read.
@@ -20,7 +20,7 @@ import pytest
 from agentm.core.abi.resource import WriteResult
 from agentm.core.lib import read_state as rs_mod
 from agentm.core.lib.read_state import get_read_state, record_read, clear
-from agentm.extensions.builtin import tool_write
+from agentm.extensions.builtin import file_tools
 
 
 # ---------------------------------------------------------------------------
@@ -66,15 +66,34 @@ class _FakeWriter:
         return _FakeWriteResult(path=path)
 
 
+class _FakeFileOps:
+    """Minimal FileOperations shim."""
+
+    async def read_file(self, path: str) -> bytes:
+        raise FileNotFoundError(path)
+
+
+class _FakeOperations:
+    """Minimal Operations bundle."""
+
+    def __init__(self) -> None:
+        self.file = _FakeFileOps()
+
+
 class _FakeApi:
-    """Minimal ExtensionAPI surface for tool_write."""
+    """Minimal ExtensionAPI surface for file_tools."""
 
     def __init__(self, writer: _FakeWriter) -> None:
         self._writer = writer
+        self._ops = _FakeOperations()
         self.tools: dict[str, Any] = {}
+        self.cwd = "/tmp"
 
     def get_resource_writer(self) -> _FakeWriter:
         return self._writer
+
+    def get_operations(self) -> _FakeOperations:
+        return self._ops
 
     def register_tool(self, t: Any) -> None:
         self.tools[t.name] = t
@@ -85,7 +104,7 @@ class _FakeApi:
 # ---------------------------------------------------------------------------
 
 def _install(api: _FakeApi, **config: Any) -> None:
-    tool_write.install(api, dict(config))  # type: ignore[arg-type]
+    file_tools.install(api, dict(config))  # type: ignore[arg-type]
 
 
 def _call(api: _FakeApi, path: str, content: str = "hello") -> tuple[str, bool]:

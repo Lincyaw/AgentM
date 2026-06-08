@@ -1,4 +1,4 @@
-"""Unit tests for tool_edit: findActualString, shrinkage guard, mtime gate, post-edit state."""
+"""Unit tests for file_tools edit: findActualString, shrinkage guard, mtime gate, post-edit state."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from agentm.core.lib.read_state import (
     record_read,
 )
 
-# Import private helpers from tool_edit for unit-testing
-from agentm.extensions.builtin.tool_edit import (
+# Import private helpers from file_tools for unit-testing
+from agentm.extensions.builtin.file_tools import (
     _check_shrinkage,
     _find_actual_string,
     _strip_line_whitespace,
@@ -176,12 +176,12 @@ class TestUpdateReadStateAfterEdit:
 
 
 # ---------------------------------------------------------------------------
-# file_modified_since_read integration (via tool_edit flow)
+# file_modified_since_read integration (via file_tools edit flow)
 # ---------------------------------------------------------------------------
 
 
 class TestFileModifiedSinceReadIntegration:
-    """Test that tool_edit's mtime gate works end-to-end with record_read."""
+    """Test that file_tools edit's mtime gate works end-to-end with record_read."""
 
     def test_no_false_positive_after_update(self) -> None:
         """After _update_read_state_after_edit, the file should not appear modified."""

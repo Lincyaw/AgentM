@@ -1,4 +1,4 @@
-"""Path-allow / -deny gate for the ``tool_read`` builtin atom.
+"""Path-allow / -deny gate for the ``file_tools`` read tool.
 
 The gate is the only thing standing between an agent given the ``read``
 tool and arbitrary filesystem reads. In RCA evals this matters: the per-
@@ -17,7 +17,7 @@ from typing import Any
 
 
 from agentm.core.abi.operations import FileOperations
-from agentm.extensions.builtin import tool_read
+from agentm.extensions.builtin import file_tools
 
 
 class _StubFileOps(FileOperations):
@@ -46,6 +46,19 @@ class _StubFileOps(FileOperations):
         raise NotImplementedError
 
 
+class _FakeWriter:
+    """Stub writer — tests here only exercise the read tool."""
+
+    async def read(self, path: str) -> bytes:
+        raise FileNotFoundError(path)
+
+    async def write(self, path: str, content: bytes, *, rationale: str = "", author: str = "agent") -> Any:
+        raise NotImplementedError
+
+    async def replace(self, path: str, old: bytes, new: bytes, *, rationale: str = "") -> Any:
+        raise NotImplementedError
+
+
 class _Api:
     def __init__(self, cwd: str, file_ops: FileOperations) -> None:
         self.cwd = cwd
@@ -60,9 +73,12 @@ class _Api:
             file = self._file_ops
         return _Ops()
 
+    def get_resource_writer(self) -> _FakeWriter:
+        return _FakeWriter()
+
 
 def _install(api: _Api, **config: Any) -> None:
-    tool_read.install(api, dict(config))
+    file_tools.install(api, dict(config))  # type: ignore[arg-type]
 
 
 def _read(api: _Api, path: str) -> tuple[str, bool]:

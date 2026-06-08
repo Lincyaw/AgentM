@@ -318,7 +318,7 @@ def test_extractor_record_replay_hydrates_recent_edges_into_state(
                 captured["state"] = cfg[EXTRACTOR_STATE_SERVICE_KEY]
             if module == "agentm.extensions.builtin.loop_budget":
                 captured["loop_budget"] = cfg
-            if module == "contrib.extensions.turn_reminder":
+            if module == "agentm.extensions.builtin.turn_reminder":
                 captured["turn_reminder"] = cfg
         captured["payload_text"] = kwargs["payload"]
         raw_payload = kwargs["payload"]

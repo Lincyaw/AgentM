@@ -1,4 +1,4 @@
-"""Tests for ``extensions.builtin.tool_read`` — aligned with Claude Code FileReadTool.
+"""Tests for ``extensions.builtin.file_tools`` read tool — aligned with Claude Code FileReadTool.
 
 Covers: full-file reads, partial reads (offset+limit), max-size gate,
 header format, and record_read integration.
@@ -14,7 +14,7 @@ import pytest
 
 from agentm.core.abi.operations import FileOperations
 from agentm.core.lib import read_state
-from agentm.extensions.builtin import tool_read
+from agentm.extensions.builtin import file_tools
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +49,19 @@ class _StubFileOps(FileOperations):
         raise NotImplementedError
 
 
+class _FakeWriter:
+    """Stub writer — tests here only exercise the read tool."""
+
+    async def read(self, path: str) -> bytes:
+        raise FileNotFoundError(path)
+
+    async def write(self, path: str, content: bytes, *, rationale: str = "", author: str = "agent") -> Any:
+        raise NotImplementedError
+
+    async def replace(self, path: str, old: bytes, new: bytes, *, rationale: str = "") -> Any:
+        raise NotImplementedError
+
+
 class _Api:
     def __init__(self, cwd: str, file_ops: FileOperations) -> None:
         self.cwd = cwd
@@ -63,13 +76,16 @@ class _Api:
             file = self._file_ops
         return _Ops()
 
+    def get_resource_writer(self) -> _FakeWriter:
+        return _FakeWriter()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _install(api: _Api, **config: Any) -> None:
-    tool_read.install(api, dict(config))  # type: ignore[arg-type]
+    file_tools.install(api, dict(config))  # type: ignore[arg-type]
 
 
 def _read(api: _Api, path: str, **kwargs: Any) -> tuple[str, bool]:
@@ -283,7 +299,7 @@ class TestConfigSchema:
     """max_size_bytes appears in the config schema."""
 
     def test_max_size_bytes_in_schema(self) -> None:
-        props = tool_read.MANIFEST.config_schema["properties"]
+        props = file_tools.MANIFEST.config_schema["properties"]
         assert "max_size_bytes" in props
         assert props["max_size_bytes"]["type"] == "integer"
         assert props["max_size_bytes"]["default"] == 262_144
@@ -293,9 +309,9 @@ class TestParameterSchema:
     """offset and limit have no defaults in the schema."""
 
     def test_no_default_on_offset(self) -> None:
-        props = tool_read._PARAMETERS["properties"]
+        props = file_tools._READ_PARAMETERS["properties"]
         assert "default" not in props["offset"]
 
     def test_no_default_on_limit(self) -> None:
-        props = tool_read._PARAMETERS["properties"]
+        props = file_tools._READ_PARAMETERS["properties"]
         assert "default" not in props["limit"]

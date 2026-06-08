@@ -674,7 +674,7 @@ class SessionTelemetry:
         The PR-A ``FileLogExporter`` writes one OTLP ``ResourceLogs``
         element per line. The ``event_name`` plays the role of the OTel
         "event name" — consumers (session_manager, indexer,
-        tool_query_traces, llmharness CLI) filter on it instead of on a
+        query_traces, llmharness CLI) filter on it instead of on a
         legacy ``kind`` field.
 
         Attribute values are coerced through :meth:`to_otel_attr` so atoms

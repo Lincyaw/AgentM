@@ -15,7 +15,7 @@ deleted on ``SessionShutdownEvent``. Each ``BashOperations.exec`` maps to one
 
 The atom *also* replaces the session's :class:`ResourceWriter` (via
 ``api.register_resource_writer``) with a sandbox-backed implementation so
-``tool_write`` / ``tool_edit`` land inside the sandbox too — keeping read and
+``write`` / ``edit`` (from ``file_tools``) land inside the sandbox too — keeping read and
 write semantics consistent with bash. The sandbox writer refuses any path
 outside ``work_dir`` (including every host path), so an agent in a sandboxed
 session cannot modify its own AgentM code.
@@ -794,7 +794,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             default_timeout=timeout_value,
         ),
     )
-    # Redirect tool_write / tool_edit / tool_propose_change writes into the
+    # Redirect write / edit / tool_propose_change writes into the
     # sandbox. The writer rejects any path outside ``work_dir``, so the agent
     # cannot mutate its own code from inside a sandboxed session.
     api.register_resource_writer(
