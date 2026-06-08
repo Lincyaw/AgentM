@@ -59,28 +59,48 @@ def _run_eval(
     scenario: str,
     concurrency: int,
     limit: int | None = None,
+    env_override: dict[str, str] | None = None,
 ) -> None:
-    """Shell out to ``rca llm-eval run`` — the existing eval pipeline."""
-    cmd = [
-        "uv", "run", "--no-sync", "rca", "llm-eval", "run", config_path,
-        "-a", "agentm",
-        "--ak", f"scenario={scenario}",
-        "-n", str(concurrency),
-        "--exp-id", exp_id,
-    ]
-    if limit is not None:
-        cmd.extend(["-l", str(limit)])
+    """Shell out to ``rca llm-eval run``.
 
-    _logger.info("Running eval: exp=%s concurrency=%d limit=%s", exp_id, concurrency, limit)
+    Renders ``${VAR}`` placeholders in the config via ``envsubst`` first.
+    """
+    env = {**os.environ, **(env_override or {})}
+
+    rendered = subprocess.run(
+        ["envsubst"], input=Path(config_path).read_text(),
+        capture_output=True, text=True, env=env,
+    )
+    if rendered.returncode != 0:
+        raise RuntimeError(f"envsubst failed: {rendered.stderr}")
+
+    fd, rendered_path = tempfile.mkstemp(suffix=".yaml", prefix="evo-eval-")
+    os.write(fd, rendered.stdout.encode())
+    os.close(fd)
+
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
-    except subprocess.TimeoutExpired:
-        _logger.warning("Eval timed out for %s; using partial results from eval.db", exp_id)
-        return
-    if result.returncode != 0:
-        _logger.error("Eval failed (exit %d): %s", result.returncode, result.stderr[-500:])
-        raise RuntimeError(f"rca llm-eval run failed: {result.stderr[-200:]}")
-    _logger.info("Eval complete: %s", exp_id)
+        cmd = [
+            "uv", "run", "--no-sync", "rca", "llm-eval", "run", rendered_path,
+            "-a", "agentm",
+            "--ak", f"scenario={scenario}",
+            "-n", str(concurrency),
+            "--exp-id", exp_id,
+        ]
+        if limit is not None:
+            cmd.extend(["-l", str(limit)])
+
+        _logger.info("Running eval: exp=%s concurrency=%d limit=%s", exp_id, concurrency, limit)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=env)
+        except subprocess.TimeoutExpired:
+            _logger.warning("Eval timed out for %s; using partial results", exp_id)
+            return
+        if result.returncode != 0:
+            _logger.error("Eval failed (exit %d): %s", result.returncode, result.stderr[-500:])
+            raise RuntimeError(f"rca llm-eval run failed: {result.stderr[-200:]}")
+        _logger.info("Eval complete: %s", exp_id)
+    finally:
+        os.unlink(rendered_path)
 
 
 def _query_results(db_path: str, exp_id: str) -> list[dict[str, Any]]:
@@ -152,7 +172,21 @@ async def run_evolution_loop(
     7. Compare accuracy, accept/reject
     """
     provider_tuple = _resolve_provider(model_profile)
-    _env = env_vars or {}
+    _, provider_cfg = provider_tuple
+
+    model_name = provider_cfg.get("model", model_profile)
+    eval_env: dict[str, str] = {
+        "MODEL_NAME": model_name,
+        "JUDGE_MODEL": model_name,
+        "AGENTM_MODEL": model_name,
+        "RCA_DATASET_ROOT": data_root,
+        "AGENTM_PROVIDER": "openai",
+        "OPENAI_API_KEY": provider_cfg.get("api_key", ""),
+        "OPENAI_VERIFY_SSL": "false",
+    }
+    if provider_cfg.get("base_url"):
+        eval_env["OPENAI_BASE_URL"] = provider_cfg["base_url"]
+    eval_env.update(env_vars or {})
 
     result = EvolutionResult()
 
@@ -162,7 +196,7 @@ async def run_evolution_loop(
     _run_eval(
         config_path=eval_config, exp_id=baseline_exp,
         scenario=scenario, concurrency=concurrency,
-        limit=test_limit,
+        limit=test_limit, env_override=eval_env,
     )
     baseline_results = _query_results(db_path, baseline_exp)
     baseline_acc = _accuracy(baseline_results)
@@ -181,7 +215,7 @@ async def run_evolution_loop(
         _run_eval(
             config_path=eval_config, exp_id=train_exp,
             scenario=scenario, concurrency=concurrency,
-            limit=train_limit,
+            limit=train_limit, env_override=eval_env,
         )
         train_results = _query_results(db_path, train_exp)
         train_acc = _accuracy(train_results)
@@ -253,7 +287,7 @@ async def run_evolution_loop(
         _run_eval(
             config_path=eval_config, exp_id=skill_exp,
             scenario=scenario, concurrency=concurrency,
-            limit=test_limit,
+            limit=test_limit, env_override=eval_env,
         )
         skill_results = _query_results(db_path, skill_exp)
         skill_acc = _accuracy(skill_results)
