@@ -1,57 +1,17 @@
 name: rca:harness.sync
 description: |
-  ``rca:harness`` in synchronous audit mode — for dataset collection.
-
-  Mounts the same five baseline atoms + ``runtime_context`` + the
-  llmharness cognitive-audit adapter as ``rca:harness``, but flips the
-  adapter to ``mode: sync``: every turn the main agent stops and waits
-  for the extractor (always) and auditor (every k turns) to finish
-  before it issues the next LLM call. That guarantees:
-
-    * Every configured extractor interval has a paired ``llmharness.audit_event`` set persisted.
-    * Every k turns has a paired ``llmharness.verdict``.
-    * No data is lost on session shutdown timeouts (nothing is queued).
-
-  Use this variant to record (trajectory, audit) pairs for offline
-  distillation of the extractor / auditor into a smaller model. Once the
-  small model is trained, switch to ``rca:harness`` (async, same atoms,
-  same cadence config) for production runs — the main agent runs at
-  provider-floor latency and audit work happens in the background.
-
-# Same task_class as baseline / async harness so traces are filterable
-# uniformly across the three scenarios when comparing.
+  Baseline investigator + llmharness sync audit with reminder injection.
+  Identical to rca:harness (both are sync); kept for backward compatibility.
 task_class: rca_baseline
 
+includes:
+  - overlays/base-investigator.yaml
+  - overlays/runtime-context.yaml
+
 extensions:
-  # --- substrate: Operations bundle is mandatory post harness-collapse
-  # (commit e062913) — the session factory fail-stops at freeze if no
-  # atom registered Operations. ThinkDepthAI tools never call FS / bash,
-  # so the bundle is unused at runtime, but the registration is required.
-  - module: agentm.extensions.builtin.operations
-    config:
-      backend: local
-
-  # --- baseline tool surface (verbatim from manifest.baseline.yaml) ---
-  - module: agentm_rca.tools.duckdb_sql
-  - module: agentm_rca.tools.finalize
-  - module: agentm.extensions.builtin.observability
-  - module: agentm_rca.rcabench_contract
-  - module: agentm_rca.prompt_loader
-    config:
-      prompt: investigator.md
-      personas: false
-
-  # Surface AGENTM_RCA_DATA_DIR to the model (see manifest.harness.yaml).
-  - module: agentm_rca.runtime_context
-
-  # --- cognitive-audit adapter in SYNC mode ---
-  # The only line that differs from manifest.harness.yaml: ``mode: sync``.
-  # Per-turn wall time grows by the extractor child latency (~10-15s for a
-  # haiku-class model, ~20-30s for a frontier model); plan budgets
-  # accordingly. Extractor and auditor both fire every 5 main-agent turns;
-  # extractor runs first, then auditor judges the freshly updated graph.
   - module: llmharness.adapters.agentm
     config:
       mode: sync
       extractor_interval_turns: 5
       audit_interval_turns: 5
+      enable_reminders: true

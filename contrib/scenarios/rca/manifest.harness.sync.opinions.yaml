@@ -1,38 +1,10 @@
 name: rca:harness.sync.opinions
 description: |
-  ``rca:harness.sync`` with auditor reminders disabled — auditor still
-  fires every k turns and persists its verdict to the replay sidecar,
-  but ``drift=true`` reminders are NOT injected back into the main
-  agent loop. The investigator therefore sees exactly the same
-  trajectory as ``rca:baseline`` while the audit data is collected
-  side-channel.
-
-  Use this variant when you want the extractor + auditor opinions for
-  per-case data export (``llmharness-aggregate``) without letting the
-  audit influence the main agent's behaviour.
-
+  Sync audit, opinions-only: auditor fires but reminders are NOT injected.
+  The investigator trajectory is identical to rca:baseline.
 task_class: rca_baseline
 
-extensions:
-  - module: agentm.extensions.builtin.operations
-    config:
-      backend: local
-  - module: agentm_rca.tools.duckdb_sql
-  - module: agentm_rca.tools.finalize
-  - module: agentm.extensions.builtin.observability
-  - module: agentm_rca.rcabench_contract
-  - module: agentm_rca.prompt_loader
-    config:
-      prompt: investigator.md
-      personas: false
-  - module: agentm_rca.runtime_context
-
-  # Sync audit, opinions-only: every 5 main-agent turns, run extractor
-  # first and then auditor; enable_reminders=false keeps the audit output
-  # observable while preventing main-agent intervention.
-  - module: llmharness.adapters.agentm
-    config:
-      mode: sync
-      extractor_interval_turns: 5
-      audit_interval_turns: 5
-      enable_reminders: false
+includes:
+  - overlays/base-investigator.yaml
+  - overlays/runtime-context.yaml
+  - overlays/harness-sync.yaml

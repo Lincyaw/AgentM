@@ -30,7 +30,7 @@ extensions:
   - module: agentm.extensions.builtin.tool_eval_run
     config:
       target_scenario: rca:baseline
-      eval_dir: contrib/scenarios/rca/eval/baseline
+      eval_dir: contrib/scenarios/rca/tuner/eval
       max_cost_usd: 0.50
 
   # Promotion gate. kind="system_prompt" landed in B-3.
@@ -51,7 +51,7 @@ extensions:
         ``contrib/scenarios/rca/prompts/investigator.md`` (now shared with
         the multi-agent rca scenario, but only loaded by rca:baseline's
         manifest) so the production scenario passes more cases in the eval
-        suite under ``contrib/scenarios/rca/eval/baseline/``.
+        suite under ``contrib/scenarios/rca/tuner/eval/``.
 
         Quality signal:
           primary : grade_mean (0.7 * service_hit + 0.3 * fault_kind_hit;

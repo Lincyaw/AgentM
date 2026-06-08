@@ -1,0 +1,15 @@
+# Shared investigator stack: operations + SQL + finalize + observability +
+# rcabench contract + prompt loader (investigator.md, single-agent mode).
+# Used by baseline and harness strategies.
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm_rca.tools.duckdb_sql
+  - module: agentm_rca.tools.finalize
+  - module: agentm.extensions.builtin.observability
+  - module: agentm_rca.rcabench_contract
+  - module: agentm_rca.prompt_loader
+    config:
+      prompt: investigator.md
+      personas: false

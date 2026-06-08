@@ -4,7 +4,7 @@
 # Expand before passing to ``rca llm-eval``:
 #
 #   RCA_DATASET_ROOT=/path/to/rca \
-#   envsubst < contrib/scenarios/rca/eval/baseline/config.yaml \
+#   envsubst < contrib/scenarios/rca/tuner/eval/config.yaml \
 #     | uv run rca llm-eval run - -a agentm -l 10 --ak scenario=rca:baseline
 #
 # See contrib/scenarios/rca/README.md for the full env-var contract.
