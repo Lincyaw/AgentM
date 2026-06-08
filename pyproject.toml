@@ -48,11 +48,9 @@ harbor = [
 terminal = [
     "agentm-terminal",
 ]
-rca = ["agentm-rca"]
 llmharness = ["llmharness"]
 mcp = ["agentm-mcp-bridge"]
 all-contrib = [
-    "agentm-rca",
     "llmharness",
     "agentm-mcp-bridge",
     "agentm-terminal",
@@ -83,7 +81,6 @@ build-backend = "uv_build"
 members = [
     "contrib/extensions/llmharness",
     "contrib/extensions/mcp_bridge",
-    "contrib/scenarios/rca",
     "contrib/scenarios/harbor",
     "contrib/gateway-peers/terminal",
     "contrib/gateway-peers/feishu",
@@ -93,7 +90,6 @@ members = [
 # a published wheel takes over transparently outside the workspace.
 [tool.uv.sources]
 agentm-terminal = { workspace = true }
-agentm-rca = { workspace = true }
 llmharness = { workspace = true }
 agentm-mcp-bridge = { workspace = true }
 agentm-harbor = { workspace = true }

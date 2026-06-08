@@ -2,4 +2,4 @@
 # so the model knows where case files live. Used by harness strategies where
 # the investigator prompt doesn't embed the path.
 extensions:
-  - module: agentm_rca.runtime_context
+  - module: rca.default.runtime_context

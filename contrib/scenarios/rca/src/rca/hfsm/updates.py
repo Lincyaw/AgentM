@@ -52,7 +52,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
-from agentm_rca.hfsm.schema import (
+from rca.hfsm.schema import (
     CheckResult,
     Hypothesis,
     Observation,

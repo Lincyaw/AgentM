@@ -1,19 +1,20 @@
-"""``judge_independence`` — ``rca.judge.independence`` service atom.
+"""``judge_falsified_genuinely`` — ``rca.judge.falsified_genuinely`` service atom.
 
 Phase 2 C1 of the rca_hfsm scenario. Registers a single ``Judge``
-implementation under the service name ``rca.judge.independence`` and
-toggles between an LLM-backed and a scripted (stub) backing
+implementation under the service name ``rca.judge.falsified_genuinely``
+and toggles between an LLM-backed and a scripted (stub) backing
 implementation via ``config.mode`` (default: ``"llm"``).
 
-Replaces the Phase 1 ``worker_session_id`` literal-equality check (see
-``updates.independent_positive_workers``). Catches: same source data,
-identical observations across different session IDs, brief copy-paste.
+Replaces the Phase 1 structural "≥1 negative prediction has been
+checked" rule (design §4.4). Captures cases the structural rule misses:
+a worker that "checked" a negative prediction by writing one cursory
+observation and concluding "not triggered" without real investigation.
 C1 only mounts the judge as a service; the gate continues to use its
 Phase 1 rules. The gate refactor is C2's job.
 
-JudgeContext shape: ``graph_slice = {"check_a", "check_b"}`` with
-``operands = {}``. Canonical verdict strings per design §4.3:
-``"independent" | "redundant" | "unclear"``.
+JudgeContext shape: ``graph_slice = {"hypothesis", "predictions",
+"all_checks"}`` with ``operands = {}``. Canonical verdict strings per
+design §4.4: ``"genuine_attempt" | "no_attempt" | "unclear"``.
 
 §11 single-file contract: stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions`` + scenario-local ``judges`` module only. Failure
@@ -47,7 +48,7 @@ from agentm.core.abi import (
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.judges import (
+from rca.hfsm.judges import (
     JudgeContext,
     SUBMIT_VERDICT_TOOL_NAME,
     Verdict,
@@ -57,17 +58,17 @@ from agentm_rca.hfsm.judges import (
 )
 
 
-_KIND = "independence"
+_KIND = "falsified_genuinely"
 _SERVICE_NAME = f"rca.judge.{_KIND}"
 _PROMPT_RELPATH = f"contrib/scenarios/rca/prompts/hfsm/judges/{_KIND}.md"
 _LRU_MAX = 256
 
 
 MANIFEST = ExtensionManifest(
-    name="judge_independence",
+    name="judge_falsified_genuinely",
     description=(
-        "Registers the rca.judge.independence service. LLM-backed by default; "
-        "scripted stub mode available via config.mode='stub' for tests."
+        "Registers the rca.judge.falsified_genuinely service. LLM-backed by "
+        "default; scripted stub mode available via config.mode='stub' for tests."
     ),
     registers=(),
     config_schema={

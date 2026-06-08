@@ -1,25 +1,25 @@
-"""``judge_falsified_genuinely`` — ``rca.judge.falsified_genuinely`` service atom.
+"""``judge_satisfied`` — ``rca.judge.satisfied`` service atom.
 
 Phase 2 C1 of the rca_hfsm scenario. Registers a single ``Judge``
-implementation under the service name ``rca.judge.falsified_genuinely``
-and toggles between an LLM-backed and a scripted (stub) backing
+implementation under the service name ``rca.judge.satisfied`` and
+toggles between an LLM-backed and a scripted (stub) backing
 implementation via ``config.mode`` (default: ``"llm"``).
 
-Replaces the Phase 1 structural "≥1 negative prediction has been
-checked" rule (design §4.4). Captures cases the structural rule misses:
-a worker that "checked" a negative prediction by writing one cursory
-observation and concluding "not triggered" without real investigation.
-C1 only mounts the judge as a service; the gate continues to use its
-Phase 1 rules. The gate refactor is C2's job.
+Replaces the Phase 1 word-boundary regex on ``verdict_proposal`` (see
+``rca_falsification_gate`` / ``updates.py``'s ``triggered`` /
+``supports`` lemma matching). C1 only mounts the judge as a service;
+the gate continues to use its Phase 1 rules. The gate refactor is C2's
+job.
 
-JudgeContext shape: ``graph_slice = {"hypothesis", "predictions",
-"all_checks"}`` with ``operands = {}``. Canonical verdict strings per
-design §4.4: ``"genuine_attempt" | "no_attempt" | "unclear"``.
+JudgeContext shape: ``graph_slice = {"prediction": ..., "checks": [...]}``
+with ``operands = {}``. Canonical verdict strings per design §4.1:
+``"satisfied" | "refuted" | "unclear" | "partial"``.
 
 §11 single-file contract: stdlib + ``agentm.core.abi.*`` +
-``agentm.extensions`` + scenario-local ``judges`` module only. Failure
-mode: one retry on provider error or malformed ``submit_verdict``
-payload, then :func:`make_unclear`. No regex anywhere.
+``agentm.extensions`` + scenario-local ``judges`` module only. No
+atom-to-atom imports. No module-level mutable state. Failure mode: one
+retry on provider error or malformed ``submit_verdict`` payload, then
+:func:`make_unclear`. No regex anywhere.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ from agentm.core.abi import (
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.judges import (
+from rca.hfsm.judges import (
     JudgeContext,
     SUBMIT_VERDICT_TOOL_NAME,
     Verdict,
@@ -58,17 +58,17 @@ from agentm_rca.hfsm.judges import (
 )
 
 
-_KIND = "falsified_genuinely"
+_KIND = "satisfied"
 _SERVICE_NAME = f"rca.judge.{_KIND}"
 _PROMPT_RELPATH = f"contrib/scenarios/rca/prompts/hfsm/judges/{_KIND}.md"
 _LRU_MAX = 256
 
 
 MANIFEST = ExtensionManifest(
-    name="judge_falsified_genuinely",
+    name="judge_satisfied",
     description=(
-        "Registers the rca.judge.falsified_genuinely service. LLM-backed by "
-        "default; scripted stub mode available via config.mode='stub' for tests."
+        "Registers the rca.judge.satisfied service. LLM-backed by default; "
+        "scripted stub mode available via config.mode='stub' for tests."
     ),
     registers=(),
     config_schema={
@@ -96,6 +96,10 @@ MANIFEST = ExtensionManifest(
 
 
 async def _inert_execute(args: dict[str, Any]) -> ToolResult:
+    """``submit_verdict`` is never invoked by the agent loop — the judge
+    reads the ``ToolCallBlock`` straight off the assistant message — but
+    a ``Tool`` still needs an ``execute`` to satisfy the Protocol."""
+
     del args
     return ToolResult(content=[TextContent(type="text", text="ok")])
 
@@ -130,6 +134,12 @@ def _load_prompt(cwd: str) -> str:
 
 
 def _parse_submit_verdict(message: AssistantMessage) -> Verdict:
+    """Extract the ``submit_verdict`` payload or raise ``ValueError``.
+
+    The ``ValueError`` path is what triggers the one-retry contract; the
+    second failure becomes :func:`make_unclear`.
+    """
+
     for block in message.content:
         if not isinstance(block, ToolCallBlock) or block.name != SUBMIT_VERDICT_TOOL_NAME:
             continue
@@ -150,6 +160,14 @@ def _parse_submit_verdict(message: AssistantMessage) -> Verdict:
 
 
 def _run_coro(coro: Any) -> Any:
+    """Sync entry point for the async provider call.
+
+    The ``Judge.judge`` Protocol is sync; ``stream_fn`` is async. Tests
+    use ``asyncio.run`` directly; when called from inside a running loop
+    (production tool handlers are async) we offload to a thread to avoid
+    "asyncio.run() cannot be called from a running event loop".
+    """
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -159,6 +177,8 @@ def _run_coro(coro: Any) -> Any:
 
 
 class _StubJudge:
+    """Returns scripted verdicts in order; caches per context."""
+
     def __init__(self, kind: str, scripted: list[dict[str, Any]]) -> None:
         self.kind = kind
         self._scripted = list(scripted)
@@ -190,6 +210,8 @@ class _StubJudge:
 
 
 class _LlmJudge:
+    """Drives the active provider via ``stream_fn``; one retry then unclear."""
+
     def __init__(
         self, *, kind: str, api: ExtensionAPI, model_override: str | None
     ) -> None:

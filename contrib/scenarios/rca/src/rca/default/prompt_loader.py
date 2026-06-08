@@ -31,7 +31,7 @@ from agentm.core.abi.events import (
 from agentm.core.abi.extension import ExtensionAPI
 
 
-from agentm_rca import SCENARIO_ROOT
+from rca import SCENARIO_ROOT
 
 _PROMPTS_DIR = SCENARIO_ROOT / "prompts"
 _AGENTS_DIR = _PROMPTS_DIR / "agents"

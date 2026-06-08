@@ -35,7 +35,7 @@ from typing import Any, Final
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.schema import (
+from rca.hfsm.schema import (
     CheckResult,
     Hypothesis,
     Observation,

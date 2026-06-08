@@ -81,7 +81,7 @@ class _State:
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    # Imported lazily so ``import agentm_rca.finalize`` does not
+    # Imported lazily so ``import rca.finalize`` does not
     # require rcabench-platform at module-load time (e.g. for static
     # analysis or tooling without the SDK installed).
     from rcabench_platform.v3.sdk.evaluation.v2 import AgentRCAOutput

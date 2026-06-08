@@ -14,7 +14,7 @@ from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import ResourcesDiscoverEvent
 from agentm.core.abi.extension import ExtensionAPI
 
-from agentm_rca import SCENARIO_ROOT
+from rca import SCENARIO_ROOT
 
 _SKILLS_DIR = SCENARIO_ROOT / "skills"
 

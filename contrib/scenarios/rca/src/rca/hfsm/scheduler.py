@@ -19,7 +19,7 @@ policy atom imports it as a pure helper.
 
 from __future__ import annotations
 
-from agentm_rca.hfsm.schema import Hypothesis, Prediction
+from rca.hfsm.schema import Hypothesis, Prediction
 
 
 def _normalise(text: str) -> str:

@@ -49,7 +49,7 @@ from agentm.core.abi import (
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.judges import (
+from rca.hfsm.judges import (
     JudgeContext,
     SUBMIT_VERDICT_TOOL_NAME,
     Verdict,
