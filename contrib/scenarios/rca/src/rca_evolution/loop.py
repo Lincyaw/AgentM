@@ -94,12 +94,14 @@ def _run_eval(
         if limit is not None:
             cmd.extend(["-l", str(limit)])
 
-        _logger.info("Running eval: exp=%s concurrency=%d limit=%s", exp_id, concurrency, limit)
+        _logger.info("Running eval: exp=%s concurrency=%d limit=%s cmd=%s", exp_id, concurrency, limit, " ".join(cmd))
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=env)
         except subprocess.TimeoutExpired:
             _logger.warning("Eval timed out for %s; using partial results", exp_id)
             return
+        if result.stderr:
+            _logger.debug("Eval stderr: %s", result.stderr[-1000:])
         if result.returncode != 0:
             _logger.error("Eval failed (exit %d): %s", result.returncode, result.stderr[-500:])
             raise RuntimeError(f"rca llm-eval run failed: {result.stderr[-200:]}")
