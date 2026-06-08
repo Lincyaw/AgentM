@@ -100,13 +100,6 @@ def _candidate_roots() -> list[Path]:
             walker = walker.parent
     except Exception:  # noqa: BLE001 — best-effort fallback
         pass
-    # Wheel data directory: ``pyproject.toml`` ships ``contrib/`` via
-    # ``[tool.uv.build-backend] data = { data = "contrib" }`` which installs
-    # to ``sys.prefix`` (the virtualenv root). Check that path so scenarios
-    # resolve from a wheel install without a source checkout.
-    prefix = Path(sys.prefix)
-    if (prefix / "contrib" / "scenarios").is_dir():
-        roots.append(prefix)
     return roots
 
 
