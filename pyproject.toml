@@ -46,12 +46,10 @@ terminal = [
     "agentm-terminal",
 ]
 rca = ["agentm-rca"]
-rca-hfsm = ["agentm-rca-hfsm"]
 llmharness = ["llmharness"]
 mcp = ["agentm-mcp-bridge"]
 all-contrib = [
     "agentm-rca",
-    "agentm-rca-hfsm",
     "llmharness",
     "agentm-mcp-bridge",
     "agentm-terminal",
@@ -71,22 +69,9 @@ dev = [
 [project.scripts]
 agentm = "agentm:main"
 
-[project.entry-points."agentm.scenarios"]
-sandbox = "agentm.scenarios.sandbox"
-
 [build-system]
 requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
-
-# Ship contrib/scenarios/ inside the wheel so scenarios are discoverable
-# after ``pip install agentm``. The ``data`` category installs to
-# ``sys.prefix`` (the virtualenv root); the scenario loader's
-# ``_candidate_roots()`` includes ``sys.prefix`` as a search path, so
-# ``contrib/scenarios/<name>/manifest.yaml`` resolves from a wheel install
-# without ``AGENTM_PROJECT_ROOT`` or a source checkout.
-[tool.uv.build-backend]
-data = { data = "contrib" }
-source-include = ["contrib/scenarios/**"]
 
 [tool.uv.workspace]
 # Explicitly list nested projects under contrib/. Other contrib/scenarios/*
@@ -105,7 +90,6 @@ members = [
 [tool.uv.sources]
 agentm-terminal = { workspace = true }
 agentm-rca = { workspace = true }
-agentm-rca-hfsm = { workspace = true }
 llmharness = { workspace = true }
 agentm-mcp-bridge = { workspace = true }
 
