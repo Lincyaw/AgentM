@@ -42,6 +42,9 @@ agent-env = [
 eval = [
     "duckdb>=1.5.2",
 ]
+harbor = [
+    "agentm-harbor>=0.1.0",
+]
 terminal = [
     "agentm-terminal",
 ]
@@ -81,6 +84,7 @@ members = [
     "contrib/extensions/llmharness",
     "contrib/extensions/mcp_bridge",
     "contrib/scenarios/rca",
+    "contrib/scenarios/harbor",
     "contrib/gateway-peers/terminal",
     "contrib/gateway-peers/feishu",
 ]
@@ -92,6 +96,7 @@ agentm-terminal = { workspace = true }
 agentm-rca = { workspace = true }
 llmharness = { workspace = true }
 agentm-mcp-bridge = { workspace = true }
+agentm-harbor = { workspace = true }
 
 [tool.pytest.ini_options]
 # UI tests exercise the Textual TUI; they pass but don't map to any
