@@ -8,7 +8,7 @@ update existing rows in place rather than duplicating.
 
 Invocation::
 
-    uv run python -m agentm_rca.eval.seed_dataset \\
+    uv run python -m rca_eval.seed_dataset \\
         --jsonl /home/ddq/AoyangSpace/dataset/rca/data.jsonl \\
         --dataset rca-openrca2-lite
 

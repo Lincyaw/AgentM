@@ -1,6 +1,6 @@
 """Rehydrate OpenAI-style chat messages into AgentM ``AgentMessage`` objects.
 
-This is the inverse of ``agentm_rca.eval.agent._build_trajectory``, which
+This is the inverse of ``rca_eval.agent._build_trajectory``, which
 serializes an AgentM session's ``final_messages`` into rcabench-platform's
 ``Message`` schema (``{role, content, tool_calls, tool_call_id}``). The
 replay-fork driver needs the round-trip: a recorded baseline trajectory --

@@ -11,7 +11,7 @@ from typing import Any
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 
-from agentm_rca.evolution.distiller_tools import (
+from rca_evolution.distiller_tools import (
     build_browse_reports_tool,
     build_get_existing_skills_tool,
     build_get_report_summary_tool,

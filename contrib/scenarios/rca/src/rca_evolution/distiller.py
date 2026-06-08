@@ -12,7 +12,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from agentm_rca.evolution.observer import DivergenceReport
+from rca_evolution.observer import DivergenceReport
 
 _logger = logging.getLogger(__name__)
 
@@ -174,7 +174,7 @@ async def distill_skill(
         loop_config=LoopConfig(max_turns=10),
         extensions=[
             ("agentm.extensions.builtin.operations", {"backend": "local"}),
-            ("agentm_rca.evolution.distiller_atom", {
+            ("rca_evolution.distiller_atom", {
                 "reports": report_dicts,
                 "report_summary": summary,
                 "existing_skills": existing_skills,

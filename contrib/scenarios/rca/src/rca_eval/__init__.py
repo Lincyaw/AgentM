@@ -19,7 +19,7 @@ Configure both from the eval YAML — no in-process monkey-patches.
 
 from __future__ import annotations
 
-from agentm_rca.eval.agent import AgentMAgent
+from rca_eval.agent import AgentMAgent
 
 
 def _register_processer_aliases() -> None:

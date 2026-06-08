@@ -13,7 +13,7 @@
 # computed locally and do not hit the LLM.
 #
 # An ``ops-lite`` alias for ``RCABenchProcesser`` is registered at
-# ``agentm_rca.eval`` import time so the processer-factory lookup picks
+# ``rca_eval`` import time so the processer-factory lookup picks
 # up RCABenchProcesser when ``dataset="ops-lite"``.
 #
 # Run:

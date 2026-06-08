@@ -2,7 +2,7 @@
 
 Usage::
 
-    uv run python -m agentm_rca.evolution.cli run \\
+    uv run python -m rca_evolution.cli run \\
         --eval-config contrib/scenarios/rca/eval/configs/ops-lite-fixed-50.yaml \\
         --model litellm-dsv4flash-nothink \\
         --train-limit 20 --test-limit 10
@@ -71,7 +71,7 @@ def run(
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
 
-    from agentm_rca.evolution.loop import run_evolution_loop
+    from rca_evolution.loop import run_evolution_loop
 
     result = asyncio.run(run_evolution_loop(
         eval_config=str(eval_config.resolve()),
