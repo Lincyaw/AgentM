@@ -1,8 +1,7 @@
-"""Grouped file-I/O tool atom: ``read``, ``write``, and ``edit``.
+"""Grouped file-I/O tool atom: ``read``, ``write``, ``edit``, ``glob``, ``grep``.
 
-Merges the former single-tool atoms ``tool_read``, ``tool_write``, and
-``tool_edit`` into one §11-compliant module. The LLM-facing tool names
-are unchanged (``read``, ``write``, ``edit``).
+Merges the former single-tool atoms into one §11-compliant module. The
+LLM-facing tool names are unchanged.
 
 Read — aligned with Claude Code's FileReadTool behavior: no hardcoded
 line cap, max-file-size gate (default 256 KB), partial-view tracking for
@@ -15,18 +14,25 @@ update.
 Edit — enforces read-before-edit, supports string replacement and
 line-range replacement modes, file-modified-since-read detection,
 post-edit read_state update.
+
+Glob — file-pattern matching via ``find`` through BashOperations, with
+directory exclusion for .git/node_modules/__pycache__.
+
+Grep — content search via grep/ripgrep through BashOperations, with
+output parsing and path relativization.
 """
 
 from __future__ import annotations
 
 import fnmatch
 import os
+import shlex
 from pathlib import Path, PurePath
 from typing import Any, Final
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.tool import TOOL_RESULT_FORMAT_METADATA_KEY
-from agentm.core.abi.operations import FileOperations
+from agentm.core.abi.operations import BashOperations, FileOperations
 from agentm.core.lib.read_state import (
     content_hash_for,
     file_modified_since_read,
@@ -43,8 +49,8 @@ from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="file_tools",
-    description="Register the read, write, and edit tools for file I/O.",
-    registers=("tool:read", "tool:write", "tool:edit"),
+    description="Register the read, write, edit, glob, and grep tools for file I/O.",
+    registers=("tool:read", "tool:write", "tool:edit", "tool:glob", "tool:grep"),
     config_schema={
         "type": "object",
         "properties": {
@@ -371,6 +377,254 @@ _WRITE_PARAMETERS: Final = {
 
 
 # ---------------------------------------------------------------------------
+# Glob helpers
+# ---------------------------------------------------------------------------
+
+_GLOB_PARAMETERS: Final = {
+    "type": "object",
+    "properties": {
+        "pattern": {
+            "type": "string",
+            "description": "Glob pattern to match files against (e.g. '*.py', '**/*.yaml').",
+        },
+        "path": {
+            "type": "string",
+            "description": (
+                "Directory to search in. Defaults to the session working "
+                "directory if omitted."
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "default": 100,
+            "description": "Maximum number of results to return. Default 100.",
+        },
+    },
+    "required": ["pattern"],
+    "additionalProperties": False,
+}
+
+_GLOB_SKIP_DIRS: Final[frozenset[str]] = frozenset({
+    ".git",
+    "node_modules",
+    "__pycache__",
+})
+
+
+def _should_skip_glob(path: str) -> bool:
+    """Return True if any path component is in the skip set."""
+    parts = path.replace(os.sep, "/").split("/")
+    return bool(_GLOB_SKIP_DIRS.intersection(parts))
+
+
+# ---------------------------------------------------------------------------
+# Grep helpers
+# ---------------------------------------------------------------------------
+
+_GREP_PARAMETERS: Final = {
+    "type": "object",
+    "properties": {
+        "pattern": {
+            "type": "string",
+            "description": "Regex pattern to search for in file contents.",
+        },
+        "path": {
+            "type": "string",
+            "description": (
+                "Directory (or file) to search. Defaults to the session "
+                "working directory."
+            ),
+        },
+        "glob": {
+            "type": "string",
+            "description": (
+                'File-name filter pattern (e.g. "*.py", "*.{ts,tsx}"). '
+                "Passed as --include (grep) or --glob (rg)."
+            ),
+        },
+        "output_mode": {
+            "type": "string",
+            "enum": ["content", "files_with_matches", "count"],
+            "description": (
+                '"content" shows matching lines with line numbers, '
+                '"files_with_matches" lists file paths only, '
+                '"count" shows per-file match counts. Default: "content".'
+            ),
+        },
+        "case_insensitive": {
+            "type": "boolean",
+            "description": "Case-insensitive matching. Default: false.",
+        },
+        "limit": {
+            "type": "integer",
+            "description": "Max result lines returned. Default: 250.",
+        },
+        "context_lines": {
+            "type": "integer",
+            "description": "Lines of context around each match (-C flag).",
+        },
+    },
+    "required": ["pattern"],
+    "additionalProperties": False,
+}
+
+_GREP_DEFAULT_LIMIT: Final[int] = 250
+
+_GREP_EXCLUDED_DIRS: Final[tuple[str, ...]] = (
+    ".git",
+    ".svn",
+    ".hg",
+    "node_modules",
+    "__pycache__",
+)
+
+
+def build_rg_command(
+    pattern: str,
+    path: str,
+    *,
+    glob_filter: str | None = None,
+    output_mode: str = "content",
+    case_insensitive: bool = False,
+    context_lines: int | None = None,
+) -> list[str]:
+    """Build an ``rg`` argument list from the tool parameters."""
+    cmd: list[str] = ["rg", "--hidden"]
+
+    for d in _GREP_EXCLUDED_DIRS:
+        cmd.extend(["--glob", f"!{d}"])
+
+    cmd.extend(["--max-columns", "500"])
+
+    if case_insensitive:
+        cmd.append("-i")
+
+    if output_mode == "files_with_matches":
+        cmd.append("-l")
+    elif output_mode == "count":
+        cmd.append("-c")
+    else:
+        cmd.append("-n")
+
+    if context_lines is not None and output_mode == "content":
+        cmd.extend(["-C", str(context_lines)])
+
+    if glob_filter:
+        cmd.extend(["--glob", glob_filter])
+
+    if pattern.startswith("-"):
+        cmd.extend(["-e", pattern])
+    else:
+        cmd.append(pattern)
+
+    cmd.append(path)
+    return cmd
+
+
+def build_grep_command(
+    pattern: str,
+    path: str,
+    *,
+    glob_filter: str | None = None,
+    output_mode: str = "content",
+    case_insensitive: bool = False,
+    context_lines: int | None = None,
+) -> list[str]:
+    """Build a POSIX ``grep`` argument list from the tool parameters."""
+    cmd: list[str] = ["grep", "-r"]
+
+    for d in _GREP_EXCLUDED_DIRS:
+        cmd.extend(["--exclude-dir", d])
+
+    if case_insensitive:
+        cmd.append("-i")
+
+    if output_mode == "files_with_matches":
+        cmd.append("-l")
+    elif output_mode == "count":
+        cmd.append("-c")
+    else:
+        cmd.append("-n")
+
+    if context_lines is not None and output_mode == "content":
+        cmd.extend(["-C", str(context_lines)])
+
+    if glob_filter:
+        cmd.extend(["--include", glob_filter])
+
+    if pattern.startswith("-"):
+        cmd.extend(["-e", pattern])
+    else:
+        cmd.append(pattern)
+
+    cmd.append(path)
+    return cmd
+
+
+def build_grep_or_rg_command(
+    pattern: str,
+    path: str,
+    *,
+    glob_filter: str | None = None,
+    output_mode: str = "content",
+    case_insensitive: bool = False,
+    context_lines: int | None = None,
+    use_ripgrep: bool | None = None,
+) -> list[str]:
+    """Select ``rg`` or ``grep`` and return the full argument list.
+
+    When *use_ripgrep* is None the caller must probe availability externally
+    (via BashOperations) before calling.
+    """
+    builder = build_rg_command if use_ripgrep else build_grep_command
+    return builder(
+        pattern,
+        path,
+        glob_filter=glob_filter,
+        output_mode=output_mode,
+        case_insensitive=case_insensitive,
+        context_lines=context_lines,
+    )
+
+
+def relativize_paths(lines: list[str], base: str) -> list[str]:
+    """Convert absolute paths at the start of each line to relative."""
+    prefix = base.rstrip(os.sep) + os.sep
+    out: list[str] = []
+    for line in lines:
+        if line.startswith(prefix):
+            line = line[len(prefix):]
+        out.append(line)
+    return out
+
+
+def parse_grep_output(
+    raw: str,
+    *,
+    base_path: str,
+    output_mode: str,
+    limit: int,
+) -> str:
+    """Post-process raw grep/rg stdout into the final tool response."""
+    if not raw.strip():
+        return "No matches found."
+
+    lines = raw.splitlines()
+    lines = relativize_paths(lines, base_path)
+
+    if output_mode == "count":
+        lines = [ln for ln in lines if not ln.endswith(":0")]
+
+    truncated = len(lines) > limit
+    lines = lines[:limit]
+
+    result = "\n".join(lines)
+    if truncated:
+        result += f"\n\n[Results truncated at {limit} lines]"
+    return result
+
+
+# ---------------------------------------------------------------------------
 # install()
 # ---------------------------------------------------------------------------
 
@@ -394,6 +648,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if not _writer_cache:
             _writer_cache.append(api.get_resource_writer())
         return _writer_cache[0]
+
+    _bash_ops_cache: list[BashOperations] = []
+
+    def _get_bash_ops() -> BashOperations:
+        if not _bash_ops_cache:
+            _bash_ops_cache.append(api.get_operations().bash)
+        return _bash_ops_cache[0]
 
     allow_globs = _coerce_globs(config.get("allow_globs"), api.cwd)
     deny_globs = _coerce_globs(config.get("deny_globs"), api.cwd)
@@ -714,5 +975,176 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             parameters=_EDIT_PARAMETERS,
             fn=_edit_execute,
             metadata={"file_op": "edit", TOOL_RESULT_FORMAT_METADATA_KEY: "diff"},
+        )
+    )
+
+    # --- glob tool -------------------------------------------------------
+
+    cwd = api.cwd
+
+    async def _glob_execute(args: dict[str, Any]) -> ToolResult:
+        pattern = str(args["pattern"])
+        search_root = str(args.get("path") or cwd)
+        limit = int(args.get("limit", 100))
+
+        bash_ops = _get_bash_ops()
+
+        # Verify directory exists via bash (works in sandbox too).
+        check = await bash_ops.exec(
+            f"test -d {shlex.quote(search_root)} && echo yes || echo no",
+            cwd=cwd,
+            timeout=10,
+        )
+        if check.stdout.decode().strip() != "yes":
+            return _error(
+                f"Directory does not exist: {search_root!r}. "
+                f"Current working directory is {cwd!r}."
+            )
+
+        # Build a find command with pruning for skip dirs.
+        # -path '*/<dir>/*' -prune keeps those dirs out of results.
+        prune_parts: list[str] = []
+        for d in sorted(_GLOB_SKIP_DIRS):
+            prune_parts.append(f"-path {shlex.quote('*/' + d)} -prune")
+        prune_expr = " -o ".join(prune_parts)
+
+        # Extra limit+1 to detect truncation.
+        find_cmd = (
+            f"find {shlex.quote(search_root)} "
+            f"\\( {prune_expr} \\) -o "
+            f"-type f -name {shlex.quote(pattern)} -print "
+            f"| head -n {limit + 1} | sort"
+        )
+
+        try:
+            result = await bash_ops.exec(find_cmd, cwd=cwd, timeout=30)
+        except Exception as exc:
+            return _error(f"Glob failed: {exc}")
+
+        raw = result.stdout.decode().strip()
+        if not raw:
+            return _ok("No files found")
+
+        all_paths = raw.split("\n")
+
+        # Filter skip dirs (belt-and-suspenders; find prunes, but sort
+        # can re-interleave pruned entries on some edge cases).
+        filtered: list[str] = []
+        for p in all_paths:
+            rel = os.path.relpath(p, search_root)
+            if _should_skip_glob(rel):
+                continue
+            filtered.append(rel)
+
+        truncated = len(filtered) > limit
+        if truncated:
+            filtered = filtered[:limit]
+
+        if not filtered:
+            return _ok("No files found")
+
+        filtered.sort()
+        lines = filtered.copy()
+        if truncated:
+            lines.append(
+                "(Results are truncated. Consider using a more specific "
+                "path or pattern.)"
+            )
+        return _ok("\n".join(lines))
+
+    api.register_tool(
+        FunctionTool(
+            name="glob",
+            description=(
+                "Find files by glob pattern. Returns matching filenames "
+                "relative to the search directory."
+            ),
+            parameters=_GLOB_PARAMETERS,
+            fn=_glob_execute,
+            metadata={"file_op": "glob"},
+        )
+    )
+
+    # --- grep tool -------------------------------------------------------
+
+    grep_default_limit = int(config.get("default_limit", _GREP_DEFAULT_LIMIT))
+
+    # Cache ripgrep availability (probed once on first grep invocation).
+    _rg_available: list[bool | None] = [None]
+
+    async def _probe_ripgrep() -> bool:
+        if _rg_available[0] is not None:
+            return _rg_available[0]
+        try:
+            result = await _get_bash_ops().exec(
+                "which rg", cwd=cwd, timeout=5,
+            )
+            _rg_available[0] = result.exit_code == 0
+        except Exception:
+            _rg_available[0] = False
+        return _rg_available[0]  # type: ignore[return-value]
+
+    async def _grep_execute(args: dict[str, Any]) -> ToolResult:
+        pattern: str = args["pattern"]
+        path: str = args.get("path", cwd)
+        glob_filter: str | None = args.get("glob")
+        output_mode: str = args.get("output_mode", "content")
+        case_insensitive: bool = bool(args.get("case_insensitive", False))
+        limit: int = int(args.get("limit", grep_default_limit))
+        context_lines: int | None = args.get("context_lines")
+
+        if not os.path.isabs(path):
+            path = os.path.normpath(os.path.join(cwd, path))
+
+        bash_ops = _get_bash_ops()
+
+        # Verify path exists.
+        check = await bash_ops.exec(
+            f"test -e {shlex.quote(path)} && echo yes || echo no",
+            cwd=cwd,
+            timeout=10,
+        )
+        if check.stdout.decode().strip() != "yes":
+            return _error(f"Path does not exist: {path!r}")
+
+        use_rg = await _probe_ripgrep()
+        cmd = build_grep_or_rg_command(
+            pattern,
+            path,
+            glob_filter=glob_filter,
+            output_mode=output_mode,
+            case_insensitive=case_insensitive,
+            context_lines=context_lines,
+            use_ripgrep=use_rg,
+        )
+
+        cmd_str = shlex.join(cmd)
+        try:
+            proc = await bash_ops.exec(cmd_str, cwd=cwd, timeout=30)
+        except Exception as exc:
+            return _error(f"Search failed: {exc}")
+
+        # grep/rg exit 1 = no matches (not an error).
+        if proc.exit_code not in (0, 1):
+            stderr = proc.stderr.decode().strip()
+            return _error(f"Search failed (exit {proc.exit_code}): {stderr}")
+
+        text = parse_grep_output(
+            proc.stdout.decode(),
+            base_path=path,
+            output_mode=output_mode,
+            limit=limit,
+        )
+        return _ok(text)
+
+    api.register_tool(
+        FunctionTool(
+            name="grep",
+            description=(
+                "Search file contents with a regex pattern. Uses ripgrep "
+                "(rg) when available, falls back to grep."
+            ),
+            parameters=_GREP_PARAMETERS,
+            fn=_grep_execute,
         )
     )
