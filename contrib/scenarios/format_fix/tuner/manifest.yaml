@@ -8,10 +8,9 @@ description: |
 task_class: format_fix_tuner
 
 extensions:
-  - module: agentm.extensions.builtin.tool_read
+  - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
-  - module: agentm.extensions.builtin.tool_query_traces
-  - module: agentm.extensions.builtin.tool_query_module_feedback
+  - module: agentm.extensions.builtin.query_tools
     config:
       default_scenario: format_fix
   - module: agentm.extensions.builtin.tool_reflect

@@ -41,7 +41,7 @@ from agentm.core._internal.catalog.manifest import (
 # ---------------------------------------------------------------------------
 
 KERNEL_PATH = "src/agentm/core/abi/loop.py"
-EXTENSION_ATOM_PATH = "src/agentm/extensions/builtin/tool_read.py"
+EXTENSION_ATOM_PATH = "src/agentm/extensions/builtin/file_tools.py"
 CATALOG_METRICS_PATH = ".agentm/catalog/atoms/x/y/metrics.jsonl"
 MANIFEST_FILENAME = "core-manifest.yaml"
 
