@@ -1,9 +1,9 @@
-"""Distiller agent tools: browse failure reports + submit a SKILL.md."""
+"""Distiller agent tools: browse failure reports + manage skills."""
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -83,20 +83,61 @@ def build_get_report_summary_tool(summary: str) -> FunctionTool:
 
 
 # ---------------------------------------------------------------------------
-# submit_skill — terminal tool
+# get_existing_skills — list current evolved skills
+# ---------------------------------------------------------------------------
+
+class GetExistingSkillsArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+def build_get_existing_skills_tool(
+    existing_skills: list[dict[str, Any]],
+) -> FunctionTool:
+    """List all currently evolved skills with their content."""
+
+    async def _fn(args: dict[str, Any]) -> ToolResult:
+        if not existing_skills:
+            text = "(no existing evolved skills)"
+        else:
+            text = json.dumps(existing_skills, ensure_ascii=False, indent=2)
+        return ToolResult(content=[TextContent(type="text", text=text)])
+
+    return FunctionTool(
+        name="get_existing_skills",
+        description=(
+            f"List all {len(existing_skills)} currently evolved skills. "
+            "Each entry has: name, description, body, evidence. "
+            "Review these before deciding whether to create a new skill, "
+            "update an existing one, or retire one that is redundant."
+        ),
+        parameters=pydantic_to_openai_tool_schema(GetExistingSkillsArgs),
+        fn=_fn,
+    )
+
+
+# ---------------------------------------------------------------------------
+# submit_skill — terminal tool (create / update / retire)
 # ---------------------------------------------------------------------------
 
 class SubmitSkillArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: str = Field(description="Kebab-case skill name, e.g. 'verify-before-conclude'.")
-    description: str = Field(description="One-line description of what the skill addresses.")
-    tags: list[str] = Field(description="Tags for the skill, e.g. ['rca', 'pod_failure'].")
-    trigger_patterns: list[str] = Field(description="Situations that should activate this skill.")
-    body: str = Field(description="Markdown body of the SKILL.md (≤300 words, actionable guidance).")
+    action: Literal["create", "update", "retire"] = Field(
+        description=(
+            "'create' = new skill; "
+            "'update' = refine an existing skill (set 'name' to the existing skill name); "
+            "'retire' = remove a skill that is redundant or harmful (only 'name' + 'reason' needed)."
+        ),
+    )
+    name: str = Field(description="Kebab-case skill name. For update/retire, must match an existing skill.")
+    description: str = Field(default="", description="One-line description (required for create/update).")
+    tags: list[str] = Field(default_factory=list, description="Tags for the skill.")
+    trigger_patterns: list[str] = Field(default_factory=list, description="Situations that should activate this skill.")
+    body: str = Field(default="", description="Markdown body of the SKILL.md (≤300 words, required for create/update).")
+    reason: str = Field(default="", description="Why this action (especially important for update/retire).")
 
 
 def build_submit_skill_tool() -> FunctionTool:
-    """Terminal tool — submit a distilled SKILL.md."""
+    """Terminal tool — create, update, or retire a skill."""
 
     async def _fn(args: dict[str, Any]) -> ToolTerminate:
         try:
@@ -113,15 +154,18 @@ def build_submit_skill_tool() -> FunctionTool:
                     text=json.dumps(parsed.model_dump(), ensure_ascii=False),
                 )],
             ),
-            reason="evolution:skill-submitted",
+            reason=f"evolution:skill-{parsed.action}",
         )
 
     return FunctionTool(
         name="submit_skill",
         description=(
-            "Submit a SKILL.md that addresses the dominant failure pattern. "
-            "The skill should be actionable, specific, and ≤300 words. "
-            "This terminates the session."
+            "Submit a skill action. Actions:\n"
+            "- 'create': write a new SKILL.md\n"
+            "- 'update': refine an existing skill with new evidence\n"
+            "- 'retire': remove a skill that is redundant or harmful\n"
+            "Prefer updating over creating when the failure pattern overlaps "
+            "an existing skill. This terminates the session."
         ),
         parameters=pydantic_to_openai_tool_schema(SubmitSkillArgs),
         fn=_fn,

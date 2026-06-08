@@ -13,6 +13,7 @@ from agentm.core.abi.extension import ExtensionAPI
 
 from agentm_rca.evolution.distiller_tools import (
     build_browse_reports_tool,
+    build_get_existing_skills_tool,
     build_get_report_summary_tool,
     build_submit_skill_tool,
 )
@@ -23,6 +24,7 @@ MANIFEST = ExtensionManifest(
     registers=(
         "tool:browse_reports",
         "tool:get_report_summary",
+        "tool:get_existing_skills",
         "tool:submit_skill",
     ),
 )
@@ -31,7 +33,9 @@ MANIFEST = ExtensionManifest(
 async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     reports = config.get("reports", [])
     summary = config.get("report_summary", "(no summary)")
+    existing_skills = config.get("existing_skills", [])
 
     api.register_tool(build_browse_reports_tool(reports))
     api.register_tool(build_get_report_summary_tool(summary))
+    api.register_tool(build_get_existing_skills_tool(existing_skills))
     api.register_tool(build_submit_skill_tool())
