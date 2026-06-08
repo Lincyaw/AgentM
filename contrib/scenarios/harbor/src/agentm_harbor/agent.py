@@ -39,7 +39,7 @@ extensions:
   - module: agentm.extensions.builtin.read_history
 """
 
-_SCENARIO_DIR = "/tmp/agentm_scenario"
+_SCENARIO_DIR = "/tmp/harbor_bench"
 
 
 class AgentMAgent(BaseInstalledAgent):
@@ -124,6 +124,14 @@ class AgentMAgent(BaseInstalledAgent):
             val = self._get_env(key)
             if val:
                 env[key] = val
+        api_key = env.get("AGENTM_API_KEY", "")
+        if api_key and "OPENAI_API_KEY" not in env:
+            env["OPENAI_API_KEY"] = api_key
+        if api_key and "ANTHROPIC_API_KEY" not in env:
+            env["ANTHROPIC_API_KEY"] = api_key
+        base_url = env.get("AGENTM_BASE_URL", "")
+        if base_url and "OPENAI_BASE_URL" not in env:
+            env["OPENAI_BASE_URL"] = base_url
         return env
 
     def _build_model_args(self) -> str:
