@@ -10,27 +10,27 @@ extensions:
   - module: agentm.extensions.builtin.operations
     config:
       backend: local
-  - module: agentm_rca.atoms.hypothesis_tools
-  - module: agentm_rca.atoms.duckdb_sql
+  - module: agentm_rca.hypothesis_tools
+  - module: agentm_rca.duckdb_sql
     config:
       exclude:
         - conclusion.parquet
-  - module: agentm_rca.atoms.finalize
+  - module: agentm_rca.finalize
   - module: agentm.extensions.builtin.artifact_store
   - module: agentm.extensions.builtin.observability
-  - module: agentm_rca.atoms.worker_skills
+  - module: agentm_rca.worker_skills
   - module: agentm.extensions.builtin.skill_loader
     config:
       include_defaults: false
       inherit_claude: false
-  - module: agentm_rca.atoms.rcabench_contract
+  - module: agentm_rca.rcabench_contract
 
   # Multi-agent wiring. ``prompt_loader`` (shared with rca:baseline) loads
   # ``prompts/orchestrator.md`` into the system prompt; ``personas: true``
   # also appends the available-agents block and answers
   # ``ResolveSubagentEvent.CHANNEL`` for the personas under ``agents/``
   # (now only ``critic``).
-  - module: agentm_rca.atoms.prompt_loader
+  - module: agentm_rca.prompt_loader
     config:
       prompt: orchestrator.md
       personas: true
@@ -56,14 +56,14 @@ extensions:
         operations:
           module: agentm.extensions.builtin.operations
         duckdb_sql:
-          module: agentm_rca.atoms.duckdb_sql
+          module: agentm_rca.duckdb_sql
         artifact_store:
           module: agentm.extensions.builtin.artifact_store
         observability:
           module: agentm.extensions.builtin.observability
         worker_skills:
-          module: agentm_rca.atoms.worker_skills
+          module: agentm_rca.worker_skills
         skill_loader:
           module: agentm.extensions.builtin.skill_loader
         worker_finalize:
-          module: agentm_rca.atoms.worker_finalize
+          module: agentm_rca.worker_finalize
