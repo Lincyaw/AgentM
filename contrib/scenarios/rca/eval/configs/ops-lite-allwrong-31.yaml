@@ -1,0 +1,28 @@
+# 31 ALL_WRONG cases from agentm-dsv4flash-baseline-100-v3:
+# agent found zero correct services in all 31.
+# Use for targeted evolution loop experiments.
+
+exp_id: "evo-allwrong-31"
+agent_type: "agentm"
+model_name: "${MODEL_NAME}"
+
+data:
+  dataset: "ops-lite"
+  type: "single"
+  question_field: "question"
+  gt_field: "answer"
+  tags: ["ops-lite-allwrong-31"]
+
+source_path: "${RCA_DATASET_ROOT}"
+source_path_pattern: "{source_path}/{source}"
+
+concurrency: 10
+judge_concurrency: 10
+
+judge_model:
+  model_provider:
+    type: "chat.completions"
+    model: "${JUDGE_MODEL}"
+    api_format: "openai"
+    base_url: "${OPENAI_BASE_URL}"
+    verify_ssl: false

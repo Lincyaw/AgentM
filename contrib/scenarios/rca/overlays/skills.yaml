@@ -1,0 +1,8 @@
+# Skill overlay: contributes scenario skills/ directory to skill_loader.
+# Restricted to scenario-local skills (include_defaults: false, inherit_claude: false).
+extensions:
+  - module: agentm_rca.worker_skills
+  - module: agentm.extensions.builtin.skill_loader
+    config:
+      include_defaults: false
+      inherit_claude: false

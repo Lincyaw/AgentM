@@ -1,0 +1,5 @@
+# Runtime context overlay: appends AGENTM_RCA_DATA_DIR to the system prompt
+# so the model knows where case files live. Used by harness strategies where
+# the investigator prompt doesn't embed the path.
+extensions:
+  - module: agentm_rca.runtime_context

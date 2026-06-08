@@ -1,32 +1,16 @@
 name: rca:harness.sync.opinions10
 description: |
-  Opinions-only harness variant for baseline-fork intervention experiments.
-
-  The main RCA agent is never modified by auditor reminders in this
-  scenario. Extractor and auditor still run synchronously every 10 main-agent
-  turns and persist replay sidecars. A separate eval orchestration mode can
-  then inspect those fixed-baseline auditor verdicts, fork from a selected
-  turn, seed the reminder into the fork, and continue the new branch.
-
+  Opinions-only at 10-turn cadence; for chained-fork intervention experiments.
 task_class: rca_baseline
 
+includes:
+  - overlays/base-investigator.yaml
+  - overlays/runtime-context.yaml
+
 extensions:
-  - module: agentm.extensions.builtin.operations
-    config:
-      backend: local
-  - module: agentm_rca.tools.duckdb_sql
-  - module: agentm_rca.tools.finalize
-  - module: agentm.extensions.builtin.observability
-  - module: agentm_rca.rcabench_contract
-  - module: agentm_rca.prompt_loader
-    config:
-      prompt: investigator.md
-      personas: false
-  - module: agentm_rca.runtime_context
   - module: llmharness.adapters.agentm
     config:
       mode: sync
       extractor_interval_turns: 10
       audit_interval_turns: 10
-      enable_auditor: true
       enable_reminders: false

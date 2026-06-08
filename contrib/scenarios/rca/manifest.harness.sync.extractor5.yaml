@@ -1,20 +1,12 @@
 name: rca:harness.sync.extractor5
-description: rca:harness.sync with extractor firing every 5 main-agent turns and auditor disabled.
+description: Extractor-only variant (no auditor); extractor fires every 5 turns.
 task_class: rca_baseline
 
+includes:
+  - overlays/base-investigator.yaml
+  - overlays/runtime-context.yaml
+
 extensions:
-  - module: agentm.extensions.builtin.operations
-    config:
-      backend: local
-  - module: agentm_rca.tools.duckdb_sql
-  - module: agentm_rca.tools.finalize
-  - module: agentm.extensions.builtin.observability
-  - module: agentm_rca.rcabench_contract
-  - module: agentm_rca.prompt_loader
-    config:
-      prompt: investigator.md
-      personas: false
-  - module: agentm_rca.runtime_context
   - module: llmharness.adapters.agentm
     config:
       mode: sync

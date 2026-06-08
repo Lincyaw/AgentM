@@ -325,9 +325,58 @@ def _parse_extensions(
     if not isinstance(payload, dict):
         raise ScenarioLoadError(source, ValueError("scenario must be a mapping"))
 
-    raw_extensions = payload.get("extensions")
-    if not isinstance(raw_extensions, list):
-        raise ScenarioLoadError(source, ValueError("'extensions' must be a list"))
+    raw_extensions: list[Any] = []
+
+    # --- includes: resolve overlay files and prepend their extensions ---
+    includes = payload.get("includes")
+    if includes is not None:
+        if not isinstance(includes, list):
+            raise ScenarioLoadError(
+                source, ValueError("'includes' must be a list of relative paths")
+            )
+        for inc_index, inc_path in enumerate(includes):
+            if not isinstance(inc_path, str) or not inc_path:
+                raise ScenarioLoadError(
+                    source,
+                    ValueError(f"includes[{inc_index}]: must be a non-empty string"),
+                )
+            overlay_path = scenario_dir / inc_path
+            if not overlay_path.is_file():
+                raise ScenarioLoadError(
+                    source,
+                    FileNotFoundError(
+                        f"includes[{inc_index}]: overlay not found at {overlay_path}"
+                    ),
+                )
+            try:
+                overlay = yaml.safe_load(overlay_path.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                raise ScenarioLoadError(
+                    source,
+                    ValueError(f"includes[{inc_index}]: failed to parse {overlay_path}: {exc}"),
+                ) from exc
+            if not isinstance(overlay, dict) or not isinstance(
+                overlay.get("extensions"), list
+            ):
+                raise ScenarioLoadError(
+                    source,
+                    ValueError(
+                        f"includes[{inc_index}]: overlay {overlay_path} must contain "
+                        "an 'extensions' list"
+                    ),
+                )
+            raw_extensions.extend(overlay["extensions"])
+
+    declared = payload.get("extensions")
+    if declared is not None:
+        if not isinstance(declared, list):
+            raise ScenarioLoadError(source, ValueError("'extensions' must be a list"))
+        raw_extensions.extend(declared)
+
+    if not raw_extensions:
+        raise ScenarioLoadError(
+            source, ValueError("scenario must declare extensions (via 'extensions' or 'includes')")
+        )
 
     extensions: list[tuple[str, dict[str, Any]]] = []
     for index, item in enumerate(raw_extensions):
