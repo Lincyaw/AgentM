@@ -196,7 +196,7 @@ async def _open_and_close_session(tmp_path: Path) -> None:
             provider=(provider_module, {}),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 (
                     "agentm.extensions.builtin.tool_guard_watch",
                     {

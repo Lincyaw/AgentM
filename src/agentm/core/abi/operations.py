@@ -24,6 +24,16 @@ class ExecResult:
     timed_out: bool
 
 
+@dataclass(frozen=True, slots=True)
+class FileStat:
+    """Portable file-stat result returned by :meth:`FileOperations.stat`."""
+
+    size: int
+    mtime_ns: int
+    is_file: bool
+    is_dir: bool
+
+
 class FileOperations(Protocol):
     async def read_file(self, path: str) -> bytes: ...
 
@@ -31,7 +41,15 @@ class FileOperations(Protocol):
 
     async def is_dir(self, path: str) -> bool: ...
 
+    async def is_file(self, path: str) -> bool: ...
+
     async def list_dir(self, path: str) -> list[str]: ...
+
+    async def stat(self, path: str) -> FileStat: ...
+
+    async def write_file(self, path: str, data: bytes) -> None: ...
+
+    async def makedirs(self, path: str, exist_ok: bool = True) -> None: ...
 
 
 class BashOperations(Protocol):

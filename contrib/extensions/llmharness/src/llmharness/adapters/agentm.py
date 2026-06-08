@@ -265,7 +265,7 @@ MANIFEST = ExtensionManifest(
     # the right scope.
     requires=(
         "observability",
-        "operations_local",
+        "operations",
     ),
     api_version=1,
     tier=1,

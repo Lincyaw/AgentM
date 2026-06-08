@@ -11,7 +11,9 @@ task_class: format_fix
 extensions:
   # --- environment ports: even toy scenarios must register an Operations
   # bundle because the substrate asserts at freeze time. ---
-  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
   - module: agentm.extensions.builtin.observability
   - local: tool_normalize_json
   - module: agentm.extensions.builtin.system_prompt

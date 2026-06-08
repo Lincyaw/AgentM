@@ -196,7 +196,7 @@ async def test_merge_within_noise_floor_rejected(tmp_path: Path) -> None:
             provider=(provider_module, {}),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 ("contrib.extensions.changespec_validators", {}),
                 (
                     "agentm.extensions.builtin.tool_propose_change",

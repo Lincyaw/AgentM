@@ -7,7 +7,7 @@ the rewriter rejects the selection, the sample is dropped.
 
 Both children run as **top-level** AgentM sessions via
 :func:`llmharness.tools.engine.run_phase_standalone` with a minimal
-four-atom extension list (observability + operations_local +
+four-atom extension list (observability + operations +
 submit_tool + system_prompt). No cards, no skills.
 """
 

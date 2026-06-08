@@ -18,7 +18,9 @@ extensions:
   # bundle. Must be listed first so any subsequent tool atom that calls
   # ``api.get_operations()`` during install sees a registered bundle.
   # See ``.claude/designs/pluggable-architecture.md`` §3.2. ---
-  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
 
   # --- tool-result size cap: spill large outputs to disk ---
   - module: agentm.extensions.builtin.tool_result_cap

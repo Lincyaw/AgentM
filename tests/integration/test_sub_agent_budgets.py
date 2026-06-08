@@ -263,14 +263,14 @@ async def _run_budget_case(
             cwd=str(tmp_path),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 (
                     "agentm.extensions.builtin.sub_agent",
                     {
-                        "inherit_extensions": ["operations_local", "ping"],
+                        "inherit_extensions": ["operations", "ping"],
                         "available_inherited_extensions": {
-                            "operations_local": (
-                                "agentm.extensions.builtin.operations_local",
+                            "operations": (
+                                "agentm.extensions.builtin.operations",
                                 {},
                             ),
                             "ping": (ping_module, {}),

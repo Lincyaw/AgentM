@@ -10,7 +10,9 @@ extensions:
   # --- environment ports: register the local-FS / asyncio-bash Operations
   # bundle. Must be listed first because ``file_tools`` (below) and sub_agent
   # children consume ``api.get_operations()``. ---
-  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
 
   # Orchestrator-side: the lead investigator now does the investigation
   # itself (single-critic flow). Earlier 3-persona dispatch caused error
@@ -58,7 +60,7 @@ extensions:
     config:
       max_workers: 2
       inherit_extensions:
-        - operations_local
+        - operations
         - duckdb_sql
         - artifact_store
         - observability
@@ -78,8 +80,8 @@ extensions:
         # comes back null to the orchestrator.
         - worker_finalize
       available_inherited_extensions:
-        operations_local:
-          module: agentm.extensions.builtin.operations_local
+        operations:
+          module: agentm.extensions.builtin.operations
         duckdb_sql:
           module: agentm_rca.tools.duckdb_sql
         artifact_store:

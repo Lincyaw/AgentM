@@ -172,7 +172,7 @@ async def _build_session(
             cwd=str(tmp_path),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 (f"{pkg}.tool_demo", {}),
                 ("contrib.extensions.tool_catalog.browse", {}),
                 ("contrib.extensions.tool_catalog.mutate", {}),

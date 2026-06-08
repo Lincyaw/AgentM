@@ -72,6 +72,9 @@ class _FakeFileOps:
     async def read_file(self, path: str) -> bytes:
         raise FileNotFoundError(path)
 
+    async def stat(self, path: str) -> Any:
+        raise FileNotFoundError(path)
+
 
 class _FakeOperations:
     """Minimal Operations bundle."""

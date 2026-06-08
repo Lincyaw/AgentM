@@ -191,7 +191,7 @@ async def _build_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, ato
         AgentSessionConfig(
             cwd=str(tmp_path),
             extensions=[
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 *((extra_extensions or [])),
                 (f"{pkg}.tool_demo", {}),
             ],

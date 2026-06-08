@@ -342,7 +342,7 @@ class ExtensionAPI(Protocol):
         already-registered case). If no atom calls this by freeze time,
         ``get_operations()`` will raise — the default scenario manifest
         is expected to list an atom that registers a bundle (the
-        ``operations_local`` builtin covers the local-FS / asyncio-bash
+        ``operations`` builtin covers the local-FS / asyncio-bash
         case).
         """
         ...
@@ -611,7 +611,7 @@ class ExtensionAPI(Protocol):
 
         An atom must have called :meth:`register_operations` before
         ``get_operations`` is invoked (the default scenario lists the
-        ``operations_local`` atom which does this at install time). If
+        ``operations`` atom which does this at install time). If
         no bundle has been registered, this raises ``RuntimeError``.
         """
         ...

@@ -115,7 +115,7 @@ async def test_artifact_write_is_append_only_for_same_title(tmp_path: Path) -> N
         tmp_path,
         extensions=[
 
-            ("agentm.extensions.builtin.operations_local", {}),
+            ("agentm.extensions.builtin.operations", {}),
 
             ("agentm.extensions.builtin.artifact_store", {})],
     )
@@ -150,7 +150,7 @@ async def test_artifact_store_shares_by_root_session_and_isolates_other_roots(
         task_id="task-a",
         extensions=[
 
-            ("agentm.extensions.builtin.operations_local", {}),
+            ("agentm.extensions.builtin.operations", {}),
 
             ("agentm.extensions.builtin.artifact_store", {})],
     )
@@ -160,7 +160,7 @@ async def test_artifact_store_shares_by_root_session_and_isolates_other_roots(
         task_id="task-b",
         extensions=[
 
-            ("agentm.extensions.builtin.operations_local", {}),
+            ("agentm.extensions.builtin.operations", {}),
 
             ("agentm.extensions.builtin.artifact_store", {})],
     )
@@ -170,7 +170,7 @@ async def test_artifact_store_shares_by_root_session_and_isolates_other_roots(
         task_id="task-c",
         extensions=[
 
-            ("agentm.extensions.builtin.operations_local", {}),
+            ("agentm.extensions.builtin.operations", {}),
 
             ("agentm.extensions.builtin.artifact_store", {})],
     )

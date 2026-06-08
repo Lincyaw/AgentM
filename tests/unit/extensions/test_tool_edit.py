@@ -132,7 +132,10 @@ class TestCheckShrinkage:
 
 
 class TestUpdateReadStateAfterEdit:
-    def test_updates_mtime_and_hash(self) -> None:
+    @pytest.mark.asyncio
+    async def test_updates_mtime_and_hash(self) -> None:
+        from agentm.extensions.builtin._operations.local import LocalFileOperations
+
         clear_read_state()
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False
@@ -145,7 +148,7 @@ class TestUpdateReadStateAfterEdit:
             # Simulate an edit by rewriting the file
             with open(path, "w") as f2:
                 f2.write("edited content\nline two\n")
-            _update_read_state_after_edit(norm)
+            await _update_read_state_after_edit(norm, LocalFileOperations())
             state = get_read_state(norm)
             assert state is not None
             assert state.mtime_ns > 0
@@ -157,7 +160,10 @@ class TestUpdateReadStateAfterEdit:
         finally:
             os.unlink(path)
 
-    def test_preserves_is_partial(self) -> None:
+    @pytest.mark.asyncio
+    async def test_preserves_is_partial(self) -> None:
+        from agentm.extensions.builtin._operations.local import LocalFileOperations
+
         clear_read_state()
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False
@@ -167,7 +173,7 @@ class TestUpdateReadStateAfterEdit:
         try:
             norm = os.path.normpath(path)
             record_read(norm, total_lines=1, is_partial=True, mtime_ns=1)
-            _update_read_state_after_edit(norm)
+            await _update_read_state_after_edit(norm, LocalFileOperations())
             state = get_read_state(norm)
             assert state is not None
             assert state.is_partial is True
@@ -183,8 +189,11 @@ class TestUpdateReadStateAfterEdit:
 class TestFileModifiedSinceReadIntegration:
     """Test that file_tools edit's mtime gate works end-to-end with record_read."""
 
-    def test_no_false_positive_after_update(self) -> None:
+    @pytest.mark.asyncio
+    async def test_no_false_positive_after_update(self) -> None:
         """After _update_read_state_after_edit, the file should not appear modified."""
+        from agentm.extensions.builtin._operations.local import LocalFileOperations
+
         clear_read_state()
         from agentm.core.lib.read_state import file_modified_since_read
 
@@ -208,7 +217,7 @@ class TestFileModifiedSinceReadIntegration:
             assert file_modified_since_read(norm) is True
 
             # After update: should no longer detect modification
-            _update_read_state_after_edit(norm)
+            await _update_read_state_after_edit(norm, LocalFileOperations())
             assert file_modified_since_read(norm) is False
         finally:
             os.unlink(path)

@@ -264,14 +264,14 @@ def _extensions(
     resolver_module: str,
 ) -> list[tuple[str, dict[str, Any]]]:
     return [
-        ("agentm.extensions.builtin.operations_local", {}),
+        ("agentm.extensions.builtin.operations", {}),
         (
             "agentm.extensions.builtin.sub_agent",
             {
-                "inherit_extensions": ["operations_local"],
+                "inherit_extensions": ["operations"],
                 "available_inherited_extensions": {
-                    "operations_local": (
-                        "agentm.extensions.builtin.operations_local",
+                    "operations": (
+                        "agentm.extensions.builtin.operations",
                         {},
                     ),
                 },

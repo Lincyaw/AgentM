@@ -20,7 +20,6 @@ post-edit read_state update.
 from __future__ import annotations
 
 import fnmatch
-import inspect
 import os
 from pathlib import Path, PurePath
 from typing import Any, Final
@@ -281,19 +280,20 @@ def _snippet_around(content: str, start_line: int, end_line: int) -> str:
     return "\n".join(numbered)
 
 
-def _update_read_state_after_edit(normalized_path: str) -> None:
+async def _update_read_state_after_edit(
+    normalized_path: str, file_ops: FileOperations
+) -> None:
     """Refresh read_state for *normalized_path* after a successful edit."""
     old = get_read_state(normalized_path)
     total_lines = old.total_lines if old else 0
     is_partial = old.is_partial if old else False
     try:
-        stat = os.stat(normalized_path)
-        mtime_ns = stat.st_mtime_ns
+        fs = await file_ops.stat(normalized_path)
+        mtime_ns = fs.mtime_ns
     except OSError:
         mtime_ns = 0
     try:
-        with open(normalized_path, "rb") as fh:
-            raw = fh.read()
+        raw = await file_ops.read_file(normalized_path)
         chash = content_hash_for(raw)
         total_lines = raw.decode("utf-8", errors="replace").count("\n") + 1
     except OSError:
@@ -379,7 +379,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # bundle or ResourceWriter may not be registered yet (depends on atom
     # load order). Deferring to first tool invocation avoids an install-time
     # ordering dependency while keeping requires=() (any Operations
-    # provider is acceptable, not just operations_local).
+    # provider is acceptable, not just the local backend).
     _file_ops_cfg = config.get("file_ops")
     _file_ops_cache: list[FileOperations] = []
 
@@ -523,7 +523,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             recorded_mtime = getattr(rs, "mtime_ns", None)
             if recorded_mtime is not None:
                 try:
-                    current_mtime = os.stat(normalized).st_mtime_ns
+                    fs = await _get_file_ops().stat(normalized)
+                    current_mtime: int | None = fs.mtime_ns
                 except OSError:
                     current_mtime = None
                 if current_mtime is not None and current_mtime != recorded_mtime:
@@ -549,10 +550,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "is_partial": False,
             }
             try:
-                disk_mtime = os.stat(normalized).st_mtime_ns
-                sig = inspect.signature(record_read)
-                if "mtime_ns" in sig.parameters:
-                    record_kwargs["mtime_ns"] = disk_mtime
+                disk_stat = await _get_file_ops().stat(normalized)
+                record_kwargs["mtime_ns"] = disk_stat.mtime_ns
             except OSError:
                 pass
             record_read(normalized, **record_kwargs)
@@ -697,7 +696,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             # Post-edit: update read_state so subsequent edits don't
             # false-positive on "modified since read".
             if not result.is_error:
-                _update_read_state_after_edit(normalized)
+                await _update_read_state_after_edit(normalized, _get_file_ops())
 
             return result
         except Exception as exc:

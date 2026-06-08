@@ -1,22 +1,17 @@
-"""``operations_agent_env`` atom — backs Operations with the ARL agent-env sandbox.
+"""ARL agent-env sandbox implementations of ``FileOperations`` and ``BashOperations``.
 
-Replaces the local-stdlib :class:`Operations` bundle (``operations_local``) with
-one whose ``BashOperations`` and ``FileOperations`` run inside an ARL sandbox.
-The atom now defaults to ``arl.ManagedSession(image=...)`` — the server-side
-managed pool flow, where the gateway provisions/scales pods automatically — and
-falls back to ``arl.SandboxSession(pool_ref=...)`` for callers that still pin a
-pre-created WarmPool. Use this whenever the agent must execute in an isolated
-Kubernetes-backed environment instead of the operator's host shell.
+Moved from the former ``operations_agent_env`` builtin atom. Provides
+:func:`install_agent_env` for use by the unified ``operations`` atom entry point.
 
-Lifecycle: ``install`` creates one sandbox per AgentM session; the sandbox is
-deleted on ``SessionShutdownEvent``. Each ``BashOperations.exec`` maps to one
+Lifecycle: ``install_agent_env`` creates one sandbox per AgentM session; the sandbox
+is deleted on ``SessionShutdownEvent``. Each ``BashOperations.exec`` maps to one
 ``session.execute`` call; ``FileOperations`` are expressed as ``cat`` / ``test``
 / ``ls`` steps so semantics stay aligned with the sandbox's view of the world.
 
-The atom *also* replaces the session's :class:`ResourceWriter` (via
+The function *also* replaces the session's :class:`ResourceWriter` (via
 ``api.register_resource_writer``) with a sandbox-backed implementation so
-``write`` / ``edit`` (from ``file_tools``) land inside the sandbox too — keeping read and
-write semantics consistent with bash. The sandbox writer refuses any path
+``write`` / ``edit`` (from ``file_tools``) land inside the sandbox too — keeping
+read and write semantics consistent with bash. The sandbox writer refuses any path
 outside ``work_dir`` (including every host path), so an agent in a sandboxed
 session cannot modify its own AgentM code.
 
@@ -42,9 +37,6 @@ required; if both are set, ``image`` wins (managed pool path):
 - ``timeout``       — Per-step timeout seconds; ``None`` means no timeout
 - ``idle_timeout_seconds`` — Sandbox idle TTL on the gateway (legacy path only;
                       ManagedSession handles idle policy server-side).
-
-§11 single-file contract: only stdlib + ``agentm.core.abi.*`` +
-``agentm.extensions.*`` + ``arl`` (optional 3rd-party). No atom-to-atom imports.
 """
 
 from __future__ import annotations
@@ -57,51 +49,22 @@ import shlex
 import sys
 import urllib.request
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.operations import ExecResult
+from agentm.core.abi.operations import ExecResult, FileStat
 from agentm.core.abi.resource import (
     BatchHandle,
     PathClass,
     WriteResult,
     WriterAuthor,
 )
-from agentm.extensions import ExtensionManifest
-
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from pathlib import Path
 
 
-MANIFEST = ExtensionManifest(
-    name="operations_agent_env",
-    description=(
-        "Registers an Operations bundle backed by ARL agent-env sandboxes. "
-        "Drop-in replacement for operations_local when the scenario should "
-        "run tool calls inside a Kubernetes-isolated environment."
-    ),
-    registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "image": {"type": "string"},
-            "experiment_id": {"type": "string"},
-            "pool_ref": {"type": "string"},
-            "gateway_url": {"type": "string"},
-            "namespace": {"type": "string"},
-            "work_dir": {"type": "string"},
-            "timeout": {"type": ["number", "null"]},
-            "idle_timeout_seconds": {"type": ["integer", "null"]},
-        },
-        "additionalProperties": False,
-    },
-    requires=(),
-    conflicts=("operations_local",),
-)
-
-
-def _resolve(config: dict[str, Any], key: str, env_var: str, default: str | None) -> str | None:
+def _resolve_config(config: dict[str, Any], key: str, env_var: str, default: str | None) -> str | None:
     value = config.get(key)
     if isinstance(value, str) and value:
         return value
@@ -251,12 +214,51 @@ class _AgentEnvFileOperations:
         _stdout, _stderr, code = await self._run(["test", "-d", self._abs(path)])
         return code == 0
 
+    async def is_file(self, path: str) -> bool:
+        _stdout, _stderr, code = await self._run(["test", "-f", self._abs(path)])
+        return code == 0
+
     async def list_dir(self, path: str) -> list[str]:
         stdout, stderr, code = await self._run(["ls", "-1A", "--", self._abs(path)])
         if code != 0:
             raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
         text = stdout.decode("utf-8", "replace").strip("\n")
         return sorted(line for line in text.split("\n") if line)
+
+    async def stat(self, path: str) -> FileStat:
+        abs_path = self._abs(path)
+        stdout, stderr, code = await self._run(
+            ["stat", "-c", "%s %Y %F", "--", abs_path]
+        )
+        if code != 0:
+            raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
+        parts = stdout.decode().strip().split(None, 2)
+        size = int(parts[0])
+        mtime_s = int(parts[1])
+        ftype = parts[2] if len(parts) > 2 else ""
+        return FileStat(
+            size=size,
+            mtime_ns=mtime_s * 1_000_000_000,
+            is_file="regular" in ftype,
+            is_dir="directory" in ftype,
+        )
+
+    async def write_file(self, path: str, data: bytes) -> None:
+        abs_path = self._abs(path)
+        encoded = base64.b64encode(data).decode("ascii")
+        _, stderr, code = await self._run(
+            ["bash", "-c", f"echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(abs_path)}"]
+        )
+        if code != 0:
+            raise OSError(f"write_file failed: {stderr.decode('utf-8', 'replace')}")
+
+    async def makedirs(self, path: str, exist_ok: bool = True) -> None:
+        abs_path = self._abs(path)
+        flag = "-p" if exist_ok else ""
+        cmd = ["mkdir", "--", abs_path] if not flag else ["mkdir", flag, "--", abs_path]
+        _, stderr, code = await self._run(cmd)
+        if code != 0 and not exist_ok:
+            raise OSError(f"makedirs failed: {stderr.decode('utf-8', 'replace')}")
 
 
 class _AgentEnvResourceWriter:
@@ -309,17 +311,6 @@ class _AgentEnvResourceWriter:
         return out.stdout.encode("utf-8"), out.stderr.encode("utf-8"), out.exit_code
 
     async def _mtime_token(self, path: str) -> str | None:
-        # Versioning token: ``<mtime_ns>-<sha16>`` for files <= the size
-        # cap, ``<mtime_ns>-<size>`` otherwise. Combining mtime with a
-        # content digest defeats the 1-second-resolution collision that
-        # ``stat -c '%Y'`` alone suffered (two writes inside the same
-        # second produced identical tokens, so
-        # ``current_version_for_path`` reported "unchanged" when content
-        # had actually changed). ``stat -c '%.Y'`` gives fractional
-        # seconds on GNU coreutils, which we encode as nanoseconds. The
-        # 16 MiB cap keeps the digest cost bounded; above it we fall
-        # back to ``(mtime_ns, size)`` — collisions are still possible
-        # for same-second writes that preserve size, documented limit.
         stdout, _stderr, code = await self._run(
             ["bash", "-lc", _MTIME_TOKEN_SCRIPT, "bash", path]
         )
@@ -481,26 +472,12 @@ class _AgentEnvResourceWriter:
         )
 
     def restore(self, path: "Path", version: str) -> None:  # noqa: ARG002
-        # Per-file restore would need bookkeeping the sandbox doesn't keep.
-        # ARL has session-wide snapshot_id (per execute step) which would
-        # need a separate "session.restore" call — out of scope for the
-        # ResourceWriter Protocol. Atoms that need rollback should use
-        # ARL's SandboxSession.restore() directly.
         raise NotImplementedError(
             "agent-env writer does not support per-file restore; use "
             "SandboxSession.restore(snapshot_id) for whole-step rollback."
         )
 
     def current_version_for_path(self, path: str) -> str | None:
-        # Synchronous caller surface (the ResourceWriter Protocol matches
-        # GitBackedResourceWriter, which can read mtime synchronously). The
-        # ARL SDK is sync, so we shell out directly via a single execute()
-        # without involving asyncio.
-        #
-        # Uses the same ``<mtime_ns>-<sha16>`` token shape as the async
-        # ``_mtime_token`` so a write's ``commit_sha_after`` and a later
-        # ``current_version_for_path`` compare equal when (and only when)
-        # the file is byte-identical to the just-written content.
         try:
             response = self._session.execute(
                 [
@@ -551,9 +528,6 @@ class _AgentEnvResourceWriter:
                 self._ops.append(("delete", (path,)))
 
             async def flush(self) -> None:
-                # Sandbox doesn't expose multi-step atomicity, so we
-                # replay sequentially. First failure aborts the rest —
-                # mirrors the in-memory single-step semantics callers see.
                 for kind, args in self._ops:
                     if kind == "write":
                         result = await writer.write(
@@ -616,12 +590,7 @@ def _upload_to_pod(gateway_url: str, session_id: str, rel_path: str, payload: by
 
 
 def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
-    """Clone the target repo into the sandbox and checkout the issue branch.
-
-    Uses WORKBUDDY_REPO, WORKBUDDY_ISSUE_NUM, and GH_TOKEN from the host env.
-    If the branch workbuddy/issue-N exists on the remote, checks it out so
-    review/merge agents see the dev agent's changes.
-    """
+    """Clone the target repo into the sandbox and checkout the issue branch."""
     repo = os.environ.get("WORKBUDDY_REPO")
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     issue_num = os.environ.get("WORKBUDDY_ISSUE_NUM")
@@ -646,10 +615,8 @@ def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
     out, err, code = _pod_exec(session, clone_cmd, "/")
     if code != 0:
         raise RuntimeError(
-            f"operations_agent_env: git clone failed (exit {code}): {err or out}"
+            f"operations agent_env: git clone failed (exit {code}): {err or out}"
         )
-    # Exclude .agentm/ so uploaded skills and observability data don't get
-    # committed by the agent's `git add -A`.
     _pod_exec(
         session,
         f"echo '.agentm/' >> {work_dir}/.gitignore",
@@ -659,11 +626,7 @@ def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
 
 
 def _inject_gh_token(session: Any, work_dir: str) -> None:
-    """Make GH_TOKEN available in the sandbox so agents can use `gh` CLI.
-
-    Writes the token to /etc/profile.d/ so all `bash -l` sessions export it.
-    The `gh` binary itself must be in the sandbox image (baked at build time).
-    """
+    """Make GH_TOKEN available in the sandbox so agents can use `gh` CLI."""
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         return
@@ -677,12 +640,7 @@ def _inject_gh_token(session: Any, work_dir: str) -> None:
 
 
 def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> None:
-    """Upload SKILL.md files from ``AGENTM_SKILLS_DIR`` into the sandbox.
-
-    Skills are stored on the host PVC (persistent across sessions). This
-    function copies them into ``<work_dir>/.agentm/skills/`` inside the
-    sandbox so ``skill_loader`` can discover them at its normal path.
-    """
+    """Upload SKILL.md files from ``AGENTM_SKILLS_DIR`` into the sandbox."""
     skills_dir = os.environ.get("AGENTM_SKILLS_DIR")
     if not skills_dir or not os.path.isdir(skills_dir):
         return
@@ -716,30 +674,30 @@ def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> 
         print(f"INFO: [agent_env_sync] uploaded {count} skill(s) to {target_base}/", file=sys.stderr)
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install_agent_env(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # Deferred import keeps the SDK truly optional — atoms that never run
     # under agent-env shouldn't fail to load just because ``arl`` is absent.
     try:
         import arl  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - install-time surface
         raise RuntimeError(
-            "operations_agent_env requires the 'arl-env' package. "
+            "operations backend 'agent_env' requires the 'arl-env' package. "
             "Install with: uv sync --extra agent-env"
         ) from exc
 
-    image = _resolve(config, "image", "AGENTM_AGENT_ENV_IMAGE", None)
-    pool_ref = _resolve(config, "pool_ref", "AGENTM_AGENT_ENV_POOL_REF", None)
+    image = _resolve_config(config, "image", "AGENTM_AGENT_ENV_IMAGE", None)
+    pool_ref = _resolve_config(config, "pool_ref", "AGENTM_AGENT_ENV_POOL_REF", None)
     if not image and not pool_ref:
         raise RuntimeError(
-            "operations_agent_env: one of 'image' (managed pool, default) or "
+            "operations backend 'agent_env': one of 'image' (managed pool, default) or "
             "'pool_ref' (legacy pre-created WarmPool) is required. Set the "
             "atom config field, or use AGENTM_AGENT_ENV_IMAGE / "
             "AGENTM_AGENT_ENV_POOL_REF."
         )
-    gateway_url = _resolve(
+    gateway_url = _resolve_config(
         config, "gateway_url", "AGENTM_AGENT_ENV_GATEWAY_URL", "http://localhost:8080"
     ) or "http://localhost:8080"
-    namespace = _resolve(
+    namespace = _resolve_config(
         config, "namespace", "AGENTM_AGENT_ENV_NAMESPACE", "default"
     ) or "default"
     work_dir = (config.get("work_dir") or "/workspace") if isinstance(config.get("work_dir"), str) else "/workspace"
@@ -749,9 +707,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     idle_value: int | None = int(idle) if isinstance(idle, int) else None
     session: Any
     if image:
-        # Managed pool path: the server creates and scales the pool from
-        # ``image``; ``experiment_id`` groups sandboxes for bulk cleanup.
-        experiment_id = _resolve(
+        experiment_id = _resolve_config(
             config,
             "experiment_id",
             "AGENTM_AGENT_ENV_EXPERIMENT_ID",
@@ -765,8 +721,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             workspace_dir=work_dir,
         )
     else:
-        # Legacy pre-created WarmPool path. ``pool_ref`` is guaranteed
-        # non-empty by the selection guard above.
         assert pool_ref is not None
         session = arl.SandboxSession(
             pool_ref=pool_ref,
@@ -777,13 +731,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
     session.create_sandbox()
 
-    # Inject GH_TOKEN and clone the repo into the sandbox. The agent works
-    # directly with git/gh inside the sandbox (autonomous mode).
     _inject_gh_token(session, work_dir)
     _clone_repo_into_sandbox(session, work_dir)
-
-    # Upload skill files from host PVC into the sandbox so skill_loader can
-    # discover them. Non-fatal: missing dir or upload errors are logged, not raised.
     _upload_skills_to_sandbox(session, gateway_url, work_dir)
 
     api.register_operations(
@@ -794,9 +743,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             default_timeout=timeout_value,
         ),
     )
-    # Redirect write / edit / tool_propose_change writes into the
-    # sandbox. The writer rejects any path outside ``work_dir``, so the agent
-    # cannot mutate its own code from inside a sandboxed session.
     api.register_resource_writer(
         _AgentEnvResourceWriter(session, work_dir=work_dir, gateway_url=gateway_url)
     )

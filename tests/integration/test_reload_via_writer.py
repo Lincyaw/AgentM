@@ -178,7 +178,7 @@ async def _build_session(
             cwd=str(tmp_path),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
 
                 (f"{pkg}.tool_demo", {})],
             provider=(f"{pkg}.provider", {}),
@@ -521,7 +521,7 @@ async def test_install_atom_in_turn_n_is_dispatchable_in_turn_n_plus_one(
             cwd=str(tmp_path),
             extensions=[
 
-                ("agentm.extensions.builtin.operations_local", {}),
+                ("agentm.extensions.builtin.operations", {}),
                 ("contrib.extensions.tool_catalog.browse", {}),
                 ("contrib.extensions.tool_catalog.mutate", {}),
             ],

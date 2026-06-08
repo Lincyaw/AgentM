@@ -15,7 +15,9 @@ description: >-
 extensions:
   # --- environment port (local FS + asyncio bash). Listed first so any later
   # atom that needs ``api.get_operations()`` finds it published.
-  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
 
   # --- L1 store. Publishes ``rca.hgraph.read`` + a one-shot
   # ``rca.hgraph.write_token`` the gate claims at install time.
@@ -98,7 +100,7 @@ extensions:
     config:
       max_workers: 2
       inherit_extensions:
-        - operations_local
+        - operations
         - rca_hgraph_store
         - judge_satisfied
         - judge_coverage
@@ -111,8 +113,8 @@ extensions:
         - observability
         - worker_finalize
       available_inherited_extensions:
-        operations_local:
-          module: agentm.extensions.builtin.operations_local
+        operations:
+          module: agentm.extensions.builtin.operations
         rca_hgraph_store:
           module: agentm_rca.hfsm.atoms.rca_hgraph_store
         judge_satisfied:

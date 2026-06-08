@@ -21,7 +21,9 @@ description: |
 task_class: rca_baseline
 
 extensions:
-  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
   # The single tool surface — four tools whose names, signatures, and
   # behavior mirror ThinkDepthAI's ``QueryParquetFilesToolkit`` plus
   # ``think_tool``. AGENTM_RCA_DATA_DIR is set per-case by the eval

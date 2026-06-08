@@ -27,7 +27,9 @@ extensions:
   # (commit e062913) — the session factory fail-stops at freeze if no
   # atom registered Operations. ThinkDepthAI tools never call FS / bash,
   # so the bundle is unused at runtime, but the registration is required.
-  - module: agentm.extensions.builtin.operations_local
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
 
   # --- baseline tool surface (verbatim from manifest.baseline.yaml) ---
   - module: agentm_rca.tools.thinkdepth_sql
