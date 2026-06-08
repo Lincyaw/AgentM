@@ -16,6 +16,9 @@ extensions:
       personas: false
   - module: agentm_rca.worker_skills
   - module: agentm.extensions.builtin.skill_loader
+    config:
+      include_defaults: false
+      inherit_claude: false
   - module: agentm.extensions.builtin.turn_reminder
     config:
       warn_within: 5
