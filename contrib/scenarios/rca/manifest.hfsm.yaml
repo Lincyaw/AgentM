@@ -80,7 +80,7 @@ extensions:
   # directory) cannot be queried to shortcut the eval. ``data_dir``
   # falls through to the ``AGENTM_RCA_DATA_DIR`` env var which the
   # eval harness sets per-case.
-  - module: agentm_rca.tools.duckdb_sql
+  - module: agentm_rca.atoms.duckdb_sql
     config:
       exclude:
         - conclusion.parquet
@@ -132,11 +132,11 @@ extensions:
         rca_evidence_tools:
           module: agentm_rca.hfsm.atoms.rca_evidence_tools
         duckdb_sql:
-          module: agentm_rca.tools.duckdb_sql
+          module: agentm_rca.atoms.duckdb_sql
         observability:
           module: agentm.extensions.builtin.observability
         worker_finalize:
-          module: agentm_rca.tools.worker_finalize
+          module: agentm_rca.atoms.worker_finalize
 
   # --- system prompt. Empty body — the FSM policy atom injects per-state
   # fragments via BeforeAgentStartEvent so the live prompt always reflects

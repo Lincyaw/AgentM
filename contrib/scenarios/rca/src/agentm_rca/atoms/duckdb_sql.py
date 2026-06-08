@@ -28,7 +28,7 @@ prompt and the tool schemas are **identical** in both:
 
 Configuration (local)::
 
-    - module: agentm_rca.tools.duckdb_sql
+    - module: agentm_rca.atoms.duckdb_sql
       config:
         data_dir: /path/to/converted     # required; or AGENTM_RCA_DATA_DIR
         exclude: [conclusion.parquet]    # optional, hides ground truth
@@ -37,7 +37,7 @@ Configuration (local)::
 
 Configuration (remote)::
 
-    - module: agentm_rca.tools.duckdb_sql
+    - module: agentm_rca.atoms.duckdb_sql
       config:
         endpoint: https://aegis.example:8082   # gateway base; or AGENTM_DUCKDB_ENDPOINT
         bucket: my-bucket                       # or AGENTM_DUCKDB_BUCKET

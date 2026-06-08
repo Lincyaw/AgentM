@@ -8,15 +8,15 @@ hook ``skill_loader`` reads to extend its discovery roots.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import ResourcesDiscoverEvent
 from agentm.core.abi.extension import ExtensionAPI
 
+from agentm_rca import SCENARIO_ROOT
 
-_SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
+_SKILLS_DIR = SCENARIO_ROOT / "skills"
 
 
 MANIFEST = ExtensionManifest(
