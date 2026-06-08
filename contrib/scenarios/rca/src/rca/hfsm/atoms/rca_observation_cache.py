@@ -56,8 +56,8 @@ from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import TextContent
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.schema import Observation
-from agentm_rca.hfsm.updates import UpdateProposal
+from rca.hfsm.schema import Observation
+from rca.hfsm.updates import UpdateProposal
 
 
 MANIFEST = ExtensionManifest(

@@ -36,7 +36,7 @@ from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.schema import (
+from rca.hfsm.schema import (
     CheckResult,
     Hypothesis,
     Interpretation,
@@ -44,8 +44,8 @@ from agentm_rca.hfsm.schema import (
     Prediction,
     Symptom,
 )
-from agentm_rca.hfsm.tool_schemas import DESCRIPTIONS, PARAMS
-from agentm_rca.hfsm.updates import UpdateProposal, UpdateResult
+from rca.hfsm.tool_schemas import DESCRIPTIONS, PARAMS
+from rca.hfsm.updates import UpdateProposal, UpdateResult
 
 
 MANIFEST = ExtensionManifest(

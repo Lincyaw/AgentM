@@ -43,7 +43,7 @@ from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import TextContent
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.judges import JudgeContext
+from rca.hfsm.judges import JudgeContext
 
 
 MANIFEST = ExtensionManifest(

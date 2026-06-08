@@ -43,7 +43,7 @@ from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.scheduler import pick_next
+from rca.hfsm.scheduler import pick_next
 
 
 FSMState = Literal[

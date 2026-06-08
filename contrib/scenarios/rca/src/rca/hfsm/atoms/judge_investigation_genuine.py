@@ -1,19 +1,49 @@
-"""``judge_satisfied`` — ``rca.judge.satisfied`` service atom.
+"""``judge_investigation_genuine`` — ``rca.judge.investigation_genuine`` atom.
 
-Phase 2 C1 of the rca_hfsm scenario. Registers a single ``Judge``
-implementation under the service name ``rca.judge.satisfied`` and
-toggles between an LLM-backed and a scripted (stub) backing
+Phase 2 C5 of the rca_hfsm scenario. Registers a single ``Judge``
+implementation under the service name ``rca.judge.investigation_genuine``
+and toggles between an LLM-backed and a scripted (stub) backing
 implementation via ``config.mode`` (default: ``"llm"``).
 
-Replaces the Phase 1 word-boundary regex on ``verdict_proposal`` (see
-``rca_falsification_gate`` / ``updates.py``'s ``triggered`` /
-``supports`` lemma matching). C1 only mounts the judge as a service;
-the gate continues to use its Phase 1 rules. The gate refactor is C2's
-job.
+Unlike the four C1 judges that gate confirm/refute/attach-check paths
+inside ``rca_falsification_gate``, this judge is consulted by
+``rca_finalize.submit_final_report`` once at termination time. It answers
+the "did the investigator actually investigate?" question by reading the
+shape of the trajectory: symptoms recorded, hypotheses proposed,
+observations gathered, gate mutations applied vs downgraded, and the
+proposed final report.
 
-JudgeContext shape: ``graph_slice = {"prediction": ..., "checks": [...]}``
-with ``operands = {}``. Canonical verdict strings per design §4.1:
-``"satisfied" | "refuted" | "unclear" | "partial"``.
+The C4 eval failure mode (0/3 grader-ok, zero judge invocations, FSM
+final state INTAKE on every case) showed the substrate was correct but
+the orchestrator was bypassing the FSM by calling ``submit_final_report``
+without ever calling ``record_symptom``. The structural coverage check
+on the empty symptom set was vacuously true. This judge moves the
+"discipline question" to LLM judgment at finalize-time.
+
+JudgeContext shape::
+
+    graph_slice = {
+        "symptom_count": int,
+        "symptoms": list[{"id": str, "text": str, "source": str}],
+        "hypotheses": list[{"id": str, "claim": str, "status": str,
+                            "predictions_summary": list[str],
+                            "checks_count": int}],
+        "observations_count": int,
+        "gate_mutations": {"applied": int, "downgraded": int},
+        "final_report": {
+            "root_cause": str,
+            "supporting_observations": list[str],
+            "refuted_alternatives": list[str],
+        },
+    }
+    operands = {}
+
+Canonical verdict strings per design CLAUDE.md "no preset enums for
+subjective dimensions" convention: ``"genuine_investigation" |
+"speculation" | "unclear"``. The judge's prompt is responsible for
+noticing structural emptiness (e.g. ``symptom_count == 0``) and
+returning ``"speculation"`` rather than relying on caller-side ``len()``
+checks.
 
 §11 single-file contract: stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions`` + scenario-local ``judges`` module only. No
@@ -48,7 +78,7 @@ from agentm.core.abi import (
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.judges import (
+from rca.hfsm.judges import (
     JudgeContext,
     SUBMIT_VERDICT_TOOL_NAME,
     Verdict,
@@ -58,17 +88,19 @@ from agentm_rca.hfsm.judges import (
 )
 
 
-_KIND = "satisfied"
+_KIND = "investigation_genuine"
 _SERVICE_NAME = f"rca.judge.{_KIND}"
 _PROMPT_RELPATH = f"contrib/scenarios/rca/prompts/hfsm/judges/{_KIND}.md"
 _LRU_MAX = 256
 
 
 MANIFEST = ExtensionManifest(
-    name="judge_satisfied",
+    name="judge_investigation_genuine",
     description=(
-        "Registers the rca.judge.satisfied service. LLM-backed by default; "
-        "scripted stub mode available via config.mode='stub' for tests."
+        "Registers the rca.judge.investigation_genuine service. Consulted "
+        "by rca_finalize at submit_final_report time; rejects reports "
+        "whose trajectory shape shows no genuine investigation took place "
+        "(zero symptoms, zero hypotheses, zero supporting checks)."
     ),
     registers=(),
     config_schema={

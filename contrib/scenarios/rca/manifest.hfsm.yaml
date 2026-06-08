@@ -21,7 +21,7 @@ extensions:
 
   # --- L1 store. Publishes ``rca.hgraph.read`` + a one-shot
   # ``rca.hgraph.write_token`` the gate claims at install time.
-  - module: agentm_rca.hfsm.atoms.rca_hgraph_store
+  - module: rca.hfsm.atoms.rca_hgraph_store
 
   # --- LLM-native judges (Phase 2). Each atom registers exactly one
   # ``rca.judge.<kind>`` service. The gate's install fetches all four,
@@ -30,22 +30,22 @@ extensions:
   # fixture in tests/_gate_fixtures.py. No ``config.model`` override —
   # the LLM judge falls through to ``api.provider`` so a single model
   # change in ``.env`` re-points every judge.
-  - module: agentm_rca.hfsm.atoms.judge_satisfied
+  - module: rca.hfsm.atoms.judge_satisfied
     config:
       mode: llm
-  - module: agentm_rca.hfsm.atoms.judge_coverage
+  - module: rca.hfsm.atoms.judge_coverage
     config:
       mode: llm
-  - module: agentm_rca.hfsm.atoms.judge_independence
+  - module: rca.hfsm.atoms.judge_independence
     config:
       mode: llm
-  - module: agentm_rca.hfsm.atoms.judge_falsified_genuinely
+  - module: rca.hfsm.atoms.judge_falsified_genuinely
     config:
       mode: llm
   # C5 — investigation-genuine judge. Consulted by rca_finalize at
   # submit_final_report time (not by the gate). Mounted alongside the
   # other 4 judges so the worker-inherit list stays a single block.
-  - module: agentm_rca.hfsm.atoms.judge_investigation_genuine
+  - module: rca.hfsm.atoms.judge_investigation_genuine
     config:
       mode: llm
 
@@ -53,26 +53,26 @@ extensions:
   # token claim succeeds, AFTER the judges so it can resolve their
   # ``rca.judge.*`` services at install time, and BEFORE every tool
   # atom so the tools can resolve ``rca.gate``.
-  - module: agentm_rca.hfsm.atoms.rca_falsification_gate
+  - module: rca.hfsm.atoms.rca_falsification_gate
 
   # --- LLM-facing tool surface (record_symptom / record_observation /
   # propose_hypothesis / attach_check / propose_update).
-  - module: agentm_rca.hfsm.atoms.rca_evidence_tools
+  - module: rca.hfsm.atoms.rca_evidence_tools
 
   # --- L1 memoization. Wraps idempotent tools at AgentStartEvent; the
   # evidence tools register with ``idempotent=False`` and pass through.
-  - module: agentm_rca.hfsm.atoms.rca_observation_cache
+  - module: rca.hfsm.atoms.rca_observation_cache
 
   # --- behavioural spine. Subscribes to ``rca.graph.mutated``; injects
   # per-state prompt fragments via BeforeAgentStartEvent; filters the
   # visible tool catalog on FINALIZE.
-  - module: agentm_rca.hfsm.atoms.rca_fsm_policy
+  - module: rca.hfsm.atoms.rca_fsm_policy
 
   # --- worker brief construction (L2 → L3 boundary).
-  - module: agentm_rca.hfsm.atoms.rca_brief_builder
+  - module: rca.hfsm.atoms.rca_brief_builder
 
   # --- the only legal exit from FINALIZE; coverage-gated submit_final_report.
-  - module: agentm_rca.hfsm.atoms.rca_finalize
+  - module: rca.hfsm.atoms.rca_finalize
 
   # --- data-access for the orchestrator. Reused verbatim from
   # contrib/scenarios/rca/manifest.yaml — same exclude rule so the
@@ -80,7 +80,7 @@ extensions:
   # directory) cannot be queried to shortcut the eval. ``data_dir``
   # falls through to the ``AGENTM_RCA_DATA_DIR`` env var which the
   # eval harness sets per-case.
-  - module: agentm_rca.duckdb_sql
+  - module: rca.default.duckdb_sql
     config:
       exclude:
         - conclusion.parquet
@@ -116,27 +116,27 @@ extensions:
         operations:
           module: agentm.extensions.builtin.operations
         rca_hgraph_store:
-          module: agentm_rca.hfsm.atoms.rca_hgraph_store
+          module: rca.hfsm.atoms.rca_hgraph_store
         judge_satisfied:
-          module: agentm_rca.hfsm.atoms.judge_satisfied
+          module: rca.hfsm.atoms.judge_satisfied
         judge_coverage:
-          module: agentm_rca.hfsm.atoms.judge_coverage
+          module: rca.hfsm.atoms.judge_coverage
         judge_independence:
-          module: agentm_rca.hfsm.atoms.judge_independence
+          module: rca.hfsm.atoms.judge_independence
         judge_falsified_genuinely:
-          module: agentm_rca.hfsm.atoms.judge_falsified_genuinely
+          module: rca.hfsm.atoms.judge_falsified_genuinely
         judge_investigation_genuine:
-          module: agentm_rca.hfsm.atoms.judge_investigation_genuine
+          module: rca.hfsm.atoms.judge_investigation_genuine
         rca_falsification_gate:
-          module: agentm_rca.hfsm.atoms.rca_falsification_gate
+          module: rca.hfsm.atoms.rca_falsification_gate
         rca_evidence_tools:
-          module: agentm_rca.hfsm.atoms.rca_evidence_tools
+          module: rca.hfsm.atoms.rca_evidence_tools
         duckdb_sql:
-          module: agentm_rca.duckdb_sql
+          module: rca.default.duckdb_sql
         observability:
           module: agentm.extensions.builtin.observability
         worker_finalize:
-          module: agentm_rca.worker_finalize
+          module: rca.default.worker_finalize
 
   # --- system prompt. Empty body — the FSM policy atom injects per-state
   # fragments via BeforeAgentStartEvent so the live prompt always reflects

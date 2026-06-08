@@ -74,9 +74,9 @@ from typing import Any
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.judges import Judge, JudgeContext, Verdict
-from agentm_rca.hfsm.schema import CheckResult, Hypothesis, Prediction
-from agentm_rca.hfsm.updates import (
+from rca.hfsm.judges import Judge, JudgeContext, Verdict
+from rca.hfsm.schema import CheckResult, Hypothesis, Prediction
+from rca.hfsm.updates import (
     GraphView,
     UpdateProposal,
     UpdateResult,

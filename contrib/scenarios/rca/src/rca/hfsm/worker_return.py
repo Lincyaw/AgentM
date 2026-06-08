@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm_rca.hfsm.schema import Interpretation, Observation, WorkerReturn
-from agentm_rca.hfsm.updates import UpdateProposal
+from rca.hfsm.schema import Interpretation, Observation, WorkerReturn
+from rca.hfsm.updates import UpdateProposal
 
 
 # Phase 1: never apply the worker's interpretation automatically. Phase 2

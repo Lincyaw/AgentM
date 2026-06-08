@@ -1,55 +1,24 @@
-"""``judge_investigation_genuine`` — ``rca.judge.investigation_genuine`` atom.
+"""``judge_independence`` — ``rca.judge.independence`` service atom.
 
-Phase 2 C5 of the rca_hfsm scenario. Registers a single ``Judge``
-implementation under the service name ``rca.judge.investigation_genuine``
-and toggles between an LLM-backed and a scripted (stub) backing
+Phase 2 C1 of the rca_hfsm scenario. Registers a single ``Judge``
+implementation under the service name ``rca.judge.independence`` and
+toggles between an LLM-backed and a scripted (stub) backing
 implementation via ``config.mode`` (default: ``"llm"``).
 
-Unlike the four C1 judges that gate confirm/refute/attach-check paths
-inside ``rca_falsification_gate``, this judge is consulted by
-``rca_finalize.submit_final_report`` once at termination time. It answers
-the "did the investigator actually investigate?" question by reading the
-shape of the trajectory: symptoms recorded, hypotheses proposed,
-observations gathered, gate mutations applied vs downgraded, and the
-proposed final report.
+Replaces the Phase 1 ``worker_session_id`` literal-equality check (see
+``updates.independent_positive_workers``). Catches: same source data,
+identical observations across different session IDs, brief copy-paste.
+C1 only mounts the judge as a service; the gate continues to use its
+Phase 1 rules. The gate refactor is C2's job.
 
-The C4 eval failure mode (0/3 grader-ok, zero judge invocations, FSM
-final state INTAKE on every case) showed the substrate was correct but
-the orchestrator was bypassing the FSM by calling ``submit_final_report``
-without ever calling ``record_symptom``. The structural coverage check
-on the empty symptom set was vacuously true. This judge moves the
-"discipline question" to LLM judgment at finalize-time.
-
-JudgeContext shape::
-
-    graph_slice = {
-        "symptom_count": int,
-        "symptoms": list[{"id": str, "text": str, "source": str}],
-        "hypotheses": list[{"id": str, "claim": str, "status": str,
-                            "predictions_summary": list[str],
-                            "checks_count": int}],
-        "observations_count": int,
-        "gate_mutations": {"applied": int, "downgraded": int},
-        "final_report": {
-            "root_cause": str,
-            "supporting_observations": list[str],
-            "refuted_alternatives": list[str],
-        },
-    }
-    operands = {}
-
-Canonical verdict strings per design CLAUDE.md "no preset enums for
-subjective dimensions" convention: ``"genuine_investigation" |
-"speculation" | "unclear"``. The judge's prompt is responsible for
-noticing structural emptiness (e.g. ``symptom_count == 0``) and
-returning ``"speculation"`` rather than relying on caller-side ``len()``
-checks.
+JudgeContext shape: ``graph_slice = {"check_a", "check_b"}`` with
+``operands = {}``. Canonical verdict strings per design §4.3:
+``"independent" | "redundant" | "unclear"``.
 
 §11 single-file contract: stdlib + ``agentm.core.abi.*`` +
-``agentm.extensions`` + scenario-local ``judges`` module only. No
-atom-to-atom imports. No module-level mutable state. Failure mode: one
-retry on provider error or malformed ``submit_verdict`` payload, then
-:func:`make_unclear`. No regex anywhere.
+``agentm.extensions`` + scenario-local ``judges`` module only. Failure
+mode: one retry on provider error or malformed ``submit_verdict``
+payload, then :func:`make_unclear`. No regex anywhere.
 """
 
 from __future__ import annotations
@@ -78,7 +47,7 @@ from agentm.core.abi import (
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from agentm_rca.hfsm.judges import (
+from rca.hfsm.judges import (
     JudgeContext,
     SUBMIT_VERDICT_TOOL_NAME,
     Verdict,
@@ -88,19 +57,17 @@ from agentm_rca.hfsm.judges import (
 )
 
 
-_KIND = "investigation_genuine"
+_KIND = "independence"
 _SERVICE_NAME = f"rca.judge.{_KIND}"
 _PROMPT_RELPATH = f"contrib/scenarios/rca/prompts/hfsm/judges/{_KIND}.md"
 _LRU_MAX = 256
 
 
 MANIFEST = ExtensionManifest(
-    name="judge_investigation_genuine",
+    name="judge_independence",
     description=(
-        "Registers the rca.judge.investigation_genuine service. Consulted "
-        "by rca_finalize at submit_final_report time; rejects reports "
-        "whose trajectory shape shows no genuine investigation took place "
-        "(zero symptoms, zero hypotheses, zero supporting checks)."
+        "Registers the rca.judge.independence service. LLM-backed by default; "
+        "scripted stub mode available via config.mode='stub' for tests."
     ),
     registers=(),
     config_schema={
@@ -128,10 +95,6 @@ MANIFEST = ExtensionManifest(
 
 
 async def _inert_execute(args: dict[str, Any]) -> ToolResult:
-    """``submit_verdict`` is never invoked by the agent loop — the judge
-    reads the ``ToolCallBlock`` straight off the assistant message — but
-    a ``Tool`` still needs an ``execute`` to satisfy the Protocol."""
-
     del args
     return ToolResult(content=[TextContent(type="text", text="ok")])
 
@@ -166,12 +129,6 @@ def _load_prompt(cwd: str) -> str:
 
 
 def _parse_submit_verdict(message: AssistantMessage) -> Verdict:
-    """Extract the ``submit_verdict`` payload or raise ``ValueError``.
-
-    The ``ValueError`` path is what triggers the one-retry contract; the
-    second failure becomes :func:`make_unclear`.
-    """
-
     for block in message.content:
         if not isinstance(block, ToolCallBlock) or block.name != SUBMIT_VERDICT_TOOL_NAME:
             continue
@@ -192,14 +149,6 @@ def _parse_submit_verdict(message: AssistantMessage) -> Verdict:
 
 
 def _run_coro(coro: Any) -> Any:
-    """Sync entry point for the async provider call.
-
-    The ``Judge.judge`` Protocol is sync; ``stream_fn`` is async. Tests
-    use ``asyncio.run`` directly; when called from inside a running loop
-    (production tool handlers are async) we offload to a thread to avoid
-    "asyncio.run() cannot be called from a running event loop".
-    """
-
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -209,8 +158,6 @@ def _run_coro(coro: Any) -> Any:
 
 
 class _StubJudge:
-    """Returns scripted verdicts in order; caches per context."""
-
     def __init__(self, kind: str, scripted: list[dict[str, Any]]) -> None:
         self.kind = kind
         self._scripted = list(scripted)
@@ -242,8 +189,6 @@ class _StubJudge:
 
 
 class _LlmJudge:
-    """Drives the active provider via ``stream_fn``; one retry then unclear."""
-
     def __init__(
         self, *, kind: str, api: ExtensionAPI, model_override: str | None
     ) -> None:
