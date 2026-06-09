@@ -61,10 +61,16 @@ def _resolve_refs(node: Any, defs: dict[str, Any], *, _inside_properties: bool =
                 return resolved
         out: dict[str, Any] = {}
         for k, v in node.items():
-            # Strip Pydantic's auto-generated "title" metadata, but
-            # preserve user-defined properties named "title" (they live
+            # Strip Pydantic's auto-generated metadata keys:
+            # - "title": noisy in wire payloads, not needed by LLMs.
+            # - "additionalProperties": validation concern, not schema
+            #   description; _force_strict adds it back for OpenAI strict
+            #   mode in the provider adapter.
+            # Preserve user-defined *properties* named "title" (they live
             # inside a "properties" dict, not at the schema-metadata level).
             if k == "title" and not _inside_properties:
+                continue
+            if k == "additionalProperties":
                 continue
             child_inside = k == "properties"
             out[k] = _resolve_refs(v, defs, _inside_properties=child_inside)
