@@ -351,11 +351,21 @@ def _to_openai_messages(
 
 @dataclass(frozen=True)
 class OpenAIToolSpecAdapter(ToolSpecAdapter):
-    """Convert AgentM tools to OpenAI function-tool specs."""
+    """Convert AgentM tools to OpenAI function-tool specs.
+
+    ``strict=True`` (the default) adds ``additionalProperties: false``
+    and forces all properties into ``required`` on every nested object —
+    required by OpenAI's structured-outputs strict mode. Set to ``False``
+    for OpenAI-compatible providers (doubao, DeepSeek, LiteLLM) whose
+    constrained-decoding engines may reject those constraints.
+    """
+
+    strict: bool = True
 
     def vendor_spec(self, tool: Tool) -> dict[str, Any]:
         params = copy.deepcopy(tool.parameters) if tool.parameters else {}
-        _force_strict(params)
+        if self.strict:
+            _force_strict(params)
         return {
             "type": "function",
             "function": {
@@ -369,8 +379,10 @@ class OpenAIToolSpecAdapter(ToolSpecAdapter):
         return encode_tool_args(args)
 
 
-def _to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
-    adapter = OpenAIToolSpecAdapter()
+def _to_openai_tools(
+    tools: list[Tool], *, strict: bool = True,
+) -> list[dict[str, Any]]:
+    adapter = OpenAIToolSpecAdapter(strict=strict)
     return [adapter.vendor_spec(t) for t in tools]
 
 
@@ -579,7 +591,8 @@ class OpenAIStreamFn:
             "stream_options": {"include_usage": True},
         }
         if tools:
-            body["tools"] = _to_openai_tools(tools)
+            strict = self.base_url is None
+            body["tools"] = _to_openai_tools(tools, strict=strict)
 
         extra = dict(self.extra_body or {})
         if self.reasoning_effort is not None:
