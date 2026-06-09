@@ -32,16 +32,19 @@ Common columns:
 
 ## Hard limits
 
-- Tool-call budget: aim for ~50 calls; extend if the evidence genuinely warrants it. Hard cap is 100 — the runtime will force a stop there.
-- Spend the budget efficiently: `list_tables_in_directory` once, `get_schema` on the files you actually plan to query, then spend the rest on `query_parquet_files`.
+- You have at most **30 turns** before the runtime stops you with NO chance
+  to submit. Call `submit_final_report` well before that — a partial answer
+  is infinitely better than no answer.
+- Spend your turns efficiently: `list_tables` once, then focus SQL queries
+  on the most informative signals.
 
 ## Investigation playbook
 
-1. `list_tables_in_directory` to confirm the parquet files.
-2. `get_schema` on the relevant ones (start with `abnormal_traces`).
-3. Diff abnormal vs normal: error rates, latency, status codes, log levels.
-4. Trace the call chain (`parent_span_id → span_id`) to find the earliest service whose own work — not its dependency's — went wrong.
-5. Decide every root cause + every propagation edge. More than one root cause is possible — note each separately when evidence supports it.
+1. `list_tables` to see available data, then `load_skill` to read relevant skills.
+2. Diff abnormal vs normal: error rates, latency, status codes, log levels.
+3. Trace the call chain (`parent_span_id → span_id`) to find the earliest service whose own work — not its dependency's — went wrong.
+4. Decide every root cause + every propagation edge. More than one root cause is possible — note each separately when evidence supports it.
+5. **Call `submit_final_report` with your findings.** Do not keep investigating indefinitely.
 
 ## Automated review
 
