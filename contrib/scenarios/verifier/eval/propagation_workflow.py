@@ -195,23 +195,19 @@ if not skip_judge and len(confirmed) > len(injections):
     for inj in injections:
         seeds.add(inj["target"])
 
-    # Build verdict_by_target from existing_verdicts (judge-only) or hop_log
-    existing_verdicts = args.get("existing_verdicts", [])
     verdict_by_target = {}
-    if existing_verdicts:
-        for v in existing_verdicts:
-            verdict_by_target[v.get("to", "")] = v
     for entry in hop_log:
         to_svc = entry.get("to", "")
-        if to_svc and to_svc not in verdict_by_target:
-            ev = node_evidence.get(to_svc, {})
-            verdict_by_target[to_svc] = {
-                "from": entry.get("from", ""),
-                "to": to_svc,
-                "verdict": entry.get("verdict", ""),
-                "rationale": ev.get("rationale", ""),
-                "symptom_evidence": ev.get("symptom_evidence", []),
-            }
+        if not to_svc or entry.get("verdict") == "edge_sql":
+            continue
+        ev = node_evidence.get(to_svc, {})
+        verdict_by_target[to_svc] = {
+            "from": entry.get("from", ""),
+            "to": to_svc,
+            "verdict": entry.get("verdict", ""),
+            "rationale": ev.get("rationale", ""),
+            "symptom_evidence": ev.get("symptom_evidence", []),
+        }
 
     rejected_verdicts = [
         v for v in verdict_by_target.values()
