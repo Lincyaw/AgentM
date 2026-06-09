@@ -34,14 +34,38 @@ class FunctionTool:
 
     ``fn`` may return either a bare :class:`ToolResult` or any
     :class:`ToolOutcome`; the kernel handles both.
+
+    ``parameters`` accepts either a JSON Schema dict or a
+    :class:`pydantic.BaseModel` subclass. A Pydantic class is
+    automatically converted to a provider-neutral JSON Schema at
+    construction time via ``pydantic_to_tool_schema``.
     """
 
     name: str
     description: str
     parameters: dict[str, Any]
     fn: Callable[[dict[str, Any]], Awaitable[ToolResult | ToolOutcome]]
-    # Mirrors the Tool protocol surface; not consumed by the kernel itself.
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str,
+        parameters: dict[str, Any] | type,
+        fn: Callable[[dict[str, Any]], Awaitable[ToolResult | ToolOutcome]],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.name = name
+        self.description = description
+        self.fn = fn
+        self.metadata = metadata or {}
+        if isinstance(parameters, type):
+            from agentm.core.lib.tool_schema import pydantic_to_tool_schema
+
+            self.parameters = pydantic_to_tool_schema(parameters)
+        else:
+            self.parameters = parameters
 
     async def execute(
         self,

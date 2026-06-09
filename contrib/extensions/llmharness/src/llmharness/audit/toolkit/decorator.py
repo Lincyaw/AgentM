@@ -37,7 +37,6 @@ from typing import Any, TypeVar
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.tool import ToolOutcome
-from agentm.core.lib import pydantic_to_tool_schema
 from pydantic import BaseModel, ValidationError
 
 ArgsT = TypeVar("ArgsT", bound=BaseModel)
@@ -111,8 +110,6 @@ def harness_tool(
                 "argument with a pydantic.BaseModel subclass"
             )
 
-        parameters = pydantic_to_tool_schema(model_cls)
-
         async def _wrapped(args: dict[str, Any]) -> ToolResult | ToolOutcome:
             try:
                 parsed = model_cls.model_validate(args)
@@ -133,7 +130,7 @@ def harness_tool(
         return FunctionTool(
             name=name,
             description=resolved_description,
-            parameters=parameters,
+            parameters=model_cls,
             fn=_wrapped,
             metadata={"terminates": True} if terminates else {},
         )
