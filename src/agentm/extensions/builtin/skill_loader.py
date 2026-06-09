@@ -493,7 +493,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         event.system = updated
         return {"system": updated}
 
-    def _load_skill(args: dict[str, Any]) -> Any:
+    async def _load_skill(args: dict[str, Any]) -> Any:
         from agentm.core.abi import ToolResult
         from agentm.core.abi.messages import TextContent
 
