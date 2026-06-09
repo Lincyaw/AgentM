@@ -149,7 +149,7 @@ def run_judge(
     """Run judge via the workflow (skip_propagate=True, skip_judge=False)."""
     data_dir = case_dir.resolve()
     out = run_dir.resolve()
-    trace_path = out / "propagation_trace.json"
+    trace_path = out / "propagation_graph.json"
     if not trace_path.exists():
         return {}
 
@@ -316,7 +316,7 @@ def run_one_case(
 
     result = asyncio.run(_run_workflow_async(workflow_args, out))
 
-    (out / "propagation_trace.json").write_text(
+    (out / "propagation_graph.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False, default=str)
     )
 
@@ -358,7 +358,7 @@ def run_one_case(
 
 def _read_cached_summary(out_dir: Path, case_name: str) -> dict | None:
     report_path = out_dir / "report.json"
-    trace_path = out_dir / "propagation_trace.json"
+    trace_path = out_dir / "propagation_graph.json"
     if not report_path.exists() or not trace_path.exists():
         return None
     try:
@@ -586,7 +586,7 @@ def _run_judge_or_skip(
             return {"case": name, "cached": True}
         except Exception:  # noqa: BLE001
             pass
-    if not (case_out / "propagation_trace.json").exists():
+    if not (case_out / "propagation_graph.json").exists():
         print(f"[{idx}/{total}] {name} SKIP: no hop results", flush=True)
         return {"case": name, "error": "no hop results"}
     print(f"[{idx}/{total}] {name} judging...", flush=True)
@@ -612,7 +612,7 @@ def judge_batch(
     _set_model(model)
     cases = sorted(
         p.name for p in run_dir.iterdir()
-        if p.is_dir() and (p / "propagation_trace.json").exists()
+        if p.is_dir() and (p / "propagation_graph.json").exists()
     )
     if limit:
         cases = cases[:limit]
