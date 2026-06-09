@@ -10,7 +10,7 @@ The script is plain ``async`` Python, run as a coroutine on the host event
 loop with a **curated namespace** that exposes only an orchestration SDK —
 bound to *already-existing* APIs:
 
-- ``agent(prompt, *, scenario=, isolation=, tool_allowlist=)`` —
+- ``agent(prompt, *, schema=, scenario=, isolation=, tool_allowlist=)`` —
   :meth:`ExtensionAPI.spawn_child_session` → ``child.prompt`` → last
   ``AssistantMessage`` text → ``child.shutdown``. Returns the text. A worker
   defaults to the **orchestrator's own scenario** (a clean reload of that
@@ -66,7 +66,7 @@ from agentm.core.abi.events import (
     TurnEndEvent,
 )
 from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
-from agentm.core.abi.messages import AgentMessage, AssistantMessage
+from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 
@@ -175,6 +175,12 @@ _AGENT_ENV_ATOM_MODULE: Final[str] = (
     "agentm.extensions.builtin.operations"
 )
 _AGENT_ENV_ATOM: Final[str] = _AGENT_ENV_ATOM_MODULE.rsplit(".", 1)[-1]
+
+# structured_output atom: wired automatically when agent(schema=...) is used.
+_STRUCTURED_OUTPUT_ATOM_MODULE: Final[str] = (
+    "agentm.extensions.builtin.structured_output"
+)
+_STRUCTURED_OUTPUT_ATOM: Final[str] = _STRUCTURED_OUTPUT_ATOM_MODULE.rsplit(".", 1)[-1]
 
 
 # Curated builtins handed to the script: data-manipulation only. This is a
@@ -373,15 +379,21 @@ class _WorkflowRun:
         self,
         prompt: str,
         *,
+        schema: dict[str, Any] | None = None,
         scenario: str | None = None,
         isolation: str | None = None,
         tool_allowlist: list[str] | None = None,
-    ) -> str:
+    ) -> str | dict[str, Any] | list[Any]:
         """Spawn one child agent session, drive it to a final reply, return its
         text. Journaled by ``hash(prompt, opts)`` — a re-run resumes from cache
-        without re-spawning."""
+        without re-spawning.
+
+        When *schema* is provided, the child session gets a ``submit_result``
+        terminal tool whose parameter shape matches the schema. The return value
+        is the parsed JSON object (dict/list) instead of a plain string."""
 
         opts: dict[str, Any] = {
+            "schema": schema,
             "scenario": scenario,
             "isolation": isolation,
             "tool_allowlist": tool_allowlist,
@@ -389,6 +401,11 @@ class _WorkflowRun:
         key = _Journal.key(prompt, opts)
         cached = await self.journal.lookup(key)
         if cached is not None:
+            if schema is not None:
+                try:
+                    return json.loads(cached)
+                except (json.JSONDecodeError, TypeError):
+                    return cached
             return cached
 
         async with self._agent_lock:
@@ -401,10 +418,16 @@ class _WorkflowRun:
 
         async with self.semaphore:
             result = await self._spawn_and_drive(
-                prompt, scenario, isolation, tool_allowlist
+                prompt, scenario, isolation, tool_allowlist, schema=schema
             )
 
         await self.journal.record(key, result)
+
+        if schema is not None:
+            try:
+                return json.loads(result)
+            except (json.JSONDecodeError, TypeError):
+                return result
         return result
 
     async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
@@ -461,8 +484,11 @@ class _WorkflowRun:
         scenario: str | None,
         isolation: str | None,
         tool_allowlist: list[str] | None,
+        *,
+        schema: dict[str, Any] | None = None,
     ) -> str:
         extensions: list[tuple[str, dict[str, Any]]] = []
+        atom_config_overrides: dict[str, dict[str, Any]] = {}
         # isolation="agent_env" selects the worker sandbox by listing the
         # operations atom (agent_env backend) in the child's extensions (policy by
         # composition, never a privileged config field). Soft, optional
@@ -481,6 +507,12 @@ class _WorkflowRun:
                 )
             extensions.append((_AGENT_ENV_ATOM_MODULE, {}))
 
+        # schema= wires the structured_output atom into the child so the
+        # worker gets a submit_result terminal tool shaped by the schema.
+        if schema is not None:
+            extensions.append((_STRUCTURED_OUTPUT_ATOM_MODULE, {}))
+            atom_config_overrides[_STRUCTURED_OUTPUT_ATOM] = {"schema": schema}
+
         config = AgentSessionConfig(
             cwd=self.api.cwd,
             provider=None,  # inherit parent's provider (spawn auto-wires it)
@@ -492,6 +524,7 @@ class _WorkflowRun:
             # parent scenario.
             scenario=scenario or self.default_scenario or self.api.scenario,
             extra_extensions=extensions,
+            atom_config_overrides=atom_config_overrides,
             tool_allowlist=tool_allowlist,
             purpose=_WORKER_PURPOSE,
         )
@@ -499,10 +532,39 @@ class _WorkflowRun:
         self.budget_svc.attach(child)
         try:
             messages = await child.prompt(prompt)
+            if schema is not None:
+                structured = _extract_structured_result(messages)
+                if structured is not None:
+                    return json.dumps(structured, ensure_ascii=False)
             return _final_assistant_text(messages)
         finally:
             with contextlib.suppress(Exception):
                 await child.shutdown()
+
+
+def _extract_structured_result(
+    messages: list[AgentMessage],
+) -> dict[str, Any] | list[Any] | None:
+    """Return the ``result`` payload from the last ``submit_result`` tool call.
+
+    Scans backward for the last ``AssistantMessage`` containing a
+    ``ToolCallBlock`` named ``submit_result`` and returns
+    ``arguments["result"]``. Returns ``None`` if no such call exists (the
+    worker may have answered in plain text instead).
+    """
+
+    for msg in reversed(messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in reversed(msg.content):
+            if (
+                isinstance(block, ToolCallBlock)
+                and block.name == "submit_result"
+            ):
+                result = block.arguments.get("result")
+                if isinstance(result, (dict, list)):
+                    return result
+    return None
 
 
 def _final_assistant_text(messages: list[AgentMessage]) -> str:
@@ -548,6 +610,7 @@ def _build_namespace(run: _WorkflowRun) -> dict[str, Any]:
         "pipeline": run.pipeline,
         "budget": _Budget(run.budget_svc),
         "args": run.args_payload,
+        "json": json,
         "log": run.log,
         "phase": run.phase,
     }
@@ -571,12 +634,14 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
             "type": "string",
             "description": (
                 "Async Python orchestration script. Available names: "
-                "agent(prompt, *, scenario=, isolation=, tool_allowlist=) "
-                "(awaitable -> str), parallel(list_of_awaitables) -> list, "
+                "agent(prompt, *, schema=, scenario=, isolation=, "
+                "tool_allowlist=) (awaitable -> str | dict when schema set), "
+                "parallel(list_of_awaitables) -> list, "
                 "pipeline(items, *stages) -> list, budget (.total / .spent() / "
-                ".remaining()), args (dict), log(msg), phase(name). Use await "
-                "for agent / parallel / pipeline. `return <value>` becomes the "
-                "tool result. Only data-manipulation builtins are available — "
+                ".remaining()), args (dict), json (module), log(msg), "
+                "phase(name). Use await for agent / parallel / pipeline. "
+                "`return <value>` becomes the tool result. Only "
+                "data-manipulation builtins are available — "
                 "no import / open / time / random."
             ),
         },
@@ -684,10 +749,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "fans out deterministic child agent sessions. Use for parallel "
                 "verify / judge / sweep harnesses where you author the control "
                 "flow as code rather than turn-by-turn. Names: agent, parallel, "
-                "pipeline, budget, args, log, phase. The script runs in a "
-                "curated namespace (data builtins only; no import / open / time "
-                "/ random). agent() results are journaled by hash(prompt, args) "
-                "so re-running a workflow resumes from cache."
+                "pipeline, budget, args, json, log, phase. The script runs in "
+                "a curated namespace (data builtins only; no import / open / "
+                "time / random). agent() results are journaled by "
+                "hash(prompt, args) so re-running a workflow resumes from "
+                "cache. agent(prompt, schema={...}) returns a parsed dict "
+                "conforming to the JSON Schema."
             ),
             parameters=_WORKFLOW_TOOL_PARAMS,
             fn=_run_workflow,
