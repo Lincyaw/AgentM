@@ -83,6 +83,7 @@ await agent(
             "fault_kind": "PodFailure",
             "all_faults": all_faults,
         },
+        "duckdb_sql": {"data_dir": data_dir},
         "hop_finalize": {"data_dir": data_dir},
     },
 )
@@ -215,3 +216,5 @@ return {
 | Use `load_module()` to import prompt builders | Merge prompt logic into the agent unit's context atom |
 | Use `schema=` when the agent already has a finalize tool | `schema=` is for agents without their own ToolTerminate tool |
 | Store evidence only for confirmed results | Store evidence for all hops — rejected rationale matters for debugging |
+| Only configure your own atoms in `atom_config` | Configure **every** atom the manifest lists — third-party atoms (e.g. `duckdb_sql`) need their config too, not just your context/finalize atoms |
+| Rely on env vars for atom config in child agents | Pass config via `atom_config`; env vars set in the harness may not reach workflow-spawned children |
