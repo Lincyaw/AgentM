@@ -20,231 +20,99 @@ A workflow script is **pure control flow**. It decides *which* agents
 run, *when*, and *with what data*. It never decides *how* an agent
 thinks — that's the agent unit's job.
 
-If a workflow script contains domain-specific string formatting, threshold
-checks, or prompt construction, that logic belongs in a context atom inside
-the agent unit.
+If you find domain-specific string formatting, threshold checks, or
+prompt construction in a workflow script, move it into the agent unit's
+context atom.
 
-## Architecture: three layers
+## Three-layer architecture
 
 ```
 Layer 1: Data preparation (full Python)
-    CLI / eval harness — DB queries, file I/O, API calls
-    → produces a JSON args dict
+    → DB queries, file I/O, API calls → JSON args dict
 
 Layer 2: Workflow script (curated namespace)
-    agent() / parallel() / pipeline() / phase() / log()
-    → orchestrates agent units, passes structured data via atom_config
-    → gets journal / resume / budget / concurrency for free
+    → agent() / parallel() / pipeline() / phase() / log()
+    → passes structured data via atom_config
+    → journal / resume / budget / concurrency for free
 
 Layer 3: Agent units (scenario folders)
-    manifest.yaml + context atom + finalize atom
-    → each agent does one thing, builds its own prompt, returns structured output
+    → manifest.yaml + context atom + finalize atom
+    → each agent does one thing, builds its own prompt
 ```
 
-### Why three layers, not two
+Layer 1 can't collapse into Layer 2 (sandboxed namespace — no imports,
+no filesystem). Layer 2 can't collapse into Layer 1 (loses
+journal/resume/budget, requires manual session management).
 
-Collapsing Layer 1 into Layer 2 (data prep inside the workflow script)
-fails because the workflow namespace is sandboxed — no `import`, no
-filesystem, no DB access. Collapsing Layer 2 into Layer 1 (orchestration
-in the harness) loses the journal/resume/budget machinery and requires
-manual session management.
+## Design decisions
 
-## Agent units
+When building a workflow, answer these questions in order:
 
-An agent unit is a scenario folder that defines a single-purpose agent:
+**1. What are the roles?** Each distinct role becomes an agent unit
+(its own manifest + atoms). If two tasks need different tools, different
+system prompts, or different output schemas — they're different roles.
 
-```
-my_workflow/reviewer/
-  manifest.yaml       ← atoms, system prompt, tool budget
-  reviewer_context.py  ← reads atom_config, builds prompt, injects via BeforeAgentStartEvent
-  reviewer_finalize.py ← registers the finalize tool (ToolTerminate)
-```
+**2. What data does each role need?** That becomes `atom_config`. The
+workflow passes structured data; a context atom inside the agent unit
+reads it and builds the prompt. The workflow never constructs prompts.
 
-### One manifest, one purpose
+**3. How does each role report results?** If structured output is
+needed, the agent unit registers a ToolTerminate finalize tool. The
+workflow's `agent()` auto-parses the result to `dict`. If no finalize
+tool exists, `schema=` synthesizes one from a JSON schema. Both paths
+produce the same result type.
 
-Never mix roles in one manifest. If a workflow needs agents with
-different tools or different guidance, each role gets its own manifest.
-A "reviewer" and a "synthesizer" are two manifests, even if they share
-most atoms.
+**4. What's the control flow?** Choose a pattern:
 
-### Agent autonomy via atom_config
+| Pattern | When to use |
+|---------|------------|
+| Fan-out (`parallel`) | Same operation across N independent items |
+| Pipeline (`pipeline`) | Multi-stage per item, no cross-item barrier |
+| Iterative expansion | Each round discovers new work (graph walk, BFS) |
+| Multi-phase | Sequential stages where later phases use earlier results |
+| Skip-to-phase | Re-run a later stage on existing earlier results |
 
-The workflow passes structured data; the agent builds its own prompt.
-The workflow never knows what the prompt looks like — it only knows
-what data the agent needs.
+**5. What does the output look like?** The workflow's return value is
+the single source of truth. No intermediate files reshaping the same
+data.
 
-```python
-# Workflow script — passes data, not prompts
-result = await agent(
-    "Review this document for quality issues.",
-    scenario="my_workflow/reviewer",
-    atom_config={
-        "reviewer_context": {
-            "document_path": doc_path,
-            "review_criteria": criteria,
-            "prior_reviews": prior,
-        },
-        "data_source": {"data_dir": data_dir},
-    },
-)
-```
+For code examples of each pattern and the agent unit structure, read
+`references/patterns.md`.
 
-```python
-# reviewer_context.py — owns all domain logic
-def install(api, config):
-    context = _build_review_prompt(
-        document_path=config["document_path"],
-        criteria=config["review_criteria"],
-        prior_reviews=config.get("prior_reviews", []),
-    )
-    def before_start(event):
-        event.system = f"{event.system}\n\n{context}"
-    api.on(BeforeAgentStartEvent.CHANNEL, before_start)
-```
+## Key contracts
 
-This separation means:
-- Workflow scripts stay readable (no multi-line prompt strings)
-- Agent units evolve independently (change the prompt without touching the workflow)
-- The same agent unit works in different workflows
+- **One manifest = one purpose.** Never mix roles.
+- **`atom_config` is the only reliable data channel to child agents.**
+  Don't rely on env vars or parent state — pass everything explicitly,
+  including config for third-party atoms in the manifest.
+- **Preserve all agent outputs.** Keep failure rationale alongside
+  successes — downstream decisions and debugging depend on both.
+- **`agent()` auto-parses.** Returns `dict` for structured output
+  (from any ToolTerminate finalize tool), `str` for free text. No
+  `json.loads()` needed.
+- **`WorkflowRunner` for programmatic invocation.** External code
+  uses `session.get_service("workflow_runner")` instead of hacking
+  into `session._tools`.
 
-### Finalize tools: the output contract
+## What the engine gives you for free
 
-Every agent that returns structured data does so through a
-**ToolTerminate finalize tool**. The workflow's `agent()` auto-parses
-the JSON result — callers get a `dict`, not a string.
+- **Journal** — crash mid-run, restart, completed `agent()` calls
+  return cached results
+- **Budget** — `budget.spent()` / `budget.remaining()` across all
+  children
+- **Concurrency** — semaphore auto-limits parallel agents
+- **Progress** — `phase()` / `log()` surface in the TUI
+- **Auto-parse** — structured output → `dict`, free text → `str`
 
-```python
-# finalize atom
-return ToolTerminate(
-    result=ToolResult(content=[TextContent(
-        type="text", text=review.model_dump_json(),
-    )]),
-    reason="review-submitted",
-)
-```
+## Smells
 
-```python
-# Workflow script — result is already a dict
-result = await agent("Review this.", scenario="my_workflow/reviewer", atom_config={...})
-if result.get("quality") == "pass":
-    ...
-```
+These signal the design needs rethinking:
 
-`schema=` on `agent()` is a convenience shortcut: it synthesizes a
-finalize tool from a JSON schema, for agents that don't have their own.
-Both paths produce the same result type.
-
-## Orchestration patterns
-
-### Fan-out: same operation across many items
-
-```python
-phase("review")
-results = await parallel([
-    review_item(item) for item in args["items"]
-])
-passed = [r for r in results if r and r.get("quality") == "pass"]
-```
-
-### Pipeline: multi-stage per item, no barrier
-
-```python
-results = await pipeline(
-    args["documents"],
-    lambda doc: agent("Extract key claims.", scenario="extractor", atom_config={...}),
-    lambda claims: agent("Verify each claim.", scenario="verifier", atom_config={...}),
-)
-```
-
-Each item flows through all stages independently — item A can be at
-stage 2 while item B is still at stage 1.
-
-### Iterative expansion (BFS / graph walk)
-
-```python
-queue = list(args["seeds"])
-visited = set(queue)
-while queue:
-    batch, queue = queue, []
-    results = await parallel([explore(node) for node in batch])
-    for node, result in zip(batch, results):
-        for neighbor in result.get("discovered", []):
-            if neighbor not in visited:
-                visited.add(neighbor)
-                queue.append(neighbor)
-```
-
-### Multi-phase: produce then review
-
-```python
-phase("produce")
-drafts = await parallel([draft(topic) for topic in args["topics"]])
-
-phase("review")
-reviewed = await parallel([
-    agent("Review this draft.", scenario="reviewer", atom_config={...})
-    for d in drafts if d
-])
-```
-
-### Skip-to-phase (rerun a later stage on earlier results)
-
-```python
-if args.get("skip_to_review"):
-    drafts = args["existing_drafts"]
-else:
-    phase("produce")
-    drafts = await parallel([...])
-
-phase("review")
-# ... review drafts ...
-```
-
-## Programmatic invocation
-
-External code (eval harnesses, CLI tools) runs workflows via the
-`WorkflowRunner` service — no need to go through the tool interface:
-
-```python
-session = await AgentSession.create(config)
-runner = session.get_service("workflow_runner")
-result = await runner.run_file("path/to/workflow.py", args)
-# result is a dict (auto-parsed from finalize tool) or str
-```
-
-## Single source of truth
-
-The workflow's return value is the only output. Don't write intermediate
-files that reshape the same data — consumers read the workflow output
-directly.
-
-```python
-return {
-    "results": results,
-    "summary": summary,
-    "metadata": {"rounds": round_n, "items_processed": len(items)},
-}
-```
-
-## What the workflow engine gives you
-
-- **Journal** — crash mid-run, restart, completed `agent()` calls return
-  cached results. Same prompt + same opts = cache hit.
-- **Budget** — `budget.spent()` / `budget.remaining()` across all children.
-- **Concurrency** — semaphore auto-limits parallel agents.
-- **Progress** — `phase()` / `log()` surface in the TUI.
-- **Auto-parse** — `agent()` returns `dict` for structured output,
-  `str` for free-text. No `json.loads()` needed.
-
-## Anti-patterns
-
-| Don't | Do |
-|-------|-----|
-| Build prompts in the workflow script | Pass data via `atom_config`, let the context atom build the prompt |
-| `json.loads(result)` on agent output | `agent()` auto-parses; check `isinstance(result, dict)` |
-| Write intermediate files alongside the main output | Return everything in the workflow's result dict |
-| Hardcode domain thresholds in the workflow | Put policy in the agent's system prompt or context atom |
-| Mix roles in one manifest | One manifest = one purpose; split roles into separate agent units |
-| Use `schema=` when the agent already has a finalize tool | `schema=` is for agents without their own ToolTerminate tool |
-| Keep only successful results, discard failures | Preserve all agent outputs — failure rationale matters for debugging and downstream decisions |
-| Assume child agents inherit env vars or parent state | `atom_config` is the only reliable channel — pass every runtime-dependent config explicitly |
+- **Prompt strings in the workflow script** → move to a context atom
+- **`json.loads()` on agent output** → `agent()` already auto-parses
+- **Intermediate files alongside the main output** → return everything
+  in the workflow's result dict
+- **Domain thresholds in the workflow** → policy belongs in the agent's
+  atoms
+- **Env var fallbacks for child agent config** → use `atom_config`
+- **`schema=` on an agent that already has a finalize tool** → redundant
