@@ -39,7 +39,39 @@ extensions:
   - module: agentm.extensions.builtin.read_history
 """
 
+SCENARIO_MANIFEST_HARNESS = """\
+name: harbor_bench_harness
+description: |
+  Harbor benchmark + llmharness cognitive audit.
+  Adds extractor + auditor that surface reasoning drift as reminders.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm.extensions.builtin.tool_result_cap
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
+  - module: agentm.extensions.builtin.runtime_context
+  - module: agentm.extensions.builtin.llm_compaction
+  - module: agentm.extensions.builtin.read_history
+  - module: llmharness.adapters.agentm
+    config:
+      mode: sync
+      extractor_interval_turns: 5
+      audit_interval_turns: 10
+      enable_reminders: true
+  - module: llmharness.extensions.check_repeated_actions
+  - module: llmharness.extensions.check_premature_conclusion
+  - module: llmharness.extensions.check_open_branches
+"""
+
 _SCENARIO_DIR = "/tmp/harbor_bench"
+_HARNESS_SCENARIO_DIR = "/tmp/harbor_bench_harness"
 
 
 class AgentMAgent(BaseInstalledAgent):
@@ -64,6 +96,17 @@ class AgentMAgent(BaseInstalledAgent):
             env_fallback="AGENTM_REASONING_EFFORT",
         ),
     ]
+
+    def __init__(self, logs_dir, *args, **kwargs):
+        self._extra_wheels: list[str] = []
+        raw = kwargs.pop("extra_wheels", "")
+        if raw:
+            self._extra_wheels = [p.strip() for p in raw.split(",") if p.strip()]
+        harness_val = kwargs.pop("harness", False)
+        self._use_harness = harness_val is True or str(harness_val).lower() in (
+            "true", "1", "yes",
+        )
+        super().__init__(logs_dir, *args, **kwargs)
 
     @staticmethod
     def name() -> str:
@@ -93,19 +136,41 @@ class AgentMAgent(BaseInstalledAgent):
             ),
         )
 
+        for wheel_path in self._extra_wheels:
+            remote = f"/tmp/{os.path.basename(wheel_path)}"
+            await environment.upload_file(wheel_path, remote)
+            await self.exec_as_agent(
+                environment,
+                command=(
+                    'export PATH="$HOME/.local/bin:$PATH" && '
+                    "uv pip install --python "
+                    "$HOME/.local/share/uv/tools/agentm/bin/python3 "
+                    f"{remote}"
+                ),
+            )
+
+        if self._use_harness:
+            scenario_dir = _HARNESS_SCENARIO_DIR
+            manifest_content = SCENARIO_MANIFEST_HARNESS
+        else:
+            scenario_dir = _SCENARIO_DIR
+            manifest_content = SCENARIO_MANIFEST
+
+        self._active_scenario_dir = scenario_dir
+
         await self.exec_as_agent(
             environment,
-            command=f"mkdir -p {_SCENARIO_DIR}",
+            command=f"mkdir -p {scenario_dir}",
         )
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".yaml", delete=False
         ) as f:
-            f.write(SCENARIO_MANIFEST)
+            f.write(manifest_content)
             local_manifest = f.name
         try:
             await environment.upload_file(
-                local_manifest, f"{_SCENARIO_DIR}/manifest.yaml"
+                local_manifest, f"{scenario_dir}/manifest.yaml"
             )
         finally:
             os.unlink(local_manifest)
@@ -152,6 +217,7 @@ class AgentMAgent(BaseInstalledAgent):
         cli_flags = self.build_cli_flags()
         extra = f" {cli_flags}" if cli_flags else ""
         agent_dir = EnvironmentPaths.agent_dir
+        scenario_dir = getattr(self, "_active_scenario_dir", _SCENARIO_DIR)
 
         await self.exec_as_agent(
             environment,
@@ -166,7 +232,7 @@ class AgentMAgent(BaseInstalledAgent):
                     'export PATH="$HOME/.local/bin:$PATH"; '
                     f"agentm -p {escaped}"
                     f" {model_args}"
-                    f" --scenario {_SCENARIO_DIR}"
+                    f" --scenario {scenario_dir}"
                     f"{extra}"
                     f" 2>&1 | tee {agent_dir / 'agentm-trace.jsonl'}"
                     "; exit 0"
