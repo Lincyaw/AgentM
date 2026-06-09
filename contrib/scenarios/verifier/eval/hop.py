@@ -1,11 +1,12 @@
-"""Hop agent execution: run a single edge verification agent."""
+"""Hop agent execution: run a single edge verification agent via SDK."""
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import json
 import os
-import shutil
-import subprocess
 from pathlib import Path
+from types import ModuleType
 
 from verdict import extract_hop_verdict
 
@@ -15,86 +16,142 @@ REPO = Path(__file__).resolve().parents[4]
 HOP_MAX_ATTEMPTS = 3
 HOP_BUDGET_BUMP = 5
 
-_REL_DESCRIPTIONS = {
-    "callee_to_caller": "{to} calls {frm}, so {frm} is {to}'s downstream "
-                        "dependency. A degraded callee propagates UP to its "
-                        "caller {to}, which blocks on or fails with the bad "
-                        "response. This is the usual direction for latency "
-                        "and error faults.",
-    "caller_to_callee": "{frm} calls {to}, so {to} is {frm}'s downstream "
-                        "dependency. A caller affects its callee ONLY for "
-                        "data-corruption / bad-request faults (it sends {to} "
-                        "a wrong or corrupted request). A merely slow or "
-                        "failing caller does NOT by itself degrade {to} — be "
-                        "skeptical of confirming on this edge.",
-    "co_deployed": "{frm} and {to} share a k8s node — ONLY a node-level "
-                   "resource fault (CPU/memory/disk exhaustion) on one can "
-                   "degrade the other. An app-logic, JVM, or network fault "
-                   "does not cross to a co-located pod.",
-    "infra_dependency": "{frm} depends on the backing component {to} "
-                        "(database/cache/broker). {to} is uninstrumented: it "
-                        "has NO spans of its own — its calls live inside {frm}.",
-}
+# ---------------------------------------------------------------------------
+# Lazy import of the prompt builder from the verifier_hop scenario package.
+# The scenario directory is not on sys.path, so we use importlib.util to
+# load it by file path.
+# ---------------------------------------------------------------------------
+
+_prompt_module: ModuleType | None = None
 
 
-def _fault_context(
-    all_faults: list[tuple[str, str, str]],
+def _get_prompt_module() -> ModuleType:
+    global _prompt_module  # noqa: PLW0603
+    if _prompt_module is not None:
+        return _prompt_module
+    prompt_path = REPO / "contrib" / "scenarios" / "verifier_hop" / "prompt.py"
+    spec = importlib.util.spec_from_file_location("verifier_hop.prompt", prompt_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load prompt module from {prompt_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _prompt_module = mod
+    return mod
+
+
+def _build_hop_prompt(
+    from_service: str,
     to_service: str,
+    rel_type: str,
+    fault_kind: str,
+    injection_target: str,
+    all_faults: list[tuple[str, str, str]],
+    fault_docs: dict[str, str],
+    is_infra: bool,
+    upstream_evidence: dict | None,
 ) -> str:
-    """One line for a single fault; a list, with params, when several coexist.
-
-    Two things the hop needs that a bare fault name omits:
-    - **Intensity.** ``corrupt=36`` vs ``corrupt=5`` predict very
-      different blast radii; the params come straight from the
-      injection so the agent can judge how much impact to expect.
-    - **Every coexisting fault.** A node can sit downstream of more
-      than one, each with its own fingerprint (a corruption/loss
-      fault in the latency tail, a data fault in errors). Faults are
-      listed flat with no "primary" — singling one out makes the
-      agent look only for that one's signal and miss the rest.
-    """
-    if len(all_faults) <= 1:
-        fk, tgt, params = all_faults[0]
-        suffix = f" ({params})" if params else ""
-        return f"Fault injected: {fk} on {tgt}{suffix}"
-    lines = [f"Faults injected in this system ({len(all_faults)}):"]
-    for fk, tgt, params in all_faults:
-        suffix = f" ({params})" if params else ""
-        lines.append(f"- {fk} on {tgt}{suffix}")
-    lines.append(
-        f"\n{to_service} may sit downstream of any of these. Each fault's "
-        f"category and intensity predicts a specific fingerprint — read "
-        f"each fault reference below and check for the signal it predicts. "
-        f"Do not assume a single fault is responsible."
+    mod = _get_prompt_module()
+    return mod.build_hop_prompt(  # type: ignore[no-any-return]
+        from_service=from_service,
+        to_service=to_service,
+        rel_type=rel_type,
+        fault_kind=fault_kind,
+        injection_target=injection_target,
+        all_faults=all_faults,
+        fault_docs=fault_docs,
+        is_infra=is_infra,
+        upstream_evidence=upstream_evidence,
     )
-    return "\n".join(lines)
 
 
-def _format_upstream_evidence(evidence: dict) -> str:
-    """Format upstream node evidence for the hop agent prompt."""
-    lines: list[str] = []
-    src = evidence.get("source", "")
-    if src == "injection_target":
-        n_ms = evidence.get("normal_avg_ms")
-        a_ms = evidence.get("abnormal_avg_ms")
-        ratio = evidence.get("ratio")
-        if n_ms is not None and a_ms is not None:
-            lines.append(
-                f"Avg latency: normal {n_ms:.1f}ms → abnormal {a_ms:.1f}ms "
-                f"({ratio}x)"
-            )
-    elif src == "hop_agent":
-        rationale = evidence.get("rationale")
-        if rationale:
-            lines.append(f"Rationale: {rationale}")
-        for ev in evidence.get("symptom_evidence", []):
-            claim = ev.get("claim", "")
-            sql = ev.get("sql", "")
-            if claim:
-                lines.append(f"- {claim}")
-            if sql:
-                lines.append(f"  ```sql\n  {sql}\n  ```")
-    return "\n".join(lines)
+# ---------------------------------------------------------------------------
+# SDK session helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_provider() -> tuple[str, dict[str, object]]:
+    """Build a provider spec from the environment (config.toml profile).
+
+    Mirrors the CLI's ``_resolve_provider_model_cwd`` logic: reads the
+    ``AGENTM_MODEL`` env var (or falls back to the config.toml
+    ``default_model``), resolves the profile, and builds the provider
+    extension spec via the registry.
+    """
+    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.lib.user_config import resolve_model_profile
+
+    model_name = os.environ.get("AGENTM_MODEL")
+    profile = resolve_model_profile(model_name)
+    if profile is not None:
+        build_config = profile.to_build_config()
+        provider_id = os.environ.get("AGENTM_PROVIDER") or profile.provider
+    else:
+        registry = DEFAULT_PROVIDER_REGISTRY
+        provider_id = os.environ.get("AGENTM_PROVIDER") or registry.default_provider().id
+        build_config = {"model": model_name or registry.default_model(provider_id)}
+
+    return DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
+
+
+def _extract_verdict_from_messages(messages: list) -> dict | None:  # type: ignore[type-arg]
+    """Extract the hop verdict from the session's final messages.
+
+    The ``submit_hop_verdict`` tool returns a ``ToolTerminate`` whose result
+    is serialised as a ``ToolResultMessage`` containing the JSON-encoded
+    verdict. We scan backwards for the last non-error tool result whose
+    text parses as a verdict dict.
+    """
+    for msg in reversed(messages):
+        if getattr(msg, "role", None) != "tool_result":
+            continue
+        for block in getattr(msg, "content", []):
+            if getattr(block, "type", None) != "tool_result":
+                continue
+            if getattr(block, "is_error", False):
+                continue
+            for inner in getattr(block, "content", []):
+                if getattr(inner, "type", None) != "text":
+                    continue
+                text = getattr(inner, "text", "")
+                if not text:
+                    continue
+                try:
+                    obj = json.loads(text)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(obj, dict) and "verdict" in obj:
+                    return obj
+    return None
+
+
+async def _run_hop_async(
+    data_dir: Path,
+    hop_dir: Path,
+    prompt: str,
+    budget: int,
+) -> dict | None:
+    """Run a single hop session via the SDK and return the verdict."""
+    from agentm.core.abi import LoopConfig
+    from agentm.core.abi.session_config import AgentSessionConfig
+    from agentm.core.runtime.session import AgentSession
+
+    os.environ["AGENTM_PROJECT_ROOT"] = str(REPO)
+    os.environ["AGENTM_RCA_DATA_DIR"] = str(data_dir)
+
+    provider_spec = _resolve_provider()
+    config = AgentSessionConfig(
+        cwd=str(hop_dir),
+        provider=provider_spec,
+        scenario="verifier_hop",
+        loop_config=LoopConfig(max_tool_calls=budget),
+        auto_commit=False,
+    )
+    session = await AgentSession.create(config)
+    try:
+        messages = await session.prompt(prompt)
+        return _extract_verdict_from_messages(messages)
+    finally:
+        await session.shutdown()
 
 
 def run_hop(
@@ -123,102 +180,40 @@ def run_hop(
     hop_dir = out_dir / "hops" / f"{from_service}__{to_service}"
     hop_dir.mkdir(parents=True, exist_ok=True)
 
-    rel_desc = _REL_DESCRIPTIONS.get(rel_type, "{frm} and {to} are related.")
-    rel_text = rel_desc.format(frm=from_service, to=to_service)
-
-    parts = [
-        f"Confirmed degraded: **{from_service}**",
-        f"Service to check: **{to_service}**",
-        f"Relationship: {rel_text}",
-        _fault_context(all_faults, to_service),
-    ]
-    if upstream_evidence:
-        ev_text = _format_upstream_evidence(upstream_evidence)
-        if ev_text:
-            parts.append(
-                f"\n## Observed symptoms on {from_service}\n{ev_text}\n\n"
-                f"This is only a partial picture of the upstream's "
-                f"degradation. Look for **different signals** on "
-                f"{to_service} — do not just repeat the same queries. "
-                f"The propagation may manifest differently on the "
-                f"downstream (e.g. errors vs latency vs missing spans)."
-            )
-    # Show every injected fault's doc (primary first, deduped by kind).
-    shown: set[str] = set()
-    ordered = [fault_kind] + [fk for fk, _, _ in all_faults if fk != fault_kind]
-    for fk in ordered:
-        if fk in shown:
-            continue
-        shown.add(fk)
-        doc = fault_docs.get(fk)
-        if doc:
-            parts.append(f"\n## Fault reference ({fk})\n{doc}")
-    if is_infra:
-        parts.append(
-            f"\n## {to_service} is an uninstrumented backing component\n"
-            f"`{to_service}` has NO spans of its own — `service_name = "
-            f"'{to_service}'` returns nothing in *_traces. Verify it via:\n"
-            f"- (A) the Client DB/cache spans **inside {from_service}**: "
-            f"`WHERE service_name = '{from_service}' AND "
-            f"\"attr.span_kind\" = 'Client'` with SQL/ORM span_name shapes "
-            f"(SELECT/INSERT/UPDATE/DELETE/Transaction/Session/%Repository%). "
-            f"Compare normal vs abnormal latency and error rate.\n"
-            f"- (B) `{to_service}`'s own resource metrics: `*_metrics` tables "
-            f"`WHERE service_name = '{to_service}'`.\n"
-            f"The component is degraded ONLY if (B) its own metrics worsen, "
-            f"or its DB/cache spans error/slow across MULTIPLE independent "
-            f"callers. A single caller's slow or failing client spans is that "
-            f"caller's egress problem — especially under a fault that lives on "
-            f"`{from_service}` (a JVM/JDBC fault, or a `tc netem` delay/loss "
-            f"that slows ALL of {from_service}'s packets). Do NOT count "
-            f"`{to_service}` degraded from `{from_service}`'s client spans "
-            f"alone — that double-counts {from_service}'s own degradation."
-        )
-    parts.append(
-        f"\nDetermine whether {to_service} is genuinely degraded due to "
-        f"this relationship with {from_service}. Query normal_* vs "
-        f"abnormal_* tables, verify the relationship, then submit."
-    )
-    prompt = "\n".join(parts)
-
-    env = dict(os.environ)
-    env["AGENTM_PROJECT_ROOT"] = str(REPO)
-    env["AGENTM_RCA_DATA_DIR"] = str(data_dir)
-    base = (
-        ["agentm"]
-        if shutil.which("agentm")
-        else ["uv", "run", "--no-sync", "agentm"]
+    prompt = _build_hop_prompt(
+        from_service=from_service,
+        to_service=to_service,
+        rel_type=rel_type,
+        fault_kind=fault_kind,
+        injection_target=injection_target,
+        all_faults=all_faults,
+        fault_docs=fault_docs,
+        is_infra=is_infra,
+        upstream_evidence=upstream_evidence,
     )
 
     obs_dir = hop_dir / ".agentm" / "observability"
-    # One shot is not enough: a hop occasionally ends its turn without
-    # emitting submit_hop_verdict, and a tight tool-call budget makes that
-    # more likely on heavier (multi-fault) prompts. A missing verdict is
-    # recorded "no-result" upstream, which dead-ends the BFS branch and
-    # silently drops the whole downstream chain. Retry with an escalating
-    # budget until a verdict appears; extract picks the newest obs session.
     verdict: dict | None = None
     for attempt in range(HOP_MAX_ATTEMPTS):
-        cmd = [
-            *base, "--scenario", "verifier",
-            "--model", env.get("AGENTM_MODEL", "doubao"),
-            "--cwd", str(hop_dir),
-            "--max-tool-calls", str(budget + attempt * HOP_BUDGET_BUMP),
-            "-p", prompt,
-        ]
-        with open(hop_dir / f"stdout.{attempt}.log", "w") as fout, \
-             open(hop_dir / f"stderr.{attempt}.log", "w") as ferr:
-            proc = subprocess.run(
-                cmd, env=env, stdout=fout, stderr=ferr,
+        attempt_budget = budget + attempt * HOP_BUDGET_BUMP
+        try:
+            verdict = asyncio.run(
+                _run_hop_async(data_dir, hop_dir, prompt, attempt_budget)
             )
-        verdict = extract_hop_verdict(obs_dir) if obs_dir.exists() else None
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"    sdk-error {from_service} -> {to_service} "
+                f"(attempt {attempt + 1}/{HOP_MAX_ATTEMPTS}): {exc}"
+            )
+        # Fall back to JSONL extraction if SDK extraction missed it
+        if verdict is None and obs_dir.exists():
+            verdict = extract_hop_verdict(obs_dir)
         if verdict:
             break
         print(
             f"    no-result {from_service} -> {to_service} "
             f"(attempt {attempt + 1}/{HOP_MAX_ATTEMPTS}, "
-            f"exit={proc.returncode}, "
-            f"budget={budget + attempt * HOP_BUDGET_BUMP})"
+            f"budget={attempt_budget})"
         )
     if verdict:
         (hop_dir / "verdict.json").write_text(

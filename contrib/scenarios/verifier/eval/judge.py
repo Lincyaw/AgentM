@@ -1,17 +1,38 @@
-"""Judge agent: review all hop verdicts for a completed case."""
+"""Judge agent: review all hop verdicts for a completed case via SDK."""
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import json
 import os
-import shutil
-import subprocess
 from pathlib import Path
+from types import ModuleType
 
 from graph import SYNTHETIC, _duckdb_conn
 from injection import get_injections
 from verdict import collect_all_verdicts, extract_hop_verdict
 
 REPO = Path(__file__).resolve().parents[4]
+
+# ---------------------------------------------------------------------------
+# Lazy import of the prompt builder from the verifier_judge scenario package.
+# ---------------------------------------------------------------------------
+
+_prompt_module: ModuleType | None = None
+
+
+def _get_prompt_module() -> ModuleType:
+    global _prompt_module  # noqa: PLW0603
+    if _prompt_module is not None:
+        return _prompt_module
+    prompt_path = REPO / "contrib" / "scenarios" / "verifier_judge" / "prompt.py"
+    spec = importlib.util.spec_from_file_location("verifier_judge.prompt", prompt_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load prompt module from {prompt_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _prompt_module = mod
+    return mod
 
 
 def _get_system_throughput(data_dir: Path) -> dict:
@@ -30,6 +51,87 @@ def _get_system_throughput(data_dir: Path) -> dict:
         pass
     conn.close()
     return result
+
+
+# ---------------------------------------------------------------------------
+# SDK helpers (shared with hop.py)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_provider() -> tuple[str, dict[str, object]]:
+    """Build a provider spec from the environment (config.toml profile)."""
+    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.lib.user_config import resolve_model_profile
+
+    model_name = os.environ.get("AGENTM_MODEL")
+    profile = resolve_model_profile(model_name)
+    if profile is not None:
+        build_config = profile.to_build_config()
+        provider_id = os.environ.get("AGENTM_PROVIDER") or profile.provider
+    else:
+        registry = DEFAULT_PROVIDER_REGISTRY
+        provider_id = os.environ.get("AGENTM_PROVIDER") or registry.default_provider().id
+        build_config = {"model": model_name or registry.default_model(provider_id)}
+
+    return DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
+
+
+def _extract_verdict_from_messages(
+    messages: list,  # type: ignore[type-arg]
+    require_key: str = "remove",
+) -> dict | None:
+    """Extract the judge verdict from the session's final messages."""
+    for msg in reversed(messages):
+        if getattr(msg, "role", None) != "tool_result":
+            continue
+        for block in getattr(msg, "content", []):
+            if getattr(block, "type", None) != "tool_result":
+                continue
+            if getattr(block, "is_error", False):
+                continue
+            for inner in getattr(block, "content", []):
+                if getattr(inner, "type", None) != "text":
+                    continue
+                text = getattr(inner, "text", "")
+                if not text:
+                    continue
+                try:
+                    obj = json.loads(text)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(obj, dict) and require_key in obj:
+                    return obj
+    return None
+
+
+async def _run_judge_async(
+    data_dir: Path,
+    judge_dir: Path,
+    prompt: str,
+    budget: int,
+) -> dict | None:
+    """Run a judge session via the SDK and return the review verdict."""
+    from agentm.core.abi import LoopConfig
+    from agentm.core.abi.session_config import AgentSessionConfig
+    from agentm.core.runtime.session import AgentSession
+
+    os.environ["AGENTM_PROJECT_ROOT"] = str(REPO)
+    os.environ["AGENTM_RCA_DATA_DIR"] = str(data_dir)
+
+    provider_spec = _resolve_provider()
+    config = AgentSessionConfig(
+        cwd=str(judge_dir),
+        provider=provider_spec,
+        scenario="verifier_judge",
+        loop_config=LoopConfig(max_tool_calls=budget),
+        auto_commit=False,
+    )
+    session = await AgentSession.create(config)
+    try:
+        messages = await session.prompt(prompt)
+        return _extract_verdict_from_messages(messages)
+    finally:
+        await session.shutdown()
 
 
 def run_judge(
@@ -57,129 +159,55 @@ def run_judge(
     injections = get_injections(data_dir)
     throughput = _get_system_throughput(data_dir)
 
-    # Build the judge prompt
     seeds = {i["target"] for i in injections}
-    inj_lines = [
-        f"- {i['target']} ({i['chaos_type']})" for i in injections
-    ]
-
-    tp_normal = throughput.get("normal", 0)
-    tp_abnormal = throughput.get("abnormal", 0)
-    tp_drop = ((tp_normal - tp_abnormal) / tp_normal * 100
-               if tp_normal > 0 else 0)
 
     # Index hop verdicts by target for evidence lookup.
     verdict_by_target: dict[str, dict] = {v["to"]: v for v in all_verdicts}
 
-    def _ev_claims(svc: str) -> str:
-        v = verdict_by_target.get(svc, {})
-        claims = [
-            e.get("claim", "") for e in v.get("symptom_evidence", [])
-            if e.get("claim")
-        ]
-        return "; ".join(claims[:4])
+    # Collect rejected verdicts for prompt
+    rejected_verdicts = [
+        v for v in all_verdicts
+        if v["verdict"] == "rejected" and v["to"] not in confirmed
+    ]
 
-    confirmed_nonseed = [s for s in confirmed if s not in seeds]
-    confirmed_lines: list[str] = []
-    for s in confirmed_nonseed:
-        v = verdict_by_target.get(s, {})
-        frm = v.get("from", "?")
-        confirmed_lines.append(
-            f"- {frm} → **{s}**: {v.get('rationale', '(no rationale)')}\n"
-            f"    evidence: {_ev_claims(s) or '(none)'}"
-        )
-    confirmed_block = "\n".join(confirmed_lines) or "(none)"
-
-    rejected_lines: list[str] = []
-    for v in all_verdicts:
-        if v["verdict"] == "rejected" and v["to"] not in confirmed:
-            rejected_lines.append(
-                f"- {v['from']} → {v['to']}: {v['rationale']}"
-            )
-    rejected_block = "\n".join(rejected_lines) or "(none)"
-
-    prompt = f"""\
-You are the lead auditor of a fault-propagation graph that independent
-hop agents built one edge at a time. Each hop agent ran careful
-per-edge analysis — checking error rate, latency magnitude, fault
-mechanism, and relationship direction — and already rejected
-throughput-only drops and noise. **Their confirmations are
-authoritative; you do NOT remove them.**
-
-Your ONLY job is to catch what no single edge could see: a system-wide
-CASCADE in which services the hop agents rejected for "fewer calls /
-throughput drop" are in fact genuinely unavailable because the whole
-system is collapsing.
-
-## Fault injection
-{chr(10).join(inj_lines)}
-
-## System-wide load (the cascade signal)
-- load-generator root spans: normal {tp_normal} → abnormal {tp_abnormal} (drop {tp_drop:.1f}%)
-- If drop > 80%: the system is in cascading collapse. Review the
-  rejected list and ADD any service that is down because the whole
-  system is down (was actively serving, now silent/erroring).
-- If drop <= 80%: there is NO cascade. ADD nothing — a throughput drop
-  is just the caller sending fewer requests.
-
-## Confirmed services (context — do NOT change these) ({len(confirmed_nonseed)})
-{confirmed_block}
-
-## Rejected services — ADD only under a real cascade ({len(rejected_lines)})
-{rejected_block}
-
-## Decide
-- Leave `remove` EMPTY. The per-edge analysis is authoritative for
-  what is degraded; second-guessing it from rationale text alone
-  removes genuinely-degraded services and corrupts the graph.
-- ADD a rejected service only if a system-wide cascade (loadgen drop
-  > 80%) makes it genuinely unavailable, not merely less-called. Use
-  `list_tables` / `query_sql` to confirm; state latencies in ms/s
-  (duration is nanoseconds).
-
-Most reviews add nothing. Call `submit_judge_review` with `add` (and
-`remove` empty) plus `rationale`.
-"""
+    # Build the judge prompt via the scenario prompt module
+    mod = _get_prompt_module()
+    prompt = mod.build_judge_prompt(
+        injections=injections,
+        confirmed=confirmed,
+        rejected_verdicts=rejected_verdicts,
+        throughput=throughput,
+        seeds=seeds,
+        verdict_by_target=verdict_by_target,
+    )
 
     judge_dir = out / "judge"
     judge_dir.mkdir(parents=True, exist_ok=True)
 
-    env = dict(os.environ)
-    env["AGENTM_PROJECT_ROOT"] = str(REPO)
-    env["AGENTM_RCA_DATA_DIR"] = str(data_dir)
-    base = (
-        ["agentm"]
-        if shutil.which("agentm")
-        else ["uv", "run", "--no-sync", "agentm"]
-    )
-    cmd = [
-        *base, "--scenario", "verifier",
-        "--model", env.get("AGENTM_MODEL", "doubao"),
-        "--cwd", str(judge_dir),
-        "--max-tool-calls", str(budget),
-        "-p", prompt,
-    ]
+    # Run the judge via SDK
+    try:
+        verdict = asyncio.run(
+            _run_judge_async(data_dir, judge_dir, prompt, budget)
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"    judge sdk-error: {exc}")
+        verdict = None
 
-    with open(judge_dir / "stdout.log", "w") as fout, \
-         open(judge_dir / "stderr.log", "w") as ferr:
-        subprocess.run(cmd, env=env, stdout=fout, stderr=ferr)
+    # Fall back to JSONL extraction if SDK extraction missed
+    if verdict is None:
+        obs_dir = judge_dir / ".agentm" / "observability"
+        verdict = (
+            extract_hop_verdict(obs_dir, "submit_judge_review", "remove")
+            if obs_dir.exists() else None
+        )
 
-    # Extract judge review (bidirectional: remove confirmed, add rejected)
-    obs_dir = judge_dir / ".agentm" / "observability"
-    verdict = (
-        extract_hop_verdict(obs_dir, "submit_judge_review", "remove")
-        if obs_dir.exists() else None
-    )
     if verdict:
         (judge_dir / "verdict.json").write_text(
             json.dumps(verdict, indent=2, ensure_ascii=False)
         )
 
     confirmed_set = set(confirmed)
-    # Judge is promotion-only: hop confirmations are authoritative. LLM
-    # pruning from rationale text alone is unreliable (it removes genuine
-    # SLOW/ERROR services), so we record any suggested removal for audit
-    # but do NOT apply it.
+    # Judge is promotion-only: hop confirmations are authoritative.
     suggested_remove = sorted(({
         s.strip() for s in (verdict.get("remove", []) if verdict else [])
         if isinstance(s, str) and s.strip()
