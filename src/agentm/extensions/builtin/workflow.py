@@ -10,7 +10,7 @@ The script is plain ``async`` Python, run as a coroutine on the host event
 loop with a **curated namespace** that exposes only an orchestration SDK —
 bound to *already-existing* APIs:
 
-- ``agent(prompt, *, schema=, scenario=, isolation=, tool_allowlist=)`` —
+- ``agent(prompt, *, schema=, scenario=, isolation=, tool_allowlist=, extra_extensions=, atom_config=)`` —
   :meth:`ExtensionAPI.spawn_child_session` → ``child.prompt`` → last
   ``AssistantMessage`` text → ``child.shutdown``. Returns the text. A worker
   defaults to the **orchestrator's own scenario** (a clean reload of that
@@ -383,20 +383,29 @@ class _WorkflowRun:
         scenario: str | None = None,
         isolation: str | None = None,
         tool_allowlist: list[str] | None = None,
+        extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
+        atom_config: dict[str, dict[str, Any]] | None = None,
     ) -> str | dict[str, Any] | list[Any]:
         """Spawn one child agent session, drive it to a final reply, return its
         text. Journaled by ``hash(prompt, opts)`` — a re-run resumes from cache
         without re-spawning.
 
-        When *schema* is provided, the child session gets a ``submit_result``
-        terminal tool whose parameter shape matches the schema. The return value
-        is the parsed JSON object (dict/list) instead of a plain string."""
+        ``extra_extensions`` and ``atom_config`` enable inline manifest assembly:
+        the script can customise a worker's atom set and per-atom config without
+        pre-writing a YAML scenario.
+
+        When *schema* is provided, the child session additionally gets a
+        ``submit_result`` terminal tool whose parameter shape matches the
+        schema. The return value is the parsed JSON object (dict/list) instead
+        of a plain string."""
 
         opts: dict[str, Any] = {
             "schema": schema,
             "scenario": scenario,
             "isolation": isolation,
             "tool_allowlist": tool_allowlist,
+            "extra_extensions": extra_extensions,
+            "atom_config": atom_config,
         }
         key = _Journal.key(prompt, opts)
         cached = await self.journal.lookup(key)
@@ -418,7 +427,10 @@ class _WorkflowRun:
 
         async with self.semaphore:
             result = await self._spawn_and_drive(
-                prompt, scenario, isolation, tool_allowlist, schema=schema
+                prompt, scenario, isolation, tool_allowlist,
+                extra_extensions=extra_extensions,
+                atom_config=atom_config,
+                schema=schema,
             )
 
         await self.journal.record(key, result)
@@ -485,10 +497,12 @@ class _WorkflowRun:
         isolation: str | None,
         tool_allowlist: list[str] | None,
         *,
+        extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
+        atom_config: dict[str, dict[str, Any]] | None = None,
         schema: dict[str, Any] | None = None,
     ) -> str:
         extensions: list[tuple[str, dict[str, Any]]] = []
-        atom_config_overrides: dict[str, dict[str, Any]] = {}
+        atom_config_overrides: dict[str, dict[str, Any]] = dict(atom_config or {})
         # isolation="agent_env" selects the worker sandbox by listing the
         # operations atom (agent_env backend) in the child's extensions (policy by
         # composition, never a privileged config field). Soft, optional
@@ -512,6 +526,11 @@ class _WorkflowRun:
         if schema is not None:
             extensions.append((_STRUCTURED_OUTPUT_ATOM_MODULE, {}))
             atom_config_overrides[_STRUCTURED_OUTPUT_ATOM] = {"schema": schema}
+
+        # User-supplied extra_extensions are appended last so they layer on
+        # top of isolation and schema atoms.
+        if extra_extensions:
+            extensions.extend(extra_extensions)
 
         config = AgentSessionConfig(
             cwd=self.api.cwd,
@@ -635,7 +654,8 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
             "description": (
                 "Async Python orchestration script. Available names: "
                 "agent(prompt, *, schema=, scenario=, isolation=, "
-                "tool_allowlist=) (awaitable -> str | dict when schema set), "
+                "tool_allowlist=, extra_extensions=, atom_config=) "
+                "(awaitable -> str | dict when schema set), "
                 "parallel(list_of_awaitables) -> list, "
                 "pipeline(items, *stages) -> list, budget (.total / .spent() / "
                 ".remaining()), args (dict), json (module), log(msg), "
