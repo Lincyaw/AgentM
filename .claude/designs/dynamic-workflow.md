@@ -67,7 +67,8 @@ script; **`operations_agent_env`** confines a *worker's* bash/file ops.
 
 | Primitive | Built from | Status |
 |---|---|---|
-| `agent(prompt, *, scenario=, isolation=, tool_allowlist=, extra_extensions=, atom_config=)` → str | `spawn_child_session(cfg)` → `child.prompt(msg)` → last `AssistantMessage.text` → `child.shutdown()`. `extra_extensions` (list of `(module, config)` tuples) are appended to the child's atom set; `atom_config` (`{atom: {k: v}}`) overrides per-atom config — both forwarded to `AgentSessionConfig`. | reuse (same recipe as `tool_eval_run` + `sub_agent`) |
+| `agent(prompt, *, schema=, scenario=, isolation=, tool_allowlist=)` → str \| dict | `spawn_child_session(cfg)` → `child.prompt(msg)` → last `AssistantMessage.text` or `submit_result` tool call → `child.shutdown()` | reuse (same recipe as `tool_eval_run` + `sub_agent`) |
+| `agent(prompt, schema={...})` (structured output) | Auto-wires `structured_output` atom into the child; worker calls `submit_result` terminal tool; orchestrator extracts and JSON-parses the result | new convenience |
 | `parallel(aws)` → list | `asyncio.gather`; each `agent` self-limits via a shared `Semaphore` | reuse |
 | `pipeline(items, *stages)` → list | per-item `_chain` (await each stage, sync or async) under `asyncio.gather`; **no cross-item barrier** | **implemented** (native async) |
 | `budget` (`.total`/`.spent()`/`.remaining()`) | `_BudgetService` summing child `TurnEndEvent.message.usage`; ceiling from `budget_tokens` config | new aggregation |
@@ -92,19 +93,20 @@ scenario keeps workers slim and appropriate. (Verified by E2E: naive
 `agent("...")` on doubao failed with all-builtins, works once workers load the
 slim `local` scenario.)
 
-**Inline manifest assembly.** `extra_extensions` and `atom_config` on
-`agent()` let a script customise a worker's atom set and per-atom
-configuration without pre-writing a YAML scenario. `extra_extensions` is
-merged *after* the isolation-derived extensions (e.g. `operations_agent_env`)
-so isolation and inline atoms coexist. `atom_config` maps to
-`AgentSessionConfig.atom_config_overrides` and follows its precedence
-(overrides > env > manifest). Both are included in the journal key, so
-different configurations produce distinct cache entries.
-
 **Anti-recursion** is enforced two ways: workers are stamped
 `purpose="workflow"`, and the atom's `install()` **skips registering the
 workflow tool** whenever `api.purpose == "workflow"` — so even a worker that
 auto-discovers builtins never gets a recursive workflow tool.
+
+**Structured output (`schema=`).** When `agent(prompt, schema={...})` is called,
+the workflow wires the `structured_output` atom into the child session
+(`extra_extensions` + `atom_config_overrides`). The child gets a `submit_result`
+terminal tool whose `result` parameter matches the supplied JSON Schema. The
+worker calls `submit_result(result={...})` to end its session; the workflow
+extracts the tool call arguments and returns a parsed dict/list to the script
+instead of a plain string. If the worker fails to call `submit_result`, the
+fallback is `_final_assistant_text` (the plain-text path). The journal stores
+the JSON string; `agent()` parses it back on cache hits.
 
 **Do not use `tool_allowlist=[]` to slim workers.** `tool_allowlist` filters the
 tool list after extensions install, which can starve an extension that requires
@@ -133,7 +135,11 @@ Workers (`purpose=workflow`) skip the publish along with the tool registration.
    cross-child aggregation, and child `TurnEndEvent`s do **not** bubble to the
    parent bus, so the service subscribes on **each child's own bus** and sums.
    `budget.total` comes from `budget_tokens` config; `remaining()` derives.
-3. **Workflow-local journal for resume.** *Not* `SessionStore.open` (that is
+3. **`structured_output.py` atom.** Registers a terminal `submit_result` tool
+   whose `result` parameter schema is supplied via atom config. Validates
+   against the schema (soft-dep on `jsonschema`; skips if absent) and returns
+   `ToolTerminate`. Wired automatically by `workflow.agent(schema=...)`.
+4. **Workflow-local journal for resume.** *Not* `SessionStore.open` (that is
    session-transcript replay, wrong granularity). Each `agent()` result is
    written to `artifact_store` keyed by `hash(prompt, opts)`; on resume the host
    returns the cached body without re-spawning. Determinism comes from *not
@@ -193,9 +199,11 @@ model in the tool's reference surface, not encoded in the runtime.
   schema set (`minItems > prefixItems`). No AgentM tool ships such a schema — it
   is Ark-internal, triggered by request shape. Mitigated by option A (slim
   workers). litellm / deepseek-official / anthropic providers are unaffected.
-- **`schema` (structured output) on `agent()`** — deferred; needs a per-child
-  forced-tool mechanism not in the reused recipe. Would map to
-  `pydantic_to_openai_tool_schema`.
+- **`schema` (structured output) on `agent()`** — **implemented**. The
+  `structured_output` builtin atom registers a terminal `submit_result` tool
+  shaped by the caller-supplied JSON Schema. Wired automatically by
+  `agent(schema=...)`; no forced-tool mechanism needed — the worker sees the
+  terminal tool and calls it naturally.
 - **Per-child env overrides** — `AgentSessionConfig` has no per-child env field
   (the old `os.environ` route is racy under parallel runs). The one change that
   would touch the substrate; deferred until a real need.
