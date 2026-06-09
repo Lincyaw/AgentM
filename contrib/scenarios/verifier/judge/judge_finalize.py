@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -46,10 +46,21 @@ class JudgeReview(BaseModel):
     )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+class JudgeFinalizeConfig(TypedDict):
+    pass
+
+
+class JudgeReviewPayload(TypedDict):
+    remove: list[str]
+    add: list[str]
+    rationale: str
+
+
+def install(api: ExtensionAPI, config: JudgeFinalizeConfig) -> None:
     async def _submit_judge(args: dict[str, Any]) -> ToolResult | ToolTerminate:
+        payload = cast(JudgeReviewPayload, args)
         try:
-            review = JudgeReview.model_validate(args)
+            review = JudgeReview.model_validate(payload)
         except ValidationError as exc:
             return ToolResult(
                 content=[TextContent(
