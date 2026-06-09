@@ -53,6 +53,7 @@ import contextlib
 import hashlib
 import inspect
 import json
+import logging
 import os
 import textwrap
 from collections.abc import Awaitable, Callable
@@ -67,10 +68,16 @@ from agentm.core.abi.events import (
     TurnEndEvent,
 )
 from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
-from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
+from agentm.core.abi.messages import (
+    AgentMessage,
+    AssistantMessage,
+    ToolCallBlock,
+    ToolResultMessage,
+)
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 
+_log = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
@@ -556,7 +563,7 @@ class _WorkflowRun:
                 structured = _extract_structured_result(messages)
                 if structured is not None:
                     return json.dumps(structured, ensure_ascii=False)
-            return _final_assistant_text(messages)
+            return _final_session_output(messages)
         finally:
             with contextlib.suppress(Exception):
                 await child.shutdown()
@@ -587,18 +594,41 @@ def _extract_structured_result(
     return None
 
 
-def _final_assistant_text(messages: list[AgentMessage]) -> str:
-    """Last assistant message's joined text blocks (the ``tool_eval_run``
-    extraction recipe: last text block wins)."""
+def _final_session_output(messages: list[AgentMessage]) -> str:
+    """Extract the agent's final output from a completed session.
 
-    final_text = ""
-    for msg in messages:
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
+    Scans backward for the last meaningful output:
+
+    1. If the session's last ``ToolResultMessage`` contains a
+       non-error result, return that text — this is the output from
+       a ``ToolTerminate``-style finalize tool (e.g.
+       ``submit_hop_verdict``, ``submit_final_report``).
+    2. Otherwise fall back to the last ``AssistantMessage`` text block.
+    3. If neither is found, return empty string and log a warning
+       (the agent likely hit its budget without submitting a result).
+    """
+
+    # Walk backward — first non-error tool result or assistant text wins.
+    for msg in reversed(messages):
+        if isinstance(msg, ToolResultMessage):
+            for result_block in reversed(msg.content):
+                if result_block.is_error:
+                    continue
+                for inner in reversed(result_block.content):
+                    text = getattr(inner, "text", None)
+                    if isinstance(text, str) and text:
+                        return text
+        elif isinstance(msg, AssistantMessage):
+            for block in reversed(msg.content):
                 text = getattr(block, "text", None)
-                if isinstance(text, str):
-                    final_text = text
-    return final_text
+                if isinstance(text, str) and text:
+                    return text
+
+    _log.warning(
+        "workflow agent produced no output — "
+        "it may have exhausted its tool budget without calling a finalize tool"
+    )
+    return ""
 
 
 def _error(message: str) -> ToolResult:

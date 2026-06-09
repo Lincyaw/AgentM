@@ -46,7 +46,7 @@ from graph import (  # noqa: E402
     get_relationships,
 )
 from injection import _load_fault_doc, get_injections, get_target_evidence  # noqa: E402
-from verdict import collect_all_verdicts  # noqa: E402
+from verdict import verdicts_from_trace  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[3]
 WORKFLOW_SCRIPT = Path(__file__).resolve().parent / "eval" / "propagation_workflow.py"
@@ -96,7 +96,7 @@ async def _run_workflow_async(
     config = AgentSessionConfig(
         cwd=str(out_dir),
         provider=provider_spec,
-        scenario="local",
+        scenario="verifier/orchestrator",
         auto_commit=False,
     )
     session = await AgentSession.create(config)
@@ -158,7 +158,7 @@ def run_judge(
     if not injections:
         return {}
 
-    all_verdicts = collect_all_verdicts(out)
+    all_verdicts = verdicts_from_trace(trace)
     (out / "all_verdicts.json").write_text(
         json.dumps(all_verdicts, indent=2, ensure_ascii=False)
     )
@@ -325,7 +325,7 @@ def run_one_case(
         json.dumps(report, indent=2, ensure_ascii=False)
     )
 
-    all_verdicts = collect_all_verdicts(out)
+    all_verdicts = verdicts_from_trace(result)
     (out / "all_verdicts.json").write_text(
         json.dumps(all_verdicts, indent=2, ensure_ascii=False)
     )

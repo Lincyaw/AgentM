@@ -1,4 +1,4 @@
-name: verifier_hop
+name: hop
 description: >
   Single-hop fault propagation checker. Given a confirmed-degraded
   service, checks whether ONE related service is also genuinely
@@ -10,7 +10,7 @@ extensions:
     config:
       backend: local
   - module: agentm.extensions.builtin.retry_policy
-  - module: agentm_rca.tools.duckdb_sql
+  - module: rca.default.duckdb_sql
     config:
       exclude:
         - conclusion.parquet

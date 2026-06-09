@@ -1,4 +1,4 @@
-name: verifier_judge
+name: judge
 description: >
   Whole-graph judge for fault-propagation verification. Reviews all
   hop verdicts and decides whether to promote rejected services or
@@ -10,7 +10,7 @@ extensions:
     config:
       backend: local
   - module: agentm.extensions.builtin.retry_policy
-  - module: agentm_rca.tools.duckdb_sql
+  - module: rca.default.duckdb_sql
     config:
       exclude:
         - conclusion.parquet
