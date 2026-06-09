@@ -47,14 +47,17 @@ reached via ``api.get_service`` and worker child sessions via
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import builtins as _builtins
 import contextlib
 import hashlib
+import importlib.util
 import inspect
 import json
 import logging
 import os
+import sys
 import textwrap
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -78,6 +81,26 @@ from agentm.extensions import ExtensionManifest
 
 _log = logging.getLogger(__name__)
 _T = TypeVar("_T")
+
+# ---------------------------------------------------------------------------
+# Public type aliases — sharpen signatures beyond bare ``dict[str, Any]``.
+# ---------------------------------------------------------------------------
+
+JsonSchema = dict[str, Any]
+"""A JSON Schema object (passed to ``schema=`` on ``agent()``)."""
+
+AtomConfigMap = dict[str, dict[str, Any]]
+"""Mapping of atom name → atom config dict (passed to ``atom_config=``)."""
+
+ExtensionEntry = tuple[str, dict[str, Any]]
+"""``(module_path, config)`` pair for ``extra_extensions``."""
+
+AgentResult = str | dict[str, Any] | list[Any]
+"""Return type of ``agent()`` — ``dict``/``list`` for structured output,
+``str`` for free-text."""
+
+WorkflowResult = str | dict[str, Any] | list[Any]
+"""Return type of a workflow run."""
 
 
 # ``Any`` is used deliberately only for genuinely arbitrary script values
@@ -386,13 +409,13 @@ class _WorkflowRun:
         self,
         prompt: str,
         *,
-        schema: dict[str, Any] | None = None,
+        schema: JsonSchema | None = None,
         scenario: str | None = None,
         isolation: str | None = None,
         tool_allowlist: list[str] | None = None,
-        extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
-        atom_config: dict[str, dict[str, Any]] | None = None,
-    ) -> str | dict[str, Any] | list[Any]:
+        extra_extensions: list[ExtensionEntry] | None = None,
+        atom_config: AtomConfigMap | None = None,
+    ) -> AgentResult:
         """Spawn one child agent session, drive it to completion, return its
         output. Journaled by ``hash(prompt, opts)`` — a re-run resumes from
         cache without re-spawning.
@@ -496,12 +519,12 @@ class _WorkflowRun:
         isolation: str | None,
         tool_allowlist: list[str] | None,
         *,
-        extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
-        atom_config: dict[str, dict[str, Any]] | None = None,
-        schema: dict[str, Any] | None = None,
+        extra_extensions: list[ExtensionEntry] | None = None,
+        atom_config: AtomConfigMap | None = None,
+        schema: JsonSchema | None = None,
     ) -> str:
-        extensions: list[tuple[str, dict[str, Any]]] = []
-        atom_config_overrides: dict[str, dict[str, Any]] = dict(atom_config or {})
+        extensions: list[ExtensionEntry] = []
+        atom_config_overrides: AtomConfigMap = dict(atom_config or {})
         # isolation="agent_env" selects the worker sandbox by listing the
         # operations atom (agent_env backend) in the child's extensions (policy by
         # composition, never a privileged config field). Soft, optional
@@ -556,6 +579,85 @@ class _WorkflowRun:
                 await child.shutdown()
 
 
+class WorkflowContext:
+    """Typed interface for module-mode workflow scripts.
+
+    Module scripts define ``async def run(ctx: WorkflowContext)`` and use
+    ``ctx.agent()``, ``ctx.parallel()``, etc. — identical semantics to the
+    exec-mode globals but with full IDE / type-checker support.
+
+    Import path::
+
+        from agentm.extensions.builtin.workflow import WorkflowContext
+    """
+
+    __slots__ = ("_run",)
+
+    def __init__(self, run: _WorkflowRun) -> None:
+        self._run = run
+
+    @property
+    def args(self) -> dict[str, Any]:
+        """Caller-supplied ``args`` payload."""
+        return self._run.args_payload
+
+    @property
+    def budget(self) -> _Budget:
+        """Read-only token-spend view."""
+        return _Budget(self._run.budget_svc)
+
+    async def agent(
+        self,
+        prompt: str,
+        *,
+        schema: JsonSchema | None = None,
+        scenario: str | None = None,
+        isolation: str | None = None,
+        tool_allowlist: list[str] | None = None,
+        extra_extensions: list[ExtensionEntry] | None = None,
+        atom_config: AtomConfigMap | None = None,
+    ) -> AgentResult:
+        """Spawn one child agent session and return its output.
+
+        Returns ``dict``/``list`` when the agent has a finalize tool or
+        ``schema=`` is set; ``str`` otherwise.
+        """
+        return await self._run.agent(
+            prompt,
+            schema=schema,
+            scenario=scenario,
+            isolation=isolation,
+            tool_allowlist=tool_allowlist,
+            extra_extensions=extra_extensions,
+            atom_config=atom_config,
+        )
+
+    async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
+        """Barrier fan-out: await every awaitable, return results in order."""
+        return await self._run.parallel(aws)
+
+    async def pipeline(
+        self,
+        items: list[Any],
+        *stages: Callable[[Any], Any],
+    ) -> list[Any]:
+        """Run each item through ``stages`` independently (no cross-item barrier)."""
+        return await self._run.pipeline(items, *stages)
+
+    def log(self, msg: str) -> None:
+        """Emit a free-text progress line on the parent session bus."""
+        self._run.log(msg)
+
+    def phase(self, name: str) -> None:
+        """Start a named phase (groups subsequent agents in the progress view)."""
+        self._run.phase(name)
+
+
+# ---------------------------------------------------------------------------
+# Output extraction
+# ---------------------------------------------------------------------------
+
+
 def _final_session_output(messages: list[AgentMessage]) -> str:
     """Extract the agent's final output from a completed session.
 
@@ -593,7 +695,7 @@ def _final_session_output(messages: list[AgentMessage]) -> str:
     return ""
 
 
-def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
+def _auto_parse(text: str) -> AgentResult:
     """Parse JSON if possible, otherwise return raw string.
 
     Every ToolTerminate finalize tool (``submit_hop_verdict``,
@@ -610,6 +712,130 @@ def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
     except (json.JSONDecodeError, TypeError):
         pass
     return text
+
+
+# ---------------------------------------------------------------------------
+# Pre-execution validation
+# ---------------------------------------------------------------------------
+
+# Names available in the exec-mode curated namespace.
+_SDK_NAMES: Final[frozenset[str]] = frozenset({
+    "agent", "parallel", "pipeline", "budget", "args", "json", "log", "phase",
+})
+_EXEC_KNOWN_NAMES: Final[frozenset[str]] = frozenset(_SAFE_BUILTIN_NAMES) | _SDK_NAMES
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptIssue:
+    """One validation finding: ``error`` blocks execution, ``warning`` is advisory."""
+
+    line: int
+    message: str
+    severity: Literal["error", "warning"]
+
+
+class WorkflowValidationError(Exception):
+    """Raised when pre-execution validation finds blocking issues."""
+
+    def __init__(self, issues: list[ScriptIssue]) -> None:
+        self.issues = issues
+        detail = "\n".join(f"  line {i.line}: {i.message}" for i in issues)
+        super().__init__(f"workflow script validation failed:\n{detail}")
+
+
+def _detect_script_mode(source: str) -> Literal["exec", "module"]:
+    """``module`` if the source defines a top-level ``async def run(...)``."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return "exec"
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "run":
+            return "module"
+    return "exec"
+
+
+def _validate_script(
+    source: str,
+    mode: Literal["exec", "module"],
+) -> list[ScriptIssue]:
+    """AST-level static checks before execution.
+
+    Returns a list of issues. Errors block execution; warnings are logged
+    and the script runs anyway. The caller (tool handler or programmatic
+    API) surfaces errors so the agent / developer can fix the script.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return [ScriptIssue(exc.lineno or 0, f"SyntaxError: {exc.msg}", "error")]
+
+    if mode == "exec":
+        return _validate_exec(tree)
+    return _validate_module(tree)
+
+
+_FORBIDDEN_CALLS: Final[frozenset[str]] = frozenset({
+    "open", "__import__", "eval", "exec", "compile", "input", "getattr",
+})
+
+
+def _validate_exec(tree: ast.Module) -> list[ScriptIssue]:
+    issues: list[ScriptIssue] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            issues.append(ScriptIssue(
+                node.lineno,
+                "import not available in exec mode — use module mode "
+                "(define `async def run(ctx: WorkflowContext)`) for imports",
+                "error",
+            ))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in _FORBIDDEN_CALLS:
+                issues.append(ScriptIssue(
+                    node.lineno,
+                    f"'{node.func.id}()' is not available in the "
+                    f"workflow namespace",
+                    "error",
+                ))
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id in ("time", "random"):
+                issues.append(ScriptIssue(
+                    node.lineno,
+                    f"'{node.value.id}' is not available — workflow "
+                    f"scripts must be deterministic for resume/journal",
+                    "error",
+                ))
+    return issues
+
+
+def _validate_module(tree: ast.Module) -> list[ScriptIssue]:
+    issues: list[ScriptIssue] = []
+    run_func: ast.AsyncFunctionDef | None = None
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "run":
+            run_func = node
+            break
+    if run_func is None:
+        issues.append(ScriptIssue(
+            0, "module mode requires `async def run(ctx: WorkflowContext)`",
+            "error",
+        ))
+        return issues
+    params = run_func.args
+    if not params.args and not params.posonlyargs:
+        issues.append(ScriptIssue(
+            run_func.lineno,
+            "`run()` must accept a WorkflowContext parameter "
+            "(e.g. `async def run(ctx: WorkflowContext)`)",
+            "error",
+        ))
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Script execution — exec mode (inline / LLM-generated)
+# ---------------------------------------------------------------------------
 
 
 def _error(message: str) -> ToolResult:
@@ -656,6 +882,40 @@ async def _run_user_script(script: str, ns: dict[str, Any]) -> object:
     code = compile(src, "<workflow-script>", "exec")
     exec(code, ns)  # noqa: S102 - curated namespace; same authority as the agent
     return await ns["__workflow__"]()
+
+
+# ---------------------------------------------------------------------------
+# Script execution — module mode (developer-written file scripts)
+# ---------------------------------------------------------------------------
+
+
+async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
+    """Import a file script as a Python module and call ``run(ctx)``.
+
+    Module mode gives the script full import/filesystem access (same
+    authority as a regular Python module). IDE type-checkers see the
+    ``WorkflowContext`` signature and provide completions + diagnostics.
+    """
+    ctx = WorkflowContext(run)
+    module_name = (
+        f"_agentm_workflow_{hashlib.sha256(str(source_path).encode()).hexdigest()[:12]}"
+    )
+    spec = importlib.util.spec_from_file_location(module_name, source_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load workflow module from {source_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+        run_fn = getattr(module, "run", None)
+        if run_fn is None or not callable(run_fn):
+            raise RuntimeError(
+                "module-mode script must define `async def run(ctx: WorkflowContext)`"
+            )
+        return await run_fn(ctx)
+    finally:
+        sys.modules.pop(module_name, None)
 
 
 _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
@@ -735,16 +995,19 @@ class WorkflowRunner:
         return self._last_run.agents_spawned if self._last_run else 0
 
     @property
-    def last_budget_snapshot(self) -> BudgetSnapshot | dict[str, Any]:
+    def last_budget_snapshot(self) -> BudgetSnapshot:
         if self._last_run is None:
-            return {}
+            return BudgetSnapshot(
+                spent=0, input_tokens=0, output_tokens=0,
+                total=None, remaining=None,
+            )
         return self._last_run.budget_svc.snapshot()
 
     async def run_file(
         self,
         path: str | Path,
         args: dict[str, Any] | None = None,
-    ) -> str | dict[str, Any] | list[Any]:
+    ) -> WorkflowResult:
         """Run a pre-written workflow script file."""
         sp = Path(path)
         if not sp.is_absolute():
@@ -753,13 +1016,13 @@ class WorkflowRunner:
         if not sp.is_file():
             raise FileNotFoundError(f"workflow script not found: {sp}")
         script = sp.read_text(encoding="utf-8")
-        return await self._execute(script, args or {})
+        return await self._execute(script, args or {}, source_path=sp)
 
     async def run_script(
         self,
         script: str,
         args: dict[str, Any] | None = None,
-    ) -> str | dict[str, Any] | list[Any]:
+    ) -> WorkflowResult:
         """Run an inline workflow script string."""
         if not script.strip():
             raise ValueError("workflow: empty script")
@@ -769,7 +1032,19 @@ class WorkflowRunner:
         self,
         script: str,
         args_payload: dict[str, Any],
-    ) -> str | dict[str, Any] | list[Any]:
+        *,
+        source_path: Path | None = None,
+    ) -> WorkflowResult:
+        # --- pre-execution validation ---
+        mode = _detect_script_mode(script)
+        issues = _validate_script(script, mode)
+        errors = [i for i in issues if i.severity == "error"]
+        if errors:
+            raise WorkflowValidationError(errors)
+        for w in issues:
+            if w.severity == "warning":
+                _log.warning("workflow line %d: %s", w.line, w.message)
+
         self._last_run = run = _WorkflowRun(
             api=self._api,
             journal=_Journal(
@@ -783,7 +1058,6 @@ class WorkflowRunner:
             max_agents=self._max_agents,
             args_payload=dict(args_payload),
         )
-        ns = _build_namespace(run)
 
         try:
             bracket = self._api.track_background()
@@ -791,13 +1065,15 @@ class WorkflowRunner:
             bracket = contextlib.nullcontext()
 
         with bracket:
-            if self._wall_clock_timeout is not None:
-                raw = await asyncio.wait_for(
-                    _run_user_script(script, ns),
-                    timeout=self._wall_clock_timeout,
-                )
+            if mode == "module" and source_path is not None:
+                coro = _run_module_script(source_path, run)
             else:
-                raw = await _run_user_script(script, ns)
+                coro = _run_user_script(script, _build_namespace(run))
+
+            if self._wall_clock_timeout is not None:
+                raw = await asyncio.wait_for(coro, timeout=self._wall_clock_timeout)
+            else:
+                raw = await coro
 
         return _auto_parse(_coerce_result(raw))
 
@@ -865,6 +1141,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 return _error(
                     "workflow: either 'script' or 'script_path' is required"
                 )
+        except WorkflowValidationError as exc:
+            return _error(str(exc))
         except (FileNotFoundError, ValueError) as exc:
             return _error(f"workflow: {exc}")
         except asyncio.TimeoutError:

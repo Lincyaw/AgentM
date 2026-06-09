@@ -1,87 +1,27 @@
 name: local
 description: |
   Default scenario. Tools execute on the local host.
-
-  Built around the "9 atomic tools + ~100-line loop" philosophy:
-  load a small core of always-useful capabilities and trust the LLM to
-  compose the rest via ``bash``. Specialised behaviour (self-modify,
-  evolution/query, plan-only, eval orchestration) lives in dedicated
-  scenarios that compose on top of this base — not in the default set.
-
-  Floor atoms (``compaction_prompts``, ``slash_commands``) are auto-mounted
-  by the session factory and don't need to be listed. User atoms under
-  ``<cwd>/.agentm/atoms/`` are merged on top so ``api.install_atom`` calls
-  persist across restarts.
-
 extensions:
-  # --- environment ports: register the local-FS / asyncio-bash Operations
-  # bundle. Must be listed first so any subsequent tool atom that calls
-  # ``api.get_operations()`` during install sees a registered bundle.
-  # See ``.claude/designs/pluggable-architecture.md`` §3.2. ---
   - module: agentm.extensions.builtin.operations
     config:
       backend: local
-
-  # --- tool-result size cap: spill large outputs to disk ---
   - module: agentm.extensions.builtin.tool_result_cap
-
-  # --- file I/O: read whole files; edit by exact-match replace;
-  # write whole files. ls/find/grep are intentionally absent —
-  # delegated to ``bash`` so the agent composes shell commands. ---
   - module: agentm.extensions.builtin.file_tools
-
-  # --- shell execution: subsumes ls / find / grep / arbitrary scripts. ---
   - module: agentm.extensions.builtin.tool_bash
-
-  # --- observability: every turn lands in the JSONL trace store so
-  # ``query_traces`` (loaded by evolution/tuner scenarios) can
-  # mine production traces later. ---
   - module: agentm.extensions.builtin.observability
-
-  # --- prompt assembly: runtime_context surfaces cwd/platform;
-  # system_prompt provides the assembly hook. ---
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: ""
   - module: agentm.extensions.builtin.runtime_context
-
-  # --- skill / template auto-discovery: SKILL.md files under
-  # ``.claude/skills/`` and prompt templates are picked up
-  # automatically. ---
   - module: agentm.extensions.builtin.skill_loader
   - module: agentm.extensions.builtin.prompt_templates
-
-  # --- context compaction: when the durable branch nears the model window,
-  # summarize older turns into one structured checkpoint and rebuild context
-  # from the session tree. Resolves prompt bodies via the auto-mounted
-  # ``compaction_prompts`` floor atom. ``read_history`` lets the agent recover
-  # the verbatim content of any [Turn N] the summary cites. ---
   - module: agentm.extensions.builtin.llm_compaction
   - module: agentm.extensions.builtin.read_history
-
-  # --- project-local persistent memory: typed frontmatter files under
-  # ``.agentm/memory/`` + MEMORY.md index injected into system prompt.
-  # Complements skills (how-to) with facts (project / user / feedback /
-  # reference). Access counter under access_stats.json feeds future
-  # evolution heuristics. ---
   - module: agentm.extensions.builtin.memory
-
-  # --- thinking retry: retry when the model emits only thinking blocks
-  # with no text or tool calls (e.g. doubao leaking tool calls into
-  # reasoning_content). ---
   - module: agentm.extensions.builtin.thinking_retry
-
-  # --- self-debug: read the terminal client's screen dump (written on
-  # /dump) so the agent can see the TUI the user sees. Pairs with the
-  # ``self-debug`` skill, which also covers reading one's own and
-  # historical traces via the ``agentm trace`` CLI over ``bash``. ---
   - module: agentm.extensions.builtin.tui_snapshot
-
-  # --- auto-background long tools: a foreground tool call that overruns
-  # ``timeout`` is moved to the background (the turn gets an immediate
-  # ticket; the real result returns later via the SessionInbox), so a slow
-  # build / network call never blocks the conversation. Companion tools
-  # check_background / wait_background / cancel_background poll or cancel it. ---
+  - module: agentm.extensions.builtin.artifact_store
+  - module: agentm.extensions.builtin.workflow
   - module: agentm.extensions.builtin.background_exec
     config:
       timeout: 120

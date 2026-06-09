@@ -993,6 +993,12 @@ def _gateway_main() -> None:
     gateway_main()
 
 
+def _workflow_main() -> None:
+    from agentm.cli_workflow import main as workflow_main
+
+    workflow_main()
+
+
 # Subcommands whose own Typer app owns argv parsing, help, and exit codes.
 # The importer is called only when that subcommand is actually dispatched, so
 # the default prompt path and ``agentm --help`` never import the ``trace`` /
@@ -1021,6 +1027,10 @@ _LAZY_SUBCOMMANDS: dict[str, tuple[Any, str]] = {
     "gateway": (
         _gateway_main,
         "Single-process gateway: hold all chat sessions and serve chat clients.",
+    ),
+    "workflow": (
+        _workflow_main,
+        "Run or validate workflow scripts.",
     ),
 }
 
