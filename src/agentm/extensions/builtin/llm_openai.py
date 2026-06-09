@@ -152,6 +152,31 @@ def _is_openai_retryable(exc: BaseException) -> bool:
     return False
 
 
+# Keywords that XGrammar-based constrained-decoding engines (Volcengine Ark,
+# vLLM, SGLang) cannot compile into an EBNF grammar. Leaving them in the
+# schema triggers ``Invalid decoding guidance syntax`` 400 errors. Safe to
+# strip: they are validation constraints, not structural schema description;
+# the LLM generates conforming output from the property descriptions alone.
+_XGRAMMAR_UNSUPPORTED = frozenset({
+    "minItems", "maxItems",
+    "minLength", "maxLength",
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+    "prefixItems",
+})
+
+
+def _strip_validation_constraints(node: Any) -> None:
+    """Remove XGrammar-unsupported keywords from a schema in-place."""
+    if isinstance(node, dict):
+        for key in _XGRAMMAR_UNSUPPORTED & node.keys():
+            del node[key]
+        for value in node.values():
+            _strip_validation_constraints(value)
+    elif isinstance(node, list):
+        for value in node:
+            _strip_validation_constraints(value)
+
+
 def _default_httpx_client(*, verify: bool) -> Any:
     import httpx
 
@@ -366,6 +391,8 @@ class OpenAIToolSpecAdapter(ToolSpecAdapter):
         params = copy.deepcopy(tool.parameters) if tool.parameters else {}
         if self.strict:
             _force_strict(params)
+        else:
+            _strip_validation_constraints(params)
         return {
             "type": "function",
             "function": {

@@ -63,7 +63,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
 
     spec: ImplementationSpec = _parse(ImplementationSpec, await ctx.agent(
         spec_prompt(requirement, language, test_framework),
-        schema=SPEC_SCHEMA,
+        schema=SPEC_SCHEMA, retry=1,
     ))
     ctx.log(f"Spec: {spec.title} — {len(spec.acceptance_criteria)} ACs")
 
@@ -75,14 +75,14 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
     spec_json = spec.model_dump_json(indent=2)
     review: DesignReview = _parse(DesignReview, await ctx.agent(
         review_prompt(spec_json),
-        schema=REVIEW_SCHEMA,
+        schema=REVIEW_SCHEMA, retry=1,
     ))
 
     if not review.approved:
         ctx.log(f"Spec rejected — revising. Feedback: {review.feedback}")
         spec = _parse(ImplementationSpec, await ctx.agent(
             revise_spec_prompt(spec_json, review.feedback, review.issues),
-            schema=SPEC_SCHEMA,
+            schema=SPEC_SCHEMA, retry=1,
         ))
         ctx.log(f"Revised: {spec.title} — {len(spec.acceptance_criteria)} ACs")
 
@@ -100,7 +100,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             "task": test_writing_task(test_framework, spec_json),
             "spec": spec_json,
         }},
-        schema=TEST_INFO_SCHEMA,
+        schema=TEST_INFO_SCHEMA, retry=1,
     ))
     test_files = test_info.test_files
     ctx.log(f"Wrote {len(test_files)} test file(s): {', '.join(test_files)}")
@@ -144,7 +144,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             atom_config={"devloop_context": {
                 "task": test_run_task(test_framework, test_files),
             }},
-            schema=TEST_RESULT_SCHEMA,
+            schema=TEST_RESULT_SCHEMA, retry=1,
         ))
 
         if test_result.all_passed:
@@ -172,7 +172,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
                 "task": CODE_REVIEW_TASK,
                 "spec": spec_json,
             }},
-            schema=CODE_REVIEW_SCHEMA,
+            schema=CODE_REVIEW_SCHEMA, retry=1,
         ))
 
         if code_review.approved:

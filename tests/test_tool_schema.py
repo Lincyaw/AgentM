@@ -20,11 +20,13 @@ from agentm.core.lib.tool_schema import _force_strict
 
 
 def _walk_base(node: Any, path: str = "$") -> list[str]:
-    """Check provider-neutral invariants: no title, no $ref."""
+    """Check provider-neutral invariants: no title, no default, no $ref."""
     violations: list[str] = []
     if isinstance(node, dict):
         if "title" in node:
             violations.append(f"{path}: title not stripped")
+        if "default" in node:
+            violations.append(f"{path}: default not stripped")
         if "$ref" in node:
             violations.append(f"{path}: $ref not inlined")
         for k, v in node.items():
@@ -94,6 +96,28 @@ def test_force_strict_all_properties_required_even_with_defaults() -> None:
     schema = copy.deepcopy(pydantic_to_tool_schema(WithDefault))
     _force_strict(schema)
     assert set(schema["required"]) == {"keep", "also"}
+
+
+def test_default_metadata_stripped_from_schema() -> None:
+    class WithDefaults(BaseModel):
+        name: str
+        note: str = Field(default="hello")
+        count: int = Field(default=0)
+
+    schema = pydantic_to_tool_schema(WithDefaults)
+    assert "default" not in schema["properties"]["note"]
+    assert "default" not in schema["properties"]["count"]
+    assert set(schema["required"]) == {"name"}
+
+
+def test_property_named_default_preserved() -> None:
+    class HasDefaultProp(BaseModel):
+        default: str = Field(description="The default value")
+        name: str
+
+    schema = pydantic_to_tool_schema(HasDefaultProp)
+    assert "default" in schema["properties"]
+    assert schema["properties"]["default"]["type"] == "string"
 
 
 def test_backward_compat_alias() -> None:
