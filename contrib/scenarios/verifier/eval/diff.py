@@ -82,9 +82,13 @@ def diff_cases(
         seeds |= gt_seeds
 
         evaluated: set[str] = set()
-        avp = run_dir / name / "all_verdicts.json"
-        if avp.exists():
-            evaluated = {v["to"] for v in json.loads(avp.read_text())}
+        pg = run_dir / name / "propagation_graph.json"
+        if pg.exists():
+            hop_log = json.loads(pg.read_text()).get("hop_log", [])
+            evaluated = {
+                h["to"] for h in hop_log
+                if h.get("verdict") not in (None, "edge_sql")
+            }
 
         agree = v_prop & gt_prop
         v_only = v_prop - gt_prop

@@ -50,31 +50,6 @@ from injection import _load_fault_doc, get_injections, get_target_evidence  # no
 REPO = Path(__file__).resolve().parents[3]
 WORKFLOW_SCRIPT = Path(__file__).resolve().parent / "eval" / "propagation_workflow.py"
 
-# ------------------------------------------------------------------
-# Verdict extraction
-# ------------------------------------------------------------------
-
-
-def _verdicts_from_graph(graph: dict) -> list[dict]:
-    """Extract all hop verdicts from a propagation graph."""
-    node_evidence = graph.get("node_evidence", {})
-    verdicts: list[dict] = []
-    for entry in graph.get("hop_log", []):
-        to_svc = entry.get("to", "")
-        verdict = entry.get("verdict", "")
-        if not to_svc or verdict == "edge_sql":
-            continue
-        ev = node_evidence.get(to_svc, {})
-        verdicts.append({
-            "from": entry.get("from", ""),
-            "to": to_svc,
-            "verdict": verdict,
-            "rationale": ev.get("rationale", ""),
-            "claim": ev.get("claim", ""),
-            "symptom_evidence": ev.get("symptom_evidence", []),
-        })
-    return verdicts
-
 
 # ------------------------------------------------------------------
 # Provider helpers
@@ -180,11 +155,6 @@ def run_judge(
     if not injections:
         return {}
 
-    all_verdicts = _verdicts_from_graph(trace)
-    (out / "all_verdicts.json").write_text(
-        json.dumps(all_verdicts, indent=2, ensure_ascii=False)
-    )
-
     fault_docs: dict[str, str] = {}
     for inj in injections:
         fk = inj["chaos_type"]
@@ -209,7 +179,6 @@ def run_judge(
         "skip_propagate": True,
         "skip_judge": False,
         "existing_propagation": trace,
-        "existing_verdicts": all_verdicts,
     }
 
     result = asyncio.run(_run_workflow_async(workflow_args, out))
@@ -344,11 +313,6 @@ def run_one_case(
     report = build_report(result, injections)
     (out / "report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False)
-    )
-
-    all_verdicts = _verdicts_from_graph(result)
-    (out / "all_verdicts.json").write_text(
-        json.dumps(all_verdicts, indent=2, ensure_ascii=False)
     )
 
     seeds = [i["target"] for i in injections]
