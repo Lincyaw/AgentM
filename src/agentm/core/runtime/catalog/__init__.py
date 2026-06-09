@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 from agentm.core.abi.project_layout import ProjectLayout
 from agentm.core.runtime.catalog import _layout
@@ -23,7 +23,14 @@ from agentm.core.runtime.catalog.indexer import (
 from agentm.core.runtime.catalog.migrate import migrate_catalog_v2
 
 
-def list_atoms(*, root: Path | None = None) -> list[dict[str, Any]]:
+class CatalogAtomRow(TypedDict):
+    name: str
+    current_hash: str
+    tier: int | None
+    api_version: int | None
+
+
+def list_atoms(*, root: Path | None = None) -> list[CatalogAtomRow]:
     """List atoms currently materialized under the catalog root.
 
     Walks ``<root>/.agentm/catalog/atoms/`` and consults
@@ -39,7 +46,7 @@ def list_atoms(*, root: Path | None = None) -> list[dict[str, Any]]:
         return []
 
     builtin = discover_builtin()
-    atoms: list[dict[str, Any]] = []
+    atoms: list[CatalogAtomRow] = []
     for atom_dir in sorted(path for path in atoms_root.iterdir() if path.is_dir()):
         versions = [
             child.name

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Protocol
 
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
+    ImageContent,
     TextContent,
     ToolCallBlock,
     ToolResultBlock,
@@ -106,16 +107,13 @@ def final_summary(messages: Iterable[AgentMessage]) -> FinalReport:
 
 def _tool_result_content(
     result: ToolResult | ToolResultBlock | ToolResultMessage,
-) -> list[Any]:
+) -> list[TextContent | ImageContent]:
     if isinstance(result, ToolResultMessage):
-        content: list[Any] = []
+        content: list[TextContent | ImageContent] = []
         for block in result.content:
             content.extend(block.content)
         return content
-    raw_content = getattr(result, "content", None)
-    if isinstance(raw_content, list):
-        return cast(list[Any], raw_content)
-    return []
+    return result.content
 
 
 __all__ = [

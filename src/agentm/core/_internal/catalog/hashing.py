@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+
+from agentm.core.abi.catalog import ActiveSetFingerprint
 
 
 def compute_atom_hash(source: str) -> str:
@@ -16,7 +17,7 @@ def compute_active_set_fingerprint(
     loaded: dict[str, str],
     scenario: str | None,
     core_hash: str | None,
-) -> dict[str, Any]:
+) -> ActiveSetFingerprint:
     atoms = {
         name: f"{name}@{content_hash}"
         for name, content_hash in sorted(loaded.items())

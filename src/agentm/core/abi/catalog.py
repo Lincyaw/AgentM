@@ -12,7 +12,16 @@ Pluggability hard rule: this module imports only stdlib + ABI siblings.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, TypedDict, TypeAlias, runtime_checkable
+
+
+class ActiveSetFingerprint(TypedDict):
+    core: str | None
+    scenario: str | None
+    atoms: dict[str, str]
+
+
+ManifestSnapshot: TypeAlias = dict[str, object]
 
 
 @runtime_checkable
@@ -31,11 +40,11 @@ class CatalogService(Protocol):
 
     def get_manifest_at(
         self, name: str, version: str, root: Path | None = None
-    ) -> dict[str, Any]: ...
+    ) -> ManifestSnapshot: ...
 
     def runs_for(
         self,
-        fingerprint: dict[str, Any] | str,
+        fingerprint: ActiveSetFingerprint | str,
         root: Path | None = None,
     ) -> list[str]: ...
 
@@ -46,7 +55,7 @@ class CatalogService(Protocol):
         loaded: dict[str, str],
         scenario: str | None,
         core_hash: str | None,
-    ) -> dict[str, Any]: ...
+    ) -> ActiveSetFingerprint: ...
 
 
 # --- Path helpers ----------------------------------------------------------
@@ -76,5 +85,7 @@ def atom_decisions_path(
 
 __all__ = [
     "CatalogService",
+    "ActiveSetFingerprint",
+    "ManifestSnapshot",
     "atom_decisions_path",
 ]

@@ -45,6 +45,7 @@ from agentm.core.abi import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from agentm.core.abi.catalog import ActiveSetFingerprint
 from agentm.core.abi.events import (
     AgentEndEvent,
     ApiRegisterEvent,
@@ -423,9 +424,11 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     }
     loaded_builtin_module_paths: set[str] = set()
     active_atom_hashes: dict[str, str] = {}
-    current_fingerprint: dict[str, Any] | None = None
+    current_fingerprint: ActiveSetFingerprint | None = None
 
-    def _compute_loaded_fingerprint(*, scenario: str | None = None) -> dict[str, Any]:
+    def _compute_loaded_fingerprint(
+        *, scenario: str | None = None
+    ) -> ActiveSetFingerprint:
         nonlocal active_atom_hashes
         active_atom_hashes = {}
         writer = api.get_resource_writer()

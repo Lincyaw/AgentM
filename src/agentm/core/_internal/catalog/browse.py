@@ -6,7 +6,21 @@ import ast
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import TypeAlias, cast
+
+from agentm.core.abi.catalog import ActiveSetFingerprint, ManifestSnapshot
+
+ManifestLiteral: TypeAlias = (
+    str
+    | int
+    | float
+    | bool
+    | None
+    | tuple["ManifestLiteral", ...]
+    | list["ManifestLiteral"]
+    | dict["ManifestLiteral", "ManifestLiteral"]
+)
+HistoricalManifest: TypeAlias = ManifestSnapshot
 
 # ``_layout`` lives in :mod:`agentm.core.runtime.catalog._layout`. Browse
 # stays in the kernel-internal catalog package and therefore computes the
@@ -72,7 +86,7 @@ def get_source_at(path: str, sha: str, root: Path | None = None) -> bytes:
 
 def get_manifest_at(
     name: str, version: str, root: Path | None = None
-) -> dict[str, Any]:
+) -> HistoricalManifest:
     source = get_source_at(name, version, root=root)
     try:
         tree = ast.parse(source.decode("utf-8"))
@@ -80,7 +94,7 @@ def get_manifest_at(
         raise UnparseableManifestError(f"Failed to parse historical source: {exc}") from exc
 
     manifest_call = _find_manifest_call(tree)
-    payload = {
+    payload: HistoricalManifest = {
         key: _literal_value(node)
         for key, node in manifest_call.keywords.items()
     }
@@ -88,7 +102,7 @@ def get_manifest_at(
     return payload
 
 
-def runs_for(fingerprint: dict[str, Any] | str, root: Path | None = None) -> list[str]:
+def runs_for(fingerprint: ActiveSetFingerprint | str, root: Path | None = None) -> list[str]:
     refs = _normalize_fingerprint(fingerprint)
     if not refs:
         return []
@@ -109,7 +123,7 @@ def runs_for(fingerprint: dict[str, Any] | str, root: Path | None = None) -> lis
 
 
 def _normalize_fingerprint(
-    fingerprint: dict[str, Any] | str,
+    fingerprint: ActiveSetFingerprint | str,
 ) -> dict[str, str]:
     if isinstance(fingerprint, str):
         atom, version = _split_atom_ref(fingerprint, None)
@@ -251,19 +265,22 @@ def _is_extension_manifest_ctor(func: ast.expr) -> bool:
     return False
 
 
-def _literal_value(node: ast.expr) -> Any:
+def _literal_value(node: ast.expr) -> ManifestLiteral:
     if isinstance(node, ast.Constant):
-        return node.value
+        value = node.value
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        raise UnparseableManifestError("MANIFEST constants must be JSON-like scalars")
     if isinstance(node, ast.Tuple):
         return tuple(_literal_value(elt) for elt in node.elts)
     if isinstance(node, ast.List):
         return [_literal_value(elt) for elt in node.elts]
     if isinstance(node, ast.Dict):
-        payload: dict[Any, Any] = {}
-        for key, value in zip(node.keys, node.values, strict=True):
+        payload: dict[ManifestLiteral, ManifestLiteral] = {}
+        for key, item_value in zip(node.keys, node.values, strict=True):
             if key is None:
                 raise UnparseableManifestError("MANIFEST dict literals may not use unpacking")
-            payload[_literal_value(key)] = _literal_value(value)
+            payload[_literal_value(key)] = _literal_value(item_value)
         return payload
     raise UnparseableManifestError(
         "MANIFEST keyword values must be literals, tuples, lists, or dicts of literals"
