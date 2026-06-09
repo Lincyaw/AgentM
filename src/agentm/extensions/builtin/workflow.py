@@ -1,10 +1,16 @@
-"""``workflow`` atom — run an LLM-authored Python orchestration script.
+"""``workflow`` atom — run Python orchestration scripts (inline or from disk).
 
 See ``.claude/designs/dynamic-workflow.md``. A *dynamic workflow* is a
-model-authored script that orchestrates many child agent sessions
-deterministically. The model writes the control flow (loops, branches,
-fan-out, budget-driven scaling) as code at runtime; this atom runs it as a
-single tool call and only the final result returns to the model's context.
+script that orchestrates many child agent sessions deterministically. Two
+modes:
+
+- **Inline** (LLM-authored): the model writes the script at runtime via the
+  ``script`` tool parameter.
+- **Pre-written** (file-based): a checked-in ``.py`` file loaded via the
+  ``script_path`` tool parameter. Pre-written scripts are trusted code and
+  get an extra ``load_module(path)`` helper for importing scenario modules.
+  Other atoms / eval harnesses can also call them programmatically via the
+  ``workflow_runner`` service (``api.get_service("workflow_runner")``).
 
 The script is plain ``async`` Python, run as a coroutine on the host event
 loop with a **curated namespace** that exposes only an orchestration SDK —
@@ -51,12 +57,15 @@ import asyncio
 import builtins as _builtins
 import contextlib
 import hashlib
+import importlib.util
 import inspect
 import json
 import os
+import sys
 import textwrap
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, ClassVar, Final, Literal, Protocol, TypedDict, TypeVar
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
@@ -200,6 +209,53 @@ _SAFE_BUILTIN_NAMES: Final[tuple[str, ...]] = (
 _SAFE_BUILTINS: Final[dict[str, Any]] = {
     name: getattr(_builtins, name) for name in _SAFE_BUILTIN_NAMES
 }
+
+
+def _make_load_module(script_dir: str) -> Callable[[str], Any]:
+    """Return a ``load_module(path)`` helper for trusted (file-based) scripts.
+
+    The helper loads an arbitrary ``.py`` file as a module object and returns
+    it, so a pre-written workflow script can call functions defined in
+    scenario packages without needing real ``import`` statements::
+
+        prompt_mod = load_module("contrib/scenarios/verifier/prompt.py")
+        text = prompt_mod.build_hop_prompt(...)
+
+    Relative paths are resolved against the script's own directory first,
+    then against the repo working directory (``api.cwd``).
+    """
+
+    def load_module(path: str) -> Any:
+        resolved = Path(path)
+        if not resolved.is_absolute():
+            candidate = Path(script_dir) / resolved
+            if candidate.is_file():
+                resolved = candidate
+            # else fall through — may be relative to cwd, caller's problem
+        resolved = resolved.resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"load_module: {resolved} not found")
+
+        module_name = f"_workflow_loaded_.{resolved.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, resolved)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"load_module: cannot load {resolved}")
+        mod = importlib.util.module_from_spec(spec)
+        # Temporarily add the module's directory to sys.path so that the
+        # loaded module's own relative imports work.
+        parent_dir = str(resolved.parent)
+        inserted = parent_dir not in sys.path
+        if inserted:
+            sys.path.insert(0, parent_dir)
+        try:
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        finally:
+            if inserted:
+                with contextlib.suppress(ValueError):
+                    sys.path.remove(parent_dir)
+        return mod
+
+    return load_module
 
 
 @dataclass(slots=True)
@@ -618,11 +674,18 @@ def _coerce_result(raw: object) -> str:
         return str(raw)
 
 
-def _build_namespace(run: _WorkflowRun) -> dict[str, Any]:
+def _build_namespace(
+    run: _WorkflowRun, *, script_dir: str | None = None
+) -> dict[str, Any]:
     """The curated globals the script runs against — only the SDK + safe
-    builtins. No ``import``, no ``open``, no ``time`` / ``random``."""
+    builtins. No ``import``, no ``open``, no ``time`` / ``random``.
 
-    return {
+    When *script_dir* is provided (pre-written / trusted script loaded from
+    disk), a ``load_module(path)`` helper is injected so the script can load
+    Python modules from the filesystem — typically scenario prompt modules.
+    """
+
+    ns: dict[str, Any] = {
         "__builtins__": _SAFE_BUILTINS,
         "agent": run.agent,
         "parallel": run.parallel,
@@ -633,6 +696,9 @@ def _build_namespace(run: _WorkflowRun) -> dict[str, Any]:
         "log": run.log,
         "phase": run.phase,
     }
+    if script_dir is not None:
+        ns["load_module"] = _make_load_module(script_dir)
+    return ns
 
 
 async def _run_user_script(script: str, ns: dict[str, Any]) -> object:
@@ -662,7 +728,18 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
                 "phase(name). Use await for agent / parallel / pipeline. "
                 "`return <value>` becomes the tool result. Only "
                 "data-manipulation builtins are available — "
-                "no import / open / time / random."
+                "no import / open / time / random. "
+                "Mutually exclusive with script_path."
+            ),
+        },
+        "script_path": {
+            "type": "string",
+            "description": (
+                "Path to a pre-written async Python workflow script on disk "
+                "(absolute, or relative to the session working directory). "
+                "The script gets the same SDK as inline scripts plus a "
+                "load_module(path) helper for importing scenario modules. "
+                "Mutually exclusive with script."
             ),
         },
         "args": {
@@ -671,9 +748,110 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
             "additionalProperties": True,
         },
     },
-    "required": ["script"],
     "additionalProperties": False,
 }
+
+
+def _resolve_script_path(raw_path: str, cwd: str) -> Path:
+    """Resolve *raw_path* against *cwd* and return an absolute ``Path``."""
+
+    p = Path(raw_path)
+    if not p.is_absolute():
+        p = Path(cwd) / p
+    return p.resolve()
+
+
+@dataclass(slots=True)
+class WorkflowRunner:
+    """Reusable execution engine for workflow scripts.
+
+    Both the ``workflow`` tool handler and the ``workflow_runner`` service
+    delegate to this class. External callers (eval harnesses, other atoms)
+    obtain it via ``api.get_service("workflow_runner")`` and call
+    :meth:`run_file` or :meth:`run_source` directly — no LLM prompt needed.
+    """
+
+    api: ExtensionAPI
+    concurrency: int
+    max_agents: int
+    wall_clock_timeout: float | None
+    default_scenario: str | None
+    budget_tokens: int | None
+
+    async def run_file(
+        self,
+        script_path: str,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run a pre-written workflow script from disk.
+
+        Returns ``{"result": <coerced>, "agents_spawned": int, "budget": ...}``.
+        Raises ``FileNotFoundError`` if the path does not exist.
+        """
+
+        resolved = _resolve_script_path(script_path, self.api.cwd)
+        if not resolved.is_file():
+            raise FileNotFoundError(
+                f"workflow: script_path not found: {resolved}"
+            )
+        source = resolved.read_text(encoding="utf-8")
+        return await self._execute(
+            source, args or {}, script_dir=str(resolved.parent)
+        )
+
+    async def run_source(
+        self,
+        script: str,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run an inline workflow script (same as the LLM tool path).
+
+        Returns ``{"result": <coerced>, "agents_spawned": int, "budget": ...}``.
+        """
+
+        return await self._execute(script, args or {}, script_dir=None)
+
+    async def _execute(
+        self,
+        source: str,
+        args_payload: dict[str, Any],
+        *,
+        script_dir: str | None,
+    ) -> dict[str, Any]:
+        run = _WorkflowRun(
+            api=self.api,
+            journal=_Journal(
+                store=self.api.get_service(_ARTIFACT_STORE_SERVICE)
+            ),
+            budget_svc=_BudgetService(
+                total_budget_tokens=self.budget_tokens
+            ),
+            semaphore=asyncio.Semaphore(self.concurrency),
+            default_scenario=self.default_scenario,
+            max_agents=self.max_agents,
+            args_payload=dict(args_payload),
+        )
+        ns = _build_namespace(run, script_dir=script_dir)
+
+        try:
+            bracket = self.api.track_background()
+        except ExtensionStaleError:
+            bracket = contextlib.nullcontext()
+
+        with bracket:
+            if self.wall_clock_timeout is not None:
+                raw = await asyncio.wait_for(
+                    _run_user_script(source, ns),
+                    timeout=self.wall_clock_timeout,
+                )
+            else:
+                raw = await _run_user_script(source, ns)
+
+        return {
+            "result": raw,
+            "agents_spawned": run.agents_spawned,
+            "budget": run.budget_svc.snapshot(),
+        }
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
@@ -712,52 +890,59 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         else None
     )
 
+    runner = WorkflowRunner(
+        api=api,
+        concurrency=concurrency,
+        max_agents=max_agents,
+        wall_clock_timeout=wall_clock_timeout,
+        default_scenario=default_scenario,
+        budget_tokens=budget_tokens,
+    )
+
     async def _run_workflow(args: dict[str, Any]) -> ToolResult:
         script = args.get("script")
-        if not isinstance(script, str) or not script.strip():
-            return _error("workflow: 'script' (a Python string) is required")
+        script_path = args.get("script_path")
 
-        run = _WorkflowRun(
-            api=api,
-            journal=_Journal(store=api.get_service(_ARTIFACT_STORE_SERVICE)),
-            budget_svc=_BudgetService(total_budget_tokens=budget_tokens),
-            semaphore=asyncio.Semaphore(concurrency),
-            default_scenario=default_scenario,
-            max_agents=max_agents,
-            args_payload=dict(args.get("args") or {}),
-        )
-        ns = _build_namespace(run)
+        if script and script_path:
+            return _error(
+                "workflow: 'script' and 'script_path' are mutually "
+                "exclusive — provide one, not both"
+            )
 
-        # Keep a one-shot host alive until the whole detached run (and any late
-        # inbox post from a child) drains — matches sub_agent discipline.
         try:
-            bracket = api.track_background()
-        except ExtensionStaleError:
-            bracket = contextlib.nullcontext()
-
-        with bracket:
-            try:
-                if wall_clock_timeout is not None:
-                    raw = await asyncio.wait_for(
-                        _run_user_script(script, ns), timeout=wall_clock_timeout
-                    )
-                else:
-                    raw = await _run_user_script(script, ns)
-            except asyncio.TimeoutError:
-                return _error(
-                    f"workflow: script exceeded wall-clock budget "
-                    f"({wall_clock_timeout}s)"
+            if isinstance(script_path, str) and script_path.strip():
+                outcome = await runner.run_file(
+                    script_path, args.get("args")
                 )
-            except Exception as exc:  # script errors surface as the tool error
+            elif isinstance(script, str) and script.strip():
+                outcome = await runner.run_source(script, args.get("args"))
+            else:
                 return _error(
-                    f"workflow script error: {type(exc).__name__}: {exc}"
+                    "workflow: provide either 'script' (inline Python) or "
+                    "'script_path' (path to a .py file)"
                 )
+        except asyncio.TimeoutError:
+            return _error(
+                f"workflow: script exceeded wall-clock budget "
+                f"({wall_clock_timeout}s)"
+            )
+        except FileNotFoundError as exc:
+            return _error(str(exc))
+        except Exception as exc:
+            return _error(
+                f"workflow script error: {type(exc).__name__}: {exc}"
+            )
 
         return ToolResult(
-            content=[TextContent(type="text", text=_coerce_result(raw))],
+            content=[
+                TextContent(
+                    type="text",
+                    text=_coerce_result(outcome["result"]),
+                )
+            ],
             extras={
-                "agents_spawned": run.agents_spawned,
-                "budget": run.budget_svc.snapshot(),
+                "agents_spawned": outcome["agents_spawned"],
+                "budget": outcome["budget"],
             },
         )
 
@@ -765,15 +950,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         FunctionTool(
             name="workflow",
             description=(
-                "Run an LLM-authored async Python orchestration script that "
-                "fans out deterministic child agent sessions. Use for parallel "
-                "verify / judge / sweep harnesses where you author the control "
-                "flow as code rather than turn-by-turn. Names: agent, parallel, "
-                "pipeline, budget, args, json, log, phase. The script runs in "
-                "a curated namespace (data builtins only; no import / open / "
-                "time / random). agent() results are journaled by "
-                "hash(prompt, args) so re-running a workflow resumes from "
-                "cache. agent(prompt, schema={...}) returns a parsed dict "
+                "Run an async Python orchestration script (inline or from a "
+                "file) that fans out deterministic child agent sessions. Use "
+                "for parallel verify / judge / sweep harnesses where you "
+                "author the control flow as code rather than turn-by-turn. "
+                "Provide either 'script' (inline) or 'script_path' (disk "
+                "file). Names: agent, parallel, pipeline, budget, args, json, "
+                "log, phase. File-based scripts also get load_module(path). "
+                "agent() results are journaled by hash(prompt, args) so "
+                "re-running a workflow resumes from cache. "
+                "agent(prompt, schema={...}) returns a parsed dict "
                 "conforming to the JSON Schema."
             ),
             parameters=_WORKFLOW_TOOL_PARAMS,
@@ -781,3 +967,5 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             metadata={"workflow": True},
         )
     )
+
+    api.set_service("workflow_runner", runner)
