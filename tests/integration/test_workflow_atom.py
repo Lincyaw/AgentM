@@ -189,6 +189,7 @@ async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
             _Journal.key(
                 "alpha",
                 {
+                    "schema": None,
                     "scenario": None,
                     "isolation": None,
                     "tool_allowlist": None,
