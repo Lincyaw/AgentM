@@ -32,7 +32,7 @@ Common columns:
 
 ## Hard limits
 
-- You have at most **30 turns** before the runtime stops you with NO chance
+- You have at most **50 turns** before the runtime stops you with NO chance
   to submit. Call `submit_final_report` well before that — a partial answer
   is infinitely better than no answer.
 - Spend your turns efficiently: `list_tables` once, then focus SQL queries
