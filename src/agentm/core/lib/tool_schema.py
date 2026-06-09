@@ -33,30 +33,32 @@ from typing import Any
 from pydantic import BaseModel
 
 
-def pydantic_to_openai_tool_schema(model_cls: type[BaseModel]) -> dict[str, Any]:
-    """Return an OpenAI strict-mode-compliant JSON schema for ``model_cls``.
-
-    The output is suitable for ``FunctionTool(parameters=...)`` and can be
-    sent with ``strict: true`` to backends that support OpenAI's
-    structured-outputs constraints (chat completions / responses API and
-    most LiteLLM-fronted providers).
+def pydantic_to_openai_tool_schema(
+    model_cls: type[BaseModel],
+    *,
+    strict: bool = True,
+) -> dict[str, Any]:
+    """Return a JSON schema for ``model_cls``, optionally OpenAI-strict.
 
     Args:
-        model_cls: a :class:`pydantic.BaseModel` subclass. Use
-            ``model_config = ConfigDict(extra="forbid")`` on the class for
-            correctness at runtime; the normaliser independently forces
-            ``additionalProperties: false`` in the *schema*.
+        model_cls: a :class:`pydantic.BaseModel` subclass.
+        strict: when True (default), forces ``additionalProperties: false``
+            and all-properties-required on every nested object — required
+            by OpenAI's strict structured-outputs mode. Set to False for
+            providers whose constrained-decoding engines reject these
+            constraints (e.g. doubao).
 
     Returns:
-        A dict shaped like ``{"type": "object", "properties": {...},
-        "required": [...], "additionalProperties": false}``. The result
-        contains no ``$ref`` / ``$defs`` and no ``title`` keys.
+        A ``$ref``-free, ``title``-free dict. With ``strict=True`` it also
+        has ``additionalProperties: false`` on every object node.
     """
 
     raw = model_cls.model_json_schema()
     defs = raw.get("$defs", {})
     flat = _resolve_refs({k: v for k, v in raw.items() if k != "$defs"}, defs)
-    return _force_strict(flat)
+    if strict:
+        return _force_strict(flat)
+    return flat
 
 
 def _resolve_refs(node: Any, defs: dict[str, Any], *, _inside_properties: bool = False) -> Any:
