@@ -59,7 +59,7 @@ def pydantic_to_openai_tool_schema(model_cls: type[BaseModel]) -> dict[str, Any]
     return _force_strict(flat)
 
 
-def _resolve_refs(node: Any, defs: dict[str, Any]) -> Any:
+def _resolve_refs(node: Any, defs: dict[str, Any], *, _inside_properties: bool = False) -> Any:
     if isinstance(node, dict):
         ref = node.get("$ref")
         if isinstance(ref, str) and ref.startswith("#/$defs/"):
@@ -70,7 +70,16 @@ def _resolve_refs(node: Any, defs: dict[str, Any]) -> Any:
                 if sibling:
                     return {**resolved, **_resolve_refs(sibling, defs)}
                 return resolved
-        return {k: _resolve_refs(v, defs) for k, v in node.items() if k != "title"}
+        out: dict[str, Any] = {}
+        for k, v in node.items():
+            # Strip Pydantic's auto-generated "title" metadata, but
+            # preserve user-defined properties named "title" (they live
+            # inside a "properties" dict, not at the schema-metadata level).
+            if k == "title" and not _inside_properties:
+                continue
+            child_inside = k == "properties"
+            out[k] = _resolve_refs(v, defs, _inside_properties=child_inside)
+        return out
     if isinstance(node, list):
         return [_resolve_refs(item, defs) for item in node]
     return node

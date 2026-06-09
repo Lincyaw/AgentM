@@ -982,27 +982,73 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
     Module mode gives the script full import/filesystem access (same
     authority as a regular Python module). IDE type-checkers see the
     ``WorkflowContext`` signature and provide completions + diagnostics.
+
+    When the script lives inside a package (``__init__.py`` chain), we walk
+    up to find the package root, add its parent to ``sys.path``, and import
+    via the fully qualified dotted name so relative imports work.
     """
     ctx = WorkflowContext(run)
-    module_name = (
-        f"_agentm_workflow_{hashlib.sha256(str(source_path).encode()).hexdigest()[:12]}"
-    )
-    spec = importlib.util.spec_from_file_location(module_name, source_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load workflow module from {source_path}")
 
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-        run_fn = getattr(module, "run", None)
-        if run_fn is None or not callable(run_fn):
-            raise RuntimeError(
-                "module-mode script must define `async def run(ctx: WorkflowContext)`"
-            )
-        return await run_fn(ctx)
-    finally:
-        sys.modules.pop(module_name, None)
+    # Walk up from the script's directory to find the package root — the
+    # topmost ancestor that still has __init__.py.
+    parts = [source_path.stem]
+    current = source_path.parent
+    while (current / "__init__.py").is_file():
+        parts.append(current.name)
+        current = current.parent
+    # `current` is the directory to put on sys.path (package root's parent).
+    # `parts` reversed gives the fully qualified module name.
+    parts.reverse()
+
+    if len(parts) > 1:
+        # Script is inside a package — use normal import machinery.
+        module_name = ".".join(parts)
+        path_entry = str(current)
+        added = path_entry not in sys.path
+        if added:
+            sys.path.insert(0, path_entry)
+        try:
+            pkg_root = parts[0]
+            module = importlib.import_module(module_name)
+            run_fn = getattr(module, "run", None)
+            if run_fn is None or not callable(run_fn):
+                raise RuntimeError(
+                    "module-mode script must define "
+                    "`async def run(ctx: WorkflowContext)`"
+                )
+            return await run_fn(ctx)
+        finally:
+            if added:
+                with contextlib.suppress(ValueError):
+                    sys.path.remove(path_entry)
+            stale = [
+                k for k in sys.modules
+                if k == pkg_root or k.startswith(pkg_root + ".")
+            ]
+            for k in stale:
+                sys.modules.pop(k, None)
+    else:
+        # Standalone file — load by path with a unique module name.
+        module_name = (
+            f"_agentm_workflow_"
+            f"{hashlib.sha256(str(source_path).encode()).hexdigest()[:12]}"
+        )
+        spec = importlib.util.spec_from_file_location(module_name, source_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot load workflow module from {source_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            run_fn = getattr(module, "run", None)
+            if run_fn is None or not callable(run_fn):
+                raise RuntimeError(
+                    "module-mode script must define "
+                    "`async def run(ctx: WorkflowContext)`"
+                )
+            return await run_fn(ctx)
+        finally:
+            sys.modules.pop(module_name, None)
 
 
 _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {

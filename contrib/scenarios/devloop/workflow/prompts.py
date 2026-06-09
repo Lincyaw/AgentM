@@ -41,7 +41,9 @@ def revise_spec_prompt(
     feedback: str,
     issues: list[ReviewIssue],
 ) -> str:
-    issues_text = json.dumps(issues, indent=2, ensure_ascii=False)
+    issues_text = json.dumps(
+        [i.model_dump() for i in issues], indent=2, ensure_ascii=False,
+    )
     return (
         f"Revise the spec based on reviewer feedback.\n\n"
         f"## Original spec\n{original_spec_json}\n\n"
@@ -74,7 +76,7 @@ def dev_fix_task(
     failures: list[TestFailure],
 ) -> str:
     failure_summary = "\n".join(
-        f"- {f['test_name']}: {f['error_message']}"
+        f"- {f.test_name}: {f.error_message}"
         for f in failures
     )
     return (

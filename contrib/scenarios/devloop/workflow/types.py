@@ -1,229 +1,113 @@
-"""Type definitions and JSON Schemas for the devloop workflow."""
+"""Pydantic models for the devloop workflow.
+
+Each model serves as both the runtime type AND the JSON Schema source
+(via ``pydantic_to_openai_tool_schema``). No hand-written schemas.
+"""
 from __future__ import annotations
 
-from typing import Required, TypedDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.extensions.builtin.workflow import JsonSchema
+from agentm.core.lib import pydantic_to_openai_tool_schema
 
-# ── JSON Schemas (passed to agent(schema=...)) ─────────────────
-
-SPEC_SCHEMA: JsonSchema = {
-    "type": "object",
-    "properties": {
-        "title": {"type": "string", "description": "Short feature title."},
-        "description": {"type": "string", "description": "What the feature does."},
-        "interfaces": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "signature": {"type": "string"},
-                    "description": {"type": "string"},
-                },
-                "required": ["name", "signature"],
-            },
-            "description": "Function/class/method signatures.",
-        },
-        "acceptance_criteria": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string", "description": "e.g. AC-1"},
-                    "description": {"type": "string"},
-                    "test_method": {
-                        "type": "string",
-                        "description": "How to verify (test name or command).",
-                    },
-                },
-                "required": ["id", "description"],
-            },
-        },
-        "file_structure": {
-            "type": "object",
-            "properties": {
-                "source_files": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Paths for implementation files.",
-                },
-                "test_files": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Paths for test files.",
-                },
-            },
-        },
-    },
-    "required": ["title", "interfaces", "acceptance_criteria"],
-}
-
-REVIEW_SCHEMA: JsonSchema = {
-    "type": "object",
-    "properties": {
-        "approved": {"type": "boolean"},
-        "feedback": {"type": "string", "description": "Overall feedback."},
-        "issues": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "ac_id": {"type": "string"},
-                    "issue": {"type": "string"},
-                },
-            },
-            "description": "Per-AC issues found.",
-        },
-    },
-    "required": ["approved"],
-}
-
-TEST_RESULT_SCHEMA: JsonSchema = {
-    "type": "object",
-    "properties": {
-        "all_passed": {"type": "boolean"},
-        "total": {"type": "integer"},
-        "passed": {"type": "integer"},
-        "failed": {"type": "integer"},
-        "failures": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "test_name": {"type": "string"},
-                    "error_message": {"type": "string"},
-                },
-                "required": ["test_name", "error_message"],
-            },
-        },
-        "stdout": {"type": "string", "description": "Raw pytest output."},
-    },
-    "required": ["all_passed", "total", "passed", "failed"],
-}
-
-CODE_REVIEW_SCHEMA: JsonSchema = {
-    "type": "object",
-    "properties": {
-        "approved": {"type": "boolean"},
-        "verdicts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "ac_id": {"type": "string"},
-                    "status": {
-                        "type": "string",
-                        "enum": ["pass", "fail", "cannot_judge"],
-                    },
-                    "reason": {"type": "string"},
-                },
-                "required": ["ac_id", "status"],
-            },
-        },
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "severity": {"type": "string"},
-                    "description": {"type": "string"},
-                },
-            },
-        },
-    },
-    "required": ["approved"],
-}
-
-TEST_INFO_SCHEMA: JsonSchema = {
-    "type": "object",
-    "properties": {
-        "test_files": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Paths of test files written.",
-        },
-        "test_count": {"type": "integer"},
-    },
-    "required": ["test_files"],
-}
-
-# ── TypedDict definitions ──────────────────────────────────────
+_STRICT = ConfigDict(extra="forbid")
 
 
-class InterfaceSpec(TypedDict, total=False):
-    name: Required[str]
-    signature: Required[str]
-    description: str
+# ── Spec ───────────────────────────────────────────────────────
+
+class InterfaceSpec(BaseModel):
+    model_config = _STRICT
+    name: str = Field(description="Function/class/method name.")
+    signature: str = Field(description="Full signature with types.")
+    description: str = Field(default="", description="What it does.")
 
 
-class AcceptanceCriterion(TypedDict, total=False):
-    id: Required[str]
-    description: Required[str]
-    test_method: str
+class AcceptanceCriterion(BaseModel):
+    model_config = _STRICT
+    id: str = Field(description="e.g. AC-1")
+    description: str = Field(description="What to verify.")
+    test_method: str = Field(default="", description="How to verify (test name or command).")
 
 
-class FileStructure(TypedDict, total=False):
-    source_files: list[str]
-    test_files: list[str]
+class FileStructure(BaseModel):
+    model_config = _STRICT
+    source_files: list[str] = Field(default_factory=list, description="Paths for implementation files.")
+    test_files: list[str] = Field(default_factory=list, description="Paths for test files.")
 
 
-class ImplementationSpec(TypedDict, total=False):
-    title: Required[str]
-    description: str
-    interfaces: Required[list[InterfaceSpec]]
-    acceptance_criteria: Required[list[AcceptanceCriterion]]
-    file_structure: FileStructure
+class ImplementationSpec(BaseModel):
+    model_config = _STRICT
+    title: str = Field(description="Short feature title.")
+    description: str = Field(default="", description="What the feature does.")
+    interfaces: list[InterfaceSpec] = Field(description="Function/class/method signatures.")
+    acceptance_criteria: list[AcceptanceCriterion] = Field(description="Testable acceptance criteria.")
+    file_structure: FileStructure = Field(default_factory=FileStructure, description="Where source and test files go.")
 
 
-class ReviewIssue(TypedDict, total=False):
-    ac_id: str
-    issue: str
+# ── Design Review ──────────────────────────────────────────────
+
+class ReviewIssue(BaseModel):
+    model_config = _STRICT
+    ac_id: str = Field(default="", description="Which AC is affected.")
+    issue: str = Field(default="", description="What's wrong.")
 
 
-class DesignReview(TypedDict, total=False):
-    approved: Required[bool]
-    feedback: str
-    issues: list[ReviewIssue]
+class DesignReview(BaseModel):
+    model_config = _STRICT
+    approved: bool = Field(description="Whether the spec passes review.")
+    feedback: str = Field(default="", description="Overall feedback.")
+    issues: list[ReviewIssue] = Field(default_factory=list, description="Per-AC issues found.")
 
 
-class TestFailure(TypedDict):
-    test_name: str
-    error_message: str
+# ── Test ───────────────────────────────────────────────────────
+
+class TestFailure(BaseModel):
+    model_config = _STRICT
+    test_name: str = Field(description="Failing test name.")
+    error_message: str = Field(description="Error message or traceback summary.")
 
 
-class TestInfo(TypedDict, total=False):
-    test_files: Required[list[str]]
-    test_count: int
+class TestInfo(BaseModel):
+    model_config = _STRICT
+    test_files: list[str] = Field(description="Paths of test files written.")
+    test_count: int = Field(default=0, description="Number of test functions.")
 
 
-class TestResult(TypedDict, total=False):
-    all_passed: Required[bool]
-    total: Required[int]
-    passed: Required[int]
-    failed: Required[int]
-    failures: list[TestFailure]
-    stdout: str
+class TestResult(BaseModel):
+    model_config = _STRICT
+    all_passed: bool = Field(description="Whether every test passed.")
+    total: int = Field(description="Total test count.")
+    passed: int = Field(description="Passed count.")
+    failed: int = Field(description="Failed count.")
+    failures: list[TestFailure] = Field(default_factory=list, description="Details of each failure.")
+    stdout: str = Field(default="", description="Raw pytest output.")
 
 
-class CodeReview(TypedDict, total=False):
-    approved: Required[bool]
-    verdicts: list[dict[str, str]]
-    findings: list[dict[str, str]]
+# ── Code Review ────────────────────────────────────────────────
+
+class ACVerdict(BaseModel):
+    model_config = _STRICT
+    ac_id: str = Field(description="Acceptance criterion ID.")
+    status: str = Field(description="pass, fail, or cannot_judge.")
+    reason: str = Field(default="", description="Why this verdict.")
 
 
-class DevContext(TypedDict, total=False):
-    task: Required[str]
-    spec: str
-    test_files: list[str]
-    previous_failures: list[TestFailure]
+class Finding(BaseModel):
+    model_config = _STRICT
+    severity: str = Field(description="critical, major, or minor.")
+    description: str = Field(description="What was found.")
 
 
-class DevloopResult(TypedDict):
-    spec: ImplementationSpec
-    design_review: DesignReview
-    test_files: list[str]
-    test_result: TestResult
-    code_review: CodeReview | None
-    rounds: int
-    success: bool
+class CodeReview(BaseModel):
+    model_config = _STRICT
+    approved: bool = Field(description="Whether the implementation passes review.")
+    verdicts: list[ACVerdict] = Field(default_factory=list, description="Per-AC verdicts.")
+    findings: list[Finding] = Field(default_factory=list, description="Code quality findings.")
+
+
+# ── Derived JSON Schemas (for schema= on agent()) ─────────────
+
+SPEC_SCHEMA = pydantic_to_openai_tool_schema(ImplementationSpec)
+REVIEW_SCHEMA = pydantic_to_openai_tool_schema(DesignReview)
+TEST_INFO_SCHEMA = pydantic_to_openai_tool_schema(TestInfo)
+TEST_RESULT_SCHEMA = pydantic_to_openai_tool_schema(TestResult)
+CODE_REVIEW_SCHEMA = pydantic_to_openai_tool_schema(CodeReview)
