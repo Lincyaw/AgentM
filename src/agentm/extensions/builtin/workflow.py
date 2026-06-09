@@ -59,6 +59,7 @@ import logging
 import os
 import sys
 import textwrap
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -145,6 +146,17 @@ class BudgetSnapshot(TypedDict):
     output_tokens: int
     total: int | None
     remaining: int | None
+
+
+class RunSummary(TypedDict):
+    """Post-execution summary of a workflow run."""
+
+    agents_spawned: int
+    agents_succeeded: int
+    agents_failed: int
+    agents_retried: int
+    budget: BudgetSnapshot
+    wall_clock_s: float
 
 
 MANIFEST = ExtensionManifest(
@@ -399,6 +411,9 @@ class _WorkflowRun:
     default_scenario: str | None = None
     max_agents: int = _AGENT_COUNT_BACKSTOP
     agents_spawned: int = 0
+    agents_succeeded: int = 0
+    agents_failed: int = 0
+    agents_retried: int = 0
     args_payload: dict[str, Any] = field(default_factory=dict)
     _agent_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _bg_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
@@ -415,6 +430,7 @@ class _WorkflowRun:
         tool_allowlist: list[str] | None = None,
         extra_extensions: list[ExtensionEntry] | None = None,
         atom_config: AtomConfigMap | None = None,
+        retry: int = 0,
     ) -> AgentResult:
         """Spawn one child agent session, drive it to completion, return its
         output. Journaled by ``hash(prompt, opts)`` — a re-run resumes from
@@ -430,8 +446,14 @@ class _WorkflowRun:
         ``schema=`` injects a ``submit_result`` terminal tool shaped by the
         schema — it's one way to get structured output but not the only way.
         Agents with their own finalize tools (via ``ToolTerminate``) return
-        structured data without needing ``schema=``."""
+        structured data without needing ``schema=``.
 
+        ``retry=N`` retries the agent up to N times on failure (empty output
+        or ``_error`` result). Failed attempts are not journaled — only the
+        final result is recorded."""
+
+        # Exclude retry from the journal key — it's execution policy, not
+        # semantic identity.
         opts: dict[str, Any] = {
             "schema": schema,
             "scenario": scenario,
@@ -461,8 +483,32 @@ class _WorkflowRun:
                 schema=schema,
             )
 
+        parsed = _auto_parse(result)
+
+        if _is_agent_error(parsed) and retry > 0:
+            _log.warning(
+                "workflow agent failed (prompt=%.60s…), retrying (%d left)",
+                prompt, retry,
+            )
+            self.agents_retried += 1
+            return await self.agent(
+                prompt,
+                schema=schema,
+                scenario=scenario,
+                isolation=isolation,
+                tool_allowlist=tool_allowlist,
+                extra_extensions=extra_extensions,
+                atom_config=atom_config,
+                retry=retry - 1,
+            )
+
+        if _is_agent_error(parsed):
+            self.agents_failed += 1
+        else:
+            self.agents_succeeded += 1
+
         await self.journal.record(key, result)
-        return _auto_parse(result)
+        return parsed
 
     async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
         """Barrier fan-out: await every awaitable, return results in order.
@@ -569,14 +615,27 @@ class _WorkflowRun:
             tool_allowlist=tool_allowlist,
             purpose=_WORKER_PURPOSE,
         )
-        child: _ChildSession = await self.api.spawn_child_session(config)
-        self.budget_svc.attach(child)
         try:
-            messages = await child.prompt(prompt)
-            return _final_session_output(messages)
-        finally:
-            with contextlib.suppress(Exception):
-                await child.shutdown()
+            child: _ChildSession = await self.api.spawn_child_session(config)
+            self.budget_svc.attach(child)
+            try:
+                messages = await child.prompt(prompt)
+                output = _final_session_output(messages)
+                if not output:
+                    return json.dumps(_build_agent_error_info(messages))
+                return output
+            finally:
+                with contextlib.suppress(Exception):
+                    await child.shutdown()
+        except Exception as exc:
+            _log.warning(
+                "workflow agent spawn/prompt failed: %s: %s",
+                type(exc).__name__, exc,
+            )
+            return json.dumps({
+                "_error": type(exc).__name__,
+                "detail": str(exc)[:500],
+            })
 
 
 class WorkflowContext:
@@ -616,11 +675,14 @@ class WorkflowContext:
         tool_allowlist: list[str] | None = None,
         extra_extensions: list[ExtensionEntry] | None = None,
         atom_config: AtomConfigMap | None = None,
+        retry: int = 0,
     ) -> AgentResult:
         """Spawn one child agent session and return its output.
 
         Returns ``dict``/``list`` when the agent has a finalize tool or
         ``schema=`` is set; ``str`` otherwise.
+
+        ``retry=N`` retries the agent up to N times on failure.
         """
         return await self._run.agent(
             prompt,
@@ -630,6 +692,7 @@ class WorkflowContext:
             tool_allowlist=tool_allowlist,
             extra_extensions=extra_extensions,
             atom_config=atom_config,
+            retry=retry,
         )
 
     async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
@@ -654,8 +717,32 @@ class WorkflowContext:
 
 
 # ---------------------------------------------------------------------------
-# Output extraction
+# Output extraction / error helpers
 # ---------------------------------------------------------------------------
+
+
+def _build_agent_error_info(messages: list[AgentMessage]) -> dict[str, Any]:
+    """Build a structured error dict when a child agent produces no output."""
+    info: dict[str, Any] = {"_error": "no_output", "turns": len(messages)}
+    for msg in reversed(messages):
+        if isinstance(msg, ToolResultMessage):
+            for result_block in reversed(msg.content):
+                if result_block.is_error:
+                    for inner in reversed(result_block.content):
+                        text = getattr(inner, "text", None)
+                        if isinstance(text, str) and text:
+                            info["last_tool_error"] = text[:500]
+                            return info
+    return info
+
+
+def _is_agent_error(result: AgentResult) -> bool:
+    """True if the result represents an agent failure."""
+    if isinstance(result, dict) and "_error" in result:
+        return True
+    if isinstance(result, str) and not result:
+        return True
+    return False
 
 
 def _final_session_output(messages: list[AgentMessage]) -> str:
@@ -926,8 +1013,8 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
             "description": (
                 "Async Python orchestration script. Available names: "
                 "agent(prompt, *, schema=, scenario=, isolation=, "
-                "tool_allowlist=, extra_extensions=, atom_config=) "
-                "(awaitable -> str | dict when schema set), "
+                "tool_allowlist=, extra_extensions=, atom_config=, retry=0) "
+                "(awaitable -> str | dict when schema set; retry=N retries on failure), "
                 "parallel(list_of_awaitables) -> list, "
                 "pipeline(items, *stages) -> list, budget (.total / .spent() / "
                 ".remaining()), args (dict), json (module), log(msg), "
@@ -989,6 +1076,7 @@ class WorkflowRunner:
         self._default_scenario = default_scenario
         self._budget_tokens = budget_tokens
         self._last_run: _WorkflowRun | None = None
+        self._last_wall_clock_s: float = 0.0
 
     @property
     def last_agents_spawned(self) -> int:
@@ -1002,6 +1090,27 @@ class WorkflowRunner:
                 total=None, remaining=None,
             )
         return self._last_run.budget_svc.snapshot()
+
+    @property
+    def last_run_summary(self) -> RunSummary:
+        if self._last_run is None:
+            return RunSummary(
+                agents_spawned=0, agents_succeeded=0,
+                agents_failed=0, agents_retried=0,
+                budget=BudgetSnapshot(
+                    spent=0, input_tokens=0, output_tokens=0,
+                    total=None, remaining=None,
+                ),
+                wall_clock_s=0.0,
+            )
+        return RunSummary(
+            agents_spawned=self._last_run.agents_spawned,
+            agents_succeeded=self._last_run.agents_succeeded,
+            agents_failed=self._last_run.agents_failed,
+            agents_retried=self._last_run.agents_retried,
+            budget=self._last_run.budget_svc.snapshot(),
+            wall_clock_s=self._last_wall_clock_s,
+        )
 
     async def run_file(
         self,
@@ -1064,6 +1173,7 @@ class WorkflowRunner:
         except ExtensionStaleError:
             bracket = contextlib.nullcontext()
 
+        t0 = time.monotonic()
         with bracket:
             if mode == "module" and source_path is not None:
                 coro = _run_module_script(source_path, run)
@@ -1074,6 +1184,7 @@ class WorkflowRunner:
                 raw = await asyncio.wait_for(coro, timeout=self._wall_clock_timeout)
             else:
                 raw = await coro
+        self._last_wall_clock_s = time.monotonic() - t0
 
         return _auto_parse(_coerce_result(raw))
 
@@ -1162,6 +1273,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             extras={
                 "agents_spawned": runner.last_agents_spawned,
                 "budget": runner.last_budget_snapshot,
+                "summary": runner.last_run_summary,
             },
         )
 
