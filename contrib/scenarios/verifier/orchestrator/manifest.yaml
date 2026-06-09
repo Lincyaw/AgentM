@@ -1,0 +1,14 @@
+name: orchestrator
+description: >
+  Thin orchestrator shell for the verifier workflow. Loads only the
+  workflow atom (which spawns hop/judge child sessions) and the
+  minimal substrate it needs (operations, observability). No tools
+  of its own — all domain work happens in child agent scenarios.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.artifact_store
+  - module: agentm.extensions.builtin.workflow

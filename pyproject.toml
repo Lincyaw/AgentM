@@ -82,6 +82,7 @@ members = [
     "contrib/extensions/llmharness",
     "contrib/extensions/mcp_bridge",
     "contrib/scenarios/harbor",
+    "contrib/scenarios/rca",
     "contrib/gateway-peers/terminal",
     "contrib/gateway-peers/feishu",
 ]
@@ -93,6 +94,8 @@ agentm-terminal = { workspace = true }
 llmharness = { workspace = true }
 agentm-mcp-bridge = { workspace = true }
 agentm-harbor = { workspace = true }
+rca-scenario = { workspace = true }
+agentm = { workspace = true }
 
 [tool.pytest.ini_options]
 # UI tests exercise the Textual TUI; they pass but don't map to any

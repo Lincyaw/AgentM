@@ -140,13 +140,44 @@ def extract_hop_verdict(
     return best
 
 
-def collect_all_verdicts(out_dir: Path) -> list[dict]:
-    """Collect all hop verdicts (confirmed + rejected) from a case run.
+def verdicts_from_trace(trace: dict) -> list[dict]:
+    """Extract all hop verdicts from a propagation trace (workflow output).
 
-    Walks the hops/ directory and extracts each hop's structured verdict
-    from verdict.json (new runs) or the observability JSONL (legacy runs).
-    Returns a list of dicts with from/to/verdict/rationale/claim.
+    The workflow ``agent()`` return values are already captured in
+    ``hop_log`` and ``node_evidence``. This replaces the legacy
+    ``collect_all_verdicts`` which walked per-hop directories.
     """
+    node_evidence = trace.get("node_evidence", {})
+    verdicts: list[dict] = []
+    for entry in trace.get("hop_log", []):
+        to_svc = entry.get("to", "")
+        verdict = entry.get("verdict", "")
+        if not to_svc or verdict == "edge_sql":
+            continue
+        ev = node_evidence.get(to_svc, {})
+        verdicts.append({
+            "from": entry.get("from", ""),
+            "to": to_svc,
+            "verdict": verdict,
+            "rationale": ev.get("rationale", ""),
+            "claim": ev.get("claim", ""),
+            "symptom_evidence": ev.get("symptom_evidence", []),
+        })
+    return verdicts
+
+
+def collect_all_verdicts(out_dir: Path) -> list[dict]:
+    """Collect hop verdicts — prefers propagation_trace.json (workflow
+    output), falls back to legacy hops/ directory for old runs.
+    """
+    trace_path = out_dir / "propagation_trace.json"
+    if trace_path.exists():
+        try:
+            trace = json.loads(trace_path.read_text())
+            return verdicts_from_trace(trace)
+        except Exception:  # noqa: BLE001
+            pass
+
     hops_dir = out_dir / "hops"
     if not hops_dir.exists():
         return []
