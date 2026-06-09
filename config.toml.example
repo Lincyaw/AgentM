@@ -1,0 +1,75 @@
+# AgentM config — place at ~/.agentm/config.toml (or $AGENTM_HOME/config.toml)
+#
+# Three sections:
+#   [models.*]          Model profiles (used by agentm / agentm gateway)
+#   [gateway]           Gateway workspace routing
+#   [feishu.bots.*]     Feishu multi-bot (used by agentm-feishu)
+
+# ── Model profiles ───────────────────────────────────────────────────
+# Select with `agentm --model doubao` or set default_model.
+
+default_model = "doubao"
+
+[models.doubao]
+provider = "openai"
+model = "doubao-seed-2-0-pro-260215"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+api_key = "your-api-key-here"
+context_window = 131072
+reasoning_effort = "high"
+
+[models.doubao.extra_body]
+thinking = { type = "enabled" }
+
+# ── Gateway ──────────────────────────────────────────────────────────
+# Per-channel workspace isolation. Each feishu bot (identified by its
+# channel_name) gets its own working directory under workspace_root.
+#
+# Without this section, all channels share the gateway's --cwd.
+
+[gateway]
+workspace_root = "~/.agentm/workspaces"
+
+# Optional: override the convention path for specific channels.
+# [gateway.workspaces]
+# researcher = "/mnt/data/rca-workspace"
+
+# ── Feishu bots ──────────────────────────────────────────────────────
+# One [feishu.bots.<name>] per Feishu app. agentm-feishu detects this
+# section automatically when --app-id is not passed on the CLI.
+#
+# Each bot connects to the gateway as a separate peer (its own
+# WireClient + FeishuAdapter). The channel_name (defaults to the bot
+# key name) determines gateway routing and workspace directory.
+#
+# Secret precedence per bot:
+#   app_secret_file > app_secret > LARK_APP_SECRET_{NAME_UPPER} env
+
+[feishu.bots.assistant]
+app_id = "cli_xxxxxxxxxxxx"
+app_secret_file = "/run/secrets/feishu_assistant"  # production: file-based
+channel_name = "assistant"                         # gateway routes by this
+scenario = "chatbot"                               # agent behavior
+# session_scope = "chat"                           # "chat" (default) or "user"
+# allow_from = ["*"]                               # sender allowlist
+
+[feishu.bots.investigator]
+app_id = "cli_yyyyyyyyyyyy"
+app_secret = "your-app-secret-here"                # dev convenience: inline
+channel_name = "investigator"
+scenario = "rca"
+
+# ── Usage ────────────────────────────────────────────────────────────
+#
+# Start the gateway (one process):
+#   agentm gateway --bind unix:///tmp/gw.sock
+#
+# Start the feishu peer (reads [feishu.bots] from this file):
+#   agentm-feishu --connect unix:///tmp/gw.sock --verbose
+#
+# Result:
+#   @assistant in Feishu  -->  session in ~/.agentm/workspaces/assistant/
+#   @investigator         -->  session in ~/.agentm/workspaces/investigator/
+#
+# Single-bot mode (backward compat, ignores [feishu.bots]):
+#   agentm-feishu --app-id cli_xxx --app-secret /path --scenario chatbot
