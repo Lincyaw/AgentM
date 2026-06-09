@@ -71,7 +71,6 @@ from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
 from agentm.core.abi.messages import (
     AgentMessage,
     AssistantMessage,
-    ToolCallBlock,
     ToolResultMessage,
 )
 from agentm.core.abi.session_config import AgentSessionConfig
@@ -394,18 +393,21 @@ class _WorkflowRun:
         extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
         atom_config: dict[str, dict[str, Any]] | None = None,
     ) -> str | dict[str, Any] | list[Any]:
-        """Spawn one child agent session, drive it to a final reply, return its
-        text. Journaled by ``hash(prompt, opts)`` — a re-run resumes from cache
-        without re-spawning.
+        """Spawn one child agent session, drive it to completion, return its
+        output. Journaled by ``hash(prompt, opts)`` — a re-run resumes from
+        cache without re-spawning.
 
-        ``extra_extensions`` and ``atom_config`` enable inline manifest assembly:
-        the script can customise a worker's atom set and per-atom config without
-        pre-writing a YAML scenario.
+        Return type depends on the agent's output:
 
-        When *schema* is provided, the child session additionally gets a
-        ``submit_result`` terminal tool whose parameter shape matches the
-        schema. The return value is the parsed JSON object (dict/list) instead
-        of a plain string."""
+        - If the agent ends via a ``ToolTerminate`` finalize tool (e.g.
+          ``submit_hop_verdict``, ``submit_result`` from ``schema=``), the
+          tool result is returned as a parsed ``dict``/``list``.
+        - Otherwise, the last assistant text is returned as ``str``.
+
+        ``schema=`` injects a ``submit_result`` terminal tool shaped by the
+        schema — it's one way to get structured output but not the only way.
+        Agents with their own finalize tools (via ``ToolTerminate``) return
+        structured data without needing ``schema=``."""
 
         opts: dict[str, Any] = {
             "schema": schema,
@@ -418,12 +420,7 @@ class _WorkflowRun:
         key = _Journal.key(prompt, opts)
         cached = await self.journal.lookup(key)
         if cached is not None:
-            if schema is not None:
-                try:
-                    return json.loads(cached)
-                except (json.JSONDecodeError, TypeError):
-                    return cached
-            return cached
+            return _auto_parse(cached)
 
         async with self._agent_lock:
             if self.agents_spawned >= self.max_agents:
@@ -442,13 +439,7 @@ class _WorkflowRun:
             )
 
         await self.journal.record(key, result)
-
-        if schema is not None:
-            try:
-                return json.loads(result)
-            except (json.JSONDecodeError, TypeError):
-                return result
-        return result
+        return _auto_parse(result)
 
     async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
         """Barrier fan-out: await every awaitable, return results in order.
@@ -559,39 +550,10 @@ class _WorkflowRun:
         self.budget_svc.attach(child)
         try:
             messages = await child.prompt(prompt)
-            if schema is not None:
-                structured = _extract_structured_result(messages)
-                if structured is not None:
-                    return json.dumps(structured, ensure_ascii=False)
             return _final_session_output(messages)
         finally:
             with contextlib.suppress(Exception):
                 await child.shutdown()
-
-
-def _extract_structured_result(
-    messages: list[AgentMessage],
-) -> dict[str, Any] | list[Any] | None:
-    """Return the ``result`` payload from the last ``submit_result`` tool call.
-
-    Scans backward for the last ``AssistantMessage`` containing a
-    ``ToolCallBlock`` named ``submit_result`` and returns
-    ``arguments["result"]``. Returns ``None`` if no such call exists (the
-    worker may have answered in plain text instead).
-    """
-
-    for msg in reversed(messages):
-        if not isinstance(msg, AssistantMessage):
-            continue
-        for block in reversed(msg.content):
-            if (
-                isinstance(block, ToolCallBlock)
-                and block.name == "submit_result"
-            ):
-                result = block.arguments.get("result")
-                if isinstance(result, (dict, list)):
-                    return result
-    return None
 
 
 def _final_session_output(messages: list[AgentMessage]) -> str:
@@ -629,6 +591,25 @@ def _final_session_output(messages: list[AgentMessage]) -> str:
         "it may have exhausted its tool budget without calling a finalize tool"
     )
     return ""
+
+
+def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
+    """Parse JSON if possible, otherwise return raw string.
+
+    Every ToolTerminate finalize tool (``submit_hop_verdict``,
+    ``submit_result`` from ``schema=``, etc.) returns JSON.  Auto-parsing
+    means workflow scripts never need ``json.loads`` — they get a dict
+    for structured agents and a string for free-text agents.
+    """
+    if not text:
+        return text
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return text
 
 
 def _error(message: str) -> ToolResult:
