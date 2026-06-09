@@ -1,4 +1,4 @@
-"""Whole-graph review submission tool for the verifier_judge scenario."""
+"""Whole-graph review submission tool for the verifier/judge scenario."""
 
 from __future__ import annotations
 
