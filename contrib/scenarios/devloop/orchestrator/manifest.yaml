@@ -1,0 +1,14 @@
+name: orchestrator
+description: >
+  DevOps control loop orchestrator. Runs the workflow script that
+  drives spec → design review → test writing → development → test
+  verification → code review. No tools of its own — all domain work
+  happens in child agent scenarios.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.artifact_store
+  - module: agentm.extensions.builtin.workflow

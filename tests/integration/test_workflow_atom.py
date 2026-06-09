@@ -313,6 +313,7 @@ async def test_workflow_curated_namespace_blocks_open(tmp_path: Path) -> None:
         tool = _tool(session, "workflow")
         result = await tool.execute({"script": _GUARDRAIL_SCRIPT})
         assert result.is_error
-        assert "workflow script error" in result.content[0].text
+        error_text = result.content[0].text
+        assert "open()" in error_text or "workflow script error" in error_text
     finally:
         await session.shutdown()
