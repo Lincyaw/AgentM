@@ -4,11 +4,18 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import TypedDict
 
 from graph import _duckdb_conn
 
 REPO = Path(__file__).resolve().parents[4]
 FAULT_KINDS_DIR = REPO / "contrib" / "scenarios" / "verifier" / "fault_kinds"
+
+
+class TargetEvidence(TypedDict, total=False):
+    normal_avg_ms: float
+    abnormal_avg_ms: float
+    ratio: float
 
 # engine_config keys that describe WHERE/WHEN, not the fault's intensity.
 # Everything else (corrupt %, loss %, delay, mutator_config, method, …) is
@@ -81,7 +88,7 @@ def get_injections(data_dir: Path) -> list[dict[str, str]]:
     return [{"target": target, "chaos_type": chaos_type, "params": ""}]
 
 
-def get_target_evidence(data_dir: Path, target: str) -> dict[str, object]:
+def get_target_evidence(data_dir: Path, target: str) -> TargetEvidence:
     """Quick SQL check: latency comparison for the injection target."""
     conn = _duckdb_conn(data_dir)
     # duration is microseconds — convert to ms with /1e3

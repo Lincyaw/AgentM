@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -52,6 +52,23 @@ class HopVerdict(BaseModel):
         "(empty string if rejected)."
     )
     claim: str = Field(description="One-line summary of the hop.")
+
+
+class HopFinalizeConfig(TypedDict, total=False):
+    data_dir: str
+
+
+class SqlEvidencePayload(TypedDict):
+    sql: str
+    claim: str
+
+
+class HopVerdictPayload(TypedDict):
+    verdict: Literal["confirmed", "rejected"]
+    rationale: str
+    symptom_evidence: list[SqlEvidencePayload]
+    relationship_sql: str
+    claim: str
 
 
 def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
@@ -130,13 +147,14 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
     return failures
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: HopFinalizeConfig) -> None:
     raw_dir = config.get("data_dir")
     data_dir = Path(raw_dir) if raw_dir else None
 
     async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:
+        payload = cast(HopVerdictPayload, args)
         try:
-            verdict = HopVerdict.model_validate(args)
+            verdict = HopVerdict.model_validate(payload)
         except ValidationError as exc:
             return ToolResult(
                 content=[TextContent(

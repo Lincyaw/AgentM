@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Required, TypedDict
 
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
@@ -115,6 +115,27 @@ _REL_DESCRIPTIONS = {
 }
 
 
+class UpstreamEvidence(TypedDict, total=False):
+    source: str
+    normal_avg_ms: float
+    abnormal_avg_ms: float
+    ratio: float
+    rationale: str
+    symptom_evidence: list[dict[str, str]]
+
+
+class HopContextConfig(TypedDict, total=False):
+    from_service: Required[str]
+    to_service: Required[str]
+    rel_type: Required[str]
+    fault_kind: Required[str]
+    injection_target: Required[str]
+    all_faults: Required[list[list[str]]]
+    fault_docs: dict[str, str]
+    is_infra: bool
+    upstream_evidence: UpstreamEvidence | None
+
+
 def _fault_context(
     all_faults: list[tuple[str, str, str]],
     to_service: str,
@@ -136,7 +157,7 @@ def _fault_context(
     return "\n".join(lines)
 
 
-def _format_upstream_evidence(evidence: dict) -> str:
+def _format_upstream_evidence(evidence: UpstreamEvidence) -> str:
     lines: list[str] = []
     src = evidence.get("source", "")
     if src == "injection_target":
@@ -171,7 +192,7 @@ def _build_hop_prompt(
     all_faults: list[tuple[str, str, str]],
     fault_docs: dict[str, str],
     is_infra: bool,
-    upstream_evidence: dict | None,
+    upstream_evidence: UpstreamEvidence | None,
 ) -> str:
     rel_desc = _REL_DESCRIPTIONS.get(rel_type, "{frm} and {to} are related.")
     rel_text = rel_desc.format(frm=from_service, to=to_service)
@@ -235,7 +256,7 @@ def _build_hop_prompt(
 # Atom install
 # ---------------------------------------------------------------
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: HopContextConfig) -> None:
     from_service = config.get("from_service", "")
     to_service = config.get("to_service", "")
     if not from_service or not to_service:
@@ -248,7 +269,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if len(f) >= 2
     ]
 
-    fault_docs_cfg: dict[str, str] = config.get("fault_docs") or {}
+    fault_docs_cfg = config.get("fault_docs") or {}
     fault_docs: dict[str, str] = {}
     for fk, _, _ in all_faults:
         if fk in fault_docs_cfg:

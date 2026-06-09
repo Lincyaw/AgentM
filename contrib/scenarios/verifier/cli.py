@@ -29,7 +29,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, TypedDict
 
 import typer
 
@@ -45,7 +45,12 @@ from graph import (  # noqa: E402
     get_node_map,
     get_relationships,
 )
-from injection import _load_fault_doc, get_injections, get_target_evidence  # noqa: E402
+from injection import (  # noqa: E402
+    TargetEvidence,
+    _load_fault_doc,
+    get_injections,
+    get_target_evidence,
+)
 
 REPO = Path(__file__).resolve().parents[3]
 WORKFLOW_SCRIPT = Path(__file__).resolve().parent / "eval" / "propagation_workflow.py"
@@ -56,7 +61,26 @@ WORKFLOW_SCRIPT = Path(__file__).resolve().parent / "eval" / "propagation_workfl
 # ------------------------------------------------------------------
 
 
-def _resolve_provider() -> tuple[str, dict[str, object]]:
+ProviderSpec = tuple[str, dict[str, Any]]
+ExtensionSpec = tuple[str, dict[str, Any]]
+
+
+class WorkflowArgs(TypedDict, total=False):
+    data_dir: str
+    graph: dict[str, list[list[str]]]
+    injections: list[dict[str, str]]
+    infra_nodes: list[str]
+    node_map: dict[str, str]
+    target_evidence: dict[str, TargetEvidence]
+    fault_docs: dict[str, str]
+    budget: int
+    out_dir: str
+    skip_propagate: bool
+    skip_judge: bool
+    existing_propagation: dict[str, Any]
+
+
+def _resolve_provider() -> ProviderSpec:
     """Build a provider spec from the environment (config.toml profile)."""
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
     from agentm.core.lib.user_config import resolve_model_profile
@@ -79,10 +103,18 @@ def _resolve_provider() -> tuple[str, dict[str, object]]:
 # ------------------------------------------------------------------
 
 
+_WORKFLOW_EXTENSIONS: list[ExtensionSpec] = [
+    ("agentm.extensions.builtin.operations", {"backend": "local"}),
+    ("agentm.extensions.builtin.observability", {}),
+    ("agentm.extensions.builtin.artifact_store", {}),
+    ("agentm.extensions.builtin.workflow", {}),
+]
+
+
 async def _run_workflow_async(
-    workflow_args: dict,
+    workflow_args: WorkflowArgs,
     out_dir: Path,
-) -> dict:
+) -> dict[str, Any]:
     """Run a workflow script via the WorkflowRunner service."""
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.runtime.session import AgentSession
@@ -93,17 +125,14 @@ async def _run_workflow_async(
     config = AgentSessionConfig(
         cwd=str(out_dir),
         provider=provider_spec,
-        scenario="verifier/orchestrator",
+        extensions=[(m, dict(c)) for m, c in _WORKFLOW_EXTENSIONS],
         auto_commit=False,
     )
     session = await AgentSession.create(config)
     try:
         runner = session.get_service("workflow_runner")
         if runner is None:
-            raise RuntimeError(
-                "workflow_runner service not found — ensure the "
-                "verifier/orchestrator scenario loads the workflow atom"
-            )
+            raise RuntimeError("workflow_runner service not found")
         result = await runner.run_file(WORKFLOW_SCRIPT, workflow_args)
         return result if isinstance(result, dict) else {}
     finally:
@@ -140,7 +169,7 @@ def run_judge(
             if doc:
                 fault_docs[fk] = doc
 
-    workflow_args = {
+    workflow_args: WorkflowArgs = {
         "data_dir": str(data_dir),
         "graph": {},
         "injections": [
@@ -250,7 +279,7 @@ def run_one_case(
     }
 
     # Pre-compute target evidence for injection seeds
-    target_evidence: dict[str, dict] = {}
+    target_evidence: dict[str, TargetEvidence] = {}
     for inj in injections:
         target = inj["target"]
         if target and target not in SYNTHETIC:
@@ -265,7 +294,7 @@ def run_one_case(
             if doc:
                 fault_docs[fk] = doc
 
-    workflow_args = {
+    workflow_args: WorkflowArgs = {
         "data_dir": str(data_dir),
         "graph": graph_serializable,
         "injections": [

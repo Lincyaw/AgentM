@@ -8,7 +8,7 @@ it so the agent starts with full context.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TypeAlias
 
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
@@ -22,7 +22,13 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def _format_value(value: Any) -> str:
+ContextValue: TypeAlias = (
+    str | int | float | bool | None | list["ContextValue"] | dict[str, "ContextValue"]
+)
+DevloopContextConfig: TypeAlias = dict[str, ContextValue]
+
+
+def _format_value(value: ContextValue) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, list) and all(isinstance(v, str) for v in value):
@@ -30,7 +36,7 @@ def _format_value(value: Any) -> str:
     return f"```json\n{json.dumps(value, indent=2, ensure_ascii=False)}\n```"
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: DevloopContextConfig) -> None:
     if not config:
         return
 

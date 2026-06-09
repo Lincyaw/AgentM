@@ -7,7 +7,7 @@ with complete case-specific knowledge.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Required, TypedDict
 
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
@@ -55,13 +55,52 @@ MANIFEST = ExtensionManifest(
 # Prompt construction
 # ---------------------------------------------------------------
 
+
+class Injection(TypedDict, total=False):
+    target: Required[str]
+    chaos_type: Required[str]
+    params: str
+
+
+class SymptomEvidence(TypedDict, total=False):
+    sql: str
+    claim: str
+
+
+JudgeTargetVerdict = TypedDict(
+    "JudgeTargetVerdict",
+    {
+        "from": str,
+        "to": str,
+        "verdict": str,
+        "rationale": str,
+        "symptom_evidence": list[SymptomEvidence],
+    },
+    total=False,
+)
+
+
+class ThroughputSummary(TypedDict, total=False):
+    normal: float
+    abnormal: float
+
+
+class JudgeContextConfig(TypedDict, total=False):
+    injections: Required[list[Injection]]
+    confirmed: Required[list[str]]
+    rejected_verdicts: list[JudgeTargetVerdict]
+    throughput: ThroughputSummary
+    seeds: list[str]
+    verdict_by_target: dict[str, JudgeTargetVerdict] | None
+
+
 def _build_judge_prompt(
-    injections: list[dict[str, str]],
+    injections: list[Injection],
     confirmed: list[str],
-    rejected_verdicts: list[dict],
-    throughput: dict,
+    rejected_verdicts: list[JudgeTargetVerdict],
+    throughput: ThroughputSummary,
     seeds: set[str],
-    verdict_by_target: dict[str, dict] | None = None,
+    verdict_by_target: dict[str, JudgeTargetVerdict] | None = None,
 ) -> str:
     verdict_by_target = verdict_by_target or {}
 
@@ -136,7 +175,7 @@ Most reviews add nothing. Call `submit_judge_review` with `add` (and
 # Atom install
 # ---------------------------------------------------------------
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: JudgeContextConfig) -> None:
     injections = config.get("injections", [])
     confirmed = config.get("confirmed", [])
     if not injections:

@@ -13,10 +13,11 @@ Args (passed via WorkflowContext.args):
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Required, TypedDict, cast
 
 from agentm.extensions.builtin.workflow import (
     AgentResult,
+    AtomConfigMap,
     JsonSchema,
     WorkflowContext,
 )
@@ -167,18 +168,116 @@ TEST_INFO_SCHEMA: JsonSchema = {
 CODER = "devloop/coder"
 
 
+class InterfaceSpec(TypedDict, total=False):
+    name: Required[str]
+    signature: Required[str]
+    description: str
+
+
+class AcceptanceCriterion(TypedDict, total=False):
+    id: Required[str]
+    description: Required[str]
+    test_method: str
+
+
+class FileStructure(TypedDict, total=False):
+    source_files: list[str]
+    test_files: list[str]
+
+
+class ImplementationSpec(TypedDict, total=False):
+    title: Required[str]
+    description: str
+    interfaces: Required[list[InterfaceSpec]]
+    acceptance_criteria: Required[list[AcceptanceCriterion]]
+    file_structure: FileStructure
+
+
+class ReviewIssue(TypedDict, total=False):
+    ac_id: str
+    issue: str
+
+
+class DesignReview(TypedDict, total=False):
+    approved: Required[bool]
+    feedback: str
+    issues: list[ReviewIssue]
+
+
+class TestFailure(TypedDict):
+    test_name: str
+    error_message: str
+
+
+class TestInfo(TypedDict, total=False):
+    test_files: Required[list[str]]
+    test_count: int
+
+
+class TestResult(TypedDict, total=False):
+    all_passed: Required[bool]
+    total: Required[int]
+    passed: Required[int]
+    failed: Required[int]
+    failures: list[TestFailure]
+    stdout: str
+
+
+class CodeReview(TypedDict, total=False):
+    approved: Required[bool]
+    verdicts: list[dict[str, str]]
+    findings: list[dict[str, str]]
+
+
+class DevContext(TypedDict, total=False):
+    task: Required[str]
+    spec: str
+    test_files: list[str]
+    previous_failures: list[TestFailure]
+
+
+class DevloopResult(TypedDict):
+    spec: ImplementationSpec
+    design_review: DesignReview
+    test_files: list[str]
+    test_result: TestResult
+    code_review: CodeReview | None
+    rounds: int
+    success: bool
+
+
 # ── helpers ─────────────────────────────────────────────────────
 
-def _as_dict(result: AgentResult) -> dict[str, Any]:
-    """Narrow AgentResult to dict (raises if agent returned plain text)."""
+def _require_dict(result: AgentResult) -> AgentResult:
+    """Require structured dict output before casting to a schema-specific type."""
     if isinstance(result, dict):
         return result
     raise TypeError(f"expected dict from agent, got {type(result).__name__}")
 
 
+def _as_spec(result: AgentResult) -> ImplementationSpec:
+    return cast(ImplementationSpec, _require_dict(result))
+
+
+def _as_design_review(result: AgentResult) -> DesignReview:
+    return cast(DesignReview, _require_dict(result))
+
+
+def _as_test_info(result: AgentResult) -> TestInfo:
+    return cast(TestInfo, _require_dict(result))
+
+
+def _as_test_result(result: AgentResult) -> TestResult:
+    return cast(TestResult, _require_dict(result))
+
+
+def _as_code_review(result: AgentResult) -> CodeReview:
+    return cast(CodeReview, _require_dict(result))
+
+
 # ── entry point ─────────────────────────────────────────────────
 
-async def run(ctx: WorkflowContext) -> dict[str, Any]:
+async def run(ctx: WorkflowContext) -> DevloopResult:
     """Execute the full devloop pipeline."""
     args = ctx.args
     requirement: str = args["requirement"]
@@ -192,7 +291,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
     ctx.phase("spec")
     ctx.log("Writing implementation spec from requirement")
 
-    spec = _as_dict(await ctx.agent(
+    spec = _as_spec(await ctx.agent(
         f"Write a detailed implementation spec for this requirement.\n\n"
         f"## Requirement\n{requirement}\n\n"
         f"## Constraints\n"
@@ -211,7 +310,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
     ctx.log("Reviewing spec for completeness")
 
     spec_text = json.dumps(spec, indent=2)
-    review = _as_dict(await ctx.agent(
+    review = _as_design_review(await ctx.agent(
         f"Review this implementation spec. Check that every acceptance "
         f"criterion is testable (maps to a concrete, automatable test), "
         f"interfaces are specific enough to implement, and there are no "
@@ -224,7 +323,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         issues_text = json.dumps(review.get("issues", []), indent=2)
         ctx.log(f"Spec rejected — revising. Feedback: {feedback}")
 
-        spec = _as_dict(await ctx.agent(
+        spec = _as_spec(await ctx.agent(
             f"Revise the spec based on reviewer feedback.\n\n"
             f"## Original spec\n{spec_text}\n\n"
             f"## Feedback\n{feedback}\n\n"
@@ -242,7 +341,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
     ctx.phase("test-writing")
     ctx.log("Writing tests from spec (before implementation)")
 
-    test_info = _as_dict(await ctx.agent(
+    test_info = _as_test_info(await ctx.agent(
         "Write test files based on the spec. One test per acceptance criterion.",
         scenario=CODER,
         atom_config={"devloop_context": {
@@ -263,7 +362,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
 
     # ── Stage 4+5: Development + Test Verification Loop ───────
 
-    test_result: dict[str, Any] = {
+    test_result: TestResult = {
         "all_passed": False, "total": 0, "passed": 0, "failed": 0, "failures": [],
     }
     round_n = 0
@@ -272,14 +371,14 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         # ── Develop ──
         ctx.phase(f"develop-{round_n}")
 
-        dev_context: dict[str, Any] = {
+        dev_context: DevContext = {
             "task": "Implement the code to pass all tests.",
             "spec": spec_text,
             "test_files": test_files,
         }
 
         if round_n > 1 and test_result.get("failures"):
-            prev_failures: list[dict[str, str]] = test_result["failures"]
+            prev_failures: list[TestFailure] = test_result["failures"]
             failure_summary = "\n".join(
                 f"- {f['test_name']}: {f['error_message']}"
                 for f in prev_failures
@@ -296,14 +395,14 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         await ctx.agent(
             "Implement the code." if round_n == 1 else "Fix the failing tests.",
             scenario=CODER,
-            atom_config={"devloop_context": dev_context},
+            atom_config=cast(AtomConfigMap, {"devloop_context": dev_context}),
         )
 
         # ── Test ──
         ctx.phase(f"test-{round_n}")
         ctx.log(f"Running tests (round {round_n})")
 
-        test_result = _as_dict(await ctx.agent(
+        test_result = _as_test_result(await ctx.agent(
             "Run the test suite and report results.",
             scenario=CODER,
             atom_config={"devloop_context": {
@@ -319,7 +418,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
 
         passed: int = test_result.get("passed", 0)
         total: int = test_result.get("total", 0)
-        failures: list[dict[str, str]] = test_result.get("failures", [])
+        failures: list[TestFailure] = test_result.get("failures", [])
 
         if test_result.get("all_passed"):
             ctx.log(f"All {total} tests passed on round {round_n}!")
@@ -332,12 +431,12 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
 
     # ── Stage 6: Code Review ──────────────────────────────────
 
-    code_review: dict[str, Any] | None = None
+    code_review: CodeReview | None = None
     if not skip_review and test_result.get("all_passed"):
         ctx.phase("code-review")
         ctx.log("Running code review against spec")
 
-        code_review = _as_dict(await ctx.agent(
+        code_review = _as_code_review(await ctx.agent(
             f"Review the implementation against the spec. Read the source "
             f"files and verify each acceptance criterion is properly "
             f"implemented. Check for correctness, code quality, and "
