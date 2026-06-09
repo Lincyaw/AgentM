@@ -1,6 +1,6 @@
 ---
 name: deployment-awareness
-description: Understand how you yourself are deployed and operated — your systemd services, workspace, config and credentials, where your observability/trace data lives, how to read back your own behaviour, and how to spot operational problems. Use when the user reports that you misbehaved, asks "why did you do that", says the bot is down/slow/silent, or asks about your own deployment, logs, or how to update you.
+description: Understand how you yourself are deployed and operated — your systemd services, workspace, config and credentials, where your observability/trace data lives, how to read back your own behaviour, and how to spot operational problems. Also covers multi-bot configuration (adding/removing/modifying feishu bots via config.toml), per-channel workspace routing, and persona management. Use when the user reports that you misbehaved, asks "why did you do that", says the bot is down/slow/silent, asks about your own deployment/logs/how to update you, or wants to add a new bot, change a bot's config, set up workspace isolation, or manage bot personas.
 ---
 
 # deployment-awareness
@@ -19,8 +19,8 @@ messages. Both are systemd **user** units (not system units):
 
 | Unit | Process | Role |
 |------|---------|------|
-| `agentm-gateway.service` | `agentm gateway --bind unix://$XDG_RUNTIME_DIR/agentm/gw.sock --cwd <workspace>` | hosts your sessions (this is where *you* run) |
-| `agentm-feishu.service` | `agentm-feishu --connect <same socket>` | the Feishu/Lark chat client peer |
+| `agentm-gateway.service` | `agentm gateway --bind ws://0.0.0.0:8765 --cwd <workspace>` | hosts your sessions (this is where *you* run) |
+| `agentm-feishu.service` | `agentm-feishu --connect ws://127.0.0.1:8765` | the Feishu/Lark chat client peer (may host multiple bots) |
 
 Both are `Restart=always` and managed with `systemctl --user`. The feishu
 unit is loosely coupled (`Wants=`, not `Requires=`) so it reconnects on its
@@ -31,14 +31,99 @@ own when the gateway restarts.
 | Thing | Path |
 |-------|------|
 | Your workspace (your file/shell tools operate here) | the gateway's `--cwd` |
-| Your character files | `<workspace>/SOUL.md`, `IDENTITY.md`, `USER.md` |
+| Your character files | `<workspace>/persona.md`, `SOUL.md`, `IDENTITY.md`, `USER.md` |
 | Model / provider / key | `~/.agentm/config.toml` |
-| Feishu credentials | `<workspace>/.env` (`LARK_APP_ID` / `LARK_APP_SECRET` / `LARK_ALLOW_FROM`) |
+| Feishu bot configs | `~/.agentm/config.toml` `[feishu.bots.*]` section |
+| Gateway workspace routing | `~/.agentm/config.toml` `[gateway]` section |
+| Per-bot workspaces | `~/.agentm/workspaces/{channel_name}/` (auto-created by gateway) |
 | Your observability trace | `<workspace>/.agentm/observability/<session_id>.jsonl` (one file per session) |
+| Example config | `config.toml.example` at repo root |
 
-You can read and edit the character files with your own tools; edits reload
-into your prompt on your next reply (no restart). `config.toml` and `.env`
-are read at process start — changing them needs a restart (below).
+Character / persona files can be read and edited with your own tools; edits
+reload into your prompt on your next reply (no restart). `config.toml` is
+read at process start — changing it needs a restart (below).
+
+## Multi-bot configuration
+
+A single `agentm-feishu` process can host multiple Feishu bots. Each bot
+is a separate Feishu app (its own `app_id`) connecting to the gateway as an
+independent peer with its own `channel_name` and `scenario`.
+
+### Adding a new bot
+
+1. Create a Feishu app in the Feishu Open Platform (get `app_id` + `app_secret`)
+2. Add a `[feishu.bots.<name>]` section to `~/.agentm/config.toml`:
+
+```toml
+[feishu.bots.newbot]
+app_id = "cli_zzzzzzzzzzzz"
+app_secret_file = "/run/secrets/newbot"   # or app_secret = "..." for dev
+channel_name = "newbot"                    # defaults to the key name
+scenario = "chatbot"                       # which scenario to run
+# session_scope = "chat"                   # "chat" (default) or "user"
+# allow_from = ["*"]                       # sender allowlist
+```
+
+3. Restart `agentm-feishu`: `systemctl --user restart agentm-feishu`
+
+Secret precedence per bot: `app_secret_file` > `app_secret` > `LARK_APP_SECRET_{NAME_UPPER}` env.
+
+### Modifying a bot
+
+Edit the corresponding `[feishu.bots.<name>]` section in config.toml, then
+restart `agentm-feishu`. The gateway does NOT need a restart — it sees the
+new peer reconnect automatically.
+
+### Removing a bot
+
+Delete the `[feishu.bots.<name>]` section from config.toml, then restart
+`agentm-feishu`. The gateway's sessions for that channel remain in memory
+until the gateway restarts (harmless).
+
+### Single-bot mode (backward compat)
+
+If `--app-id` is passed on the CLI (or `LARK_APP_ID` is in env), the
+`[feishu.bots]` section is ignored and the old single-bot path runs.
+
+## Per-channel workspace routing
+
+When `[gateway] workspace_root` is set, each channel gets its own isolated
+workspace directory. Without it, all bots share the gateway's `--cwd`.
+
+```toml
+[gateway]
+workspace_root = "~/.agentm/workspaces"
+```
+
+The gateway resolves: channel `"assistant"` → `~/.agentm/workspaces/assistant/`,
+auto-creating the directory on first message. Each workspace has its own
+session store, `.agentm/` state, and observability traces.
+
+Explicit overrides for specific channels:
+
+```toml
+[gateway.workspaces]
+researcher = "/mnt/data/rca-workspace"    # only when convention path won't do
+```
+
+### Persona management
+
+Each bot's workspace can contain a `persona.md` that the scenario reads as
+the bot's character/role description. The bot manages this file itself —
+users tell the bot who it should be through conversation, and the bot
+writes/updates `persona.md` in its own workspace. No manual file editing
+needed; no config.toml entry. This is the same self-modification pattern as
+Claude Code's `CLAUDE.md`.
+
+### Listing active bots
+
+```bash
+# From config.toml:
+grep -A3 '\[feishu\.bots\.' ~/.agentm/config.toml
+
+# Running workspaces:
+ls ~/.agentm/workspaces/
+```
 
 ## Observe yourself
 
