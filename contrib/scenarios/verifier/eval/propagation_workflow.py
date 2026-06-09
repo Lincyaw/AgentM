@@ -142,10 +142,7 @@ while queue and not skip_propagate:
                 "hop_finalize": {"data_dir": data_dir},
             },
         )
-        try:
-            return json.loads(result)
-        except Exception:
-            return None
+        return result if isinstance(result, dict) else None
 
     coros = []
     for item in pending_hops:
@@ -166,13 +163,15 @@ while queue and not skip_propagate:
         })
         log("  " + from_svc + " -> " + to_svc + ": " + (verdict if verdict else "no-result"))
 
+        # Store evidence for all hops (confirmed and rejected)
+        if isinstance(result, dict) and verdict:
+            ev = {"source": "hop_agent", "from": from_svc}
+            for k, v in result.items():
+                ev[k] = v
+            node_evidence[to_svc] = ev
+
         if verdict == "confirmed" and to_svc not in confirmed:
             confirmed.add(to_svc)
-            ev = {"source": "hop_agent"}
-            if isinstance(result, dict):
-                for k, v in result.items():
-                    ev[k] = v
-            node_evidence[to_svc] = ev
             if from_svc in node_fault:
                 node_fault[to_svc] = node_fault[from_svc]
             if to_svc not in infra_set:
@@ -233,10 +232,7 @@ if not skip_judge and len(confirmed) > len(injections):
             },
         },
     )
-    try:
-        judge_result = json.loads(judge_text)
-    except Exception:
-        judge_result = None
+    judge_result = judge_text if isinstance(judge_text, dict) else None
 
     if judge_result:
         propagation_result["judge"] = judge_result
