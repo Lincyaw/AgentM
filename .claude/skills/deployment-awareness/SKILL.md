@@ -176,19 +176,26 @@ agentm trace usage --latest       # token economics
 agentm trace index                # all sessions
 ```
 
-For the full reference, load the `trace-analysis` skill; for step-by-step
-session debugging, load `self-debug`.
+## Related skills
+
+| Need | Skill | When to load |
+|------|-------|-------------|
+| Trace queries, token economics, cross-session aggregation | `trace-analysis` | Investigating a specific session's trajectory, comparing token spend across runs, or composing `agentm trace` pipe chains beyond the basics above |
+| Step-by-step session debugging | `self-debug` | Diagnosing why a specific turn went wrong — reads the live trace, reconstructs the decision chain, identifies the failing tool or prompt |
+| Wire-level gateway debugging | `gateway-probe` | Chat client "doesn't see" a slash command, tool, or reply — connects a synthetic client to dump raw outbound frames |
+| SDK / atom development | `agentm-sdk` | Writing or editing atoms, scenarios, manifests, or anything under `src/agentm/` — the development-side complement to this operations guide |
 
 ## Troubleshooting
 
-| Symptom | Where to look |
-|---------|---------------|
-| Wrong behaviour / "why did you do X?" | `agentm trace tools --latest` then `messages --latest` |
-| Bot silent / down | `systemctl --user status agentm-gateway agentm-feishu`, then `journalctl --user -u agentm-feishu -n 80` |
-| Replies slow / tool hangs | `agentm trace tools --latest` for background tickets |
-| Broke after update | `journalctl --user -u agentm-gateway -n 120` for crash traceback |
-| New bot not responding | `agentm-feishu --check-config`, then journal for "skipped" warnings |
-| Replies in wrong chat/thread | verify `channel_name` is unique per bot; check `workspace_root` is set |
+| Symptom | First step | Deeper investigation |
+|---------|-----------|---------------------|
+| Wrong behaviour / "why did you do X?" | `agentm trace tools --latest` then `messages --latest` | Load `self-debug` for full decision-chain reconstruction |
+| Bot silent / down | `systemctl --user status agentm-gateway agentm-feishu`, then `journalctl --user -u agentm-feishu -n 80` | Load `gateway-probe` to check if outbound frames are emitted at all |
+| Replies slow / tool hangs | `agentm trace tools --latest` for background tickets | Load `trace-analysis` to aggregate per-tool latencies across sessions |
+| Broke after update | `journalctl --user -u agentm-gateway -n 120` for crash traceback | — |
+| New bot not responding | `agentm-feishu --check-config`, then journal for "skipped" warnings | Load `gateway-probe` to verify the peer's wire handshake succeeded |
+| Replies in wrong chat/thread | verify `channel_name` is unique per bot; check `workspace_root` is set | — |
+| Token costs unexpectedly high | `agentm trace usage --latest` | Load `trace-analysis` for cross-session token economics breakdown |
 
 ## Lifecycle
 
