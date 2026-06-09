@@ -15,7 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.tool import ToolTerminate
-from agentm.core.lib import pydantic_to_tool_schema
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +53,7 @@ def build_get_turn_tool(snapshot: list[dict[str, Any]]) -> FunctionTool:
             "Returns the serialized turn (role, content, tool_calls, tool_results). "
             "Use to inspect what the agent did at a particular step."
         ),
-        parameters=pydantic_to_tool_schema(GetTurnArgs),
+        parameters=GetTurnArgs,
         fn=_fn,
     )
 
@@ -83,7 +82,7 @@ def build_get_gt_info_tool(gt_info: dict[str, Any]) -> FunctionTool:
             "fault types, and what the agent concluded. Call this first to "
             "understand what the correct answer was."
         ),
-        parameters=pydantic_to_tool_schema(GetGtInfoArgs),
+        parameters=GetGtInfoArgs,
         fn=_fn,
     )
 
@@ -111,7 +110,7 @@ def build_get_trajectory_summary_tool(summary: str, total_turns: int) -> Functio
             "with turn indices. Use this to get an overview before drilling "
             "into specific turns with get_turn."
         ),
-        parameters=pydantic_to_tool_schema(GetTrajectorySummaryArgs),
+        parameters=GetTrajectorySummaryArgs,
         fn=_fn,
     )
 
@@ -173,7 +172,7 @@ def build_submit_divergence_report_tool() -> FunctionTool:
             "Call this after you have investigated the trajectory and identified "
             "the divergence points. This terminates the session."
         ),
-        parameters=pydantic_to_tool_schema(SubmitDivergenceReportArgs),
+        parameters=SubmitDivergenceReportArgs,
         fn=_fn,
         metadata={"terminates": True},
     )
