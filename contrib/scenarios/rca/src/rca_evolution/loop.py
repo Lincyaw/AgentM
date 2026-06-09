@@ -59,7 +59,7 @@ def _run_eval(
     scenario: str,
     concurrency: int,
     limit: int | None = None,
-    max_turns: int = 50,
+    max_turns: int = 100,
     extra_ak: dict[str, str] | None = None,
     env_override: dict[str, str] | None = None,
 ) -> None:
