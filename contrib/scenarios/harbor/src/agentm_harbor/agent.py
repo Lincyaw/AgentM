@@ -65,6 +65,7 @@ extensions:
       extractor_interval_turns: 5
       audit_interval_turns: 10
       enable_reminders: true
+      auditor_prompt: bench
   - module: llmharness.extensions.check_repeated_actions
   - module: llmharness.extensions.check_premature_conclusion
   - module: llmharness.extensions.check_open_branches
