@@ -83,7 +83,7 @@ async def _run_workflow_async(
     workflow_args: dict,
     out_dir: Path,
 ) -> dict:
-    """Create a session with the workflow atom and invoke the script directly."""
+    """Run a workflow script via the WorkflowRunner service."""
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.runtime.session import AgentSession
 
@@ -98,37 +98,14 @@ async def _run_workflow_async(
     )
     session = await AgentSession.create(config)
     try:
-        # Find the workflow tool and call it directly
-        workflow_tool = None
-        for tool in session._tools:
-            if getattr(tool, "name", None) == "workflow":
-                workflow_tool = tool
-                break
-        if workflow_tool is None:
+        runner = session.get_service("workflow_runner")
+        if runner is None:
             raise RuntimeError(
-                "workflow tool not found on local scenario session"
+                "workflow_runner service not found — ensure the "
+                "verifier/orchestrator scenario loads the workflow atom"
             )
-
-        result = await workflow_tool.fn({  # type: ignore[attr-defined]
-            "script_path": str(WORKFLOW_SCRIPT),
-            "args": workflow_args,
-        })
-
-        # Parse the ToolResult
-        if result.is_error:
-            text = ""
-            for block in result.content:
-                t = getattr(block, "text", None)
-                if isinstance(t, str):
-                    text = t
-            raise RuntimeError(f"workflow failed: {text}")
-
-        text = ""
-        for block in result.content:
-            t = getattr(block, "text", None)
-            if isinstance(t, str):
-                text = t
-        return json.loads(text) if text else {}
+        result = await runner.run_file(WORKFLOW_SCRIPT, workflow_args)
+        return result if isinstance(result, dict) else {}
     finally:
         await session.shutdown()
 

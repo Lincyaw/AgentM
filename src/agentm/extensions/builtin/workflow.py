@@ -696,10 +696,113 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
 }
 
 
+_WORKFLOW_RUNNER_SERVICE: Final[str] = "workflow_runner"
+
+
+class WorkflowRunner:
+    """Programmatic entry point for running workflow scripts.
+
+    Registered as the ``workflow_runner`` service by the workflow atom.
+    External code (eval harnesses, CLI tools) can obtain it via
+    ``session.get_service("workflow_runner")`` and call ``run_file`` /
+    ``run_script`` without going through the tool interface.
+
+    Return value semantics match ``agent()``: structured output (from
+    ToolTerminate finalize tools) is auto-parsed to ``dict``/``list``;
+    plain text is returned as ``str``.
+    """
+
+    def __init__(
+        self,
+        api: ExtensionAPI,
+        *,
+        concurrency: int,
+        max_agents: int,
+        wall_clock_timeout: float | None,
+        default_scenario: str | None,
+        budget_tokens: int | None,
+    ) -> None:
+        self._api = api
+        self._concurrency = concurrency
+        self._max_agents = max_agents
+        self._wall_clock_timeout = wall_clock_timeout
+        self._default_scenario = default_scenario
+        self._budget_tokens = budget_tokens
+        self._last_run: _WorkflowRun | None = None
+
+    @property
+    def last_agents_spawned(self) -> int:
+        return self._last_run.agents_spawned if self._last_run else 0
+
+    @property
+    def last_budget_snapshot(self) -> BudgetSnapshot | dict[str, Any]:
+        if self._last_run is None:
+            return {}
+        return self._last_run.budget_svc.snapshot()
+
+    async def run_file(
+        self,
+        path: str | Path,
+        args: dict[str, Any] | None = None,
+    ) -> str | dict[str, Any] | list[Any]:
+        """Run a pre-written workflow script file."""
+        sp = Path(path)
+        if not sp.is_absolute():
+            sp = Path(self._api.cwd) / sp
+        sp = sp.resolve()
+        if not sp.is_file():
+            raise FileNotFoundError(f"workflow script not found: {sp}")
+        script = sp.read_text(encoding="utf-8")
+        return await self._execute(script, args or {})
+
+    async def run_script(
+        self,
+        script: str,
+        args: dict[str, Any] | None = None,
+    ) -> str | dict[str, Any] | list[Any]:
+        """Run an inline workflow script string."""
+        if not script.strip():
+            raise ValueError("workflow: empty script")
+        return await self._execute(script, args or {})
+
+    async def _execute(
+        self,
+        script: str,
+        args_payload: dict[str, Any],
+    ) -> str | dict[str, Any] | list[Any]:
+        self._last_run = run = _WorkflowRun(
+            api=self._api,
+            journal=_Journal(
+                store=self._api.get_service(_ARTIFACT_STORE_SERVICE),
+            ),
+            budget_svc=_BudgetService(
+                total_budget_tokens=self._budget_tokens,
+            ),
+            semaphore=asyncio.Semaphore(self._concurrency),
+            default_scenario=self._default_scenario,
+            max_agents=self._max_agents,
+            args_payload=dict(args_payload),
+        )
+        ns = _build_namespace(run)
+
+        try:
+            bracket = self._api.track_background()
+        except ExtensionStaleError:
+            bracket = contextlib.nullcontext()
+
+        with bracket:
+            if self._wall_clock_timeout is not None:
+                raw = await asyncio.wait_for(
+                    _run_user_script(script, ns),
+                    timeout=self._wall_clock_timeout,
+                )
+            else:
+                raw = await _run_user_script(script, ns)
+
+        return _auto_parse(_coerce_result(raw))
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    # Anti-recursion: a worker child session (spawned with purpose=workflow)
-    # must not itself get the workflow tool, or a script could spawn workflows
-    # without bound. Workers auto-discovering all builtins still hit this guard.
     if api.purpose == _WORKER_PURPOSE:
         return
 
@@ -732,6 +835,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         else None
     )
 
+    runner = WorkflowRunner(
+        api,
+        concurrency=concurrency,
+        max_agents=max_agents,
+        wall_clock_timeout=wall_clock_timeout,
+        default_scenario=default_scenario,
+        budget_tokens=budget_tokens,
+    )
+    api.set_service(_WORKFLOW_RUNNER_SERVICE, runner)
+
     async def _run_workflow(args: dict[str, Any]) -> ToolResult:
         script = args.get("script")
         script_path_raw = args.get("script_path")
@@ -741,61 +854,36 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "workflow: 'script' and 'script_path' are mutually exclusive"
             )
 
-        if isinstance(script_path_raw, str) and script_path_raw.strip():
-            sp = Path(script_path_raw)
-            if not sp.is_absolute():
-                sp = Path(api.cwd) / sp
-            sp = sp.resolve()
-            if not sp.is_file():
-                return _error(f"workflow: script_path not found: {sp}")
-            script = sp.read_text(encoding="utf-8")
-
-        if not isinstance(script, str) or not script.strip():
+        try:
+            if isinstance(script_path_raw, str) and script_path_raw.strip():
+                result = await runner.run_file(
+                    script_path_raw, args.get("args"),
+                )
+            elif isinstance(script, str) and script.strip():
+                result = await runner.run_script(script, args.get("args"))
+            else:
+                return _error(
+                    "workflow: either 'script' or 'script_path' is required"
+                )
+        except (FileNotFoundError, ValueError) as exc:
+            return _error(f"workflow: {exc}")
+        except asyncio.TimeoutError:
             return _error(
-                "workflow: either 'script' or 'script_path' is required"
+                f"workflow: script exceeded wall-clock budget "
+                f"({wall_clock_timeout}s)"
+            )
+        except Exception as exc:
+            return _error(
+                f"workflow script error: {type(exc).__name__}: {exc}"
             )
 
-        run = _WorkflowRun(
-            api=api,
-            journal=_Journal(store=api.get_service(_ARTIFACT_STORE_SERVICE)),
-            budget_svc=_BudgetService(total_budget_tokens=budget_tokens),
-            semaphore=asyncio.Semaphore(concurrency),
-            default_scenario=default_scenario,
-            max_agents=max_agents,
-            args_payload=dict(args.get("args") or {}),
-        )
-        ns = _build_namespace(run)
-
-        # Keep a one-shot host alive until the whole detached run (and any late
-        # inbox post from a child) drains — matches sub_agent discipline.
-        try:
-            bracket = api.track_background()
-        except ExtensionStaleError:
-            bracket = contextlib.nullcontext()
-
-        with bracket:
-            try:
-                if wall_clock_timeout is not None:
-                    raw = await asyncio.wait_for(
-                        _run_user_script(script, ns), timeout=wall_clock_timeout
-                    )
-                else:
-                    raw = await _run_user_script(script, ns)
-            except asyncio.TimeoutError:
-                return _error(
-                    f"workflow: script exceeded wall-clock budget "
-                    f"({wall_clock_timeout}s)"
-                )
-            except Exception as exc:  # script errors surface as the tool error
-                return _error(
-                    f"workflow script error: {type(exc).__name__}: {exc}"
-                )
-
         return ToolResult(
-            content=[TextContent(type="text", text=_coerce_result(raw))],
+            content=[TextContent(
+                type="text", text=_coerce_result(result),
+            )],
             extras={
-                "agents_spawned": run.agents_spawned,
-                "budget": run.budget_svc.snapshot(),
+                "agents_spawned": runner.last_agents_spawned,
+                "budget": runner.last_budget_snapshot,
             },
         )
 
