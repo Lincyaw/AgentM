@@ -42,7 +42,7 @@ from .types import (
     TestResult,
 )
 
-CODER = "devloop/coder"
+CODER = "devloop/agents/coder"
 
 
 def _require_dict(result: AgentResult) -> dict:
