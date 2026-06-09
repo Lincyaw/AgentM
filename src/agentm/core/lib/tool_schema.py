@@ -1,29 +1,22 @@
-"""Convert a Pydantic model into an OpenAI-strict-mode JSON tool schema.
-
-OpenAI's structured-outputs / function-calling strict mode imposes three
-constraints on the JSON schema attached to a tool:
-
-1. every ``object`` has ``additionalProperties: false``;
-2. every key in ``properties`` is listed in ``required`` — there are no
-   "optional" properties (optionality is expressed via nullable type
-   unions, e.g. ``str | None`` → ``{"anyOf": [{"type": "string"},
-   {"type": "null"}]}``);
-3. no ``$ref`` / ``$defs`` indirection.
+"""Convert a Pydantic model into a provider-neutral JSON tool schema.
 
 Pydantic's :meth:`pydantic.BaseModel.model_json_schema` produces output
-that violates 1 and 3 by default and only partially satisfies 2 (fields
-with default values are dropped from ``required``). This helper
-normalises the output so atoms can use a single Pydantic source of truth
-for both runtime validation AND the schema advertised to the LLM —
-instead of hand-writing a parallel JSON schema constant that drifts.
+with ``$ref`` / ``$defs`` indirection and auto-generated ``title`` keys.
+This helper normalises the output: inlines ``$defs`` and strips metadata
+``title`` keys (preserving user-defined properties named "title"), so
+atoms can use a single Pydantic source of truth for both runtime
+validation AND the schema advertised to the LLM — instead of hand-writing
+a parallel JSON schema constant that drifts.
+
+Provider-specific constraints (e.g. OpenAI strict mode requiring
+``additionalProperties: false`` and full ``required``) are applied by the
+provider adapter layer, not here. See :func:`_force_strict` for the
+mutation applied by the OpenAI adapter.
 
 Why this lives in ``core.lib``: it is a pure function used by atoms.
 ``core.lib`` is the canonical home for stateless helpers shared across
 atoms and core code (see :mod:`agentm.core.lib.frontmatter`,
 :mod:`agentm.core.lib.redact`).
-
-The normaliser also strips Pydantic's auto-generated ``title`` keys
-(harmless to OpenAI but visually noisy in the wire payload).
 """
 
 from __future__ import annotations
@@ -33,32 +26,26 @@ from typing import Any
 from pydantic import BaseModel
 
 
-def pydantic_to_openai_tool_schema(
+def pydantic_to_tool_schema(
     model_cls: type[BaseModel],
-    *,
-    strict: bool = True,
 ) -> dict[str, Any]:
-    """Return a JSON schema for ``model_cls``, optionally OpenAI-strict.
+    """Return a provider-neutral JSON schema for ``model_cls``.
 
-    Args:
-        model_cls: a :class:`pydantic.BaseModel` subclass.
-        strict: when True (default), forces ``additionalProperties: false``
-            and all-properties-required on every nested object — required
-            by OpenAI's strict structured-outputs mode. Set to False for
-            providers whose constrained-decoding engines reject these
-            constraints (e.g. doubao).
+    Performs ``model_json_schema()`` → resolve ``$ref`` / ``$defs`` →
+    strip metadata ``title`` keys (preserving user properties named
+    "title").
 
-    Returns:
-        A ``$ref``-free, ``title``-free dict. With ``strict=True`` it also
-        has ``additionalProperties: false`` on every object node.
+    Provider-specific constraints (OpenAI strict mode, etc.) are NOT
+    applied here — they belong in the provider adapter layer.
     """
 
     raw = model_cls.model_json_schema()
     defs = raw.get("$defs", {})
-    flat = _resolve_refs({k: v for k, v in raw.items() if k != "$defs"}, defs)
-    if strict:
-        return _force_strict(flat)
-    return flat
+    return _resolve_refs({k: v for k, v in raw.items() if k != "$defs"}, defs)
+
+
+# Backward-compatible alias — deprecated, use pydantic_to_tool_schema.
+pydantic_to_openai_tool_schema = pydantic_to_tool_schema
 
 
 def _resolve_refs(node: Any, defs: dict[str, Any], *, _inside_properties: bool = False) -> Any:
@@ -101,4 +88,4 @@ def _force_strict(node: Any) -> Any:
     return node
 
 
-__all__ = ["pydantic_to_openai_tool_schema"]
+__all__ = ["_force_strict", "pydantic_to_openai_tool_schema", "pydantic_to_tool_schema"]

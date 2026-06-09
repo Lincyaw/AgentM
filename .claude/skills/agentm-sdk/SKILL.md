@@ -286,7 +286,7 @@ Rules:
 | Consume another atom's state | `api.get_service(name)` |
 | Inject system prompt content | Handle `BeforeAgentStartEvent` |
 | Inject per-turn context | Handle `ContextEvent` |
-| JSON Schema from Pydantic | `pydantic_to_openai_tool_schema(Model)` |
+| JSON Schema from Pydantic | `pydantic_to_tool_schema(Model)` |
 | Spawn a child agent | `api.spawn_child_session(config)` |
 | Run a session from Python | `AgentSession.create(AgentSessionConfig(...))` |
 | Orchestrate multiple agents | Dynamic workflow (`agent()` + `parallel()`) |
@@ -315,7 +315,7 @@ For provider layer, CLI conventions, and logging, read
 - **Direct filesystem I/O in tool handlers** — Use Operations.
 - **`subprocess.run()` for shell commands** — Use `BashOperations.exec()`.
 - **Hand-writing JSON Schema next to a Pydantic model** — Use
-  `pydantic_to_openai_tool_schema`.
+  `pydantic_to_tool_schema`.
 - **`print()` or stdout writes in atoms** — Use `logging` or
   `DiagnosticEvent`.
 

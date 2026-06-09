@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.tool import ToolTerminate
-from agentm.core.lib import pydantic_to_openai_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ def build_browse_reports_tool(reports: list[dict[str, Any]]) -> FunctionTool:
             "divergence_points (with category, description, should_have_done), "
             "and key_lesson."
         ),
-        parameters=pydantic_to_openai_tool_schema(BrowseReportsArgs),
+        parameters=pydantic_to_tool_schema(BrowseReportsArgs),
         fn=_fn,
     )
 
@@ -77,7 +77,7 @@ def build_get_report_summary_tool(summary: str) -> FunctionTool:
             "frequencies, and per-case summaries. Call this first to identify "
             "the dominant failure pattern before browsing individual reports."
         ),
-        parameters=pydantic_to_openai_tool_schema(GetReportSummaryArgs),
+        parameters=pydantic_to_tool_schema(GetReportSummaryArgs),
         fn=_fn,
     )
 
@@ -110,7 +110,7 @@ def build_get_existing_skills_tool(
             "Review these before deciding whether to create a new skill, "
             "update an existing one, or retire one that is redundant."
         ),
-        parameters=pydantic_to_openai_tool_schema(GetExistingSkillsArgs),
+        parameters=pydantic_to_tool_schema(GetExistingSkillsArgs),
         fn=_fn,
     )
 
@@ -167,7 +167,7 @@ def build_submit_skill_tool() -> FunctionTool:
             "Prefer updating over creating when the failure pattern overlaps "
             "an existing skill. This terminates the session."
         ),
-        parameters=pydantic_to_openai_tool_schema(SubmitSkillArgs),
+        parameters=pydantic_to_tool_schema(SubmitSkillArgs),
         fn=_fn,
         metadata={"terminates": True},
     )

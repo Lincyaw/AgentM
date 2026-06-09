@@ -36,7 +36,7 @@ import json
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.lib import pydantic_to_openai_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...schema import Edge, Event
@@ -58,7 +58,7 @@ class GetEventDetailArgs(BaseModel):
 
 # Stateless schema constant — exported for downstream training code that
 # needs to register the tool surface without actual events/edges in hand.
-GET_EVENT_DETAIL_PARAMETERS: dict[str, Any] = pydantic_to_openai_tool_schema(GetEventDetailArgs)
+GET_EVENT_DETAIL_PARAMETERS: dict[str, Any] = pydantic_to_tool_schema(GetEventDetailArgs)
 
 
 def _coerce_events(raw: Any) -> tuple[Event, ...]:

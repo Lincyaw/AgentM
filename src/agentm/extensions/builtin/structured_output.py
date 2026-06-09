@@ -70,7 +70,6 @@ def install(api: Any, config: dict[str, Any]) -> None:
             "result": schema,
         },
         "required": ["result"],
-        "additionalProperties": False,
     }
 
     async def _submit_result(args: dict[str, Any]) -> ToolTerminate:

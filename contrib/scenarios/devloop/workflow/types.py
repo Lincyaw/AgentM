@@ -1,13 +1,13 @@
 """Pydantic models for the devloop workflow.
 
 Each model serves as both the runtime type AND the JSON Schema source
-(via ``pydantic_to_openai_tool_schema``). No hand-written schemas.
+(via ``pydantic_to_tool_schema``). No hand-written schemas.
 """
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.core.lib import pydantic_to_openai_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 
 _STRICT = ConfigDict(extra="forbid")
 
@@ -106,8 +106,8 @@ class CodeReview(BaseModel):
 
 # ── Derived JSON Schemas (for schema= on agent()) ─────────────
 
-SPEC_SCHEMA = pydantic_to_openai_tool_schema(ImplementationSpec, strict=False)
-REVIEW_SCHEMA = pydantic_to_openai_tool_schema(DesignReview, strict=False)
-TEST_INFO_SCHEMA = pydantic_to_openai_tool_schema(TestInfo, strict=False)
-TEST_RESULT_SCHEMA = pydantic_to_openai_tool_schema(TestResult, strict=False)
-CODE_REVIEW_SCHEMA = pydantic_to_openai_tool_schema(CodeReview, strict=False)
+SPEC_SCHEMA = pydantic_to_tool_schema(ImplementationSpec)
+REVIEW_SCHEMA = pydantic_to_tool_schema(DesignReview)
+TEST_INFO_SCHEMA = pydantic_to_tool_schema(TestInfo)
+TEST_RESULT_SCHEMA = pydantic_to_tool_schema(TestResult)
+CODE_REVIEW_SCHEMA = pydantic_to_tool_schema(CodeReview)

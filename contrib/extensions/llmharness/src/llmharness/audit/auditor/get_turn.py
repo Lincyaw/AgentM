@@ -23,7 +23,7 @@ import json
 from typing import Any
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.lib import pydantic_to_openai_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..toolkit.decorator import harness_tool
@@ -46,7 +46,7 @@ class GetTurnArgs(BaseModel):
 
 # Stateless schema constant — exported for downstream training code that
 # needs to register the tool surface without an actual snapshot in hand.
-GET_TURN_PARAMETERS: dict[str, Any] = pydantic_to_openai_tool_schema(GetTurnArgs)
+GET_TURN_PARAMETERS: dict[str, Any] = pydantic_to_tool_schema(GetTurnArgs)
 
 
 def build_get_turn_tool(snapshot: list[dict[str, Any]]) -> FunctionTool:
