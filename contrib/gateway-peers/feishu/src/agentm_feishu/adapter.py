@@ -230,6 +230,7 @@ class _LiveTurn:
     """
 
     chat_id: str
+    thread_id: str | None = None
     body: str = ""
     steps: list[_Step] = field(default_factory=list)
     message_id: str | None = None
@@ -295,10 +296,31 @@ class FeishuAdapter:
         self._running = False
         self._stop_event: asyncio.Event = asyncio.Event()
 
+    # -- live-turn key ------------------------------------------------
+
+    @staticmethod
+    def _live_key(chat_id: str, thread_id: str | None = None) -> str:
+        """Composite key for ``_live`` dict so different topic-group threads
+        get independent live turn cards."""
+        if thread_id:
+            return f"{chat_id}:{thread_id}"
+        return chat_id
+
+    def _find_turn_by_message(self, message_id: str) -> _LiveTurn | None:
+        """Look up the live turn that owns a given card ``message_id``."""
+        for turn in self._live.values():
+            if turn.message_id == message_id:
+                return turn
+        return None
+
     # -- session_key (§3.4) -------------------------------------------
 
-    def _session_key(self, chat_id: str, sender_id: str) -> str:
+    def _session_key(
+        self, chat_id: str, sender_id: str, thread_id: str | None = None
+    ) -> str:
         base = f"{self._config.channel_name}:{chat_id}"
+        if thread_id:
+            base = f"{base}:{thread_id}"
         if self._config.session_scope == "user":
             return f"{base}:{sender_id}"
         return base
@@ -367,16 +389,23 @@ class FeishuAdapter:
         message_id = getattr(msg, "message_id", None)
         chat_id = getattr(msg, "chat_id", "") or ""
         content = getattr(msg, "content_text", "") or ""
+        # Topic groups: extract the thread's root message_id so the gateway
+        # can route different topics to separate sessions and replies land in
+        # the correct thread.
+        thread_id: str | None = getattr(
+            getattr(msg, "conversation", None), "thread_id", None
+        )
         # Group chats prefix the bot's text with the user's @-mention; strip it
         # so a leading slash command (and normal prompts) parse like p2p.
         content = _strip_leading_bot_mention(
             content, getattr(msg, "mentions", None), self._bot_open_id()
         )
         log.info(
-            "[feishu] rx chat=%s sender=%s msg_id=%s text=%r",
+            "[feishu] rx chat=%s sender=%s msg_id=%s thread=%s text=%r",
             chat_id,
             sender,
             message_id,
+            thread_id,
             content[:120],
         )
         if self._is_self(sender):
@@ -399,6 +428,7 @@ class FeishuAdapter:
             chat_id=str(chat_id),
             content=content,
             button_value=None,
+            thread_id=thread_id,
         )
 
     async def _on_card_action(self, event: Any) -> None:
@@ -431,16 +461,25 @@ class FeishuAdapter:
         chat_id = getattr(event, "chat_id", "") or ""
         if not self._is_allowed(str(sender)):
             return
+        # Card actions don't carry thread context directly; recover it from
+        # the live turn that owns the clicked card so the gateway routes
+        # them to the correct session (thread-aware).
+        card_mid = getattr(event, "message_id", None)
+        turn = self._find_turn_by_message(str(card_mid)) if card_mid else None
+        thread_id = turn.thread_id if turn else None
         if control == _INTERRUPT_CONTROL:
             # Reflect the interrupt on the live card right away so the user
             # sees it took effect, then forward the control verb so the
             # gateway aborts the in-flight turn (context preserved).
-            await self._mark_interrupted(str(chat_id))
+            if turn and not turn.finalized:
+                turn.interrupted = True
+                await self._maybe_render(turn, force=True)
             await self._forward_inbound(
                 sender_id=str(sender),
                 chat_id=str(chat_id),
                 content="[interrupt]",
                 control=_INTERRUPT_CONTROL,
+                thread_id=thread_id,
             )
             return
         await self._forward_inbound(
@@ -448,6 +487,7 @@ class FeishuAdapter:
             chat_id=str(chat_id),
             content=f"[card click: {button_value}]",
             button_value=button_value,
+            thread_id=thread_id,
         )
 
     async def _forward_inbound(
@@ -458,14 +498,17 @@ class FeishuAdapter:
         content: str,
         button_value: str | None = None,
         control: str | None = None,
+        thread_id: str | None = None,
     ) -> None:
-        session_key = self._session_key(chat_id, sender_id)
+        session_key = self._session_key(chat_id, sender_id, thread_id)
         body: dict[str, Any] = {
             "channel": self._config.channel_name,
             "sender_id": sender_id,
             "chat_id": chat_id,
             "content": content,
         }
+        if thread_id is not None:
+            body["thread_id"] = thread_id
         if button_value is not None:
             body["button_value"] = button_value
         if control is not None:
@@ -541,10 +584,12 @@ class FeishuAdapter:
         finalize tasks only ever call :meth:`_render` (guarded by
         ``turn.lock``), never this method.
         """
-        turn = self._live.get(chat_id)
+        thread_id: str | None = body.get("thread_id")  # type: ignore[assignment]
+        key = self._live_key(chat_id, thread_id)
+        turn = self._live.get(key)
         if turn is None or turn.finalized:
-            turn = _LiveTurn(chat_id=chat_id)
-            self._live[chat_id] = turn
+            turn = _LiveTurn(chat_id=chat_id, thread_id=thread_id)
+            self._live[key] = turn
 
         # Any of these marks an actual agent run (a slash-command reply emits
         # only a bare assistant_text), so the turn must wait for agent_end.
@@ -643,29 +688,15 @@ class FeishuAdapter:
             turn.finalize_task.cancel()
         # A run that produced nothing chat-relevant (no card, no steps, no
         # text) should not leave a bare "完成" card behind.
+        key = self._live_key(turn.chat_id, turn.thread_id)
         if turn.message_id is None and not turn.steps and not turn.body:
-            self._live.pop(turn.chat_id, None)
+            self._live.pop(key, None)
             return
         if not turn.body:
             turn.body = "_(已完成,无文本回复)_"
         await self._clear_pending_acks(turn.chat_id)
         await self._maybe_render(turn, force=True)
-        self._live.pop(turn.chat_id, None)
-
-    async def _mark_interrupted(self, chat_id: str) -> None:
-        """Flag the chat's live turn as interrupted and repaint its card.
-
-        Best-effort UX feedback for a 停止 click: if a live (non-finalized)
-        turn exists, set its activity line to "已中断" so the user sees the
-        interrupt registered. The server-side abort then ends the turn (the
-        trailing assistant_text / agent_end finalizes the card as usual). A
-        no-op if nothing is running, mirroring ``sess.interrupt()``.
-        """
-        turn = self._live.get(chat_id)
-        if turn is None or turn.finalized:
-            return
-        turn.interrupted = True
-        await self._maybe_render(turn, force=True)
+        self._live.pop(key, None)
 
     async def _maybe_render(self, turn: _LiveTurn, *, force: bool = False) -> None:
         """Render now, or schedule a trailing flush, respecting the throttle."""
@@ -701,7 +732,12 @@ class FeishuAdapter:
         async with turn.lock:
             try:
                 if turn.message_id is None:
-                    result = await self._channel.send(turn.chat_id, {"card": card})
+                    opts = (
+                        {"reply_to": turn.thread_id} if turn.thread_id else None
+                    )
+                    result = await self._channel.send(
+                        turn.chat_id, {"card": card}, opts
+                    )
                     turn.message_id = _result_message_id(result)
                     if turn.message_id is None:
                         log.warning("[feishu] live card send returned no message_id")
@@ -727,8 +763,10 @@ class FeishuAdapter:
             if label and value:
                 buttons.append(_ButtonLike(label=label, value=value, style=style))
         content = str(body.get("content") or "")
+        thread_id: str | None = body.get("thread_id")  # type: ignore[assignment]
+        opts = {"reply_to": thread_id} if thread_id else None
         await self._channel.send(
-            chat_id, {"card": _markdown_card(content, buttons=buttons)}
+            chat_id, {"card": _markdown_card(content, buttons=buttons)}, opts
         )
 
     async def _send_alert(
@@ -743,7 +781,11 @@ class FeishuAdapter:
         text = f"{icon} **{content}**"
         if source:
             text += f"\n\n_来源: {source}_"
-        await self._channel.send(chat_id, {"card": _markdown_card(text, buttons=[])})
+        thread_id: str | None = body.get("thread_id")  # type: ignore[assignment]
+        opts = {"reply_to": thread_id} if thread_id else None
+        await self._channel.send(
+            chat_id, {"card": _markdown_card(text, buttons=[])}, opts
+        )
 
     # -- ACK reactions ------------------------------------------------
 
