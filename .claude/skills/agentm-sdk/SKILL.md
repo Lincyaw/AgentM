@@ -147,9 +147,13 @@ with ThreadPoolExecutor(max_workers=4) as pool:
 
 For multi-agent orchestration, prefer **dynamic workflow scripts** over
 hand-written session management. The workflow atom (`workflow.py`)
-provides `agent()`, `parallel()`, `pipeline()` with built-in journal
-(resume from cache), budget tracking, concurrency management, and
-progress display.
+provides `agent()`, `parallel()`, `pipeline()` with built-in journal,
+budget tracking, concurrency management, and auto-parsed structured
+output.
+
+For the full design guide (three-layer architecture, agent autonomy,
+finalize-tool contract, patterns, anti-patterns), read the
+`workflow-orchestration` skill. This section covers the SDK surface only.
 
 ### Pre-written vs inline scripts
 
@@ -158,48 +162,36 @@ progress display.
 | Inline (`script=`) | LLM generates the orchestration at runtime |
 | Pre-written (`script_path=`) | Fixed orchestration logic checked into repo |
 
-Pre-written scripts get `load_module(path)` for importing scenario
-modules (prompt builders, etc.). They are trusted code — no namespace
-restrictions on imports.
+### agent() return value
 
-### The three-layer pattern
+`agent()` auto-parses the child's output:
 
-```
-Layer 1: Data preparation (full Python — DuckDB, file I/O, etc.)
-    → produces a JSON args dict
+- Agent has a **finalize tool** (ToolTerminate) → returns `dict`
+- Agent has `schema=` (synthesizes a finalize tool) → returns `dict`
+- Agent ends with free text → returns `str`
 
-Layer 2: Workflow script (curated namespace — agent/parallel/pipeline)
-    → orchestrates agent units via agent(prompt, scenario="...")
-    → gets journal/resume/budget/progress for free
+No `json.loads()` needed in workflow scripts.
 
-Layer 3: Agent units (scenario folders — manifest + atoms + prompt.py)
-    → each agent does one thing well
-```
+### Example — workflow script with autonomous agents
 
-Example — fault propagation verifier:
 ```python
-# Layer 1: eval harness pre-computes
-graph = build_graph(data_dir)        # DuckDB queries
-injections = parse_injections(data_dir)
-
-# Layer 2: workflow script orchestrates
-# propagation_workflow.py:
-hop_prompt = load_module("../../verifier_hop/prompt.py")
-
-phase("propagate")
-for round in bfs_rounds(args["graph"], confirmed):
-    results = await parallel([
-        agent(
-            hop_prompt.build_hop_prompt(src, tgt, ...),
-            scenario="verifier_hop",
-            atom_config={"hop_finalize": {"data_dir": args["data_dir"]}},
-        )
-        for src, tgt, rel in round
-    ])
-    # ... update confirmed set ...
-
-phase("judge")
-await agent(judge_prompt, scenario="verifier_judge")
+# Workflow passes structured data; agent builds its own prompt
+result = await agent(
+    "Verify this propagation edge.",
+    scenario="verifier/hop",
+    atom_config={
+        "hop_context": {
+            "from_service": src,
+            "to_service": tgt,
+            "rel_type": rel,
+            "all_faults": all_faults,
+        },
+        "hop_finalize": {"data_dir": data_dir},
+    },
+)
+# result is a dict (hop agent has a ToolTerminate finalize tool)
+if result.get("verdict") == "confirmed":
+    confirmed.add(tgt)
 ```
 
 ### What the workflow engine gives you for free
@@ -208,10 +200,9 @@ await agent(judge_prompt, scenario="verifier_judge")
   return cached results instantly
 - **Budget tracking** — `budget.spent()` / `budget.remaining()` across
   all child sessions
-- **Concurrency** — `Semaphore(min(16, cpu-2))` auto-limits parallel agents
+- **Concurrency** — semaphore auto-limits parallel agents
 - **Progress** — `phase()` / `log()` surface in TUI
-- **WorkflowRunner service** — `api.get_service("workflow_runner")` for
-  programmatic invocation from other atoms
+- **Auto-parse** — structured output from finalize tools returned as dict
 
 ---
 
@@ -331,12 +322,18 @@ For provider layer, CLI conventions, and logging, read
 ### Composition mistakes
 
 - **Multi-role manifest** — One manifest = one purpose. Split roles.
-- **Prompt construction in orchestration code** — Co-locate with the
-  manifest; export a builder function.
+- **Prompt construction in workflow scripts** — Domain logic belongs in
+  the agent unit's context atom, not orchestration code. Pass structured
+  data via `atom_config`, let the agent build its own prompt.
 - **Hardcoded domain thresholds in orchestration** — Policy belongs in
-  atoms, not in eval harnesses.
+  atoms, not in eval harnesses or workflow scripts.
 - **Hand-writing session management for multi-agent** — Use dynamic
   workflow scripts; get journal/resume/budget for free.
+- **`json.loads()` on `agent()` results** — `agent()` auto-parses
+  structured output from finalize tools. Check `isinstance(result, dict)`.
+- **Intermediate output files reshaping the same data** — The workflow
+  return value is the single source of truth. Don't write redundant
+  `all_verdicts.json` alongside `propagation_graph.json`.
 
 ### Invocation mistakes
 

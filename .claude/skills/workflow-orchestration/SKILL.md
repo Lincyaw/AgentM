@@ -1,115 +1,217 @@
 ---
 name: workflow-orchestration
 description: >
-  Use when a task is a KNOWN-SHAPE fan-out over many items and you want it run
-  as deterministic code in one tool call instead of many turns — e.g. review N
-  files, research M sub-questions in parallel, judge/verify K candidates, sweep
-  a dataset, map-then-reduce. Trigger when you catch yourself about to dispatch
-  several near-identical sub-agents by hand, or when the user says "research X"
-  / "compare these" / "go through all of these" / 调研 / 批量 / 并行 / 扇出 /
-  写个 workflow / 跑一遍. Do NOT use for exploratory work whose next step depends
-  on the previous result (use turn-by-turn tools or dispatch_agent for that).
+  How to design, structure, and implement multi-agent workflows in AgentM.
+  Covers the three-layer architecture (data prep → workflow script → agent
+  units), agent autonomy via atom_config, finalize-tool output contract,
+  and common patterns (BFS, fan-out, judge). Trigger when designing a new
+  workflow, refactoring an existing multi-agent pipeline, deciding how to
+  split work between workflow scripts and agent units, or when the user
+  says 编排 / workflow / 多 agent / 拆分 / 调度. Also trigger when you
+  catch yourself putting prompt-construction or domain logic into a
+  workflow script — that's a sign the logic belongs in an agent unit's
+  context atom.
 ---
 
-# Workflow orchestration (the `workflow` tool)
+# Workflow orchestration
 
-The `workflow` tool runs an **async Python** script you write. The script
-fans out child agent sessions deterministically; only its return value comes
-back to you. Use it to push a repetitive multi-agent plan into code so it runs
-in one tool call — cheaply, reproducibly, without polluting your context with
-every intermediate result.
+## Core principle
 
-## When to reach for it (and when not)
+A workflow script is **pure control flow**. It decides *which* agents
+run, *when*, and *with what data*. It never decides *how* an agent
+thinks — that's the agent unit's job.
 
-Use `workflow` when the **shape is known before the work starts**:
-- fan-out the same operation over a list (review each file, research each
-  sub-question, grade each candidate);
-- a fixed pipeline (search → read → summarize per item);
-- you'd otherwise call `dispatch_agent` 3+ times with near-identical prompts.
+If a workflow script contains domain-specific string formatting, threshold
+checks, or prompt construction, that logic belongs in a context atom inside
+the agent unit.
 
-Do **not** use it when you must **see each result before deciding the next
-step** (open-ended debugging, "investigate and follow the trail"). That is
-model-driven work — stay turn-by-turn or use `dispatch_agent`. Common hybrid:
-scout inline first to discover the work-list, *then* run a `workflow` over it.
+## Architecture: three layers
 
-## The SDK (names already in scope — do not import anything)
+```
+Layer 1: Data preparation (full Python)
+    CLI / eval harness — DuckDB, file I/O, API calls
+    → produces a JSON args dict
 
-- `await agent(prompt, *, scenario=None, isolation=None, tool_allowlist=None)`
-  → the child's final text. Each call is journaled by `hash(prompt, args)`, so
-  re-running the same workflow resumes from cache instead of re-spawning.
-- `await parallel([agent(p) for p in items])` → list of results (concurrent;
-  a shared semaphore caps real parallelism).
-- `await pipeline(items, stage1, stage2, ...)` → run each item through the
-  stages independently, **no barrier between items** (item A can be at stage 2
-  while B is still at stage 1). Stages are callables (sync or async).
-- `budget.total` / `budget.spent()` / `budget.remaining()` → token spend so far
-  (a ceiling, when configured, lets you scale depth: loop until budget is low).
-- `args` → the JSON payload passed alongside the script (a dict).
-- `log(msg)` / `phase(name)` → surface progress (fire-and-forget).
+Layer 2: Workflow script (curated namespace)
+    agent() / parallel() / pipeline() / phase() / log()
+    → orchestrates agent units, passes structured data via atom_config
+    → gets journal / resume / budget / concurrency for free
 
-Write normal Python control flow (`for`, `while`, `if`, comprehensions) and
-`await` the SDK calls. End the script with `return <value>` — that becomes the
-tool result. The namespace has **data builtins only**: no `import`, `open`,
-`eval`, `time`, or `random` (the last two are withheld so resume stays
-deterministic — don't rely on wall-clock or randomness in the script).
-
-## Minimal examples
-
-Fan-out (map):
-```python
-findings = await parallel([
-    agent(f"Research this sub-question and return 5 cited bullets: {q}")
-    for q in args["subquestions"]
-])
-return findings
+Layer 3: Agent units (scenario folders)
+    manifest.yaml + context atom + finalize atom
+    → each agent does one thing, builds its own prompt, returns structured output
 ```
 
-Pipeline (search → summarize, no barrier):
-```python
-async def research(q):
-    return await agent(f"Use the tinyfish CLI via bash to search the web for "
-                       f"'{q}', fetch the top 1-2 sources, and return cited "
-                       f"bullet findings. Only state facts grounded in fetched "
-                       f"content; do not invent ids or numbers.")
-return await pipeline(args["topics"], research)
+### Why three layers, not two
+
+Collapsing Layer 1 into Layer 2 (data prep inside the workflow script)
+fails because the workflow namespace is sandboxed — no `import`, no
+filesystem, no DuckDB. Collapsing Layer 2 into Layer 1 (orchestration
+in the eval harness) loses the journal/resume/budget machinery and
+requires manual session management.
+
+## Agent units
+
+An agent unit is a scenario folder that defines a single-purpose agent:
+
+```
+verifier/hop/
+  manifest.yaml       ← atoms, system prompt, tool budget
+  hop_context.py       ← reads atom_config, builds domain prompt, injects via BeforeAgentStartEvent
+  hop_finalize.py      ← registers the finalize tool (ToolTerminate)
 ```
 
-## Workers: what tools they have
+### Manifest = one agent, one purpose
 
-A worker (`agent(...)`) defaults to **your own scenario** — a clean, slim
-reload of it. So a worker has roughly the tools you have, *minus* the
-`workflow` tool itself (no nested workflows). Consequences:
-- If workers need to **search the web**, tell them in the prompt to use the
-  `tinyfish` CLI through their `bash` tool (it is not a dedicated tool).
-- If a worker needs a different toolset, pass `scenario="..."`. Do **not** try
-  to slim a worker with `tool_allowlist=[]` — an empty allowlist can starve
-  extensions that need their tools (e.g. file editing).
-- For untrusted/destructive worker work, pass `isolation="agent_env"` (requires
-  the `operations_agent_env` atom in the scenario).
+Never mix roles in one manifest. If an agent needs different tools or
+guidance for different jobs, that's two manifests.
 
-## Make the output trustworthy
+### Agent autonomy via atom_config
 
-Worker models hallucinate — especially specific numbers, ids, and URLs. Two
-cheap defenses, both worth adding for research/judging tasks:
-- **Constrain the worker prompt**: "only state facts grounded in fetched
-  content; cite source URLs; do not invent arxiv ids, stats, or numbers."
-- **Adversarial verify stage**: after gathering findings, `parallel` a second
-  pass of skeptic agents, each asked to *refute* a finding against its source;
-  drop findings the majority cannot confirm. Then synthesize from survivors.
-
-## Scaling depth to budget
+The workflow passes structured data; the agent builds its own prompt:
 
 ```python
-results = []
-while budget.total and budget.remaining() > 50_000:
-    results.append(await agent(next_prompt(results)))
-return results
+# Workflow script — pure data, no prompt knowledge
+await agent(
+    "Verify this propagation edge.",
+    scenario="verifier/hop",
+    atom_config={
+        "hop_context": {
+            "from_service": src,
+            "to_service": tgt,
+            "rel_type": rel,
+            "fault_kind": "PodFailure",
+            "all_faults": all_faults,
+        },
+        "hop_finalize": {"data_dir": data_dir},
+    },
+)
 ```
 
-## Gotchas
+```python
+# hop_context.py — owns all domain logic
+def install(api, config):
+    context = _build_hop_prompt(
+        from_service=config["from_service"],
+        to_service=config["to_service"],
+        ...
+    )
+    def before_start(event):
+        event.system = f"{event.system}\n\n{context}"
+    api.on(BeforeAgentStartEvent.CHANNEL, before_start)
+```
 
-- `await` every `agent` / `parallel` / `pipeline` call — they are coroutines.
-- The script's `return` value is the result; a bare last expression is not.
-- Re-running an identical workflow hits the journal and spawns nothing — change
-  a prompt to force fresh work.
-- Errors in the script surface as the tool error; fix and call again.
+This separation means:
+- Workflow scripts stay readable (no 40-line prompt strings)
+- Agent units evolve independently (change prompt without touching workflow)
+- The same agent unit works in different workflows
+
+### Finalize tools: the output contract
+
+Every agent that returns structured data does so through a
+**ToolTerminate finalize tool**. The workflow's `agent()` auto-parses
+the JSON result — callers get a `dict`, not a string.
+
+```python
+# hop_finalize.py
+return ToolTerminate(
+    result=ToolResult(content=[TextContent(type="text", text=verdict.model_dump_json())]),
+    reason="hop:verdict-submitted",
+)
+```
+
+```python
+# Workflow script — result is already a dict
+result = await agent("Verify this edge.", scenario="verifier/hop", atom_config={...})
+if result.get("verdict") == "confirmed":
+    ...
+```
+
+`schema=` on `agent()` is a convenience shortcut: it synthesizes a
+finalize tool from a JSON schema, for agents that don't have their own.
+Both paths go through the same extraction — ToolTerminate result →
+auto-parse JSON → dict.
+
+## Workflow script patterns
+
+### Fan-out (parallel hops)
+
+```python
+coros = []
+for src, tgt, rel in pending_edges:
+    coros.append(check_edge(src, tgt, rel))
+results = await parallel(coros)
+```
+
+### BFS with parallel rounds
+
+```python
+queue = list(seeds)
+while queue:
+    batch, queue = queue, []
+    results = await parallel([check(node) for node in batch])
+    for node, result in zip(batch, results):
+        if result and result.get("verdict") == "confirmed":
+            queue.append(node)
+```
+
+### Two-phase: propagate then judge
+
+```python
+phase("propagate")
+# ... BFS loop ...
+
+phase("judge")
+judge_result = await agent(
+    "Review the propagation graph.",
+    scenario="verifier/judge",
+    atom_config={"judge_context": {...}},
+)
+```
+
+### Skip-to-phase (rerun judge on existing data)
+
+```python
+skip_propagate = args.get("skip_propagate", False)
+if skip_propagate:
+    # Load existing results, jump to judge
+    ...
+```
+
+## Single source of truth
+
+The workflow's return value is the only output. Don't write intermediate
+files (`all_verdicts.json`, `hop_results/`, etc.) that reshape the same
+data — consumers read the workflow output directly.
+
+```python
+return {
+    "confirmed_nodes": sorted(confirmed),
+    "edges": edges,
+    "node_evidence": node_evidence,   # evidence for ALL hops, confirmed + rejected
+    "hop_log": hop_log,
+    "rounds": round_n,
+}
+```
+
+## What the workflow engine gives you
+
+- **Journal** — crash mid-run, restart, completed `agent()` calls return
+  cached results. Same prompt + same opts = cache hit.
+- **Budget** — `budget.spent()` / `budget.remaining()` across all children.
+- **Concurrency** — semaphore auto-limits parallel agents.
+- **Progress** — `phase()` / `log()` surface in the TUI.
+- **Auto-parse** — `agent()` returns `dict` for structured output,
+  `str` for free-text. No `json.loads()` needed.
+
+## Anti-patterns
+
+| Don't | Do |
+|-------|-----|
+| Build prompts in the workflow script | Pass data via `atom_config`, let the context atom build the prompt |
+| `json.loads(result)` on agent output | `agent()` auto-parses; check `isinstance(result, dict)` |
+| Write intermediate files alongside the graph | Return everything in the workflow's result dict |
+| Hardcode domain thresholds in the workflow | Put policy in the agent's system prompt or context atom |
+| Use `load_module()` to import prompt builders | Merge prompt logic into the agent unit's context atom |
+| Use `schema=` when the agent already has a finalize tool | `schema=` is for agents without their own ToolTerminate tool |
+| Store evidence only for confirmed results | Store evidence for all hops — rejected rationale matters for debugging |
