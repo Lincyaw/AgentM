@@ -109,13 +109,28 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if not triggered:
             return
 
-        # Force-finalize: on the last 2 turns, restrict tool catalog to only
-        # the finalize tool so the model MUST call it or produce text.
         last = (turns_left is not None and turns_left <= 2) or (
             tools_left is not None and tools_left <= 2
         )
-        if last and finalize_tool and event.tools:
-            event.tools[:] = [t for t in event.tools if t.name == finalize_tool]
+        if last and finalize_tool:
+            import time as _time
+            event.messages.append(
+                UserMessage(
+                    role="user",
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=(
+                                f"SYSTEM: Your investigation time is up. You MUST call "
+                                f"`{finalize_tool}` NOW with your best findings. "
+                                f"Do NOT make any more investigation calls."
+                            ),
+                        )
+                    ],
+                    timestamp=_time.time(),
+                )
+            )
+            return
 
         text = _format_warning(turns_left, tools_left, finalize_tool)
         _append_to_last_message(event.messages, text, state)
