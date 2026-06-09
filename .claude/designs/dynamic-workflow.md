@@ -178,6 +178,53 @@ model in the tool's reference surface, not encoded in the runtime.
   `getattr`/swallow) so a broken child contract fails loudly rather than silently
   zeroing the budget ceiling.
 
+## Pre-written script mode
+
+The workflow tool accepts two mutually exclusive parameters: `script`
+(inline, LLM-authored) and `script_path` (disk file, pre-written). Both
+run through the same execution engine and get the same SDK
+(agent/parallel/pipeline/budget/args/log/phase) plus journal/resume for
+free.
+
+### Namespace relaxation for trusted scripts
+
+Pre-written scripts are checked-in code, not LLM-authored at runtime. When
+loaded via `script_path`, the namespace is augmented with a `load_module(path)`
+helper that loads an arbitrary `.py` file as a module object via
+`importlib.util`. This lets workflow scripts call functions defined in
+scenario prompt modules:
+
+```python
+prompt_mod = load_module("contrib/scenarios/verifier/prompt.py")
+text = prompt_mod.build_hop_prompt(graph, injection)
+```
+
+Relative paths resolve against the script's own directory first, so sibling
+modules work naturally. The helper temporarily adds the loaded module's
+parent directory to `sys.path` for the duration of `exec_module` so that the
+loaded module's own relative imports work.
+
+Inline scripts do NOT get `load_module` — the guardrail (no `import`, no
+filesystem access) remains for LLM-authored code.
+
+### Programmatic API (`workflow_runner` service)
+
+The atom registers a `WorkflowRunner` instance as the `workflow_runner`
+service (`api.set_service`). Other atoms or eval harnesses with access to the
+`ExtensionAPI` can call workflows programmatically without going through an
+LLM prompt:
+
+```python
+runner = api.get_service("workflow_runner")
+outcome = await runner.run_file(
+    "contrib/scenarios/verifier/eval/propagation_workflow.py",
+    args={"graph": {...}, "injections": [...]},
+)
+# outcome = {"result": ..., "agents_spawned": int, "budget": BudgetSnapshot}
+```
+
+`run_source(script, args)` is also available for inline scripts.
+
 ## Decisions / rejected
 
 - **LLM authors the script at runtime** (vs. only pre-written orchestrator

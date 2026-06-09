@@ -316,3 +316,119 @@ async def test_workflow_curated_namespace_blocks_open(tmp_path: Path) -> None:
         assert "workflow script error" in result.content[0].text
     finally:
         await session.shutdown()
+
+
+# --- Pre-written script mode (script_path) ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_workflow_script_path_runs_file(tmp_path: Path) -> None:
+    """A pre-written script loaded via ``script_path`` executes identically
+    to an inline ``script``."""
+
+    script_file = tmp_path / "my_workflow.py"
+    script_file.write_text(
+        'a = await agent("file-alpha")\nreturn a\n',
+        encoding="utf-8",
+    )
+
+    session = await _make_session(tmp_path)
+    try:
+        tool = _tool(session, "workflow")
+        result = await tool.execute(
+            {"script_path": str(script_file)}
+        )
+        assert not result.is_error, result.content[0].text
+        assert "echo:file-alpha" in result.content[0].text
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_workflow_script_and_script_path_mutual_exclusion(
+    tmp_path: Path,
+) -> None:
+    """Providing both ``script`` and ``script_path`` is an error."""
+
+    script_file = tmp_path / "dummy.py"
+    script_file.write_text("return 1\n", encoding="utf-8")
+
+    session = await _make_session(tmp_path)
+    try:
+        tool = _tool(session, "workflow")
+        result = await tool.execute(
+            {"script": "return 1", "script_path": str(script_file)}
+        )
+        assert result.is_error
+        assert "mutually exclusive" in result.content[0].text
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_workflow_script_path_injects_load_module(
+    tmp_path: Path,
+) -> None:
+    """File-based scripts get ``load_module`` in their namespace, and can
+    use it to load a sibling Python module."""
+
+    # Create a helper module next to the workflow script.
+    helper = tmp_path / "helper_mod.py"
+    helper.write_text(
+        "def greet(name: str) -> str:\n    return f'hello {name}'\n",
+        encoding="utf-8",
+    )
+
+    script_file = tmp_path / "wf.py"
+    script_file.write_text(
+        'mod = load_module("helper_mod.py")\n'
+        'return mod.greet("world")\n',
+        encoding="utf-8",
+    )
+
+    session = await _make_session(tmp_path)
+    try:
+        tool = _tool(session, "workflow")
+        result = await tool.execute({"script_path": str(script_file)})
+        assert not result.is_error, result.content[0].text
+        assert "hello world" in result.content[0].text
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_workflow_inline_script_has_no_load_module(
+    tmp_path: Path,
+) -> None:
+    """Inline (LLM-authored) scripts do NOT get ``load_module`` — it is only
+    available for trusted file-based scripts."""
+
+    session = await _make_session(tmp_path)
+    try:
+        tool = _tool(session, "workflow")
+        result = await tool.execute(
+            {"script": 'return load_module("x.py")\n'}
+        )
+        assert result.is_error
+        assert "workflow script error" in result.content[0].text
+    finally:
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_workflow_runner_service_registered(tmp_path: Path) -> None:
+    """The ``workflow_runner`` service is registered and its ``run_source``
+    method returns the same result as calling the tool directly."""
+
+    session = await _make_session(tmp_path)
+    try:
+        runner = session.get_service("workflow_runner")
+        assert runner is not None
+        outcome = await runner.run_source(
+            'return await agent("svc-test")',
+            {"key": "val"},
+        )
+        assert outcome["agents_spawned"] == 1
+        assert "echo:svc-test" in str(outcome["result"])
+    finally:
+        await session.shutdown()
