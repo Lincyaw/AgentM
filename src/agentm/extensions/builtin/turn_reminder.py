@@ -30,6 +30,7 @@ Budget is read live from ``api.session.get_loop_config()`` (which reflects the
 
 from __future__ import annotations
 
+import time as _time
 from typing import Any
 
 from agentm.core.abi import TextContent, ToolResultMessage, UserMessage
@@ -113,7 +114,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             tools_left is not None and tools_left <= 2
         )
         if last and finalize_tool:
-            import time as _time
             event.messages.append(
                 UserMessage(
                     role="user",

@@ -19,7 +19,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from agentm.core.abi import FunctionTool, ToolResult
 from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.abi.messages import TextContent
 from agentm.core.abi.skill import SkillDiagnostic, SkillRecord
 from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.extensions import ExtensionManifest
@@ -494,9 +496,6 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         return {"system": updated}
 
     async def _load_skill(args: dict[str, Any]) -> Any:
-        from agentm.core.abi import ToolResult
-        from agentm.core.abi.messages import TextContent
-
         name = str(args.get("name", "")).strip()
         if not name:
             return ToolResult(
@@ -521,8 +520,6 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 is_error=True,
             )
         return ToolResult(content=[TextContent(type="text", text=content)])
-
-    from agentm.core.abi import FunctionTool
 
     api.register_tool(
         FunctionTool(
