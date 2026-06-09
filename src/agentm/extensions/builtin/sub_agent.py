@@ -1072,21 +1072,15 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "budget": {
                         "type": "object",
                         "properties": {
-                            "max_tool_calls": {"type": "integer", "minimum": 1},
-                            "max_turns": {"type": "integer", "minimum": 1},
+                            "max_tool_calls": {"type": "integer"},
+                            "max_turns": {"type": "integer"},
                         },
-                        "additionalProperties": False,
                     },
                     "extensions": {
                         "type": "array",
+                        "description": "Each element is a [module_path, config] pair.",
                         "items": {
                             "type": "array",
-                            "prefixItems": [
-                                {"type": "string"},
-                                {"type": "object"},
-                            ],
-                            "minItems": 2,
-                            "maxItems": 2,
                         },
                     },
                 },

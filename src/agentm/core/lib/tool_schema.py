@@ -1,12 +1,21 @@
 """Convert a Pydantic model into a provider-neutral JSON tool schema.
 
 Pydantic's :meth:`pydantic.BaseModel.model_json_schema` produces output
-with ``$ref`` / ``$defs`` indirection and auto-generated ``title`` keys.
+with ``$ref`` / ``$defs`` indirection and auto-generated metadata keys.
 This helper normalises the output: inlines ``$defs`` and strips metadata
-``title`` keys (preserving user-defined properties named "title"), so
-atoms can use a single Pydantic source of truth for both runtime
-validation AND the schema advertised to the LLM — instead of hand-writing
-a parallel JSON schema constant that drifts.
+keys (``title``, ``default``, ``additionalProperties``), preserving
+user-defined *properties* that happen to share those names.
+
+Stripped keys and why:
+
+- ``title``: auto-generated noise (e.g. ``"Title": "Leaf"``), not needed
+  by LLMs, inflates the wire payload.
+- ``default``: validation metadata telling validators what value to use
+  when a field is absent. Irrelevant for constrained decoding and
+  **rejected by OpenAI strict mode**.
+- ``additionalProperties``: validation concern (Pydantic's
+  ``extra="forbid"`` adds it); ``_force_strict`` re-adds it for OpenAI
+  in the provider adapter.
 
 Provider-specific constraints (e.g. OpenAI strict mode requiring
 ``additionalProperties: false`` and full ``required``) are applied by the
@@ -32,8 +41,8 @@ def pydantic_to_tool_schema(
     """Return a provider-neutral JSON schema for ``model_cls``.
 
     Performs ``model_json_schema()`` → resolve ``$ref`` / ``$defs`` →
-    strip metadata ``title`` keys (preserving user properties named
-    "title").
+    strip metadata keys (``title``, ``default``, ``additionalProperties``),
+    preserving user properties that share those names.
 
     Provider-specific constraints (OpenAI strict mode, etc.) are NOT
     applied here — they belong in the provider adapter layer.
@@ -61,14 +70,13 @@ def _resolve_refs(node: Any, defs: dict[str, Any], *, _inside_properties: bool =
                 return resolved
         out: dict[str, Any] = {}
         for k, v in node.items():
-            # Strip Pydantic's auto-generated metadata keys:
-            # - "title": noisy in wire payloads, not needed by LLMs.
-            # - "additionalProperties": validation concern, not schema
-            #   description; _force_strict adds it back for OpenAI strict
-            #   mode in the provider adapter.
-            # Preserve user-defined *properties* named "title" (they live
-            # inside a "properties" dict, not at the schema-metadata level).
+            # Strip Pydantic's auto-generated metadata keys.
+            # Preserve user-defined *properties* that share these names
+            # (they live inside a "properties" dict, guarded by
+            # _inside_properties).
             if k == "title" and not _inside_properties:
+                continue
+            if k == "default" and not _inside_properties:
                 continue
             if k == "additionalProperties":
                 continue
