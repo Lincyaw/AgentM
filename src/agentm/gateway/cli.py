@@ -72,6 +72,7 @@ from agentm.gateway.wire import (
     Envelope,
     InboundBody,
 )
+from agentm.gateway.workspace import WorkspaceResolver, load_gateway_config
 
 autoload_dotenv()
 
@@ -230,7 +231,12 @@ def _build_authenticator(spec: BindSpec) -> Authenticator:
 
 
 def _build_session_factory(
-    *, provider: str, model: str, profile: Any | None, reasoning_effort: str | None = None
+    *,
+    provider: str,
+    model: str,
+    profile: Any | None,
+    reasoning_effort: str | None = None,
+    workspace: WorkspaceResolver | None = None,
 ) -> Callable[[str, str, str | None, str | None, dict[str, Any]], Awaitable[Any]]:
     from typing import cast as _cast
 
@@ -252,6 +258,10 @@ def _build_session_factory(
         wire_services: dict[str, Any],
     ) -> Any:
         del session_key  # routing identity; not needed for construction
+        # Per-channel workspace routing
+        if workspace is not None and workspace.active:
+            channel = (wire_services.get("turn_context") or {}).get("channel", "")
+            cwd = workspace.resolve(channel)
         store = make_default_session_store(cwd)
         state = resolve_session_state(
             cwd=cwd, resume=resume, continue_recent=False, session_store=store
@@ -1235,6 +1245,8 @@ async def _arun(
         frozenset(),
         300.0,
     )
+    workspace = load_gateway_config(cwd)
+
     # Builder the runtime calls on ``/model <name>`` to produce a fresh factory
     # for a named profile (the command validates the name exists first).
     def make_factory(model_name: str) -> Any:
@@ -1246,6 +1258,7 @@ async def _arun(
             model=prof.model,
             profile=prof,
             reasoning_effort=reasoning_effort,
+            workspace=workspace,
         )
 
     from agentm.core.lib.user_config import load_user_config
@@ -1263,6 +1276,7 @@ async def _arun(
             model=resolved_model,
             profile=profile,
             reasoning_effort=reasoning_effort,
+            workspace=workspace,
         ),
         command_router=CommandRouter(registry=command_registry),
         approval_policy=approval_policy,
