@@ -33,7 +33,9 @@ class _FakeChannel:
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self._next = 0
 
-    async def send(self, to: str, message: dict[str, Any]) -> _SendResult:
+    async def send(
+        self, to: str, message: dict[str, Any], opts: Any = None
+    ) -> _SendResult:
         self.sends.append((to, message))
         self._next += 1
         return _SendResult(f"om_msg-{self._next}")
@@ -253,9 +255,17 @@ class _FakeWireClient:
 class _CardAction:
     """Mirrors the lark cardAction event shape ``_on_card_action`` reads."""
 
-    def __init__(self, *, value: dict[str, Any], chat_id: str, sender: str) -> None:
+    def __init__(
+        self,
+        *,
+        value: dict[str, Any],
+        chat_id: str,
+        sender: str,
+        message_id: str = "",
+    ) -> None:
         self.action = type("A", (), {"value": value})()
         self.chat_id = chat_id
+        self.message_id = message_id
         self.operator = type("O", (), {"open_id": sender})()
 
 
@@ -345,8 +355,15 @@ async def test_interrupt_marks_card_and_drops_stop_button(
     chat = "oc_1"
     await adapter.handle_outbound(_outbound(chat, "turn_start", meta={"turn_id": "t1"}))
 
+    # The card action must carry the card's message_id so the adapter can
+    # look up the correct live turn (thread-aware).
+    card_mid = channel.sends[-1][0] if not channel.sends else ""
+    card_mid = "om_msg-1"  # the _FakeChannel assigned this on the first send
     await adapter._on_card_action(
-        _CardAction(value={"control": "interrupt"}, chat_id=chat, sender="ou_user")
+        _CardAction(
+            value={"control": "interrupt"}, chat_id=chat, sender="ou_user",
+            message_id=card_mid,
+        )
     )
 
     final = _last_card(channel)
@@ -397,6 +414,14 @@ class _Mention:
         self.name = name
 
 
+class _Conversation:
+    """Mirrors lark's ``Conversation`` dataclass."""
+
+    def __init__(self, *, chat_id: str, thread_id: str | None = None) -> None:
+        self.chat_id = chat_id
+        self.thread_id = thread_id
+
+
 class _InboundMsg:
     """Minimal stand-in for lark's ``InboundMessage`` (only the fields
     ``_on_message`` reads via getattr)."""
@@ -409,12 +434,16 @@ class _InboundMsg:
         sender_id: str = "ou_user",
         chat_id: str = "oc_grp",
         message_id: str = "om_1",
+        thread_id: str | None = None,
     ) -> None:
         self.content_text = content_text
         self.mentions = mentions or []
         self.sender_id = sender_id
         self.chat_id = chat_id
         self.message_id = message_id
+        self.conversation = _Conversation(
+            chat_id=chat_id, thread_id=thread_id
+        )
 
 
 _BOT_OID = "ou_bot"
@@ -511,3 +540,132 @@ async def test_approval_is_a_standalone_card(monkeypatch: pytest.MonkeyPatch) ->
     tags = [el["tag"] for el in card["body"]["elements"]]
     assert "button" in tags  # schema-2.0 standalone button element
     assert adapter._live == {}  # approval does not open a live turn
+
+
+# -- thread_id / topic-group support ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inbound_thread_id_forwarded_to_gateway() -> None:
+    """When an inbound message carries a thread_id (topic group), it must
+    appear in the wire envelope body AND influence the session_key so
+    different topics get separate sessions."""
+    adapter, client = _make_mention_adapter()
+    await adapter._on_message(
+        _InboundMsg(
+            content_text="hello", chat_id="oc_grp", thread_id="om_root_42"
+        )
+    )
+    body = _last_inbound(client)
+    assert body["thread_id"] == "om_root_42"
+    # session_key must contain the thread_id
+    env = client.sent[-1]
+    assert "om_root_42" in env.session_key
+
+
+@pytest.mark.asyncio
+async def test_inbound_no_thread_id_omits_field() -> None:
+    """A non-topic-group message must not carry thread_id at all."""
+    adapter, client = _make_mention_adapter()
+    await adapter._on_message(_InboundMsg(content_text="hi", chat_id="oc_p2p"))
+    body = _last_inbound(client)
+    assert "thread_id" not in body
+
+
+@pytest.mark.asyncio
+async def test_different_threads_get_separate_live_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two concurrent threads in the same chat must produce two independent
+    live cards (separate _live entries)."""
+    adapter, channel = _make_adapter(monkeypatch)
+    chat = "oc_grp"
+    await adapter.handle_outbound(
+        _outbound(chat, "turn_start", meta={"turn_id": "t1"}, thread_id="om_t1")
+    )
+    await adapter.handle_outbound(
+        _outbound(chat, "turn_start", meta={"turn_id": "t2"}, thread_id="om_t2")
+    )
+    # Two distinct cards sent (one per thread).
+    assert len(channel.sends) == 2
+    # Two entries in _live under different keys.
+    assert len(adapter._live) == 2
+
+
+@pytest.mark.asyncio
+async def test_outbound_live_card_passes_reply_to_for_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first card send for a threaded turn must pass opts with reply_to
+    so Lark places it in the correct topic thread."""
+    monkeypatch.setattr(adapter_mod, "_MIN_UPDATE_INTERVAL", 0.0)
+    monkeypatch.setattr(adapter_mod, "_AGENT_END_GRACE", 0.02)
+    cfg = FeishuConfig(app_id="x", app_secret="y", channel_name="feishu")
+    adapter = FeishuAdapter(client=object(), config=cfg)  # type: ignore[arg-type]
+
+    # Use a channel that records opts
+    class _OptsChannel:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any], Any]] = []
+            self._n = 0
+
+        async def send(
+            self, to: str, message: dict[str, Any], opts: Any = None
+        ) -> _SendResult:
+            self.calls.append((to, message, opts))
+            self._n += 1
+            return _SendResult(f"om_msg-{self._n}")
+
+        async def update_card(
+            self, message_id: str, card: dict[str, Any]
+        ) -> _SendResult:
+            return _SendResult(message_id)
+
+    ch = _OptsChannel()
+    adapter._channel = ch
+
+    await adapter.handle_outbound(
+        _outbound("oc_grp", "turn_start", meta={"turn_id": "t1"}, thread_id="om_root")
+    )
+    assert len(ch.calls) == 1
+    _, _, opts = ch.calls[0]
+    assert opts is not None
+    assert opts["reply_to"] == "om_root"
+
+
+@pytest.mark.asyncio
+async def test_outbound_no_thread_sends_no_opts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-threaded outbound must pass opts=None (no reply_to)."""
+    monkeypatch.setattr(adapter_mod, "_MIN_UPDATE_INTERVAL", 0.0)
+    monkeypatch.setattr(adapter_mod, "_AGENT_END_GRACE", 0.02)
+    cfg = FeishuConfig(app_id="x", app_secret="y", channel_name="feishu")
+    adapter = FeishuAdapter(client=object(), config=cfg)  # type: ignore[arg-type]
+
+    class _OptsChannel:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any], Any]] = []
+            self._n = 0
+
+        async def send(
+            self, to: str, message: dict[str, Any], opts: Any = None
+        ) -> _SendResult:
+            self.calls.append((to, message, opts))
+            self._n += 1
+            return _SendResult(f"om_msg-{self._n}")
+
+        async def update_card(
+            self, message_id: str, card: dict[str, Any]
+        ) -> _SendResult:
+            return _SendResult(message_id)
+
+    ch = _OptsChannel()
+    adapter._channel = ch
+
+    await adapter.handle_outbound(
+        _outbound("oc_grp", "turn_start", meta={"turn_id": "t1"})
+    )
+    assert len(ch.calls) == 1
+    _, _, opts = ch.calls[0]
+    assert opts is None
