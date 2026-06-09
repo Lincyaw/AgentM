@@ -62,10 +62,10 @@ scenario = "rca"
 # ── Usage ────────────────────────────────────────────────────────────
 #
 # Start the gateway (one process):
-#   agentm gateway --bind unix:///tmp/gw.sock
+#   agentm gateway --bind ws://0.0.0.0:8765
 #
 # Start the feishu peer (reads [feishu.bots] from this file):
-#   agentm-feishu --connect unix:///tmp/gw.sock --verbose
+#   agentm-feishu --connect ws://127.0.0.1:8765 --verbose
 #
 # Result:
 #   @assistant in Feishu  -->  session in ~/.agentm/workspaces/assistant/
