@@ -131,7 +131,7 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    raw_dir = config.get("data_dir") or os.environ.get("AGENTM_RCA_DATA_DIR")
+    raw_dir = config.get("data_dir")
     data_dir = Path(raw_dir) if raw_dir else None
 
     async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:

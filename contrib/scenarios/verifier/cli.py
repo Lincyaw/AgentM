@@ -88,9 +88,6 @@ async def _run_workflow_async(
     from agentm.core.runtime.session import AgentSession
 
     os.environ["AGENTM_PROJECT_ROOT"] = str(REPO)
-    os.environ["AGENTM_RCA_DATA_DIR"] = str(
-        workflow_args.get("data_dir", "")
-    )
 
     provider_spec = _resolve_provider()
     config = AgentSessionConfig(
@@ -239,7 +236,6 @@ def run_one_case(
     out_dir: Path,
     *,
     budget: int = 15,
-    parallel: int = 4,
 ) -> dict:
     """Run propagation verification on a single case.
 
@@ -389,7 +385,6 @@ def _run_or_cache(
     idx: int,
     total: int,
     budget: int,
-    parallel: int,
 ) -> dict:
     """Run one case or return cached result.  Thread-safe."""
     case_out = run_dir / name
@@ -404,7 +399,7 @@ def _run_or_cache(
     try:
         summary = run_one_case(
             dataset_dir / name, case_out,
-            budget=budget, parallel=parallel,
+            budget=budget,
         )
         if "error" in summary:
             print(f"  [{name}] ERROR: {summary['error']}", flush=True)
@@ -423,7 +418,6 @@ def run_batch(
     run_dir: Path,
     *,
     budget: int = 15,
-    parallel: int = 4,
     case_parallel: int = 1,
     limit: int | None = None,
     offset: int = 0,
@@ -431,8 +425,7 @@ def run_batch(
 ) -> list[dict]:
     """Run propagation on multiple cases under *dataset_dir*.
 
-    *case_parallel* controls how many cases run concurrently (each case
-    uses up to *parallel* hop agents internally).  A
+    *case_parallel* controls how many cases run concurrently.
     ``run_summary.jsonl`` in *run_dir* holds one JSON line per case,
     suitable for diff/analysis across ablation runs.
     """
@@ -448,7 +441,7 @@ def run_batch(
 
     if case_parallel <= 1:
         summaries = [
-            _run_or_cache(dataset_dir, run_dir, name, i, total, budget, parallel)
+            _run_or_cache(dataset_dir, run_dir, name, i, total, budget)
             for i, name in enumerate(cases, 1)
         ]
     else:
@@ -457,7 +450,7 @@ def run_batch(
             futures = {
                 pool.submit(
                     _run_or_cache,
-                    dataset_dir, run_dir, name, i, total, budget, parallel,
+                    dataset_dir, run_dir, name, i, total, budget,
                 ): name
                 for i, name in enumerate(cases, 1)
             }
@@ -507,13 +500,12 @@ def run(
     case_dir: Annotated[Path, typer.Argument(help="single case directory")],
     out: Annotated[Path | None, typer.Option(help="output directory")] = None,
     budget: Annotated[int, typer.Option(help="tool-call budget per hop agent")] = 15,
-    parallel: Annotated[int, typer.Option(help="concurrent hop agents")] = 4,
     model: Annotated[str | None, typer.Option(help="config.toml profile name")] = None,
 ) -> None:
     """Run propagation check on a single case."""
     _set_model(model)
     out_dir = out or case_dir.resolve() / ".verify_propagate"
-    summary = run_one_case(case_dir, out_dir, budget=budget, parallel=parallel)
+    summary = run_one_case(case_dir, out_dir, budget=budget)
     if "error" in summary:
         raise typer.Exit(1)
 
@@ -523,7 +515,6 @@ def batch(
     dataset_dir: Annotated[Path, typer.Argument(help="directory containing case subdirectories")],
     run_dir: Annotated[Path, typer.Option("--run-dir", help="output directory for this run")],
     budget: Annotated[int, typer.Option(help="tool-call budget per hop agent")] = 15,
-    parallel: Annotated[int, typer.Option(help="concurrent hop agents per case")] = 4,
     case_parallel: Annotated[int, typer.Option("--case-parallel", help="concurrent cases")] = 1,
     model: Annotated[str | None, typer.Option(help="config.toml profile name")] = None,
     limit: Annotated[int | None, typer.Option(help="max cases to run")] = None,
@@ -537,7 +528,7 @@ def batch(
         case_filter = set(cases_file.read_text().strip().splitlines())
     run_batch(
         dataset_dir.resolve(), run_dir.resolve(),
-        budget=budget, parallel=parallel,
+        budget=budget,
         case_parallel=case_parallel,
         limit=limit, offset=offset,
         case_filter=case_filter,
