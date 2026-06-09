@@ -67,7 +67,7 @@ script; **`operations_agent_env`** confines a *worker's* bash/file ops.
 
 | Primitive | Built from | Status |
 |---|---|---|
-| `agent(prompt, *, scenario=, isolation=, tool_allowlist=)` → str | `spawn_child_session(cfg)` → `child.prompt(msg)` → last `AssistantMessage.text` → `child.shutdown()` | reuse (same recipe as `tool_eval_run` + `sub_agent`) |
+| `agent(prompt, *, scenario=, isolation=, tool_allowlist=, extra_extensions=, atom_config=)` → str | `spawn_child_session(cfg)` → `child.prompt(msg)` → last `AssistantMessage.text` → `child.shutdown()`. `extra_extensions` (list of `(module, config)` tuples) are appended to the child's atom set; `atom_config` (`{atom: {k: v}}`) overrides per-atom config — both forwarded to `AgentSessionConfig`. | reuse (same recipe as `tool_eval_run` + `sub_agent`) |
 | `parallel(aws)` → list | `asyncio.gather`; each `agent` self-limits via a shared `Semaphore` | reuse |
 | `pipeline(items, *stages)` → list | per-item `_chain` (await each stage, sync or async) under `asyncio.gather`; **no cross-item barrier** | **implemented** (native async) |
 | `budget` (`.total`/`.spent()`/`.remaining()`) | `_BudgetService` summing child `TurnEndEvent.message.usage`; ceiling from `budget_tokens` config | new aggregation |
@@ -91,6 +91,15 @@ breaks the provider's tool-call grammar generation. Mirroring the orchestrator's
 scenario keeps workers slim and appropriate. (Verified by E2E: naive
 `agent("...")` on doubao failed with all-builtins, works once workers load the
 slim `local` scenario.)
+
+**Inline manifest assembly.** `extra_extensions` and `atom_config` on
+`agent()` let a script customise a worker's atom set and per-atom
+configuration without pre-writing a YAML scenario. `extra_extensions` is
+merged *after* the isolation-derived extensions (e.g. `operations_agent_env`)
+so isolation and inline atoms coexist. `atom_config` maps to
+`AgentSessionConfig.atom_config_overrides` and follows its precedence
+(overrides > env > manifest). Both are included in the journal key, so
+different configurations produce distinct cache entries.
 
 **Anti-recursion** is enforced two ways: workers are stamped
 `purpose="workflow"`, and the atom's `install()` **skips registering the

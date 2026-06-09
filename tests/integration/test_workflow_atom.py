@@ -188,7 +188,13 @@ async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
         cached_alpha = await cold.lookup(
             _Journal.key(
                 "alpha",
-                {"scenario": None, "isolation": None, "tool_allowlist": None},
+                {
+                    "scenario": None,
+                    "isolation": None,
+                    "tool_allowlist": None,
+                    "extra_extensions": None,
+                    "atom_config": None,
+                },
             )
         )
         assert cached_alpha is not None and "echo:alpha" in cached_alpha
