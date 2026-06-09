@@ -92,9 +92,11 @@ async def _run_async(
     quiet: bool,
 ) -> int:
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.abi.events import EventBus
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.lib.user_config import resolve_model_profile
     from agentm.core.runtime.session import AgentSession
+    from agentm.extensions.builtin.workflow import WorkflowPhaseEvent
 
     model_name = model_flag or os.environ.get("AGENTM_MODEL")
     profile = resolve_model_profile(model_name)
@@ -108,11 +110,20 @@ async def _run_async(
 
     provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
 
+    bus = EventBus()
+
+    if not quiet:
+        def _on_phase(event: WorkflowPhaseEvent) -> None:
+            print(f"[{event.kind}] {event.text}", file=sys.stderr)
+
+        bus.on(WorkflowPhaseEvent.CHANNEL, _on_phase)
+
     config = AgentSessionConfig(
         cwd=resolved_cwd,
         provider=provider_spec,
         extensions=[(m, dict(c)) for m, c in _WORKFLOW_EXTENSIONS],
         auto_commit=False,
+        bus=bus,
     )
     session = await AgentSession.create(config)
     try:
@@ -127,6 +138,31 @@ async def _run_async(
         result = await runner.run_file(script_path, workflow_args)
         output = json.dumps(result, indent=2, ensure_ascii=False, default=str)
         print(output)
+
+        if not quiet:
+            summary = runner.last_run_summary
+            print(
+                "\n--- workflow summary ---",
+                file=sys.stderr,
+            )
+            print(
+                f"agents: {summary['agents_spawned']} spawned, "
+                f"{summary['agents_succeeded']} ok, "
+                f"{summary['agents_failed']} failed, "
+                f"{summary['agents_retried']} retried",
+                file=sys.stderr,
+            )
+            print(
+                f"tokens: {summary['budget']['spent']} "
+                f"(in={summary['budget']['input_tokens']}, "
+                f"out={summary['budget']['output_tokens']})",
+                file=sys.stderr,
+            )
+            print(
+                f"wall clock: {summary['wall_clock_s']:.1f}s",
+                file=sys.stderr,
+            )
+
         return 0
 
     except Exception as exc:
