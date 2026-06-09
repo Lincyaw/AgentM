@@ -175,9 +175,9 @@ async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
         assert "echo:alpha" in first_text
         assert "echo:beta" in first_text
         assert "echo:gamma" in first_text
-        assert first.extras["agents_spawned"] == 3
+        assert first.extras["summary"]["agents_spawned"] == 3
         # Budget aggregated across the three children (5+7 tokens each).
-        assert first.extras["budget"]["spent"] == 36
+        assert first.extras["summary"]["budget"]["spent"] == 36
 
         # Load-bearing resume path: a fresh _Journal (empty in-memory cache)
         # must resolve the first run's key from artifact_store on DISK
@@ -205,7 +205,7 @@ async def test_workflow_journal_resume_skips_respawn(tmp_path: Path) -> None:
         assert not second.is_error, second.content[0].text
         # Journal resume: every agent() call hits the cache -> no new spawns.
         assert spawned == []
-        assert second.extras["agents_spawned"] == 0
+        assert second.extras["summary"]["agents_spawned"] == 0
         assert second.content[0].text == first_text
     finally:
         await session.shutdown()
@@ -266,7 +266,7 @@ async def test_workflow_pipeline_runs_each_item_through_stages(
         out = json.loads(result.content[0].text)
         # each item: agent("x") -> "echo:x" -> upper -> "ECHO:X"
         assert out == ["ECHO:X", "ECHO:Y"]
-        assert result.extras["agents_spawned"] == 2
+        assert result.extras["summary"]["agents_spawned"] == 2
     finally:
         await session.shutdown()
 

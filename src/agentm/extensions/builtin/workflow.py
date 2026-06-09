@@ -1287,6 +1287,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "workflow: 'script' and 'script_path' are mutually exclusive"
             )
 
+        # Capture progress events so the agent can observe the execution
+        # trajectory (phases, log lines) — not just the final result.
+        progress: list[dict[str, str]] = []
+
+        async def _capture_phase(event: WorkflowPhaseEvent) -> None:
+            progress.append({"kind": event.kind, "text": event.text})
+
+        unsub = api.events.on(WorkflowPhaseEvent.CHANNEL, _capture_phase)
+
         try:
             if isinstance(script_path_raw, str) and script_path_raw.strip():
                 result = await runner.run_file(
@@ -1311,14 +1320,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return _error(
                 f"workflow script error: {type(exc).__name__}: {exc}"
             )
+        finally:
+            unsub()
 
         return ToolResult(
             content=[TextContent(
                 type="text", text=_coerce_result(result),
             )],
             extras={
-                "agents_spawned": runner.last_agents_spawned,
-                "budget": runner.last_budget_snapshot,
+                "progress": progress,
                 "summary": runner.last_run_summary,
             },
         )
