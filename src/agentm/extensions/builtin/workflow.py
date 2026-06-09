@@ -10,7 +10,7 @@ The script is plain ``async`` Python, run as a coroutine on the host event
 loop with a **curated namespace** that exposes only an orchestration SDK —
 bound to *already-existing* APIs:
 
-- ``agent(prompt, *, scenario=, isolation=, tool_allowlist=)`` —
+- ``agent(prompt, *, scenario=, isolation=, tool_allowlist=, extra_extensions=, atom_config=)`` —
   :meth:`ExtensionAPI.spawn_child_session` → ``child.prompt`` → last
   ``AssistantMessage`` text → ``child.shutdown``. Returns the text. A worker
   defaults to the **orchestrator's own scenario** (a clean reload of that
@@ -376,15 +376,23 @@ class _WorkflowRun:
         scenario: str | None = None,
         isolation: str | None = None,
         tool_allowlist: list[str] | None = None,
+        extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
+        atom_config: dict[str, dict[str, Any]] | None = None,
     ) -> str:
         """Spawn one child agent session, drive it to a final reply, return its
         text. Journaled by ``hash(prompt, opts)`` — a re-run resumes from cache
-        without re-spawning."""
+        without re-spawning.
+
+        ``extra_extensions`` and ``atom_config`` enable inline manifest assembly:
+        the script can customise a worker's atom set and per-atom config without
+        pre-writing a YAML scenario."""
 
         opts: dict[str, Any] = {
             "scenario": scenario,
             "isolation": isolation,
             "tool_allowlist": tool_allowlist,
+            "extra_extensions": extra_extensions,
+            "atom_config": atom_config,
         }
         key = _Journal.key(prompt, opts)
         cached = await self.journal.lookup(key)
@@ -401,7 +409,8 @@ class _WorkflowRun:
 
         async with self.semaphore:
             result = await self._spawn_and_drive(
-                prompt, scenario, isolation, tool_allowlist
+                prompt, scenario, isolation, tool_allowlist,
+                extra_extensions, atom_config,
             )
 
         await self.journal.record(key, result)
@@ -461,6 +470,8 @@ class _WorkflowRun:
         scenario: str | None,
         isolation: str | None,
         tool_allowlist: list[str] | None,
+        extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
+        atom_config: dict[str, dict[str, Any]] | None = None,
     ) -> str:
         extensions: list[tuple[str, dict[str, Any]]] = []
         # isolation="agent_env" selects the worker sandbox by listing the
@@ -491,7 +502,8 @@ class _WorkflowRun:
             # break tool-call grammar generation. Explicit arg > atom config >
             # parent scenario.
             scenario=scenario or self.default_scenario or self.api.scenario,
-            extra_extensions=extensions,
+            extra_extensions=[*extensions, *(extra_extensions or [])],
+            atom_config_overrides=atom_config or {},
             tool_allowlist=tool_allowlist,
             purpose=_WORKER_PURPOSE,
         )
@@ -571,13 +583,18 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
             "type": "string",
             "description": (
                 "Async Python orchestration script. Available names: "
-                "agent(prompt, *, scenario=, isolation=, tool_allowlist=) "
+                "agent(prompt, *, scenario=, isolation=, tool_allowlist=, "
+                "extra_extensions=, atom_config=) "
                 "(awaitable -> str), parallel(list_of_awaitables) -> list, "
                 "pipeline(items, *stages) -> list, budget (.total / .spent() / "
                 ".remaining()), args (dict), log(msg), phase(name). Use await "
                 "for agent / parallel / pipeline. `return <value>` becomes the "
                 "tool result. Only data-manipulation builtins are available — "
-                "no import / open / time / random."
+                "no import / open / time / random. "
+                "agent() kwargs: extra_extensions is a list of "
+                "(module_path, config_dict) tuples appended to the worker's "
+                "atom set; atom_config is a {atom_name: {key: value}} dict of "
+                "per-atom config overrides."
             ),
         },
         "args": {
