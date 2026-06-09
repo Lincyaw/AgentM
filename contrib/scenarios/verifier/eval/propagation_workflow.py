@@ -139,6 +139,7 @@ while queue and not skip_propagate:
                     "is_infra": is_infra,
                     "upstream_evidence": node_evidence.get(from_svc),
                 },
+                "duckdb_sql": {"data_dir": data_dir},
                 "hop_finalize": {"data_dir": data_dir},
             },
         )
@@ -218,6 +219,7 @@ if not skip_judge and len(confirmed) > len(injections):
         "Review the fault-propagation graph.",
         scenario="verifier/judge",
         atom_config={
+            "duckdb_sql": {"data_dir": data_dir},
             "judge_context": {
                 "injections": injections,
                 "confirmed": sorted(confirmed),
