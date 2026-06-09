@@ -1,4 +1,4 @@
-"""Single-hop verdict submission tool for the verifier_hop scenario."""
+"""Single-hop verdict submission tool for the verifier/hop scenario."""
 
 from __future__ import annotations
 

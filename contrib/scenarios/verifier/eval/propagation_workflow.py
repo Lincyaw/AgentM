@@ -4,7 +4,7 @@
 
 Pure orchestration: BFS over the neighbor graph, parallel hop agents,
 optional judge phase. All prompt/domain logic is encapsulated in the
-agent units (verifier_hop and verifier_judge scenarios with their
+agent units (verifier/hop and verifier/judge scenarios with their
 context atoms). The workflow passes structured data via atom_config.
 
 Runs in the workflow atom's curated namespace (agent, parallel, args,
@@ -18,14 +18,29 @@ Output (return value): dict with confirmed_nodes, edges, node_evidence,
 hop_log, rounds, judge (if run).
 """
 
-phase("propagate")
-confirmed = set()
-node_evidence = {}
-node_fault = {}
-edges = []
-hop_log = []
-
+skip_propagate = args.get("skip_propagate", False)
 injections = args["injections"]
+
+# When skip_propagate=True, load existing propagation results and jump to judge
+if skip_propagate:
+    existing = args.get("existing_propagation", {})
+    confirmed = set(existing.get("confirmed_nodes", []))
+    node_evidence = existing.get("node_evidence", {})
+    edges = existing.get("edges", [])
+    hop_log = existing.get("hop_log", [])
+    round_n = existing.get("rounds", 0)
+    node_fault = {}
+    for inj in injections:
+        target = inj["target"]
+        if target:
+            node_fault[target] = [inj["chaos_type"], target]
+else:
+    phase("propagate")
+    confirmed = set()
+    node_evidence = {}
+    node_fault = {}
+    edges = []
+    hop_log = []
 graph = args["graph"]
 infra_nodes_list = args.get("infra_nodes", [])
 infra_set = set(infra_nodes_list)
@@ -43,22 +58,23 @@ all_faults = [
     if inj.get("target")
 ]
 
-# Seed from injections
-for inj in injections:
-    target = inj["target"]
-    if target:
-        confirmed.add(target)
-        ev = args.get("target_evidence", {}).get(target, {})
-        node_evidence[target] = {"source": "injection_target"}
-        for k, v in ev.items():
-            node_evidence[target][k] = v
-        node_fault[target] = [inj["chaos_type"], target]
+if not skip_propagate:
+    # Seed from injections
+    for inj in injections:
+        target = inj["target"]
+        if target:
+            confirmed.add(target)
+            ev = args.get("target_evidence", {}).get(target, {})
+            node_evidence[target] = {"source": "injection_target"}
+            for k, v in ev.items():
+                node_evidence[target][k] = v
+            node_fault[target] = [inj["chaos_type"], target]
 
-queue = list(confirmed)
-checked_edges = set()
-round_n = 0
+    queue = list(confirmed)
+    checked_edges = set()
+    round_n = 0
 
-while queue:
+while queue and not skip_propagate:
     round_n += 1
     batch = list(queue)
     queue = []
@@ -110,7 +126,7 @@ while queue:
         is_infra = to_svc in infra_set
         result = await agent(
             "Verify this propagation edge.",
-            scenario="verifier_hop",
+            scenario="verifier/hop",
             atom_config={
                 "hop_context": {
                     "from_service": from_svc,
@@ -180,8 +196,12 @@ if not skip_judge and len(confirmed) > len(injections):
     for inj in injections:
         seeds.add(inj["target"])
 
-    # Build verdict_by_target from hop_log + node_evidence
+    # Build verdict_by_target from existing_verdicts (judge-only) or hop_log
+    existing_verdicts = args.get("existing_verdicts", [])
     verdict_by_target = {}
+    if existing_verdicts:
+        for v in existing_verdicts:
+            verdict_by_target[v.get("to", "")] = v
     for entry in hop_log:
         to_svc = entry.get("to", "")
         if to_svc and to_svc not in verdict_by_target:
@@ -201,7 +221,7 @@ if not skip_judge and len(confirmed) > len(injections):
 
     judge_text = await agent(
         "Review the fault-propagation graph.",
-        scenario="verifier_judge",
+        scenario="verifier/judge",
         atom_config={
             "judge_context": {
                 "injections": injections,

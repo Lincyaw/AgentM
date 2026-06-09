@@ -61,9 +61,7 @@ MANIFEST = ExtensionManifest(
 # Fault doc loading
 # ---------------------------------------------------------------
 
-_FAULT_KINDS_DIR = (
-    Path(__file__).resolve().parents[1] / "verifier" / "fault_kinds"
-)
+_FAULT_KINDS_DIR = Path(__file__).resolve().parent.parent / "fault_kinds"
 
 _FAULT_DOC_ALIAS = {
     "memorystress": "memstress",
