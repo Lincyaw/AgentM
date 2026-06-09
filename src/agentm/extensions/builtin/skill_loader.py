@@ -35,6 +35,7 @@ MANIFEST = ExtensionManifest(
     name="skill_loader",
     description="Discover SKILL.md files and inject an <available_skills> index.",
     registers=(
+        "tool:load_skill",
         "event:before_agent_start",
         "event:resources_discover",
         "event:session_ready",
@@ -339,8 +340,7 @@ def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
 
     lines = [
         "\n\nThe following skills provide specialized instructions for specific tasks.",
-        "Use the read tool to load a skill's file when the task matches its description.",
-        "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+        "Call `load_skill` with the skill name to read its full content when the task matches its description.",
         "",
         "<available_skills>",
     ]
@@ -369,6 +369,7 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     inherit_claude = bool(config.get("inherit_claude", include_defaults))
     configured_skill_paths = [str(path) for path in config.get("skill_paths", [])]
     cached_prompt_block = ""
+    skills_by_name: dict[str, SkillRecord] = {}
 
     async def _populate(_: SessionReadyEvent) -> None:
         nonlocal cached_prompt_block
@@ -481,6 +482,9 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             seen_names.add(record.name)
             skills.append(record)
         cached_prompt_block = format_skills_for_prompt(skills)
+        skills_by_name.clear()
+        for skill in skills:
+            skills_by_name[skill.name] = skill
 
     def _inject(event: BeforeAgentStartEvent) -> dict[str, str] | None:
         if not cached_prompt_block:
@@ -488,6 +492,59 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         updated = f"{event.system or ''}{cached_prompt_block}"
         event.system = updated
         return {"system": updated}
+
+    def _load_skill(args: dict[str, Any]) -> Any:
+        from agentm.core.abi import ToolResult
+        from agentm.core.abi.messages import TextContent
+
+        name = str(args.get("name", "")).strip()
+        if not name:
+            return ToolResult(
+                content=[TextContent(type="text", text="error: name is required")],
+                is_error=True,
+            )
+        record = skills_by_name.get(name)
+        if record is None:
+            available = ", ".join(sorted(skills_by_name)) or "(none)"
+            return ToolResult(
+                content=[TextContent(
+                    type="text",
+                    text=f"error: skill {name!r} not found. Available: {available}",
+                )],
+                is_error=True,
+            )
+        try:
+            content = Path(record.file_path).read_text(encoding="utf-8")
+        except OSError as exc:
+            return ToolResult(
+                content=[TextContent(type="text", text=f"error reading skill: {exc}")],
+                is_error=True,
+            )
+        return ToolResult(content=[TextContent(type="text", text=content)])
+
+    from agentm.core.abi import FunctionTool
+
+    api.register_tool(
+        FunctionTool(
+            name="load_skill",
+            description=(
+                "Load the full content of a skill by name. "
+                "Use this to read detailed instructions from <available_skills>."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name from <available_skills>.",
+                    },
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+            fn=_load_skill,
+        )
+    )
 
     api.on(SessionReadyEvent.CHANNEL, _populate)
     api.on(BeforeAgentStartEvent.CHANNEL, _inject)
