@@ -9,7 +9,7 @@ from typing import Any, Literal, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from agentm.core.lib import pydantic_to_openai_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 from agentm.core.abi import FunctionTool, ToolResult, ToolTerminate
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi.extension import ExtensionAPI
@@ -202,7 +202,7 @@ def install(api: ExtensionAPI, config: HopFinalizeConfig) -> None:
                 "For confirmed, symptom_evidence and relationship_sql "
                 "must be non-empty and re-executable."
             ),
-            parameters=pydantic_to_openai_tool_schema(HopVerdict),
+            parameters=pydantic_to_tool_schema(HopVerdict),
             fn=_submit,
         )
     )

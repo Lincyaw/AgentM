@@ -5,18 +5,14 @@ validation that followed them (the auditor's V2 ``submit_verdict`` schema
 duplicated every field description across the constant and the
 ``RawVerdictOutput`` coercer). Pydantic v2's ``model_json_schema()`` is the
 single source of truth for both — the decorator pipes the model's JSON schema
-into ``FunctionTool.parameters`` after normalising it to OpenAI strict-mode
-shape (inline ``$defs``, strip ``title``, force ``additionalProperties: false``
-and full ``required``).
+into ``FunctionTool.parameters`` after normalising it (inline ``$defs``,
+strip ``title``).
 
 Schema normalisation is delegated to
-:func:`agentm.core.lib.pydantic_to_openai_tool_schema`. Earlier revisions of
-this module carried a private ``_inline_schema`` helper that only performed
-the inline-and-strip-title pass; the core helper additionally enforces
-OpenAI strict-mode constraints (``additionalProperties: false`` on every
-object, every property listed in ``required``). For the audit Args models
-that constraint is satisfied trivially because they declare
-``model_config = ConfigDict(extra="forbid")`` and avoid field defaults.
+:func:`agentm.core.lib.pydantic_to_tool_schema`. Provider-specific
+constraints (e.g. OpenAI strict mode: ``additionalProperties: false``
+on every object, every property in ``required``) are applied by the
+provider adapter layer, not at schema-generation time.
 
 Two-axis contract preserved:
 
@@ -41,7 +37,7 @@ from typing import Any, TypeVar
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.tool import ToolOutcome
-from agentm.core.lib import pydantic_to_openai_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 from pydantic import BaseModel, ValidationError
 
 ArgsT = TypeVar("ArgsT", bound=BaseModel)
@@ -59,9 +55,7 @@ def harness_tool(
     The decorated function must have the signature
     ``async def fn(args: SomeArgsModel, ctx) -> ToolResult | ToolTerminate``
     where ``SomeArgsModel`` is a :class:`pydantic.BaseModel` with
-    ``model_config = ConfigDict(extra="forbid")`` (matches the schema-level
-    ``additionalProperties: false`` that
-    :func:`agentm.core.lib.pydantic_to_openai_tool_schema` forces).
+    ``model_config = ConfigDict(extra="forbid")``.
 
     **Docstring-first description.** Following the Pydantic-AI / LangChain
     ``@tool`` convention, the tool description comes from the handler's
@@ -117,7 +111,7 @@ def harness_tool(
                 "argument with a pydantic.BaseModel subclass"
             )
 
-        parameters = pydantic_to_openai_tool_schema(model_cls)
+        parameters = pydantic_to_tool_schema(model_cls)
 
         async def _wrapped(args: dict[str, Any]) -> ToolResult | ToolOutcome:
             try:

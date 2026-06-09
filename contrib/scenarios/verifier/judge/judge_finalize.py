@@ -7,7 +7,7 @@ from typing import Any, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from agentm.core.lib import pydantic_to_openai_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 from agentm.core.abi import FunctionTool, ToolResult, ToolTerminate
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi.extension import ExtensionAPI
@@ -90,7 +90,7 @@ def install(api: ExtensionAPI, config: JudgeFinalizeConfig) -> None:
                 "services to demote, `add` lists rejected services to "
                 "promote. Either list may be empty."
             ),
-            parameters=pydantic_to_openai_tool_schema(JudgeReview),
+            parameters=pydantic_to_tool_schema(JudgeReview),
             fn=_submit_judge,
         )
     )

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import logging
 import os
 import time
@@ -78,6 +79,7 @@ from agentm.core.abi.stream import (
 from agentm.core.abi.tool import Tool
 
 from agentm.core.lib.stream import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+from agentm.core.lib.tool_schema import _force_strict
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from openai import AsyncOpenAI
@@ -352,12 +354,14 @@ class OpenAIToolSpecAdapter(ToolSpecAdapter):
     """Convert AgentM tools to OpenAI function-tool specs."""
 
     def vendor_spec(self, tool: Tool) -> dict[str, Any]:
+        params = copy.deepcopy(tool.parameters) if tool.parameters else {}
+        _force_strict(params)
         return {
             "type": "function",
             "function": {
                 "name": tool.name,
                 "description": tool.description,
-                "parameters": tool.parameters,
+                "parameters": params,
             },
         }
 

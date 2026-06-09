@@ -117,8 +117,8 @@ Never raise exceptions from tool handlers — catch and return `is_error=True`.
 If you have a Pydantic model, don't hand-write JSON Schema:
 
 ```python
-from agentm.core.lib import pydantic_to_openai_tool_schema
-schema = pydantic_to_openai_tool_schema(MyModel)
+from agentm.core.lib import pydantic_to_tool_schema
+schema = pydantic_to_tool_schema(MyModel)
 ```
 
 This strips `$defs`, inlines refs, and produces a clean schema compatible
