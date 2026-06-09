@@ -356,16 +356,24 @@ def cli(
     Connects over the v1 wire protocol (Unix socket) and bridges
     Feishu events ↔ gateway envelopes.
 
-    Examples:
+    Single-bot mode (CLI flags / env):
 
-      File-based secret (recommended):
-        agentm-feishu --connect unix:///tmp/gw.sock \\
-          --app-id cli_xxxx \\
-          --app-secret /run/secrets/feishu_app_secret
+      agentm-feishu --connect unix:///tmp/gw.sock \\
+        --app-id cli_xxxx \\
+        --app-secret /run/secrets/feishu_app_secret
 
-      Env-based credentials:
-        LARK_APP_ID=cli_xxxx LARK_APP_SECRET=... \\
-          agentm-feishu --connect unix:///tmp/gw.sock
+    Multi-bot mode (config.toml, no --app-id):
+
+      # ~/.agentm/config.toml
+      [feishu.bots.ops]
+      app_id = "cli_ops"
+      app_secret_file = "/run/secrets/ops"
+      scenario = "rca"
+
+      [feishu.bots.chat]
+      app_id = "cli_chat"
+      app_secret_file = "/run/secrets/chat"
+      scenario = "chatbot"
     """
     from agentm.gateway import resolve_token
 
@@ -381,23 +389,76 @@ def cli(
     )
     _install_lark_log_filters()
 
-    try:
-        rc = asyncio.run(
-            _arun(
-                connect_opts=ConnectOptions(
-                    connect=connect, token=effective_token, tls_ca=tls_ca
-                ),
+    # Detect single-bot (CLI flags / env) vs multi-bot (config.toml).
+    resolved_app_id = app_id or os.environ.get("LARK_APP_ID", "").strip()
+    resolved_app_secret_present = bool(
+        app_secret or os.environ.get("LARK_APP_SECRET", "").strip()
+    )
+
+    if resolved_app_id or resolved_app_secret_present:
+        # Single-bot mode — backward compatible path
+        if check_config:
+            _resolve_config(
                 app_id=app_id,
                 app_secret_path=app_secret,
                 allow_from=allow_from,
                 channel_name=channel_name,
                 scenario=scenario,
                 session_scope=session_scope,
-                check_config=check_config,
             )
-        )
-    except KeyboardInterrupt:
-        rc = EXIT_SIGINT
+            raise typer.Exit(code=EXIT_OK)
+        try:
+            rc = asyncio.run(
+                _arun(
+                    connect_opts=ConnectOptions(
+                        connect=connect, token=effective_token, tls_ca=tls_ca
+                    ),
+                    app_id=app_id,
+                    app_secret_path=app_secret,
+                    allow_from=allow_from,
+                    channel_name=channel_name,
+                    scenario=scenario,
+                    session_scope=session_scope,
+                    check_config=False,
+                )
+            )
+        except KeyboardInterrupt:
+            rc = EXIT_SIGINT
+    else:
+        # Multi-bot mode — load from config.toml
+        from .bot_config import load_bot_configs
+
+        bot_configs = load_bot_configs()
+        if not bot_configs:
+            _err(
+                "bad-argument",
+                "no bot configured (no --app-id / LARK_APP_ID and no "
+                "[feishu.bots] in config.toml)",
+                "pass --app-id or add [feishu.bots.<name>] to "
+                "~/.agentm/config.toml",
+            )
+            raise typer.Exit(code=EXIT_USAGE)
+
+        if check_config:
+            for name, cfg in bot_configs:
+                sys.stderr.write(
+                    f"  bot {name!r}: app_id={cfg.app_id} "
+                    f"channel={cfg.channel_name} scenario={cfg.scenario}\n"
+                )
+            raise typer.Exit(code=EXIT_OK)
+
+        try:
+            rc = asyncio.run(
+                _arun_multi(
+                    connect=connect,
+                    token=effective_token,
+                    tls_ca=tls_ca,
+                    bot_configs=bot_configs,
+                )
+            )
+        except KeyboardInterrupt:
+            rc = EXIT_SIGINT
+
     raise typer.Exit(code=rc)
 
 
@@ -413,7 +474,7 @@ async def _arun(
     channel_name: str,
     scenario: str | None,
     session_scope: str,
-    check_config: bool,
+    check_config: bool = False,
 ) -> int:
     connect = connect_opts.connect
     token = connect_opts.token
@@ -567,6 +628,190 @@ async def _arun(
         await client.close()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await reconnect_task
+
+    if sigint_seen:
+        return EXIT_SIGINT
+    return exit_code
+
+
+# -- multi-bot run loop ------------------------------------------------
+
+
+async def _arun_multi(
+    *,
+    connect: str,
+    token: str | None,
+    tls_ca: str | None,
+    bot_configs: list[tuple[str, FeishuConfig]],
+) -> int:
+    """Run N bots, each with its own WireClient + FeishuAdapter."""
+    stop_event = asyncio.Event()
+    exit_code = EXIT_OK
+    sigint_seen = False
+
+    def _on_sigint() -> None:
+        nonlocal sigint_seen
+        sigint_seen = True
+        stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(
+                sig, _on_sigint if sig == signal.SIGINT else stop_event.set
+            )
+        except (NotImplementedError, RuntimeError):  # pragma: no cover — Windows
+            pass
+
+    apply_ws_patch()
+
+    clients: list[WireClient] = []
+    adapters: list[FeishuAdapter] = []
+    tasks: list[asyncio.Task[None]] = []
+
+    def _make_outbound_handler(
+        bot_name: str, adapter_slot: list[FeishuAdapter | None]
+    ):
+        """Factory that closes over per-bot state (avoids loop-variable capture)."""
+
+        async def on_outbound(env: Envelope) -> None:
+            nonlocal exit_code
+            if env.kind == KIND_OUTBOUND:
+                a = adapter_slot[0]
+                if a is not None:
+                    try:
+                        await a.handle_outbound(env)
+                    except Exception:  # noqa: BLE001
+                        log.exception(
+                            "[%s] handle_outbound failed id=%s", bot_name, env.id
+                        )
+                return
+            if env.kind in (KIND_PING, KIND_PONG):
+                return
+            if env.kind == KIND_ERROR:
+                body = env.body if isinstance(env.body, dict) else {}
+                code = body.get("code", "unknown")
+                message = body.get("message", "")
+                _err(
+                    "gateway-error",
+                    f"[{bot_name}] gateway error code={code!r} message={message!r}",
+                    "check the gateway logs",
+                )
+                exit_code = EXIT_GENERIC
+                stop_event.set()
+
+        return on_outbound
+
+    # Connect all bots
+    for name, cfg in bot_configs:
+        _spec, transport = _resolve_connect(connect, tls_ca)
+        peer_name = f"feishu-{name}-{uuid.uuid4().hex[:8]}"
+
+        adapter_slot: list[FeishuAdapter | None] = [None]
+        client = WireClient(
+            transport=transport,
+            peer_name=peer_name,
+            token=token,
+            on_outbound=_make_outbound_handler(name, adapter_slot),
+        )
+
+        try:
+            await client.connect()
+        except AuthError as exc:
+            _err(
+                "auth-failed",
+                f"[{name}] gateway rejected handshake (code={exc.code!r})",
+                "verify --bind-allow-uid on the gateway",
+            )
+            for c in clients:
+                await c.close()
+            return EXIT_AUTH
+        except (FileNotFoundError, ConnectionRefusedError) as exc:
+            _err(
+                "connect-failed",
+                f"[{name}] cannot connect to {connect!r} "
+                f"({exc.__class__.__name__})",
+                "is the gateway running",
+            )
+            for c in clients:
+                await c.close()
+            return EXIT_CONNECT
+        except OSError as exc:
+            _err(
+                "connect-failed",
+                f"[{name}] cannot connect to {connect!r}: "
+                f"{exc.strerror or exc}",
+                "check the socket path",
+            )
+            for c in clients:
+                await c.close()
+            return EXIT_CONNECT
+
+        adapter = FeishuAdapter(client=client, config=cfg)
+        adapter_slot[0] = adapter
+        clients.append(client)
+        adapters.append(adapter)
+
+        tasks.append(
+            asyncio.create_task(adapter.start(), name=f"feishu-adapter-{name}")
+        )
+        tasks.append(
+            asyncio.create_task(
+                client.run_reconnecting(connect_first=False),
+                name=f"feishu-reconnect-{name}",
+            )
+        )
+
+    log.info(
+        "agentm-feishu: started %d bot(s): %s",
+        len(bot_configs),
+        ", ".join(n for n, _ in bot_configs),
+    )
+
+    stop_task = asyncio.create_task(stop_event.wait(), name="feishu-multi-stop")
+    all_tasks = [*tasks, stop_task]
+
+    try:
+        done, pending = await asyncio.wait(
+            all_tasks, return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in done:
+            if t is stop_task:
+                continue
+            task_exc = t.exception()
+            if task_exc is None:
+                continue
+            tname = t.get_name()
+            if isinstance(task_exc, AuthError):
+                _err(
+                    "auth-failed",
+                    f"[{tname}] gateway rejected reconnect (code={task_exc.code!r})",
+                    "verify credentials",
+                )
+                exit_code = EXIT_AUTH
+            else:
+                _err(
+                    "bot-error",
+                    f"[{tname}] {task_exc.__class__.__name__}: {task_exc}",
+                    "check bot config and Feishu app status",
+                )
+                exit_code = exit_code or EXIT_GENERIC
+            break
+        for t in pending:
+            t.cancel()
+    finally:
+        for adapter in adapters:
+            try:
+                await adapter.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("adapter.stop raised")
+        for client in clients:
+            await client.close()
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
 
     if sigint_seen:
         return EXIT_SIGINT
