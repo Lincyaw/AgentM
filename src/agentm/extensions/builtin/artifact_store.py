@@ -15,6 +15,8 @@ from typing import Any, Final
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.lib import to_jsonable
 from agentm.core.lib.artifact_files import (
+    ArtifactCreator,
+    ArtifactMetadata,
     artifacts_dir_for,
     find_metadata_files,
     list_artifacts_for_task,
@@ -294,9 +296,9 @@ class ArtifactStore:
         tags: list[str] | None = None,
         created_by_task: str | None = None,
         since: float | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[ArtifactMetadata]:
         metas = await asyncio.to_thread(self._scan_metadata)
-        filtered: list[dict[str, Any]] = []
+        filtered: list[ArtifactMetadata] = []
         for meta in metas:
             if kind is not None and str(meta.get("kind")) != kind:
                 continue
@@ -304,7 +306,7 @@ class ArtifactStore:
             if tags and not set(tags).issubset(set(meta_tags)):
                 continue
             raw_created_by = meta.get("created_by")
-            created_by: dict[str, Any]
+            created_by: ArtifactCreator
             if isinstance(raw_created_by, dict):
                 created_by = raw_created_by
             else:
@@ -334,7 +336,7 @@ class ArtifactStore:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def _scan_metadata(self) -> list[dict[str, Any]]:
+    def _scan_metadata(self) -> list[ArtifactMetadata]:
         return scan_artifact_metadata(self._ctx.artifacts_dir)
 
 
@@ -583,7 +585,7 @@ def _maybe_str(value: Any) -> str | None:
     return text or None
 
 
-def _file_size(meta: dict[str, Any]) -> int:
+def _file_size(meta: ArtifactMetadata) -> int:
     try:
         return Path(str(meta["path"])).stat().st_size
     except OSError:

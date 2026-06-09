@@ -9,9 +9,8 @@ and the convenience builders used by ``ExtensionAPI`` wiring.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
-from agentm.core.abi.catalog import CatalogService
+from agentm.core.abi.catalog import ActiveSetFingerprint, CatalogService, ManifestSnapshot
 from agentm.core.abi.project_layout import ProjectLayout
 
 
@@ -39,14 +38,14 @@ class _DefaultCatalogService:
 
     def get_manifest_at(
         self, name: str, version: str, root: Path | None = None
-    ) -> dict[str, Any]:
+    ) -> ManifestSnapshot:
         from agentm.core._internal.catalog import get_manifest_at as _impl
 
         return _impl(name, version, root)
 
     def runs_for(
         self,
-        fingerprint: dict[str, Any] | str,
+        fingerprint: ActiveSetFingerprint | str,
         root: Path | None = None,
     ) -> list[str]:
         from agentm.core._internal.catalog import runs_for as _impl
@@ -63,7 +62,7 @@ class _DefaultCatalogService:
         loaded: dict[str, str],
         scenario: str | None,
         core_hash: str | None,
-    ) -> dict[str, Any]:
+    ) -> ActiveSetFingerprint:
         from agentm.core._internal.catalog import (
             compute_active_set_fingerprint as _impl,
         )

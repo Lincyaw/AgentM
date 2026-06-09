@@ -11,9 +11,20 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 logger = logging.getLogger(__name__)
+
+
+class ModelBuildConfig(TypedDict, total=False):
+    model: str
+    base_url: str
+    api_key: str
+    name: str
+    context_window: int
+    max_output_tokens: int
+    reasoning_effort: str
+    extra_body: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -30,9 +41,9 @@ class ModelProfile:
     reasoning_effort: str | None = None
     extra_body: dict[str, Any] | None = None
 
-    def to_build_config(self) -> dict[str, Any]:
+    def to_build_config(self) -> ModelBuildConfig:
         """Build the config dict for ``ProviderRegistry.build()``."""
-        config: dict[str, Any] = {"model": self.model}
+        config: ModelBuildConfig = {"model": self.model}
         if self.base_url:
             config["base_url"] = self.base_url
         if self.api_key:
@@ -170,8 +181,8 @@ def resolve_model_profile(model_name: str | None) -> ModelProfile | None:
 
 
 def apply_reasoning_effort(
-    build_config: dict[str, Any], cli_flag: str | None
-) -> dict[str, Any]:
+    build_config: ModelBuildConfig, cli_flag: str | None
+) -> ModelBuildConfig:
     """Apply reasoning-effort precedence: CLI flag > env > config.toml profile.
 
     Mutates and returns *build_config*. When no effort is resolved, any value
