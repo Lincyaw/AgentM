@@ -14,8 +14,8 @@ are the detailed tools it points to.
 
 You run inside an **`agentm gateway`** process — a single-process host that
 holds chat sessions in memory. The Feishu/Lark client is a *separate*
-process that connects to the gateway over a Unix socket and relays
-messages. Both are systemd **user** units (not system units):
+process that connects to the gateway over WebSocket and relays messages.
+Both are systemd **user** units (not system units):
 
 | Unit | Process | Role |
 |------|---------|------|
@@ -155,6 +155,8 @@ Match the symptom to where the evidence is:
 | Bot silent / not replying / "down" | `systemctl --user status agentm-gateway agentm-feishu`, then `journalctl --user -u agentm-feishu -n 80 --no-pager` |
 | Replies slow / a tool hangs | long tools auto-move to the background (~120s); check `agentm trace tools --latest` for a background ticket |
 | Something broke right after an update | `journalctl --user -u agentm-gateway -n 120 --no-pager` for a crash/traceback at start |
+| New bot not responding | check `--check-config` (`agentm-feishu --check-config`), then `journalctl --user -u agentm-feishu` for "skipped" warnings (missing secret / app_id) |
+| Bot replies landing in wrong thread | verify `channel_name` is unique per bot in config.toml; check `workspace_root` is set if bots need isolated workspaces |
 
 Work from evidence to hypothesis to fix — in that order.
 
@@ -178,3 +180,26 @@ agentm gateway --cwd <workspace> --install-systemd
 Restarting or reinstalling **terminates the running gateway**, ending the
 current conversation — never do it casually mid-task. If the user asks you
 to update yourself, confirm first, and expect the session to drop.
+
+## Quick start: first-time multi-bot setup
+
+For a user setting up from scratch with two bots:
+
+```bash
+# 1. Copy the example config and edit credentials
+cp config.toml.example ~/.agentm/config.toml
+vim ~/.agentm/config.toml   # fill in app_id, app_secret, model keys
+
+# 2. Start the gateway (one process, workspace routing enabled)
+agentm gateway --bind ws://0.0.0.0:8765
+
+# 3. In another terminal, start the feishu peer (reads [feishu.bots] automatically)
+agentm-feishu --connect ws://127.0.0.1:8765 --verbose
+
+# 4. Validate config without connecting
+agentm-feishu --check-config
+```
+
+After this, @-mention each bot in a Feishu group. The gateway auto-creates
+`~/.agentm/workspaces/{channel_name}/` on the first message. Tell the bot
+its role through conversation — it writes `persona.md` in its own workspace.
