@@ -15,6 +15,7 @@ from agentm.core.abi.roles import (
     COMMAND_PARSER,
     COMPACTION_PROMPTS,
     LOOP_BUDGET_SERVICE,
+    MODEL_RESOLVER_SERVICE,
     PROMPT_REGISTRY,
     SESSION_STORE_SERVICE,
     SLASH_COMMAND_DISPATCHER_SERVICE,
@@ -159,6 +160,23 @@ async def create_agent_session(
     if SESSION_STORE_SERVICE not in services:
         from agentm.core.runtime.session_bootstrap import make_default_session_store
         services[SESSION_STORE_SERVICE] = make_default_session_store(config.cwd)
+
+    if MODEL_RESOLVER_SERVICE not in services:
+        def _resolve_model(model_name: str) -> tuple[str, dict[str, Any]] | None:
+            from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+            from agentm.core.lib.user_config import resolve_model_profile
+
+            profile = resolve_model_profile(model_name)
+            if profile is None:
+                return None
+            build_config = profile.to_build_config()
+            provider_id = profile.provider
+            try:
+                return DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
+            except KeyError:
+                return None
+
+        services[MODEL_RESOLVER_SERVICE] = _resolve_model
 
     active_provider_box: dict[str, ProviderConfig | None] = {"value": None}
     loop_box: dict[str, AgentLoop | None] = {"value": None}

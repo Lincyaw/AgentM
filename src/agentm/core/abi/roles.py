@@ -90,11 +90,20 @@ budget. Absent ⇒ the substrate falls back to ``LoopConfig()`` (no cap). An
 explicit caller override (CLI ``--max-turns`` / SDK ``loop_config=``) takes
 precedence over whatever the atom registered."""
 
+MODEL_RESOLVER_SERVICE: Final = "model_resolver"
+"""``service_registry`` key under which the session factory publishes a
+callable ``(model_name: str) -> tuple[str, dict[str, Any]] | None`` that
+resolves a ``config.toml`` profile name to a provider tuple suitable for
+``AgentSessionConfig.provider``.  Atoms that need model resolution (e.g.
+``workflow`` for its ``model=`` parameter) use this service instead of
+importing presenter-layer modules directly."""
+
 
 __all__ = [
     "COMMAND_PARSER",
     "COMPACTION_PROMPTS",
     "LOOP_BUDGET_SERVICE",
+    "MODEL_RESOLVER_SERVICE",
     "PARENT_PROVIDER_CONFIG_KEY",
     "PROMPT_REGISTRY",
     "PROVIDER_INHERITOR",
