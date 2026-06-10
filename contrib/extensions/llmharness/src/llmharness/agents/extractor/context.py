@@ -1,11 +1,4 @@
-"""Extractor context atom — self-contained child setup.
-
-Receives raw data from the parent via atom_config, creates the
-per-firing ExtractionState (with file-based op persistence),
-publishes it as a service for the tools atom, and injects the
-system prompt (template + directive). The parent only sends data;
-the child owns its state and prompt assembly.
-"""
+"""Extractor context atom — creates state and injects the system prompt."""
 
 from __future__ import annotations
 
@@ -17,7 +10,7 @@ from agentm.extensions import ExtensionManifest
 
 from llmharness.schema import Edge, Event
 
-from .state import ExtractionState
+from .tools import ExtractionState
 
 STATE_SERVICE_KEY: Final = "llmharness.extractor_state"
 
@@ -112,7 +105,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     )
     api.set_service(STATE_SERVICE_KEY, state)
 
-    prompt_text = config.get("prompt_text") or ""
+    from .prompt import load_extractor_prompt
+
+    prompt_name = config.get("prompt_name", "default")
+    prompt_text = config.get("prompt_text") or load_extractor_prompt(prompt_name)
     directive = _build_directive(next_event_id, len(recent_events), tool_call_budget)
 
     system = f"{prompt_text}\n\n{directive}" if prompt_text else directive

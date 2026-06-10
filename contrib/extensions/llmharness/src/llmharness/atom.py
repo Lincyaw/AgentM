@@ -1,17 +1,21 @@
 """§11 atom: two-phase cognitive audit (extractor + auditor).
 
-Hooks into an AgentM session via turn_end / decide_turn_action events.
-Uses primitives to build inputs, spawns agent children via the SDK's
-scenario-based interface, processes outputs, and injects reminders.
+Parent orchestrator — hooks turn_end / decide_turn_action, spawns
+extractor and auditor child sessions with raw data, reads back
+outputs, manages cumulative state, and injects reminders.
 """
 
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
+import copy
 import json
 import logging
 import time
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -31,30 +35,30 @@ from agentm.core.abi.messages import (
     UserMessage,
     text_message,
 )
+from agentm.core.abi.session import SessionEntry
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 
 from . import schema as _et
 from .agents import auditor_scenario, extractor_scenario
 from .agents.auditor.profiles import resolve_tools as _resolve_auditor_tools
-from .agents.auditor.prompt import load_auditor_prompt
-from .agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
-from .agents.extractor.prompt import load_extractor_prompt
-from .graph.ops import GraphOp, parse_op
-from .primitives import (
-    AuditorSettings,
-    CumulativeAuditState,
-    _render_message_text,
-    _serialize_message,
-    build_auditor_input,
-    process_auditor_output,
-    serialize_full_trajectory,
+from .agents.auditor.tools import (
+    SUBMIT_VERDICT_TOOL_NAME,
+    AuditorOutputError,
+    RawVerdictOutput,
 )
-from .schema import Reminder
+from .agents.extractor.tools import GraphOp, parse_op
+from .schema import Edge, Event, Phase, Reminder
 
 _log = logging.getLogger(__name__)
 
 REMINDER_PREAMBLE: Final = "[system reminder — automated review of your investigation so far]\n"
+
+_DEFAULT_RECENT_VERDICTS: Final[int] = _et.RECENT_VERDICTS_FOR_AUDITOR
+
+# ---------------------------------------------------------------------------
+# MANIFEST
+# ---------------------------------------------------------------------------
 
 MANIFEST = ExtensionManifest(
     name="llmharness",
@@ -99,7 +103,192 @@ MANIFEST = ExtensionManifest(
 
 
 # ---------------------------------------------------------------------------
-# Extractor data preparation
+# CumulativeAuditState
+# ---------------------------------------------------------------------------
+
+
+def _bool_safe_int(raw: Any) -> int | None:
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    return None
+
+
+@dataclass
+class CumulativeAuditState:
+    """Event-sourced graph state + auditor side-channel state across firings."""
+
+    ops: list[GraphOp] = field(default_factory=list)
+    cursor_last_turn_index: int = -1
+    recent_verdicts: collections.deque[dict[str, Any]] = field(
+        default_factory=lambda: collections.deque(maxlen=_DEFAULT_RECENT_VERDICTS)
+    )
+    last_continuation_notes: list[str] = field(default_factory=list)
+    firing_id_counter: int = 0
+    _cached_len: int = -1
+    _cached_view: tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]] | None = None
+    _phases: list[Phase] = field(default_factory=list)
+
+    def graph_view(self) -> tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]]:
+        if self._cached_view is not None and self._cached_len == len(self.ops):
+            return self._cached_view
+        from .agents.extractor.tools import fold_graph
+        folded = fold_graph(self.ops)
+        events = tuple(folded.nodes_list())
+        edges = tuple(folded.edges_list())
+        phases = tuple(self._phases)
+        self._cached_view = (events, edges, phases)
+        self._cached_len = len(self.ops)
+        return self._cached_view
+
+    def next_event_id(self) -> int:
+        events, _edges, _phases = self.graph_view()
+        return max((e.id for e in events), default=0) + 1
+
+    def _invalidate_cache(self) -> None:
+        self._cached_view = None
+        self._cached_len = -1
+
+    def absorb_extractor_firing(
+        self,
+        *,
+        firing_ops: Sequence[GraphOp],
+        firing_cursor: int,
+        firing_id: int,
+        firing_phases: Sequence[Phase] = (),
+    ) -> None:
+        self.ops.extend(firing_ops)
+        self.cursor_last_turn_index = firing_cursor
+        self._phases.extend(firing_phases)
+        if firing_id >= self.firing_id_counter:
+            self.firing_id_counter = firing_id + 1
+        self._invalidate_cache()
+
+    def absorb_auditor_verdict(self, verdict: dict[str, Any]) -> None:
+        self.recent_verdicts.append(verdict)
+        raw_notes = verdict.get("continuation_notes")
+        if isinstance(raw_notes, list):
+            self.last_continuation_notes = [n for n in raw_notes if isinstance(n, str)]
+
+    @classmethod
+    def fresh(cls) -> CumulativeAuditState:
+        return cls()
+
+    def snapshot(self) -> CumulativeAuditState:
+        return copy.deepcopy(self)
+
+    @classmethod
+    def hydrate_from_session_log(cls, branch: list[SessionEntry]) -> CumulativeAuditState:
+        ops: list[GraphOp] = []
+        verdicts_all: list[dict[str, Any]] = []
+        cursor_last_turn_index = -1
+        for entry in branch:
+            payload = entry.payload
+            if not isinstance(payload, dict):
+                continue
+            if entry.type == _et.AUDIT_GRAPH_OP:
+                try:
+                    ops.append(parse_op(payload))
+                except (KeyError, ValueError, TypeError):
+                    continue
+            elif entry.type == _et.VERDICT:
+                verdicts_all.append(payload)
+            elif entry.type == _et.EXTRACTOR_CURSOR:
+                raw = _bool_safe_int(payload.get("last_turn_index"))
+                if raw is not None:
+                    cursor_last_turn_index = raw
+        last_notes: list[str] = []
+        if verdicts_all:
+            raw_notes = verdicts_all[-1].get("continuation_notes")
+            if isinstance(raw_notes, list):
+                last_notes = [n for n in raw_notes if isinstance(n, str)]
+        recent: collections.deque[dict[str, Any]] = collections.deque(
+            maxlen=_DEFAULT_RECENT_VERDICTS
+        )
+        for v in verdicts_all[-_DEFAULT_RECENT_VERDICTS:]:
+            recent.append(v)
+        return cls(
+            ops=ops,
+            cursor_last_turn_index=cursor_last_turn_index,
+            recent_verdicts=recent,
+            last_continuation_notes=last_notes,
+            firing_id_counter=0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Message serialization
+# ---------------------------------------------------------------------------
+
+
+def _serialize_block(block: Any) -> dict[str, Any] | None:
+    text = getattr(block, "text", None)
+    if isinstance(text, str) and text:
+        block_type = getattr(block, "type", None)
+        return {
+            "type": block_type if isinstance(block_type, str) and block_type else "text",
+            "text": text,
+        }
+    name = getattr(block, "name", None)
+    arguments = getattr(block, "arguments", None)
+    if isinstance(name, str) and isinstance(arguments, dict):
+        return {"type": "tool_call", "id": getattr(block, "id", None), "name": name, "arguments": dict(arguments)}
+    tool_call_id = getattr(block, "tool_call_id", None)
+    inner_content = getattr(block, "content", None)
+    if isinstance(tool_call_id, str) and isinstance(inner_content, list):
+        inner_blocks: list[dict[str, Any]] = []
+        for inner in inner_content:
+            inner_text = getattr(inner, "text", None)
+            if isinstance(inner_text, str):
+                inner_blocks.append({"type": "text", "text": inner_text})
+            else:
+                inner_blocks.append({"type": getattr(inner, "type", inner.__class__.__name__), "repr": repr(inner)})
+        return {"type": "tool_result", "tool_call_id": tool_call_id, "content": inner_blocks, "is_error": bool(getattr(block, "is_error", False))}
+    return {"type": getattr(block, "type", block.__class__.__name__), "repr": repr(block)}
+
+
+def _render_message_text(msg: AgentMessage) -> str:
+    parts: list[str] = []
+    content = getattr(msg, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            text = getattr(block, "text", None)
+            if isinstance(text, str) and text:
+                parts.append(text)
+                continue
+            inner = getattr(block, "content", None)
+            if isinstance(inner, list):
+                for sub in inner:
+                    sub_text = getattr(sub, "text", None)
+                    if isinstance(sub_text, str) and sub_text:
+                        parts.append(sub_text)
+            args = getattr(block, "arguments", None)
+            if isinstance(args, dict):
+                with contextlib.suppress(TypeError, ValueError):
+                    parts.append(json.dumps(args, ensure_ascii=False, default=str))
+    return " ".join(parts)
+
+
+def _serialize_message(msg: AgentMessage, *, index: int) -> dict[str, Any] | None:
+    content = getattr(msg, "content", None)
+    if not isinstance(content, list):
+        return None
+    blocks = [b for b in (_serialize_block(blk) for blk in content) if b is not None]
+    if not blocks:
+        return None
+    return {"index": index, "role": getattr(msg, "role", "unknown"), "content": blocks}
+
+
+def serialize_full_trajectory(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for i, msg in enumerate(messages):
+        serialized = _serialize_message(msg, index=i)
+        if serialized is not None:
+            out.append(serialized)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Data preparation
 # ---------------------------------------------------------------------------
 
 
@@ -114,23 +303,19 @@ def _prepare_extractor_data(
     window_messages = messages[window_lo:]
     if not window_messages:
         return None
-
     events_cum, edges_cum, _ = cumulative.graph_view()
-
     turn_texts: dict[str, str] = {}
     for i, msg in enumerate(window_messages, start=window_lo):
         turn_texts[str(i)] = _render_message_text(msg)
     for t in {t for e in events_cum for t in e.source_turns}:
         if str(t) not in turn_texts and 0 <= t < len(messages):
             turn_texts[str(t)] = _render_message_text(messages[t])
-
     new_turns = [
         s for s in (
             _serialize_message(msg, index=i)
             for i, msg in enumerate(window_messages, start=window_lo)
         ) if s is not None
     ]
-
     return {
         "turn_texts": turn_texts,
         "recent_graph": [e.to_dict() for e in events_cum],
@@ -143,7 +328,6 @@ def _prepare_extractor_data(
 
 
 def _read_ops_file(path: Path) -> list[GraphOp]:
-    """Read persisted ops from the JSONL file the extractor tools wrote."""
     if not path.exists():
         return []
     ops: list[GraphOp] = []
@@ -173,11 +357,7 @@ async def _run_child(
     extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
     provider: tuple[str, dict[str, Any]] | None = None,
 ) -> list[AgentMessage] | None:
-    """Spawn a child agent session, drive to completion, return messages.
-
-    Returns None on any failure (spawn or prompt). Shutdown is always
-    executed via try/finally — no separate helper needed.
-    """
+    """Spawn a child agent session and return its messages, or None on failure."""
     config = AgentSessionConfig(
         cwd=api.cwd,
         provider=provider,
@@ -201,7 +381,6 @@ async def _run_child(
 def _terminal_tool_args(
     messages: list[AgentMessage], tool_name: str,
 ) -> dict[str, Any] | None:
-    """Extract the last call to ``tool_name`` from messages."""
     for msg in reversed(messages):
         if not isinstance(msg, AssistantMessage):
             continue
@@ -226,24 +405,14 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     shutdown_timeout = max(0.0, float(config.get("shutdown_timeout_s", 600.0)))
     enable_auditor = bool(config.get("enable_auditor", True))
     enable_reminders = bool(config.get("enable_reminders", True))
-
     summary_threshold = int(config.get("audit_summary_threshold", 30))
 
-    # Prompts
+    # Prompt names (children load prompts themselves; override passes raw text)
     ext_prompt_override = config.get("prompt_override_extractor")
-    aud_prompt_override = config.get("prompt_override_auditor")
-    extractor_prompt = (
-        ext_prompt_override
-        if isinstance(ext_prompt_override, str)
-        else load_extractor_prompt(config.get("extractor_prompt") or "default")
-    )
-    auditor_prompt = (
-        aud_prompt_override
-        if isinstance(aud_prompt_override, str)
-        else load_auditor_prompt(config.get("auditor_prompt") or "minimal")
-    )
+    extractor_prompt_name = config.get("extractor_prompt") or "default"
+    auditor_prompt_name = config.get("auditor_prompt") or "minimal"
 
-    # Auditor tools/profile
+    # Auditor tool profile
     auditor_tools = _resolve_auditor_tools(
         profile=config.get("auditor_profile") if isinstance(config.get("auditor_profile"), str) else None,
         tools=config.get("auditor_tools") if isinstance(config.get("auditor_tools"), list) else None,
@@ -252,40 +421,29 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # Tool call budget
     tcb_raw = config.get("extractor_tool_call_budget")
     tool_call_budget: int | None = (
-        int(tcb_raw)
-        if isinstance(tcb_raw, int) and not isinstance(tcb_raw, bool)
-        else None
+        int(tcb_raw) if isinstance(tcb_raw, int) and not isinstance(tcb_raw, bool) else None
     )
 
     # Providers
     extractor_provider = _parse_provider(config.get("extractor_provider"))
     auditor_provider = _parse_provider(config.get("auditor_provider"))
 
-    # Auditor settings (primitives version)
-    aud_settings = AuditorSettings(
-        base_prompt=auditor_prompt,
-        summary_threshold=summary_threshold,
-        tools=auditor_tools,
-    )
-
     # State
     cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
     pending_reminders: list[Reminder] = []
     turn_count = 0
 
-    # Agent scenarios
     ext_scenario = extractor_scenario()
     aud_scenario = auditor_scenario()
 
     # ------------------------------------------------------------------
-    # Core pipeline step — shared by sync and async paths
+    # Core pipeline step
     # ------------------------------------------------------------------
 
     async def _step(messages: list[AgentMessage], tc: int) -> None:
         nonlocal turn_count
         turn_count = tc
 
-        # Cadence
         auditor_due = enable_auditor and (tc % auditor_k) == 0
         extractor_due = (tc % extractor_k) == 0 or auditor_due
 
@@ -304,8 +462,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     ])
 
                 ctx_config = dict(data)
-                ctx_config["prompt_text"] = extractor_prompt
                 ctx_config["ops_file"] = str(ops_path)
+                ctx_config["prompt_name"] = extractor_prompt_name
+                if isinstance(ext_prompt_override, str):
+                    ctx_config["prompt_text"] = ext_prompt_override
 
                 child_msgs = await _run_child(
                     api,
@@ -334,33 +494,50 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 
         # --- Auditor ---
         if auditor_due:
+            events, edges, phases = cumulative.graph_view()
             trajectory = serialize_full_trajectory(list(messages))
-            ai = build_auditor_input(
-                cumulative, aud_settings,
-                trajectory_snapshot=trajectory,
-            )
+
             child_msgs = await _run_child(
                 api,
                 scenario=aud_scenario,
                 prompt=json.dumps({
-                    "graph": [e.to_dict() for e in (cumulative.graph_view()[0])],
+                    "graph": [e.to_dict() for e in events],
                     "recent_verdicts": list(cumulative.recent_verdicts),
                     "continuation_notes_from_prior_firing": list(cumulative.last_continuation_notes),
                 }, ensure_ascii=False, default=str),
                 purpose="cognitive_audit_auditor",
                 atom_config_overrides={
-                    "auditor_tools": ai.tools_config,
-                    "system_prompt": {"prompt": ai.prompt_text},
+                    "auditor_context": {
+                        "events": [e.to_dict() for e in events],
+                        "edges": [ed.to_dict() for ed in edges],
+                        "phases": [p.to_dict() for p in phases],
+                        "continuation_notes": list(cumulative.last_continuation_notes),
+                        "summary_threshold": summary_threshold,
+                        "prompt_name": auditor_prompt_name,
+                        "trajectory_snapshot": trajectory,
+                    },
+                    "auditor_tools": {
+                        "tools": list(auditor_tools),
+                        "trajectory_snapshot": trajectory,
+                        "events": [e.to_dict() for e in events],
+                        "edges": [ed.to_dict() for ed in edges],
+                    },
                 },
                 provider=auditor_provider,
             )
             if child_msgs is not None:
                 args = _terminal_tool_args(child_msgs, SUBMIT_VERDICT_TOOL_NAME)
-                out = process_auditor_output(args, cumulative)
-                if out.verdict is not None:
-                    api.session.append_entry(_et.VERDICT, out.verdict.to_dict())
-                    if out.verdict.surface_reminder and out.verdict.reminder_text:
-                        pending_reminders.append(Reminder(text=out.verdict.reminder_text))
+                if args is not None:
+                    try:
+                        raw = RawVerdictOutput.from_dict(args)
+                        verdict = raw.to_verdict()
+                    except AuditorOutputError:
+                        _log.warning("auditor output malformed")
+                    else:
+                        cumulative.absorb_auditor_verdict(verdict.to_dict())
+                        api.session.append_entry(_et.VERDICT, verdict.to_dict())
+                        if verdict.surface_reminder and verdict.reminder_text:
+                            pending_reminders.append(Reminder(text=verdict.reminder_text))
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -374,7 +551,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return None
         default = event.observation.default_action
         if isinstance(default, Stop) and default.cause.final:
-            _log.warning("reminder pending but loop is final-stopped; not delivered")
             return None
         injected: list[AgentMessage] = []
         while pending_reminders:

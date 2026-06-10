@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from llmharness.agents.auditor.output import AuditorOutputError, RawVerdictOutput
+from llmharness.agents.auditor.tools import AuditorOutputError, RawVerdictOutput
 
 # --- RawVerdictOutput negative cases ---
 

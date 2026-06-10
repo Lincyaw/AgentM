@@ -15,7 +15,7 @@ See ``_compute_degree_warning`` and
 
 from __future__ import annotations
 
-from llmharness.agents.extractor.state import (
+from llmharness.agents.extractor.tools import (
     ExtractionState,
     _compute_degree_warning,
 )

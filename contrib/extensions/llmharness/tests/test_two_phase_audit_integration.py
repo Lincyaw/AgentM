@@ -55,8 +55,8 @@ from agentm.core.abi.extension import ProviderConfig
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 
-from llmharness.agents.auditor.auditor_tools import SUBMIT_VERDICT_TOOL_NAME
-from llmharness.agents.extractor.tools.finalize_extraction import FINALIZE_EXTRACTION_TOOL_NAME
+from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
+from llmharness.agents.extractor.tools import FINALIZE_EXTRACTION_TOOL_NAME
 from llmharness.schema import (
     AUDIT_GRAPH_OP,
     EXTRACTOR_CURSOR,
