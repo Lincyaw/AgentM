@@ -73,7 +73,7 @@ from agentm.core.runtime.session_inbox import (
     SessionInbox,
     render_item,
 )
-from agentm.core.runtime.session_runtime import SessionRuntime
+from agentm.core.runtime.session_factory import SessionRuntime
 from agentm.core.runtime.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)

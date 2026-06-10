@@ -6,6 +6,7 @@ import inspect
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -55,9 +56,27 @@ from agentm.core.runtime.session_helpers import (
 )
 from agentm.core.runtime.session_inbox import SessionInbox
 from agentm.core.runtime.session_manager import InMemorySessionManager, SessionManager
-from agentm.core.runtime.session_runtime import SessionRuntime
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class SessionRuntime:
+    """Session-scoped runtime bundle passed into ``AgentSession.__init__``."""
+
+    bus: EventBus
+    session_manager: SessionManager
+    resource_loader: ResourceLoader
+    loop: AgentLoop
+    active_provider_ref: Ref[ProviderConfig | None]
+    tools: list[Tool]
+    commands: dict[str, CommandSpec]
+    providers: dict[str, ProviderConfig]
+    renderers: dict[str, Renderer]
+    apis: dict[str, _ExtensionAPIImpl]
+    services: dict[str, Any]
+    reloader: AtomReloader
+    inbox: SessionInbox
 
 
 def default_child_provider_factory(parent_provider: Any) -> tuple[str, dict[str, Any]]:
