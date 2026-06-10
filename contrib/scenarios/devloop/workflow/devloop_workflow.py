@@ -308,17 +308,24 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
     }
 
     skills_dir = str(_PROJECT_ROOT / "skills")
+    agents_dir = str(_PROJECT_ROOT / "agents")
     await ctx.agent(
         f"A devloop workflow just completed. Analyze the result and "
-        f"decide whether to create or update skills.\n\n"
+        f"improve the workflow's capabilities for future runs.\n\n"
         f"## Result\n```json\n{json.dumps(result_summary, indent=2)}\n```\n\n"
-        f"## Skills directory\n{skills_dir}\n\n"
-        f"Read the skills directory to see existing skills. "
-        f"If the workflow struggled or failed, diagnose why and write "
-        f"a skill to prevent the same issue next time. If it succeeded "
-        f"cleanly, note any inefficiencies you see from the result.\n\n"
-        f"Keep skills focused (one concept each, under 60 lines). "
-        f"Do not create a skill if the existing ones already cover the issue.",
+        f"## Project layout\n"
+        f"- Skills: {skills_dir} (SKILL.md files, loaded by agents)\n"
+        f"- Agents: {agents_dir} (manifest.yaml + local atoms)\n"
+        f"- Prompts: {_PROJECT_ROOT}/workflow/prompts.py\n\n"
+        f"## What you can do\n"
+        f"- Edit existing skills to refine guidance based on what you observed\n"
+        f"- Create new skills for knowledge gaps that caused failures\n"
+        f"- Delete skills that are stale or unhelpful\n"
+        f"- Edit prompts if the issue is in task formulation, not knowledge\n"
+        f"- Create a new tool atom (single .py file with MANIFEST + install) "
+        f"if agents repeatedly do manual work that should be automated\n\n"
+        f"Decide what to do based on what you see. Do nothing if "
+        f"the existing setup is adequate.",
         scenario=SUPERVISOR,
         tool_allowlist=["read", "write", "edit", "glob", "grep", "bash"],
         extra_extensions=SUPERVISE_BUDGET,
