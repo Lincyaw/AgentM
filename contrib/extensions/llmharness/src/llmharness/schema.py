@@ -303,7 +303,38 @@ class Phase:
         )
 
 
+# ---------------------------------------------------------------------------
+# Entry-type constants for session entries
+# ---------------------------------------------------------------------------
+
+AUDIT_GRAPH_OP = "llmharness.audit_graph_op"
+VERDICT = "llmharness.verdict"
+EXTRACTOR_CURSOR = "llmharness.extractor_cursor"
+REMINDER_DELIVERED = "llmharness.reminder_delivered"
+
+EXTRACTOR_NO_CALL = "llmharness.extractor_no_call"
+EXTRACTOR_ERROR = "llmharness.extractor_error"
+EXTRACTOR_EMPTY = "llmharness.extractor_empty"
+EXTRACTOR_PARTIAL = "llmharness.extractor_partial"
+AUDIT_NO_CALL = "llmharness.audit_no_call"
+AUDIT_ERROR = "llmharness.audit_error"
+
+MESSAGE = "message"
+
+RECENT_VERDICTS_FOR_AUDITOR = 5
+
 __all__ = [
+    "AUDIT_ERROR",
+    "AUDIT_GRAPH_OP",
+    "AUDIT_NO_CALL",
+    "EXTRACTOR_CURSOR",
+    "EXTRACTOR_EMPTY",
+    "EXTRACTOR_ERROR",
+    "EXTRACTOR_NO_CALL",
+    "EXTRACTOR_PARTIAL",
+    "MESSAGE",
+    "RECENT_VERDICTS_FOR_AUDITOR",
+    "VERDICT",
     "Edge",
     "EdgeKind",
     "Event",

@@ -12,7 +12,7 @@ import contextlib
 import json
 import logging
 import time
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 
 from agentm.core.abi import (
@@ -24,31 +24,33 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.messages import AgentMessage, UserMessage, text_message
+from agentm.core.abi.messages import (
+    AgentMessage,
+    AssistantMessage,
+    ToolCallBlock,
+    UserMessage,
+    text_message,
+)
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 
-from . import entry_types as _et
+from . import schema as _et
 from .agents import auditor_scenario, extractor_scenario
 from .agents.auditor.profiles import resolve_tools as _resolve_auditor_tools
 from .agents.auditor.prompt import load_auditor_prompt
 from .agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
-from .agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
 from .agents.extractor.prompt import load_extractor_prompt
+from .graph.ops import GraphOp, parse_op
 from .primitives import (
     AuditorSettings,
     CumulativeAuditState,
+    _render_message_text,
+    _serialize_message,
     build_auditor_input,
-    build_extractor_input,
     process_auditor_output,
-    process_extractor_output,
     serialize_full_trajectory,
 )
-from .registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
-from .registry import AuditCheckRegistry, CheckContext
 from .schema import Reminder
-from .triggers import SERVICE_KEY as TRIGGER_SERVICE_KEY
-from .triggers import TriggerContext, TriggerRegistry, tool_names_from_message
 
 _log = logging.getLogger(__name__)
 
@@ -97,6 +99,66 @@ MANIFEST = ExtensionManifest(
 
 
 # ---------------------------------------------------------------------------
+# Extractor data preparation
+# ---------------------------------------------------------------------------
+
+
+def _prepare_extractor_data(
+    messages: list[AgentMessage],
+    cumulative: CumulativeAuditState,
+    tool_call_budget: int | None,
+) -> dict[str, Any] | None:
+    """Prepare raw data for the extractor child. Returns None if window is empty."""
+    window_lo = max(cumulative.cursor_last_turn_index + 1, 0)
+    window_hi = len(messages) - 1
+    window_messages = messages[window_lo:]
+    if not window_messages:
+        return None
+
+    events_cum, edges_cum, _ = cumulative.graph_view()
+
+    turn_texts: dict[str, str] = {}
+    for i, msg in enumerate(window_messages, start=window_lo):
+        turn_texts[str(i)] = _render_message_text(msg)
+    for t in {t for e in events_cum for t in e.source_turns}:
+        if str(t) not in turn_texts and 0 <= t < len(messages):
+            turn_texts[str(t)] = _render_message_text(messages[t])
+
+    new_turns = [
+        s for s in (
+            _serialize_message(msg, index=i)
+            for i, msg in enumerate(window_messages, start=window_lo)
+        ) if s is not None
+    ]
+
+    return {
+        "turn_texts": turn_texts,
+        "recent_graph": [e.to_dict() for e in events_cum],
+        "recent_edges": [ed.to_dict() for ed in edges_cum],
+        "next_event_id": cumulative.next_event_id(),
+        "new_turns": new_turns,
+        "tool_call_budget": tool_call_budget,
+        "window_hi": window_hi,
+    }
+
+
+def _read_ops_file(path: Path) -> list[GraphOp]:
+    """Read persisted ops from the JSONL file the extractor tools wrote."""
+    if not path.exists():
+        return []
+    ops: list[GraphOp] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ops.append(parse_op(json.loads(line)))
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            _log.warning("skipping malformed op line in %s", path)
+    return ops
+
+
+# ---------------------------------------------------------------------------
 # Child session helper
 # ---------------------------------------------------------------------------
 
@@ -110,8 +172,12 @@ async def _run_child(
     atom_config_overrides: dict[str, dict[str, Any]] | None = None,
     extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
     provider: tuple[str, dict[str, Any]] | None = None,
-    terminal_tool: str | None = None,
-) -> _ChildResult:
+) -> list[AgentMessage] | None:
+    """Spawn a child agent session, drive to completion, return messages.
+
+    Returns None on any failure (spawn or prompt). Shutdown is always
+    executed via try/finally — no separate helper needed.
+    """
     config = AgentSessionConfig(
         cwd=api.cwd,
         provider=provider,
@@ -120,54 +186,29 @@ async def _run_child(
         atom_config_overrides=atom_config_overrides or {},
         purpose=purpose,
     )
-    t0 = time.monotonic()
     try:
         child = await api.spawn_child_session(config)
-    except Exception as exc:
-        return _ChildResult(error=str(exc))
-
-    try:
-        messages = await child.prompt(prompt)
-    except Exception as exc:
-        await _safe_shutdown(child)
-        return _ChildResult(error=str(exc))
-
-    if terminal_tool is not None:
-        from .child_collect import nudge_until_tool_call, terminal_tool_arguments
-
-        messages = await nudge_until_tool_call(child.prompt, messages, terminal_tool)
-        await _safe_shutdown(child)
-        args = terminal_tool_arguments(messages, terminal_tool)
-        return _ChildResult(
-            terminal_called=args is not None,
-            terminal_args=args,
-            messages=messages,
-            latency_ms=int((time.monotonic() - t0) * 1000),
-        )
-
-    await _safe_shutdown(child)
-    return _ChildResult(
-        messages=messages,
-        latency_ms=int((time.monotonic() - t0) * 1000),
-    )
-
-
-@dataclass
-class _ChildResult:
-    messages: list[AgentMessage] | None = None
-    terminal_called: bool = False
-    terminal_args: dict[str, Any] | None = None
-    error: str | None = None
-    latency_ms: int = 0
-
-
-async def _safe_shutdown(session: Any) -> None:
-    try:
-        shutdown = getattr(session, "shutdown", None)
-        if shutdown is not None:
-            await shutdown()
+        try:
+            return await child.prompt(prompt)
+        finally:
+            with contextlib.suppress(Exception):
+                await child.shutdown()
     except Exception:
-        pass
+        _log.exception("child session failed (purpose=%s)", purpose)
+        return None
+
+
+def _terminal_tool_args(
+    messages: list[AgentMessage], tool_name: str,
+) -> dict[str, Any] | None:
+    """Extract the last call to ``tool_name`` from messages."""
+    for msg in reversed(messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in reversed(msg.content):
+            if isinstance(block, ToolCallBlock) and block.name == tool_name:
+                return dict(block.arguments)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -227,13 +268,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         tools=auditor_tools,
     )
 
-    # Registries
-    with contextlib.suppress(KeyError):
-        api.set_service(AUDIT_REGISTRY_SERVICE_KEY, AuditCheckRegistry())
-    trigger_registry = TriggerRegistry()
-    with contextlib.suppress(KeyError):
-        api.set_service(TRIGGER_SERVICE_KEY, trigger_registry)
-
     # State
     cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
     pending_reminders: list[Reminder] = []
@@ -247,32 +281,21 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     # Core pipeline step — shared by sync and async paths
     # ------------------------------------------------------------------
 
-    async def _step(messages: list[AgentMessage], tc: int, tool_names: frozenset[str]) -> None:
+    async def _step(messages: list[AgentMessage], tc: int) -> None:
         nonlocal turn_count
         turn_count = tc
 
         # Cadence
-        if trigger_registry:
-            ctx = TriggerContext(turn_count=tc, tool_names_called=tool_names)
-            auditor_due_raw, extractor_due_raw = trigger_registry.evaluate(ctx)
-            auditor_due = enable_auditor and auditor_due_raw
-            extractor_due = extractor_due_raw or auditor_due
-        else:
-            auditor_due = enable_auditor and (tc % auditor_k) == 0
-            extractor_due = (tc % extractor_k) == 0 or auditor_due
+        auditor_due = enable_auditor and (tc % auditor_k) == 0
+        extractor_due = (tc % extractor_k) == 0 or auditor_due
 
         # --- Extractor ---
         if extractor_due:
-            inp = build_extractor_input(
-                list(messages), cumulative,
-                prompt_text=extractor_prompt,
-                tool_call_budget=tool_call_budget,
-            )
-            if inp is not None:
-                overrides = {
-                    "extractor_tools": {"state": inp.state},
-                    "system_prompt": {"prompt": extractor_prompt},
-                }
+            data = _prepare_extractor_data(messages, cumulative, tool_call_budget)
+            if data is not None:
+                firing_id = cumulative.firing_id_counter
+                ops_path = Path(api.cwd) / ".agentm" / "audit_ops" / f"{firing_id}.jsonl"
+
                 extra: list[tuple[str, dict[str, Any]]] = []
                 if tool_call_budget is not None:
                     extra.extend([
@@ -280,56 +303,43 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                         ("agentm.extensions.builtin.turn_reminder", {"warn_within": tool_call_budget}),
                     ])
 
-                result = await _run_child(
+                ctx_config = dict(data)
+                ctx_config["prompt_text"] = extractor_prompt
+                ctx_config["ops_file"] = str(ops_path)
+
+                child_msgs = await _run_child(
                     api,
                     scenario=ext_scenario,
-                    prompt=inp.prompt,
+                    prompt=json.dumps(data, ensure_ascii=False, default=str),
                     purpose="cognitive_audit_extractor",
-                    atom_config_overrides=overrides,
+                    atom_config_overrides={"extractor_context": ctx_config},
                     extra_extensions=extra,
                     provider=extractor_provider,
-                    terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
                 )
-                if result.error is None:
-                    output = process_extractor_output(
-                        inp.state, cumulative,
-                        terminator_called=result.terminal_called,
-                        window=inp.turn_window,
+                if child_msgs is not None:
+                    ops = _read_ops_file(ops_path)
+                    for op in ops:
+                        d = op.to_dict()
+                        d["firing_id"] = firing_id
+                        api.session.append_entry(_et.AUDIT_GRAPH_OP, d)
+                    cumulative.absorb_extractor_firing(
+                        firing_ops=ops,
+                        firing_cursor=data["window_hi"],
+                        firing_id=firing_id,
                     )
-                    for op in output.ops:
-                        payload = op.to_dict()
-                        payload["firing_id"] = cumulative.firing_id_counter - 1
-                        api.session.append_entry(_et.AUDIT_GRAPH_OP, payload)
                     api.session.append_entry(
                         _et.EXTRACTOR_CURSOR,
-                        {"last_turn_index": inp.turn_window[1]},
+                        {"last_turn_index": data["window_hi"]},
                     )
 
         # --- Auditor ---
         if auditor_due:
-            # Run checks
-            findings, check_errors = [], {}
-            registry = _get_registry(api)
-            if registry is not None:
-                try:
-                    events, edges, _ = cumulative.graph_view()
-                    ctx = CheckContext(events=events, edges=edges)
-                    findings, check_errors = registry.run_all(ctx)
-                except Exception:
-                    _log.exception("audit-check run_all failed")
-
             trajectory = serialize_full_trajectory(list(messages))
             ai = build_auditor_input(
                 cumulative, aud_settings,
                 trajectory_snapshot=trajectory,
-                findings=findings,
-                check_errors=check_errors,
             )
-            overrides = {
-                "auditor_tools": ai.tools_config,
-                "system_prompt": {"prompt": ai.prompt_text},
-            }
-            result = await _run_child(
+            child_msgs = await _run_child(
                 api,
                 scenario=aud_scenario,
                 prompt=json.dumps({
@@ -338,12 +348,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     "continuation_notes_from_prior_firing": list(cumulative.last_continuation_notes),
                 }, ensure_ascii=False, default=str),
                 purpose="cognitive_audit_auditor",
-                atom_config_overrides=overrides,
+                atom_config_overrides={
+                    "auditor_tools": ai.tools_config,
+                    "system_prompt": {"prompt": ai.prompt_text},
+                },
                 provider=auditor_provider,
-                terminal_tool=SUBMIT_VERDICT_TOOL_NAME,
             )
-            if result.error is None:
-                out = process_auditor_output(result.terminal_args, cumulative)
+            if child_msgs is not None:
+                args = _terminal_tool_args(child_msgs, SUBMIT_VERDICT_TOOL_NAME)
+                out = process_auditor_output(args, cumulative)
                 if out.verdict is not None:
                     api.session.append_entry(_et.VERDICT, out.verdict.to_dict())
                     if out.verdict.surface_reminder and out.verdict.reminder_text:
@@ -377,7 +390,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         async def _on_turn_end_sync(event: TurnEndEvent) -> None:
             nonlocal turn_count
             turn_count += 1
-            await _step(list(event.messages), turn_count, tool_names_from_message(event.message))
+            await _step(list(event.messages), turn_count)
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
         if enable_reminders:
@@ -385,7 +398,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         return
 
     # --- Async path ---
-    queue: asyncio.Queue[tuple[list[AgentMessage], int, frozenset[str]] | None] = asyncio.Queue()
+    queue: asyncio.Queue[tuple[list[AgentMessage], int] | None] = asyncio.Queue()
     worker_task: asyncio.Task[None] | None = None
 
     async def _worker() -> None:
@@ -394,8 +407,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             try:
                 if job is None:
                     return
-                msgs, tc, tools = job
-                await _step(msgs, tc, tools)
+                msgs, tc = job
+                await _step(msgs, tc)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -411,16 +424,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     def _on_turn_end(event: TurnEndEvent) -> None:
         nonlocal turn_count
         turn_count += 1
-        if trigger_registry:
-            enqueue = True
-        else:
-            auditor_due = enable_auditor and (turn_count % auditor_k) == 0
-            extractor_due = (turn_count % extractor_k) == 0 or auditor_due
-            enqueue = extractor_due or auditor_due
-        if not enqueue:
+        auditor_due = enable_auditor and (turn_count % auditor_k) == 0
+        extractor_due = (turn_count % extractor_k) == 0 or auditor_due
+        if not (extractor_due or auditor_due):
             return
         _ensure_worker()
-        queue.put_nowait((list(event.messages), turn_count, tool_names_from_message(event.message)))
+        queue.put_nowait((list(event.messages), turn_count))
 
     async def _on_shutdown(_event: SessionShutdownEvent) -> None:
         if worker_task is None or worker_task.done():
@@ -440,14 +449,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     if enable_reminders:
         api.on(DecideTurnActionEvent.CHANNEL, _on_decide)
     api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)
-
-
-def _get_registry(api: ExtensionAPI) -> AuditCheckRegistry | None:
-    try:
-        r = api.get_service(AUDIT_REGISTRY_SERVICE_KEY)
-    except Exception:
-        return None
-    return r if isinstance(r, AuditCheckRegistry) else None
 
 
 def _parse_provider(raw: Any) -> tuple[str, dict[str, Any]] | None:

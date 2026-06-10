@@ -1,19 +1,9 @@
-"""Composable building blocks for the cognitive-audit pipeline.
+"""Shared building blocks for the cognitive-audit pipeline.
 
-Every use case — live adapter, offline replay, chain replay, fork tree,
-distill — is a different composition of these primitives:
-
-* :func:`build_extractor_input` — trajectory + cumulative state → payload + ExtractionState
-* :func:`process_extractor_output` — fired state → ops, update cumulative
+* :class:`CumulativeAuditState` — event-sourced graph state across firings
 * :func:`build_auditor_input` — cumulative state → prompt + tools config
 * :func:`process_auditor_output` — raw terminal-tool args → Verdict
-* :class:`CumulativeAuditState` — event-sourced graph state across firings
-
-Agent invocation (``run_child_task`` / ``run_phase_standalone``) is
-intentionally NOT a primitive here — it lives in ``runtime/`` because it
-couples to AgentM session construction. These primitives are pure
-input-building and output-processing; the "how to run the agent" decision
-belongs to the caller.
+* Message serialization helpers used by atom.py for data preparation
 """
 
 from __future__ import annotations
@@ -26,10 +16,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolResultMessage
+from agentm.core.abi.messages import AgentMessage, AssistantMessage
 from agentm.core.abi.session import SessionEntry
 
-from . import entry_types as _et
+from . import schema as _et
 from .agents.auditor.output import AuditorOutputError, RawVerdictOutput
 from .agents.auditor.profiles import (
     TOOL_GET_EVENT_DETAIL,
@@ -41,40 +31,15 @@ from .agents.auditor.prompt import (
     build_auditor_trajectory_prompt,
     load_auditor_prompt,
 )
-from .agents.extractor.output import RawExtractorOutput
-from .agents.extractor.state import ExtractionState
 from .graph.ops import GraphOp, parse_op
-from .graph.phase import merge_to_phases
 from .schema import Edge, Event, Finding, Phase, Verdict
 
 _DEFAULT_RECENT_VERDICTS: Final[int] = _et.RECENT_VERDICTS_FOR_AUDITOR
 
 
 # ---------------------------------------------------------------------------
-# Input/output data containers
+# Data containers
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ExtractorInput:
-    """Everything needed to fire one extractor agent invocation."""
-
-    state: ExtractionState
-    prompt: str
-    payload: dict[str, Any]
-    turn_window: tuple[int, int]
-    tool_call_budget: int | None = None
-
-
-@dataclass(frozen=True)
-class ExtractorOutput:
-    """Result of processing one extractor firing."""
-
-    ops: list[GraphOp]
-    raw: RawExtractorOutput
-    phases: list[Phase]
-    ok: bool
-    terminator_called: bool = True
 
 
 @dataclass(frozen=True)
@@ -93,6 +58,19 @@ class AuditorOutput:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class AuditorSettings:
+    """Knobs for assembling an auditor firing."""
+
+    base_prompt: str
+    summary_threshold: int = 30
+    tools: tuple[str, ...] = (TOOL_SUBMIT_VERDICT,)
+
+    @classmethod
+    def default(cls) -> AuditorSettings:
+        return cls(base_prompt=load_auditor_prompt("minimal"))
+
+
 # ---------------------------------------------------------------------------
 # CumulativeAuditState
 # ---------------------------------------------------------------------------
@@ -106,11 +84,7 @@ def _bool_safe_int(raw: Any) -> int | None:
 
 @dataclass
 class CumulativeAuditState:
-    """Event-sourced graph state + auditor side-channel state.
-
-    Single source of truth for the cumulative view: ops accumulate across
-    firings; :meth:`graph_view` folds them on demand.
-    """
+    """Event-sourced graph state + auditor side-channel state."""
 
     ops: list[GraphOp] = field(default_factory=list)
     cursor_last_turn_index: int = -1
@@ -217,8 +191,69 @@ class CumulativeAuditState:
 
 
 # ---------------------------------------------------------------------------
-# Helpers (message rendering)
+# Message serialization helpers
 # ---------------------------------------------------------------------------
+
+
+def serialize_block(block: Any) -> dict[str, Any] | None:
+    """Serialize one content block into a dict."""
+    text = getattr(block, "text", None)
+    if isinstance(text, str) and text:
+        block_type = getattr(block, "type", None)
+        return {
+            "type": block_type if isinstance(block_type, str) and block_type else "text",
+            "text": text,
+        }
+
+    name = getattr(block, "name", None)
+    arguments = getattr(block, "arguments", None)
+    if isinstance(name, str) and isinstance(arguments, dict):
+        return {
+            "type": "tool_call",
+            "id": getattr(block, "id", None),
+            "name": name,
+            "arguments": dict(arguments),
+        }
+
+    tool_call_id = getattr(block, "tool_call_id", None)
+    inner_content = getattr(block, "content", None)
+    if isinstance(tool_call_id, str) and isinstance(inner_content, list):
+        inner_blocks: list[dict[str, Any]] = []
+        for inner in inner_content:
+            inner_text = getattr(inner, "text", None)
+            if isinstance(inner_text, str):
+                inner_blocks.append({"type": "text", "text": inner_text})
+            else:
+                inner_blocks.append(
+                    {
+                        "type": getattr(inner, "type", inner.__class__.__name__),
+                        "repr": repr(inner),
+                    }
+                )
+        return {
+            "type": "tool_result",
+            "tool_call_id": tool_call_id,
+            "content": inner_blocks,
+            "is_error": bool(getattr(block, "is_error", False)),
+        }
+
+    return {"type": getattr(block, "type", block.__class__.__name__), "repr": repr(block)}
+
+
+def flatten_assistant_blocks(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+    """Flatten every assistant message's content blocks into dicts."""
+    blocks: list[dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        content = getattr(msg, "content", None)
+        if not isinstance(content, list):
+            continue
+        for blk in content:
+            serialized = serialize_block(blk)
+            if serialized is not None:
+                blocks.append(serialized)
+    return blocks
 
 
 def _render_message_text(msg: AgentMessage) -> str:
@@ -244,8 +279,6 @@ def _render_message_text(msg: AgentMessage) -> str:
 
 
 def _serialize_message(msg: AgentMessage, *, index: int) -> dict[str, Any] | None:
-    from .child_collect import serialize_block
-
     content = getattr(msg, "content", None)
     if not isinstance(content, list):
         return None
@@ -264,149 +297,9 @@ def serialize_full_trajectory(messages: list[AgentMessage]) -> list[dict[str, An
     return out
 
 
-def window_is_non_trivial(messages_slice: list[AgentMessage]) -> bool:
-    return any(isinstance(msg, (AssistantMessage, ToolResultMessage)) for msg in messages_slice)
-
-
 # ---------------------------------------------------------------------------
-# Primitive 1: build_extractor_input
+# Auditor primitives
 # ---------------------------------------------------------------------------
-
-
-def build_extractor_input(
-    messages: list[AgentMessage],
-    cumulative: CumulativeAuditState,
-    *,
-    prompt_text: str,
-    tool_call_budget: int | None = None,
-) -> ExtractorInput | None:
-    """Build the per-firing input for the extractor agent.
-
-    Returns ``None`` if the trajectory window is empty.
-    """
-    from .agents.directive import build_extractor_directive
-
-    window_lo = max(cumulative.cursor_last_turn_index + 1, 0)
-    window_hi = len(messages) - 1
-    window_messages = messages[window_lo:]
-    if not window_messages:
-        return None
-
-    events_cum, edges_cum, _ = cumulative.graph_view()
-
-    state = ExtractionState()
-    for i, msg in enumerate(window_messages, start=window_lo):
-        state.turn_texts[i] = _render_message_text(msg)
-
-    referenced_turns: set[int] = {t for e in events_cum for t in e.source_turns}
-    for t in referenced_turns:
-        if t in state.turn_texts:
-            continue
-        if 0 <= t < len(messages):
-            state.turn_texts[t] = _render_message_text(messages[t])
-    state.recent_graph = events_cum
-    state.recent_graph_dict = {e.id: e for e in events_cum}
-    state.recent_edges_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in edges_cum}
-    state._refold()
-    state.next_event_id = cumulative.next_event_id()
-
-    new_turn_window = [
-        s for s in (
-            _serialize_message(msg, index=i)
-            for i, msg in enumerate(window_messages, start=window_lo)
-        ) if s is not None
-    ]
-
-    recent_graph_payload: list[dict[str, Any]] = []
-    for e in events_cum:
-        entry = e.to_dict()
-        entry["source_turn_texts"] = [
-            state.turn_texts.get(t, "") if t >= window_lo else ""
-            for t in e.source_turns
-        ]
-        recent_graph_payload.append(entry)
-
-    payload: dict[str, Any] = {
-        "next_event_id": state.next_event_id,
-        "new_turns": new_turn_window,
-        "graph": {
-            "nodes": recent_graph_payload,
-            "edges": [ed.to_dict() for ed in edges_cum],
-        },
-        "recent_graph": recent_graph_payload,
-        "recent_edges": [ed.to_dict() for ed in edges_cum],
-    }
-    if isinstance(tool_call_budget, int) and tool_call_budget > 0:
-        payload["tool_call_budget"] = tool_call_budget
-
-    directive = build_extractor_directive(payload)
-    prompt = directive + json.dumps(payload, ensure_ascii=False, default=str)
-
-    return ExtractorInput(
-        state=state,
-        prompt=prompt,
-        payload=payload,
-        turn_window=(window_lo, window_hi),
-        tool_call_budget=tool_call_budget,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Primitive 2: process_extractor_output
-# ---------------------------------------------------------------------------
-
-
-def process_extractor_output(
-    state: ExtractionState,
-    cumulative: CumulativeAuditState,
-    *,
-    terminator_called: bool,
-    window: tuple[int, int],
-) -> ExtractorOutput:
-    """Read the extractor's state after firing and update cumulative state."""
-    raw = RawExtractorOutput.salvage(state)
-    ops = list(state.pending_ops)
-    has_ops = bool(ops)
-
-    if not has_ops and not raw.dropped_edges:
-        cumulative.cursor_last_turn_index = window[1]
-        return ExtractorOutput(
-            ops=[], raw=raw, phases=[], ok=False,
-            terminator_called=terminator_called,
-        )
-
-    firing_id = cumulative.firing_id_counter
-    phases = list(merge_to_phases(raw.events))
-
-    cumulative.absorb_extractor_firing(
-        firing_ops=ops,
-        firing_cursor=window[1],
-        firing_id=firing_id,
-        firing_phases=phases,
-    )
-
-    return ExtractorOutput(
-        ops=ops, raw=raw, phases=phases, ok=True,
-        terminator_called=terminator_called,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Primitive 3: build_auditor_input
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class AuditorSettings:
-    """Knobs for assembling an auditor firing."""
-
-    base_prompt: str
-    summary_threshold: int = 30
-    tools: tuple[str, ...] = (TOOL_SUBMIT_VERDICT,)
-
-    @classmethod
-    def default(cls) -> AuditorSettings:
-        return cls(base_prompt=load_auditor_prompt("minimal"))
 
 
 def build_auditor_input(
@@ -462,11 +355,6 @@ def build_auditor_input(
     return AuditorInput(prompt_text=prompt_text, tools_config=tools_config)
 
 
-# ---------------------------------------------------------------------------
-# Primitive 4: process_auditor_output
-# ---------------------------------------------------------------------------
-
-
 def process_auditor_output(
     terminal_args: dict[str, Any] | None,
     cumulative: CumulativeAuditState | None = None,
@@ -498,12 +386,9 @@ __all__ = [
     "AuditorOutput",
     "AuditorSettings",
     "CumulativeAuditState",
-    "ExtractorInput",
-    "ExtractorOutput",
     "build_auditor_input",
-    "build_extractor_input",
+    "flatten_assistant_blocks",
     "process_auditor_output",
-    "process_extractor_output",
+    "serialize_block",
     "serialize_full_trajectory",
-    "window_is_non_trivial",
 ]
