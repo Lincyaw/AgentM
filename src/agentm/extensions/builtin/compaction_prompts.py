@@ -66,88 +66,143 @@ PROMPT_BRANCH_SUMMARY_PREAMBLE = "compaction.branch_summary_preamble"
 # --- Default prompt bodies --------------------------------------------------
 
 _SUMMARIZATION_SYSTEM = (
-    "You are a context summarization assistant. Your task is to read a "
-    "conversation and produce a structured summary following the exact "
-    "format specified.\n\n"
+    "You are a context compaction assistant for an AI agent session. "
+    "Your task is to read a conversation transcript and produce a structured "
+    "checkpoint summary that will replace the original messages in context. "
+    "The summary must contain everything a successor agent needs to continue "
+    "the work without re-reading the original.\n\n"
     "Do NOT continue the conversation. Do NOT respond to any questions in "
     "the conversation. ONLY output the structured summary."
 )
 
-_SUMMARIZATION = """The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
+_SUMMARIZATION = """\
+The messages above are a conversation to summarize. Create a structured \
+context checkpoint that will replace the original messages. A successor \
+agent will use ONLY this summary to continue the work.
 
-Use this EXACT format:
+Before writing, silently perform:
+- **Contradiction check**: if user statements, tool results, or system \
+constraints conflict, prefer the most recent reliable source and note the \
+conflict.
+- **Temporal ordering**: order events chronologically; latest state takes \
+priority.
+- **Hallucination control**: do not invent facts. Mark unverified \
+information as UNVERIFIED.
+
+Use this format:
+
+## Session Identity
+Record any visible session metadata (session_id, trace_id, scenario). The \
+full original transcript is preserved in the observability log and can be \
+searched via `agentm trace messages --session <session_id>` or \
+`agentm trace tools --session <session_id>`.
 
 ## Goal
-[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+What is the user trying to accomplish? Include acceptance criteria if \
+stated. Can be multiple items if the session covers different tasks.
 
 ## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "(none)" if none were mentioned]
+- Any constraints, preferences, or requirements the user stated
+- Safety, privacy, or operational boundaries — preserve verbatim
+- Rejected approaches and why they were rejected
+- "(none)" if none were mentioned
 
 ## Progress
 ### Done
-- [x] [Completed tasks/changes]
+- [x] Completed tasks/changes — be specific about what was done and where
 
 ### In Progress
-- [ ] [Current work]
+- [ ] Current work
 
 ### Blocked
-- [Issues preventing progress, if any]
+- Issues preventing progress, if any
 
 ## Key Decisions
-- **[Decision]**: [Brief rationale]
+- **Decision**: Brief rationale, alternative considered, why rejected
+
+## Files & Artifacts
+### Read
+- `path` — why it was read, key content or takeaway
+
+### Modified
+- `path` — what changed, key code snippets or config values
+
+### Created
+- `path` — purpose and contents
+
+## Tool Trace Summary
+For significant tool calls, preserve:
+- Tool name, purpose, and key input parameters
+- Result: conclusion, key data, paths, IDs, error codes
+- Whether it succeeded or failed
+- Impact on next steps
+
+Discard redundant logs, verbose terminal output, and repeated search \
+results. Preserve exact error messages, stack traces, exit codes, and \
+command lines.
+
+## Errors & Debugging
+- Exact error messages and stack traces (verbatim)
+- Failed approaches and why they failed — so the successor does not repeat \
+them
+- Successful fixes and what they addressed
 
 ## Next Steps
-1. [Ordered list of what should happen next]
+1. Ordered list of what should happen next
 
-## Critical Context
-- [Any data, examples, or references needed to continue]
-- [Or "(none)" if not applicable]
+## Recovery Pointers
+The original conversation is never deleted. List items where this summary \
+is intentionally brief and full detail should be recovered on demand:
+- Turn references: "Full implementation details at [Turn N]" — use \
+`read_history` tool
+- Files: "Re-read `path/to/file` for exact content"
+- Previous sessions: "Search via `agentm trace messages --session <id>` \
+or `agentm trace tools --session <id> --tool <name>`"
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.
+---
 
-The conversation above is grouped into turns marked [Turn N]. When you reference specific work, cite its originating turn (e.g. "implemented the parser [Turn 14]"). Full detail of any turn can be recovered later with the read_history tool, so prefer concise turn-tagged pointers over copying long verbatim content."""
+Rules:
+- The conversation is grouped into turns marked [Turn N]. Cite originating \
+turns for specific work (e.g. "implemented parser [Turn 14]"). Full detail \
+of any turn can be recovered via the read_history tool, so prefer concise \
+turn-tagged pointers over copying long verbatim content.
+- Preserve exact file paths, function names, error messages, command \
+outputs, variable names, and identifiers — specificity over brevity for \
+these.
+- For tool results: keep conclusions, key data, paths, IDs, error codes; \
+drop verbose logs and terminal noise.
+- Do not pad sections with generic filler. If a section has nothing, write \
+"(none)" and move on."""
 
-_UPDATE_SUMMARIZATION = """The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
+_UPDATE_SUMMARIZATION = """\
+The messages above are NEW conversation messages to incorporate into the \
+existing summary in <previous-summary> tags.
 
-Update the existing structured summary with new information. RULES:
-- PRESERVE all existing information from the previous summary
-- ADD new progress, decisions, and context from the new messages
-- UPDATE the Progress section: move items from \"In Progress\" to \"Done\" when completed
-- UPDATE \"Next Steps\" based on what was accomplished
-- PRESERVE exact file paths, function names, and error messages
-- If something is no longer relevant, you may remove it
+Before updating, silently check:
+- **Contradictions**: if new messages contradict the previous summary, \
+prefer the newer source and note the change.
+- **Superseded info**: if a decision, status, or file state changed, \
+update it — do not stack conflicting versions.
 
-Use this EXACT format:
+Rules for updating:
+- PRESERVE all information from the previous summary that is still relevant
+- ADD new progress, decisions, context, files, errors, tool results from \
+the new messages
+- UPDATE Progress: move items from "In Progress" to "Done" when completed; \
+remove resolved blockers
+- UPDATE "Next Steps" based on what was accomplished
+- PRESERVE the Session Identity section from the previous summary
+- PRESERVE exact file paths, function names, error messages, and identifiers
+- PRESERVE any existing [Turn N] citations; tag newly summarized work with \
+its turn marker the same way
+- Do not repeat the early-conversation detail already captured in the \
+previous summary — focus on what's new
 
-## Goal
-[Preserve existing goals, add new ones if the task expanded]
+Use the same section structure as the existing summary. Add new sections \
+only when they become relevant.
 
-## Constraints & Preferences
-- [Preserve existing, add new ones discovered]
-
-## Progress
-### Done
-- [x] [Include previously done items AND newly completed items]
-
-### In Progress
-- [ ] [Current work - update based on progress]
-
-### Blocked
-- [Current blockers - remove if resolved]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
-
-## Next Steps
-1. [Update based on current state]
-
-## Critical Context
-- [Preserve important context, add new if needed]
-
-Keep each section concise. Preserve exact file paths, function names, and error messages.
-
-PRESERVE any existing [Turn N] citations from the previous summary, and tag newly summarized work with its turn marker the same way. The read_history tool can recover full detail of any cited turn."""
+The read_history tool can recover full detail of any cited turn. For \
+previous sessions, `agentm trace` can search the full transcript."""
 
 _BRANCH_SUMMARY = """Create a structured summary of this conversation branch for context when returning later.
 
