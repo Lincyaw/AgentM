@@ -463,12 +463,11 @@ class SessionTelemetry:
 
     **Observability fields** (``obs_*`` and the tracker dicts) are populated
     by the observability atom during :func:`install` and consumed by the
-    per-event :meth:`Event.to_otel` translators. They are part of the
-    telemetry handle so the declarative-mapping pattern can stay §11-clean:
-    events reach the substrate exclusively through this ABI-exposed object.
-    Atoms that do not install observability simply leave the fields at
-    their construction defaults — :meth:`Event.to_otel` no-ops on the
-    base class, so no records are emitted in that case.
+    per-event translators registered in ``event_otel.py``. They are part of
+    the telemetry handle so the registry-based dispatch can stay §11-clean:
+    events reach the substrate exclusively through this object. Atoms that
+    do not install observability simply leave the fields at their
+    construction defaults — unregistered event types produce no records.
     """
 
     session_id: str
@@ -483,9 +482,9 @@ class SessionTelemetry:
     log_exporter: FileLogExporter
     # --- Observability-atom-populated context ------------------------------
     # The observability atom stamps these in its install() so each
-    # ``Event.to_otel(telemetry)`` translator has session-scoped metadata
-    # without re-reaching for ``ExtensionAPI``. Empty defaults keep the
-    # substrate's construction path side-effect-free.
+    # per-event translator has session-scoped metadata without re-reaching
+    # for ``ExtensionAPI``. Empty defaults keep the substrate's construction
+    # path side-effect-free.
     obs_root_session_id: str = ""
     obs_parent_session_id: str = ""
     obs_purpose: str = ""
@@ -498,8 +497,8 @@ class SessionTelemetry:
     # :meth:`open_span` / :meth:`close_span` for the contract.
     span_tracker: dict[tuple[str, str], Span] = field(default_factory=dict)
     # Per-turn aggregator state for the ``agentm.turn.summary`` log record.
-    # Mutated by :meth:`TurnStartEvent.to_otel` (records turn_start_ns,
-    # rotates error counter) and :meth:`ToolResultEvent.to_otel` (increments
+    # Mutated by the TurnStartEvent translator (records turn_start_ns,
+    # rotates error counter) and the ToolResultEvent translator (increments
     # current_tool_errors on tool-result is_error).
     turn_state: dict[str, int] = field(
         default_factory=lambda: {
@@ -511,7 +510,7 @@ class SessionTelemetry:
     # Live ``agentm.turn`` span for the currently open turn, used as the
     # parent context for ``chat`` and ``execute_tool`` child spans so the
     # span tree groups per turn under ``invoke_agent``. Set by
-    # :meth:`TurnStartEvent.to_otel`, cleared by :meth:`TurnEndEvent.to_otel`.
+    # the TurnStartEvent translator, cleared by the TurnEndEvent translator.
     # ``None`` between turns or when no turn lifecycle has fired.
     current_turn_span: Span | None = None
     _shutdown: bool = False
@@ -524,11 +523,10 @@ class SessionTelemetry:
         Many event families come in Start/End pairs whose lifetime maps to
         a single OTel span: ``BeforeAgentStartEvent``→``AgentEndEvent``,
         ``LlmRequestStartEvent``→``LlmRequestEndEvent``,
-        ``ToolCallEvent``→``ToolResultEvent``. The Start event's
-        :meth:`Event.to_otel` calls ``tracer.start_span(...)`` and stashes
-        the resulting :class:`Span` here under a ``(kind, key)`` tuple; the
-        End event's :meth:`Event.to_otel` looks it up with
-        :meth:`close_span`, sets terminal attributes, and ``.end()`` s it.
+        ``ToolCallEvent``→``ToolResultEvent``. The Start translator calls
+        ``tracer.start_span(...)`` and stashes the resulting :class:`Span`
+        here under a ``(kind, key)`` tuple; the End translator looks it up
+        with :meth:`pop_span`, sets terminal attributes, and ``.end()`` s it.
 
         ``kind`` is a short discriminator string (``"invoke_agent"``,
         ``"chat"``, ``"execute_tool"``) so the same correlator (e.g. a
@@ -577,7 +575,7 @@ class SessionTelemetry:
         OTel attribute values are restricted to str / bool / int / float /
         and homogeneous sequences thereof. We round-trip anything richer
         through JSON so the on-disk shape stays inspectable. Shared with
-        every :meth:`Event.to_otel` so the on-disk coercion is consistent.
+        every per-event translator so the on-disk coercion is consistent.
         """
         if value is None:
             return ""

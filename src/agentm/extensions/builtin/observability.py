@@ -1,16 +1,16 @@
-"""Observability atom — thin dispatcher over the declarative ``Event → OTel`` mapping.
+"""Observability atom — wires the registry-based ``Event → OTel`` mapping.
 
-Most of the on-disk wire format now lives on the events themselves
-(:meth:`Event.to_otel`, see ``.claude/designs/single-event-log.md`` "Event
-→ OTel mapping"). This atom is what wires that mapping into the runtime:
+Per-event OTel translators are registered in ``runtime/event_otel.py`` via
+:func:`~agentm.core.lib.otel_dispatch.register_otel`. This atom is what
+wires that mapping into the runtime:
 
-* On install, it stamps session-scoped metadata onto the
-  :class:`SessionTelemetry` handle (so per-event ``to_otel`` translators
-  have access to ``scenario``, ``purpose``, ``redact_prompts``, etc.).
-* It subscribes one uniform handler per channel — the handler just calls
-  ``event.to_otel(telemetry)`` — so adding a new Event class with its own
-  :meth:`to_otel` override automatically reaches the wire.
-* It still owns the bus-observer side of the contract:
+* On install, it stamps session-scoped metadata onto the telemetry handle
+  (so per-event translators have access to ``scenario``, ``purpose``,
+  ``redact_prompts``, etc.).
+* It subscribes one uniform handler per channel that calls
+  :func:`~agentm.core.lib.otel_dispatch.dispatch_otel` — so adding a new
+  Event class with a registered translator automatically reaches the wire.
+* It owns the bus-observer side of the contract:
   ``agentm.event.dispatch``, ``agentm.handler.invoke``, and
   ``agentm.handler.mutated`` records come from observer hooks (``on_emit_*``
   / ``on_handler_done``), not from individual Event classes — those records
@@ -520,8 +520,9 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
 
     # --- Wire subscriptions -----------------------------------------------
     # The declarative dispatcher: one handler per channel, uniformly
-    # delegating to ``event.to_otel(telemetry)``. New Event subclasses
-    # land on the wire by adding their channel to ``_TO_OTEL_CHANNELS``.
+    # delegating to ``dispatch_otel(event, telemetry)``. New Event
+    # subclasses land on the wire by registering a translator in
+    # ``event_otel.py`` and adding their channel to ``_TO_OTEL_CHANNELS``.
 
     def _dispatch_to_otel(event: Event) -> None:
         dispatch_otel(event, telemetry)
@@ -529,7 +530,7 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
     for channel in _TO_OTEL_CHANNELS:
         api.on(channel, _dispatch_to_otel)
 
-    # Observability-owned bookkeeping that can't fold into ``Event.to_otel``.
+    # Observability-owned bookkeeping that doesn't fit the per-event registry.
     api.on(SessionReadyEvent.CHANNEL, _on_session_ready_fingerprint)
     api.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
     api.on(ExtensionReloadEvent.CHANNEL, _on_extension_reload)

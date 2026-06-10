@@ -517,6 +517,4 @@ __all__ = [
     "Handler",
     "ObserverCallback",
     "ObserverRegistration",
-    "_Subscription",
-    "_sub_key",
 ]
