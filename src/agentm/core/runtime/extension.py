@@ -202,13 +202,6 @@ class _SessionTelemetryHolder:
 def _default_session_telemetry_factory(
     *, cwd: str, session_id: str, scenario: str | None
 ) -> SessionTelemetryFactory:
-    """Bind a :func:`setup_session_telemetry` invocation to a session.
-
-    Extracted so callers (notably tests) can wrap or override the factory
-    without rebuilding the bind logic. The bound callable takes no
-    arguments — the holder calls it exactly once.
-    """
-
     def _build() -> SessionTelemetry:
         return setup_session_telemetry(
             session_id=session_id,
@@ -277,13 +270,6 @@ def build_extension_api_scope(
     telemetry_factory: SessionTelemetryFactory | None = None,
     service_registry: dict[str, Any] | None = None,
 ) -> ExtensionAPIScope:
-    """Resolve service defaults and return an :class:`ExtensionAPIScope`.
-
-    Centralises the fallback choices (local operations, default project
-    layout, git-backed resource writer) so the impl constructor stays a
-    pure assignment.
-    """
-
     resolved_layout = project_layout or default_project_layout(cwd)
     return ExtensionAPIScope(
         bus=bus,
@@ -326,15 +312,7 @@ def build_extension_api_scope(
 
 
 class _ExtensionAPIImpl:
-    """Concrete ``ExtensionAPI`` owned by an ``AgentSession``.
-
-    Intentionally not exported at the module top-level: callers should never
-    construct one directly. ``AgentSession`` builds its own instance during
-    ``create``.
-
-    The impl is a thin shim — every meaningful action delegates to the
-    session's ``EventBus`` or the registries the session exposes.
-    """
+    """Concrete ``ExtensionAPI``; delegates to the session's bus and registries."""
 
     def __init__(self, scope: ExtensionAPIScope, *, owner_name: str = "<unknown>") -> None:
         self._bus = scope.bus
@@ -433,7 +411,6 @@ class _ExtensionAPIImpl:
     def register_operations(
         self, *, file: FileOperations, bash: BashOperations
     ) -> None:
-        """Register the session's Operations bundle (see ExtensionAPI docs)."""
         self._assert_active()
         if self._operations_holder.bundle is not None:
             raise KeyError(
@@ -463,17 +440,6 @@ class _ExtensionAPIImpl:
         dedup_key: str | None = None,
         terminal: bool = False,
     ) -> None:
-        """Push an item onto the session inbox — the generic producer entry.
-
-        Thin wrapper over :meth:`SessionInbox.push`. The runtime-owned
-        ``context`` handler drains the inbox at the next turn boundary and
-        renders each item per its ``source``, so a posted item surfaces on the
-        very next turn. ``dedup_key`` makes a later same-key push replace the
-        earlier undrained item in place (no stacking). ``terminal=True`` marks
-        a terminate intent the runtime drain seam routes through loop
-        termination (#177). See ``.claude/designs/session-inbox.md`` (step-3
-        design decisions).
-        """
         self._assert_active()
         self._inbox.push(
             InboxItem(
@@ -486,17 +452,6 @@ class _ExtensionAPIImpl:
 
     @contextlib.contextmanager
     def track_background(self) -> Iterator[None]:
-        """Bracket a detached background unit so the host can wait it out (#179).
-
-        Thin wrapper over the inbox's background-work counter. ``__enter__``
-        increments (the session is now non-idle); ``__exit__`` ALWAYS
-        decrements, even if the bracketed coroutine raised — so a failing
-        background unit cannot leak the count and wedge a one-shot host into
-        never exiting. Staleness is checked on enter only; if the atom reloaded
-        between enter and exit the decrement still runs against the (same) inbox
-        object the count was taken on, keeping the books balanced.
-        """
-
         self._assert_active()
         self._inbox.note_work_started()
         try:
@@ -505,14 +460,6 @@ class _ExtensionAPIImpl:
             self._inbox.note_work_finished()
 
     def send_user_message(self, content: str | list[Any]) -> None:
-        """Push a user message onto the session inbox for the next turn.
-
-        Sugar over :meth:`post_inbox` (``source="user"``). The runtime-owned
-        ``context`` handler drains the inbox at the next turn boundary, so
-        content surfaces on the very next turn — the same observable behaviour
-        the old ``pending_user_messages`` queue had, now riding the single
-        session-inbox entry point.
-        """
         from agentm.core.abi.events import ApiSendUserMessageEvent
 
         self.post_inbox(source="user", payload=content)
@@ -526,7 +473,6 @@ class _ExtensionAPIImpl:
     async def spawn_child_session(
         self, config: Any | None = None, **kwargs: Any
     ) -> Any:
-        """Spawn a child session via the runtime-injected factory."""
         self._assert_active()
         if config is not None and kwargs:
             raise TypeError(
@@ -611,20 +557,10 @@ class _ExtensionAPIImpl:
         return self._resource_writer_holder.writer
 
     def get_session_telemetry(self) -> SessionTelemetry:
-        """Return this session's :class:`SessionTelemetry` handle.
-
-        Lazily constructs the underlying OTLP/JSON ndjson exporters on the
-        first call (see :mod:`agentm.core.runtime.otel_export`); subsequent
-        calls return the same handle. The substrate also installs a
-        ``SessionShutdownEvent`` handler that drains the batch processors
-        and closes the file handles, so atoms do not have to call
-        :meth:`SessionTelemetry.shutdown` explicitly.
-        """
         self._assert_active()
         return self._telemetry_holder.get()
 
     def register_resource_writer(self, writer: ResourceWriter) -> None:
-        """Replace the session's :class:`ResourceWriter` (see ExtensionAPI docs)."""
         self._assert_active()
         if self._resource_writer_holder.replaced:
             raise KeyError(
@@ -684,13 +620,11 @@ class _ExtensionAPIImpl:
 
     @property
     def events(self) -> EventBus:
-        """Shared bus access remains valid even from stale API references."""
         return self._bus
 
     # --- Service facades ----------------------------------------------------
 
     def get_operations(self) -> Operations:
-        """Return the atom-registered operations bundle for this session."""
         self._assert_active()
         bundle = self._operations_holder.bundle
         if bundle is None:
