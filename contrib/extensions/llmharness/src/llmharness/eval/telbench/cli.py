@@ -121,6 +121,9 @@ def telbench(
     model: Annotated[
         str | None, typer.Option("--model", help="config.toml profile name")
     ] = None,
+    auditor_prompt: Annotated[
+        str, typer.Option("--auditor-prompt", help="Auditor prompt variant name")
+    ] = "telbench",
 ) -> None:
     """Run TELBench evaluation with the cognitive-audit pipeline."""
     if mode not in ("posthoc", "online"):
@@ -169,6 +172,7 @@ def telbench(
                     cwd=resolved_cwd,
                     extractor_interval=extractor_interval,
                     audit_interval=audit_interval,
+                    auditor_prompt=auditor_prompt,
                 )
             )
             instance_scores.append(result.scores)

@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from ...audit.auditor.prompt import load_auditor_prompt
 from ...audit.runner import AuditorSettings, ExtractorSettings
 from ...replay.offline_driver import replay_pipeline_over_trajectory
 from .adapter import TelBenchInstance, spans_to_messages
@@ -43,13 +44,20 @@ async def evaluate_instance(
     cwd: str,
     extractor_interval: int = 5,
     audit_interval: int = 5,
+    auditor_prompt: str = "telbench",
 ) -> EvalResult:
     """Run the llmharness pipeline on one TELBench instance and score."""
     messages = spans_to_messages(instance.spans)
     n_spans = len(messages)
 
     ext_settings = ExtractorSettings.default()
-    aud_settings = AuditorSettings.default()
+    aud_default = AuditorSettings.default()
+    aud_settings = AuditorSettings(
+        base_prompt=load_auditor_prompt(auditor_prompt),
+        observability_config=aud_default.observability_config,
+        summary_threshold=aud_default.summary_threshold,
+        tools=aud_default.tools,
+    )
 
     if mode == "posthoc":
         eff_extractor_interval = n_spans
