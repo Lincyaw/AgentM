@@ -1,22 +1,17 @@
-"""Reference scenario check atoms for the v3 cognitive-audit pipeline.
+"""Reference audit check functions for the cognitive-audit pipeline.
 
-Each submodule is a §11 single-file extension. They are mounted on
-the parent session AFTER ``llmharness.atom`` has published
-the audit registry service. Each atom calls
-``api.get_service("llmharness.audit_registry").register_check(...)``
-from inside ``install(api, config)`` and fails fast if the service is
-not present.
+Each submodule exports a pure function ``(events, edges) → list[Finding]``.
+These are no longer atoms — the trigger/registry machinery was removed
+during the architecture simplification. They can be called directly by
+any consumer that has a graph view.
 
-Available reference atoms:
+Available checks:
 
 - :mod:`.check_repeated_actions` — flags identical-summary ``act`` events.
 - :mod:`.check_open_branches` — flags ``dec`` / ``hyp`` events with no
   outgoing data edge.
 - :mod:`.check_premature_conclusion` — flags ``concl`` events with fewer
   than two incoming edges.
-
-These ship as worked examples; downstream scenarios (e.g. rca-autorl)
-typically register their own one-file atoms following the same shape.
 """
 
 from __future__ import annotations

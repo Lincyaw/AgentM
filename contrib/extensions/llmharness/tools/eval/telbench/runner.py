@@ -17,9 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from ...agents.auditor.prompt import load_auditor_prompt
+from llmharness.agents.auditor.prompt import load_auditor_prompt
+
 from ...replay.offline_driver import replay_pipeline_over_trajectory
-from ...runtime.runner import AuditorSettings, ExtractorSettings
+from ...replay.runner import AuditorSettings, ExtractorSettings
 from .adapter import TelBenchInstance, spans_to_messages
 from .scoring import SpanScores, score_instance
 
@@ -51,12 +52,9 @@ async def evaluate_instance(
     n_spans = len(messages)
 
     ext_settings = ExtractorSettings.default()
-    aud_default = AuditorSettings.default()
     aud_settings = AuditorSettings(
         base_prompt=load_auditor_prompt(auditor_prompt),
-        observability_config=aud_default.observability_config,
-        summary_threshold=aud_default.summary_threshold,
-        tools=aud_default.tools,
+        summary_threshold=30,
     )
 
     if mode == "posthoc":
@@ -90,9 +88,11 @@ async def evaluate_instance(
     matched_event_ids: set[int] = set()
 
     for step in result.all_step_results:
-        if step.surfaced_reminder is not None and step.auditor_record is not None:
-            output = step.auditor_record.output
-            if output and output.get("surface_reminder"):
+        reminder = step.get("surfaced_reminder") if isinstance(step, dict) else None
+        auditor_record = step.get("auditor_record") if isinstance(step, dict) else None
+        if reminder is not None and auditor_record is not None:
+            output = auditor_record.get("output") if isinstance(auditor_record, dict) else None
+            if output and isinstance(output, dict) and output.get("surface_reminder"):
                 surfaced_verdicts.append(output)
                 matched_event_ids.update(output.get("matched_event_ids", []))
 

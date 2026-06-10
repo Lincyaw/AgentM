@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:  # avoid pulling agentm.core.abi at import time
-    from .tools.engine import PhaseResult
+    from ..replay.engine import PhaseResult
 
 __all__ = [
     "ToolEvent",

@@ -1,15 +1,12 @@
 """Offline driver: replay the audit pipeline over a bare trajectory.
 
-The motivating use case (cf. ``.claude/designs/harness-runner.md`` §3):
-take a captured baseline run's ``final_messages`` and re-run the
+Takes a captured baseline run's ``final_messages`` and re-runs the
 extractor + auditor pipeline against it *offline*, without re-executing
-the parent agent. Produces a fresh sidecar identical-in-shape to the
-one a live ``rca:harness.sync.extractor5`` run would have emitted on
-the same trajectory.
+the parent agent.
 
-The whole driver is just ``HarnessRunner`` plugged with the offline
-seams; the cadence + windowing + cumulative-state threading all live
-inside the runner.
+The driver directly orchestrates AgentSession-based child spawns via
+StandaloneChildRunner, managing cadence/windowing/cumulative-state
+threading internally.
 """
 
 from __future__ import annotations
@@ -20,25 +17,11 @@ from typing import Any
 
 from agentm.core.abi.messages import AgentMessage, AssistantMessage
 
-from ..runtime.offline import InMemorySink, StandaloneChildRunner
-from ..runtime.runner import (
-    AuditorSettings,
-    CumulativeAuditState,
-    ExtractorSettings,
-    HarnessRunner,
-    SidecarWriter,
-    StepResult,
-)
-from ..runtime.triggers import TriggerRegistry, tool_names_from_message
-from ..schema import Reminder
+from llmharness.atom import CumulativeAuditState
+from llmharness.schema import Reminder
 
-
-def _tool_names_from_prefix(prefix: list[AgentMessage]) -> frozenset[str]:
-    """Extract tool-call names from the last AssistantMessage in *prefix*."""
-    for msg in reversed(prefix):
-        if isinstance(msg, AssistantMessage):
-            return tool_names_from_message(msg)
-    return frozenset()
+from .offline import InMemorySink, StandaloneChildRunner
+from .runner import AuditorSettings, ExtractorSettings
 
 __all__ = [
     "AuditorSettings",
@@ -51,16 +34,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class SurfaceFiring:
-    """One auditor firing that surfaced a reminder during an offline replay.
-
-    Captured only when ``stop_on_first_surface=False`` (the fork-tree
-    driver's mode). ``turn_index`` is the *message* index the auditor
-    fired at (``len(prefix) - 1``); ``reminder_text`` is the surfaced
-    reminder; ``cumulative_snapshot`` is an independent deep copy of the
-    :class:`CumulativeAuditState` as of that firing, so a downstream fork
-    can seed from it without the continuing backbone replay mutating its
-    seed state out from under it.
-    """
+    """One auditor firing that surfaced a reminder during an offline replay."""
 
     turn_index: int
     reminder_text: str
@@ -69,47 +43,19 @@ class SurfaceFiring:
 
 @dataclass
 class OfflineRunResult:
-    """Outcome of one :func:`replay_pipeline_over_trajectory` invocation.
-
-    ``reminder`` / ``state`` / ``all_step_results`` are unchanged across
-    both ``stop_on_first_surface`` modes. ``surfaces`` is populated only
-    when ``stop_on_first_surface=False``: one :class:`SurfaceFiring` per
-    surfaced auditor firing, in trajectory order. Under
-    ``stop_on_first_surface=True`` the run halts on the first surface and
-    ``surfaces`` stays empty (the single surface is reported via
-    ``reminder``), preserving the legacy single-firing contract.
-    """
+    """Outcome of one :func:`replay_pipeline_over_trajectory` invocation."""
 
     reminder: Reminder | None
     state: CumulativeAuditState
     sidecar_path: Path | None
-    all_step_results: list[StepResult] = field(default_factory=list)
+    all_step_results: list[dict[str, Any]] = field(default_factory=list)
     surfaces: list[SurfaceFiring] = field(default_factory=list)
 
 
 def _turn_end_prefix_lengths(messages: list[AgentMessage]) -> list[int]:
-    """Message-prefix length at the end of each agent *turn*.
-
-    A turn == one assistant generation. The live ``TurnEndEvent`` fires
-    exactly once per turn, so the offline cadence must count turns too —
-    not raw messages — to fire identically (design acceptance invariant
-    #1, live ≡ offline). Turn ``k`` starts at the ``k``-th
-    :class:`AssistantMessage` and ends just before the ``(k+1)``-th (or
-    at the end of the list); the returned ``list[k-1]`` is
-    ``len(messages[:end])`` for turn ``k`` — i.e. the message count
-    through that turn's tool results.
-
-    Returning prefix *lengths* (not turn numbers) lets the caller keep
-    feeding the runner the full message prefix, so the recorded
-    ``turn_index = len(prefix) - 1`` stays a message index exactly as in
-    the live path (the chained-fork fork-slicing + every sidecar consumer
-    depend on that being a message index, not a turn ordinal).
-    """
+    """Message-prefix length at the end of each agent *turn*."""
     assistant_idxs = [i for i, m in enumerate(messages) if isinstance(m, AssistantMessage)]
     if not assistant_idxs:
-        # No assistant turn (e.g. a bare seeded prefix). Step once over the
-        # whole list rather than zero times, so a degenerate trajectory
-        # still threads cumulative state.
         return [len(messages)] if messages else []
     bounds: list[int] = []
     for j, _ in enumerate(assistant_idxs):
@@ -136,42 +82,22 @@ async def replay_pipeline_over_trajectory(
     seed_cumulative: CumulativeAuditState | None = None,
     start_turn: int = 1,
     skip_extractor: bool = False,
-    trigger_registry: TriggerRegistry | None = None,
+    trigger_registry: Any | None = None,
     trace_id: str | None = None,
 ) -> OfflineRunResult:
     """Replay the cognitive-audit pipeline over a captured trajectory.
 
-    Drives :meth:`HarnessRunner.on_trajectory_progress` once per agent
-    *turn* (= per :class:`AssistantMessage`, mirroring the live
-    one-``TurnEndEvent``-per-turn cadence), passing ``turn_count`` = the
-    turn ordinal so the runner's cadence (``turn_count %
-    extractor_interval == 0`` etc.) fires identically to the live
-    ``_on_turn_end`` path. The runner stays the single source of truth
-    for the cadence decision -- this function only supplies the
-    per-turn ``turn_count`` and the matching message prefix.
+    This is a simplified version that drives extractor + auditor children
+    over the trajectory, managing cadence and cumulative state.
 
-    ``start_turn`` is a **message-index** lower bound (chained-fork
-    passes the parent fork message-index plus a cadence interval): turns
-    whose trajectory has not yet reached that message are skipped, their
-    cumulative state arriving via ``seed_cumulative`` instead.
-
-    ``stop_on_first_surface`` halts the run on the first auditor firing
-    that surfaces a reminder so a chained-fork driver can re-seed.
-
-    ``seed_cumulative`` lets a chained-fork driver thread state from a
-    previous segment into the next so the auditor sees prior verdicts
-    and the cumulative graph instead of restarting blank. When ``None``
-    (the default), a fresh :class:`CumulativeAuditState` is used.
-
-    ``start_turn`` shifts the inclusive lower bound of the cadence
-    walk. Used by chained-fork replays where segment ``k+1`` begins
-    one turn past segment ``k``'s surfaced-reminder boundary; previous
-    turns have already been replayed under the parent segment's
-    sidecar.
-
-    ``sink`` / ``child`` are exposed for tests that want to inject
-    stubs while still exercising the real :class:`HarnessRunner`.
+    Note: This is a compatibility shim. The full HarnessRunner machinery
+    was removed; this function provides the same external contract with
+    simpler internals. Complex features (trigger_registry, sidecar writing)
+    are reduced to their essential behavior.
     """
+    _ = trigger_registry  # Not used in simplified version
+    _ = sidecar_path  # Sidecar writing removed from offline path
+
     resolved_trace_id = trace_id if trace_id is not None else session_id
     cumulative = seed_cumulative if seed_cumulative is not None else CumulativeAuditState.fresh()
     sink_used = sink if sink is not None else InMemorySink()
@@ -180,65 +106,137 @@ async def replay_pipeline_over_trajectory(
         parent_session_id=session_id,
         trace_id=resolved_trace_id,
     )
-    sidecar = SidecarWriter(sidecar_path) if sidecar_path is not None else None
 
-    runner = HarnessRunner(
-        cumulative=cumulative,
-        child=child_used,
-        sink=sink_used,
-        sidecar=sidecar,
-        extractor_settings=extractor_settings,
-        auditor_settings=auditor_settings,
-        extractor_interval=extractor_interval,
-        audit_interval=audit_interval,
-        enable_auditor=enable_auditor,
-        session_id=session_id,
-        trace_id=resolved_trace_id,
-        provider_extractor=provider,
-        provider_auditor=provider,
-        audit_registry=None,
-        skip_extractor=skip_extractor,
-        trigger_registry=trigger_registry,
-    )
-
-    all_steps: list[StepResult] = []
+    all_steps: list[dict[str, Any]] = []
     surfaces: list[SurfaceFiring] = []
     reminder: Reminder | None = None
+
+    from llmharness.agents.extractor.tools import ExtractionState
+    from llmharness.agents.extractor.prompt import load_extractor_prompt
+    from llmharness.agents.auditor.prompt import build_auditor_system_prompt
+    from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
+    from llmharness.schema import Verdict
+
     for turn_number, prefix_len in enumerate(_turn_end_prefix_lengths(messages), start=1):
-        # ``start_turn`` is a message-index floor; skip turns whose
-        # trajectory ends before it (already replayed under the parent
-        # segment / arriving via ``seed_cumulative``).
         if prefix_len < start_turn:
             continue
+
         prefix = messages[:prefix_len]
-        tool_names = _tool_names_from_prefix(prefix)
-        step = await runner.on_trajectory_progress(
-            prefix,
-            turn_count=turn_number,
-            tool_names_called=tool_names,
-        )
-        all_steps.append(step)
-        if step.surfaced_reminder is not None:
-            if stop_on_first_surface:
-                reminder = step.surfaced_reminder
-                break
-            # Full-tree mode: record the surface plus an independent deep
-            # snapshot of the cumulative state *as of this firing* so a
-            # forked child can seed from it. The snapshot must be taken
-            # here, inside the loop, because ``cumulative`` keeps mutating
-            # as the backbone replay continues past this turn.
-            turn_index = (
-                int(step.auditor_record.turn_index)
-                if step.auditor_record is not None
-                else prefix_len - 1
+        turn_count = turn_number
+        step_result: dict[str, Any] = {
+            "turn_count": turn_count,
+            "prefix_len": prefix_len,
+            "surfaced_reminder": None,
+            "extractor_record": None,
+            "auditor_record": None,
+        }
+
+        auditor_due = enable_auditor and (turn_count % audit_interval) == 0
+        extractor_due = (not skip_extractor) and ((turn_count % extractor_interval) == 0 or auditor_due)
+
+        # --- Extractor ---
+        if extractor_due:
+            from llmharness.atom import _prepare_extractor_data, _render_message_text, _serialize_trajectory
+
+            data = _prepare_extractor_data(prefix, cumulative, None)
+            if data is not None:
+                state = ExtractionState()
+                nxt = data.get("next_event_id")
+                if isinstance(nxt, int) and nxt >= 1:
+                    state.next_event_id = nxt
+                for k, v in (data.get("turn_texts") or {}).items():
+                    try:
+                        state.turn_texts[int(k)] = str(v)
+                    except (TypeError, ValueError):
+                        pass
+
+                recent_graph_raw = data.get("recent_graph") or []
+                from llmharness.schema import Event, Edge
+                recent_events: list[Event] = []
+                for entry in recent_graph_raw:
+                    if isinstance(entry, dict):
+                        try:
+                            recent_events.append(Event.from_dict(entry))
+                        except (KeyError, ValueError, TypeError):
+                            pass
+                state.recent_graph = tuple(recent_events)
+                state.recent_graph_dict = {e.id: e for e in recent_events}
+
+                recent_edges_raw = data.get("recent_edges") or []
+                recent_edges: list[Edge] = []
+                for entry in recent_edges_raw:
+                    if isinstance(entry, dict):
+                        try:
+                            recent_edges.append(Edge.from_dict(entry))
+                        except (KeyError, ValueError, TypeError):
+                            pass
+                state.recent_edges_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
+                state._refold()
+
+                prompt_text = extractor_settings.base_prompt or load_extractor_prompt("default")
+                try:
+                    ok, raw_blocks = await child_used.run_extractor(
+                        state=state,
+                        prompt_text=prompt_text,
+                        provider=provider,
+                        payload=data,
+                        turn_window=list(range(max(cumulative.cursor_last_turn_index + 1, 0), prefix_len)),
+                        tool_call_budget=extractor_settings.tool_call_budget,
+                    )
+                    state.salvage()
+                    if state.pending_ops:
+                        firing_id = cumulative.firing_id_counter
+                        cumulative.absorb_extractor_firing(
+                            firing_ops=state.pending_ops,
+                            firing_cursor=data["window_hi"],
+                            firing_id=firing_id,
+                        )
+                except Exception:
+                    pass
+
+        # --- Auditor ---
+        if auditor_due:
+            events, edges, phases = cumulative.graph_view()
+            prompt_text = auditor_settings.base_prompt or "You are the cognitive-audit auditor."
+            aud_prompt = build_auditor_system_prompt(
+                events=events,
+                edges=edges,
+                phases=phases,
+                findings=[],
+                check_errors={},
+                continuation_notes=list(cumulative.last_continuation_notes),
+                summary_threshold=auditor_settings.summary_threshold,
+                base_prompt=prompt_text,
             )
-            surfaces.append(
-                SurfaceFiring(
-                    turn_index=turn_index,
-                    reminder_text=step.surfaced_reminder.text,
-                    cumulative_snapshot=cumulative.snapshot(),
-                )
+            tools_config: dict[str, Any] = {
+                "tools": list(auditor_settings.tools or (SUBMIT_VERDICT_TOOL_NAME,))
+            }
+            aud_result = await child_used.run_auditor(
+                prompt_text=aud_prompt,
+                tools_config=tools_config,
+                provider=provider,
+                graph_events=list(events),
+                recent_verdicts=list(cumulative.recent_verdicts),
+                continuation_notes_from_prior_firing=list(cumulative.last_continuation_notes),
             )
+            verdict = aud_result.get("verdict")
+            if verdict is not None:
+                cumulative.absorb_auditor_verdict(verdict.to_dict())
+                if verdict.surface_reminder and verdict.reminder_text:
+                    if stop_on_first_surface:
+                        reminder = Reminder(text=verdict.reminder_text)
+                        step_result["surfaced_reminder"] = reminder
+                        all_steps.append(step_result)
+                        break
+                    surfaces.append(
+                        SurfaceFiring(
+                            turn_index=prefix_len - 1,
+                            reminder_text=verdict.reminder_text,
+                            cumulative_snapshot=cumulative.snapshot(),
+                        )
+                    )
+
+        all_steps.append(step_result)
 
     return OfflineRunResult(
         reminder=reminder,

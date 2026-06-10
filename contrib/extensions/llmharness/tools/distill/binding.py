@@ -30,7 +30,7 @@ from pydantic import BaseModel
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from ..replay.record import audit_session_id
+from llmharness.replay.record import audit_session_id
 
 _logger = logging.getLogger(__name__)
 

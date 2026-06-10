@@ -29,7 +29,7 @@ import json
 from collections.abc import Iterable, Iterator
 from typing import Any, Literal
 
-from ..replay.record import ReplayRecord
+from llmharness.replay.record import ReplayRecord
 
 Phase = Literal["extractor", "auditor"]
 
