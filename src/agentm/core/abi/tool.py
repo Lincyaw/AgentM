@@ -20,7 +20,8 @@ would have to compete with ``is_error`` for meaning.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from .messages import ImageContent, TextContent
@@ -129,11 +130,69 @@ class Tool(Protocol):
     ) -> ToolResult | ToolOutcome: ...
 
 
+@dataclass(slots=True)
+class FunctionTool:
+    """Concrete ``Tool`` adapter wrapping an async callable.
+
+    Useful for tests and trivial cases where a full tool class would be
+    overkill. The wrapped ``fn`` is called with the raw ``args`` dict; if it
+    raises, the exception **propagates** — ``FunctionTool`` deliberately does
+    not convert exceptions to ``ToolResult(is_error=True)``. The agent loop is
+    responsible for that conversion so the policy is uniform across all tool
+    implementations.
+
+    ``fn`` may return either a bare :class:`ToolResult` or any
+    :class:`ToolOutcome`; the kernel handles both.
+
+    ``parameters`` accepts either a JSON Schema dict or a
+    :class:`pydantic.BaseModel` subclass. A Pydantic class is
+    automatically converted to a provider-neutral JSON Schema at
+    construction time via ``pydantic_to_tool_schema``.
+    """
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    fn: Callable[[dict[str, Any]], Awaitable[ToolResult | ToolOutcome]]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str,
+        parameters: dict[str, Any] | type,
+        fn: Callable[[dict[str, Any]], Awaitable[ToolResult | ToolOutcome]],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.name = name
+        self.description = description
+        self.fn = fn
+        self.metadata = metadata or {}
+        if isinstance(parameters, type):
+            from agentm.core.lib.tool_schema import pydantic_to_tool_schema
+
+            self.parameters = pydantic_to_tool_schema(parameters)
+        else:
+            self.parameters = parameters
+
+    async def execute(
+        self,
+        args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None = None,
+    ) -> ToolResult | ToolOutcome:
+        """Invoke the wrapped function. Exceptions propagate unchanged."""
+
+        return await self.fn(args)
+
+
 __all__ = [
     "FILE_OP_EDIT",
     "FILE_OP_METADATA_KEY",
     "FILE_OP_READ",
     "FILE_OP_WRITE",
+    "FunctionTool",
     "TOOL_RESULT_FORMAT_METADATA_KEY",
     "Tool",
     "ToolContinue",

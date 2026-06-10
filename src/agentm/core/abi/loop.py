@@ -43,6 +43,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from .bus import EventBus
 from .events import (
     AgentEndEvent,
     AgentStartEvent,
@@ -50,7 +51,6 @@ from .events import (
     BudgetExhausted,
     ContextEvent,
     DecideTurnActionEvent,
-    EventBus,
     Inject,
     LlmRequestEndEvent,
     LlmRequestStartEvent,

@@ -1,18 +1,19 @@
-"""Declarative Event → OTel mapping.
+"""Registry-based OTel translators for kernel events.
 
-Each event class in ``agentm.core.abi.events`` declares a ``to_otel`` no-op
-on the :class:`Event` base class. This module overrides ``to_otel`` on
-concrete subclasses that have an OTel wire-format meaning, keeping the ABI
-event module free of ``opentelemetry`` imports.
+Each concrete event subclass has a translator function registered via
+:func:`agentm.core.lib.otel_dispatch.register_otel`. The observability
+atom dispatches through :func:`~agentm.core.lib.otel_dispatch.dispatch_otel`
+instead of calling ``event.to_otel(telemetry)`` directly.
 
-Imported once by ``agentm.core.runtime.__init__`` so the patches are applied
-before any event is handled.
+Importing this module is a side-effect: it populates the registry. The
+``runtime/__init__.py`` imports it unconditionally so the registry is
+filled before any session starts.
 """
 
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from opentelemetry._logs import SeverityNumber
 from opentelemetry.trace import (
@@ -44,10 +45,9 @@ from agentm.core.abi.events import (
     TurnStartEvent,
 )
 from agentm.core.abi.messages import ToolCallBlock
+from agentm.core.lib.otel_dispatch import register_otel
 
-if TYPE_CHECKING:
-    from agentm.core.runtime.otel_export import SessionTelemetry
-
+# Span-kind keys for ``SessionTelemetry.span_tracker``.
 _SPAN_INVOKE_AGENT = "invoke_agent"
 _SPAN_TURN = "turn"
 _SPAN_CHAT = "chat"
@@ -55,6 +55,12 @@ _SPAN_EXECUTE_TOOL = "execute_tool"
 
 
 def _remote_parent_context(root_session_id: str, parent_session_id: str) -> Any:
+    """Build an OTel context whose current span is a *remote* parent carrying
+    ``trace_id=root_session_id`` and ``span_id=parent_session_id``.
+
+    Returns ``None`` (fresh trace) unless BOTH ids are valid lowercase hex of
+    OTel width (trace_id 32, span_id 16) and non-zero.
+    """
     if not root_session_id or not parent_session_id:
         return None
     if len(root_session_id) != 32 or len(parent_session_id) != 16:
@@ -75,12 +81,10 @@ def _remote_parent_context(root_session_id: str, parent_session_id: str) -> Any:
     return set_span_in_context(NonRecordingSpan(parent))
 
 
-# --- Translators ------------------------------------------------------------
-
-
 def _before_agent_start_to_otel(
-    self: BeforeAgentStartEvent, telemetry: "SessionTelemetry"
+    self: "BeforeAgentStartEvent", telemetry: Any
 ) -> None:
+    """Open the ``invoke_agent <scenario>`` INTERNAL span for this session."""
     session_id = telemetry.session_id
     preempted = telemetry.pop_span(_SPAN_INVOKE_AGENT, session_id)
     if preempted is not None:
@@ -109,8 +113,9 @@ def _before_agent_start_to_otel(
 
 
 def _agent_end_to_otel(
-    self: AgentEndEvent, telemetry: "SessionTelemetry"
+    self: "AgentEndEvent", telemetry: Any
 ) -> None:
+    """Close the matching ``invoke_agent`` span and emit ``agentm.agent.end``."""
     session_id = telemetry.session_id
     trailing_turn_span = telemetry.current_turn_span
     if trailing_turn_span is not None:
@@ -150,8 +155,9 @@ def _agent_end_to_otel(
 
 
 def _llm_request_start_to_otel(
-    self: LlmRequestStartEvent, telemetry: "SessionTelemetry"
+    self: "LlmRequestStartEvent", telemetry: Any
 ) -> None:
+    """Open the ``chat <model>`` CLIENT span for one LLM call."""
     model_id = self.model_id or "unknown"
     turn_span = telemetry.current_turn_span
     parent_ctx = set_span_in_context(turn_span) if turn_span is not None else None
@@ -192,8 +198,9 @@ def _llm_request_start_to_otel(
 
 
 def _llm_request_end_to_otel(
-    self: LlmRequestEndEvent, telemetry: "SessionTelemetry"
+    self: "LlmRequestEndEvent", telemetry: Any
 ) -> None:
+    """Close the ``chat`` span; stamp duration / error on the way out."""
     span = telemetry.pop_span(_SPAN_CHAT, str(self.turn_id))
     if span is None:
         return
@@ -208,8 +215,9 @@ def _llm_request_end_to_otel(
 
 
 def _tool_call_to_otel(
-    self: ToolCallEvent, telemetry: "SessionTelemetry"
+    self: "ToolCallEvent", telemetry: Any
 ) -> None:
+    """Open the ``execute_tool <name>`` span and stamp the call arguments."""
     args = dict(self.args)
     turn_span = telemetry.current_turn_span
     parent_ctx = set_span_in_context(turn_span) if turn_span is not None else None
@@ -230,8 +238,9 @@ def _tool_call_to_otel(
 
 
 def _tool_result_to_otel(
-    self: ToolResultEvent, telemetry: "SessionTelemetry"
+    self: "ToolResultEvent", telemetry: Any
 ) -> None:
+    """Close the matching ``execute_tool`` span, stamp the result."""
     from agentm.core.lib import to_jsonable
 
     if getattr(self.result, "is_error", False):
@@ -253,8 +262,9 @@ def _tool_result_to_otel(
 
 
 def _turn_start_to_otel(
-    self: TurnStartEvent, telemetry: "SessionTelemetry"
+    self: "TurnStartEvent", telemetry: Any
 ) -> None:
+    """Open the ``agentm.turn`` INTERNAL span and rotate per-turn state."""
     telemetry.turn_state["turn_start_ns"] = time.time_ns()
     telemetry.turn_state["previous_tool_errors"] = telemetry.turn_state[
         "current_tool_errors"
@@ -290,8 +300,9 @@ def _turn_start_to_otel(
 
 
 def _turn_end_to_otel(
-    self: TurnEndEvent, telemetry: "SessionTelemetry"
+    self: "TurnEndEvent", telemetry: Any
 ) -> None:
+    """Emit one ``agentm.turn.summary`` log record per completed turn."""
     end_ns = time.time_ns()
     tool_calls = [
         block.name
@@ -361,8 +372,9 @@ def _turn_end_to_otel(
 
 
 def _session_header_to_otel(
-    self: SessionHeaderEmittedEvent, telemetry: "SessionTelemetry"
+    self: "SessionHeaderEmittedEvent", telemetry: Any
 ) -> None:
+    """Emit ``agentm.session.header`` — body is the SessionHeader dict verbatim."""
     telemetry.emit_log(
         "agentm.session.header",
         body=self.record,
@@ -374,8 +386,9 @@ def _session_header_to_otel(
 
 
 def _message_appended_to_otel(
-    self: MessageAppendedEvent, telemetry: "SessionTelemetry"
+    self: "MessageAppendedEvent", telemetry: Any
 ) -> None:
+    """Emit ``agentm.message.appended`` — SessionEntry dict verbatim in body."""
     telemetry.emit_log(
         "agentm.message.appended",
         body=self.record,
@@ -389,7 +402,7 @@ def _message_appended_to_otel(
 
 
 def _api_register_to_otel(
-    self: ApiRegisterEvent, telemetry: "SessionTelemetry"
+    self: "ApiRegisterEvent", telemetry: Any
 ) -> None:
     from agentm.core.lib import to_jsonable
 
@@ -406,8 +419,9 @@ def _api_register_to_otel(
 
 
 def _api_send_user_message_to_otel(
-    self: ApiSendUserMessageEvent, telemetry: "SessionTelemetry"
+    self: "ApiSendUserMessageEvent", telemetry: Any
 ) -> None:
+    """Emit ``agentm.api.send_user_message`` with optional prompt redaction."""
     from agentm.core.lib import redact_messages, to_jsonable
 
     raw_content: Any = to_jsonable(self.content)
@@ -431,7 +445,7 @@ def _api_send_user_message_to_otel(
 
 
 def _diagnostic_to_otel(
-    self: DiagnosticEvent, telemetry: "SessionTelemetry"
+    self: "DiagnosticEvent", telemetry: Any
 ) -> None:
     sev = {
         "info": SeverityNumber.INFO,
@@ -451,7 +465,7 @@ def _diagnostic_to_otel(
 
 
 def _extension_unload_to_otel(
-    self: ExtensionUnloadEvent, telemetry: "SessionTelemetry"
+    self: "ExtensionUnloadEvent", telemetry: Any
 ) -> None:
     telemetry.emit_log(
         "agentm.extension.unload",
@@ -468,8 +482,9 @@ def _extension_unload_to_otel(
 
 
 def _session_ready_to_otel(
-    self: SessionReadyEvent, telemetry: "SessionTelemetry"
+    self: "SessionReadyEvent", telemetry: Any
 ) -> None:
+    """Emit ``agentm.session.ready`` with the final tool / command / extension lists."""
     from agentm.core.lib import to_jsonable
 
     telemetry.emit_log(
@@ -493,8 +508,9 @@ def _session_ready_to_otel(
 
 
 def _session_shutdown_to_otel(
-    self: SessionShutdownEvent, telemetry: "SessionTelemetry"
+    self: "SessionShutdownEvent", telemetry: Any
 ) -> None:
+    """Drain every still-open tracked span; emit ``agentm.session.end``."""
     del self
     end_ns = time.time_ns()
     telemetry.close_open_spans(status_description="session shutdown")
@@ -520,21 +536,21 @@ def _session_shutdown_to_otel(
     )
 
 
-# --- Install patches ---------------------------------------------------------
+# --- Registry population ---------------------------------------------------
 
-BeforeAgentStartEvent.to_otel = _before_agent_start_to_otel  # type: ignore[assignment]
-AgentEndEvent.to_otel = _agent_end_to_otel  # type: ignore[assignment]
-LlmRequestStartEvent.to_otel = _llm_request_start_to_otel  # type: ignore[assignment]
-LlmRequestEndEvent.to_otel = _llm_request_end_to_otel  # type: ignore[assignment]
-ToolCallEvent.to_otel = _tool_call_to_otel  # type: ignore[assignment]
-ToolResultEvent.to_otel = _tool_result_to_otel  # type: ignore[assignment]
-TurnStartEvent.to_otel = _turn_start_to_otel  # type: ignore[assignment]
-TurnEndEvent.to_otel = _turn_end_to_otel  # type: ignore[assignment]
-SessionHeaderEmittedEvent.to_otel = _session_header_to_otel  # type: ignore[assignment]
-MessageAppendedEvent.to_otel = _message_appended_to_otel  # type: ignore[assignment]
-ApiRegisterEvent.to_otel = _api_register_to_otel  # type: ignore[assignment]
-ApiSendUserMessageEvent.to_otel = _api_send_user_message_to_otel  # type: ignore[assignment]
-DiagnosticEvent.to_otel = _diagnostic_to_otel  # type: ignore[assignment]
-ExtensionUnloadEvent.to_otel = _extension_unload_to_otel  # type: ignore[assignment]
-SessionReadyEvent.to_otel = _session_ready_to_otel  # type: ignore[assignment]
-SessionShutdownEvent.to_otel = _session_shutdown_to_otel  # type: ignore[assignment]
+register_otel(BeforeAgentStartEvent, _before_agent_start_to_otel)
+register_otel(AgentEndEvent, _agent_end_to_otel)
+register_otel(LlmRequestStartEvent, _llm_request_start_to_otel)
+register_otel(LlmRequestEndEvent, _llm_request_end_to_otel)
+register_otel(ToolCallEvent, _tool_call_to_otel)
+register_otel(ToolResultEvent, _tool_result_to_otel)
+register_otel(TurnStartEvent, _turn_start_to_otel)
+register_otel(TurnEndEvent, _turn_end_to_otel)
+register_otel(SessionHeaderEmittedEvent, _session_header_to_otel)
+register_otel(MessageAppendedEvent, _message_appended_to_otel)
+register_otel(ApiRegisterEvent, _api_register_to_otel)
+register_otel(ApiSendUserMessageEvent, _api_send_user_message_to_otel)
+register_otel(DiagnosticEvent, _diagnostic_to_otel)
+register_otel(ExtensionUnloadEvent, _extension_unload_to_otel)
+register_otel(SessionReadyEvent, _session_ready_to_otel)
+register_otel(SessionShutdownEvent, _session_shutdown_to_otel)
