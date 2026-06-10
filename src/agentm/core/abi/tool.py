@@ -4,9 +4,9 @@ Implements §3.2 (Tool Execution boundary) of
 `.claude/designs/pluggable-architecture.md` — the bare ``Tool`` Protocol the
 agent loop sees, plus the ``ToolResult`` / ``ToolOutcome`` data shapes.
 
-Concrete adapters such as ``FunctionTool`` live outside the ABI surface in
-``agentm.core._internal.tools``; they are re-exported from this package's
-``__init__`` for ergonomics but are not part of the boundary contract.
+``FunctionTool`` is a concrete adapter that wraps an async callable — it
+lives in this module alongside the Protocol for ergonomic ``from
+agentm.core.abi import FunctionTool`` access.
 
 Schemas are raw JSON Schema dicts; no pydantic in the kernel.
 
