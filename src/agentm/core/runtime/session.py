@@ -118,7 +118,7 @@ class AgentSession:
         self._session_manager = runtime.session_manager
         self._resources = runtime.resource_loader
         self._loop = runtime.loop
-        self._active_provider_box = runtime.active_provider_box
+        self._active_provider_ref = runtime.active_provider_ref
         self._tools = runtime.tools
         self._commands = runtime.commands
         self._providers = runtime.providers
@@ -439,7 +439,7 @@ class AgentSession:
 
     @property
     def model(self) -> Model | None:
-        active = self._active_provider_box["value"]
+        active = self._active_provider_ref.value
         return active.model if active is not None else None
 
     @property
