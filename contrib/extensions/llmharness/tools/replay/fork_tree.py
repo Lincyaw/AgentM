@@ -52,16 +52,12 @@ from agentm.core.abi.messages import (
     ToolResultMessage,
 )
 
-from ..runtime.offline import InMemorySink, StandaloneChildRunner
-from ..runtime.runner import (
-    AuditorSettings,
-    CumulativeAuditState,
-    ExtractorSettings,
-    StepResult,
-)
-from ..runtime.triggers import TriggerRegistry
+from llmharness.atom import CumulativeAuditState
+
+from .offline import InMemorySink, StandaloneChildRunner
 from .offline_driver import SurfaceFiring, replay_pipeline_over_trajectory
-from .record import ReplayRecord, write_record
+from .runner import AuditorSettings, ExtractorSettings
+from llmharness.replay.record import ReplayRecord, write_record
 
 _logger = logging.getLogger(__name__)
 
@@ -172,7 +168,7 @@ class ForkNode:
     seeded_reminder: str | None
     fork_turn_index: int | None
     surfaces: list[Surface]
-    step_results: list[StepResult]
+    step_results: list[dict[str, Any]]
     depth: int
     path: tuple[str, ...]
     payload: SessionPayload
@@ -298,7 +294,7 @@ async def run_fork_tree_experiment(
     sink: InMemorySink | None = None,
     child: StandaloneChildRunner | None = None,
     skip_extractor: bool = False,
-    trigger_registry: TriggerRegistry | None = None,
+    trigger_registry: Any | None = None,
     trace_id: str | None = None,
 ) -> ForkTreeExperiment:
     """Drive a fork-tree counterfactual experiment to completion.
@@ -644,8 +640,10 @@ def write_fork_tree_replay(
     for node in nodes:
         turn_lo, turn_hi = _node_window(node)
         for step in node.step_results:
-            for record in (step.extractor_record, step.auditor_record):
+            for record in (step.get("extractor_record"), step.get("auditor_record")):
                 if record is None:
+                    continue
+                if not isinstance(record, ReplayRecord):
                     continue
                 t = int(record.turn_index)
                 if t < turn_lo:

@@ -1,21 +1,11 @@
-"""Offline seams for :class:`HarnessRunner`.
-
-Symmetric to :mod:`llmharness.runtime.live` but for paths that drive
-the audit pipeline without a parent :class:`ExtensionAPI`:
+"""Offline seams for replay drivers.
 
 * :class:`StandaloneChildRunner` — spawns a top-level audit child via
-  :func:`llmharness.replay.engine.run_phase_standalone` (no
-  ``api.spawn_child_session``). Used by
-  :mod:`llmharness.replay.offline_driver` for full-trajectory offline
-  replay. (Single-firing replay calls ``run_phase_standalone`` directly
-  in :mod:`llmharness.replay.runner` and does not use this seam.)
+  :func:`llmharness.tools.replay.engine.run_phase_standalone` (no
+  ``api.spawn_child_session``).
 
 * :class:`InMemorySink` — drops every persisted entry into a Python list
-  instead of the AgentM session log. Used by offline drivers and tests
-  that want the runner's full behaviour but no on-disk session state.
-
-Neither seam emits ``DiagnosticEvent`` s; that channel only exists on the
-live ExtensionAPI.
+  instead of the AgentM session log.
 """
 
 from __future__ import annotations
@@ -24,36 +14,49 @@ import json
 import logging
 from typing import Any
 
-from ..agents.auditor.output import AuditorOutputError, RawVerdictOutput
-from ..agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
-from ..agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
-from ..agents.extractor.state import ExtractionState
-from ..graph.ops import GraphOp
-from ..replay.engine import run_phase_standalone
-from ..schema import Event
-from .directive import build_extractor_directive
-from .runner import (
-    AuditorChildResult,
-    ExtractorSpawnError,
-    _flatten_assistant_blocks,
+from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
+from llmharness.agents.extractor.tools import (
+    ExtractionState,
+    FINALIZE_EXTRACTION_TOOL_NAME,
+    GraphOp,
 )
+from llmharness.schema import Event, Verdict
+
+from .engine import PhaseResult, run_phase_standalone, terminal_tool_arguments
 
 _logger = logging.getLogger(__name__)
+
+
+def _flatten_assistant_blocks(messages: list[Any]) -> list[dict[str, Any]]:
+    """Extract serialized content blocks from AssistantMessages."""
+    from agentm.core.abi.messages import AssistantMessage, ToolCallBlock
+
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in msg.content:
+            if isinstance(block, ToolCallBlock):
+                out.append({
+                    "type": "tool_call",
+                    "name": block.name,
+                    "arguments": dict(block.arguments),
+                })
+            elif hasattr(block, "text"):
+                btype = getattr(block, "type", "text")
+                out.append({"type": btype, "text": block.text})
+    return out
 
 
 # --- child runner -----------------------------------------------------------
 
 
-class StandaloneChildRunner:
-    """:class:`ChildRunner` impl driven by :func:`run_phase_standalone`.
+class ExtractorSpawnError(RuntimeError):
+    """Raised by the child runner on spawn/prompt failure."""
 
-    Accepts domain-level parameters (state, prompt text, tool config)
-    from the runner and composes extension lists internally for replay
-    compatibility. Same return signatures and failure routing as
-    :class:`llmharness.runtime.live.LiveChildRunner`, but spawns a
-    top-level session per phase. There is no parent ``ExtensionAPI``;
-    ``cwd`` is the working directory the child sessions execute in.
-    """
+
+class StandaloneChildRunner:
+    """Spawns top-level sessions per phase for offline replay."""
 
     def __init__(
         self,
@@ -76,17 +79,9 @@ class StandaloneChildRunner:
         turn_window: list[int],
         tool_call_budget: int | None = None,
     ) -> tuple[bool, list[dict[str, Any]]]:
-        """Run one extractor firing as a top-level session.
-
-        Composes the extension list internally from domain-level params,
-        then delegates to :func:`run_phase_standalone`.
-
-        Returns ``(terminator_called, raw_assistant_blocks)``. Spawn /
-        prompt failures raise :class:`ExtractorSpawnError`; everything
-        else (including ``no_call``) is signalled via ``terminator_called=False``.
-        """
-        del turn_window  # surfaced by the runner via append_failure context
-        _EXT_TOOLS = "llmharness.agents.extractor.extractor_tools"
+        """Run one extractor firing as a top-level session."""
+        del turn_window
+        _EXT_TOOLS = "llmharness.agents.extractor.tools"
         _OBS = "agentm.extensions.builtin.observability"
         _OPS = "agentm.extensions.builtin.operations"
         _SYS = "agentm.extensions.builtin.system_prompt"
@@ -103,12 +98,11 @@ class StandaloneChildRunner:
             ])
 
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
-        directive = build_extractor_directive(payload)
         result = await run_phase_standalone(
             cwd=self._cwd,
             extensions=extensions,
             provider=provider,
-            payload=directive + payload_json,
+            payload=payload_json,
             terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
             purpose="cognitive_audit_extractor_offline",
             parent_session_id=self._parent_session_id,
@@ -128,20 +122,12 @@ class StandaloneChildRunner:
         graph_events: list[Event],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
-    ) -> AuditorChildResult:
+    ) -> dict[str, Any]:
         """Run one auditor firing as a top-level session.
 
-        Composes the extension list internally from domain-level params
-        (``prompt_text`` and ``tools_config``), then delegates to
-        :func:`run_phase_standalone`. Returns an :class:`AuditorChildResult`
-        with ``verdict=None`` for every failure mode (spawn / prompt /
-        no-call / malformed); ``error`` / ``latency_ms`` are taken
-        verbatim from :func:`run_phase_standalone`'s
-        :class:`PhaseResult`. Failure persistence is not this seam's
-        responsibility — offline drivers route through ``InMemorySink``
-        which has no diagnostic channel to emit on.
+        Returns a dict with keys: verdict, raw_blocks, error, latency_ms.
         """
-        _AUD_TOOLS = "llmharness.agents.auditor.auditor_tools"
+        _AUD_TOOLS = "llmharness.agents.auditor.tools"
         _OBS = "agentm.extensions.builtin.observability"
         _OPS = "agentm.extensions.builtin.operations"
         _SYS = "agentm.extensions.builtin.system_prompt"
@@ -170,55 +156,49 @@ class StandaloneChildRunner:
         latency_ms = result.latency_ms
 
         if result.status != "ok" or result.output is None:
-            return AuditorChildResult(
-                verdict=None,
-                raw_blocks=raw_blocks,
-                error=result.error,
-                latency_ms=latency_ms,
-            )
+            return {
+                "verdict": None,
+                "raw_blocks": raw_blocks,
+                "error": result.error,
+                "latency_ms": latency_ms,
+            }
 
+        # Parse verdict from raw output
         try:
-            raw = RawVerdictOutput.from_dict(result.output)
-            return AuditorChildResult(
-                verdict=raw.to_verdict(),
-                raw_blocks=raw_blocks,
-                error=None,
-                latency_ms=latency_ms,
-            )
-        except AuditorOutputError as exc:
-            err = f"malformed: {exc}"
-            _logger.debug("offline auditor returned malformed verdict: %s", exc)
-            return AuditorChildResult(
-                verdict=None,
-                raw_blocks=raw_blocks,
-                error=err,
-                latency_ms=latency_ms,
-            )
+            verdict_raw = result.output.get("verdict") or result.output
+            if isinstance(verdict_raw, dict):
+                verdict = Verdict.from_dict(verdict_raw)
+                return {
+                    "verdict": verdict,
+                    "raw_blocks": raw_blocks,
+                    "error": None,
+                    "latency_ms": latency_ms,
+                }
+        except (KeyError, TypeError, ValueError) as exc:
+            return {
+                "verdict": None,
+                "raw_blocks": raw_blocks,
+                "error": f"malformed: {exc}",
+                "latency_ms": latency_ms,
+            }
+
+        return {
+            "verdict": None,
+            "raw_blocks": raw_blocks,
+            "error": "no verdict in output",
+            "latency_ms": latency_ms,
+        }
 
 
 # --- op sink ----------------------------------------------------------------
 
 
 class InMemorySink:
-    """:class:`OpSink` impl that captures every entry in local lists.
-
-    Designed for offline drivers and tests: every ``append_*`` call just
-    grows the corresponding list. There is no session log, no
-    diagnostic channel, no on-disk persistence. The cumulative state
-    held by the runner is authoritative; this sink is for inspection
-    only.
-
-    All lists are public so callers (tests in particular) can assert on
-    counts and contents directly.
-    """
+    """Captures every entry in local lists — for offline drivers and tests."""
 
     def __init__(self) -> None:
         self.ops: list[tuple[GraphOp, int, int, list[int]]] = []
-        """``(op, firing_id, op_index, turn_window)`` per :meth:`append_op` call."""
-
         self.cursors: list[int] = []
-        """One ``last_turn_index`` per :meth:`append_cursor` call."""
-
         self.verdicts: list[dict[str, Any]] = []
         self.failures: list[tuple[str, dict[str, Any]]] = []
         self.partials: list[dict[str, Any]] = []
@@ -246,4 +226,4 @@ class InMemorySink:
         self.partials.append(dict(payload))
 
 
-__all__ = ["InMemorySink", "StandaloneChildRunner"]
+__all__ = ["ExtractorSpawnError", "InMemorySink", "StandaloneChildRunner"]

@@ -4,39 +4,26 @@ Live path: parent session spawns a child via ``api.spawn_child_session``.
 Replay path: this module creates a brand-new top-level session with the
 same extensions and pumps the recorded payload through it.
 
-Both paths share :mod:`llmharness.audit.{extractor,auditor}.extensions`
-composers, the terminal-tool scraper in
-:mod:`llmharness.runtime.child_collect`, and the shutdown helper in
-:mod:`llmharness.runtime.session`, so the system prompt, tool
-surface, payload shape, and collect contract are identical to a live
-firing.
-
 Boundary: this module is a host-side driver (not a §11 atom — no
 ``MANIFEST`` / ``install`` pair, never named in a scenario manifest), so
 the ``agentm.core.runtime.*`` imports below are intentional and must not
-be removed. If this file is ever promoted to an atom, route session
-construction through ``ExtensionAPI`` instead.
+be removed.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from dataclasses import dataclass
 from typing import Any
 
-from agentm.core.abi.messages import AgentMessage
+from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolCallBlock
 from agentm.core.abi.session_config import AgentSessionConfig
-
-# Both imports are runtime-required: ``AgentSession`` is passed as a
-# positional argument to ``create_agent_session(AgentSession, config)``,
-# so it cannot be hidden behind ``TYPE_CHECKING``.
 from agentm.core.runtime.session import AgentSession
 from agentm.core.runtime.session_factory import create_agent_session
 
-from ..replay.record import Status
-from ..runtime.child_collect import nudge_until_tool_call, terminal_tool_arguments
-from ..runtime.session import safe_shutdown
+from llmharness.replay.record import Status
 
 
 @dataclass
@@ -54,6 +41,19 @@ class PhaseResult:
     messages: list[AgentMessage]
 
 
+def terminal_tool_arguments(
+    messages: list[AgentMessage], tool_name: str,
+) -> dict[str, Any] | None:
+    """Extract the arguments of the last call to ``tool_name``."""
+    for msg in reversed(messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in reversed(msg.content):
+            if isinstance(block, ToolCallBlock) and block.name == tool_name:
+                return dict(block.arguments)
+    return None
+
+
 async def run_phase_standalone(
     *,
     cwd: str,
@@ -68,14 +68,8 @@ async def run_phase_standalone(
     """Spawn a top-level session, send ``payload`` as a user message,
     return the ``terminal_tool`` arguments.
 
-    The live path's ``api.spawn_child_session`` produces a bus-parented
-    child; this produces an isolated root session — same tool surface
-    and prompt, no parent linkage.
-
     ``payload`` is either a dict (JSON-serialised and sent as the user
-    message) or a string (sent verbatim). Callers that need a per-phase
-    directive prefix construct the combined string themselves and pass
-    it in — this engine no longer special-cases any terminal tool.
+    message) or a string (sent verbatim).
 
     ``parent_session_id`` / ``trace_id`` are optional linkage fields:
     when set, the child session's observability file carries the parent
@@ -109,7 +103,8 @@ async def run_phase_standalone(
             user_message = json.dumps(payload, ensure_ascii=False, default=str)
         messages = await session.prompt(user_message)
     except Exception as exc:
-        await safe_shutdown(session)
+        with contextlib.suppress(Exception):
+            await session.shutdown()
         return PhaseResult(
             output=None,
             status="prompt_error",
@@ -118,9 +113,8 @@ async def run_phase_standalone(
             messages=[],
         )
 
-    messages = await nudge_until_tool_call(session.prompt, messages, terminal_tool)
-
-    await safe_shutdown(session)
+    with contextlib.suppress(Exception):
+        await session.shutdown()
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     args = terminal_tool_arguments(messages, terminal_tool)

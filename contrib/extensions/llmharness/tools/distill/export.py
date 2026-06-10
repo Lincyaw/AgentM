@@ -38,16 +38,32 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from ..agents.auditor.prompt import (
-    DEFAULT_PROMPT_NAME as _AUDITOR_DEFAULT_PROMPT_NAME,
+from llmharness.agents.auditor.prompt import load_auditor_prompt
+from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
+from llmharness.agents.extractor.prompt import load_extractor_prompt
+from llmharness.agents.extractor.tools import (
+    UPSERT_NODE_TOOL_NAME,
+    UPSERT_EDGE_TOOL_NAME,
+    DELETE_NODE_TOOL_NAME,
+    DELETE_EDGE_TOOL_NAME,
+    RESET_EXTRACTION_TOOL_NAME,
+    FINALIZE_EXTRACTION_TOOL_NAME,
 )
-from ..agents.auditor.prompt import load_auditor_prompt
-from ..agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
-from ..agents.extractor.extractor_tools import EXTRACTOR_TOOL_NAMES
-from ..agents.extractor.prompt import (
-    DEFAULT_PROMPT_NAME as _EXTRACTOR_DEFAULT_PROMPT_NAME,
-)
-from ..agents.extractor.prompt import load_extractor_prompt
+
+# Tool names the extractor can call — used to filter valid steps in SFT export.
+EXTRACTOR_TOOL_NAMES: frozenset[str] = frozenset({
+    UPSERT_NODE_TOOL_NAME,
+    UPSERT_EDGE_TOOL_NAME,
+    DELETE_NODE_TOOL_NAME,
+    DELETE_EDGE_TOOL_NAME,
+    RESET_EXTRACTION_TOOL_NAME,
+    FINALIZE_EXTRACTION_TOOL_NAME,
+})
+
+# Default prompt names — the new modules don't export DEFAULT_PROMPT_NAME
+# as a constant; use the string directly.
+_EXTRACTOR_DEFAULT_PROMPT_NAME = "default"
+_AUDITOR_DEFAULT_PROMPT_NAME = "minimal"
 
 Phase = Literal["extractor", "auditor"]
 

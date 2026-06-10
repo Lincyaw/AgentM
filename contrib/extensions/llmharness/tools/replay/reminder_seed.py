@@ -12,32 +12,34 @@ reminders, if any, come from the still-live auditor running in the
 branched session (configured at the CLI layer to keep observing but not
 re-inject).
 
-Message format is delegated to ``audit/_reminder_format.py`` so the
-output is byte-identical to what the live adapter would have produced
-for the same text — train/inference parity is load-bearing for the
-distill loop.
-
-§11 contract: single file, no atom-to-atom imports (the
-``audit/_reminder_format`` module is a shared helper, not an atom — it
-ships no ``MANIFEST``), no ``agentm.core.runtime.*`` import, no
-``agentm.core._internal`` import.
+§11 contract: single file, no atom-to-atom imports, no
+``agentm.core.runtime.*`` import, no ``agentm.core._internal`` import.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from agentm.core.abi import DecideTurnActionEvent, Inject, LoopAction, Stop
 from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi.messages import UserMessage, text_message
 from agentm.extensions import ExtensionManifest
 
-from ..entry_types import REMINDER_DELIVERED
-from ..runtime.reminder import build_reminder_message
+from llmharness.schema import REMINDER_DELIVERED
 
 _logger = logging.getLogger(__name__)
+
+# Matches the preamble in llmharness.atom so the injected message is
+# byte-identical to what the live adapter would have produced.
+REMINDER_PREAMBLE = "[system reminder — automated review of your investigation so far]\n"
+
+
+def _build_reminder_message(text: str) -> UserMessage:
+    return text_message(REMINDER_PREAMBLE + text, timestamp=time.time())
 
 
 class ReplayReminderSeedConfig(BaseModel):
@@ -45,8 +47,7 @@ class ReplayReminderSeedConfig(BaseModel):
         min_length=1,
         description=(
             "Reminder text to inject on the next "
-            "DecideTurnActionEvent. The preamble defined in "
-            "audit/_reminder_format.REMINDER_PREAMBLE is "
+            "DecideTurnActionEvent. The preamble is "
             "prepended automatically; pass only the body."
         ),
     )
@@ -75,18 +76,9 @@ MANIFEST = ExtensionManifest(
 
 
 def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
-    """Wire the one-shot reminder seeder.
-
-    Validation of ``text`` is handled by the Pydantic model; an empty /
-    missing reminder is a programmer error from the CLI driver and will
-    fail at model validation time.
-    """
+    """Wire the one-shot reminder seeder."""
     text: str = config.text
 
-    # ``fired`` is a list-of-one to keep the closure mutable from inside
-    # the handler without resorting to ``nonlocal`` on a primitive —
-    # matches the pattern used elsewhere in the adapter for queue-like
-    # state captured by an event handler closure.
     fired: list[bool] = [False]
     unsubscribe: list[Any] = []
 
@@ -95,14 +87,6 @@ def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
             return None
         default = event.observation.default_action
         if isinstance(default, Stop) and default.cause.final:
-            # Mirrors live adapter behaviour: a final-cause stop
-            # (MaxTurnsExhausted / SignalAborted) ignores overrides.
-            # Warn and leave ``fired`` False so a later non-final turn —
-            # if one ever materialises in this branched session — still
-            # gets the seed. In practice this branch is unreachable for
-            # the prefix-replay flow (the loop wouldn't have stopped on
-            # the very first decide call) but keeping the guard
-            # consistent with the live path avoids surprise behaviour.
             _logger.warning(
                 "replay_reminder_seed: first DecideTurnActionEvent has "
                 "final-cause Stop (%s); reminder will not be delivered, "
@@ -110,7 +94,7 @@ def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
                 type(default.cause).__name__,
             )
             return None
-        message = build_reminder_message(text)
+        message = _build_reminder_message(text)
         try:
             api.session.append_entry(REMINDER_DELIVERED, {"text": text})
         except Exception:

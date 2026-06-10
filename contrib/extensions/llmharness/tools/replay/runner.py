@@ -4,9 +4,8 @@ These functions back chain replay, the
 ``llmharness-replay {extractor,auditor} --turn N`` CLI, and the RL
 prompts exporter. A replay record already carries a finished
 ``payload`` + ``compose_kwargs``, so a firing needs none of the live
-``HarnessRunner`` machinery (cadence, cumulative state, sinks): rebuild
-the per-firing inputs from the record and call
-:func:`run_phase_standalone` directly.
+machinery (cadence, cumulative state, sinks): rebuild the per-firing
+inputs from the record and call :func:`run_phase_standalone` directly.
 """
 
 from __future__ import annotations
@@ -15,16 +14,111 @@ import contextlib
 import json
 from typing import Any
 
-from ..agents.auditor.prompt import build_auditor_system_prompt
-from ..agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
-from ..agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
-from ..agents.extractor.output import RawExtractorOutput
-from ..agents.extractor.state import ExtractionState
-from ..runtime.directive import build_extractor_directive
-from ..runtime.runner import AuditorSettings, ExtractorSettings
-from ..schema import Edge, Event, Finding, Phase
+from llmharness.agents.auditor.prompt import build_auditor_system_prompt
+from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
+from llmharness.agents.extractor.tools import (
+    FINALIZE_EXTRACTION_TOOL_NAME,
+    ExtractionState,
+)
+from llmharness.schema import Edge, Event, Finding, Phase
+
 from .engine import PhaseResult, run_phase_standalone
-from .record import ReplayRecord
+from llmharness.replay.record import ReplayRecord
+
+
+# ---------------------------------------------------------------------------
+# Settings dataclasses (replace old runtime.runner Settings)
+# ---------------------------------------------------------------------------
+
+
+class ExtractorSettings:
+    """Minimal config needed to replay an extractor firing."""
+
+    def __init__(
+        self,
+        *,
+        base_prompt: str | None = None,
+        tool_call_budget: int | None = None,
+        compose_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        self.base_prompt = base_prompt
+        self.tool_call_budget = tool_call_budget
+        self.compose_kwargs = compose_kwargs or {}
+
+    @classmethod
+    def from_compose_kwargs(
+        cls,
+        compose_kwargs: dict[str, Any],
+        *,
+        prompt_override: str | None = None,
+    ) -> ExtractorSettings:
+        from llmharness.agents.extractor.prompt import load_extractor_prompt
+
+        base_prompt = prompt_override
+        if base_prompt is None:
+            prompt_name = compose_kwargs.get("prompt_name") or "default"
+            base_prompt = load_extractor_prompt(prompt_name)
+        return cls(
+            base_prompt=base_prompt,
+            tool_call_budget=compose_kwargs.get("tool_call_budget"),
+            compose_kwargs=compose_kwargs,
+        )
+
+    @classmethod
+    def default(cls) -> ExtractorSettings:
+        from llmharness.agents.extractor.prompt import load_extractor_prompt
+
+        return cls(base_prompt=load_extractor_prompt("default"))
+
+
+class AuditorSettings:
+    """Minimal config needed to replay an auditor firing."""
+
+    def __init__(
+        self,
+        *,
+        base_prompt: str | None = None,
+        summary_threshold: int = 30,
+        tools: tuple[str, ...] | None = None,
+        observability_config: dict[str, Any] | None = None,
+    ) -> None:
+        self.base_prompt = base_prompt
+        self.summary_threshold = summary_threshold
+        self.tools = tools
+        self.observability_config = observability_config
+
+    @classmethod
+    def from_compose_kwargs(
+        cls,
+        compose_kwargs: dict[str, Any],
+        *,
+        prompt_override: str | None = None,
+    ) -> AuditorSettings:
+        from llmharness.agents.auditor.prompt import load_auditor_prompt
+
+        base_prompt = prompt_override
+        if base_prompt is None:
+            prompt_name = compose_kwargs.get("prompt_name") or "minimal"
+            base_prompt = load_auditor_prompt(prompt_name)
+        tools_raw = compose_kwargs.get("tools")
+        tools = tuple(tools_raw) if isinstance(tools_raw, (list, tuple)) else None
+        return cls(
+            base_prompt=base_prompt,
+            summary_threshold=int(compose_kwargs.get("summary_threshold", 30)),
+            tools=tools,
+            observability_config=compose_kwargs.get("observability_config"),
+        )
+
+    @classmethod
+    def default(cls) -> AuditorSettings:
+        from llmharness.agents.auditor.prompt import load_auditor_prompt
+
+        return cls(base_prompt=load_auditor_prompt("minimal"))
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _coerce_provider(record: ReplayRecord) -> tuple[str, dict[str, Any]] | None:
@@ -52,6 +146,11 @@ def _coerce_schema_list(cls: Any, items: Any) -> list[Any]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Extractor replay
+# ---------------------------------------------------------------------------
+
+
 async def replay_extractor_record(
     record: ReplayRecord,
     *,
@@ -66,11 +165,8 @@ async def replay_extractor_record(
     identical — the A/B knobs that motivate this module.
 
     Rebuilds an :class:`ExtractionState` from ``record.payload`` +
-    ``extras.turn_texts`` (so external_refs can be witnessed against
-    trajectory text), binds it onto the extractor extension list, runs
-    the firing, and snapshots :class:`RawExtractorOutput` from the bound
-    state. The returned ``events`` / ``edges`` / ``dropped_edges`` /
-    ``ops`` shape is pinned by tests.
+    ``extras.turn_texts``, binds it onto the extractor extension list,
+    runs the firing, and snapshots results from the bound state.
     """
     if record.phase != "extractor":
         raise ValueError(f"expected extractor record, got phase={record.phase!r}")
@@ -89,15 +185,11 @@ async def replay_extractor_record(
     for k, v in (extras.get("turn_texts") or {}).items():
         with contextlib.suppress(TypeError, ValueError):
             state.turn_texts[int(k)] = str(v)
-    # Union in any prior-firing turn texts the caller supplied (the CLI
-    # computes these from earlier records so external_refs can be
-    # witnessed; the live adapter does the same enrichment at firing time).
     for k, v in (extras.get("prior_turn_texts") or {}).items():
         with contextlib.suppress(TypeError, ValueError):
             state.turn_texts.setdefault(int(k), str(v))
 
-    # Enrich recent_graph entries with source_turn_texts and populate
-    # state.recent_graph so external_refs can be witnessed.
+    # Enrich recent_graph entries and populate state.recent_graph.
     payload = dict(record.payload or {})
     graph_obj = payload.get("graph")
     graph_raw: dict[str, Any] = graph_obj if isinstance(graph_obj, dict) else {}
@@ -139,7 +231,7 @@ async def replay_extractor_record(
     state.recent_edges_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
     state._refold()
 
-    _EXT_TOOLS = "llmharness.agents.extractor.extractor_tools"
+    _EXT_TOOLS = "llmharness.agents.extractor.tools"
     _OBS = "agentm.extensions.builtin.observability"
     _OPS = "agentm.extensions.builtin.operations"
     _SYS = "agentm.extensions.builtin.system_prompt"
@@ -159,18 +251,18 @@ async def replay_extractor_record(
         cwd=cwd,
         extensions=extensions,
         provider=provider,
-        payload=build_extractor_directive(payload)
-        + json.dumps(payload, ensure_ascii=False, default=str),
+        payload=json.dumps(payload, ensure_ascii=False, default=str),
         terminal_tool=FINALIZE_EXTRACTION_TOOL_NAME,
         purpose="cognitive_audit_extractor_replay",
     )
-    snapshot = RawExtractorOutput.salvage(state)
+    # Salvage: commit-on-stop if the extractor didn't finalize.
+    state.salvage()
     if state.pending_ops:
         result = PhaseResult(
             output={
-                "events": [e.to_dict() for e in snapshot.events],
-                "edges": [ed.to_dict() for ed in snapshot.edges],
-                "dropped_edges": list(snapshot.dropped_edges),
+                "events": [e.to_dict() for e in state.events],
+                "edges": [ed.to_dict() for ed in state.edges],
+                "dropped_edges": list(state.dropped_edges),
                 "ops": [op.to_dict() for op in state.pending_ops],
             },
             status="ok",
@@ -179,6 +271,11 @@ async def replay_extractor_record(
             messages=result.messages,
         )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Auditor replay
+# ---------------------------------------------------------------------------
 
 
 async def replay_auditor_record(
@@ -216,7 +313,7 @@ async def replay_auditor_record(
         base_prompt=settings.base_prompt or None,
     )
     tools_config: dict[str, Any] = {"tools": list(settings.tools or (SUBMIT_VERDICT_TOOL_NAME,))}
-    _AUDITOR_TOOLS = "llmharness.agents.auditor.auditor_tools"
+    _AUDITOR_TOOLS = "llmharness.agents.auditor.tools"
     _OBS = "agentm.extensions.builtin.observability"
     _OPS = "agentm.extensions.builtin.operations"
     _SYS = "agentm.extensions.builtin.system_prompt"

@@ -30,11 +30,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from ..graph.ops import parse_op
-from ..runtime.runner import CumulativeAuditState
-from ..schema import Verdict
+from llmharness.agents.extractor.tools import parse_op
+from llmharness.atom import CumulativeAuditState
+from llmharness.schema import Verdict
+
 from .engine import PhaseResult
-from .record import Phase, ReplayRecord, iter_records
+from llmharness.replay.record import Phase, ReplayRecord, iter_records
 from .runner import replay_auditor_record, replay_extractor_record
 
 PhaseFilter = Phase | Literal["both"]
@@ -158,7 +159,7 @@ def _absorb_auditor_output(result: PhaseResult, cumulative: CumulativeAuditState
         verdict = Verdict.from_dict(raw_verdict)
     except (KeyError, TypeError, ValueError):
         return
-    cumulative.absorb_auditor_verdict(verdict.to_dict(), is_silent=not verdict.surface_reminder)
+    cumulative.absorb_auditor_verdict(verdict.to_dict())
 
 
 async def chain_replay(

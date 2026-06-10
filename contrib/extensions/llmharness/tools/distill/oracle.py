@@ -20,12 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from ..replay.engine import run_phase_standalone
-from ..runtime.constants import (
-    OBSERVABILITY_MODULE,
-    OPERATIONS_MODULE,
-    SYSTEM_PROMPT_MODULE,
-)
-from ..schema import Edge, Event, Finding
+from llmharness.schema import Edge, Event, Finding
+
+# Module paths for standard builtin atoms.
+OBSERVABILITY_MODULE = "agentm.extensions.builtin.observability"
+OPERATIONS_MODULE = "agentm.extensions.builtin.operations"
+SYSTEM_PROMPT_MODULE = "agentm.extensions.builtin.system_prompt"
 from ._submit_oracle import SUBMIT_ORACLE_TOOL_NAME
 from ._submit_rewriter import SUBMIT_REWRITE_TOOL_NAME
 from .causal import CausalSnapshot, causal_mask
