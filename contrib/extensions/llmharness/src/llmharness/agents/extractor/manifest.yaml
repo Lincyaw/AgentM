@@ -1,13 +1,9 @@
 name: extractor
 description: >
   Cognitive audit extractor: incremental event/edge graph builder.
-  Walks new turn windows and maintains a logic-flow graph via
-  upsert/delete/finalize tools.
 
 extensions:
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.operations
-  - module: llmharness.agents.extractor.extractor_tools
-  - module: agentm.extensions.builtin.system_prompt
-    config:
-      prompt: ""
+  - module: llmharness.agents.extractor.context
+  - module: llmharness.agents.extractor.tools

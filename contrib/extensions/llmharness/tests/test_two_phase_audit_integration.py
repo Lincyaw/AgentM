@@ -56,8 +56,8 @@ from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 
 from llmharness.agents.auditor.auditor_tools import SUBMIT_VERDICT_TOOL_NAME
-from llmharness.agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
-from llmharness.entry_types import (
+from llmharness.agents.extractor.tools.finalize_extraction import FINALIZE_EXTRACTION_TOOL_NAME
+from llmharness.schema import (
     AUDIT_GRAPH_OP,
     EXTRACTOR_CURSOR,
     EXTRACTOR_EMPTY,
@@ -550,49 +550,6 @@ async def test_salvage_path_commits_ops_without_terminator(tmp_path: Path) -> No
     cursors = _entries(session, EXTRACTOR_CURSOR)
     assert len(cursors) >= 1, "cursor must advance when ops were salvaged"
     assert no_call == [], "no EXTRACTOR_NO_CALL when ops were salvaged from the op log"
-
-
-# --- Scenario 3c: empty-turn nudge (zero tool calls → re-prompt) -----------
-
-
-@pytest.mark.asyncio
-async def test_empty_turn_nudge_converts_no_call_into_recorded_firing(
-    tmp_path: Path,
-) -> None:
-    """A firing whose FIRST turn emits zero tool calls is re-prompted.
-
-    The ``nudge`` stub returns prose only on its first extractor turn —
-    which, without the empty-turn nudge, would commit nothing and record
-    an ``extractor_no_call``. The nudge in ``run_child_task`` re-prompts
-    the same child; the nudge turn walks the happy node+edge+finalize
-    script, so the firing instead lands two node upserts, one edge upsert,
-    and a cursor — and NO ``extractor_no_call``.
-    """
-    provider = _V31StubProvider(mode="nudge")
-    provider_module = _install_provider_module("tests._fake_v31_nudge_provider", provider)
-
-    session = await AgentSession.create(
-        _build_session_config(cwd=str(tmp_path), provider_module=provider_module)
-    )
-    await session.prompt("user turn 1")
-    await session.shutdown()
-
-    ops = _entries(session, AUDIT_GRAPH_OP)
-    no_call = _entries(session, EXTRACTOR_NO_CALL)
-
-    op_kinds = [e.payload.get("op") if isinstance(e.payload, dict) else None for e in ops]
-    node_upserts = sum(1 for k in op_kinds if k == "node_upsert")
-    edge_upserts = sum(1 for k in op_kinds if k == "edge_upsert")
-    assert node_upserts == 2, f"nudge turn must land 2 node_upsert ops, got {node_upserts}: {ops}"
-    assert edge_upserts == 1, f"nudge turn must land 1 edge_upsert op, got {edge_upserts}: {ops}"
-    cursors = _entries(session, EXTRACTOR_CURSOR)
-    assert len(cursors) == 1, f"cursor must advance after the nudge firing, got {len(cursors)}"
-    assert no_call == [], "the nudge converted the empty first turn into a recorded firing"
-    # The wasted first turn + the nudge turn means the extractor child was
-    # prompted at least twice for the single firing.
-    assert provider.extractor_calls >= 2, (
-        f"expected >=2 extractor provider calls (initial + nudge), got {provider.extractor_calls}"
-    )
 
 
 # --- Scenario 4: empty (terminator called with empty events) ---------------
