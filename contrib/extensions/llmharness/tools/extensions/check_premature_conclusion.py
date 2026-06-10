@@ -83,7 +83,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     registry = api.get_service(SERVICE_KEY)
     if not isinstance(registry, AuditCheckRegistry):
         raise RuntimeError(
-            "audit registry service not published; mount llmharness.adapter first"
+            "audit registry service not published; mount llmharness.atom first"
         )
     registry.register_check(_PrematureConclusionCheck())
 

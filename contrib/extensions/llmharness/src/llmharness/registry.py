@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Protocol, runtime_checkable
 
-from ..schema import Edge, Event, Finding
+from .schema import Edge, Event, Finding
 
 
 @dataclass(frozen=True)

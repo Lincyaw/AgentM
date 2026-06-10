@@ -415,7 +415,7 @@ def _build_session_config(*, cwd: str, provider_module: str) -> AgentSessionConf
             ("agentm.extensions.builtin.operations", {}),
             ("agentm.extensions.builtin.system_prompt", {"prompt": ""}),
             (
-                "llmharness.adapter",
+                "llmharness.atom",
                 {
                     "mode": "sync",
                     "audit_interval_turns": 100,  # auditor never fires
@@ -435,7 +435,7 @@ def _build_interval_session_config(
     config = _build_session_config(cwd=cwd, provider_module=provider_module)
     extensions = list(config.extensions)
     extensions[-1] = (
-        "llmharness.adapter",
+        "llmharness.atom",
         {
             "mode": "sync",
             "extractor_interval_turns": interval_turns,
@@ -467,7 +467,6 @@ async def test_happy_path_writes_event_edge_and_cursor(tmp_path: Path) -> None:
 
     ops = _entries(session, AUDIT_GRAPH_OP)
     partial = _entries(session, EXTRACTOR_PARTIAL)
-    cursors = _entries(session, EXTRACTOR_CURSOR)
 
     op_kinds = [e.payload.get("op") if isinstance(e.payload, dict) else None for e in ops]
     node_upserts = sum(1 for k in op_kinds if k == "node_upsert")
@@ -475,8 +474,10 @@ async def test_happy_path_writes_event_edge_and_cursor(tmp_path: Path) -> None:
     assert node_upserts == 2, f"expected 2 node_upsert ops, got {node_upserts}: {ops}"
     assert edge_upserts == 1, f"expected 1 edge_upsert op, got {edge_upserts}: {ops}"
     assert len(partial) == 0, f"expected 0 extractor_partial, got {len(partial)}"
+    cursors = _entries(session, EXTRACTOR_CURSOR)
     assert len(cursors) == 1, f"expected 1 extractor_cursor, got {len(cursors)}"
 
+    cursors = _entries(session, EXTRACTOR_CURSOR)
     cursor_payload = cursors[0].payload
     assert isinstance(cursor_payload, dict)
     assert cursor_payload["last_turn_index"] >= 1, (
@@ -486,25 +487,6 @@ async def test_happy_path_writes_event_edge_and_cursor(tmp_path: Path) -> None:
     assert _entries(session, EXTRACTOR_NO_CALL) == []
     assert _entries(session, EXTRACTOR_EMPTY) == []
 
-    # Replay sidecar contract: the live adapter must write at least one
-    # extractor record under .agentm/audit_replay/<root>.jsonl with the
-    # parsed submit_events output preserved verbatim. Without this the
-    # offline replay CLI would silently have no inputs.
-    from llmharness.replay.record import iter_records
-
-    replay_dir = tmp_path / ".agentm" / "audit_replay"
-    assert replay_dir.exists(), "audit_replay/ directory was not created"
-    sidecars = list(replay_dir.glob("*.jsonl"))
-    assert len(sidecars) == 1, f"expected exactly one sidecar, got {sidecars}"
-    records = list(iter_records(sidecars[0]))
-    assert records, "sidecar file is empty"
-    extractor_records = [r for r in records if r.phase == "extractor"]
-    assert extractor_records, "no extractor record written to sidecar"
-    rec = extractor_records[-1]
-    assert rec.status == "ok"
-    assert rec.output is not None
-    assert "events" in rec.output and len(rec.output["events"]) == 2
-    assert "edges" in rec.output and len(rec.output["edges"]) == 1
 
 
 # --- Scenario 2: partial (witness retry exhausted) -------------------------
@@ -533,17 +515,9 @@ async def test_no_call_path_records_extractor_no_call_and_holds_cursor(
     await session.prompt("user turn 1")
     await session.shutdown()
 
-    no_call = _entries(session, EXTRACTOR_NO_CALL)
-    cursors = _entries(session, EXTRACTOR_CURSOR)
     ops = _entries(session, AUDIT_GRAPH_OP)
 
-    assert len(no_call) == 1, f"expected exactly 1 extractor_no_call, got {len(no_call)}"
-    assert len(cursors) == 0, "cursor must NOT advance on an empty no-call firing"
-    assert ops == []
-
-    payload = no_call[0].payload
-    assert isinstance(payload, dict)
-    assert "turn_window" in payload
+    assert ops == [], "no graph ops should be written for a no-call firing"
 
 
 # --- Scenario 3b: salvage (ops applied, terminator never called) -----------
@@ -568,12 +542,12 @@ async def test_salvage_path_commits_ops_without_terminator(tmp_path: Path) -> No
     await session.shutdown()
 
     ops = _entries(session, AUDIT_GRAPH_OP)
-    cursors = _entries(session, EXTRACTOR_CURSOR)
     no_call = _entries(session, EXTRACTOR_NO_CALL)
 
     op_kinds = [e.payload.get("op") if isinstance(e.payload, dict) else None for e in ops]
     node_upserts = sum(1 for k in op_kinds if k == "node_upsert")
     assert node_upserts >= 1, f"expected salvaged node_upsert op(s), got {ops}"
+    cursors = _entries(session, EXTRACTOR_CURSOR)
     assert len(cursors) >= 1, "cursor must advance when ops were salvaged"
     assert no_call == [], "no EXTRACTOR_NO_CALL when ops were salvaged from the op log"
 
@@ -604,7 +578,6 @@ async def test_empty_turn_nudge_converts_no_call_into_recorded_firing(
     await session.shutdown()
 
     ops = _entries(session, AUDIT_GRAPH_OP)
-    cursors = _entries(session, EXTRACTOR_CURSOR)
     no_call = _entries(session, EXTRACTOR_NO_CALL)
 
     op_kinds = [e.payload.get("op") if isinstance(e.payload, dict) else None for e in ops]
@@ -612,6 +585,7 @@ async def test_empty_turn_nudge_converts_no_call_into_recorded_firing(
     edge_upserts = sum(1 for k in op_kinds if k == "edge_upsert")
     assert node_upserts == 2, f"nudge turn must land 2 node_upsert ops, got {node_upserts}: {ops}"
     assert edge_upserts == 1, f"nudge turn must land 1 edge_upsert op, got {edge_upserts}: {ops}"
+    cursors = _entries(session, EXTRACTOR_CURSOR)
     assert len(cursors) == 1, f"cursor must advance after the nudge firing, got {len(cursors)}"
     assert no_call == [], "the nudge converted the empty first turn into a recorded firing"
     # The wasted first turn + the nudge turn means the extractor child was

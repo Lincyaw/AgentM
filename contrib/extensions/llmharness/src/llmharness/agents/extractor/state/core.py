@@ -42,8 +42,8 @@ from llmharness.graph.ops import (
     NodeUpsert,
 )
 from llmharness.schema import Edge, EdgeKind, Event
-from llmharness.validation.enum_schema import EDGE_KIND_VALUES
 
+from ..validation.enum_schema import EDGE_KIND_VALUES
 from ..witness import witness_ref
 from .validate import (
     _coerce_int,

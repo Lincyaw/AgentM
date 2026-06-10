@@ -1,7 +1,7 @@
 """Reference scenario check atoms for the v3 cognitive-audit pipeline.
 
 Each submodule is a §11 single-file extension. They are mounted on
-the parent session AFTER ``llmharness.adapter`` has published
+the parent session AFTER ``llmharness.atom`` has published
 the audit registry service. Each atom calls
 ``api.get_service("llmharness.audit_registry").register_check(...)``
 from inside ``install(api, config)`` and fails fast if the service is

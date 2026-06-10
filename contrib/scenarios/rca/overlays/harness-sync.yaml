@@ -3,7 +3,7 @@
 # are disabled by default (opinions-only). To enable reminder injection,
 # override enable_reminders in the consuming manifest's extensions.
 extensions:
-  - module: llmharness.adapter
+  - module: llmharness.atom
     config:
       mode: sync
       extractor_interval_turns: 5

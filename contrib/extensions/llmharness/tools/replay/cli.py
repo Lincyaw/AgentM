@@ -455,7 +455,7 @@ def agent_from_reminder(
     1. Opens the source main-agent session JSONL.
     2. Picks the leaf entry that ends turn ``t`` (the ``t``-th
        ``message`` entry on the active branch — same indexing convention
-       as ``llmharness.adapter``).
+       as ``llmharness.atom``).
     3. Calls ``SessionManager.create_branched_session`` to materialise
        a new persisted session whose tree mirrors the original prefix
        and whose header carries ``parent_session`` pointing at the
