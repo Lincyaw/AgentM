@@ -79,7 +79,10 @@ async def _safe_shutdown(session: Any) -> None:
 async def run_child_task(
     api: ExtensionAPI,
     *,
-    extensions: list[tuple[str, dict[str, Any]]],
+    extensions: list[tuple[str, dict[str, Any]]] | None = None,
+    scenario: str | None = None,
+    extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
+    atom_config_overrides: dict[str, dict[str, Any]] | None = None,
     provider: tuple[str, dict[str, Any]] | None,
     prompt: str,
     purpose: str,
@@ -88,6 +91,13 @@ async def run_child_task(
     """Spawn a child session, send it ``prompt``, run it to completion,
     collect the result, and always shut the child down.
 
+    When ``scenario`` is provided, the child session is configured via
+    scenario-based resolution (``AgentSessionConfig(scenario=...)``)
+    with optional ``extra_extensions`` and ``atom_config_overrides``.
+    When ``extensions`` is provided (legacy path), the child uses the
+    raw extension list directly. At least one of ``scenario`` or
+    ``extensions`` must be set.
+
     Spawn / prompt exceptions are captured into ``ChildTaskResult.error``
     rather than raised, so the happy path never throws; callers that need
     typed error routing inspect ``error`` themselves.
@@ -95,7 +105,10 @@ async def run_child_task(
     config = AgentSessionConfig(
         cwd=api.cwd,
         provider=provider,
-        extensions=extensions,
+        extensions=extensions or [],
+        scenario=scenario,
+        extra_extensions=extra_extensions or [],
+        atom_config_overrides=atom_config_overrides or {},
         purpose=purpose,
     )
     t0 = time.monotonic()

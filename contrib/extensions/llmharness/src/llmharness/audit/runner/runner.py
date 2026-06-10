@@ -50,8 +50,16 @@ from ..auditor import (
     SUBMIT_VERDICT_TOOL_NAME,
     AuditorOutputError,
     RawVerdictOutput,
-    compose_auditor_extensions,
-    compose_auditor_trajectory_extensions,
+)
+from ..auditor.profiles import (
+    TOOL_GET_EVENT_DETAIL,
+    TOOL_GET_TURN,
+    TOOL_SUBMIT_VERDICT,
+)
+from ..auditor.prompt import (
+    build_auditor_system_prompt,
+    build_auditor_trajectory_prompt,
+    load_auditor_prompt,
 )
 from ..extractor import (
     FINALIZE_EXTRACTION_TOOL_NAME,
@@ -63,7 +71,6 @@ from ..graph.ops import GraphOp, parse_op
 from ..graph.phase import merge_to_phases
 from ..registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..registry import AuditCheckRegistry, CheckContext
-from ..seams.session import bind_extractor_state
 from ..triggers import TriggerContext, TriggerRegistry
 
 _logger = logging.getLogger(__name__)
@@ -76,10 +83,18 @@ _DEFAULT_RECENT_VERDICTS: Final[int] = _et.RECENT_VERDICTS_FOR_AUDITOR
 
 @dataclass(frozen=True)
 class ExtractorSettings:
-    """Per-install knobs for assembling a per-firing extractor extension list."""
+    """Per-install knobs for assembling a per-firing extractor extension list.
+
+    ``base_prompt`` and ``tool_call_budget`` are the domain-level parameters
+    the runner passes to the :class:`ChildRunner`. ``extensions`` is kept
+    for sidecar recording and replay compatibility but is no longer passed
+    to the child runner on the live path.
+    """
 
     extensions: list[tuple[str, dict[str, Any]]]
     compose_kwargs: dict[str, Any]
+    base_prompt: str = ""
+    tool_call_budget: int | None = None
 
     @classmethod
     def from_compose_kwargs(
@@ -103,12 +118,19 @@ class ExtractorSettings:
             if prompt_override is not None
             else ck.get("base_prompt") or ck.get("prompt_override")
         )
+        tcb_raw = ck.get("tool_call_budget")
+        tcb = int(tcb_raw) if isinstance(tcb_raw, int) and not isinstance(tcb_raw, bool) else None
         extensions = compose_extractor_extensions(
             base_prompt=effective_prompt,
             observability_config=ck.get("observability_config"),
-            tool_call_budget=ck.get("tool_call_budget"),
+            tool_call_budget=tcb,
         )
-        return cls(extensions=extensions, compose_kwargs=ck)
+        return cls(
+            extensions=extensions,
+            compose_kwargs=ck,
+            base_prompt=effective_prompt or "",
+            tool_call_budget=tcb,
+        )
 
     @classmethod
     def default(cls) -> ExtractorSettings:
@@ -139,7 +161,12 @@ class ExtractorSettings:
             observability_config={},
             tool_call_budget=None,
         )
-        return cls(extensions=extensions, compose_kwargs=compose_kwargs)
+        return cls(
+            extensions=extensions,
+            compose_kwargs=compose_kwargs,
+            base_prompt=base_prompt,
+            tool_call_budget=None,
+        )
 
 
 @dataclass(frozen=True)
@@ -388,15 +415,24 @@ class AuditorChildResult:
 
 
 class ChildRunner(Protocol):
-    """How a single child phase is invoked."""
+    """How a single child phase is invoked.
+
+    The protocol passes domain-level parameters (state, prompt text, tool
+    config) rather than a pre-composed extension list. Each implementation
+    decides HOW to compose the session: the live runner uses declarative
+    scenario manifests with ``atom_config_overrides``; the offline runner
+    composes an extension list internally for replay compatibility.
+    """
 
     async def run_extractor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        state: ExtractionState,
+        prompt_text: str,
         provider: tuple[str, dict[str, Any]] | None,
         payload: dict[str, Any],
         turn_window: list[int],
+        tool_call_budget: int | None = None,
     ) -> tuple[bool, list[dict[str, Any]]]:
         """Run the extractor child.
 
@@ -409,7 +445,8 @@ class ChildRunner(Protocol):
     async def run_auditor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        prompt_text: str,
+        tools_config: dict[str, Any],
         provider: tuple[str, dict[str, Any]] | None,
         graph_events: list[Event],
         recent_verdicts: list[dict[str, Any]],
@@ -423,6 +460,10 @@ class ChildRunner(Protocol):
         runner's sink (the live impl uses ``api.session.append_entry``).
         ``error`` / ``latency_ms`` are surfaced on the synthetic
         :class:`ReplayRecord` produced by the runner.
+
+        ``tools_config`` is the dict that goes into the auditor_tools
+        atom config (selected tools + trajectory_snapshot + events + edges).
+        ``prompt_text`` is the fully-built auditor system prompt.
         """
         ...
 
@@ -816,18 +857,15 @@ class HarnessRunner:
             "recent_graph": recent_graph_payload,
             "recent_edges": [ed.to_dict() for ed in edges_cum],
         }
-        tool_call_budget = self._extractor_settings.compose_kwargs.get("tool_call_budget")
+        tool_call_budget = self._extractor_settings.tool_call_budget
+        if tool_call_budget is None:
+            # Legacy fallback: compose_kwargs may carry the budget for
+            # replay-constructed settings that predate the field.
+            tcb_raw = self._extractor_settings.compose_kwargs.get("tool_call_budget")
+            if isinstance(tcb_raw, int) and not isinstance(tcb_raw, bool) and tcb_raw > 0:
+                tool_call_budget = tcb_raw
         if isinstance(tool_call_budget, int) and tool_call_budget > 0:
             payload["tool_call_budget"] = tool_call_budget
-
-        # Inject state into the per-firing extensions list. The base
-        # list returned by ``compose_extractor_extensions`` is shared
-        # across firings; ``bind_extractor_state`` returns a copy with
-        # the ``state`` config knob set on the extractor-tools atom.
-        firing_extensions = bind_extractor_state(
-            self._extractor_settings.extensions,
-            state=state,
-        )
 
         # Always materialise the per-firing replay-record metadata so a
         # synthetic :class:`ReplayRecord` can be attached to the
@@ -884,10 +922,12 @@ class HarnessRunner:
 
         try:
             terminator_called, raw_assistant_messages = await self._child.run_extractor(
-                extensions=firing_extensions,
+                state=state,
+                prompt_text=self._extractor_settings.base_prompt,
                 provider=self._provider_extractor,
                 payload=payload,
                 turn_window=turn_window,
+                tool_call_budget=tool_call_budget,
             )
         except ExtractorSpawnError as exc:
             self._sink.append_failure(
@@ -983,14 +1023,15 @@ class HarnessRunner:
             # trajectory to the auditor.  Use AuditorSettings.base_prompt
             # when it was explicitly set (non-empty); fall back to the
             # default trajectory variant otherwise.
-            traj_prompt = self._auditor_settings.base_prompt or None
-            firing_extensions = compose_auditor_trajectory_extensions(
-                base_prompt=traj_prompt,
-                observability_config=self._auditor_settings.observability_config,
+            traj_framing = self._auditor_settings.base_prompt or load_auditor_prompt("trajectory")
+            prompt_text = build_auditor_trajectory_prompt(
                 trajectory=trajectory_snapshot,
                 continuation_notes=continuation_notes,
-                tools=self._auditor_settings.tools,
+                base_prompt=traj_framing,
             )
+            # Trajectory-mode: only submit_verdict, no drill-down tools.
+            tools_config: dict[str, Any] = {"tools": [SUBMIT_VERDICT_TOOL_NAME]}
+
             replay_compose_kwargs: dict[str, Any] = {
                 "base_prompt": self._auditor_settings.base_prompt,
                 "observability_config": self._auditor_settings.observability_config,
@@ -1025,10 +1066,7 @@ class HarnessRunner:
                     _logger.exception("audit-check registry run_all failed; using empty findings")
                     findings, check_errors = [], {}
 
-            firing_extensions = compose_auditor_extensions(
-                base_prompt=self._auditor_settings.base_prompt,
-                observability_config=self._auditor_settings.observability_config,
-                trajectory_snapshot=trajectory_snapshot,
+            prompt_text = build_auditor_system_prompt(
                 events=events_tuple,
                 edges=edges_tuple,
                 phases=phases_tuple,
@@ -1036,8 +1074,25 @@ class HarnessRunner:
                 check_errors=dict(check_errors),
                 continuation_notes=continuation_notes,
                 summary_threshold=self._auditor_settings.summary_threshold,
-                tools=self._auditor_settings.tools,
+                base_prompt=self._auditor_settings.base_prompt,
             )
+
+            # Build auditor_tools config: selected tools + drill-down state.
+            tools_tuple = self._auditor_settings.tools
+            selected: list[str] = []
+            if TOOL_SUBMIT_VERDICT in tools_tuple:
+                selected.append(TOOL_SUBMIT_VERDICT)
+            if TOOL_GET_TURN in tools_tuple and trajectory_snapshot is not None:
+                selected.append(TOOL_GET_TURN)
+            if TOOL_GET_EVENT_DETAIL in tools_tuple:
+                selected.append(TOOL_GET_EVENT_DETAIL)
+
+            tools_config = {"tools": selected}
+            if TOOL_GET_TURN in selected:
+                tools_config["trajectory_snapshot"] = trajectory_snapshot
+            if TOOL_GET_EVENT_DETAIL in selected:
+                tools_config["events"] = list(events_tuple)
+                tools_config["edges"] = list(edges_tuple)
 
             # Always compute the replay record metadata (independent of
             # sidecar emission) so the runner can return a synthetic
@@ -1065,7 +1120,8 @@ class HarnessRunner:
             }
 
         child_result = await self._child.run_auditor(
-            extensions=firing_extensions,
+            prompt_text=prompt_text,
+            tools_config=tools_config,
             provider=self._provider_auditor,
             graph_events=list(events_tuple),
             recent_verdicts=recent_verdicts,

@@ -25,6 +25,7 @@ from llmharness.audit.runner import AuditorSettings, ExtractorSettings
 from llmharness.audit.seams.offline import InMemorySink
 from llmharness.audit.toolkit.atom_constants import EXTRACTOR_TOOLS_MODULE
 from llmharness.replay.offline_driver import replay_pipeline_over_trajectory
+from llmharness.schema import Event
 
 _REPLAY_RECORD_KEYS = {
     "phase",
@@ -69,10 +70,10 @@ def _make_trajectory(n_assistant_turns: int) -> list[AgentMessage]:
 class _StubChildRunner:
     """Canned :class:`ChildRunner` stub.
 
-    Extractor: locates the bound ``ExtractionState`` in the per-firing
-    extensions list, appends one fresh ``NodeUpsert`` to its
-    ``pending_ops`` (id = ``state.next_event_id``), and returns
-    ``(True, [<one tool_call block>])``. The runner's own
+    Extractor: receives the bound ``ExtractionState`` directly via the
+    ``state`` parameter (domain-level protocol), appends one fresh
+    ``NodeUpsert`` to its ``pending_ops`` (id = ``state.next_event_id``),
+    and returns ``(True, [<one tool_call block>])``. The runner's own
     ``RawExtractorOutput.from_state`` will read the state right after.
 
     Auditor: returns a silent verdict (``surface_reminder=False``).
@@ -87,23 +88,16 @@ class _StubChildRunner:
     async def run_extractor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        state: ExtractionState,
+        prompt_text: str,
         provider: tuple[str, dict[str, Any]] | None,
         payload: dict[str, Any],
         turn_window: list[int],
+        tool_call_budget: int | None = None,
     ) -> tuple[bool, list[dict[str, Any]]]:
-        del provider
+        del provider, prompt_text, tool_call_budget
         self.extractor_calls += 1
         self.extractor_payloads.append(payload)
-
-        state: ExtractionState | None = None
-        for module, cfg in extensions:
-            if module == EXTRACTOR_TOOLS_MODULE:
-                candidate = cfg.get("state")
-                if isinstance(candidate, ExtractionState):
-                    state = candidate
-                    break
-        assert state is not None, "stub could not find bound ExtractionState"
 
         node_id = state.next_event_id
         state.pending_ops.append(
@@ -126,13 +120,15 @@ class _StubChildRunner:
     async def run_auditor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        prompt_text: str,
+        tools_config: dict[str, Any],
         provider: tuple[str, dict[str, Any]] | None,
-        graph_events: list[Any],
+        graph_events: list[Event],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
     ) -> Any:
-        del extensions, provider, recent_verdicts, continuation_notes_from_prior_firing
+        del prompt_text, tools_config, provider
+        del recent_verdicts, continuation_notes_from_prior_firing
         self.auditor_calls += 1
         self.auditor_graphs.append(list(graph_events))
 
@@ -165,13 +161,15 @@ class _SurfacingStubChildRunner(_StubChildRunner):
     async def run_auditor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        prompt_text: str,
+        tools_config: dict[str, Any],
         provider: tuple[str, dict[str, Any]] | None,
-        graph_events: list[Any],
+        graph_events: list[Event],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
     ) -> Any:
-        del extensions, provider, recent_verdicts, continuation_notes_from_prior_firing
+        del prompt_text, tools_config, provider
+        del recent_verdicts, continuation_notes_from_prior_firing
         self.auditor_calls += 1
         self.auditor_graphs.append(list(graph_events))
 
@@ -210,6 +208,7 @@ async def test_replay_pipeline_breaks_on_first_surface(tmp_path: Path) -> None:
     extractor_settings = ExtractorSettings(
         extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
         compose_kwargs={"base_prompt": "stub-extractor-prompt"},
+        base_prompt="stub-extractor-prompt",
     )
     auditor_settings = AuditorSettings(
         base_prompt="stub-auditor-prompt",
@@ -269,6 +268,7 @@ async def test_historical_source_turn_texts_elided_from_payload(tmp_path: Path) 
     extractor_settings = ExtractorSettings(
         extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
         compose_kwargs={"base_prompt": "stub-extractor-prompt"},
+        base_prompt="stub-extractor-prompt",
     )
     auditor_settings = AuditorSettings(
         base_prompt="stub-auditor-prompt",
