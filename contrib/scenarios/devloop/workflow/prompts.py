@@ -72,7 +72,8 @@ def test_writing_task(
         f"Use the file paths from the spec's file_structure.test_files. "
         f"The tests should be runnable (import the modules that will "
         f"be implemented) but are expected to FAIL right now since "
-        f"no implementation exists yet."
+        f"no implementation exists yet.\n\n"
+        f"## Spec\n{spec_json}"
     )
 
 
