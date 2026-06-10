@@ -17,7 +17,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal, TypedDict
 
 from agentm.core.abi import (
     DecideTurnActionEvent,
@@ -41,7 +41,6 @@ from agentm.extensions import ExtensionManifest
 
 from . import schema as _et
 from .agents import auditor_scenario, extractor_scenario
-from .agents.auditor.profiles import resolve_tools as _resolve_auditor_tools
 from .agents.auditor.tools import (
     SUBMIT_VERDICT_TOOL_NAME,
     AuditorOutputError,
@@ -49,6 +48,30 @@ from .agents.auditor.tools import (
 )
 from .agents.extractor.tools import GraphOp, parse_op
 from .schema import Edge, Event, Phase, Reminder
+
+
+class ProviderConfig(TypedDict, total=False):
+    module: str
+    config: dict[str, Any]
+
+
+class LLMHarnessConfig(TypedDict, total=False):
+    mode: Literal["async", "sync"]
+    extractor_interval_turns: int
+    audit_interval_turns: int
+    audit_summary_threshold: int
+    extractor_tool_call_budget: int | None
+    prompt_override_extractor: str
+    prompt_override_auditor: str
+    extractor_prompt: str
+    auditor_prompt: str
+    auditor_profile: str
+    auditor_tools: list[str]
+    shutdown_timeout_s: float
+    extractor_provider: ProviderConfig | None
+    auditor_provider: ProviderConfig | None
+    enable_auditor: bool
+    enable_reminders: bool
 
 _log = logging.getLogger(__name__)
 
@@ -395,7 +418,7 @@ def _terminal_tool_args(
 # ---------------------------------------------------------------------------
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:  # type: ignore[override]
     mode = config.get("mode", "async")
     if mode not in ("async", "sync"):
         mode = "async"
@@ -407,18 +430,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     enable_reminders = bool(config.get("enable_reminders", True))
     summary_threshold = int(config.get("audit_summary_threshold", 30))
 
-    # Prompt names (children load prompts themselves; override passes raw text)
     ext_prompt_override = config.get("prompt_override_extractor")
     extractor_prompt_name = config.get("extractor_prompt") or "default"
     auditor_prompt_name = config.get("auditor_prompt") or "minimal"
+    auditor_profile = config.get("auditor_profile") or "minimal"
+    auditor_tools_override = config.get("auditor_tools")
 
-    # Auditor tool profile
-    auditor_tools = _resolve_auditor_tools(
-        profile=config.get("auditor_profile") if isinstance(config.get("auditor_profile"), str) else None,
-        tools=config.get("auditor_tools") if isinstance(config.get("auditor_tools"), list) else None,
-    )
-
-    # Tool call budget
     tcb_raw = config.get("extractor_tool_call_budget")
     tool_call_budget: int | None = (
         int(tcb_raw) if isinstance(tcb_raw, int) and not isinstance(tcb_raw, bool) else None
@@ -517,7 +534,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                         "trajectory_snapshot": trajectory,
                     },
                     "auditor_tools": {
-                        "tools": list(auditor_tools),
+                        "profile": auditor_profile,
+                        **({"tools": list(auditor_tools_override)} if auditor_tools_override else {}),
                         "trajectory_snapshot": trajectory,
                         "events": [e.to_dict() for e in events],
                         "edges": [ed.to_dict() for ed in edges],

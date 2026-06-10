@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
 from agentm.core.abi.extension import ExtensionAPI
@@ -424,9 +424,34 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    tools_raw = config.get("tools", [SUBMIT_VERDICT_TOOL_NAME])
-    tools = list(tools_raw) if isinstance(tools_raw, (list, tuple)) else [SUBMIT_VERDICT_TOOL_NAME]
+PROFILES: dict[str, tuple[str, ...]] = {
+    "minimal": (SUBMIT_VERDICT_TOOL_NAME,),
+    "with_drill_down": (SUBMIT_VERDICT_TOOL_NAME, GET_EVENT_DETAIL_TOOL_NAME, GET_TURN_TOOL_NAME),
+}
+
+
+class AuditorToolsConfig(TypedDict, total=False):
+    profile: str
+    tools: list[str]
+    trajectory_snapshot: list[dict[str, Any]]
+    events: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
+
+
+def _resolve_tools(config: AuditorToolsConfig) -> tuple[str, ...]:
+    tools_raw = config.get("tools")
+    if isinstance(tools_raw, (list, tuple)):
+        resolved = tuple(t for t in tools_raw if isinstance(t, str) and t)
+    else:
+        profile = config.get("profile", "minimal")
+        resolved = PROFILES.get(str(profile), PROFILES["minimal"])
+    if SUBMIT_VERDICT_TOOL_NAME not in resolved:
+        resolved = (SUBMIT_VERDICT_TOOL_NAME, *resolved)
+    return resolved
+
+
+def install(api: ExtensionAPI, config: AuditorToolsConfig) -> None:  # type: ignore[override]
+    tools = _resolve_tools(config)
 
     unknown = [t for t in tools if t not in AUDITOR_TOOL_NAMES]
     if unknown:
