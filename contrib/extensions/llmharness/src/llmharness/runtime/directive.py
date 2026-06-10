@@ -3,8 +3,8 @@
 The directive prepended to every extractor child prompt
 (workflow + finalize semantics + start-id rule + cross-firing reference
 rule) MUST be byte-identical between the live seam
-(:class:`llmharness.audit.seams.live.LiveChildRunner`) and the offline
-seam (:class:`llmharness.audit.seams.offline.StandaloneChildRunner`).
+(:class:`llmharness.runtime.live.LiveChildRunner`) and the offline
+seam (:class:`llmharness.runtime.offline.StandaloneChildRunner`).
 Two different prompts would silently violate the design's invariant #1
 (live === offline equivalence).
 

@@ -6,7 +6,7 @@ graph-only justifiability and emits the final `reminder_text`. If
 the rewriter rejects the selection, the sample is dropped.
 
 Both children run as **top-level** AgentM sessions via
-:func:`llmharness.tools.engine.run_phase_standalone` with a minimal
+:func:`llmharness.replay.engine.run_phase_standalone` with a minimal
 four-atom extension list (observability + operations +
 submit_tool + system_prompt). No cards, no skills.
 """
@@ -19,13 +19,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..audit.toolkit.atom_constants import (
+from ..replay.engine import run_phase_standalone
+from ..runtime.constants import (
     OBSERVABILITY_MODULE,
     OPERATIONS_MODULE,
     SYSTEM_PROMPT_MODULE,
 )
 from ..schema import Edge, Event, Finding
-from ..tools.engine import run_phase_standalone
 from ._submit_oracle import SUBMIT_ORACLE_TOOL_NAME
 from ._submit_rewriter import SUBMIT_REWRITE_TOOL_NAME
 from .causal import CausalSnapshot, causal_mask

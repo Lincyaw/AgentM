@@ -20,10 +20,10 @@ from agentm.core.abi import (
 from agentm.core.abi.messages import AgentMessage
 
 from llmharness.agents.extractor.state import ExtractionState
-from llmharness.audit.graph.ops import NodeUpsert
-from llmharness.audit.runner import AuditorSettings, ExtractorSettings
-from llmharness.audit.seams.offline import InMemorySink
+from llmharness.graph.ops import NodeUpsert
 from llmharness.replay.offline_driver import replay_pipeline_over_trajectory
+from llmharness.runtime.offline import InMemorySink
+from llmharness.runtime.runner import AuditorSettings, ExtractorSettings
 from llmharness.schema import Event
 
 _REPLAY_RECORD_KEYS = {
@@ -131,7 +131,7 @@ class _StubChildRunner:
         self.auditor_calls += 1
         self.auditor_graphs.append(list(graph_events))
 
-        from llmharness.audit.runner import AuditorChildResult
+        from llmharness.runtime.runner import AuditorChildResult
         from llmharness.schema import Verdict
 
         verdict = Verdict(
@@ -172,7 +172,7 @@ class _SurfacingStubChildRunner(_StubChildRunner):
         self.auditor_calls += 1
         self.auditor_graphs.append(list(graph_events))
 
-        from llmharness.audit.runner import AuditorChildResult
+        from llmharness.runtime.runner import AuditorChildResult
         from llmharness.schema import Verdict
 
         verdict = Verdict(

@@ -1,6 +1,6 @@
 """Shared entry-type constants for cognitive-audit session entries.
 
-The runtime adapter (``llmharness.adapters.agentm``) writes these
+The runtime adapter (``llmharness.adapter``) writes these
 ``SessionEntry.type`` strings into the AgentM session log; the offline
 hydration path and dataset exporter read them back. Centralising the
 literals prevents silent drift between the writer and the readers.
@@ -19,7 +19,7 @@ Entry types:
 from __future__ import annotations
 
 # One graph op produced by an extractor firing. Payload is the result of
-# ``llmharness.audit.graph.ops.GraphOp.to_dict()`` — i.e. an ``"op"``
+# ``llmharness.graph.ops.GraphOp.to_dict()`` — i.e. an ``"op"``
 # discriminator (``node_upsert`` / ``node_delete`` / ``edge_upsert`` /
 # ``edge_delete``) plus the op-specific fields, augmented with firing
 # metadata: ``firing_id`` (int), ``op_index`` (int — the op's position

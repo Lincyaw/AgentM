@@ -1,6 +1,6 @@
 """Shared reminder-message format.
 
-Both the live cognitive-audit adapter (``llmharness.adapters.agentm``) and
+Both the live cognitive-audit adapter (``llmharness.adapter``) and
 the offline prefix-replay seed atom (``llmharness.replay.reminder_seed``)
 build the user-message that carries an auditor reminder into the main
 agent's turn loop. The format MUST stay identical between the two so that

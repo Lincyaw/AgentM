@@ -2,7 +2,7 @@
 offline replay runner.
 
 Terminal-tool argument scraping now lives in
-:func:`llmharness.child_collect.terminal_tool_arguments` (shared
+:func:`llmharness.runtime.child_collect.terminal_tool_arguments` (shared
 across the live and embedded paths); this module keeps the
 extractor-state binding and the best-effort child-shutdown helper used
 by the embedded host-driver.
@@ -13,8 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ...agents.extractor.state import ExtractionState
-from ..toolkit.atom_constants import (
+from ..agents.extractor.state import ExtractionState
+from .constants import (
     EXTRACTOR_STATE_SERVICE_KEY,
     EXTRACTOR_TOOLS_MODULE,
 )

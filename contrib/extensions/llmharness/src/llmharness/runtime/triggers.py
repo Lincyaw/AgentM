@@ -11,7 +11,7 @@ OR-semantics: any trigger firing causes the auditor to run. Each trigger
 independently declares whether it ``requires_extractor`` (default
 ``True``); if at least one firing trigger does, the extractor also runs.
 
-Follow the pattern of :mod:`llmharness.audit.registry` (the existing
+Follow the pattern of :mod:`llmharness.runtime.registry` (the existing
 ``AuditCheckRegistry``).
 """
 

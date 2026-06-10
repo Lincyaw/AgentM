@@ -15,7 +15,7 @@ from typing import Any
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from ..audit.triggers import SERVICE_KEY, TriggerContext, TriggerDecision, TriggerRegistry
+from ..runtime.triggers import SERVICE_KEY, TriggerContext, TriggerDecision, TriggerRegistry
 
 MANIFEST = ExtensionManifest(
     name="trigger_on_submission",
@@ -72,7 +72,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     registry = api.get_service(SERVICE_KEY)
     if not isinstance(registry, TriggerRegistry):
         raise RuntimeError(
-            "trigger registry service not published; mount llmharness.adapters.agentm first"
+            "trigger registry service not published; mount llmharness.adapter first"
         )
     registry.register_trigger(_OnSubmissionTrigger(tool_names))
 

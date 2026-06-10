@@ -28,7 +28,7 @@ from agentm.core.abi.session import ENTRY_TYPE_MESSAGE, message_entry
 from agentm.core.runtime.session_manager import SessionManager
 from typer.testing import CliRunner
 
-from llmharness.audit import entry_types as et
+from llmharness import entry_types as et
 from llmharness.replay.cli import app
 from llmharness.replay.record import ReplayRecord, write_record
 
@@ -184,5 +184,5 @@ def test_agent_from_reminder_branches_at_turn_and_prints_command(
     assert f"--resume {new_sid}" in result.stdout or new_sid in result.stdout
     assert reminder_text in result.stdout
     assert "llmharness.replay.reminder_seed" in result.stdout
-    assert "llmharness.adapters.agentm" in result.stdout
+    assert "llmharness.adapter" in result.stdout
     assert "enable_reminders" in result.stdout

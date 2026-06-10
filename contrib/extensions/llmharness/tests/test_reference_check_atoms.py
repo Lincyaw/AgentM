@@ -23,15 +23,15 @@ from typing import Any
 
 import pytest
 
-from llmharness.audit.registry import (
-    SERVICE_KEY,
-    AuditCheckRegistry,
-    CheckContext,
-)
 from llmharness.extensions import (
     check_open_branches,
     check_premature_conclusion,
     check_repeated_actions,
+)
+from llmharness.runtime.registry import (
+    SERVICE_KEY,
+    AuditCheckRegistry,
+    CheckContext,
 )
 from llmharness.schema import Event, EventKind
 

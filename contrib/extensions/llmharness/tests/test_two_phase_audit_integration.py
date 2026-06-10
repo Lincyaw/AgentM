@@ -57,7 +57,7 @@ from agentm.core.runtime.session import AgentSession
 
 from llmharness.agents.auditor.auditor_tools import SUBMIT_VERDICT_TOOL_NAME
 from llmharness.agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
-from llmharness.audit.entry_types import (
+from llmharness.entry_types import (
     AUDIT_GRAPH_OP,
     EXTRACTOR_CURSOR,
     EXTRACTOR_EMPTY,
@@ -415,7 +415,7 @@ def _build_session_config(*, cwd: str, provider_module: str) -> AgentSessionConf
             ("agentm.extensions.builtin.operations", {}),
             ("agentm.extensions.builtin.system_prompt", {"prompt": ""}),
             (
-                "llmharness.adapters.agentm",
+                "llmharness.adapter",
                 {
                     "mode": "sync",
                     "audit_interval_turns": 100,  # auditor never fires
@@ -435,7 +435,7 @@ def _build_interval_session_config(
     config = _build_session_config(cwd=cwd, provider_module=provider_module)
     extensions = list(config.extensions)
     extensions[-1] = (
-        "llmharness.adapters.agentm",
+        "llmharness.adapter",
         {
             "mode": "sync",
             "extractor_interval_turns": interval_turns,

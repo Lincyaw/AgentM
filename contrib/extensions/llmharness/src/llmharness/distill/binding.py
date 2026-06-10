@@ -9,7 +9,7 @@ Mount::
 
     LLMHARNESS_DISTILL_SAMPLE_ID=ts0-mysql-corrupt-kwx8n5 \\
     LLMHARNESS_DISTILL_DATASET=/path/to/data.jsonl \\
-    agentm --extension llmharness.adapters.agentm \\
+    agentm --extension llmharness.adapter \\
            --extension llmharness.distill.binding ...
 
 §11 single-file: no atom-to-atom imports, no core.runtime imports,

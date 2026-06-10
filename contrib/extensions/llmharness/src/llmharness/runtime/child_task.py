@@ -5,7 +5,7 @@ This is a thin convenience over the ``api.spawn_child_session`` ABI seam —
 the one place AgentM exposes nested-session creation. It is **not** an
 atom (no ``MANIFEST`` / ``install``, never auto-discovered) and **not** a
 core module: its sole consumer is llmharness's
-:class:`~llmharness.audit.seams.live.LiveChildRunner` (extractor +
+:class:`~llmharness.runtime.live.LiveChildRunner` (extractor +
 auditor), so it lives here in contrib rather than the core tree. It is a
 *convenience layer*, not a new pluggability axis — the axis is
 ``spawn_child_session`` itself. Should a second in-session consumer with a
@@ -15,7 +15,7 @@ import) instead of moving the function.
 
 It imports only :mod:`agentm.core.abi` (``ExtensionAPI``,
 ``AgentSessionConfig``, messages) and the sibling
-:mod:`llmharness.child_collect` — never :mod:`agentm.core.runtime`. The
+:mod:`llmharness.runtime.child_collect` — never :mod:`agentm.core.runtime`. The
 caller supplies the policy (which extensions / provider, free-text vs.
 terminal-tool collect); this helper only composes the config, runs the
 child, always shuts it down, and scrapes the result. It does NOT support

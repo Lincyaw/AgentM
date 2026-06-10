@@ -39,15 +39,7 @@ from agentm.core.abi.messages import (
 )
 
 from llmharness.agents.extractor.state import ExtractionState
-from llmharness.audit.graph.ops import NodeUpsert
-from llmharness.audit.runner import (
-    AuditorChildResult,
-    AuditorSettings,
-    CumulativeAuditState,
-    ExtractorSettings,
-    StepResult,
-)
-from llmharness.audit.seams.offline import InMemorySink
+from llmharness.graph.ops import NodeUpsert
 from llmharness.replay import fork_tree as _fork_tree_mod
 from llmharness.replay.fork_tree import (
     FORK_TREE_HEADER_KEY,
@@ -65,6 +57,14 @@ from llmharness.replay.offline_driver import (
     replay_pipeline_over_trajectory,
 )
 from llmharness.replay.record import ReplayRecord, iter_records
+from llmharness.runtime.offline import InMemorySink
+from llmharness.runtime.runner import (
+    AuditorChildResult,
+    AuditorSettings,
+    CumulativeAuditState,
+    ExtractorSettings,
+    StepResult,
+)
 from llmharness.schema import Reminder, Verdict
 
 

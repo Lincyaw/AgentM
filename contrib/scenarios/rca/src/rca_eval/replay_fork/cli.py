@@ -176,7 +176,7 @@ def run(
     agent_provider = build_profile_provider(agent_model)
 
     # -- Build trigger registry: cadence + on-submission --
-    from llmharness.audit.triggers import TriggerRegistry
+    from llmharness.runtime.triggers import TriggerRegistry
     from llmharness.extensions.trigger_cadence import _CadenceTrigger
     from llmharness.extensions.trigger_on_submission import _OnSubmissionTrigger
 

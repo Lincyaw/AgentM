@@ -5,8 +5,8 @@ by driving a nested :class:`AgentSession` to completion. They have no I/O
 and no side effects, importing only :mod:`agentm.core.abi.messages`.
 
 They are llmharness-internal: the three audit paths that consume them
-(:class:`~llmharness.audit.seams.live.LiveChildRunner`, the embedded
-:func:`~llmharness.tools.engine.run_phase_standalone`, and the runner's
+(:class:`~llmharness.runtime.live.LiveChildRunner`, the embedded
+:func:`~llmharness.replay.engine.run_phase_standalone`, and the runner's
 trajectory serializer) all live in this package. They are deliberately
 NOT in the agentm core tree — llmharness is their sole consumer, and they
 are composed entirely from the public ``core.abi`` surface, so the "keep

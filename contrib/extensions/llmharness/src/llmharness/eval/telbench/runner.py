@@ -18,8 +18,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from ...agents.auditor.prompt import load_auditor_prompt
-from ...audit.runner import AuditorSettings, ExtractorSettings
 from ...replay.offline_driver import replay_pipeline_over_trajectory
+from ...runtime.runner import AuditorSettings, ExtractorSettings
 from .adapter import TelBenchInstance, spans_to_messages
 from .scoring import SpanScores, score_instance
 

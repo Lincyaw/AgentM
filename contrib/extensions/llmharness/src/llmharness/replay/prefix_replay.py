@@ -120,7 +120,7 @@ def locate_source_session_file(*, session_dir: Path, session_id: str) -> Path:
 def find_leaf_entry_for_turn(manager: SessionManager, *, turn: int) -> SessionEntry:
     """Pick the entry that ends turn ``turn`` on the active branch.
 
-    Counting rule matches :mod:`llmharness.adapters.agentm`'s
+    Counting rule matches :mod:`llmharness.adapter`'s
     ``turn_index = len(messages) - 1``: the active branch's
     materialised message stream is the trajectory the audit pipeline
     saw, and the ``turn``-th message (0-indexed) is the boundary.
@@ -217,7 +217,7 @@ def build_prefix_replay_command(
         "--resume",
         shlex.quote(branched_session_id),
         "--extension",
-        shlex.quote(f"llmharness.adapters.agentm:{adapter_cfg}"),
+        shlex.quote(f"llmharness.adapter:{adapter_cfg}"),
         "--extension",
         shlex.quote(f"llmharness.replay.reminder_seed:{seed_cfg}"),
     ]

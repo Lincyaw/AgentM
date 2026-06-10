@@ -46,8 +46,8 @@ submodules. Promote them here when an in-tree caller actually needs
 them through the top-level surface.
 
 The runtime entry point is the AgentM extension at
-``llmharness.adapters.agentm``, loaded via
-``AgentSessionConfig(extensions=[("llmharness.adapters.agentm", {})])``.
+``llmharness.adapter``, loaded via
+``AgentSessionConfig(extensions=[("llmharness.adapter", {})])``.
 """
 
 from .agents.auditor.auditor_tools import (
@@ -61,7 +61,13 @@ from .agents.extractor.extractor_tools import (
     EXTRACTOR_TOOL_NAMES,
 )
 from .agents.extractor.prompt import load_extractor_prompt
-from .audit.runner import AuditorSettings, ExtractorSettings
+from .distill.signals import (
+    ToolEvent,
+    auditor_process_reward,
+    extractor_process_reward,
+    tool_events_from_phase_result,
+)
+from .replay.engine import PhaseResult
 from .replay.fork_tree import (
     FORK_TREE_HEADER_KEY,
     ForkNode,
@@ -77,6 +83,7 @@ from .replay.fork_tree import (
 )
 from .replay.record import ReplayRecord, Status, iter_records, write_record
 from .replay.runner import replay_auditor_record, replay_extractor_record
+from .runtime.runner import AuditorSettings, ExtractorSettings
 from .schema import (
     Edge,
     EdgeKind,
@@ -86,13 +93,6 @@ from .schema import (
     Phase,
     Reminder,
     Verdict,
-)
-from .tools.engine import PhaseResult
-from .train_signals import (
-    ToolEvent,
-    auditor_process_reward,
-    extractor_process_reward,
-    tool_events_from_phase_result,
 )
 
 __all__ = [

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from llmharness.audit.triggers import (
+from llmharness.runtime.triggers import (
     TriggerContext,
     TriggerDecision,
     TriggerRegistry,

@@ -4,9 +4,9 @@ Holds the in-memory :class:`CumulativeAuditState`, the
 :class:`ChildRunner` / :class:`OpSink` :class:`typing.Protocol`
 boundaries, the :class:`SidecarWriter` helper, and the
 :class:`HarnessRunner` itself. Two backends satisfy the Protocols: the
-live adapter (:mod:`llmharness.adapters.agentm`) wires in
-:mod:`llmharness.audit.seams.live`; offline full-trajectory replay
-drivers wire in :mod:`llmharness.audit.seams.offline`
+live adapter (:mod:`llmharness.adapter`) wires in
+:mod:`llmharness.runtime.live`; offline full-trajectory replay
+drivers wire in :mod:`llmharness.runtime.offline`
 (``StandaloneChildRunner`` / ``InMemorySink``). Single-firing replay of
 one recorded firing needs none of this machinery and lives in
 :mod:`llmharness.replay.runner`.
@@ -39,36 +39,36 @@ from typing import Any, Final, Protocol
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolResultMessage
 from agentm.core.abi.session import SessionEntry
 
-from ...agents.auditor.output import AuditorOutputError, RawVerdictOutput
-from ...agents.auditor.profiles import (
+from .. import entry_types as _et
+from ..agents.auditor.output import AuditorOutputError, RawVerdictOutput
+from ..agents.auditor.profiles import (
     TOOL_GET_EVENT_DETAIL,
     TOOL_GET_TURN,
     TOOL_SUBMIT_VERDICT,
 )
-from ...agents.auditor.prompt import (
+from ..agents.auditor.prompt import (
     build_auditor_system_prompt,
     build_auditor_trajectory_prompt,
     load_auditor_prompt,
 )
-from ...agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
-from ...agents.extractor.extractor_tools import (
+from ..agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
+from ..agents.extractor.extractor_tools import (
     FINALIZE_EXTRACTION_TOOL_NAME,
 )
-from ...agents.extractor.output import RawExtractorOutput
-from ...agents.extractor.state import ExtractionState
-from ...child_collect import (
-    flatten_assistant_blocks as _flatten_assistant_blocks,
-)
-from ...child_collect import serialize_block as _serialize_block
-from ...replay.record import ReplayRecord, now_ns, write_record
-from ...schema import Edge, Event, Phase, Reminder, Verdict
-from .. import entry_types as _et
+from ..agents.extractor.output import RawExtractorOutput
+from ..agents.extractor.state import ExtractionState
 from ..graph.fold import fold_graph
 from ..graph.ops import GraphOp, parse_op
 from ..graph.phase import merge_to_phases
-from ..registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
-from ..registry import AuditCheckRegistry, CheckContext
-from ..triggers import TriggerContext, TriggerRegistry
+from ..replay.record import ReplayRecord, now_ns, write_record
+from ..schema import Edge, Event, Phase, Reminder, Verdict
+from .child_collect import (
+    flatten_assistant_blocks as _flatten_assistant_blocks,
+)
+from .child_collect import serialize_block as _serialize_block
+from .registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
+from .registry import AuditCheckRegistry, CheckContext
+from .triggers import TriggerContext, TriggerRegistry
 
 _logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ class ExtractorSettings:
     @classmethod
     def default(cls) -> ExtractorSettings:
         """Built-in extractor defaults."""
-        from ...agents.extractor.prompt import load_extractor_prompt
+        from ..agents.extractor.prompt import load_extractor_prompt
 
         base_prompt = load_extractor_prompt("default")
         return cls(
@@ -178,7 +178,7 @@ class AuditorSettings:
         same OTLP/JSON trace shape a live auditor would. See the
         symmetric note on :meth:`ExtractorSettings.default`.
         """
-        from ...agents.auditor.prompt import load_auditor_prompt
+        from ..agents.auditor.prompt import load_auditor_prompt
 
         return cls(
             base_prompt=load_auditor_prompt("minimal"),

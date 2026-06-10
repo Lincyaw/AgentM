@@ -31,13 +31,13 @@ When Phase 3 lands, the pair builder will:
 
 1. Read a control replay bundle + its alternative-trajectory siblings
    (siblings come from fork-and-continue runs scored with the same
-   process-reward function in :mod:`llmharness.train_signals`).
+   process-reward function in :mod:`llmharness.distill.signals`).
 2. For each firing, group alternatives by phase+firing_index.
 3. Emit ``C(n,2)`` pairs per firing where ``chosen_score >
    rejected_score`` (filter ties at the caller).
 4. Score each side with
-   :func:`llmharness.train_signals.extractor_process_reward` /
-   :func:`~llmharness.train_signals.auditor_process_reward` (composite).
+   :func:`llmharness.distill.signals.extractor_process_reward` /
+   :func:`~llmharness.distill.signals.auditor_process_reward` (composite).
 
 This module is the "where to plug Phase 3 in" sentinel.
 """

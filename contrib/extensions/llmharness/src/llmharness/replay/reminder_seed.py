@@ -32,8 +32,8 @@ from agentm.core.abi import DecideTurnActionEvent, Inject, LoopAction, Stop
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from ..audit.entry_types import REMINDER_DELIVERED
-from ..audit.toolkit.reminder_format import build_reminder_message
+from ..entry_types import REMINDER_DELIVERED
+from ..runtime.reminder import build_reminder_message
 
 _logger = logging.getLogger(__name__)
 

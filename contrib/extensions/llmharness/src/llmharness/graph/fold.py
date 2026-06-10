@@ -23,7 +23,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from ...schema import Edge, EdgeKind, Event, EventKind
+from llmharness.schema import Edge, EdgeKind, Event, EventKind
+
 from .ops import (
     EdgeDelete,
     EdgeUpsert,

@@ -189,7 +189,7 @@ class Finding:
     """Advisory finding emitted by a scenario-registered audit check.
 
     Per design §4.c, registered checks (see ``audit/registry.py``) run
-    over a frozen :class:`~llmharness.audit.registry.CheckContext`
+    over a frozen :class:`~llmharness.runtime.registry.CheckContext`
     snapshot at auditor firing time and return a list of
     :class:`Finding` records. The auditor folds these into its prompt
     block as advisory signals — it may ignore, contradict, or extend
