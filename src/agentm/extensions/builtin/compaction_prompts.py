@@ -30,6 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi.roles import COMPACTION_PROMPTS
 from agentm.core.abi import (
     AgentMessage,
@@ -288,6 +290,16 @@ class _CompactionEntryMaterializer:
 # --- Manifest + install -----------------------------------------------------
 
 
+class CompactionPromptsConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    summarization_system: str | None = None
+    summarization: str | None = None
+    update_summarization: str | None = None
+    branch_summary: str | None = None
+    branch_summary_preamble: str | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="compaction_prompts",
     description=(
@@ -298,33 +310,19 @@ MANIFEST = ExtensionManifest(
     # providers, or renderers). All registration goes through the
     # PromptTemplatesService and the ENTRY_MATERIALIZERS module dict.
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "summarization_system": {"type": "string"},
-            "summarization": {"type": "string"},
-            "update_summarization": {"type": "string"},
-            "branch_summary": {"type": "string"},
-            "branch_summary_preamble": {"type": "string"},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=CompactionPromptsConfig,
     requires=("prompt_templates",),
     provides_role=(COMPACTION_PROMPTS,),
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
     bodies: dict[str, str] = {
-        PROMPT_SUMMARIZATION_SYSTEM: _override(config, "summarization_system", _SUMMARIZATION_SYSTEM),
-        PROMPT_SUMMARIZATION: _override(config, "summarization", _SUMMARIZATION),
-        PROMPT_UPDATE_SUMMARIZATION: _override(
-            config, "update_summarization", _UPDATE_SUMMARIZATION
-        ),
-        PROMPT_BRANCH_SUMMARY: _override(config, "branch_summary", _BRANCH_SUMMARY),
-        PROMPT_BRANCH_SUMMARY_PREAMBLE: _override(
-            config, "branch_summary_preamble", _BRANCH_SUMMARY_PREAMBLE
-        ),
+        PROMPT_SUMMARIZATION_SYSTEM: config.summarization_system or _SUMMARIZATION_SYSTEM,
+        PROMPT_SUMMARIZATION: config.summarization or _SUMMARIZATION,
+        PROMPT_UPDATE_SUMMARIZATION: config.update_summarization or _UPDATE_SUMMARIZATION,
+        PROMPT_BRANCH_SUMMARY: config.branch_summary or _BRANCH_SUMMARY,
+        PROMPT_BRANCH_SUMMARY_PREAMBLE: config.branch_summary_preamble or _BRANCH_SUMMARY_PREAMBLE,
     }
     registry = api.get_service("prompt_templates")
     if registry is None:

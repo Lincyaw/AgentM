@@ -23,46 +23,46 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import LoopConfig
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.roles import LOOP_BUDGET_SERVICE
 from agentm.extensions import ExtensionManifest
 
+
+class LoopBudgetConfig(BaseModel):
+    max_turns: int | None = None
+    max_tool_calls: int | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="loop_budget",
     description="Sets the agent-loop turn / tool-call budget for the session.",
     registers=(),  # Registers a service, not a tool/event/role — empty by design.
-    config_schema={
-        "type": "object",
-        "properties": {
-            "max_turns": {"type": ["integer", "null"], "minimum": 1},
-            "max_tool_calls": {"type": ["integer", "null"], "minimum": 1},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=LoopBudgetConfig,
     requires=(),
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    max_turns = _positive_int_or_none(config, "max_turns")
-    max_tool_calls = _positive_int_or_none(config, "max_tool_calls")
+def install(api: ExtensionAPI, config: LoopBudgetConfig) -> None:
+    max_turns = _positive_int_or_none_from_model(config.max_turns, "max_turns")
+    max_tool_calls = _positive_int_or_none_from_model(config.max_tool_calls, "max_tool_calls")
     api.set_service(
         LOOP_BUDGET_SERVICE,
         LoopConfig(max_turns=max_turns, max_tool_calls=max_tool_calls),
     )
 
 
-def _positive_int_or_none(config: dict[str, Any], key: str) -> int | None:
-    """Validate ``config[key]`` as a positive int (``None``/absent ⇒ no cap).
+def _positive_int_or_none_from_model(value: int | None, key: str) -> int | None:
+    """Validate a value as a positive int (``None`` ⇒ no cap).
 
-    Fail fast on a typo'd or non-positive value rather than silently dropping
+    Fail fast on a non-positive value rather than silently dropping
     it — a silently-ignored budget would let two "identical" runs diverge.
     ``bool`` is rejected explicitly: ``isinstance(True, int)`` is True, so a
     stray ``max_turns: true`` would otherwise slip through as 1.
     """
 
-    value = config.get(key)
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:

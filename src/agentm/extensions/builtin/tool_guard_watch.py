@@ -42,12 +42,31 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import TraceReader
 from agentm.core.abi.events import SessionReadyEvent
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_RECENT_N = 20
+_DEFAULT_MIN_SAMPLES = 5
+_DEFAULT_REGRESSION_THRESHOLD = 0.20  # tool_error_rate (errors / turns)
+_DEFAULT_COOLDOWN_SECONDS = 24 * 3600.0
+
+
+class ToolGuardWatchConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    target_scenario: str | None = None
+    recent_n: int = _DEFAULT_RECENT_N
+    min_samples: int = _DEFAULT_MIN_SAMPLES
+    regression_threshold: float = _DEFAULT_REGRESSION_THRESHOLD
+    auto_rollback: bool = True
+    cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS
+    disabled: bool = False
 
 
 MANIFEST = ExtensionManifest(
@@ -59,49 +78,27 @@ MANIFEST = ExtensionManifest(
         "configured guard threshold."
     ),
     registers=("event:session_ready",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "target_scenario": {"type": "string"},
-            "recent_n": {"type": "integer"},
-            "min_samples": {"type": "integer"},
-            "regression_threshold": {"type": "number"},
-            "auto_rollback": {"type": "boolean"},
-            "cooldown_seconds": {"type": "number"},
-            "disabled": {"type": "boolean"},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=ToolGuardWatchConfig,
 )
 
 
-_DEFAULT_RECENT_N = 20
-_DEFAULT_MIN_SAMPLES = 5
-_DEFAULT_REGRESSION_THRESHOLD = 0.20  # tool_error_rate (errors / turns)
-_DEFAULT_COOLDOWN_SECONDS = 24 * 3600.0
-
-
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    if bool(config.get("disabled", False)):
+def install(api: ExtensionAPI, config: ToolGuardWatchConfig) -> None:
+    if config.disabled:
         # Operator override — do not subscribe at all so the watch
         # introduces zero overhead when off.
         return
 
-    target_scenario = str(config.get("target_scenario") or "")
+    target_scenario = config.target_scenario or ""
     if not target_scenario:
         # Without a target scenario we have no activations.jsonl to
         # write rollbacks to — degrade silently rather than warn.
         return
 
-    recent_n = _coerce_int(config.get("recent_n"), _DEFAULT_RECENT_N)
-    min_samples = _coerce_int(config.get("min_samples"), _DEFAULT_MIN_SAMPLES)
-    regression_threshold = _coerce_float(
-        config.get("regression_threshold"), _DEFAULT_REGRESSION_THRESHOLD
-    )
-    auto_rollback = bool(config.get("auto_rollback", True))
-    cooldown_seconds = _coerce_float(
-        config.get("cooldown_seconds"), _DEFAULT_COOLDOWN_SECONDS
-    )
+    recent_n = config.recent_n
+    min_samples = config.min_samples
+    regression_threshold = config.regression_threshold
+    auto_rollback = config.auto_rollback
+    cooldown_seconds = config.cooldown_seconds
 
     cwd = Path(api.cwd)
 

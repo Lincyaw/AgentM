@@ -14,9 +14,18 @@ import os
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import ImageContent, TextContent, ToolResult, ToolResultEvent
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+
+
+class ToolResultCapConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    max_chars: int = 8000
+    preview_chars: int = 2000
 
 
 MANIFEST = ExtensionManifest(
@@ -26,21 +35,14 @@ MANIFEST = ExtensionManifest(
         "can read them on demand."
     ),
     registers=("event:tool_result",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "max_chars": {"type": "integer", "minimum": 0, "default": 8000},
-            "preview_chars": {"type": "integer", "minimum": 0, "default": 2000},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=ToolResultCapConfig,
     requires=(),
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    max_chars = max(0, int(config.get("max_chars", 8000)))
-    preview_chars = max(0, int(config.get("preview_chars", 2000)))
+def install(api: ExtensionAPI, config: ToolResultCapConfig) -> None:
+    max_chars = max(0, config.max_chars)
+    preview_chars = max(0, config.preview_chars)
     output_dir = Path(api.cwd) / ".agentm" / "tool_outputs"
 
     def _on_tool_result(event: ToolResultEvent) -> ToolResult | None:

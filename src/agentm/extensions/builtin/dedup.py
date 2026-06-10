@@ -9,22 +9,22 @@ import json
 from collections import deque
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import AgentStartEvent, ToolCallEvent
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
+
+
+class DedupConfig(BaseModel):
+    window: int = 10
 
 
 MANIFEST = ExtensionManifest(
     name="dedup",
     description="Block recently repeated tool calls within a sliding window.",
     registers=("event:agent_start", "event:tool_call"),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "window": {"type": "integer", "minimum": 0, "default": 10},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=DedupConfig,
     requires=(),  # Leaf atom: observes tool calls without requiring tool atoms.
 )
 
@@ -33,8 +33,8 @@ def _make_key(tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
     return (tool_name, json.dumps(args, sort_keys=True, separators=(",", ":"), default=str))
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    window = max(0, int(config.get("window", 10)))
+def install(api: ExtensionAPI, config: DedupConfig) -> None:
+    window = max(0, config.window)
     if window == 0:
         return
 

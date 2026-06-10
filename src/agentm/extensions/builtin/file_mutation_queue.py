@@ -6,25 +6,22 @@ import asyncio
 import os
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import AgentStartEvent, Tool, ToolOutcome, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError
+
+
+class FileMutationQueueConfig(BaseModel):
+    tools: list[str] = ["edit", "write"]
 
 
 MANIFEST = ExtensionManifest(
     name="file_mutation_queue",
     description="Serializes file-mutation tools with per-path asyncio locks.",
     registers=("event:agent_start",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "tools": {
-                "type": "array",
-                "items": {"type": "string"},
-            }
-        },
-        "additionalProperties": False,
-    },
+    config_schema=FileMutationQueueConfig,
     requires=("file_tools",),
 )
 
@@ -62,8 +59,8 @@ def _normalize_path(args: dict[str, Any]) -> str:
     return os.path.abspath(raw)
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    target_names = tuple(str(name) for name in config.get("tools", ["edit", "write"]))
+def install(api: ExtensionAPI, config: FileMutationQueueConfig) -> None:
+    target_names = tuple(config.tools)
     locks: dict[str, asyncio.Lock] = {}
     wrapped_names: set[str] = set()
 

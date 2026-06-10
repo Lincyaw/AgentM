@@ -25,6 +25,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
@@ -32,6 +34,13 @@ from agentm.core.abi.extension import ExtensionAPI
 
 _DEFAULT_FILES: Final = ("SOUL.md", "IDENTITY.md", "USER.md")
 _DEFAULT_MAX_CHARS: Final = 12000
+
+
+class PersonaConfig(BaseModel):
+    dir: str | None = None
+    files: list[str] | None = None
+    max_chars: int = _DEFAULT_MAX_CHARS
+    defaults: dict[str, str] | None = None
 
 
 MANIFEST = ExtensionManifest(
@@ -42,47 +51,7 @@ MANIFEST = ExtensionManifest(
         "to change the agent's character — no scenario code change needed."
     ),
     registers=("event:before_agent_start",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "dir": {
-                "type": "string",
-                "description": (
-                    "Directory holding the persona files. Relative paths "
-                    "anchor under cwd; absolute paths (e.g. ~/.agentm/persona) "
-                    "enable a shared identity across workspaces. Default: cwd."
-                ),
-            },
-            "files": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Ordered filenames to compose. Present files are "
-                    "concatenated in this order under a '# Persona' heading; "
-                    "absent ones are skipped. Default: SOUL.md, IDENTITY.md, "
-                    "USER.md."
-                ),
-            },
-            "max_chars": {
-                "type": "integer",
-                "description": (
-                    "Per-file character cap before truncation with a marker. "
-                    "Guards the prompt budget. Default: 12000."
-                ),
-            },
-            "defaults": {
-                "type": "object",
-                "additionalProperties": {"type": "string"},
-                "description": (
-                    "Preset starter content keyed by filename. On first run, "
-                    "any listed file absent from the workspace is seeded with "
-                    "its preset (absent files only — never clobbers existing "
-                    "or agent-edited content). Omit to disable seeding."
-                ),
-            },
-        },
-        "additionalProperties": False,
-    },
+    config_schema=PersonaConfig,
     # Leaf atom: reads via api.get_operations().file, seeds via
     # api.get_resource_writer(); no atom-to-atom dependency.
     requires=(),
@@ -170,11 +139,11 @@ async def _seed_defaults(
             continue
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    base = _resolve_dir(api.cwd, str(config.get("dir", ".")))
-    files = tuple(str(f) for f in config.get("files", _DEFAULT_FILES))
-    max_chars = int(config.get("max_chars", _DEFAULT_MAX_CHARS))
-    defaults = {str(k): str(v) for k, v in (config.get("defaults") or {}).items()}
+def install(api: ExtensionAPI, config: PersonaConfig) -> None:
+    base = _resolve_dir(api.cwd, config.dir or ".")
+    files = tuple(config.files) if config.files is not None else _DEFAULT_FILES
+    max_chars = config.max_chars
+    defaults = dict(config.defaults) if config.defaults is not None else {}
     file_ops = api.get_operations().file
     writer = api.get_resource_writer() if defaults else None
     seeded = {"done": False}

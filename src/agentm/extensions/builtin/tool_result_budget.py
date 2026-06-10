@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import ImageContent, TextContent, ToolResult, ToolResultEvent
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
@@ -22,6 +24,13 @@ from agentm.core.abi.extension import ExtensionAPI
 _ERROR_FLOOR = 256
 
 
+class ToolResultBudgetConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    max_chars: int = 50_000
+    error_floor: int = _ERROR_FLOOR
+
+
 MANIFEST = ExtensionManifest(
     name="tool_result_budget",
     description=(
@@ -30,21 +39,14 @@ MANIFEST = ExtensionManifest(
         "reasons survive."
     ),
     registers=("event:tool_result",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "max_chars": {"type": "integer", "minimum": 0, "default": 50_000},
-            "error_floor": {"type": "integer", "minimum": 0, "default": _ERROR_FLOOR},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=ToolResultBudgetConfig,
     requires=(),  # Leaf atom: post-processes tool results only.
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    max_chars = max(0, int(config.get("max_chars", 50_000)))
-    error_floor = max(0, int(config.get("error_floor", _ERROR_FLOOR)))
+def install(api: ExtensionAPI, config: ToolResultBudgetConfig) -> None:
+    max_chars = max(0, config.max_chars)
+    error_floor = max(0, config.error_floor)
 
     def _on_tool_result(event: ToolResultEvent) -> ToolResult | None:
         text_total = sum(

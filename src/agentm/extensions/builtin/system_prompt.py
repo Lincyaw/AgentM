@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from pydantic import BaseModel
 
 from agentm.core.abi.roles import SYSTEM_PROMPT_PROVIDER
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
+
+
+class SystemPromptConfig(BaseModel):
+    prompt: str | None = None
+    prompt_file: str | None = None
 
 
 MANIFEST = ExtensionManifest(
@@ -26,33 +31,25 @@ MANIFEST = ExtensionManifest(
     # ``required`` list and would otherwise reject a ``prompt_file``-only
     # config as "missing prompt". install() instead resolves whichever source
     # is present and contributes nothing when neither yields text.
-    config_schema={
-        "type": "object",
-        "properties": {
-            "prompt": {"type": "string"},
-            "prompt_file": {"type": "string"},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=SystemPromptConfig,
     requires=(),  # Leaf atom: prepends configured prompt text only.
     provides_role=(SYSTEM_PROMPT_PROVIDER,),
 )
 
 
-def _resolve_prompt(config: dict[str, Any]) -> str:
+def _resolve_prompt(config: SystemPromptConfig) -> str:
     """Resolve the prompt text from config: ``prompt_file`` (read) or ``prompt``.
 
     A non-empty ``prompt_file`` takes precedence over inline ``prompt``. A
     missing file raises (surfaced as an install diagnostic by the session
     factory) rather than silently producing no prompt.
     """
-    prompt_file = config.get("prompt_file")
-    if prompt_file:
-        return Path(str(prompt_file)).read_text(encoding="utf-8")
-    return str(config.get("prompt", ""))
+    if config.prompt_file:
+        return Path(config.prompt_file).read_text(encoding="utf-8")
+    return config.prompt or ""
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: SystemPromptConfig) -> None:
     prompt = _resolve_prompt(config)
     # Empty config (e.g. the auto-discovery floor's {"prompt": ""}) contributes
     # nothing — register no handler rather than prepend stray separators.

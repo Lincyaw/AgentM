@@ -30,6 +30,8 @@ import shlex
 from pathlib import Path, PurePath
 from typing import Any, Final
 
+from pydantic import BaseModel, ConfigDict
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.tool import TOOL_RESULT_FORMAT_METADATA_KEY
 from agentm.core.abi.operations import BashOperations, FileOperations
@@ -47,34 +49,22 @@ from agentm.core.abi.extension import ExtensionAPI
 # MANIFEST
 # ---------------------------------------------------------------------------
 
+
+class FileToolsConfig(BaseModel):
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+
+    file_ops: Any = None
+    allow_globs: list[str] | None = None
+    deny_globs: list[str] | None = None
+    max_size_bytes: int = 262_144
+    require_read: bool = True
+
+
 MANIFEST = ExtensionManifest(
     name="file_tools",
     description="Register the read, write, edit, glob, and grep tools for file I/O.",
     registers=("tool:read", "tool:write", "tool:edit", "tool:glob", "tool:grep"),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "file_ops": {"type": "object"},
-            "allow_globs": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "deny_globs": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "max_size_bytes": {
-                "type": "integer",
-                "default": 262_144,
-            },
-            "require_read": {
-                "type": "boolean",
-                "default": True,
-                "description": "Require existing files to be read before overwriting/editing.",
-            },
-        },
-        "additionalProperties": True,
-    },
+    config_schema=FileToolsConfig,
     requires=(),
 )
 
@@ -628,13 +618,13 @@ def parse_grep_output(
 # install()
 # ---------------------------------------------------------------------------
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
     # Lazy-resolve file_ops and writer: at install time, the Operations
     # bundle or ResourceWriter may not be registered yet (depends on atom
     # load order). Deferring to first tool invocation avoids an install-time
     # ordering dependency while keeping requires=() (any Operations
     # provider is acceptable, not just the local backend).
-    _file_ops_cfg = config.get("file_ops")
+    _file_ops_cfg = config.file_ops
     _file_ops_cache: list[FileOperations] = []
 
     def _get_file_ops() -> FileOperations:
@@ -656,12 +646,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             _bash_ops_cache.append(api.get_operations().bash)
         return _bash_ops_cache[0]
 
-    allow_globs = _coerce_globs(config.get("allow_globs"), api.cwd)
-    deny_globs = _coerce_globs(config.get("deny_globs"), api.cwd)
-    max_size_bytes: int = int(
-        config.get("max_size_bytes", _DEFAULT_MAX_SIZE_BYTES)
-    )
-    require_read = bool(config.get("require_read", True))
+    allow_globs = _coerce_globs(config.allow_globs, api.cwd)
+    deny_globs = _coerce_globs(config.deny_globs, api.cwd)
+    max_size_bytes: int = config.max_size_bytes
+    require_read = config.require_read
 
     # --- read tool --------------------------------------------------------
 

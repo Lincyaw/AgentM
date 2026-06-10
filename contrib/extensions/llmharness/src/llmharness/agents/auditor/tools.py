@@ -405,20 +405,20 @@ AUDITOR_TOOL_NAMES: tuple[str, ...] = (
 )
 AUDITOR_TERMINATION_REASON: str = "llmharness:submit_verdict"
 
+class AuditorToolsSchemaConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    tools: list[str] = []
+    trajectory_snapshot: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+
+
 MANIFEST = ExtensionManifest(
     name="auditor_tools",
     description="Register the auditor tool surface.",
     registers=("tool:submit_verdict", "tool:get_turn", "tool:get_event_detail"),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "tools": {"type": "array", "items": {"type": "string"}},
-            "trajectory_snapshot": {"type": "array", "items": {"type": "object"}},
-            "events": {"type": "array", "items": {"type": "object"}},
-            "edges": {"type": "array", "items": {"type": "object"}},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=AuditorToolsSchemaConfig,
     api_version=1,
     tier=1,
 )

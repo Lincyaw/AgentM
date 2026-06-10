@@ -54,6 +54,8 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, to_jsonable
+from pydantic import BaseModel
+
 from agentm.core.lib.background_tasks import (
     BackgroundTask,
     BackgroundTaskRegistry,
@@ -76,6 +78,14 @@ _DEFAULT_HEARTBEAT = 120.0
 _DEFAULT_SILENCE_WARNING = 300.0
 
 
+class BackgroundExecConfig(BaseModel):
+    timeout: float = _DEFAULT_TIMEOUT
+    heartbeat_interval: float = _DEFAULT_HEARTBEAT
+    silence_warning: float = _DEFAULT_SILENCE_WARNING
+    denylist: list[str] = []
+    shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
+
+
 MANIFEST = ExtensionManifest(
     name="background_exec",
     description=(
@@ -89,55 +99,7 @@ MANIFEST = ExtensionManifest(
         "event:agent_start",
         "event:session_shutdown",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "timeout": {
-                "type": "number",
-                "minimum": 0,
-                "default": _DEFAULT_TIMEOUT,
-                "description": (
-                    f"Seconds a foreground call may run before it is moved to "
-                    f"the background (default {_DEFAULT_TIMEOUT:g})."
-                ),
-            },
-            "heartbeat_interval": {
-                "type": "number",
-                "minimum": 0,
-                "default": _DEFAULT_HEARTBEAT,
-                "description": (
-                    f"Sparse heartbeat: post a 'still running' status every N "
-                    f"seconds of no other milestone (default {_DEFAULT_HEARTBEAT:g})."
-                ),
-            },
-            "silence_warning": {
-                "type": "number",
-                "minimum": 0,
-                "default": _DEFAULT_SILENCE_WARNING,
-                "description": (
-                    f"Emit a silence-too-long warning once a backgrounded task "
-                    f"produces no result for N seconds (default {_DEFAULT_SILENCE_WARNING:g})."
-                ),
-            },
-            "denylist": {
-                "type": "array",
-                "items": {"type": "string"},
-                "default": [],
-                "description": "Tool names that must never be wrapped/backgrounded.",
-            },
-            "shutdown_grace_seconds": {
-                "type": "number",
-                "minimum": 0,
-                "default": DEFAULT_SHUTDOWN_GRACE_SECONDS,
-                "description": (
-                    "Seconds the session_shutdown drain waits for still-"
-                    "running background tasks to finish cooperatively before "
-                    f"cancelling them (default {DEFAULT_SHUTDOWN_GRACE_SECONDS:g})."
-                ),
-            },
-        },
-        "additionalProperties": False,
-    },
+    config_schema=BackgroundExecConfig,
     requires=(),  # Defers wrapping to agent_start so tool atoms may load in any order.
 )
 
@@ -693,16 +655,14 @@ class _BgManager:
             self._exit_work_tracking(state)
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
     manager = _BgManager(
         api=api,
-        timeout=float(config.get("timeout", _DEFAULT_TIMEOUT)),
-        heartbeat_interval=float(config.get("heartbeat_interval", _DEFAULT_HEARTBEAT)),
-        silence_warning=float(config.get("silence_warning", _DEFAULT_SILENCE_WARNING)),
-        denylist={str(name) for name in config.get("denylist", [])},
-        shutdown_grace_seconds=float(
-            config.get("shutdown_grace_seconds", DEFAULT_SHUTDOWN_GRACE_SECONDS)
-        ),
+        timeout=config.timeout,
+        heartbeat_interval=config.heartbeat_interval,
+        silence_warning=config.silence_warning,
+        denylist=set(config.denylist),
+        shutdown_grace_seconds=config.shutdown_grace_seconds,
     )
 
     def on_agent_start(_: AgentStartEvent) -> None:

@@ -11,9 +11,18 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from pydantic import BaseModel, ConfigDict
+
 from agentm.core.abi.roles import PARENT_PROVIDER_CONFIG_KEY, PROVIDER_INHERITOR
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
+
+
+class InheritProviderConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    parent_provider_config: Any  # ProviderConfig, injected by the spawn factory
+
 
 MANIFEST = ExtensionManifest(
     name="inherit_provider",
@@ -23,19 +32,7 @@ MANIFEST = ExtensionManifest(
         "spawn_child_session when AgentSessionConfig.provider is None."
     ),
     registers=("provider:<inherited>",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            PARENT_PROVIDER_CONFIG_KEY: {
-                "description": (
-                    "ProviderConfig instance from the parent session. "
-                    "Injected by the spawn factory; not user-settable."
-                ),
-            },
-        },
-        "required": [PARENT_PROVIDER_CONFIG_KEY],
-        "additionalProperties": False,
-    },
+    config_schema=InheritProviderConfig,
     requires=(),  # Leaf provider shim: consumes only injected config.
     api_version=1,
     tier=1,
@@ -43,8 +40,8 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    provider = config.get(PARENT_PROVIDER_CONFIG_KEY)
+def install(api: ExtensionAPI, config: InheritProviderConfig) -> None:
+    provider = config.parent_provider_config
     if not isinstance(provider, ProviderConfig):
         raise ExtensionLoadError(
             __name__,

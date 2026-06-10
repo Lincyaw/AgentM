@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
@@ -31,6 +33,11 @@ from agentm.core.abi.extension import ExtensionAPI
 # MANIFEST
 # ---------------------------------------------------------------------------
 
+
+class AtomManagementConfig(BaseModel):
+    pass
+
+
 MANIFEST = ExtensionManifest(
     name="atom_management",
     description=(
@@ -38,11 +45,7 @@ MANIFEST = ExtensionManifest(
         "for agent self-modification of the atom set."
     ),
     registers=("tool:install_atom", "tool:unload_atom", "tool:list_atoms"),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    config_schema=AtomManagementConfig,
     requires=(),
 )
 
@@ -131,7 +134,7 @@ _LIST_PARAMETERS: Final = {
 # install()
 # ---------------------------------------------------------------------------
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
     del config
 
     # --- install_atom tool ------------------------------------------------

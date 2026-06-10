@@ -36,11 +36,22 @@ from typing import Any, Final, TypedDict
 
 import yaml
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, TraceReader
 from agentm.core.abi.messages import AssistantMessage
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.session_config import AgentSessionConfig
+
+
+class ToolEvalRunConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    target_scenario: str | None = None
+    eval_dir: str | None = None
+    max_cost_usd: float | None = None
+    rollouts_budget: int | None = None
 
 
 class GradeResult(TypedDict):
@@ -77,30 +88,7 @@ MANIFEST = ExtensionManifest(
         "writes a per-task record to .agentm/eval_runs/<id>.jsonl."
     ),
     registers=("tool:eval_run",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "target_scenario": {"type": "string"},
-            "eval_dir": {"type": "string"},
-            "max_cost_usd": {
-                "type": "number",
-                "description": (
-                    "Per-tuning-session USD budget. When exceeded, the "
-                    "eval run aborts BETWEEN tasks (never mid-task)."
-                ),
-            },
-            "rollouts_budget": {
-                "type": ["integer", "null"],
-                "description": (
-                    "B-6: per-tuning-session rollout cap. Each task x "
-                    "sample counts as one rollout. Aborts BETWEEN tasks "
-                    "when the cap is hit; refuses the call entirely when "
-                    "already exhausted at start."
-                ),
-            },
-        },
-        "additionalProperties": True,
-    },
+    config_schema=ToolEvalRunConfig,
 )
 
 
@@ -150,25 +138,11 @@ _PARAMETERS: Final[dict[str, Any]] = {
 }
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    target_scenario = config.get("target_scenario")
-    default_eval_dir = config.get("eval_dir")
-    max_cost_usd_raw = config.get("max_cost_usd")
-    max_cost_usd: float | None
-    try:
-        max_cost_usd = (
-            float(max_cost_usd_raw) if max_cost_usd_raw is not None else None
-        )
-    except (TypeError, ValueError):
-        max_cost_usd = None
-    rollouts_budget_raw = config.get("rollouts_budget")
-    rollouts_budget: int | None
-    try:
-        rollouts_budget = (
-            int(rollouts_budget_raw) if rollouts_budget_raw is not None else None
-        )
-    except (TypeError, ValueError):
-        rollouts_budget = None
+def install(api: ExtensionAPI, config: ToolEvalRunConfig) -> None:
+    target_scenario = config.target_scenario
+    default_eval_dir = config.eval_dir
+    max_cost_usd = config.max_cost_usd
+    rollouts_budget = config.rollouts_budget
     cwd = Path(api.cwd)
 
     async def _execute(args: dict[str, Any]) -> ToolResult:

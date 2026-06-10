@@ -29,34 +29,23 @@ from __future__ import annotations
 import fnmatch
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import ToolCallEvent
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
+
+
+class PermissionConfig(BaseModel):
+    allow: list[str] = []
+    deny: list[str] = []
 
 
 MANIFEST = ExtensionManifest(
     name="permission",
     description="Block or allow tool calls via allow/deny lists (glob-aware).",
     registers=("event:tool_call",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "allow": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "fnmatch-style patterns; absent or empty means 'allow "
-                    "everything not denied'."
-                ),
-            },
-            "deny": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "fnmatch-style patterns; takes precedence over allow.",
-            },
-        },
-        "additionalProperties": True,
-    },
+    config_schema=PermissionConfig,
     requires=(),  # Leaf policy atom: can guard absent, present, or future tools.
     tier=2,
 )
@@ -75,9 +64,9 @@ def _matches_any(name: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    allow = tuple(str(p) for p in config.get("allow", []))
-    deny = tuple(str(p) for p in config.get("deny", []))
+def install(api: ExtensionAPI, config: PermissionConfig) -> None:
+    allow = tuple(config.allow)
+    deny = tuple(config.deny)
     if not allow and not deny:
         return
 

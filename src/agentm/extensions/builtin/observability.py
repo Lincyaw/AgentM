@@ -65,6 +65,8 @@ from agentm.core.abi.events import (
     TurnEndEvent,
     TurnStartEvent,
 )
+from pydantic import BaseModel
+
 from agentm.core.abi.extension import ExtensionAPI, Handler
 from agentm.core.lib import redact_messages, to_jsonable
 from agentm.extensions import ExtensionManifest
@@ -134,6 +136,13 @@ _TO_OTEL_CHANNELS: tuple[str, ...] = (
 )
 
 
+class ObservabilityConfig(BaseModel):
+    include_handler_records: bool = True
+    include_mutation_diff: bool = True
+    exclude_channels: list[str] | None = None
+    redact_prompts: bool = True
+
+
 MANIFEST = ExtensionManifest(
     name="observability",
     description=(
@@ -161,29 +170,7 @@ MANIFEST = ExtensionManifest(
         "event:message_appended",
         "event:diagnostic",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "include_handler_records": {"type": "boolean"},
-            "include_mutation_diff": {"type": "boolean"},
-            "exclude_channels": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "redact_prompts": {
-                "type": "boolean",
-                "description": (
-                    "When True (default), LLM request/response bodies and "
-                    "api_send_user_message content are recorded as "
-                    "{chars, sha256_prefix} stubs instead of full text. Set "
-                    "False to capture raw prompt content for debugging "
-                    "(only do this on a trusted machine — operators must "
-                    "explicitly opt in to logging user-pasted secrets)."
-                ),
-            },
-        },
-        "additionalProperties": False,
-    },
+    config_schema=ObservabilityConfig,
     requires=(),
 )
 
@@ -240,16 +227,16 @@ def _deep_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
     return [{"path": path or "<root>", "before": before, "after": after}]
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
     telemetry: SessionTelemetry = api.get_session_telemetry()
 
-    include_handlers = bool(config.get("include_handler_records", True))
-    include_diff = bool(config.get("include_mutation_diff", True))
-    user_excludes = config.get("exclude_channels")
+    include_handlers = config.include_handler_records
+    include_diff = config.include_mutation_diff
+    user_excludes = config.exclude_channels
     exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
-        frozenset(str(ch) for ch in user_excludes) if user_excludes else frozenset()
+        frozenset(user_excludes) if user_excludes else frozenset()
     )
-    redact_prompts = bool(config.get("redact_prompts", True))
+    redact_prompts = config.redact_prompts
 
     # --- Stamp session-scoped metadata onto the telemetry handle ----------
     # Every per-event :meth:`Event.to_otel` translator reads from these

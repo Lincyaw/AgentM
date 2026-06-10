@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.operations import BashOperations
 from agentm.extensions import ExtensionManifest
@@ -13,22 +15,19 @@ from agentm.core.abi.extension import ExtensionAPI
 
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 120.0
 
+
+class ToolBashConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    bash_ops: Any = None
+    default_timeout: float = _DEFAULT_TIMEOUT_SECONDS
+
+
 MANIFEST = ExtensionManifest(
     name="tool_bash",
     description="Register the bash tool backed by BashOperations.",
     registers=("tool:bash",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "bash_ops": {"type": "object"},
-            "default_timeout": {
-                "type": "number",
-                "minimum": 0,
-                "default": _DEFAULT_TIMEOUT_SECONDS,
-            },
-        },
-        "additionalProperties": True,
-    },
+    config_schema=ToolBashConfig,
     requires=(),  # Leaf tool atom: consumes Operations via ExtensionAPI.
 )
 
@@ -43,9 +42,9 @@ _PARAMETERS: Final[dict[str, Any]] = {
 }
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    bash_ops = _coerce_bash_ops(api, config.get("bash_ops"))
-    default_timeout = float(config.get("default_timeout", _DEFAULT_TIMEOUT_SECONDS))
+def install(api: ExtensionAPI, config: ToolBashConfig) -> None:
+    bash_ops = _coerce_bash_ops(api, config.bash_ops)
+    default_timeout = float(config.default_timeout)
 
     parameters = {
         **_PARAMETERS,

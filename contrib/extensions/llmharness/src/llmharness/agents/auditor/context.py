@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
 
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+from pydantic import BaseModel
 
 from llmharness.schema import Edge, Event, Finding, Phase
 
@@ -17,59 +18,38 @@ from .prompt import (
 )
 
 
-class AuditorContextConfig(TypedDict, total=False):
-    events: list[dict[str, Any]]
-    edges: list[dict[str, Any]]
-    phases: list[dict[str, Any]]
-    findings: list[dict[str, Any]]
-    check_errors: dict[str, str]
-    continuation_notes: list[str]
-    summary_threshold: int
-    prompt_name: str
-    trajectory_snapshot: list[dict[str, Any]]
-    mode: Literal["graph", "trajectory"]
+class AuditorContextConfig(BaseModel):
+    events: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    phases: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    check_errors: dict[str, str] = {}
+    continuation_notes: list[str] = []
+    summary_threshold: int = 30
+    prompt_name: str = "minimal"
+    trajectory_snapshot: list[dict[str, Any]] | None = None
+    mode: Literal["graph", "trajectory"] = "graph"
 
 MANIFEST = ExtensionManifest(
     name="auditor_context",
     description="Build the auditor system prompt from raw graph data.",
     registers=("event:before_agent_start",),
-    config_schema={"type": "object", "additionalProperties": True},
+    config_schema=AuditorContextConfig,
 )
 
 
-def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:  # type: ignore[override]
-    if not config:
-        return
+def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
+    events = tuple(Event.from_dict(e) for e in config.events)
+    edges = tuple(Edge.from_dict(e) for e in config.edges)
+    phases = tuple(Phase.from_dict(p) for p in config.phases)
+    findings = [Finding.from_dict(f) for f in config.findings]
 
-    events = tuple(
-        Event.from_dict(e) for e in (config.get("events") or []) if isinstance(e, dict)
-    )
-    edges = tuple(
-        Edge.from_dict(e) for e in (config.get("edges") or []) if isinstance(e, dict)
-    )
-    phases = tuple(
-        Phase.from_dict(p) for p in (config.get("phases") or []) if isinstance(p, dict)
-    )
-    findings = [
-        Finding.from_dict(f) for f in (config.get("findings") or []) if isinstance(f, dict)
-    ]
-    check_errors = config.get("check_errors") or {}
-    if not isinstance(check_errors, dict):
-        check_errors = {}
-    continuation_notes = [
-        str(n) for n in (config.get("continuation_notes") or []) if isinstance(n, str)
-    ]
-    summary_threshold = int(config.get("summary_threshold", 30))
-    prompt_name = str(config.get("prompt_name", "minimal"))
-    trajectory_snapshot = config.get("trajectory_snapshot")
-    mode = str(config.get("mode", "graph"))
+    base_prompt = load_auditor_prompt(config.prompt_name)
 
-    base_prompt = load_auditor_prompt(prompt_name)
-
-    if mode == "trajectory" and trajectory_snapshot is not None:
+    if config.mode == "trajectory" and config.trajectory_snapshot is not None:
         prompt_text = build_auditor_trajectory_prompt(
-            trajectory=trajectory_snapshot,
-            continuation_notes=continuation_notes,
+            trajectory=config.trajectory_snapshot,
+            continuation_notes=config.continuation_notes,
             base_prompt=base_prompt,
         )
     else:
@@ -78,9 +58,9 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:  # type: i
             edges=edges,
             phases=phases,
             findings=findings,
-            check_errors=dict(check_errors),
-            continuation_notes=continuation_notes,
-            summary_threshold=summary_threshold,
+            check_errors=config.check_errors,
+            continuation_notes=config.continuation_notes,
+            summary_threshold=config.summary_threshold,
             base_prompt=base_prompt,
         )
 

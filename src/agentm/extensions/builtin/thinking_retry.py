@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi.events import DecideTurnActionEvent, ModelEndTurn
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.loop import Step, Stop
@@ -23,6 +25,11 @@ from agentm.core.abi.messages import TextContent, ThinkingBlock, ToolCallBlock
 from agentm.extensions import ExtensionManifest
 
 _logger = logging.getLogger(__name__)
+
+
+class ThinkingRetryConfig(BaseModel):
+    max_retries: int = 3
+
 
 MANIFEST = ExtensionManifest(
     name="thinking_retry",
@@ -33,17 +40,7 @@ MANIFEST = ExtensionManifest(
         "from silently aborting the session."
     ),
     registers=("event:decide_turn_action",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "max_retries": {
-                "type": "integer",
-                "minimum": 1,
-                "default": 3,
-            },
-        },
-        "additionalProperties": False,
-    },
+    config_schema=ThinkingRetryConfig,
     requires=(),
 )
 
@@ -60,8 +57,8 @@ def _is_thinking_only(content: list[Any]) -> bool:
     return has_thinking
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    max_retries: int = config.get("max_retries", 3)
+def install(api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
+    max_retries: int = config.max_retries
     consecutive_count = 0
 
     def on_decide(event: DecideTurnActionEvent) -> Step | None:

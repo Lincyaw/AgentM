@@ -164,6 +164,14 @@ class RunSummary(TypedDict):
     wall_clock_s: float
 
 
+class WorkflowConfig(BaseModel):
+    max_concurrency: int | None = None
+    max_agents: int | None = None
+    wall_clock_timeout_s: float | None = None
+    default_scenario: str | None = None
+    budget_tokens: int | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="workflow",
     description=(
@@ -176,20 +184,7 @@ MANIFEST = ExtensionManifest(
         "tool:workflow",
         "event:workflow_phase",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "max_concurrency": {"type": "integer", "minimum": 1},
-            "max_agents": {"type": "integer", "minimum": 1},
-            "wall_clock_timeout_s": {"type": ["number", "null"], "minimum": 0},
-            "default_scenario": {"type": ["string", "null"]},
-            # Hard token ceiling for one workflow run; backs budget.total /
-            # budget.remaining() so a script can scale depth (loop-until-budget).
-            # Null ⇒ no ceiling (remaining stays None, spend still tracked).
-            "budget_tokens": {"type": ["integer", "null"], "minimum": 1},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=WorkflowConfig,
     # The workflow-local journal (resume) is backed by the artifact_store
     # service; the atom reaches it via api.get_service, never an import.
     requires=("artifact_store",),
@@ -1458,36 +1453,29 @@ class WorkflowRunner:
         return result
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
     if api.purpose == _WORKER_PURPOSE:
         return
 
-    max_concurrency = config.get("max_concurrency")
     concurrency = (
-        int(max_concurrency)
-        if isinstance(max_concurrency, int) and max_concurrency > 0
+        config.max_concurrency
+        if config.max_concurrency is not None and config.max_concurrency > 0
         else _default_concurrency()
     )
-    max_agents_cfg = config.get("max_agents")
     max_agents = (
-        int(max_agents_cfg)
-        if isinstance(max_agents_cfg, int) and max_agents_cfg > 0
+        config.max_agents
+        if config.max_agents is not None and config.max_agents > 0
         else _AGENT_COUNT_BACKSTOP
     )
-    wall_clock = config.get("wall_clock_timeout_s")
     wall_clock_timeout: float | None = (
-        float(wall_clock)
-        if isinstance(wall_clock, (int, float)) and wall_clock > 0
+        config.wall_clock_timeout_s
+        if config.wall_clock_timeout_s is not None and config.wall_clock_timeout_s > 0
         else None
     )
-    default_scenario_cfg = config.get("default_scenario")
-    default_scenario = (
-        default_scenario_cfg if isinstance(default_scenario_cfg, str) else None
-    )
-    budget_tokens_cfg = config.get("budget_tokens")
+    default_scenario = config.default_scenario
     budget_tokens: int | None = (
-        int(budget_tokens_cfg)
-        if isinstance(budget_tokens_cfg, int) and budget_tokens_cfg > 0
+        config.budget_tokens
+        if config.budget_tokens is not None and config.budget_tokens > 0
         else None
     )
 

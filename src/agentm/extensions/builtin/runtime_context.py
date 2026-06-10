@@ -13,22 +13,22 @@ from __future__ import annotations
 
 import platform
 from pathlib import Path
-from typing import Any
+from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
 
 
+class RuntimeContextConfig(BaseModel):
+    pass
+
+
 MANIFEST = ExtensionManifest(
     name="runtime_context",
     description="Injects workspace cwd + host runtime facts into the system prompt.",
     registers=("event:before_agent_start",),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    config_schema=RuntimeContextConfig,
     requires=(),  # Leaf atom: reads only api.cwd + stdlib platform.
 )
 
@@ -53,7 +53,7 @@ def _build_block(cwd: str) -> str:
     )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:
     block = _build_block(api.cwd)
 
     def before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str]:

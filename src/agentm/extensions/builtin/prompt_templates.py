@@ -14,6 +14,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi.prompt_template import PromptRegistry, PromptTemplateRecord
 from agentm.core.abi.roles import PROMPT_REGISTRY
 from agentm.core.lib.frontmatter import parse_frontmatter
@@ -226,26 +228,24 @@ class _PromptRegistry:
 # --- Manifest + install ----------------------------------------------------
 
 
+class PromptTemplatesConfig(BaseModel):
+    prompt_paths: list[str] = []
+    include_defaults: bool = True
+
+
 MANIFEST = ExtensionManifest(
     name="prompt_templates",
     description="Expand /<name> args templates and host the named-prompt registry.",
     registers=("event:input", "event:resources_discover", "event:session_ready"),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "prompt_paths": {"type": "array", "items": {"type": "string"}},
-            "include_defaults": {"type": "boolean"},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=PromptTemplatesConfig,
     requires=(),  # Leaf atom: loads prompt templates from resources.
     provides_role=(PROMPT_REGISTRY,),
 )
 
 
-async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    include_defaults = bool(config.get("include_defaults", True))
-    configured_prompt_paths = [str(path) for path in config.get("prompt_paths", [])]
+async def install(api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
+    include_defaults = config.include_defaults
+    configured_prompt_paths = list(config.prompt_paths)
 
     project_dirs: tuple[str, ...] = tuple(
         str(p) for p in api.get_project_layout().prompts_dirs()

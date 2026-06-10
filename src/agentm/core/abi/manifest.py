@@ -10,12 +10,12 @@ from pydantic import BaseModel, ConfigDict
 class ExtensionManifest(BaseModel):
     """Module-level declaration every atom exports as MANIFEST."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     name: str
     description: str
     registers: tuple[str, ...] = ()
-    config_schema: dict[str, Any] | None = None
+    config_schema: type[BaseModel] | None = None
     requires: tuple[str, ...] = ()
     conflicts: tuple[str, ...] = ()
     api_version: int = 1

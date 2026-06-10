@@ -62,6 +62,8 @@ from agentm.core.abi.extension import (
     ExtensionStaleError,
     Unsubscribe,
 )
+from pydantic import BaseModel
+
 from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, to_jsonable
 from agentm.extensions import ExtensionManifest
 
@@ -142,6 +144,12 @@ _KERNEL_CONTROL_CHANNELS: frozenset[str] = frozenset(
 )
 
 
+class MonitorConfig(BaseModel):
+    shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
+    event_summary_max_chars: int = _DEFAULT_EVENT_SUMMARY_MAX
+    condition_poll_min_seconds: float = _DEFAULT_CONDITION_POLL_MIN
+
+
 MANIFEST = ExtensionManifest(
     name="monitor",
     description=(
@@ -156,42 +164,7 @@ MANIFEST = ExtensionManifest(
         "tool:cancel_monitor",
         "event:session_shutdown",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "shutdown_grace_seconds": {
-                "type": "number",
-                "minimum": 0,
-                "default": DEFAULT_SHUTDOWN_GRACE_SECONDS,
-                "description": (
-                    "Seconds the session_shutdown drain waits for still-"
-                    "pending wakeup tasks to be cancelled and gathered "
-                    f"(default {DEFAULT_SHUTDOWN_GRACE_SECONDS:g})."
-                ),
-            },
-            "event_summary_max_chars": {
-                "type": "integer",
-                "minimum": 1,
-                "default": _DEFAULT_EVENT_SUMMARY_MAX,
-                "description": (
-                    "Maximum length of the channel-fire event_summary "
-                    f"embedded in the inbox payload (default {_DEFAULT_EVENT_SUMMARY_MAX})."
-                ),
-            },
-            "condition_poll_min_seconds": {
-                "type": "number",
-                "minimum": 0,
-                "default": _DEFAULT_CONDITION_POLL_MIN,
-                "description": (
-                    "Floor for a condition monitor's poll_interval — a per-call "
-                    "interval below this is clamped up so the agent cannot wedge "
-                    f"the session into a tight re-poll spin (default "
-                    f"{_DEFAULT_CONDITION_POLL_MIN:g})."
-                ),
-            },
-        },
-        "additionalProperties": False,
-    },
+    config_schema=MonitorConfig,
     requires=(),
 )
 
@@ -663,18 +636,12 @@ class _MonitorManager:
         await asyncio.gather(*wakeup_tasks, return_exceptions=True)
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: MonitorConfig) -> None:
     manager = _MonitorManager(
         api=api,
-        shutdown_grace_seconds=float(
-            config.get("shutdown_grace_seconds", DEFAULT_SHUTDOWN_GRACE_SECONDS)
-        ),
-        event_summary_max_chars=int(
-            config.get("event_summary_max_chars", _DEFAULT_EVENT_SUMMARY_MAX)
-        ),
-        condition_poll_min_seconds=float(
-            config.get("condition_poll_min_seconds", _DEFAULT_CONDITION_POLL_MIN)
-        ),
+        shutdown_grace_seconds=config.shutdown_grace_seconds,
+        event_summary_max_chars=config.event_summary_max_chars,
+        condition_poll_min_seconds=config.condition_poll_min_seconds,
     )
     api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
     api.register_tool(

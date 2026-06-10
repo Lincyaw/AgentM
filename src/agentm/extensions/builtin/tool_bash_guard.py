@@ -11,19 +11,22 @@ from __future__ import annotations
 import re
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import ToolCallEvent
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+
+
+class ToolBashGuardConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
 
 MANIFEST = ExtensionManifest(
     name="tool_bash_guard",
     description="Block destructive file-editing shell commands (sed -i, awk inplace).",
     registers=("event:tool_call",),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": True,
-    },
+    config_schema=ToolBashGuardConfig,
     requires=(),
 )
 
@@ -45,7 +48,7 @@ _BLOCKED: Final[list[tuple[re.Pattern[str], str]]] = [
 ]
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: ToolBashGuardConfig) -> None:
     del config
 
     def _on_tool_call(event: ToolCallEvent) -> dict[str, Any] | None:

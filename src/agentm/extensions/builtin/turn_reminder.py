@@ -33,6 +33,8 @@ from __future__ import annotations
 import time as _time
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import TextContent, ToolResultMessage, UserMessage
 from agentm.core.abi.events import (
     AgentStartEvent,
@@ -42,6 +44,12 @@ from agentm.core.abi.events import (
 )
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+
+
+class TurnReminderConfig(BaseModel):
+    warn_within: int = 5
+    finalize_tool: str = ""
+
 
 MANIFEST = ExtensionManifest(
     name="turn_reminder",
@@ -55,21 +63,14 @@ MANIFEST = ExtensionManifest(
         "event:tool_result",
         "event:before_send_to_llm",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "warn_within": {"type": "integer", "minimum": 1, "default": 5},
-            "finalize_tool": {"type": "string", "default": ""},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=TurnReminderConfig,
     requires=(),
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    warn_within = int(config.get("warn_within", 5))
-    finalize_tool = config.get("finalize_tool", "")
+def install(api: ExtensionAPI, config: TurnReminderConfig) -> None:
+    warn_within = config.warn_within
+    finalize_tool = config.finalize_tool
 
     # Per-run counters. ``turn_index`` is authoritative from ``turn_start``;
     # ``tool_calls_used`` mirrors the loop's own counter (both reset per run).

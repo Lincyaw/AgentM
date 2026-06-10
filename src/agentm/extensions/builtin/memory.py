@@ -44,6 +44,8 @@ import time
 from pathlib import Path
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
@@ -51,6 +53,16 @@ from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.extensions import ExtensionManifest
 
 logger = logging.getLogger(__name__)
+
+_VALID_TYPES: Final[tuple[str, ...]] = ("feedback", "project", "user", "reference")
+_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
+_DEFAULT_MAX_INDEX_LINES: Final[int] = 200
+
+
+class MemoryConfig(BaseModel):
+    path: str = ".agentm/memory"
+    index_in_system_prompt: bool = True
+    max_index_lines: int = _DEFAULT_MAX_INDEX_LINES
 
 
 MANIFEST = ExtensionManifest(
@@ -67,41 +79,9 @@ MANIFEST = ExtensionManifest(
         "tool:memory_search",
         "tool:memory_delete",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": (
-                    "Memory directory. Relative paths anchor under cwd; "
-                    "absolute paths (e.g. ~/.agentm/memory) enable cross-"
-                    "project sharing. Default: .agentm/memory"
-                ),
-            },
-            "index_in_system_prompt": {
-                "type": "boolean",
-                "description": (
-                    "When true (default), MEMORY.md content is prepended to "
-                    "the system prompt at BeforeAgentStartEvent."
-                ),
-            },
-            "max_index_lines": {
-                "type": "integer",
-                "description": (
-                    "Cap on MEMORY.md lines injected into the system prompt. "
-                    "Excess lines are dropped with a truncation marker."
-                ),
-            },
-        },
-        "additionalProperties": False,
-    },
+    config_schema=MemoryConfig,
     requires=(),
 )
-
-
-_VALID_TYPES: Final[tuple[str, ...]] = ("feedback", "project", "user", "reference")
-_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
-_DEFAULT_MAX_INDEX_LINES: Final[int] = 200
 
 
 _SAVE_PARAMS: Final[dict[str, Any]] = {
@@ -185,10 +165,10 @@ _DELETE_PARAMS: Final[dict[str, Any]] = {
 }
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    base_path = _resolve_base(api.cwd, config.get("path", ".agentm/memory"))
-    index_in_prompt = bool(config.get("index_in_system_prompt", True))
-    max_index_lines = int(config.get("max_index_lines", _DEFAULT_MAX_INDEX_LINES))
+def install(api: ExtensionAPI, config: MemoryConfig) -> None:
+    base_path = _resolve_base(api.cwd, config.path)
+    index_in_prompt = config.index_in_system_prompt
+    max_index_lines = config.max_index_lines
 
     file_ops = api.get_operations().file
     writer = api.get_resource_writer()
