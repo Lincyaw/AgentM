@@ -68,6 +68,7 @@ from agentm.core.abi.events import (
 from pydantic import BaseModel
 
 from agentm.core.abi.extension import ExtensionAPI, Handler
+from agentm.core.abi.telemetry import SessionTelemetry
 from agentm.core.lib import redact_messages, to_jsonable
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
@@ -228,7 +229,7 @@ def _deep_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
 
 
 def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
-    telemetry: Any = api.get_session_telemetry()
+    telemetry: SessionTelemetry = api.get_session_telemetry()
 
     include_handlers = config.include_handler_records
     include_diff = config.include_mutation_diff

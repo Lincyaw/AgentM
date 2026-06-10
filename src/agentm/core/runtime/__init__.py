@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from agentm.core.abi import FunctionTool
 from agentm.core.abi import events
-import agentm.core.runtime.event_otel as _event_otel  # noqa: F401 — patches Event.to_otel
+import agentm.core.runtime.event_otel as _event_otel  # noqa: F401 — populates OTel registry
 from agentm.core.abi.events import (
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
@@ -59,10 +59,6 @@ from agentm.core.runtime.session_bootstrap import (
     resolve_session_state,
 )
 
-# Side-effect import: populates the OTel translator registry in
-# ``agentm.core.lib.otel_dispatch``. Must run before any session emits
-# events so the observability atom can dispatch through the registry.
-import agentm.core.runtime.event_otel as _event_otel  # noqa: F401,E402
 __all__ = [
     "AgentSession",
     "ApiRegisterEvent",

@@ -37,6 +37,7 @@ from agentm.core.abi.operations import (
 )
 from agentm.core.abi.project_layout import ProjectLayout
 from agentm.core.abi.resource import ResourceWriter
+from agentm.core.abi.telemetry import SessionTelemetry
 
 
 # --- Type aliases ----------------------------------------------------------
@@ -502,30 +503,8 @@ class ExtensionAPI(Protocol):
     def list_atoms(self) -> list[AtomInfo]: ...
     def is_constitution_path(self, path: str) -> bool: ...
     def get_resource_writer(self) -> ResourceWriter: ...
-    def get_session_telemetry(self) -> Any:
-        """Return this session's :class:`SessionTelemetry` handle.
-
-        The handle bundles per-session OTel ``Tracer`` and ``Logger``
-        instances configured to write OTLP/JSON ``ResourceSpans`` /
-        ``ResourceLogs`` ndjson into
-        ``<cwd>/.agentm/observability/<session_id>.jsonl`` — the single
-        event log of ``.claude/designs/single-event-log.md``. Atoms that
-        want to emit spans / log records (notably the ``observability``
-        atom) acquire it once at install time and capture
-        ``telemetry.tracer`` / ``telemetry.logger`` in handler closures.
-
-        The substrate lazily constructs the handle on first call (so tests
-        and sessions that never observe pay no SDK setup cost) and wires
-        its :meth:`SessionTelemetry.shutdown` into ``SessionShutdownEvent``
-        so the batch processors drain cleanly when the session ends.
-        Atoms therefore never call ``shutdown`` themselves.
-
-        ``SessionTelemetry`` is the public ABI surface; the construction
-        details (file exporters, blocking batch processors) live in
-        :mod:`agentm.core.runtime.otel_export` per the standard
-        service-facade convention (cf. :meth:`get_operations` /
-        :meth:`get_resource_writer`).
-        """
+    def get_session_telemetry(self) -> "SessionTelemetry":
+        """Return this session's :class:`SessionTelemetry` handle."""
         ...
 
     # --- Read-only context --------------------------------------------------

@@ -64,6 +64,7 @@ from .presenter import PHASE_GLYPHS, Phase
 from .provider import ProviderConfig, ProviderManifest, ProviderResolver
 from .retry import RetryPolicy
 from .session_store import SessionState, SessionStore
+from .telemetry import SessionTelemetry
 from .messages import (
     AgentMessage,
     AssistantContent,
@@ -131,7 +132,7 @@ __all__ = [
     "ProviderManifest", "ProviderProtocolViolation", "ProviderResolver",
     "ProviderTruncated",
     "RetryPolicy",
-    "SessionIdentity", "SessionState", "SessionStore",
+    "SessionIdentity", "SessionState", "SessionStore", "SessionTelemetry",
     "SignalAborted", "Span", "Step", "Stop", "StreamDeltaEvent", "StreamFn",
     "TerminationCause", "TerminationHint",
     "TextContent", "TextDelta", "ThinkingBlock", "ThinkingDelta",
