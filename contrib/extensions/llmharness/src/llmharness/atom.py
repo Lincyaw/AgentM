@@ -10,7 +10,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, Literal, TypedDict
+from typing import Any, Final, Literal
 
 from agentm.core.abi import (
     DecideTurnActionEvent,
@@ -31,6 +31,7 @@ from agentm.core.abi.messages import (
 from agentm.core.abi.session import SessionEntry
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
+from pydantic import BaseModel
 
 from . import schema as _et
 from .agents import auditor_scenario, extractor_scenario
@@ -43,28 +44,28 @@ from .agents.extractor.tools import GraphOp, parse_op
 from .schema import Edge, Event, Phase, Reminder
 
 
-class ProviderConfig(TypedDict, total=False):
+class ProviderConfig(BaseModel):
     module: str
-    config: dict[str, Any]
+    config: dict[str, Any] = {}
 
 
-class LLMHarnessConfig(TypedDict, total=False):
-    mode: Literal["async", "sync"]
-    extractor_interval_turns: int
-    audit_interval_turns: int
-    audit_summary_threshold: int
-    extractor_tool_call_budget: int | None
-    prompt_override_extractor: str
-    prompt_override_auditor: str
-    extractor_prompt: str
-    auditor_prompt: str
-    auditor_profile: str
-    auditor_tools: list[str]
-    shutdown_timeout_s: float
-    extractor_provider: ProviderConfig | None
-    auditor_provider: ProviderConfig | None
-    enable_auditor: bool
-    enable_reminders: bool
+class LLMHarnessConfig(BaseModel):
+    mode: Literal["async", "sync"] = "async"
+    extractor_interval_turns: int = 1
+    audit_interval_turns: int = 3
+    audit_summary_threshold: int = 30
+    extractor_tool_call_budget: int | None = None
+    prompt_override_extractor: str | None = None
+    prompt_override_auditor: str | None = None
+    extractor_prompt: str = "default"
+    auditor_prompt: str = "minimal"
+    auditor_profile: str = "minimal"
+    auditor_tools: list[str] | None = None
+    shutdown_timeout_s: float = 600.0
+    extractor_provider: ProviderConfig | None = None
+    auditor_provider: ProviderConfig | None = None
+    enable_auditor: bool = True
+    enable_reminders: bool = True
 
 _log = logging.getLogger(__name__)
 
@@ -72,46 +73,11 @@ REMINDER_PREAMBLE: Final = "[system reminder — automated review of your invest
 
 _DEFAULT_RECENT_VERDICTS: Final[int] = _et.RECENT_VERDICTS_FOR_AUDITOR
 
-# ---------------------------------------------------------------------------
-# MANIFEST
-# ---------------------------------------------------------------------------
-
 MANIFEST = ExtensionManifest(
     name="llmharness",
     description="Two-phase cognitive-audit: per-turn extractor + every-k-turns auditor.",
     registers=("event:turn_end", "event:decide_turn_action", "event:session_shutdown"),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "mode": {"type": "string", "enum": ["async", "sync"]},
-            "extractor_interval_turns": {"type": "integer", "minimum": 1},
-            "audit_interval_turns": {"type": "integer", "minimum": 1},
-            "audit_summary_threshold": {"type": "integer", "minimum": 0},
-            "extractor_tool_call_budget": {"type": ["integer", "null"], "minimum": 1},
-            "prompt_override_extractor": {"type": "string"},
-            "prompt_override_auditor": {"type": "string"},
-            "extractor_prompt": {"type": "string"},
-            "auditor_prompt": {"type": "string"},
-            "auditor_profile": {"type": "string"},
-            "auditor_tools": {"type": "array", "items": {"type": "string"}},
-            "shutdown_timeout_s": {"type": "number", "minimum": 0},
-            "extractor_provider": {
-                "type": ["object", "null"],
-                "properties": {"module": {"type": "string"}, "config": {"type": "object"}},
-                "required": ["module"],
-                "additionalProperties": False,
-            },
-            "auditor_provider": {
-                "type": ["object", "null"],
-                "properties": {"module": {"type": "string"}, "config": {"type": "object"}},
-                "required": ["module"],
-                "additionalProperties": False,
-            },
-            "enable_auditor": {"type": "boolean"},
-            "enable_reminders": {"type": "boolean"},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=LLMHarnessConfig.model_json_schema(),
     requires=("observability", "operations"),
     api_version=1,
     tier=1,
@@ -376,32 +342,19 @@ def _terminal_tool_args(
 # ---------------------------------------------------------------------------
 
 
-def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:  # type: ignore[override]
-    mode = config.get("mode", "async")
-    if mode not in ("async", "sync"):
-        mode = "async"
+def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
+    cfg = config
 
-    extractor_k = max(1, int(config.get("extractor_interval_turns", 1)))
-    auditor_k = max(1, int(config.get("audit_interval_turns", 3)))
-    shutdown_timeout = max(0.0, float(config.get("shutdown_timeout_s", 600.0)))
-    enable_auditor = bool(config.get("enable_auditor", True))
-    enable_reminders = bool(config.get("enable_reminders", True))
-    summary_threshold = int(config.get("audit_summary_threshold", 30))
+    extractor_k = max(1, cfg.extractor_interval_turns)
+    auditor_k = max(1, cfg.audit_interval_turns)
+    shutdown_timeout = max(0.0, cfg.shutdown_timeout_s)
+    enable_auditor = cfg.enable_auditor
+    enable_reminders = cfg.enable_reminders
+    summary_threshold = cfg.audit_summary_threshold
+    tool_call_budget = cfg.extractor_tool_call_budget
 
-    ext_prompt_override = config.get("prompt_override_extractor")
-    extractor_prompt_name = config.get("extractor_prompt") or "default"
-    auditor_prompt_name = config.get("auditor_prompt") or "minimal"
-    auditor_profile = config.get("auditor_profile") or "minimal"
-    auditor_tools_override = config.get("auditor_tools")
-
-    tcb_raw = config.get("extractor_tool_call_budget")
-    tool_call_budget: int | None = (
-        int(tcb_raw) if isinstance(tcb_raw, int) and not isinstance(tcb_raw, bool) else None
-    )
-
-    # Providers
-    extractor_provider = _parse_provider(config.get("extractor_provider"))
-    auditor_provider = _parse_provider(config.get("auditor_provider"))
+    extractor_provider = (cfg.extractor_provider.module, dict(cfg.extractor_provider.config)) if cfg.extractor_provider else None
+    auditor_provider = (cfg.auditor_provider.module, dict(cfg.auditor_provider.config)) if cfg.auditor_provider else None
 
     # State
     cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
@@ -438,9 +391,9 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:  # type: ignor
 
                 ctx_config = dict(data)
                 ctx_config["ops_file"] = str(ops_path)
-                ctx_config["prompt_name"] = extractor_prompt_name
-                if isinstance(ext_prompt_override, str):
-                    ctx_config["prompt_text"] = ext_prompt_override
+                ctx_config["prompt_name"] = cfg.extractor_prompt
+                if cfg.prompt_override_extractor is not None:
+                    ctx_config["prompt_text"] = cfg.prompt_override_extractor
 
                 child_msgs = await _run_child(
                     api,
@@ -488,12 +441,12 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:  # type: ignor
                         "phases": [p.to_dict() for p in phases],
                         "continuation_notes": list(cumulative.last_continuation_notes),
                         "summary_threshold": summary_threshold,
-                        "prompt_name": auditor_prompt_name,
+                        "prompt_name": cfg.auditor_prompt,
                         "trajectory_snapshot": trajectory,
                     },
                     "auditor_tools": {
-                        "profile": auditor_profile,
-                        **({"tools": list(auditor_tools_override)} if auditor_tools_override else {}),
+                        "profile": cfg.auditor_profile,
+                        **({"tools": list(cfg.auditor_tools)} if cfg.auditor_tools else {}),
                         "trajectory_snapshot": trajectory,
                         "events": [e.to_dict() for e in events],
                         "edges": [ed.to_dict() for ed in edges],
@@ -538,7 +491,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:  # type: ignor
                 _log.exception("failed to persist reminder_delivered")
         return Inject(messages=injected)
 
-    if mode == "sync":
+    if cfg.mode == "sync":
         async def _on_turn_end_sync(event: TurnEndEvent) -> None:
             nonlocal turn_count
             turn_count += 1
@@ -603,13 +556,3 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:  # type: ignor
     api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)
 
 
-def _parse_provider(raw: Any) -> tuple[str, dict[str, Any]] | None:
-    if not isinstance(raw, dict) or not raw:
-        return None
-    module = raw.get("module")
-    if not isinstance(module, str) or not module.strip():
-        return None
-    cfg = raw.get("config", {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    return module, dict(cfg)
