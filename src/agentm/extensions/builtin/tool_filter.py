@@ -8,31 +8,33 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import AgentStartEvent
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
+
+
+class ToolFilterConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    allow: list[str] = []
+    deny: list[str] = []
 
 
 MANIFEST = ExtensionManifest(
     name="tool_filter",
     description="Remove tools from the registered catalog by allow/deny rules.",
     registers=("event:agent_start",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "allow": {"type": "array", "items": {"type": "string"}},
-            "deny": {"type": "array", "items": {"type": "string"}},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=ToolFilterConfig,
     requires=(),  # Defers filtering to agent_start so tool atoms may load in any order.
     tier=2,
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    allow = {str(name) for name in config.get("allow", [])}
-    deny = {str(name) for name in config.get("deny", [])}
+def install(api: ExtensionAPI, config: ToolFilterConfig) -> None:
+    allow = {str(name) for name in config.allow}
+    deny = {str(name) for name in config.deny}
     if not allow and not deny:
         return
 

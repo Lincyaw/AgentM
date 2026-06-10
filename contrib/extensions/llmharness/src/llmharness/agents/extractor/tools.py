@@ -1240,6 +1240,10 @@ def build_finalize_extraction_tool(state: ExtractionState) -> FunctionTool:
 
 STATE_SERVICE_KEY = "llmharness.extractor_state"
 
+class ExtractorToolsConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+
 MANIFEST = ExtensionManifest(
     name="extractor_tools",
     description="Register the extractor graph-editing tools.",
@@ -1251,7 +1255,7 @@ MANIFEST = ExtensionManifest(
         "tool:reset_extraction",
         "tool:finalize_extraction",
     ),
-    config_schema={"type": "object", "additionalProperties": True},
+    config_schema=ExtractorToolsConfig,
 )
 
 _BUILDERS = [

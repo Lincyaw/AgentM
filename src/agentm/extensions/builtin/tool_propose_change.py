@@ -69,9 +69,29 @@ import uuid
 from pathlib import Path
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
+
+
+class PromotionConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    threshold_relative: float = 0.05
+    guard_tolerance: float = 0.10
+    stop_after_no_improvement: int | None = 3
+
+
+class ToolProposeChangeConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    target_scenario: str = "default"
+    promotion: PromotionConfig = PromotionConfig()
+    rollouts_budget: int | None = None
+    usd_budget: float | None = None
+    transfer_to: list[str] = []
 
 
 def mad_confidence(
@@ -125,48 +145,7 @@ MANIFEST = ExtensionManifest(
         ".agentm/decisions/<scenario>/activations.jsonl."
     ),
     registers=("tool:propose_change",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "target_scenario": {"type": "string"},
-            "promotion": {
-                "type": "object",
-                "properties": {
-                    "threshold_relative": {"type": "number"},
-                    "guard_tolerance": {"type": "number"},
-                    "stop_after_no_improvement": {"type": "integer"},
-                },
-                "additionalProperties": True,
-            },
-            "rollouts_budget": {
-                "type": ["integer", "null"],
-                "description": (
-                    "B-6: per-tuning-session rollout cap. None = unbounded."
-                ),
-            },
-            "usd_budget": {
-                "type": ["number", "null"],
-                "description": (
-                    "B-6: per-tuning-session USD cap; mirrors "
-                    "tool_eval_run.max_cost_usd. None = unbounded."
-                ),
-            },
-            "transfer_to": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "B-8: opt-in cross-task transfer. After a successful "
-                    "kind='atom_source' activation, plant a non-activating "
-                    "candidate record in each listed sibling scenario's "
-                    "candidates/ directory with transferred_from=<source>. "
-                    "The destination tuner decides independently whether "
-                    "to eval + activate. Only atom_source transfers — "
-                    "system_prompt and manifest changes are scenario-shape."
-                ),
-            },
-        },
-        "additionalProperties": True,
-    },
+    config_schema=ToolProposeChangeConfig,
 )
 
 
@@ -275,58 +254,17 @@ _DEFAULT_GUARD_TOLERANCE = 0.10
 _DEFAULT_STOP_AFTER_NO_IMPROVEMENT = 3
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    target_scenario = str(config.get("target_scenario") or "default")
-    promotion = config.get("promotion") or {}
-    threshold_relative = float(
-        promotion.get("threshold_relative", _DEFAULT_THRESHOLD_RELATIVE)
-    )
-    guard_tolerance = float(
-        promotion.get("guard_tolerance", _DEFAULT_GUARD_TOLERANCE)
-    )
-    # B-9: structural anti-thrash counter. Default 3 consecutive rejections;
-    # explicit None disables. Counter reads from activations.jsonl on every
-    # call so it persists across tuner restarts (the load-bearing property).
-    stop_after_raw = promotion.get(
-        "stop_after_no_improvement", _DEFAULT_STOP_AFTER_NO_IMPROVEMENT
-    )
-    stop_after_no_improvement: int | None
-    if stop_after_raw is None:
+def install(api: ExtensionAPI, config: ToolProposeChangeConfig) -> None:
+    target_scenario = config.target_scenario
+    promotion = config.promotion
+    threshold_relative = promotion.threshold_relative
+    guard_tolerance = promotion.guard_tolerance
+    stop_after_no_improvement: int | None = promotion.stop_after_no_improvement
+    if stop_after_no_improvement is not None and stop_after_no_improvement <= 0:
         stop_after_no_improvement = None
-    else:
-        try:
-            stop_after_no_improvement = int(stop_after_raw)
-        except (TypeError, ValueError):
-            stop_after_no_improvement = _DEFAULT_STOP_AFTER_NO_IMPROVEMENT
-        if (
-            stop_after_no_improvement is not None
-            and stop_after_no_improvement <= 0
-        ):
-            stop_after_no_improvement = None
-    rollouts_budget_raw = config.get("rollouts_budget")
-    rollouts_budget: int | None
-    try:
-        rollouts_budget = (
-            int(rollouts_budget_raw) if rollouts_budget_raw is not None else None
-        )
-    except (TypeError, ValueError):
-        rollouts_budget = None
-    transfer_to_raw = config.get("transfer_to") or []
-    transfer_to: tuple[str, ...]
-    if isinstance(transfer_to_raw, (list, tuple)):
-        transfer_to = tuple(
-            str(s) for s in transfer_to_raw if isinstance(s, str) and s
-        )
-    else:
-        transfer_to = ()
-    usd_budget_raw = config.get("usd_budget")
-    usd_budget: float | None
-    try:
-        usd_budget = (
-            float(usd_budget_raw) if usd_budget_raw is not None else None
-        )
-    except (TypeError, ValueError):
-        usd_budget = None
+    rollouts_budget = config.rollouts_budget
+    transfer_to = tuple(config.transfer_to)
+    usd_budget = config.usd_budget
     cwd = Path(api.cwd)
 
     async def _execute(args: dict[str, Any]) -> ToolResult:

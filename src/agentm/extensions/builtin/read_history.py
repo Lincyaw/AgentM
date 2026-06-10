@@ -29,6 +29,8 @@ from agentm.core.abi import (
     UserMessage,
 )
 from agentm.core.abi.messages import AgentMessage
+from pydantic import BaseModel
+
 from agentm.core.lib import Turn, enumerate_turns
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
@@ -39,6 +41,11 @@ _DEFAULT_TOOL_RESULT_MAX_CHARS: Final = 20_000
 _DEFAULT_TOTAL_MAX_CHARS: Final = 200_000
 
 
+class ReadHistoryConfig(BaseModel):
+    tool_result_max_chars: int = _DEFAULT_TOOL_RESULT_MAX_CHARS
+    total_max_chars: int = _DEFAULT_TOTAL_MAX_CHARS
+
+
 MANIFEST = ExtensionManifest(
     name="read_history",
     description=(
@@ -47,22 +54,7 @@ MANIFEST = ExtensionManifest(
     ),
     registers=("tool:read_history",),
     requires=(),  # Leaf atom: reads the session branch only.
-    config_schema={
-        "type": "object",
-        "properties": {
-            "tool_result_max_chars": {
-                "type": "integer",
-                "minimum": 1,
-                "default": _DEFAULT_TOOL_RESULT_MAX_CHARS,
-            },
-            "total_max_chars": {
-                "type": "integer",
-                "minimum": 1,
-                "default": _DEFAULT_TOTAL_MAX_CHARS,
-            },
-        },
-        "additionalProperties": False,
-    },
+    config_schema=ReadHistoryConfig,
 )
 
 
@@ -87,9 +79,9 @@ _PARAMETERS: Final[dict[str, Any]] = {
 }
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    tool_result_cap = int(config.get("tool_result_max_chars", _DEFAULT_TOOL_RESULT_MAX_CHARS))
-    total_cap = int(config.get("total_max_chars", _DEFAULT_TOTAL_MAX_CHARS))
+def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
+    tool_result_cap = config.tool_result_max_chars
+    total_cap = config.total_max_chars
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         start = int(args["start"])

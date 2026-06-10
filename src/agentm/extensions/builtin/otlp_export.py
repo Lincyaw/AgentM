@@ -36,10 +36,20 @@ import os
 import threading
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+
+class OtlpExportConfig(BaseModel):
+    endpoint: str | None = None
+    protocol: str | None = None
+    headers: str | None = None
+    insecure: bool | None = None
+    timeout: float | None = None
 
 
 MANIFEST = ExtensionManifest(
@@ -50,17 +60,7 @@ MANIFEST = ExtensionManifest(
         "the on-disk ndjson file. Idempotent across sessions in one process."
     ),
     registers=(),  # Attaches to process-global OTel providers; no §11 surface.
-    config_schema={
-        "type": "object",
-        "properties": {
-            "endpoint": {"type": "string"},
-            "protocol": {"type": "string", "enum": ["grpc", "http/protobuf"]},
-            "headers": {"type": "string"},
-            "insecure": {"type": "boolean"},
-            "timeout": {"type": "number"},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=OtlpExportConfig,
     requires=("observability",),
     api_version=1,
     tier=1,
@@ -90,7 +90,7 @@ def _parse_headers(raw: str | None) -> dict[str, str] | None:
     return out or None
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
     # Reach the process-level SDK TracerProvider + LoggerProvider through
     # the per-session telemetry handle. The substrate does not register
     # these as OTel globals (so ``opentelemetry.trace.get_tracer_provider``
@@ -103,12 +103,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return
 
         endpoint = (
-            config.get("endpoint")
+            config.endpoint
             or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
             or "http://localhost:4317"
         )
         protocol = (
-            config.get("protocol")
+            config.protocol
             or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
             or "grpc"
         )
@@ -121,16 +121,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 ),
             )
         headers = _parse_headers(
-            config.get("headers") or os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
+            config.headers or os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
         )
-        insecure_raw = config.get("insecure")
+        insecure_raw = config.insecure
         if insecure_raw is None:
             env_insecure = os.environ.get("OTEL_EXPORTER_OTLP_INSECURE")
             insecure = env_insecure is None or env_insecure.lower() == "true"
         else:
             insecure = bool(insecure_raw)
-        timeout_raw = (
-            config.get("timeout")
+        timeout_raw: float | str = (
+            config.timeout
             or os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT")
             or 10
         )

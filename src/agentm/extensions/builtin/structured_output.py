@@ -20,10 +20,24 @@ import json
 import logging
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
 from agentm.extensions import ExtensionManifest
 
 _log = logging.getLogger(__name__)
+
+
+class StructuredOutputConfig(BaseModel):
+    result_schema: dict[str, Any] = {}
+
+    def __init__(self, **data: Any) -> None:
+        # Accept "schema" from external callers (manifest config dicts use
+        # the original key name).
+        if "schema" in data and "result_schema" not in data:
+            data["result_schema"] = data.pop("schema")
+        super().__init__(**data)
+
 
 MANIFEST = ExtensionManifest(
     name="structured_output",
@@ -33,22 +47,12 @@ MANIFEST = ExtensionManifest(
         "terminates the session."
     ),
     registers=("tool:submit_result",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "schema": {
-                "type": "object",
-                "description": "JSON Schema for the result parameter.",
-            },
-        },
-        "required": ["schema"],
-        "additionalProperties": False,
-    },
+    config_schema=StructuredOutputConfig,
 )
 
 
-def install(api: Any, config: dict[str, Any]) -> None:
-    schema: dict[str, Any] = config["schema"]
+def install(api: Any, config: StructuredOutputConfig) -> None:
+    schema: dict[str, Any] = config.result_schema
 
     # Soft-dep: validate against the schema if jsonschema is available.
     _validate_fn: Any = None

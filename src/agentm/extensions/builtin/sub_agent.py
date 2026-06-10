@@ -42,6 +42,8 @@ from agentm.core.lib.background_tasks import (
     BackgroundTaskRegistry,
     SlotLimitReached,
 )
+from pydantic import BaseModel as PydanticBaseModel
+
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 from agentm.core.abi.events import (
@@ -63,6 +65,13 @@ _ABORTED: Literal["aborted"] = "aborted"
 _ERROR: Literal["error"] = "error"
 _Status = Literal["running", "completed", "aborted", "error"]
 
+class SubAgentConfig(PydanticBaseModel):
+    inherit_extensions: list[str] = []
+    available_inherited_extensions: dict[str, Any] = {}
+    max_workers: int = 4
+    shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
+
+
 MANIFEST = ExtensionManifest(
     name="sub_agent",
     description=(
@@ -80,49 +89,7 @@ MANIFEST = ExtensionManifest(
         "event:session_ready",
         "event:tool_call",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "inherit_extensions": {
-                "type": "array",
-                "items": {"type": "string"},
-                "default": [],
-                "description": (
-                    "Names of parent-side extensions the child session may "
-                    "inherit. Each name listed here MUST appear as a key in "
-                    "``available_inherited_extensions`` or installation fails "
-                    "fast with ExtensionLoadError."
-                ),
-            },
-            "available_inherited_extensions": {
-                "type": "object",
-                "additionalProperties": True,
-                "description": (
-                    "Resolution map the parent supplies to translate inherited "
-                    "names into concrete extension specs. Each value is either "
-                    "a ``[module_path, config_dict]`` pair or "
-                    "``{'module': str, 'config': dict}``. When config is omitted "
-                    "or empty for an inherited parent atom, the child inherits "
-                    "that parent atom's resolved config by manifest name. Parents must populate "
-                    "this for every name in ``inherit_extensions``; otherwise "
-                    "inheritance silently fails — which is why this atom now "
-                    "fast-fails on missing keys."
-                ),
-            },
-            "max_workers": {"type": "integer", "minimum": 1, "default": 4},
-            "shutdown_grace_seconds": {
-                "type": "number",
-                "minimum": 0,
-                "default": DEFAULT_SHUTDOWN_GRACE_SECONDS,
-                "description": (
-                    "Seconds the session_shutdown drain waits for still-"
-                    "running child sessions to finish cooperatively before "
-                    f"aborting them (default {DEFAULT_SHUTDOWN_GRACE_SECONDS:g})."
-                ),
-            },
-        },
-        "additionalProperties": True,
-    },
+    config_schema=SubAgentConfig,
     requires=("system_prompt",),
     provides_role=(SUB_AGENT_RUNTIME,),
 )
@@ -1011,9 +978,9 @@ class _ChildTaskManager:
             await asyncio.gather(*still_running, return_exceptions=True)
 
 
-async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    inherit_extensions = list(config.get("inherit_extensions", []))
-    available_inherited = dict(config.get("available_inherited_extensions", {}))
+async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
+    inherit_extensions = list(config.inherit_extensions)
+    available_inherited = dict(config.available_inherited_extensions)
     missing = [name for name in inherit_extensions if name not in available_inherited]
     if missing:
         raise ExtensionLoadError(
@@ -1038,11 +1005,9 @@ async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         api=api,
         inherit_extensions=inherit_extensions,
         available_inherited=available_inherited,
-        max_workers=int(config.get("max_workers", 4)),
+        max_workers=config.max_workers,
         system_prompt_module=system_prompt.module_path,
-        shutdown_grace_seconds=float(
-            config.get("shutdown_grace_seconds", DEFAULT_SHUTDOWN_GRACE_SECONDS)
-        ),
+        shutdown_grace_seconds=config.shutdown_grace_seconds,
     )
 
     api.on(SessionReadyEvent.CHANNEL, manager.on_session_ready)

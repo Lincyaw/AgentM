@@ -26,6 +26,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
@@ -69,6 +71,13 @@ _PROMPT_SUMMARIZATION = "compaction.summarization"
 _PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
 
 
+class LlmCompactionConfig(BaseModel):
+    enabled: bool = True
+    reserve_tokens: int = 16_384
+    tool_result_max_chars: int = 8_000
+    custom_instructions: str | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="llm_compaction",
     description="LLM-driven full-compress compaction for long session branches.",
@@ -78,16 +87,7 @@ MANIFEST = ExtensionManifest(
         "event:after_compact",
         "command:compact",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "enabled": {"type": "boolean", "default": True},
-            "reserve_tokens": {"type": "integer", "minimum": 1, "default": 16_384},
-            "tool_result_max_chars": {"type": "integer", "minimum": 1, "default": 8_000},
-            "custom_instructions": {"type": "string"},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=LlmCompactionConfig,
     requires=("compaction_prompts", "prompt_templates"),
     tier=2,
 )
@@ -529,15 +529,13 @@ async def compact(
 # === Atom install ==========================================================
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
     settings = CompactionSettings(
-        enabled=bool(config.get("enabled", True)),
-        reserve_tokens=int(config.get("reserve_tokens", 16_384)),
-        tool_result_max_chars=int(config.get("tool_result_max_chars", 8_000)),
+        enabled=config.enabled,
+        reserve_tokens=config.reserve_tokens,
+        tool_result_max_chars=config.tool_result_max_chars,
     )
-    custom_instructions = config.get("custom_instructions")
-    if not isinstance(custom_instructions, str):
-        custom_instructions = None
+    custom_instructions = config.custom_instructions
 
     async def _run_compaction(
         reason: str, session_messages: list[AgentMessage], est_tokens: int

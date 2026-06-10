@@ -37,9 +37,18 @@ import json
 from pathlib import Path
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
+
+
+class ToolReflectConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    default_scenario: str | None = None
+    template_filename: str = "reflection_template.md"
 
 
 MANIFEST = ExtensionManifest(
@@ -51,21 +60,7 @@ MANIFEST = ExtensionManifest(
         "itself; output is the scaffold plus a ChangeSpec schema hint."
     ),
     registers=("tool:reflect",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "default_scenario": {"type": "string"},
-            "template_filename": {
-                "type": "string",
-                "description": (
-                    "Override the per-scenario reflection template "
-                    "filename. Defaults to ``reflection_template.md`` "
-                    "under contrib/scenarios/<scenario>/eval/."
-                ),
-            },
-        },
-        "additionalProperties": True,
-    },
+    config_schema=ToolReflectConfig,
 )
 
 
@@ -137,11 +132,9 @@ _RECENT_FEEDBACK_CAP = 12
 _TRACE_DIGEST_CAP = 8
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    default_scenario = str(config.get("default_scenario") or "")
-    template_filename = str(
-        config.get("template_filename") or "reflection_template.md"
-    )
+def install(api: ExtensionAPI, config: ToolReflectConfig) -> None:
+    default_scenario = config.default_scenario or ""
+    template_filename = config.template_filename
     cwd = Path(api.cwd)
 
     async def _execute(args: dict[str, Any]) -> ToolResult:

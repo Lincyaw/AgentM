@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any, Final, TypeVar
 
+from pydantic import BaseModel as PydanticBaseModel
+
 from agentm.core.abi import AssistantStreamEvent, Model, RetryPolicy
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.tool import Tool
@@ -18,6 +20,15 @@ from agentm.core.abi.extension import ExtensionAPI, ProviderConfig
 T = TypeVar("T")
 
 
+class RetryPolicyConfig(PydanticBaseModel):
+    max_retries: int = 7
+    base_delay: float = 5.0
+    factor: float = 2.0
+    jitter: float = 0.0
+    retry_streaming: bool = False
+    wrap_providers: bool = False
+
+
 MANIFEST = ExtensionManifest(
     name="retry_policy",
     description=(
@@ -25,18 +36,7 @@ MANIFEST = ExtensionManifest(
         "provider stream functions."
     ),
     registers=("event:api_register",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "max_retries": {"type": "integer", "minimum": 0, "default": 7},
-            "base_delay": {"type": "number", "minimum": 0, "default": 5.0},
-            "factor": {"type": "number", "minimum": 1, "default": 2.0},
-            "jitter": {"type": "number", "minimum": 0, "default": 0.0},
-            "retry_streaming": {"type": "boolean", "default": False},
-            "wrap_providers": {"type": "boolean", "default": False},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=RetryPolicyConfig,
     requires=(),
     tier=1,
 )
@@ -164,17 +164,17 @@ def _wrap_provider(
     )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: RetryPolicyConfig) -> None:
     policy = ExponentialBackoffRetry(
-        max_retries=max(0, int(config.get("max_retries", 7))),
-        base_delay=max(0.0, float(config.get("base_delay", 5.0))),
-        factor=max(1.0, float(config.get("factor", 2.0))),
-        jitter=max(0.0, float(config.get("jitter", 0.0))),
+        max_retries=max(0, config.max_retries),
+        base_delay=max(0.0, config.base_delay),
+        factor=max(1.0, config.factor),
+        jitter=max(0.0, config.jitter),
     )
     api.set_service("retry_policy", policy)
 
-    retry_streaming = bool(config.get("retry_streaming", False))
-    wrap_providers = bool(config.get("wrap_providers", False))
+    retry_streaming = config.retry_streaming
+    wrap_providers = config.wrap_providers
     if not wrap_providers:
         return
 

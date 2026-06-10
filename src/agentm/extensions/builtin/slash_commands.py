@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import BusPriority
 from agentm.core.abi.roles import COMMAND_PARSER, SLASH_COMMAND_DISPATCHER_SERVICE
 from agentm.extensions import ExtensionManifest
@@ -11,14 +13,15 @@ from agentm.core.abi.events import CommandDispatchedEvent
 from agentm.core.abi.extension import CommandDispatcher, ExtensionAPI
 
 
+class SlashCommandsConfig(BaseModel):
+    pass
+
+
 MANIFEST = ExtensionManifest(
     name="slash_commands",
     description="Rewrite escaped slashes and dispatch registered slash commands.",
     registers=("event:input", "event:command_dispatched"),
-    config_schema={
-        "type": "object",
-        "additionalProperties": False,
-    },
+    config_schema=SlashCommandsConfig,
     requires=(),  # Leaf atom: dispatches commands registered by any peer.
     api_version=1,
     tier=1,
@@ -26,7 +29,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: SlashCommandsConfig) -> None:
     del config
     service = api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)
     dispatcher = service if isinstance(service, CommandDispatcher) else None

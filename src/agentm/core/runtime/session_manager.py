@@ -10,22 +10,11 @@ from __future__ import annotations
 import copy
 import time
 import uuid
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
-from agentm.core.abi import (
-    AgentMessage,
-    AssistantMessage,
-    ImageContent,
-    TextContent,
-    ThinkingBlock,
-    ToolCallBlock,
-    ToolResultBlock,
-    ToolResultMessage,
-    Usage,
-    UserMessage,
-)
+from agentm.core.abi import AgentMessage
 from agentm.core.abi.events import (
     MessageAppendedEvent,
     SessionHeaderEmittedEvent,
@@ -42,6 +31,7 @@ from agentm.core.abi.session import (
     compaction_entry,
     message_entry,
 )
+from agentm.core.lib.message_codec import deserialize_payload, serialize_payload
 from agentm.core.runtime.otel_export import setup_session_telemetry
 from agentm.core.runtime.trace_reader import TraceReader
 from opentelemetry._logs import SeverityNumber
@@ -58,151 +48,13 @@ def _now() -> float:
     return time.time()
 
 
-def _serialize_payload(payload: Any) -> Any:
-    if is_dataclass(payload) and not isinstance(payload, type):
-        return {
-            f.name: _serialize_payload(getattr(payload, f.name))
-            for f in fields(payload)
-        }
-    if isinstance(payload, list):
-        return [_serialize_payload(item) for item in payload]
-    if isinstance(payload, tuple):
-        return [_serialize_payload(item) for item in payload]
-    if isinstance(payload, dict):
-        return {str(k): _serialize_payload(v) for k, v in payload.items()}
-    if isinstance(payload, bytes):
-        return {"__bytes__": list(payload)}
-    return payload
-
-
-def _deserialize_payload(payload: Any) -> Any:
-    if not isinstance(payload, dict):
-        if isinstance(payload, list):
-            return [_deserialize_payload(item) for item in payload]
-        return payload
-
-    if "__bytes__" in payload:
-        raw = payload["__bytes__"]
-        if isinstance(raw, list):
-            return bytes(int(item) for item in raw)
-        return b""
-
-    role = payload.get("role")
-    if role == "user":
-        return UserMessage(
-            role="user",
-            content=_deserialize_user_blocks(payload.get("content", [])),
-            timestamp=float(payload.get("timestamp", 0.0)),
-        )
-    if role == "assistant":
-        return AssistantMessage(
-            role="assistant",
-            content=_deserialize_assistant_blocks(payload.get("content", [])),
-            timestamp=float(payload.get("timestamp", 0.0)),
-            stop_reason=payload.get("stop_reason"),
-            usage=_deserialize_usage(payload.get("usage")),
-        )
-    if role == "tool_result":
-        return ToolResultMessage(
-            role="tool_result",
-            content=_deserialize_tool_result_blocks(payload.get("content", [])),
-            timestamp=float(payload.get("timestamp", 0.0)),
-        )
-
-    return {str(k): _deserialize_payload(v) for k, v in payload.items()}
-
-
-def _deserialize_usage(payload: Any) -> Usage | None:
-    if not isinstance(payload, dict):
-        return None
-    return Usage(
-        input_tokens=int(payload.get("input_tokens", 0)),
-        output_tokens=int(payload.get("output_tokens", 0)),
-        cache_read=int(payload.get("cache_read", 0)),
-        cache_write=int(payload.get("cache_write", 0)),
-    )
-
-
-def _deserialize_user_blocks(payload: Any) -> list[TextContent | ImageContent]:
-    if not isinstance(payload, list):
-        return []
-    blocks: list[TextContent | ImageContent] = []
-    for raw in payload:
-        if not isinstance(raw, dict):
-            continue
-        if raw.get("type") == "text":
-            blocks.append(TextContent(type="text", text=str(raw.get("text", ""))))
-        elif raw.get("type") == "image":
-            blocks.append(
-                ImageContent(
-                    type="image",
-                    data=_deserialize_payload(raw.get("data", {"__bytes__": []})),
-                    mime_type=str(raw.get("mime_type", "application/octet-stream")),
-                )
-            )
-    return blocks
-
-
-def _deserialize_assistant_blocks(
-    payload: Any,
-) -> list[TextContent | ToolCallBlock | ThinkingBlock]:
-    if not isinstance(payload, list):
-        return []
-    blocks: list[TextContent | ToolCallBlock | ThinkingBlock] = []
-    for raw in payload:
-        if not isinstance(raw, dict):
-            continue
-        kind = raw.get("type")
-        if kind == "text":
-            blocks.append(TextContent(type="text", text=str(raw.get("text", ""))))
-        elif kind == "tool_call":
-            args = raw.get("arguments", {})
-            blocks.append(
-                ToolCallBlock(
-                    type="tool_call",
-                    id=str(raw.get("id", "")),
-                    name=str(raw.get("name", "")),
-                    arguments=args if isinstance(args, dict) else {},
-                )
-            )
-        elif kind == "thinking":
-            signature = raw.get("signature")
-            blocks.append(
-                ThinkingBlock(
-                    type="thinking",
-                    text=str(raw.get("text", "")),
-                    signature=str(signature) if isinstance(signature, str) else None,
-                )
-            )
-    return blocks
-
-
-def _deserialize_tool_result_blocks(payload: Any) -> list[ToolResultBlock]:
-    if not isinstance(payload, list):
-        return []
-    blocks: list[ToolResultBlock] = []
-    for raw in payload:
-        if not isinstance(raw, dict):
-            continue
-        content = _deserialize_user_blocks(raw.get("content", []))
-        blocks.append(
-            ToolResultBlock(
-                type="tool_result",
-                tool_call_id=str(raw.get("tool_call_id", "")),
-                content=content,
-                is_error=bool(raw.get("is_error", False)),
-            )
-        )
-    return blocks
-
-
 def _entry_to_record(entry: SessionEntry) -> dict[str, Any]:
     return {
         "type": entry.type,
         "id": entry.id,
         "parent_id": entry.parent_id,
         "timestamp": entry.timestamp,
-        "payload": _serialize_payload(entry.payload),
+        "payload": serialize_payload(entry.payload),
     }
 
 
@@ -212,7 +64,7 @@ def _entry_from_record(record: dict[str, Any]) -> SessionEntry:
         id=str(record["id"]),
         parent_id=record.get("parent_id"),
         timestamp=float(record.get("timestamp", 0.0)),
-        payload=_deserialize_payload(record.get("payload")),
+        payload=deserialize_payload(record.get("payload")),
     )
 
 

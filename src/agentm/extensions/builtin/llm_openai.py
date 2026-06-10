@@ -52,6 +52,8 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
+from pydantic import BaseModel, ConfigDict
+
 from agentm.core.abi.events import DiagnosticEvent, EventBus
 from agentm.core.abi.provider import ProviderConfig
 from agentm.extensions import ExtensionManifest
@@ -87,34 +89,26 @@ if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
 logger = logging.getLogger(__name__)
 
 
+class LlmOpenaiConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str = "gpt-4o"
+    api_key: str | None = None
+    base_url: str | None = None
+    name: str | None = None
+    default_query: dict[str, Any] | None = None
+    default_headers: dict[str, Any] | None = None
+    verify_ssl: bool | None = None
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    thinking_round_trip: Literal["drop", "system_note", "raise"] | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="llm_openai",
     description="Register an OpenAI Chat Completions API LLM stream provider.",
     registers=("provider:openai",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "model": {
-                "type": "string",
-                "minLength": 1,
-                "default": "gpt-4o",
-            },
-            "api_key": {"type": "string"},
-            "base_url": {"type": "string"},
-            "name": {"type": "string", "minLength": 1},
-            "default_query": {"type": "object"},
-            "default_headers": {"type": "object"},
-            "verify_ssl": {"type": "boolean"},
-            "context_window": {"type": "integer", "minimum": 1},
-            "max_output_tokens": {"type": "integer", "minimum": 1},
-            "thinking_round_trip": {
-                "type": "string",
-                "enum": ["drop", "system_note", "raise"],
-            },
-        },
-        "required": ["model"],
-        "additionalProperties": True,
-    },
+    config_schema=LlmOpenaiConfig,
     requires=("retry_policy",),
 )
 
@@ -805,10 +799,10 @@ async def _translate_chunk(
 # --- Extension entrypoint --------------------------------------------------
 
 
-def install(api: Any, config: dict[str, Any]) -> None:
+def install(api: Any, config: LlmOpenaiConfig) -> None:
     """Provider extension entrypoint.
 
-    Reads ``config["model"]`` (required) and the optional fields ``api_key``,
+    Reads ``config.model`` (required) and the optional fields ``api_key``,
     ``base_url``, ``default_query``, ``default_headers``, ``verify_ssl``,
     ``context_window``, ``max_output_tokens``, ``name`` (registry name —
     defaults to ``"openai"``; override when registering multiple
@@ -816,15 +810,15 @@ def install(api: Any, config: dict[str, Any]) -> None:
 
     """
 
-    model_id = config.get("model")
+    model_id = config.model
     if not model_id or not isinstance(model_id, str):
         raise ValueError(
-            "agentm.extensions.builtin.llm_openai.install: config['model'] is required and must "
+            "agentm.extensions.builtin.llm_openai.install: config.model is required and must "
             "be a non-empty string (e.g. 'gpt-4o' or 'Kimi-K2')."
         )
 
     retry_policy = api.get_service("retry_policy")
-    verify_ssl = bool(config.get("verify_ssl", True))
+    verify_ssl = config.verify_ssl if config.verify_ssl is not None else True
     if not verify_ssl:
         api.events.emit_sync(
             DiagnosticEvent.CHANNEL,
@@ -838,28 +832,30 @@ def install(api: Any, config: dict[str, Any]) -> None:
             ),
         )
 
+    # Access extra fields from the Pydantic model for pass-through config
+    extra = config.model_extra or {}
     stream_fn = OpenAIStreamFn(
-        api_key=config.get("api_key"),
-        base_url=config.get("base_url"),
-        default_query=config.get("default_query"),
-        default_headers=config.get("default_headers"),
+        api_key=config.api_key,
+        base_url=config.base_url,
+        default_query=config.default_query,
+        default_headers=config.default_headers,
         verify_ssl=verify_ssl,
         retry_policy=retry_policy,
-        thinking_round_trip=config.get("thinking_round_trip", "drop"),
-        reasoning_effort=config.get("reasoning_effort"),
-        extra_body=config.get("extra_body"),
+        thinking_round_trip=config.thinking_round_trip or "drop",
+        reasoning_effort=extra.get("reasoning_effort"),
+        extra_body=extra.get("extra_body"),
         events=getattr(api, "events", None),
     )
 
     model_kwargs: dict[str, int] = {}
-    if "context_window" in config:
-        model_kwargs["context_window"] = int(config["context_window"])
-    if "max_output_tokens" in config:
-        model_kwargs["max_output_tokens"] = int(config["max_output_tokens"])
+    if config.context_window is not None:
+        model_kwargs["context_window"] = config.context_window
+    if config.max_output_tokens is not None:
+        model_kwargs["max_output_tokens"] = config.max_output_tokens
     model = _build_model(model_id, **model_kwargs)
 
-    raw_name = config.get("name")
-    base_url = config.get("base_url")
+    raw_name = config.name
+    base_url = config.base_url
     if raw_name is None:
         if _is_non_canonical_base_url(base_url):
             raise DuplicateProviderError(

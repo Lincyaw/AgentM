@@ -45,6 +45,8 @@ from agentm.core.abi.messages import (
     Usage,
     UserMessage,
 )
+from pydantic import BaseModel, ConfigDict
+
 from agentm.core.abi.provider import ProviderConfig
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.retry import RetryPolicy
@@ -77,34 +79,23 @@ if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
 logger = logging.getLogger(__name__)
 
 
+class LlmAnthropicConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str = "claude-sonnet-4-6"
+    api_key: str | None = None
+    base_url: str | None = None
+    default_headers: dict[str, str] | None = None
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    thinking_budgets: dict[str, int] | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="llm_anthropic",
     description="Register an Anthropic Messages API LLM stream provider.",
     registers=("provider:anthropic",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "model": {
-                "type": "string",
-                "minLength": 1,
-                "default": "claude-sonnet-4-6",
-            },
-            "api_key": {"type": "string"},
-            "base_url": {"type": "string"},
-            "default_headers": {
-                "type": "object",
-                "additionalProperties": {"type": "string"},
-            },
-            "context_window": {"type": "integer", "minimum": 1},
-            "max_output_tokens": {"type": "integer", "minimum": 1},
-            "thinking_budgets": {
-                "type": "object",
-                "additionalProperties": {"type": "integer", "minimum": 1},
-            },
-        },
-        "required": ["model"],
-        "additionalProperties": True,
-    },
+    config_schema=LlmAnthropicConfig,
     requires=("retry_policy",),
 )
 
@@ -657,45 +648,47 @@ async def _translate_event(
 # --- Extension entrypoint --------------------------------------------------
 
 
-def install(api: Any, config: dict[str, Any]) -> None:
+def install(api: Any, config: LlmAnthropicConfig) -> None:
     """Provider extension entrypoint.
 
-    Reads ``config["model"]`` (required), optional ``config["api_key"]`` and
-    ``config["base_url"]``, then registers the resulting ``AnthropicStreamFn``
+    Reads ``config.model`` (required), optional ``config.api_key`` and
+    ``config.base_url``, then registers the resulting ``AnthropicStreamFn``
     on the given :class:`ExtensionAPI` under the name ``"anthropic"``.
 
     """
 
-    model_id = config.get("model")
+    model_id = config.model
     if not model_id or not isinstance(model_id, str):
         raise ValueError(
-            "agentm.extensions.builtin.llm_anthropic.install: config['model'] is required and must "
+            "agentm.extensions.builtin.llm_anthropic.install: config.model is required and must "
             "be a non-empty string (e.g. 'claude-opus-4-7')."
         )
 
-    api_key = config.get("api_key")
-    base_url = config.get("base_url")
-    default_headers = config.get("default_headers")
+    api_key = config.api_key
+    base_url = config.base_url
+    default_headers = config.default_headers
     if default_headers is not None and not isinstance(default_headers, Mapping):
         raise ValueError(
-            "agentm.extensions.builtin.llm_anthropic.install: config['default_headers'] "
+            "agentm.extensions.builtin.llm_anthropic.install: config.default_headers "
             "must be a mapping of header name to string value."
         )
+    # Access extra fields from the Pydantic model for pass-through config
+    extra = config.model_extra or {}
     stream_fn = AnthropicStreamFn(
         api_key=api_key,
         base_url=base_url,
         default_headers=default_headers,
-        thinking_budgets=config.get("thinking_budgets"),
-        reasoning_effort=config.get("reasoning_effort"),
-        extra_body=config.get("extra_body"),
+        thinking_budgets=config.thinking_budgets,
+        reasoning_effort=extra.get("reasoning_effort"),
+        extra_body=extra.get("extra_body"),
         retry_policy=api.get_service("retry_policy"),
     )
     # Optional model-spec overrides; defaults handled in ``_build_model``.
     model_kwargs: dict[str, int] = {}
-    if "context_window" in config:
-        model_kwargs["context_window"] = int(config["context_window"])
-    if "max_output_tokens" in config:
-        model_kwargs["max_output_tokens"] = int(config["max_output_tokens"])
+    if config.context_window is not None:
+        model_kwargs["context_window"] = config.context_window
+    if config.max_output_tokens is not None:
+        model_kwargs["max_output_tokens"] = config.max_output_tokens
     model = _build_model(model_id, **model_kwargs)
 
     api.register_provider(

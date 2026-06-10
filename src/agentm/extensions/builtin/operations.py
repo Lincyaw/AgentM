@@ -14,10 +14,26 @@ prevents auto-discovery as separate atoms).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Literal
+
+from pydantic import BaseModel
 
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+
+
+class OperationsConfig(BaseModel):
+    backend: Literal["local", "agent_env"] = "local"
+    # agent_env-specific properties (ignored when backend=local)
+    image: str | None = None
+    experiment_id: str | None = None
+    pool_ref: str | None = None
+    gateway_url: str | None = None
+    namespace: str | None = None
+    work_dir: str | None = None
+    timeout: float | None = None
+    idle_timeout_seconds: int | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="operations",
@@ -26,39 +42,22 @@ MANIFEST = ExtensionManifest(
         "Backend selected by config: 'local' (default) or 'agent_env'."
     ),
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "backend": {
-                "type": "string",
-                "enum": ["local", "agent_env"],
-                "default": "local",
-            },
-            # agent_env-specific properties (ignored when backend=local)
-            "image": {"type": "string"},
-            "experiment_id": {"type": "string"},
-            "pool_ref": {"type": "string"},
-            "gateway_url": {"type": "string"},
-            "namespace": {"type": "string"},
-            "work_dir": {"type": "string"},
-            "timeout": {"type": ["number", "null"]},
-            "idle_timeout_seconds": {"type": ["integer", "null"]},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=OperationsConfig,
     requires=(),
 )
 
 
-async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    backend = config.get("backend", "local")
+async def install(api: ExtensionAPI, config: OperationsConfig) -> None:
+    # Sub-installers expect a plain dict; forward the full model dump.
+    config_dict = config.model_dump()
+    backend = config.backend
     if backend == "local":
         from agentm.extensions.builtin._operations.local import install_local
 
-        install_local(api, config)
+        install_local(api, config_dict)
     elif backend == "agent_env":
         from agentm.extensions.builtin._operations.agent_env import install_agent_env
 
-        install_agent_env(api, config)
+        install_agent_env(api, config_dict)
     else:
         raise ValueError(f"Unknown operations backend: {backend!r}")

@@ -2,28 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Any, Final, TypedDict
+from typing import Any, Final
 
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+from pydantic import BaseModel
 
 from llmharness.schema import Edge, Event
 
+from .prompt import load_extractor_prompt
 from .tools import ExtractionState
 
 
-class ExtractorContextConfig(TypedDict, total=False):
-    turn_texts: dict[str, str]
-    recent_graph: list[dict[str, Any]]
-    recent_edges: list[dict[str, Any]]
-    next_event_id: int
-    new_turns: list[dict[str, Any]]
-    tool_call_budget: int | None
-    window_hi: int
-    ops_file: str
-    prompt_name: str
-    prompt_text: str
+class ExtractorContextConfig(BaseModel):
+    turn_texts: dict[str, str] = {}
+    recent_graph: list[dict[str, Any]] = []
+    recent_edges: list[dict[str, Any]] = []
+    next_event_id: int = 1
+    new_turns: list[dict[str, Any]] = []
+    tool_call_budget: int | None = None
+    window_hi: int = 0
+    ops_file: str | None = None
+    prompt_name: str = "default"
+    prompt_text: str | None = None
 
 STATE_SERVICE_KEY: Final = "llmharness.extractor_state"
 
@@ -31,7 +33,7 @@ MANIFEST = ExtensionManifest(
     name="extractor_context",
     description="Create extraction state from config data and inject system prompt.",
     registers=("event:before_agent_start",),
-    config_schema={"type": "object", "additionalProperties": True},
+    config_schema=ExtractorContextConfig,
 )
 
 
@@ -84,50 +86,27 @@ def _build_directive(
     return "Below is the firing input. Workflow:\n" + numbered
 
 
-def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:  # type: ignore[override]
-    turn_texts: dict[int, str] = {
-        int(k): str(v) for k, v in (config.get("turn_texts") or {}).items()
-    }
+def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:
+    turn_texts: dict[int, str] = {int(k): str(v) for k, v in config.turn_texts.items()}
 
-    recent_graph_raw = config.get("recent_graph") or []
-    recent_events = tuple(
-        Event.from_dict(e) for e in recent_graph_raw if isinstance(e, dict)
-    )
-
-    recent_edges_raw = config.get("recent_edges") or []
-    recent_edges = tuple(
-        Edge.from_dict(e) for e in recent_edges_raw if isinstance(e, dict)
-    )
-
-    next_event_id = int(config.get("next_event_id", 1))
-    ops_file = config.get("ops_file")
-
-    tcb_raw = config.get("tool_call_budget")
-    tool_call_budget: int | None = (
-        int(tcb_raw) if isinstance(tcb_raw, int) and not isinstance(tcb_raw, bool) and tcb_raw > 0
-        else None
-    )
+    recent_events = tuple(Event.from_dict(e) for e in config.recent_graph)
+    recent_edges = tuple(Edge.from_dict(e) for e in config.recent_edges)
 
     state = ExtractionState(
         turn_texts=turn_texts,
         recent_graph=recent_events,
         recent_graph_dict={e.id: e for e in recent_events},
         recent_edges_dict={(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges},
-        next_event_id=next_event_id,
-        ops_file=ops_file,
+        next_event_id=config.next_event_id,
+        ops_file=config.ops_file,
     )
     api.set_service(STATE_SERVICE_KEY, state)
 
-    from .prompt import load_extractor_prompt
-
-    prompt_name = config.get("prompt_name", "default")
-    prompt_text = config.get("prompt_text") or load_extractor_prompt(prompt_name)
-    directive = _build_directive(next_event_id, len(recent_events), tool_call_budget)
-
+    prompt_text = config.prompt_text or load_extractor_prompt(config.prompt_name)
+    directive = _build_directive(config.next_event_id, len(recent_events), config.tool_call_budget)
     system = f"{prompt_text}\n\n{directive}" if prompt_text else directive
 
-    def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
+    def _before_start(event: BeforeAgentStartEvent) -> None:
         event.system = system
-        return {"system": system}
 
     api.on(BeforeAgentStartEvent.CHANNEL, _before_start)

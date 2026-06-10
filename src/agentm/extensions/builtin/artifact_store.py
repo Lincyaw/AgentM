@@ -12,6 +12,8 @@ import re
 import time
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.lib import to_jsonable
 from agentm.core.lib.artifact_files import (
@@ -33,6 +35,18 @@ _DEFAULT_SNIPPET_LINES = 2
 _NEXT_ID_WIDTH = 3
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _KIND_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+class ArtifactStoreConfig(BaseModel):
+    inline_max_bytes: int = _DEFAULT_INLINE_BYTES
+    max_inline_bytes: int = _DEFAULT_INLINE_BYTES
+    list_max_results: int = _DEFAULT_LIST_LIMIT
+    grep_max_matches: int = _DEFAULT_GREP_MAX_HITS
+    root_session_id: str | None = None
+    task_id: str | None = None
+    persona: str | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="artifact_store",
     description="Shared append-only filesystem artifact store for session trees.",
@@ -43,35 +57,7 @@ MANIFEST = ExtensionManifest(
         "tool:artifact_grep",
         "event:session_ready",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "inline_max_bytes": {
-                "type": "integer",
-                "minimum": 1,
-                "default": _DEFAULT_INLINE_BYTES,
-            },
-            "max_inline_bytes": {
-                "type": "integer",
-                "minimum": 1,
-                "default": _DEFAULT_INLINE_BYTES,
-            },
-            "list_max_results": {
-                "type": "integer",
-                "minimum": 1,
-                "default": _DEFAULT_LIST_LIMIT,
-            },
-            "grep_max_matches": {
-                "type": "integer",
-                "minimum": 1,
-                "default": _DEFAULT_GREP_MAX_HITS,
-            },
-            "root_session_id": {"type": "string"},
-            "task_id": {"type": ["string", "null"]},
-            "persona": {"type": ["string", "null"]},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=ArtifactStoreConfig,
     requires=(),  # Leaf atom: registers its own tools and service.
 )
 
@@ -94,25 +80,23 @@ class _StoreContext:
 
 
 class ArtifactStore:
-    def __init__(self, api: ExtensionAPI, config: dict[str, Any]) -> None:
+    def __init__(self, api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
         self._api = api
         self._id_lock = asyncio.Lock()
-        root_session_id = str(config.get("root_session_id") or api.session_id)
+        root_session_id = str(config.root_session_id or api.session_id)
+        # inline_max_bytes takes priority when explicitly set (non-default);
+        # otherwise fall back to max_inline_bytes for backward compat.
+        max_inline = config.inline_max_bytes if config.inline_max_bytes != _DEFAULT_INLINE_BYTES else config.max_inline_bytes
         self._ctx = _StoreContext(
             cwd=Path(api.cwd),
             layout=api.get_project_layout(),
             session_id=api.session_id,
             root_session_id=root_session_id,
-            task_id=_maybe_str(config.get("task_id")),
-            persona=_maybe_str(config.get("persona")),
-            max_inline_bytes=int(
-                config.get(
-                    "inline_max_bytes",
-                    config.get("max_inline_bytes", _DEFAULT_INLINE_BYTES),
-                )
-            ),
-            list_max_results=int(config.get("list_max_results", _DEFAULT_LIST_LIMIT)),
-            grep_max_matches=int(config.get("grep_max_matches", _DEFAULT_GREP_MAX_HITS)),
+            task_id=_maybe_str(config.task_id),
+            persona=_maybe_str(config.persona),
+            max_inline_bytes=max_inline,
+            list_max_results=config.list_max_results,
+            grep_max_matches=config.grep_max_matches,
         )
 
     async def on_session_ready(self, event: SessionReadyEvent) -> None:
@@ -340,7 +324,7 @@ class ArtifactStore:
         return scan_artifact_metadata(self._ctx.artifacts_dir)
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
     store = ArtifactStore(api, config)
     api.set_service("artifact_store", store)
 

@@ -21,6 +21,8 @@ import json
 from pathlib import Path
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, TraceReader
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
@@ -29,6 +31,11 @@ from agentm.core.abi.extension import ExtensionAPI
 # ---------------------------------------------------------------------------
 # MANIFEST
 # ---------------------------------------------------------------------------
+
+
+class QueryToolsConfig(BaseModel):
+    default_scenario: str = ""
+
 
 MANIFEST = ExtensionManifest(
     name="query_tools",
@@ -41,13 +48,7 @@ MANIFEST = ExtensionManifest(
         "tool:query_candidates",
         "tool:query_module_feedback",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "default_scenario": {"type": "string"},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=QueryToolsConfig,
 )
 
 
@@ -331,8 +332,8 @@ def _load_run(
 # install()
 # ---------------------------------------------------------------------------
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    default_scenario = str(config.get("default_scenario") or "")
+def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
+    default_scenario = config.default_scenario
     cwd = Path(api.cwd)
 
     from agentm.core.lib.observability_dir import resolve_observability_dir

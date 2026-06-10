@@ -12,6 +12,8 @@ import json
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Protocol
 
+from pydantic import BaseModel, ConfigDict
+
 from agentm.core.abi import BeforeSendToLlmEvent, BudgetExhausted, TurnEndEvent
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import ExtensionManifest
@@ -37,6 +39,14 @@ class CostQueryService(Protocol):
     def estimate(self, usage: Any, *, provider: str | None = None) -> CostBreakdown: ...
 
 
+class CostBudgetConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    limit: float
+    currency: str = "usd"
+    pricing: dict[str, Any] | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="cost_budget",
     description="Track estimated LLM spend and emit cost_budget_exceeded on overflow.",
@@ -46,24 +56,7 @@ MANIFEST = ExtensionManifest(
         "event:turn_end",
         "event:cost_budget_exceeded",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "limit": {"type": "number", "minimum": 0},
-            "currency": {"type": "string"},
-            "pricing": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "array",
-                    "prefixItems": [{"type": "number"}, {"type": "number"}],
-                    "minItems": 2,
-                    "maxItems": 2,
-                },
-            },
-        },
-        "required": ["limit"],
-        "additionalProperties": True,
-    },
+    config_schema=CostBudgetConfig,
     requires=(),  # Leaf atom: consumes model/events only.
     tier=2,
 )
@@ -98,14 +91,10 @@ def _coerce_pricing(raw: Any) -> dict[str, tuple[float, float]]:
     return pricing
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    # ``limit`` is in ``MANIFEST.config_schema.required``, so the discovery
-    # filter (session.py:_atom_requires_unsupplied_config) skips this atom
-    # when no explicit config was supplied. ``install`` therefore assumes
-    # the key is present.
-    limit = float(config["limit"])
-    currency = str(config.get("currency", "usd"))
-    pricing = _coerce_pricing(config.get("pricing"))
+def install(api: ExtensionAPI, config: CostBudgetConfig) -> None:
+    limit = config.limit
+    currency = config.currency
+    pricing = _coerce_pricing(config.pricing)
     warned_unpriced: set[str] = set()
     state = {
         "used": 0.0,

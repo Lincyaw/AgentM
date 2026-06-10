@@ -47,6 +47,8 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import AssistantMessage, TextContent
 from agentm.core.abi.events import (
     AfterCompactEvent,
@@ -82,6 +84,10 @@ ProjectorResult = dict[str, Any] | list[dict[str, Any]] | None
 Projector = Callable[[Any], ProjectorResult]
 
 _PREVIEW_LIMIT = 4000
+
+class WireDriverConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
 
 MANIFEST = ExtensionManifest(
     name="wire_driver",
@@ -119,11 +125,7 @@ MANIFEST = ExtensionManifest(
         "event:session_ready",
         "event:command_dispatched",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": True,
-    },
+    config_schema=WireDriverConfig,
 )
 
 
@@ -383,7 +385,7 @@ _SYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:  # noqa: ARG001
+def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG001
     outbound_sink = api.get_service("wire_outbound")
     session_key = api.get_service("session_key")
     if outbound_sink is None or session_key is None:

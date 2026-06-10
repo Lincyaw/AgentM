@@ -22,6 +22,8 @@ from typing import Any
 from agentm.core.abi import FunctionTool, ToolResult
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.messages import TextContent
+from pydantic import BaseModel
+
 from agentm.core.abi.skill import SkillDiagnostic, SkillRecord
 from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.extensions import ExtensionManifest
@@ -33,6 +35,12 @@ from agentm.core.abi.events import (
 from agentm.core.abi.extension import ExtensionAPI
 
 
+class SkillLoaderConfig(BaseModel):
+    skill_paths: list[str] = []
+    include_defaults: bool = True
+    inherit_claude: bool | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="skill_loader",
     description="Discover SKILL.md files and inject an <available_skills> index.",
@@ -42,15 +50,7 @@ MANIFEST = ExtensionManifest(
         "event:resources_discover",
         "event:session_ready",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "skill_paths": {"type": "array", "items": {"type": "string"}},
-            "include_defaults": {"type": "boolean"},
-            "inherit_claude": {"type": "boolean"},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=SkillLoaderConfig,
     requires=(),  # Leaf atom: consumes resource-discovery responses from any peer.
 )
 
@@ -363,13 +363,13 @@ def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
 # === Atom install ==========================================================
 
 
-async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    include_defaults = bool(config.get("include_defaults", True))
+async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
+    include_defaults = config.include_defaults
     # ``inherit_claude`` defaults to ``include_defaults`` — when callers turn
     # off the standard agentm defaults (e.g. test isolation) they should not
     # silently pick up the real user's ``~/.claude/skills`` either.
-    inherit_claude = bool(config.get("inherit_claude", include_defaults))
-    configured_skill_paths = [str(path) for path in config.get("skill_paths", [])]
+    inherit_claude = config.inherit_claude if config.inherit_claude is not None else include_defaults
+    configured_skill_paths = list(config.skill_paths)
     cached_prompt_block = ""
     skills_by_name: dict[str, SkillRecord] = {}
 

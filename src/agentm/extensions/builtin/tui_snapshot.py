@@ -20,9 +20,18 @@ import time
 from pathlib import Path
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+
+
+class TuiSnapshotConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    dump_path: str | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="tui_snapshot",
@@ -31,15 +40,7 @@ MANIFEST = ExtensionManifest(
         "screen dump (written on /dump) so the agent can see the UI."
     ),
     registers=("tool:tui_snapshot",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            # Override the dump path; otherwise $AGENTM_TUI_DUMP or the
-            # /tmp default is used at call time.
-            "dump_path": {"type": "string"},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=TuiSnapshotConfig,
 )
 
 _DEFAULT_DUMP_PATH: Final[str] = "/tmp/agentm-tui-dump.txt"
@@ -90,9 +91,8 @@ def _resolve_path(configured: str | None, arg: Any) -> str:
     return os.environ.get("AGENTM_TUI_DUMP") or _DEFAULT_DUMP_PATH
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    configured = config.get("dump_path")
-    configured_path = str(configured) if isinstance(configured, str) else None
+def install(api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
+    configured_path = config.dump_path
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
         path = Path(_resolve_path(configured_path, args.get("path")))
