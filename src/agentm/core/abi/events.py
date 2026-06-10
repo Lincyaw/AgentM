@@ -85,18 +85,7 @@ class BusPriority:
 class Event:
     """Base class for all kernel events.
 
-    Carries a per-emission ``dispatch_id`` so observability consumers can
-    correlate a single ``agentm.event.dispatch`` log record with every
-    ``agentm.handler.invoke`` record fanned out from it. The field default
-    keeps test fixtures and standalone constructions sane; the
-    :class:`EventBus` **reassigns** ``dispatch_id`` on every ``emit`` /
-    ``emit_sync`` entry, so a re-emitted instance produces a fresh id.
-
-    Declared ``kw_only=True`` at the field level so subclass positional
-    fields remain compatible without re-ordering. The base is **not**
-    ``frozen`` — the bus needs to write ``dispatch_id`` on every emit, and
-    Python dataclasses forbid mixing frozen / non-frozen across the
-    inheritance chain — so every concrete Event subclass is also non-frozen.
+    Not frozen — the bus reassigns ``dispatch_id`` on every emit.
     """
 
     dispatch_id: str = field(
@@ -113,16 +102,7 @@ class Event:
 
 @dataclass(slots=True, frozen=True)
 class TerminationCause:
-    """Sealed sum-type base. Concrete subclasses describe WHO decided to
-    terminate and WHY.
-
-    ``final`` controls whether extensions can override the kernel default via
-    :class:`Inject`. When ``final`` is True, the loop emits
-    :class:`DecideTurnActionEvent` for observability but ignores any
-    :class:`LoopAction` overrides — used for kernel-imposed terminations such
-    as ``MaxTurnsExhausted`` and ``SignalAborted`` where the cause cannot be
-    safely contradicted.
-    """
+    """Sealed sum-type: ``final=True`` causes cannot be overridden by extensions."""
 
     final: ClassVar[bool] = False
 
@@ -178,27 +158,12 @@ class ProviderProtocolViolation(TerminationCause):
 
 @dataclass(slots=True, frozen=True)
 class NoPendingInput(TerminationCause):
-    """Resume-without-prompt found nothing to do.
-
-    Surfaced by :meth:`AgentSession.tick` as the **default action** of the
-    synthetic ``decide_turn_action`` it fires before any LLM call.
-    ``final = False`` is load-bearing, not symmetric padding: it is what
-    permits an extension handler on the same channel (e.g.
-    ``llmharness.replay.reminder_seed``) to return :class:`Inject` and
-    override the default — without that override, the loop never runs and
-    the resume produces no new turn. The cause only appears on
-    :class:`AgentEndEvent` when no handler injected; in that case the
-    trajectory is intentionally untouched (see ``tick`` docstring).
-    """
+    """Resume-without-prompt: no pending input. Non-final so extensions can Inject."""
 
 
 @dataclass(slots=True, frozen=True)
 class BudgetExhausted(TerminationCause):
-    """A budget cap was reached. ``detail`` names which budget — e.g.
-    ``"cost"`` (runtime session-level cost cap) or ``"max_tool_calls"``
-    (kernel-loop tool-call cap). Cannot be overridden; extensions can cap
-    budgets but not un-cap them once tripped.
-    """
+    """A budget cap was reached (``detail`` names which). Cannot be overridden."""
 
     final: ClassVar[bool] = True
 
@@ -215,11 +180,7 @@ class LoopAction:
 
 @dataclass(slots=True, frozen=True)
 class Step(LoopAction):
-    """Continue to the next turn with current messages.
-
-    Default action after a successful tools-and-results round when no tool
-    asked to terminate.
-    """
+    """Continue to the next turn."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -269,14 +230,7 @@ class AgentEndEvent(Event):
 
 @dataclass(slots=True)
 class TurnObservation:
-    """Snapshot of one turn's outcome.
-
-    Given to :class:`DecideTurnActionEvent` handlers along with the kernel's
-    default :class:`LoopAction`. ``assistant_message`` is ``None`` only on
-    kernel-imposed termination paths (``SignalAborted`` / ``MaxTurnsExhausted``)
-    that fire the hook for observability symmetry but skip the message
-    pipeline; in that case ``tool_outcomes`` is also empty.
-    """
+    """One turn's outcome, given to DecideTurnActionEvent handlers."""
 
     turn_index: int
     assistant_message: AssistantMessage | None
@@ -287,19 +241,7 @@ class TurnObservation:
 
 @dataclass(slots=True)
 class DecideTurnActionEvent(Event):
-    """Fires after every turn, before the loop advances or terminates.
-
-    Handlers may return a :class:`LoopAction` (or ``None`` for "no opinion")
-    to override the kernel's default. Resolution lattice (see
-    ``.claude/designs/agent-loop.md``):
-
-    1. If the kernel default is ``Stop(cause)`` and ``cause.final`` is True,
-       no override is honored — the hook fires for logging/observability
-       only.
-    2. Among handler returns, any :class:`Inject` wins (messages from all
-       Inject returns are concatenated in registration order); else any
-       :class:`Stop` overrides ``Step``; else the default applies.
-    """
+    """Fires after every turn. Handlers may return a LoopAction to override the default."""
 
     CHANNEL: ClassVar[Literal["decide_turn_action"]] = "decide_turn_action"
     observation: TurnObservation
@@ -316,16 +258,7 @@ class TurnStartEvent(Event):
 
 @dataclass(slots=True)
 class TurnEndEvent(Event):
-    """Emitted after a turn's assistant message is fully assembled.
-
-    ``messages`` is the full live trajectory snapshot **including** the
-    just-emitted ``message`` and every prior turn's tool calls / tool
-    results. Consumers that need to slice "what was new this turn" do so
-    against this snapshot rather than ``api.session.get_messages()``,
-    which only reflects entries the kernel has persisted to the
-    SessionManager — the kernel persists in one batch after ``prompt()``
-    returns, so mid-loop reads of the session view are stale.
-    """
+    """Emitted after a turn's assistant message is assembled. ``messages`` is the full snapshot."""
 
     CHANNEL: ClassVar[Literal["turn_end"]] = "turn_end"
     turn_index: int
@@ -336,15 +269,7 @@ class TurnEndEvent(Event):
 
 @dataclass(slots=True)
 class ToolCallEvent(Event):
-    """Emitted before a tool is executed.
-
-    **Mutability contract**: this event is intentionally **not frozen**.
-    Handlers may mutate ``args`` in place — later handlers and the actual
-    tool ``execute`` will see the mutations. Handlers may also return
-    ``{"block": True, "reason": str}`` from their handler function; the loop
-    will short-circuit and emit a synthetic error tool result instead of
-    running the tool.
-    """
+    """Before tool execution. Handlers may mutate ``args`` or return ``{"block": True}``."""
 
     CHANNEL: ClassVar[Literal["tool_call"]] = "tool_call"
     tool_call_id: str
@@ -354,12 +279,7 @@ class ToolCallEvent(Event):
 
 @dataclass(slots=True)
 class ToolResultEvent(Event):
-    """Emitted after a tool returns.
-
-    **Replacement contract**: handlers may return a replacement
-    :class:`ToolResult`; the last non-None replacement wins (see
-    ``loop._collect_tool_result_replacement``).
-    """
+    """After tool execution. Handlers may return a replacement ToolResult (last wins)."""
 
     CHANNEL: ClassVar[Literal["tool_result"]] = "tool_result"
     tool_call_id: str
@@ -369,28 +289,7 @@ class ToolResultEvent(Event):
 
 @dataclass(slots=True)
 class ToolErrorEvent(Event):
-    """Emitted by the loop when a tool call cannot produce a normal result.
-
-    The kernel does NOT synthesize the user-visible English error string
-    itself; it constructs an empty :class:`ToolResult` (``is_error=True``,
-    ``content=[]``) and emits this event so a default builtin atom
-    (``tool_error_messages``) can write the human-readable text into
-    ``result.content``. Extensions that want to localize, re-format, or
-    suppress error text replace the default atom on this channel.
-
-    The ``result`` field is the same instance the loop will pass through
-    :class:`ToolResultEvent` and into the message trajectory; handlers
-    mutate ``result.content`` in place. The dataclass itself is frozen
-    because the *kind* / *tool_name* / *reason* are facts the kernel has
-    already decided; they describe the cause, not a recommendation.
-
-    ``kind`` discriminates the three kernel-imposed error paths:
-    - ``"execution_failed"`` — ``tool.execute`` raised an exception.
-    - ``"unknown_tool"``     — the assistant called a name not in the
-                                 tool index.
-    - ``"blocked"``          — a ``tool_call`` handler returned
-                                 ``{"block": True, "reason": ...}``.
-    """
+    """Tool error: handlers populate ``result.content`` with the user-visible message."""
 
     CHANNEL: ClassVar[Literal["tool_error"]] = "tool_error"
     kind: Literal["execution_failed", "unknown_tool", "blocked"]
@@ -402,19 +301,7 @@ class ToolErrorEvent(Event):
 
 @dataclass(slots=True)
 class BeforeSendToLlmEvent(Event):
-    """Fires after context handlers have rewritten messages, immediately
-    before the StreamFn is invoked. Handlers MAY mutate ``messages`` in
-    place to make a final adjustment. This is the last hook before bytes
-    leave the runtime.
-
-    The ``messages`` list is the same instance the loop will pass to
-    ``StreamFn``; mutate it cautiously.
-
-    Distinct from :class:`ContextEvent`: ``context`` may rewrite-by-return
-    (replacement list) or in-place; this event fires *after* that resolution
-    on the final ``messages`` list, so handlers like ``cost_budget`` see
-    exactly what is about to hit the wire.
-    """
+    """Last hook before StreamFn. Handlers may mutate ``messages`` in place."""
 
     CHANNEL: ClassVar[Literal["before_send_to_llm"]] = "before_send_to_llm"
     messages: list[AgentMessage]
@@ -458,17 +345,7 @@ class LlmRequestEndEvent(Event):
 
 @dataclass(slots=True)
 class StreamDeltaEvent(Event):
-    """One raw chunk from the provider stream, forwarded by the loop.
-
-    Used by presenters (TUI, JSON tap) that want token-by-token output.
-    The kernel still assembles the full ``AssistantMessage`` itself and
-    publishes it via ``turn_end``; ``stream_delta`` is purely additive.
-
-    ``delta`` is the same ``AssistantStreamEvent`` instance the loop
-    received from ``stream_fn`` — typically a ``TextDelta``,
-    ``ToolCallStart``, or ``MessageEnd``. Subscribers should pattern-match
-    on the delta's type.
-    """
+    """One raw chunk from the provider stream, forwarded for presenters."""
 
     CHANNEL: ClassVar[Literal["stream_delta"]] = "stream_delta"
     turn_index: int
@@ -492,12 +369,7 @@ class ContextEvent(Event):
 
 @dataclass(slots=True)
 class DiagnosticEvent(Event):
-    """Non-fatal diagnostic from any subsystem during session construction
-    or runtime. Emitted on the ``"diagnostic"`` channel. Used for failures
-    that the recovery-floor invariant requires us to survive — scenario
-    yaml load errors, skill/prompt loader hiccups, etc. The CLI subscribes
-    and prints; only ``"error"`` level affects the exit code.
-    """
+    """Non-fatal diagnostic; ``"error"`` level affects the exit code."""
 
     CHANNEL: ClassVar[Literal["diagnostic"]] = "diagnostic"
     level: Literal["info", "warning", "error"]
@@ -506,27 +378,11 @@ class DiagnosticEvent(Event):
 
 
 # --- Runtime-level event payloads ------------------------------------------
-#
-# The events below are emitted by runtime-level subsystems (compaction,
-# child-session lifecycle, cost budget, plan-mode, install/reload/unload,
-# resource writes). They live in the ABI module — alongside the kernel
-# events — so atoms have a single canonical import for every event payload.
-# Per the layer rule (kernel does not import runtime), the kernel ``EventBus``
-# does not have typed ``emit`` overloads for these; they flow through the
-# ``str`` fallback channel.
 
 
 @dataclass(slots=True)
 class BeforeAgentStartEvent(Event):
-    """Fires at the top of ``AgentSession.prompt`` before the kernel loop runs.
-
-    Mutability: this event is intentionally **not frozen**. Handlers may mutate
-    ``system`` in place; alternatively they may return a ``dict[str, str]`` of
-    shape ``{"system": "..."}`` and the runtime will use the last non-None
-    replacement to overwrite the system prompt. ``messages`` is the live list
-    that will be passed to the loop — handlers should generally not rewrite it
-    here (use ``context`` / ``before_send_to_llm`` for that).
-    """
+    """Before the kernel loop. Handlers may return ``{"system": "..."}`` to replace the prompt."""
 
     CHANNEL: ClassVar[Literal["before_agent_start"]] = "before_agent_start"
     messages: list[AgentMessage]
@@ -535,11 +391,7 @@ class BeforeAgentStartEvent(Event):
 
 @dataclass(slots=True)
 class SessionShutdownEvent(Event):
-    """Fires when ``AgentSession.shutdown`` is called.
-
-    Carries the session's cwd so cleanup handlers can locate session-scoped
-    resources without holding a reference to the session itself.
-    """
+    """Fires on ``AgentSession.shutdown``."""
 
     CHANNEL: ClassVar[Literal["session_shutdown"]] = "session_shutdown"
     cwd: str
@@ -547,16 +399,7 @@ class SessionShutdownEvent(Event):
 
 @dataclass(slots=True)
 class BeforeCompactEvent(Event):
-    """Fires before an extension performs context compaction.
-
-    Observation-only channel: the emitter (``llm_compaction``)
-    discards handler return values. Subscribers may inspect or mutate
-    ``messages`` in place to influence the buffer that compaction will see,
-    but cannot cancel or replace the compaction itself.
-
-    Mutability: ``messages`` is intentionally mutable (not frozen) so a
-    handler can adjust the in-flight buffer before compaction kicks off.
-    """
+    """Observation-only: fires before compaction. Handlers may mutate ``messages``."""
 
     CHANNEL: ClassVar[Literal["before_compact"]] = "before_compact"
     messages: list[AgentMessage]
@@ -586,31 +429,7 @@ class ChildSessionStartEvent(Event):
 
 @dataclass(slots=True)
 class ChildSessionExtendingEvent(Event):
-    """Fires synchronously on the parent bus BEFORE the substrate spawns a
-    child session, so extensions can contribute additional atoms to the
-    child's load order.
-
-    Handlers should return either ``None`` (no opinion) or a list of
-    ``(module_path, config)`` tuples that the substrate will append to
-    the child's ``AgentSessionConfig.extensions`` before the factory
-    runs. Multiple handlers' contributions are concatenated in
-    registration order. The substrate dedupes by ``module_path``: if an
-    entry is already present in ``child_config.extensions`` (operator
-    override) OR contributed by an earlier handler, later contributions
-    of the same module are dropped — handlers don't need to dedupe
-    themselves.
-
-    The ``child_config`` is exposed read-only on the event; handlers
-    MUST NOT mutate it. The substrate clones the extensions list before
-    appending, so even if a misbehaving handler mutates the field in
-    place the live config the factory sees is the substrate-controlled
-    one.
-
-    Emitted via ``bus.emit_sync`` because the spawn path needs the
-    contributions to be settled before ``session_cls.create`` runs;
-    async handlers are skipped (matching the rest of the ``emit_sync``
-    contract).
-    """
+    """Handlers return ``[(module_path, config)]`` to add atoms to a child session."""
 
     CHANNEL: ClassVar[Literal["child_session_extending"]] = "child_session_extending"
     parent_session_id: str
@@ -630,14 +449,7 @@ class ChildSessionEndEvent(Event):
 
 @dataclass(slots=True)
 class CostBudgetExceededEvent(Event):
-    """Fires when the ``cost_budget`` extension's accumulator crosses the
-    configured limit.
-
-    ``AgentSession`` subscribes once at create-time and latches an internal
-    flag; the next ``prompt`` short-circuits with an ``agent_end`` event
-    carrying ``stop_reason='budget'``. Pure event-bus signalling — no
-    exceptions cross handler boundaries.
-    """
+    """Budget limit crossed; next prompt short-circuits."""
 
     CHANNEL: ClassVar[Literal["cost_budget_exceeded"]] = "cost_budget_exceeded"
     used: float
@@ -647,12 +459,7 @@ class CostBudgetExceededEvent(Event):
 
 @dataclass(slots=True)
 class PlanSubmittedEvent(Event):
-    """Fires when the ``tool_submit_plan`` tool runs to completion.
-
-    Carries the plan id (entry id returned by ``ReadonlySession.append_entry``)
-    so downstream extensions (``trajectory``, plan-mode controllers) can
-    correlate the submission to its persisted entry.
-    """
+    """A plan was submitted; ``plan_id`` is the session-entry id."""
 
     CHANNEL: ClassVar[Literal["plan_submitted"]] = "plan_submitted"
     plan_id: str
@@ -661,16 +468,7 @@ class PlanSubmittedEvent(Event):
 
 @dataclass(slots=True)
 class MessagePersistedEvent(Event):
-    """Fires from inside ``AgentLoop`` immediately after the loop's local
-    message list gains a new durable entry — assistant turn, tool_result, or
-    extension-injected message. The runtime subscribes once and routes each
-    event through ``SessionManager.append_message`` so the on-disk trajectory
-    is updated in real time rather than batched at the end of ``run``.
-
-    Whole-list replacements done by compaction / context-rewrite handlers
-    via ``messages[:] = ...`` deliberately do NOT emit this event — those
-    are ephemeral context rewrites, not durable additions.
-    """
+    """A durable message was appended to the loop's trajectory."""
 
     CHANNEL: ClassVar[Literal["message_persisted"]] = "message_persisted"
     message: AgentMessage
@@ -681,21 +479,7 @@ class MessagePersistedEvent(Event):
 
 @dataclass(slots=True)
 class MessageAppendedEvent(Event):
-    """Fires after :meth:`SessionManager._append_record` mutates in-memory
-    state.
-
-    Routes session-trajectory persistence through the observability sink:
-    the observability atom subscribes and writes ``record`` straight into
-    the merged per-session JSONL. Replaces the older synchronous
-    ``open("a") + write + close`` per-message write path in SessionManager
-    (see ``.claude/designs/single-event-log.md``).
-
-    ``record`` is the JSON-ready dict shape SessionManager already used on
-    disk (``{"type", "id", "parent_id", "timestamp", "payload"}``) — keeping
-    it as a plain dict avoids dragging :class:`SessionEntry` into the
-    ABI-event surface and lets the writer dump it without further
-    massaging.
-    """
+    """SessionManager entry appended; ``record`` is the JSON-ready dict."""
 
     CHANNEL: ClassVar[Literal["message_appended"]] = "message_appended"
     record: dict[str, Any]
@@ -703,15 +487,7 @@ class MessageAppendedEvent(Event):
 
 @dataclass(slots=True)
 class SessionHeaderEmittedEvent(Event):
-    """Fires when :meth:`SessionManager.new_session` mints a fresh session
-    header.
-
-    Header round-trips through the same merged log as
-    :class:`MessageAppendedEvent`. ``record`` carries the JSON-ready
-    SessionHeader dict; subsequent loads filter by ``kind=session.header``
-    and take the most recent (the "rewrite-style behavior in the merged
-    world becomes 'emit a new header'" reconciliation from the spec).
-    """
+    """New session header minted; ``record`` is the JSON-ready dict."""
 
     CHANNEL: ClassVar[Literal["session_header_emitted"]] = "session_header_emitted"
     record: dict[str, Any]
@@ -719,31 +495,10 @@ class SessionHeaderEmittedEvent(Event):
 
 @dataclass(slots=True)
 class EntryAppendedEvent(Event):
-    """Fires after :meth:`ReadonlySession.append_entry` persists an entry.
-
-    Lets extensions observe every write to the session entry tree —
-    assistant messages, ``llmharness.audit_event`` / ``llmharness.verdict`` /
-    ``llmharness.audit_graph_op`` entries, plan submissions, etc. — without
-    polling ``get_branch()`` or tailing the on-disk JSONL.
-
-    Emitted via :meth:`EventBus.emit_sync` from inside the sync
-    ``append_entry`` codepath. Handlers must therefore be sync (an async
-    handler is skipped with a diagnostic, matching the rest of the
-    ``emit_sync`` contract). The event fires AFTER the entry has been
-    durably written so handler crashes cannot corrupt session state.
-
-    ``payload`` is the raw object passed to ``append_entry`` — observers
-    that need a JSON-serialisable view should run it through
-    :func:`agentm.core.lib.to_jsonable` themselves; we don't pre-serialise
-    on the hot path since most subscribers (e.g. ``live_inspector``) need
-    a custom shape anyway.
-    """
+    """A session entry was appended (sync-only handlers)."""
 
     CHANNEL: ClassVar[Literal["entry_appended"]] = "entry_appended"
     session_id: str
-    """The persisted session-manager header id (``ReadonlySession.get_session_id``),
-    not the OTel span id. Distinct from the bus-owning session's
-    ``api.session_id`` for embedded callers."""
     entry_type: str
     entry_id: str
     parent_id: str | None
@@ -752,13 +507,7 @@ class EntryAppendedEvent(Event):
 
 @dataclass(slots=True)
 class SessionReadyEvent(Event):
-    """Fires once after ``AgentSession.create`` has loaded every extension
-    and the active provider has been picked, but before the first ``prompt``.
-
-    This is the only timing point where every extension is guaranteed to see
-    the *final* tool list, command set, and model. ``tool_filter`` and
-    similar "post-install scrub" extensions hook here.
-    """
+    """All extensions loaded, provider picked, before first prompt."""
 
     CHANNEL: ClassVar[Literal["session_ready"]] = "session_ready"
     cwd: str
@@ -770,10 +519,6 @@ class SessionReadyEvent(Event):
     root_session_id: str
     task_id: str | None = None
     persona: str | None = None
-    # Per-task-evolution loop fields (see per-task-evolution-loop.md §4).
-    # ``task_class`` ties this session's trace to a tunable task family;
-    # ``eval_run_id`` and ``eval_task_id`` are populated only on eval-run
-    # child sessions spawned by ``tool_eval_run``.
     task_class: str | None = None
     eval_run_id: str | None = None
     eval_task_id: str | None = None
@@ -781,12 +526,7 @@ class SessionReadyEvent(Event):
 
 @dataclass(slots=True)
 class ResolveSubagentEvent(Event):
-    """Request persona metadata for a named sub-agent type.
-
-    The ``sub_agent`` atom emits this typed channel before spawning a child
-    session. Scenario atoms may return a mapping with ``body``, ``tools``,
-    ``input_schema``, ``budget_defaults``, and ``artifact_kinds`` entries.
-    """
+    """Request persona metadata for a named sub-agent type."""
 
     CHANNEL: ClassVar[Literal["resolve_subagent"]] = "resolve_subagent"
     name: str
@@ -794,16 +534,7 @@ class ResolveSubagentEvent(Event):
 
 @dataclass(slots=True)
 class ExtensionInstallEvent(Event):
-    """Fires twice per ``load_extension`` call: ``"start"`` precedes
-    ``install(api, config)``; ``"end"`` follows a successful return;
-    ``"error"`` follows a thrown exception.
-
-    ``trigger`` distinguishes who initiated the install. ``"bootstrap"``
-    is the default for installs done by ``AgentSession.create`` from a
-    scenario or auto-discovery; the other values flow through
-    ``api.install_atom``. Subscribers (e.g. the TUI) use this to decide
-    whether to surface a "★ self-modify" toast.
-    """
+    """Extension install lifecycle: ``phase`` is ``start``/``end``/``error``."""
 
     CHANNEL: ClassVar[Literal["extension_install"]] = "extension_install"
     module_path: str
