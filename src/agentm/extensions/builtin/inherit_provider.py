@@ -21,7 +21,7 @@ from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError, Provider
 class InheritProviderConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    parent_provider_config: Any  # ProviderConfig, injected by the spawn factory
+    provider: Any  # ProviderConfig, injected by the spawn factory
 
 
 MANIFEST = ExtensionManifest(
@@ -41,7 +41,7 @@ MANIFEST = ExtensionManifest(
 
 
 def install(api: ExtensionAPI, config: InheritProviderConfig) -> None:
-    provider = config.parent_provider_config
+    provider = config.provider
     if not isinstance(provider, ProviderConfig):
         raise ExtensionLoadError(
             __name__,

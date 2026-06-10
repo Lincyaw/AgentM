@@ -21,6 +21,7 @@ from agentm.core.abi.resource import WriteResult
 from agentm.core.lib import read_state as rs_mod
 from agentm.core.lib.read_state import get_read_state, record_read, clear
 from agentm.extensions.builtin import file_tools
+from agentm.extensions.builtin.file_tools import FileToolsConfig
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ class _FakeApi:
 # ---------------------------------------------------------------------------
 
 def _install(api: _FakeApi, **config: Any) -> None:
-    file_tools.install(api, dict(config))  # type: ignore[arg-type]
+    file_tools.install(api, FileToolsConfig(**config))  # type: ignore[arg-type]
 
 
 def _call(api: _FakeApi, path: str, content: str = "hello") -> tuple[str, bool]:

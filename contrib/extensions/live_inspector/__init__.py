@@ -109,10 +109,21 @@ from agentm.core.abi.events import (
     SessionShutdownEvent,
 )
 from agentm.core.abi.extension import ExtensionAPI, Handler
+from pydantic import BaseModel
+
 from agentm.core.lib import to_jsonable
 from agentm.extensions import ExtensionManifest
 
 logger = logging.getLogger(__name__)
+
+
+class LiveInspectorConfig(BaseModel):
+    bind: str = "127.0.0.1"
+    port: int = 0
+    url_file: str | None = None
+    role: str = "root"
+    parent_root: str | None = None
+    parent_port: int | None = None
 
 
 MANIFEST = ExtensionManifest(
@@ -129,23 +140,7 @@ MANIFEST = ExtensionManifest(
         f"event:{EntryAppendedEvent.CHANNEL}",
         f"event:{SessionShutdownEvent.CHANNEL}",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "bind": {"type": "string"},
-            "port": {"type": "integer"},
-            "url_file": {"type": ["string", "null"]},
-            # Set internally by the spawn-wrap when this atom is auto-
-            # attached to a child session. Tells ``install()`` to skip
-            # the URL stderr/file announcement (the root already did it)
-            # and to look up the existing server by ``parent_root``
-            # rather than create a new one.
-            "role": {"type": "string"},
-            "parent_root": {"type": ["string", "null"]},
-            "parent_port": {"type": ["integer", "null"]},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=LiveInspectorConfig,
 )
 
 
@@ -529,13 +524,12 @@ class _BusObserver(EventBusObserver):
         )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    bind = str(config.get("bind", "127.0.0.1"))
-    port = int(config.get("port", 0))
-    url_file_raw = config.get("url_file")
-    url_file = str(url_file_raw) if url_file_raw else None
-    role = str(config.get("role", "root"))
-    parent_port_raw = config.get("parent_port")
+def install(api: ExtensionAPI, config: LiveInspectorConfig) -> None:
+    bind = config.bind
+    port = config.port
+    url_file = config.url_file
+    role = config.role
+    parent_port_raw = config.parent_port
 
     # Env-var overrides for ROOT only. Children inherit the resolved
     # bind:port from the spawn-wrap config so they cannot drift.
@@ -556,10 +550,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         # For child role: use the parent's already-resolved port verbatim.
         # This is the unambiguous join key — we never re-bind in a child.
         if parent_port_raw is not None:
-            try:
-                port = int(parent_port_raw)
-            except (TypeError, ValueError):
-                pass
+            port = parent_port_raw
 
     # For a child, the per-root server already exists in this process; the
     # registry-keyed-by-root lookup finds it. For a root, we bind a fresh

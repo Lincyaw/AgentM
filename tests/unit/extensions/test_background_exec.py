@@ -37,7 +37,7 @@ from agentm.core.abi import (
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
 from agentm.extensions.builtin import background_exec
-from agentm.extensions.builtin.background_exec import _BgManager, _BgTool
+from agentm.extensions.builtin.background_exec import BackgroundExecConfig, _BgManager, _BgTool
 from tests.unit.extensions._fake_api import FakeExtensionAPI
 
 # Alias for diff continuity with the pre-B7 tests; the shared helper IS the
@@ -400,7 +400,7 @@ def test_install_registers_companion_tools() -> None:
     agent_start + session_shutdown handlers."""
 
     api = _FakeApi()
-    background_exec.install(cast(ExtensionAPI, api), {})
+    background_exec.install(cast(ExtensionAPI, api), BackgroundExecConfig())
     names = {t.name for t in api.tools}
     assert names == {"check_background", "wait_background", "cancel_background"}
     assert "agent_start" in api._handlers
@@ -417,7 +417,7 @@ async def test_install_propagates_shutdown_grace_config() -> None:
     api = _FakeApi()
     background_exec.install(
         cast(ExtensionAPI, api),
-        {"shutdown_grace_seconds": 0.05},
+        BackgroundExecConfig(shutdown_grace_seconds=0.05),
     )
     # Pull the manager off the bound shutdown handler so the test does not
     # reach into install internals.

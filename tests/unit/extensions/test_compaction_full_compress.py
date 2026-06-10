@@ -34,6 +34,7 @@ from agentm.core.abi.session import (
 from agentm.core.lib import enumerate_turns
 from agentm.core.runtime.session_manager import SessionManager
 from agentm.extensions.builtin import compaction_prompts, read_history
+from agentm.extensions.builtin.compaction_prompts import CompactionPromptsConfig
 from agentm.extensions.builtin.llm_compaction import (
     CompactionSettings,
     prepare_compaction,
@@ -139,7 +140,7 @@ def materializers() -> Any:
     """Register the default entry materializers and restore afterwards."""
 
     snapshot = dict(ENTRY_MATERIALIZERS)
-    compaction_prompts.install(_PromptApi(), {})  # type: ignore[arg-type]
+    compaction_prompts.install(_PromptApi(), CompactionPromptsConfig())  # type: ignore[arg-type]
     yield
     ENTRY_MATERIALIZERS.clear()
     ENTRY_MATERIALIZERS.update(snapshot)
@@ -176,7 +177,7 @@ def test_read_history_returns_turn_content() -> None:
         message_entry(_assistant("second answer"), None),
     ]
     api = _ToolApi(branch)
-    read_history.install(api, {})  # type: ignore[arg-type]
+    read_history.install(api, read_history.ReadHistoryConfig())
 
     res = asyncio.run(api.tool.fn({"start": 2}))
     assert not res.is_error
@@ -210,7 +211,8 @@ def test_install_registers_compact_command() -> None:
             self.commands[name] = spec
 
     api = _Api()
-    llm_compaction.install(api, {})  # type: ignore[arg-type]
+    from agentm.extensions.builtin.llm_compaction import LlmCompactionConfig
+    llm_compaction.install(api, LlmCompactionConfig())  # type: ignore[arg-type]
     assert "compact" in api.commands
     spec = api.commands["compact"]
     assert spec.description.strip()

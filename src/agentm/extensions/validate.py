@@ -918,27 +918,17 @@ def validate_extension_contract(
             )
 
     schema = resolved_manifest.config_schema
-    if schema is not None and not isinstance(schema, dict):
-        issues.append(
-            ValidationIssue(
-                module_path=module_path,
-                rule="11.4.8-config-schema",
-                message=(
-                    "MANIFEST.config_schema must be a dict (JSON-Schema) "
-                    "or None"
-                ),
-            )
-        )
+    if schema is not None:
+        from pydantic import BaseModel as _PydanticBaseModel
 
-    if isinstance(schema, dict) and schema:
-        if "type" not in schema and "properties" not in schema:
+        if not (isinstance(schema, type) and issubclass(schema, _PydanticBaseModel)):
             issues.append(
                 ValidationIssue(
                     module_path=module_path,
                     rule="11.4.8-config-schema",
                     message=(
-                        "MANIFEST.config_schema should declare 'type' "
-                        "or 'properties' at the top level"
+                        "MANIFEST.config_schema must be a BaseModel "
+                        "subclass or None"
                     ),
                 )
             )

@@ -58,6 +58,7 @@ class FileToolsConfig(BaseModel):
     deny_globs: list[str] | None = None
     max_size_bytes: int = 262_144
     require_read: bool = True
+    default_limit: int = 250
 
 
 MANIFEST = ExtensionManifest(
@@ -1055,7 +1056,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
 
     # --- grep tool -------------------------------------------------------
 
-    grep_default_limit = int(config.get("default_limit", _GREP_DEFAULT_LIMIT))
+    grep_default_limit = config.default_limit
 
     # Cache ripgrep availability (probed once on first grep invocation).
     _rg_available: list[bool | None] = [None]

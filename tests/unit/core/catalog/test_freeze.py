@@ -14,7 +14,6 @@ def _manifest(name: str = "tool_read") -> ExtensionManifest:
         name=name,
         description="Read tool with truncation guard",
         registers=("tool:read",),
-        config_schema={"type": "object"},
         requires=("permission",),
         conflicts=(),
         api_version=1,

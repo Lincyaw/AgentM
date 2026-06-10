@@ -25,7 +25,7 @@ import pytest
 from agentm.core.abi import ToolCallEvent
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI
-from agentm.extensions.builtin.sub_agent import _ChildTask, _ChildTaskManager
+from agentm.extensions.builtin.sub_agent import SubAgentConfig, _ChildTask, _ChildTaskManager
 from tests.unit.extensions._fake_api import FakeExtensionAPI
 
 # Alias for diff continuity; the shared helper is enough for the wiring
@@ -128,7 +128,7 @@ def test_install_subscribes_tool_call_handler() -> None:
     async def _drive() -> None:
         from agentm.extensions.builtin import sub_agent
 
-        await sub_agent.install(cast(ExtensionAPI, api), {})
+        await sub_agent.install(cast(ExtensionAPI, api), SubAgentConfig())
 
     asyncio.run(_drive())
     handlers = api._handlers.get(ToolCallEvent.CHANNEL, [])

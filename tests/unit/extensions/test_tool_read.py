@@ -15,6 +15,7 @@ import pytest
 from agentm.core.abi.operations import FileOperations
 from agentm.core.lib import read_state
 from agentm.extensions.builtin import file_tools
+from agentm.extensions.builtin.file_tools import FileToolsConfig
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +86,7 @@ class _Api:
 # ---------------------------------------------------------------------------
 
 def _install(api: _Api, **config: Any) -> None:
-    file_tools.install(api, dict(config))  # type: ignore[arg-type]
+    file_tools.install(api, FileToolsConfig(**config))  # type: ignore[arg-type]
 
 
 def _read(api: _Api, path: str, **kwargs: Any) -> tuple[str, bool]:
@@ -299,7 +300,9 @@ class TestConfigSchema:
     """max_size_bytes appears in the config schema."""
 
     def test_max_size_bytes_in_schema(self) -> None:
-        props = file_tools.MANIFEST.config_schema["properties"]
+        schema = file_tools.MANIFEST.config_schema
+        assert schema is not None
+        props = schema.model_json_schema()["properties"]
         assert "max_size_bytes" in props
         assert props["max_size_bytes"]["type"] == "integer"
         assert props["max_size_bytes"]["default"] == 262_144

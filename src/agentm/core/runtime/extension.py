@@ -678,18 +678,15 @@ def load_extension(
             AttributeError(f"module {module_path!r} has no callable 'install' symbol"),
         )
 
-    # Auto-validate config if install's type hint declares a Pydantic model.
+    # Auto-validate config via MANIFEST.config_schema (Pydantic model class).
     resolved_config: Any = config
-    try:
-        import typing
-        from pydantic import BaseModel as _PydanticBase
-
-        hints = typing.get_type_hints(install)
-        config_hint = hints.get("config")
-        if isinstance(config_hint, type) and issubclass(config_hint, _PydanticBase):
-            resolved_config = config_hint.model_validate(config)
-    except Exception:  # noqa: BLE001
-        pass
+    manifest = getattr(module, "MANIFEST", None)
+    if manifest is not None:
+        schema_cls = getattr(manifest, "config_schema", None)
+        if schema_cls is not None:
+            from pydantic import BaseModel as _PydanticBase
+            if isinstance(schema_cls, type) and issubclass(schema_cls, _PydanticBase):
+                resolved_config = schema_cls.model_validate(config)
 
     token = _INSTALLING_EXTENSION.set(module_path)
     try:

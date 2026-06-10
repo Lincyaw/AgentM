@@ -18,6 +18,7 @@ from typing import Any
 
 from agentm.core.abi.operations import FileOperations
 from agentm.extensions.builtin import file_tools
+from agentm.extensions.builtin.file_tools import FileToolsConfig
 
 
 class _StubFileOps(FileOperations):
@@ -78,7 +79,7 @@ class _Api:
 
 
 def _install(api: _Api, **config: Any) -> None:
-    file_tools.install(api, dict(config))  # type: ignore[arg-type]
+    file_tools.install(api, FileToolsConfig(**config))  # type: ignore[arg-type]
 
 
 def _read(api: _Api, path: str) -> tuple[str, bool]:

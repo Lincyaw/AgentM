@@ -21,7 +21,7 @@ def _manifest(name: str = "tool_read") -> ExtensionManifest:
         name=name,
         description="test atom",
         registers=("tool:read",),
-        config_schema={"type": "object"},
+        config_schema=None,
         api_version=1,
         tier=1,
     )

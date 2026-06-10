@@ -24,7 +24,7 @@ from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
 from agentm.core.runtime.session_inbox import InboxItem, render_item
 from agentm.extensions.builtin import monitor
-from agentm.extensions.builtin.monitor import _MonitorManager
+from agentm.extensions.builtin.monitor import MonitorConfig, _MonitorManager
 from tests.unit.extensions._fake_api import FakeExtensionAPI
 
 # Alias for diff continuity with the pre-B7 tests; the shared helper IS the
@@ -561,7 +561,7 @@ def test_install_registers_tools_and_shutdown_handler() -> None:
     session_shutdown handler so MANIFEST.registers and the wiring agree."""
 
     api = _FakeApi()
-    monitor.install(cast(ExtensionAPI, api), {})
+    monitor.install(cast(ExtensionAPI, api), MonitorConfig())
     names = {t.name for t in api.tools}
     assert names == {
         "schedule_wakeup",
@@ -587,7 +587,7 @@ async def test_install_propagates_shutdown_grace_config() -> None:
     api = _FakeApi()
     monitor.install(
         cast(ExtensionAPI, api),
-        {"shutdown_grace_seconds": 0.05},
+        MonitorConfig(shutdown_grace_seconds=0.05),
     )
     # The manager isn't exposed by install(); reach it through the captured
     # shutdown handler closure (the install pattern wraps it in api.on()).
@@ -616,7 +616,7 @@ async def test_install_propagates_event_summary_max_chars() -> None:
     api = _FakeApi()
     monitor.install(
         cast(ExtensionAPI, api),
-        {"event_summary_max_chars": 10},
+        MonitorConfig(event_summary_max_chars=10),
     )
     handler = api._handlers["session_shutdown"][0]
     bound_manager = handler.__self__  # type: ignore[attr-defined]
