@@ -1,30 +1,4 @@
-"""Per-atom hot-reload state machine.
-
-Pulled out of ``AgentSession.create`` (which had grown to ~640 lines around
-this state) per the B1 refactor. The reloader owns:
-
-* The loaded-atom registry (by module path and by manifest name).
-* Per-owner handler unsubscribe lists and registration lists, so a reload
-  can unwind everything an atom installed.
-* The validation + atomic file-replace + rollback dance for swapping an
-  atom's source.
-
-It implements the :class:`_SessionGateway` shape and is plugged into
-``_ExtensionAPIImpl`` as the ``gateway`` argument. Construction order in
-``AgentSession.create``:
-
-1. Build registries (``tools``, ``commands``, ...) and the bus.
-2. Construct ``AtomReloader``, passing those registries by reference.
-3. Define ``_make_api(owner)`` (which builds an ``_ExtensionAPIImpl`` with
-   the reloader as its gateway).
-4. Call ``reloader.set_api_factory(_make_api)`` so ``reload_atom`` can
-   rebuild an API for the freshly-imported module.
-
-Hard rule: this module imports only stdlib + ``agentm.core.*`` +
-``agentm.core.runtime.extension`` + ``agentm.extensions.*``. It never reaches
-back into ``agentm.core.runtime.session`` to avoid the circular imports the
-old in-line implementation tolerated by being a closure.
-"""
+"""Per-atom hot-reload state machine and ``_SessionGateway`` implementation."""
 
 from __future__ import annotations
 
@@ -71,10 +45,6 @@ from agentm.core.runtime.resource_writer import ResourceWriter
 
 logger = logging.getLogger(__name__)
 
-# Synthetic-module dotted prefix used by the scenario loader for atoms it
-# materializes as ``agentm._scenarios.<scenario>.<stem>``. Kept as a single
-# named constant so the prefix list in ``install_atom``'s synthetic branch
-# stays single-sourced as new synthetic axes are added.
 _SCENARIO_MODULE_PREFIX = "agentm._scenarios."
 
 
@@ -93,31 +63,7 @@ class LoadedAtom:
 
 @dataclass(slots=True, frozen=True)
 class _ReloadSnapshot:
-    """Single immutable pre-reload capture used as the rollback floor.
-
-    The transactional reload contract is:
-
-    1. ``capture()`` builds a defensive deep-ish copy of every mutable
-       structure the reloader can touch: the loaded-atom registries,
-       per-atom handler/registration tracking, the owners-by-kind map,
-       all extension registries (tools/commands/providers/renderers),
-       the live ``apis`` dict, the ``sys.modules`` entry for the atom's
-       module path, and the full bus subscription map.
-    2. ``apply`` (a.k.a. ``_activate_atom_install``) is then free to
-       mutate any of those structures.
-    3. If ``apply`` raises, the reloader first attempts an in-place
-       rollback by re-installing from the original ``LoadedAtom``. If
-       *that* rollback also raises, ``restore()`` is called — a single
-       function whose only job is to overwrite every mutable structure
-       from the snapshot. Because the snapshot already holds private
-       copies, ``restore()`` cannot half-fail.
-
-    The snapshot deliberately stores list/dict instances by *reference
-    after copy* (e.g. ``list(self._tools)``) instead of trying to deep
-    copy individual ``Tool`` / ``ProviderConfig`` payloads — those are
-    treated as opaque values whose identity is what callers compare
-    against.
-    """
+    """Pre-reload capture for transactional rollback."""
 
     loaded_by_module: dict[str, LoadedAtom]
     loaded_by_name: dict[str, LoadedAtom]
@@ -195,12 +141,7 @@ class AtomReloader:
     # --- Lifecycle wiring --------------------------------------------------
 
     def set_api_factory(self, factory: Callable[[str], _ExtensionAPIImpl]) -> None:
-        """Inject the session's ``_make_api(owner)`` callable.
-
-        Must be called before the first ``reload_atom`` call. We accept it
-        post-construction because the API factory itself closes over this
-        reloader (as the gateway), creating a chicken-and-egg cycle.
-        """
+        """Must be called before the first ``reload_atom``."""
         self._api_factory = factory
 
     # --- Public read accessors ---------------------------------------------
@@ -227,12 +168,6 @@ class AtomReloader:
     # --- Subscription tracking (called from ExtensionAPI.on/add_observer) ---
 
     def wrap_api_on(self, api: _ExtensionAPIImpl, owner: str) -> None:
-        """Wrap event registration APIs so ``owner`` cleanup is tracked.
-
-        Each handler also gets a ``_agentm_obs_owner`` attribute so the
-        ``observability`` atom can attribute event handlers to the
-        installing extension.
-        """
         original_on = api.on
         original_add_observer = api.add_observer
 
@@ -353,16 +288,7 @@ class AtomReloader:
         tag: str,
         require_manifest: bool,
     ) -> ExtensionManifest | None:
-        """Run the §11 contract validator on ``new_source`` in a throwaway
-        temp dir. Returns the parsed manifest (or ``None`` if the module did
-        not declare one and ``require_manifest`` is False). Raises on
-        signature/contract violations. ``tag`` distinguishes the temp-dir
-        prefix between reload and install for diagnostics.
-
-        Used by both ``reload_atom`` (the existing atom must keep its name)
-        and ``install_atom`` (a brand-new atom; manifest may be absent for
-        the §11 minimum, though contract validation still runs).
-        """
+        """Validate ``new_source`` in a throwaway temp dir; return its manifest."""
         with tempfile.TemporaryDirectory(prefix=f"agentm-{tag}-{name}-") as tmpdir:
             src_path = Path(tmpdir) / f"{name}.py"
             src_path.write_text(new_source, encoding="utf-8")
@@ -461,32 +387,16 @@ class AtomReloader:
                 "AtomReloader.set_api_factory must be called before reload_atom"
             )
         previous_api = self._apis.get(atom.module_path)
-        # Capture per-channel rank BEFORE removal so reload can restore the
-        # atom to its original slot. Without this, every reload silently
-        # appends new handlers to the end of each channel's list, which
-        # changes the dispatch order and (under last-non-None-replacement
-        # semantics) flips which atom's voice wins.
+        # Capture handler positions BEFORE removal to restore after reload.
         positions = self._capture_handler_positions(atom.module_path)
         self._remove_handlers(atom.module_path)
         self._remove_registrations(atom.module_path)
         sys.modules.pop(atom.module_path, None)
         self._clear_module_bytecode(atom.file_path)
         importlib.invalidate_caches()
-        # Synthetic user atoms (loaded under ``_agentm_user_atom__<name>``)
-        # have no package finder — once popped from ``sys.modules`` a plain
-        # ``importlib.import_module`` cannot rediscover them. Re-establish
-        # the sys.modules entry from the on-disk file before delegating to
-        # ``_finish_install``; ``load_extension`` will then hit the
-        # populated cache. Builtin atoms keep their normal import-finder
-        # path: they aren't synthetic, so this branch is skipped and
-        # ``import_module`` resolves them via ``sys.path`` as before.
+        # Synthetic atoms have no package finder; re-seed sys.modules from disk.
         if atom.import_kind == "synthetic" or atom.module_path.startswith(_SCENARIO_MODULE_PREFIX):
-            # Scenario-local atoms (loaded by the loader under
-            # ``agentm._scenarios.<scenario>.<stem>``) are synthetic too —
-            # they have no normal import finder, so rebuild the sys.modules
-            # entry from the on-disk file (which may now point at the
-            # eval-sandbox tempdir) before delegating to
-            # ``_finish_install``.
+            # Scenario-local atoms are synthetic too.
             self._import_synthetic_module(atom.module_path, atom.file_path)
         await self._finish_install(
             atom.module_path,
@@ -507,12 +417,7 @@ class AtomReloader:
         _disc.reset_cache()
 
     def _capture_handler_positions(self, owner: str) -> dict[str, int]:
-        """Record, per channel, the index of ``owner``'s first handler so a
-        reload can splice the new install back at the same within-tier slot.
-        Cross-tier ordering is already handled by :class:`BusPriority` via
-        ``bisect.insort``; this is the safety net for atoms that don't
-        declare a priority.
-        """
+        """Record per-channel handler positions for post-reload splicing."""
         positions: dict[str, int] = {}
         for channel in self._bus.channels():
             for idx, sub in enumerate(self._bus.subscriptions_for(channel)):
@@ -522,11 +427,6 @@ class AtomReloader:
         return positions
 
     def _restore_handler_positions(self, owner: str, positions: dict[str, int]) -> None:
-        """Splice ``owner``'s freshly-registered subscriptions back to
-        ``positions[channel]``. Channels the new install didn't re-subscribe
-        to are skipped; channels added that had no prior anchor stay at the
-        tail.
-        """
         for channel, anchor_idx in positions.items():
             subs = self._bus.subscriptions_for(channel)
             if not subs:
@@ -550,13 +450,6 @@ class AtomReloader:
             )
 
     def _capture_snapshot(self, module_path: str) -> _ReloadSnapshot:
-        """Take a single immutable snapshot of all reloader-mutable state.
-
-        Run this BEFORE any swap-in begins. ``restore_from_snapshot`` is
-        the sole guaranteed-safe rollback path: every list/dict in the
-        snapshot is a fresh copy, so writing those copies back into the
-        live registries cannot half-fail mid-restore.
-        """
         return _ReloadSnapshot(
             loaded_by_module=dict(self._loaded_by_module),
             loaded_by_name=dict(self._loaded_by_name),
@@ -584,13 +477,6 @@ class AtomReloader:
         )
 
     def _restore_from_snapshot(self, snapshot: _ReloadSnapshot) -> None:
-        """Overwrite every mutable structure from ``snapshot``.
-
-        Defensive: the snapshot already holds copies, so this method
-        only does in-place ``clear() + update()`` / slice-assignment.
-        Nothing here can raise on partial state because by the time we
-        get here every value comes from immutable bookkeeping.
-        """
         self._loaded_by_module.clear()
         self._loaded_by_module.update(snapshot.loaded_by_module)
         self._loaded_by_name.clear()
@@ -732,9 +618,7 @@ class AtomReloader:
             old_hash = self._advisory_hash(current_source)
             new_hash = self._advisory_hash(new_source)
         event_new_hash = new_hash or self._advisory_hash(new_source)
-        # Single transactional snapshot: every dict/list copy is taken
-        # eagerly, so the rollback floor (`_restore_from_snapshot`) is a
-        # pure write-back that cannot half-fail. See ``_ReloadSnapshot``.
+        # Transactional snapshot for rollback.
         snapshot = self._capture_snapshot(atom.module_path)
 
         try:
@@ -773,10 +657,7 @@ class AtomReloader:
                     self._restore_git_path(atom, write_result.commit_sha_before)
                 await self._activate_atom_install(atom)
             except Exception as rollback_exc:  # noqa: BLE001
-                # Rollback (re-install of the original atom) itself blew
-                # up. Fall back to the immutable pre-reload snapshot —
-                # this is the only path that guarantees the live agent
-                # ends up with a consistent (entirely pre-reload) state
+                # Rollback also failed; restore from immutable snapshot.
                 # rather than something half-new / half-old.
                 logger.exception(
                     "atom %r rollback failed after apply failure; "
