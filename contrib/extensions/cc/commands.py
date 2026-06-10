@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
+from pydantic import BaseModel
+
 from agentm.core.abi.skill import SkillRecord
 from agentm.core.abi import BusPriority
 from agentm.extensions import ExtensionManifest
@@ -14,6 +16,13 @@ from agentm.core.abi.extension import CommandSpec, ExtensionAPI
 from ._md_skills import parse_md_command_records, parse_md_skill_records
 
 
+class CommandsConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    command_paths: list[str] = []
+    inherit_claude: bool = True
+
+
 MANIFEST = ExtensionManifest(
     name="commands",
     description=(
@@ -21,14 +30,7 @@ MANIFEST = ExtensionManifest(
         "surface them to the model via the skills block."
     ),
     registers=("event:session_ready", "event:resources_discover"),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "command_paths": {"type": "array", "items": {"type": "string"}},
-            "inherit_claude": {"type": "boolean"},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=CommandsConfig,
     tier=2,
 )
 
@@ -60,9 +62,9 @@ def _dedupe_records(records: list[SkillRecord]) -> list[SkillRecord]:
     return out
 
 
-async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    inherit_claude = bool(config.get("inherit_claude", True))
-    configured_paths = [Path(str(p)) for p in config.get("command_paths", [])]
+async def install(api: ExtensionAPI, config: CommandsConfig) -> None:
+    inherit_claude = config.inherit_claude
+    configured_paths = [Path(p) for p in config.command_paths]
     discover_in_progress = False
     registered_commands: set[str] = set()
 

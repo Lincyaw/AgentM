@@ -7,9 +7,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+
+class DistillSubmitRewriterConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
 
 MANIFEST = ExtensionManifest(
     name="distill_submit_rewriter",
@@ -18,11 +24,7 @@ MANIFEST = ExtensionManifest(
         "rewriter child of the distill labeler."
     ),
     registers=("tool:submit_rewrite",),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": True,
-    },
+    config_schema=DistillSubmitRewriterConfig,
     api_version=1,
     tier=1,
 )
@@ -71,8 +73,7 @@ SUBMIT_REWRITE_PARAMETERS: dict[str, Any] = {
 }
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    del config
+def install(api: ExtensionAPI, config: DistillSubmitRewriterConfig) -> None:
 
     async def _submit(args: dict[str, Any]) -> ToolTerminate:
         del args

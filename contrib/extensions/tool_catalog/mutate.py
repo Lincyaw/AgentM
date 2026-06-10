@@ -7,6 +7,8 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import (
@@ -19,6 +21,10 @@ from agentm.core.abi.resource import WriteResult
 
 from ._paths import catalog_root, resolve_catalog_path
 
+class ToolCatalogMutateConfig(BaseModel):
+    root: str | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="tool_catalog_mutate",
     description="Mutate managed resources and live atoms through audited catalog tools.",
@@ -28,7 +34,7 @@ MANIFEST = ExtensionManifest(
         "tool:unload_atom",
         "tool:reload_atom",
     ),
-    config_schema=None,
+    config_schema=ToolCatalogMutateConfig,
     api_version=1,
     affects=(),
     tier=1,
@@ -145,8 +151,8 @@ _RELOAD_ATOM_PARAMS: Final = {
 }
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    root = catalog_root(api, config)
+def install(api: ExtensionAPI, config: ToolCatalogMutateConfig) -> None:
+    root = catalog_root(api, config.root)
 
     async def _rollback_resource_tool(args: dict[str, Any]) -> ToolResult:
         resolved = resolve_catalog_path(api, str(args["path"]), root)

@@ -23,12 +23,11 @@ class ResolvedCatalogPath:
         self.writer_path = writer_path
 
 
-def catalog_root(api: ExtensionAPI, config: dict[str, Any]) -> Path:
-    raw_root = config.get("root")
+def catalog_root(api: ExtensionAPI, raw_root: str | None = None) -> Path:
     if raw_root is None:
         root = Path(api.cwd)
     else:
-        root = Path(str(raw_root))
+        root = Path(raw_root)
         if not root.is_absolute():
             root = Path(api.cwd) / root
     return root.resolve()

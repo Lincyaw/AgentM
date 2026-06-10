@@ -53,6 +53,8 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.operations import ExecResult, FileStat
@@ -64,8 +66,18 @@ from agentm.core.abi.resource import (
 )
 
 
-def _resolve_config(config: dict[str, Any], key: str, env_var: str, default: str | None) -> str | None:
-    value = config.get(key)
+class AgentEnvConfig(BaseModel):
+    image: str | None = None
+    experiment_id: str | None = None
+    pool_ref: str | None = None
+    gateway_url: str | None = None
+    namespace: str | None = None
+    work_dir: str | None = None
+    timeout: float | None = None
+    idle_timeout_seconds: int | None = None
+
+
+def _resolve_str(value: str | None, env_var: str, default: str | None) -> str | None:
     if isinstance(value, str) and value:
         return value
     env_value = os.environ.get(env_var)
@@ -674,7 +686,7 @@ def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> 
         print(f"INFO: [agent_env_sync] uploaded {count} skill(s) to {target_base}/", file=sys.stderr)
 
 
-def install_agent_env(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     # Deferred import keeps the SDK truly optional — atoms that never run
     # under agent-env shouldn't fail to load just because ``arl`` is absent.
     try:
@@ -685,8 +697,8 @@ def install_agent_env(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "Install with: uv sync --extra agent-env"
         ) from exc
 
-    image = _resolve_config(config, "image", "AGENTM_AGENT_ENV_IMAGE", None)
-    pool_ref = _resolve_config(config, "pool_ref", "AGENTM_AGENT_ENV_POOL_REF", None)
+    image = _resolve_str(config.image, "AGENTM_AGENT_ENV_IMAGE", None)
+    pool_ref = _resolve_str(config.pool_ref, "AGENTM_AGENT_ENV_POOL_REF", None)
     if not image and not pool_ref:
         raise RuntimeError(
             "operations backend 'agent_env': one of 'image' (managed pool, default) or "
@@ -694,22 +706,19 @@ def install_agent_env(api: ExtensionAPI, config: dict[str, Any]) -> None:
             "atom config field, or use AGENTM_AGENT_ENV_IMAGE / "
             "AGENTM_AGENT_ENV_POOL_REF."
         )
-    gateway_url = _resolve_config(
-        config, "gateway_url", "AGENTM_AGENT_ENV_GATEWAY_URL", "http://localhost:8080"
+    gateway_url = _resolve_str(
+        config.gateway_url, "AGENTM_AGENT_ENV_GATEWAY_URL", "http://localhost:8080"
     ) or "http://localhost:8080"
-    namespace = _resolve_config(
-        config, "namespace", "AGENTM_AGENT_ENV_NAMESPACE", "default"
+    namespace = _resolve_str(
+        config.namespace, "AGENTM_AGENT_ENV_NAMESPACE", "default"
     ) or "default"
-    work_dir = (config.get("work_dir") or "/workspace") if isinstance(config.get("work_dir"), str) else "/workspace"
-    timeout = config.get("timeout")
-    timeout_value: float | None = float(timeout) if isinstance(timeout, (int, float)) else None
-    idle = config.get("idle_timeout_seconds")
-    idle_value: int | None = int(idle) if isinstance(idle, int) else None
+    work_dir = config.work_dir or "/workspace"
+    timeout_value: float | None = config.timeout
+    idle_value: int | None = config.idle_timeout_seconds
     session: Any
     if image:
-        experiment_id = _resolve_config(
-            config,
-            "experiment_id",
+        experiment_id = _resolve_str(
+            config.experiment_id,
             "AGENTM_AGENT_ENV_EXPERIMENT_ID",
             "agentm-default",
         ) or "agentm-default"

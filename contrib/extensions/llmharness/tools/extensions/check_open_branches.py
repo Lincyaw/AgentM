@@ -17,11 +17,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from ..runtime.registry import SERVICE_KEY, AuditCheckRegistry, CheckContext
 from ..schema import EdgeKind, EventKind, Finding
+
+class CheckOpenBranchesConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
 
 MANIFEST = ExtensionManifest(
     name="check_open_branches",
@@ -31,11 +37,7 @@ MANIFEST = ExtensionManifest(
         "llmharness.audit_registry service."
     ),
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": True,
-    },
+    config_schema=CheckOpenBranchesConfig,
     api_version=1,
     tier=1,
 )
@@ -70,10 +72,8 @@ class _OpenBranchesCheck:
         return findings
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: CheckOpenBranchesConfig) -> None:
     """Register the open-branches check on the parent audit registry."""
-
-    del config  # no configuration knobs
     registry = api.get_service(SERVICE_KEY)
     if not isinstance(registry, AuditCheckRegistry):
         raise RuntimeError(

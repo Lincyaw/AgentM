@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import ResourcesDiscoverEvent
@@ -21,6 +23,13 @@ from agentm.core.abi.extension import ExtensionAPI
 _RECOGNIZED_SCOPES: frozenset[str] = frozenset({"user", "project"})
 
 
+class PluginsConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    registry_path: str | None = None
+    exclude: list[str] = []
+
+
 MANIFEST = ExtensionManifest(
     name="plugins",
     description=(
@@ -28,27 +37,7 @@ MANIFEST = ExtensionManifest(
         "directories through resource discovery."
     ),
     registers=("event:resources_discover",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "registry_path": {
-                "type": "string",
-                "description": (
-                    "Override path to ``installed_plugins.json``. Defaults "
-                    "to ``~/.claude/plugins/installed_plugins.json``."
-                ),
-            },
-            "exclude": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Plugin keys to skip (matches the JSON's "
-                    "``<plugin>@<marketplace>`` form)."
-                ),
-            },
-        },
-        "additionalProperties": True,
-    },
+    config_schema=PluginsConfig,
     tier=2,
 )
 
@@ -104,9 +93,9 @@ def _resolve_install_paths(
     return result, unknown_scopes
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    registry_path = Path(config.get("registry_path") or _default_registry_path())
-    exclude = set(config.get("exclude") or ())
+def install(api: ExtensionAPI, config: PluginsConfig) -> None:
+    registry_path = Path(config.registry_path) if config.registry_path else _default_registry_path()
+    exclude = set(config.exclude)
 
     async def _on_discover(_event: ResourcesDiscoverEvent) -> dict[str, Any] | None:
         install_paths, unknown_scopes = _resolve_install_paths(

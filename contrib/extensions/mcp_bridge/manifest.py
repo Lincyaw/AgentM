@@ -10,7 +10,28 @@ rationale.
 
 from __future__ import annotations
 
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
 from agentm.extensions import ExtensionManifest
+
+
+class MCPServerSpec(BaseModel):
+    model_config = {"extra": "allow"}
+
+    name: str
+    transport: Literal["stdio", "http"]
+    command: list[str] | None = None
+    env: dict[str, str] | None = None
+    url: str | None = None
+    headers: dict[str, str] | None = None
+
+
+class MCPBridgeConfig(BaseModel):
+    servers: list[MCPServerSpec] = Field(min_length=1)
+    naming: str | None = None
+    timeout_seconds: float | None = None
 
 
 MANIFEST = ExtensionManifest(
@@ -29,58 +50,11 @@ MANIFEST = ExtensionManifest(
         # under the ``mcp__<server>__<tool>`` namespace.
         "mutates:tool_catalog",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "servers": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "transport": {
-                            "type": "string",
-                            "enum": ["stdio", "http"],
-                        },
-                        # stdio-only
-                        "command": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "env": {
-                            "type": "object",
-                            "additionalProperties": {"type": "string"},
-                        },
-                        # http-only
-                        "url": {"type": "string"},
-                        "headers": {
-                            "type": "object",
-                            "additionalProperties": {"type": "string"},
-                        },
-                    },
-                    "required": ["name", "transport"],
-                    "additionalProperties": True,
-                },
-            },
-            "naming": {
-                "type": "string",
-                "description": (
-                    "Template used to render Tool.name. Substitutions: "
-                    "{server}, {tool}. Default: 'mcp__{server}__{tool}'."
-                ),
-            },
-            "timeout_seconds": {
-                "type": "number",
-                "minimum": 0,
-            },
-        },
-        "required": ["servers"],
-        "additionalProperties": False,
-    },
+    config_schema=MCPBridgeConfig,
     requires=(),  # leaf atom: consumes nothing from other atoms
     api_version=1,
     tier=1,
 )
 
 
-__all__ = ["MANIFEST"]
+__all__ = ["MANIFEST", "MCPBridgeConfig"]

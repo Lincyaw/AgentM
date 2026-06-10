@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
+from pydantic import BaseModel
+
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import (
     BeforeAgentStartEvent,
@@ -98,6 +100,13 @@ def available_agents_block(
     return "\n".join(lines)
 
 
+class AgentsConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
+    agent_paths: list[str] = []
+    inherit_claude: bool = True
+
+
 MANIFEST = ExtensionManifest(
     name="agents",
     description=(
@@ -108,14 +117,7 @@ MANIFEST = ExtensionManifest(
         "event:session_ready",
         "event:before_agent_start",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "agent_paths": {"type": "array", "items": {"type": "string"}},
-            "inherit_claude": {"type": "boolean"},
-        },
-        "additionalProperties": True,
-    },
+    config_schema=AgentsConfig,
     tier=2,
 )
 
@@ -142,9 +144,9 @@ def _format_block(agents: list[AgentRecord]) -> str:
     )
 
 
-async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    inherit_claude = bool(config.get("inherit_claude", True))
-    configured_paths = [Path(str(p)) for p in config.get("agent_paths", [])]
+async def install(api: ExtensionAPI, config: AgentsConfig) -> None:
+    inherit_claude = config.inherit_claude
+    configured_paths = [Path(p) for p in config.agent_paths]
     cached_block = ""
 
     async def _populate(_: SessionReadyEvent) -> None:

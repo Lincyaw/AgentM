@@ -5,12 +5,18 @@ from __future__ import annotations
 import json
 from typing import Any, Final
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 
 from ._git_log import list_history
 from ._paths import catalog_root, resolve_catalog_path
+
+class ToolCatalogBrowseConfig(BaseModel):
+    root: str | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="tool_catalog_browse",
@@ -23,7 +29,7 @@ MANIFEST = ExtensionManifest(
         "tool:list_history",
         "tool:list_atoms",
     ),
-    config_schema=None,
+    config_schema=ToolCatalogBrowseConfig,
     api_version=1,
     affects=(),
     tier=1,
@@ -107,8 +113,8 @@ _LIST_ATOMS_PARAMS: Final = {
 }
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    root = catalog_root(api, config)
+def install(api: ExtensionAPI, config: ToolCatalogBrowseConfig) -> None:
+    root = catalog_root(api, config.root)
 
     async def _list_versions_tool(args: dict[str, Any]) -> ToolResult:
         versions = api.catalog.list_versions(str(args["atom"]), root)

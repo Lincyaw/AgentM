@@ -28,6 +28,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from agentm.core.abi import DecideTurnActionEvent, Inject, LoopAction, Stop
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
@@ -36,6 +38,18 @@ from ..entry_types import REMINDER_DELIVERED
 from ..runtime.reminder import build_reminder_message
 
 _logger = logging.getLogger(__name__)
+
+
+class ReplayReminderSeedConfig(BaseModel):
+    text: str = Field(
+        min_length=1,
+        description=(
+            "Reminder text to inject on the next "
+            "DecideTurnActionEvent. The preamble defined in "
+            "audit/_reminder_format.REMINDER_PREAMBLE is "
+            "prepended automatically; pass only the body."
+        ),
+    )
 
 
 MANIFEST = ExtensionManifest(
@@ -52,23 +66,7 @@ MANIFEST = ExtensionManifest(
         "produced."
     ),
     registers=("event:decide_turn_action",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "text": {
-                "type": "string",
-                "minLength": 1,
-                "description": (
-                    "Reminder text to inject on the next "
-                    "DecideTurnActionEvent. The preamble defined in "
-                    "audit/_reminder_format.REMINDER_PREAMBLE is "
-                    "prepended automatically; pass only the body."
-                ),
-            },
-        },
-        "required": ["text"],
-        "additionalProperties": False,
-    },
+    config_schema=ReplayReminderSeedConfig,
     affects=("event:decide_turn_action",),
     requires=("operations",),
     api_version=1,
@@ -76,17 +74,14 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
     """Wire the one-shot reminder seeder.
 
-    Validation of ``text`` is performed here rather than relying purely
-    on the JSON-schema layer: an empty / missing reminder is a
-    programmer error from the CLI driver and should fail loudly.
+    Validation of ``text`` is handled by the Pydantic model; an empty /
+    missing reminder is a programmer error from the CLI driver and will
+    fail at model validation time.
     """
-    text_raw = config.get("text")
-    if not isinstance(text_raw, str) or not text_raw.strip():
-        raise ValueError("replay_reminder_seed: config['text'] must be a non-empty string")
-    text: str = text_raw
+    text: str = config.text
 
     # ``fired`` is a list-of-one to keep the closure mutable from inside
     # the handler without resorting to ``nonlocal`` on a primitive —

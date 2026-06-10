@@ -21,6 +21,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from xml.sax.saxutils import escape
 
+from pydantic import BaseModel
+
 from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import (
@@ -119,6 +121,11 @@ def available_agents_block(
     return "\n".join(lines)
 
 
+class PromptLoaderConfig(BaseModel):
+    prompt: str
+    personas: bool = False
+
+
 MANIFEST = ExtensionManifest(
     name="prompt_loader",
     description=(
@@ -130,15 +137,7 @@ MANIFEST = ExtensionManifest(
         f"event:{BeforeAgentStartEvent.CHANNEL}",
         f"event:{ResolveSubagentEvent.CHANNEL}",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "prompt": {"type": "string"},
-            "personas": {"type": "boolean"},
-        },
-        "required": ["prompt"],
-        "additionalProperties": False,
-    },
+    config_schema=PromptLoaderConfig,
     # tier defaults to 1: this atom is mounted from outside ``extensions/builtin/``
     # so the validator's §11.4.10 cross-check against
     # ``core-manifest.yaml::reload.tier_2_atoms`` does not run for it. Opt into
@@ -221,12 +220,12 @@ def _load_personas() -> dict[str, dict[str, Any]]:
     return personas
 
 
-async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    prompt_name = str(config["prompt"]).strip()
+async def install(api: ExtensionAPI, config: PromptLoaderConfig) -> None:
+    prompt_name = config.prompt.strip()
     if not prompt_name:
         raise ValueError("prompt_loader: 'prompt' config must be a non-empty filename")
     prompt_path = _PROMPTS_DIR / prompt_name
-    enable_personas = bool(config.get("personas", False))
+    enable_personas = config.personas
 
     cached_system = ""
     personas: dict[str, dict[str, Any]] = {}

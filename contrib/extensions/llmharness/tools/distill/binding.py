@@ -25,12 +25,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from ..replay.record import audit_session_id
 
 _logger = logging.getLogger(__name__)
+
+class DistillBindingConfig(BaseModel):
+    sample_id: str = ""
+    dataset_name: str = ""
+    dataset_path: str = ""
+
 
 MANIFEST = ExtensionManifest(
     name="distill_binding",
@@ -39,15 +47,7 @@ MANIFEST = ExtensionManifest(
         "distill labeler can join trajectory records to ground truth."
     ),
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "sample_id": {"type": "string"},
-            "dataset_name": {"type": "string"},
-            "dataset_path": {"type": "string"},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=DistillBindingConfig,
     api_version=1,
     tier=1,
 )
@@ -104,13 +104,13 @@ def read_sample_meta(path: Path) -> SampleMeta | None:
     )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    sample_id = config.get("sample_id") or os.environ.get(_SAMPLE_ID_ENV) or ""
+def install(api: ExtensionAPI, config: DistillBindingConfig) -> None:
+    sample_id = config.sample_id or os.environ.get(_SAMPLE_ID_ENV) or ""
     if not sample_id:
         _logger.debug("distill_binding mounted without sample_id; meta sidecar will not be written")
         return
-    dataset_name = config.get("dataset_name") or os.environ.get(_DATASET_NAME_ENV) or ""
-    dataset_path = config.get("dataset_path") or os.environ.get(_DATASET_PATH_ENV) or ""
+    dataset_name = config.dataset_name or os.environ.get(_DATASET_NAME_ENV) or ""
+    dataset_path = config.dataset_path or os.environ.get(_DATASET_PATH_ENV) or ""
     session_id = audit_session_id(api)
     meta = SampleMeta(
         sample_id=str(sample_id),

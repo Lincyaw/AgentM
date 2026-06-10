@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 
@@ -18,6 +20,14 @@ from rca_evolution.observer_tools import (
     build_submit_divergence_report_tool,
 )
 
+class EvolutionObserverConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    trajectory_snapshot: list[Any] = []
+    gt_info: dict[str, Any] = {}
+    trajectory_summary: str = "(no summary)"
+
+
 MANIFEST = ExtensionManifest(
     name="evolution_observer",
     description="Observer tools for self-evolution divergence analysis.",
@@ -27,13 +37,14 @@ MANIFEST = ExtensionManifest(
         "tool:get_trajectory_summary",
         "tool:submit_divergence_report",
     ),
+    config_schema=EvolutionObserverConfig,
 )
 
 
-async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    snapshot = config.get("trajectory_snapshot", [])
-    gt_info = config.get("gt_info", {})
-    summary = config.get("trajectory_summary", "(no summary)")
+async def install(api: ExtensionAPI, config: EvolutionObserverConfig) -> None:
+    snapshot = config.trajectory_snapshot
+    gt_info = config.gt_info
+    summary = config.trajectory_summary
     total_turns = len(snapshot)
 
     api.register_tool(build_get_turn_tool(snapshot))
