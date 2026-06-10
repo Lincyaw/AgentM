@@ -98,6 +98,7 @@ MANIFEST = ExtensionManifest(
 # Per issue #76 the engine keeps **zero** literal English prompt text: prompts
 # are passed in as parameters by the caller (resolved via the prompt registry).
 
+# Lower than read_history's 20k: summarization prompts have a fixed token budget.
 DEFAULT_TOOL_RESULT_MAX_CHARS = 8_000
 
 
@@ -108,14 +109,14 @@ ToolRegistry = Mapping[str, Tool] | Sequence[Tool]
 
 
 @dataclass(slots=True)
-class FileOperations:
+class _FileOpTracker:
     read: set[str] = field(default_factory=set)
     written: set[str] = field(default_factory=set)
     edited: set[str] = field(default_factory=set)
 
 
-def create_file_ops() -> FileOperations:
-    return FileOperations()
+def create_file_ops() -> _FileOpTracker:
+    return _FileOpTracker()
 
 
 def _normalize_registry(tools: ToolRegistry | None) -> Mapping[str, Tool]:
@@ -128,7 +129,7 @@ def _normalize_registry(tools: ToolRegistry | None) -> Mapping[str, Tool]:
 
 def extract_file_ops_from_message(
     message: AgentMessage,
-    file_ops: FileOperations,
+    file_ops: _FileOpTracker,
     tools: ToolRegistry | None = None,
 ) -> None:
     """Inspect ``message`` for tool calls and route ``path`` arguments into
@@ -163,7 +164,7 @@ def extract_file_ops_from_message(
             file_ops.edited.add(path)
 
 
-def compute_file_lists(file_ops: FileOperations) -> tuple[list[str], list[str]]:
+def compute_file_lists(file_ops: _FileOpTracker) -> tuple[list[str], list[str]]:
     modified = set(file_ops.edited)
     modified.update(file_ops.written)
     read_only = sorted(path for path in file_ops.read if path not in modified)
@@ -286,7 +287,7 @@ class CompactionPreparation:
     covered_through_turn: int
     tokens_before: int
     previous_summary: str | None
-    file_ops: FileOperations = field(default_factory=create_file_ops)
+    file_ops: _FileOpTracker = field(default_factory=create_file_ops)
     settings: CompactionSettings = field(default_factory=CompactionSettings)
 
 

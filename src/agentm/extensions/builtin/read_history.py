@@ -34,6 +34,7 @@ from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 
 
+# Higher than llm_compaction's 8k: the agent explicitly requested this detail.
 _DEFAULT_TOOL_RESULT_MAX_CHARS: Final = 20_000
 _DEFAULT_TOTAL_MAX_CHARS: Final = 200_000
 

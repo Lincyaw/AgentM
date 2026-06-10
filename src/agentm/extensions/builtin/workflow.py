@@ -683,7 +683,8 @@ class _WorkflowRun:
 
         config = AgentSessionConfig(
             cwd=self.cwd_override or self.api.cwd,
-            provider=self.provider_override,  # None = inherit parent's provider
+            # Resolved upfront via MODEL_RESOLVER_SERVICE; None = inherit parent's provider.
+            provider=self.provider_override,
             scenario=scenario or self.default_scenario or self.api.scenario,
             extra_extensions=extensions,
             atom_config_overrides=atom_config_overrides,
@@ -1047,26 +1048,6 @@ def _validate_module(tree: ast.Module) -> list[ScriptIssue]:
 # ---------------------------------------------------------------------------
 # Script execution — exec mode (inline / LLM-generated)
 # ---------------------------------------------------------------------------
-
-
-def _resolve_model_to_provider(
-    model_name: str,
-) -> tuple[str, dict[str, Any]] | None:
-    """Resolve a config.toml profile name to a ``(provider_id, build_config)``
-    tuple suitable for ``AgentSessionConfig.provider``.  Returns ``None`` when
-    the profile is unknown."""
-    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib.user_config import resolve_model_profile
-
-    profile = resolve_model_profile(model_name)
-    if profile is None:
-        return None
-    build_config = profile.to_build_config()
-    provider_id = profile.provider
-    try:
-        return DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
-    except KeyError:
-        return None
 
 
 def _error(message: str) -> ToolResult:
@@ -1510,6 +1491,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         else None
     )
 
+    from agentm.core.abi.roles import MODEL_RESOLVER_SERVICE
+
+    model_resolver = api.get_service(MODEL_RESOLVER_SERVICE)
+
     runner = WorkflowRunner(
         api,
         concurrency=concurrency,
@@ -1535,7 +1520,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         model_arg = args.get("model")
         provider: tuple[str, dict[str, Any]] | None = None
         if isinstance(model_arg, str) and model_arg.strip():
-            provider = _resolve_model_to_provider(model_arg.strip())
+            if model_resolver is None:
+                return _error(
+                    "workflow: model= requires the model_resolver service, "
+                    "but it is not available in this session"
+                )
+            provider = model_resolver(model_arg.strip())
             if provider is None:
                 return _error(f"workflow: unknown model profile '{model_arg}'")
 
