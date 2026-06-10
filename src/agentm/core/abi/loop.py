@@ -41,7 +41,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from .events import (
     AgentEndEvent,
@@ -133,64 +133,37 @@ class LoopConfig:
 # --- Helpers ----------------------------------------------------------------
 
 
-def _collect_replacement(returns: list[Any], key: str) -> Any | None:
-    """Pick the last non-None value of ``key`` from a list of handler returns.
+T = TypeVar("T")
 
-    Handlers on mutating/replaceable channels return either ``None`` (no
-    opinion) or a dict-like object whose entries describe an override
-    decision (e.g. ``{"block": True, "reason": "..."}`` on ``tool_call``,
-    ``{"messages": [...]}`` on ``context``). The "last non-None wins" rule
-    keeps the contract simple: extensions stack, and the most recently
-    registered authoritative voice wins.
-    """
 
+def _last_of(returns: list[Any], typ: type[T]) -> T | None:
+    """Return the last value matching ``typ`` (last-wins scan)."""
+    chosen: T | None = None
+    for value in returns:
+        if isinstance(value, typ):
+            chosen = value
+    return chosen
+
+
+def _last_key(returns: list[Any], key: str) -> Any | None:
+    """Return the last non-None ``returns[i][key]`` from dict returns."""
     chosen: Any | None = None
     for value in returns:
-        if value is None:
-            continue
-        if isinstance(value, dict) and key in value and value[key] is not None:
+        if isinstance(value, dict) and value.get(key) is not None:
             chosen = value[key]
-        elif not isinstance(value, dict) and key == "":
-            # Allow non-dict replacements when key is empty (used for the
-            # ToolResult-replacement case where handlers may return the new
-            # ToolResult directly).
-            chosen = value
     return chosen
 
 
-def _collect_tool_result_replacement(returns: list[Any]) -> ToolResult | None:
-    """Return the last non-None ``ToolResult`` from handler returns."""
-
-    chosen: ToolResult | None = None
-    for value in returns:
-        if isinstance(value, ToolResult):
-            chosen = value
-    return chosen
-
-
-def _collect_context_messages(
-    returns: list[Any],
-) -> list[AgentMessage] | None:
-    """Return the last non-None replacement message list, if any."""
-
+def _last_messages(returns: list[Any]) -> list[AgentMessage] | None:
+    """Return the last replacement message list (bare list or ``{"messages": [...]}``\ )."""
     chosen: list[AgentMessage] | None = None
     for value in returns:
         if isinstance(value, list):
             chosen = value
-        elif isinstance(value, dict) and value.get("messages") is not None:
-            messages = value["messages"]
+        elif isinstance(value, dict):
+            messages = value.get("messages")
             if isinstance(messages, list):
                 chosen = messages
-    return chosen
-
-
-def _collect_error(returns: list[Any]) -> BaseException | None:
-    """Return the last explicit exception object from handler returns."""
-
-    chosen: BaseException | None = None
-    for value in returns:
-        if isinstance(value, BaseException):
-            chosen = value
     return chosen
 
 
@@ -416,7 +389,7 @@ class AgentLoop:
         start_returns = await self._bus.emit(
             AgentStartEvent.CHANNEL, AgentStartEvent(messages=messages)
         )
-        start_error = _collect_error(start_returns)
+        start_error = _last_of(start_returns, BaseException)
         if start_error is not None:
             raise start_error
 
@@ -469,7 +442,7 @@ class AgentLoop:
                 # context event — handlers may rewrite message list
                 ctx_event = ContextEvent(messages=messages)
                 ctx_returns = await self._bus.emit(ContextEvent.CHANNEL, ctx_event)
-                replacement = _collect_context_messages(ctx_returns)
+                replacement = _last_messages(ctx_returns)
                 if replacement is not None:
                     messages = list(replacement)
                 else:
@@ -708,11 +681,11 @@ class AgentLoop:
                 args=dict(tc.arguments),  # mutable copy for handlers
             )
             call_returns = await self._bus.emit(ToolCallEvent.CHANNEL, tc_event)
-            blocked = _collect_replacement(call_returns, "block")
+            blocked = _last_key(call_returns, "block")
             outcome: ToolOutcome
             if blocked:
                 reason = (
-                    _collect_replacement(call_returns, "reason")
+                    _last_key(call_returns, "reason")
                     or "blocked by extension"
                 )
                 outcome = ToolContinue(
@@ -763,7 +736,7 @@ class AgentLoop:
                 result=result,
             )
             res_returns = await self._bus.emit(ToolResultEvent.CHANNEL, res_event)
-            replaced = _collect_tool_result_replacement(res_returns)
+            replaced = _last_of(res_returns, ToolResult)
             final_result = replaced if replaced is not None else res_event.result
 
             # If the result was replaced, propagate the replacement into the
