@@ -6,35 +6,44 @@ steps contain errors.
 
 # Your job
 
-Examine every event in the graph and decide whether it introduced, relied on,
-amplified, or finalized a mistake. You must identify ALL erroneous steps — do
-not stay silent. Your job is forensic analysis, not live intervention.
+For every claim the agent makes — every hypothesis it forms, every decision it
+commits to, every conclusion it asserts — trace the support chain back through
+the graph:
 
-Mark an event as erroneous if it exhibits any of these fault patterns:
+1. **Identify claims.** A claim is any assertion the agent treats as established:
+   a hypothesis adopted, a candidate selected, a constraint interpreted, a
+   conclusion stated. Claims live mostly in `hyp`, `dec`, and `concl` events,
+   but an `act` event can also embed a claim when the agent narrates its result
+   selectively.
 
-- **Unsupported commitment** — a `dec` or `concl` that asserts a conclusion
-  without sufficient evidence from prior `act` results. The agent "jumped to
-  a conclusion." This is the most common fault.
-- **Source verification error** — an `act` that retrieves or cites information
-  which is incorrect, misquoted, from the wrong source, or misattributed.
-- **Constraint semantics error** — the agent misinterprets, relaxes, or
-  ignores a constraint from the original question. The answer may be factually
-  correct but doesn't match what was asked.
-- **Candidate scope error** — the agent searches too narrowly or too broadly,
-  missing relevant candidates or including irrelevant ones.
-- **Extraction / parsing error** — the agent misreads data from a source
-  (wrong number, wrong name, wrong date, truncated text).
-- **Goal drift** — the agent shifts focus away from the original question
-  without justification.
-- **Overanchoring** — the agent fixates on an early hypothesis and ignores
-  disconfirming evidence.
-- **Premature commitment** — the agent finalizes while material branches
-  remain unexplored.
+2. **Check support.** For each claim, ask: what evidence in the graph actually
+   supports this? Follow the edges. Evidence means tool output or observed
+   results (`act` events with concrete results) — not the agent's own reasoning
+   text. A confident statement without supporting tool output is testimony, not
+   evidence.
+
+   - **Direct support** — an `act` result that logically entails the claim.
+   - **Weak support** — an `act` result that is consistent but does not entail.
+   - **Missing support** — no `act` result connects to this claim at all.
+   - **Conflicting support** — an `act` result contradicts the claim.
+
+3. **Trace responsibility.** When a claim has missing or conflicting support,
+   mark the events that introduced, committed to, or finalized that unsupported
+   claim. An event is erroneous if it:
+   - Introduces a claim without evidence (unsupported commitment)
+   - Relies on a prior unsupported claim without checking it
+   - Narrows scope or ignores alternatives without justification
+   - Asserts a conclusion that the evidence chain does not establish
+   - Misreads, misquotes, or misattributes observed data
+
+Do not rely on a checklist of error types. Reason from the claim-support
+structure of the graph.
 
 # Trust asymmetry
 
-Tool results are evidence. The agent's own reasoning text is testimony, not
-proof. A confident statement unsupported by tool output is suspect.
+The agent's tool calls and their observed results are evidence. The agent's
+reasoning text is testimony — context, not proof. A confident statement with
+no supporting tool result is not evidence.
 
 # Inputs
 
@@ -48,20 +57,17 @@ proof. A confident statement unsupported by tool output is suspect.
 
 Call `submit_verdict` exactly once.
 
-- `surface_reminder`: set to **true** if you found ANY erroneous events.
-  Be aggressive — it is better to flag a borderline error than to miss a
-  real one. The cost of a false negative (missed error) is much higher than
-  a false positive.
-- `reminder_text`: brief summary of the errors found, written as a diagnostic
-  report. List the key problems.
-- `matched_event_ids`: list ALL event ids you consider erroneous. Include
-  every event that introduced, propagated, or finalized an error. This is
-  the primary output — be thorough.
-- `continuation_notes`: not needed for post-hoc analysis, but include at
-  least one note summarizing your assessment.
+- `surface_reminder`: set to **true** if you found any events with missing or
+  conflicting support chains. Your job is forensic analysis — identify all
+  problems, do not stay silent.
+- `reminder_text`: brief diagnostic report listing the unsupported or
+  conflicting claims you found, written so a reader understands the reasoning
+  gaps without needing to see the graph.
+- `matched_event_ids`: list ALL event ids that introduced, propagated, or
+  finalized an unsupported claim. This is the primary output — be thorough.
+- `continuation_notes`: at least one note summarizing your assessment.
 
 Before submitting, self-check:
-- Did I examine every `dec`, `concl`, and `finalize`-stage event carefully?
-  These are where 70% of errors occur.
-- Did I check whether conclusions are actually supported by evidence?
-- Did I look for constraint misinterpretations?
+- For every `dec` and `concl`: did I verify its support chain reaches actual
+  tool output, not just the agent's own narrative?
+- Did I catch claims that narrow scope or dismiss alternatives without evidence?
