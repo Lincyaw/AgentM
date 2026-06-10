@@ -58,6 +58,11 @@ from agentm.core.runtime.session_bootstrap import (
     make_default_session_store,
     resolve_session_state,
 )
+
+# Side-effect import: populates the OTel translator registry in
+# ``agentm.core.lib.otel_dispatch``. Must run before any session emits
+# events so the observability atom can dispatch through the registry.
+import agentm.core.runtime.event_otel as _event_otel  # noqa: F401,E402
 __all__ = [
     "AgentSession",
     "ApiRegisterEvent",

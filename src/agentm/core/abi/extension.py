@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from agentm.core.abi import (
     AgentMessage,
@@ -37,14 +37,6 @@ from agentm.core.abi.operations import (
 )
 from agentm.core.abi.project_layout import ProjectLayout
 from agentm.core.abi.resource import ResourceWriter
-
-if TYPE_CHECKING:
-    # Re-exported through ``agentm.core.abi`` for atoms (see
-    # ``agentm.core.abi.__init__``). Importing here under ``TYPE_CHECKING``
-    # keeps the ABI module side-effect-free at import time and preserves
-    # the "abi never imports runtime at runtime" property — the symbol is
-    # used only for type annotations on the Protocol method below.
-    from agentm.core.runtime.otel_export import SessionTelemetry
 
 
 # --- Type aliases ----------------------------------------------------------
@@ -321,17 +313,53 @@ class ExtensionAPI(Protocol):
     def register_tool(self, tool: Tool) -> None: ...
     def register_command(self, name: str, spec: CommandSpec) -> None: ...
     def register_provider(self, name: str, config: ProviderConfig) -> None: ...
-    def has_provider(self, name: str) -> bool: ...
+    def has_provider(self, name: str) -> bool:
+        """Return ``True`` if a provider has already been registered under ``name``.
+
+        Atoms that publish under a dynamic name (e.g. the OpenAI-compatible
+        ``llm_openai`` atom may register as ``"openai"`` / ``"doubao"`` /
+        ``"litellm"`` depending on config) use this to short-circuit duplicate
+        installations cleanly instead of relying on ``LastRegisteredWins``
+        silently shadowing a previous registration.
+        """
+        ...
 
     def register_operations(
         self, *, file: FileOperations, bash: BashOperations
     ) -> None:
-        """Register the session's ``Operations`` bundle (at most once)."""
+        """Register the session's ``Operations`` bundle.
+
+        Must be called at most once before freeze; a second call raises
+        ``KeyError`` (mirroring ``set_service`` semantics for the
+        already-registered case). If no atom calls this by freeze time,
+        ``get_operations()`` will raise — the default scenario manifest
+        is expected to list an atom that registers a bundle (the
+        ``operations`` builtin covers the local-FS / asyncio-bash
+        case).
+        """
         ...
 
     def register_resource_writer(self, writer: ResourceWriter) -> None:
-        """Override the session's ``ResourceWriter`` (at most once)."""
+        """Replace the session's ``ResourceWriter``.
+
+        Must be called at most once before freeze; a second call raises
+        ``KeyError``. Atoms that want to redirect ``write`` /
+        ``edit`` / ``tool_propose_change`` writes to a non-default
+        target (e.g. a sandbox-backed filesystem) call this at install
+        time. If no atom calls it, ``get_resource_writer()`` returns the
+        default :class:`~agentm.core.runtime.resource_writer.GitBackedResourceWriter`
+        the substrate constructed from ``cwd``.
+
+        Implementations must honour the constitution-path refusal contract
+        of :class:`ResourceWriter`. Sandbox-backed writers typically reject
+        every host path (the sandbox cannot see the AgentM tree) and
+        accept only paths inside their managed work-dir.
+        """
         ...
+    def register_message_renderer(
+        self, custom_type: str, renderer: Renderer
+    ) -> None: ...
+    def register_tool_renderer(self, tool_name: str, renderer: Renderer) -> None: ...
 
     # --- Actions ------------------------------------------------------------
     def post_inbox(
@@ -342,22 +370,64 @@ class ExtensionAPI(Protocol):
         dedup_key: str | None = None,
         terminal: bool = False,
     ) -> None:
-        """Push an item onto the session inbox for the next turn.
+        """Push an item onto the session inbox — the generic producer entry.
 
-        ``source`` routes rendering; ``dedup_key`` replaces an earlier
-        same-key item; ``terminal=True`` stops the loop after delivery.
+        ``source`` is the mechanism-level routing tag (``"user"`` /
+        ``"background"`` / ``"ticker"`` / ``"monitor"`` / ``"subagent"``) that
+        decides how the item is rendered at the next turn boundary (see
+        ``SessionInbox.render_item``). ``payload`` is rendered per ``source``.
+        A producer that supersedes its own prior, not-yet-drained item passes a
+        stable ``dedup_key``: a later push with the same key replaces the
+        earlier item in place rather than stacking (e.g. a background ticker's
+        rolling status line).
+
+        ``terminal=True`` carries a *terminate intent* into the loop (#177): a
+        backgrounded tool whose detached completion is a
+        :class:`ToolTerminate` posts with ``terminal=True`` so the runtime stops
+        the loop (``ToolTerminated``) once the item is delivered, rather than
+        keeping the agent alive on the non-empty inbox. The message still lands
+        in the conversation first.
+
+        :meth:`send_user_message` is the ``source="user"`` sugar over this; new
+        producers (``background_exec``, ``monitor``, the future ``sub_agent``
+        rewrite) post through ``post_inbox`` directly. See
+        ``.claude/designs/session-inbox.md`` (step-3 design decisions).
         """
         ...
 
     def track_background(self) -> AbstractContextManager[None]:
-        """Context manager that keeps the session non-idle while a background unit runs."""
+        """Bracket a detached background unit so the host can wait it out (#179).
+
+        A producer that runs work in an ``asyncio.Task`` outliving the agent's
+        turn (auto-backgrounded tools, child subagent sessions) wraps the unit's
+        lifetime in this context manager::
+
+            with api.track_background():
+                await self._watch(state, task)
+
+        While any tracked unit is live the session is **not idle**: a one-shot
+        host (``agentm -p``) blocks in :meth:`AgentSession.idle` until every
+        tracked unit finishes, so a late completion is never dropped for lack of
+        an event loop. Recurring signals (monitor wakeups / condition polls /
+        tickers) deliberately do NOT track — they are not work to drain before
+        exit and would keep a one-shot host alive forever. The pairing is
+        structural (``__exit__`` always decrements), so an exception in the unit
+        cannot leak the count.
+        """
         ...
 
     def send_user_message(self, content: str | list[Any]) -> None: ...
     async def spawn_child_session(
         self, config: Any | None = None, **kwargs: Any
     ) -> Any:
-        """Create a child ``AgentSession`` inheriting this session's context."""
+        """Create a nested ``AgentSession`` rooted at this one.
+
+        ``config`` is an ``AgentSessionConfig`` (typed ``Any`` here to avoid
+        pulling ``agentm.core.runtime.session`` into the §11 import allow-list).
+        The runtime fills in ``parent_bus`` and ``parent_session_id`` from
+        the current session — caller-supplied values for those fields are
+        ignored. Returns the constructed child session.
+        """
         ...
 
     def set_service(self, name: str, obj: Any) -> None: ...
@@ -380,7 +450,29 @@ class ExtensionAPI(Protocol):
         rationale: str | None = None,
         agent_initiated: bool = True,
     ) -> InstallAtomResult:
-        """Install a new atom into the running session."""
+        """Install a brand-new atom into the running session.
+
+        ``name`` becomes the atom's ``MANIFEST.name`` (must agree); ``source``
+        is the full module text. ``target_path`` is filesystem path (relative
+        to ``cwd`` or absolute) where the source will be written through
+        ``ResourceWriter`` so it lands as a git commit. When omitted the
+        runtime writes to ``<cwd>/.agentm/atoms/<name>.py`` so agent-installed
+        atoms are isolated from the framework's builtin tree.
+
+        Hard rejections (return ``ok=False`` with an explanatory ``error``):
+
+        - ``target_path`` is in the constitution
+        - an atom with ``name`` is already loaded
+        - the source fails the §11 single-file extension validator
+        - ``MANIFEST.tier == 2``: agent-installed atoms cannot ship at
+          tier 2; promotion requires human review (separate flow)
+
+        Successful installs emit ``ExtensionInstallEvent`` (phase=start/end)
+        with ``trigger="agent"`` (or ``"propose_change_approved"`` when the
+        request flows through the future approval gate). The atom appears
+        in ``api.list_atoms()`` immediately and its registrations are
+        active for the next bus event.
+        """
         ...
 
     def unload_atom(
@@ -389,13 +481,51 @@ class ExtensionAPI(Protocol):
         *,
         agent_initiated: bool = True,
     ) -> UnloadAtomResult:
-        """Remove an atom from the running session (on-disk files untouched)."""
+        """Remove an installed atom from the running session.
+
+        The on-disk file and git history are untouched; only the live
+        session forgets the atom. Reverse of ``install_atom``: removes
+        every handler/tool/command/renderer the atom registered, drops
+        its module from ``sys.modules``, marks its captured ``ExtensionAPI``
+        as stale, and fires ``ExtensionUnloadEvent``.
+
+        Refused (with ``ok=False``):
+
+        - ``name`` not loaded
+        - the atom is the active provider (would leave the loop without
+          ``stream_fn``)
+        - the atom's source is in the constitution layer
+        """
         ...
 
+    def freeze_current(self, name: str) -> str: ...
     def list_atoms(self) -> list[AtomInfo]: ...
+    def is_constitution_path(self, path: str) -> bool: ...
     def get_resource_writer(self) -> ResourceWriter: ...
-    def get_session_telemetry(self) -> SessionTelemetry:
-        """Return this session's :class:`SessionTelemetry` (lazily constructed)."""
+    def get_session_telemetry(self) -> Any:
+        """Return this session's :class:`SessionTelemetry` handle.
+
+        The handle bundles per-session OTel ``Tracer`` and ``Logger``
+        instances configured to write OTLP/JSON ``ResourceSpans`` /
+        ``ResourceLogs`` ndjson into
+        ``<cwd>/.agentm/observability/<session_id>.jsonl`` — the single
+        event log of ``.claude/designs/single-event-log.md``. Atoms that
+        want to emit spans / log records (notably the ``observability``
+        atom) acquire it once at install time and capture
+        ``telemetry.tracer`` / ``telemetry.logger`` in handler closures.
+
+        The substrate lazily constructs the handle on first call (so tests
+        and sessions that never observe pay no SDK setup cost) and wires
+        its :meth:`SessionTelemetry.shutdown` into ``SessionShutdownEvent``
+        so the batch processors drain cleanly when the session ends.
+        Atoms therefore never call ``shutdown`` themselves.
+
+        ``SessionTelemetry`` is the public ABI surface; the construction
+        details (file exporters, blocking batch processors) live in
+        :mod:`agentm.core.runtime.otel_export` per the standard
+        service-facade convention (cf. :meth:`get_operations` /
+        :meth:`get_resource_writer`).
+        """
         ...
 
     # --- Read-only context --------------------------------------------------
@@ -403,23 +533,59 @@ class ExtensionAPI(Protocol):
     def cwd(self) -> str: ...
     @property
     def session_id(self) -> str:
-        """OTel span_id (16 hex) for this session."""
+        """This session's OTel ``span_id`` — 8 bytes / 16 hex chars.
+        Always set; identifies the *session-root span* inside the trace.
+        The observability sink uses it as the JSONL filename so each
+        session lands in ``.agentm/observability/<session_id>.jsonl``.
+        Cross-process embedders that already maintain an OTel span id
+        can supply it on :class:`AgentSessionConfig.session_id`."""
         ...
     @property
     def root_session_id(self) -> str:
-        """OTel trace_id (32 hex) shared across the agent tree."""
+        """The OTel ``trace_id`` — 16 bytes / 32 hex chars — shared
+        across the whole agent tree (this session + every transitive
+        child). The observability sink stamps it as the ``trace_id``
+        field of every event line so a single ``trace_id =`` filter
+        recovers the entire trace regardless of which JSONL file each
+        span lives in. For a session with no parent the substrate
+        generates a fresh trace_id; for spawned children it inherits
+        from the parent verbatim."""
         ...
     @property
     def parent_session_id(self) -> str | None:
-        """Parent's session_id, or ``None`` for root sessions."""
+        """``None`` for root sessions; the parent's ``session_id`` for
+        any session created via :meth:`spawn_child_session` — the OTel
+        ``parent_span_id`` of this session-root span. Surfaced so that
+        atoms (notably the observability sink) can chain spans across
+        sessions without an external mapping table."""
         ...
     @property
-    def purpose(self) -> str: ...
+    def purpose(self) -> str:
+        """Caller-defined label from :class:`AgentSessionConfig.purpose`,
+        defaulting to ``"root"``. Used by the observability sink and any
+        atom that needs to discriminate parent vs spawned child sessions
+        (e.g. ``cognitive_audit_extractor`` / ``cognitive_audit_auditor``)
+        without inferring it from the loaded module list."""
+        ...
     @property
-    def scenario(self) -> str | None: ...
+    def scenario(self) -> str | None:
+        """Scenario name from :class:`AgentSessionConfig.scenario` (e.g.
+        ``"rca:harness.sync"``), or ``None`` when atoms were assembled
+        directly without going through a manifest. Exposed so the
+        observability sink can stamp it onto ``session.start`` and the
+        fingerprint span — otherwise the trace file gives no in-band
+        signal of which scenario produced it."""
+        ...
     @property
     def tools(self) -> list[Tool]:
-        """Live mutable tool list; same reference every call."""
+        """The live tool-catalog list for the session.
+
+        Returns the same list reference every call — mutations (append,
+        replace by index, ``tools[:] = kept``) are visible to the kernel
+        and to other extensions on subsequent turns. Atoms that need to
+        unregister or wrap registered tools (``tool_filter``,
+        ``file_mutation_queue``) rely on this contract.
+        """
         ...
 
     @property
@@ -432,7 +598,15 @@ class ExtensionAPI(Protocol):
     def events(self) -> EventBus: ...
 
     # --- Service facades ----------------------------------------------------
-    def get_operations(self) -> Operations: ...
+    def get_operations(self) -> Operations:
+        """Return the active ``Operations`` bundle for this session.
+
+        An atom must have called :meth:`register_operations` before
+        ``get_operations`` is invoked (the default scenario lists the
+        ``operations`` atom which does this at install time). If
+        no bundle has been registered, this raises ``RuntimeError``.
+        """
+        ...
 
     def get_project_layout(self) -> ProjectLayout: ...
     @property

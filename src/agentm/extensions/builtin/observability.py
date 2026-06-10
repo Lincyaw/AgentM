@@ -40,11 +40,11 @@ from agentm.core.abi import (
     EventBusObserver,
     LlmRequestEndEvent,
     LlmRequestStartEvent,
-    SessionTelemetry,
     StreamDeltaEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
+from agentm.core.lib.otel_dispatch import dispatch_otel
 from agentm.core.abi.catalog import ActiveSetFingerprint
 from agentm.core.abi.events import (
     AgentEndEvent,
@@ -228,7 +228,7 @@ def _deep_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
 
 
 def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
-    telemetry: SessionTelemetry = api.get_session_telemetry()
+    telemetry: Any = api.get_session_telemetry()
 
     include_handlers = config.include_handler_records
     include_diff = config.include_mutation_diff
@@ -524,13 +524,7 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
     # land on the wire by adding their channel to ``_TO_OTEL_CHANNELS``.
 
     def _dispatch_to_otel(event: Event) -> None:
-        # Defensive: a malformed atom could emit a non-Event payload on a
-        # typed channel; falling back to a no-op keeps the bus contract
-        # (failures isolated) intact.
-        translator = getattr(event, "to_otel", None)
-        if translator is None:
-            return
-        translator(telemetry)
+        dispatch_otel(event, telemetry)
 
     for channel in _TO_OTEL_CHANNELS:
         api.on(channel, _dispatch_to_otel)

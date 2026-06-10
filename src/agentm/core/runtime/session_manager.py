@@ -37,7 +37,7 @@ from agentm.core.runtime.trace_reader import TraceReader
 from opentelemetry._logs import SeverityNumber
 
 if TYPE_CHECKING:
-    from agentm.core.abi.events import EventBus
+    from agentm.core.abi.bus import EventBus
 
 
 def _new_id() -> str:

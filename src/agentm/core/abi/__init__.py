@@ -5,29 +5,28 @@ Public surface for the kernel layer described in
 considered stable API for higher layers (runtime, scenarios, presenters).
 
 The ABI is the type/Protocol foundation the other layers depend on. Its own
-submodules import only stdlib; the package ``__init__`` additionally
-re-exports a few concrete service *types* from ``core/_internal/`` and
-``core/runtime/`` — ``FunctionTool``, ``SessionTelemetry``, ``TraceReader``
-(+ its view dataclasses) — so atoms can name them for annotation without
-importing ``agentm.core.runtime.*`` directly (the §11 atom contract forbids
-that). Where the substrate owns the instance lifecycle (e.g.
-``SessionTelemetry`` via ``api.get_session_telemetry()``), import the type to
-annotate and obtain the live instance through ``ExtensionAPI`` — do not
-construct it yourself. These re-exports stay within the recovery floor
-(``core/abi`` + ``core/lib`` + ``core/runtime`` + stdlib), so they do not
-weaken it.
+submodules import only stdlib + ``lib/``; the package ``__init__`` re-exports
+concrete types so atoms can name them for annotation without importing
+``agentm.core.runtime.*`` directly (the §11 atom contract forbids that).
 
 It exposes:
 
 - Message data model (``messages``)
 - Bare tool contract (``tool``)
-- Event bus + typed events (``events``)
+- Event bus + typed events (``events`` + ``bus``)
 - LLM stream boundary (``stream``)
 - The minimal :class:`AgentLoop` (``loop``)
 """
 
 from __future__ import annotations
 
+from .bus import (
+    EventBus,
+    EventBusObserver,
+    Handler,
+    ObserverCallback,
+    ObserverRegistration,
+)
 from .events import (
     AgentEndEvent,
     AgentStartEvent,
@@ -37,11 +36,6 @@ from .events import (
     ContextEvent,
     DecideTurnActionEvent,
     Event,
-    EventBus,
-    EventBusObserver,
-    Handler,
-    ObserverCallback,
-    ObserverRegistration,
     Inject,
     LlmRequestEndEvent,
     LlmRequestStartEvent,
@@ -107,32 +101,18 @@ from .termination import (
     ToolUseExpected,
     VendorSpecific,
 )
-from .tool import Tool, ToolContinue, ToolOutcome, ToolResult, ToolTerminate
+from .tool import FunctionTool, Tool, ToolContinue, ToolOutcome, ToolResult, ToolTerminate
 
-from agentm.core._internal.tools import FunctionTool  # noqa: E402
-
-# Lazy re-exports from runtime (break circular import chain).
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from agentm.core.runtime.otel_export import SessionTelemetry as SessionTelemetry
-    from agentm.core.runtime.trace_reader import (
-        LogRecord as LogRecord,
-        SessionIdentity as SessionIdentity,
-        Span as Span,
-        TraceReader as TraceReader,
-        attr as attr,
-    )
-
-
-def __getattr__(name: str) -> object:
-    if name == "SessionTelemetry":
-        from agentm.core.runtime.otel_export import SessionTelemetry
-        return SessionTelemetry
-    if name in ("LogRecord", "SessionIdentity", "Span", "TraceReader", "attr"):
-        from agentm.core.runtime import trace_reader as _tr
-        return getattr(_tr, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+# ``TraceReader`` is the canonical reader API for the OTLP/JSON event log.
+# It now lives in ``lib/trace_reader`` (no runtime dependency); re-exported
+# here so atoms can ``from agentm.core.abi import TraceReader`` per §11.
+from agentm.core.lib.trace_reader import (  # noqa: E402
+    LogRecord,
+    SessionIdentity,
+    Span,
+    TraceReader,
+    attr,
+)
 
 __all__ = [
     "Aborted", "AgentEndEvent", "AgentLoop", "AgentMessage", "AgentStartEvent",
@@ -151,7 +131,7 @@ __all__ = [
     "ProviderManifest", "ProviderProtocolViolation", "ProviderResolver",
     "ProviderTruncated",
     "RetryPolicy",
-    "SessionIdentity", "SessionState", "SessionStore", "SessionTelemetry",
+    "SessionIdentity", "SessionState", "SessionStore",
     "SignalAborted", "Span", "Step", "Stop", "StreamDeltaEvent", "StreamFn",
     "TerminationCause", "TerminationHint",
     "TextContent", "TextDelta", "ThinkingBlock", "ThinkingDelta",
