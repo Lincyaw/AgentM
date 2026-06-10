@@ -12,10 +12,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from ..runtime.triggers import SERVICE_KEY, TriggerContext, TriggerDecision, TriggerRegistry
+
+class TriggerCadenceConfig(BaseModel):
+    interval: int = Field(default=5, ge=1)
+
 
 MANIFEST = ExtensionManifest(
     name="trigger_cadence",
@@ -24,13 +30,7 @@ MANIFEST = ExtensionManifest(
         "Registers itself via the llmharness.audit_triggers service."
     ),
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "interval": {"type": "integer", "minimum": 1, "default": 5},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=TriggerCadenceConfig,
     api_version=1,
     tier=1,
 )
@@ -55,9 +55,9 @@ class _CadenceTrigger:
         return TriggerDecision(fire=False)
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: TriggerCadenceConfig) -> None:
     """Register the cadence trigger on the parent trigger registry."""
-    interval = int(config.get("interval", _DEFAULT_INTERVAL))
+    interval = config.interval
     registry = api.get_service(SERVICE_KEY)
     if not isinstance(registry, TriggerRegistry):
         raise RuntimeError(

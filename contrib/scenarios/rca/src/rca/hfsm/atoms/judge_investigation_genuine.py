@@ -62,6 +62,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
@@ -94,6 +96,18 @@ _PROMPT_RELPATH = f"contrib/scenarios/rca/prompts/hfsm/judges/{_KIND}.md"
 _LRU_MAX = 256
 
 
+class _ScriptedVerdict(BaseModel):
+    verdict: str
+    reason: str
+    confidence: str
+
+
+class JudgeInvestigationGenuineConfig(BaseModel):
+    mode: str = "llm"
+    model: str | None = None
+    scripted: list[_ScriptedVerdict] = []
+
+
 MANIFEST = ExtensionManifest(
     name="judge_investigation_genuine",
     description=(
@@ -103,26 +117,7 @@ MANIFEST = ExtensionManifest(
         "(zero symptoms, zero hypotheses, zero supporting checks)."
     ),
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "mode": {"type": "string", "enum": ["llm", "stub"]},
-            "model": {"type": "string"},
-            "scripted": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "verdict": {"type": "string"},
-                        "reason": {"type": "string"},
-                        "confidence": {"type": "string"},
-                    },
-                    "required": ["verdict", "reason", "confidence"],
-                },
-            },
-        },
-        "additionalProperties": False,
-    },
+    config_schema=JudgeInvestigationGenuineConfig,
     requires=(),
 )
 
@@ -316,21 +311,18 @@ class _LlmJudge:
         )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    mode = str(config.get("mode", "llm")).lower()
+def install(api: ExtensionAPI, config: JudgeInvestigationGenuineConfig) -> None:
+    mode = config.mode.lower()
     if mode not in {"llm", "stub"}:
         raise ValueError(
             f"judge_{_KIND}: config.mode must be 'llm' or 'stub'; got {mode!r}"
         )
     impl: Any
     if mode == "stub":
-        scripted = config.get("scripted", []) or []
-        if not isinstance(scripted, list):
-            raise ValueError(f"judge_{_KIND}: config.scripted must be a list")
-        impl = _StubJudge(kind=_KIND, scripted=scripted)
+        impl = _StubJudge(
+            kind=_KIND,
+            scripted=[v.model_dump() for v in config.scripted],
+        )
     else:
-        model_override = config.get("model")
-        if model_override is not None and not isinstance(model_override, str):
-            raise ValueError(f"judge_{_KIND}: config.model must be a string when set")
-        impl = _LlmJudge(kind=_KIND, api=api, model_override=model_override)
+        impl = _LlmJudge(kind=_KIND, api=api, model_override=config.model)
     api.set_service(_SERVICE_NAME, impl)

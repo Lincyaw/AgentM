@@ -18,11 +18,18 @@ parity-locked ``rca:baseline`` does not load this atom.
 from __future__ import annotations
 
 import os
-from typing import Any
+
+from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
+
+
+class RuntimeContextConfig(BaseModel):
+    # Override the env-derived path. Useful in tests or when the
+    # case dir is not driven by AGENTM_RCA_DATA_DIR.
+    data_dir: str | None = None
 
 
 MANIFEST = ExtensionManifest(
@@ -32,15 +39,7 @@ MANIFEST = ExtensionManifest(
         "resolution rule) to the system prompt."
     ),
     registers=(f"event:{BeforeAgentStartEvent.CHANNEL}",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            # Override the env-derived path. Useful in tests or when the
-            # case dir is not driven by AGENTM_RCA_DATA_DIR.
-            "data_dir": {"type": "string"},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=RuntimeContextConfig,
     # tier defaults to 1: out-of-tree atom; see prompt_loader.py for the rationale.
 )
 
@@ -60,11 +59,8 @@ def _build_block(data_dir: str) -> str:
     )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    configured = config.get("data_dir")
-    data_dir_override = (
-        configured.strip() if isinstance(configured, str) and configured.strip() else None
-    )
+def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:
+    data_dir_override = config.data_dir.strip() if config.data_dir else None
 
     def _inject(event: BeforeAgentStartEvent) -> dict[str, str] | None:
         data_dir = data_dir_override or os.environ.get("AGENTM_RCA_DATA_DIR", "").strip()

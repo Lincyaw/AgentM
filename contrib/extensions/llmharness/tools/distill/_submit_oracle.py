@@ -12,9 +12,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+
+class DistillSubmitOracleConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
 
 MANIFEST = ExtensionManifest(
     name="distill_submit_oracle",
@@ -23,11 +29,7 @@ MANIFEST = ExtensionManifest(
         "GT-aware oracle child of the distill labeler."
     ),
     registers=("tool:submit_oracle_label",),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": True,
-    },
+    config_schema=DistillSubmitOracleConfig,
     api_version=1,
     tier=1,
 )
@@ -74,8 +76,7 @@ SUBMIT_ORACLE_PARAMETERS: dict[str, Any] = {
 }
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    del config
+def install(api: ExtensionAPI, config: DistillSubmitOracleConfig) -> None:
 
     async def _submit(args: dict[str, Any]) -> ToolTerminate:
         del args

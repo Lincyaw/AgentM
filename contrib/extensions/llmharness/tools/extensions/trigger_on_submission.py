@@ -12,10 +12,18 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from ..runtime.triggers import SERVICE_KEY, TriggerContext, TriggerDecision, TriggerRegistry
+
+class TriggerOnSubmissionConfig(BaseModel):
+    tool_names: list[str] = Field(
+        default=["submit_final_report", "submit_investigation"],
+    )
+
 
 MANIFEST = ExtensionManifest(
     name="trigger_on_submission",
@@ -25,17 +33,7 @@ MANIFEST = ExtensionManifest(
         "Registers itself via the llmharness.audit_triggers service."
     ),
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "tool_names": {
-                "type": "array",
-                "items": {"type": "string"},
-                "default": ["submit_final_report", "submit_investigation"],
-            },
-        },
-        "additionalProperties": False,
-    },
+    config_schema=TriggerOnSubmissionConfig,
     api_version=1,
     tier=1,
 )
@@ -62,13 +60,9 @@ class _OnSubmissionTrigger:
         return TriggerDecision(fire=False)
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: TriggerOnSubmissionConfig) -> None:
     """Register the on-submission trigger on the parent trigger registry."""
-    raw_names = config.get("tool_names")
-    if isinstance(raw_names, list):
-        tool_names = frozenset(str(n) for n in raw_names if isinstance(n, str) and n)
-    else:
-        tool_names = frozenset(_DEFAULT_TOOL_NAMES)
+    tool_names = frozenset(n for n in config.tool_names if n)
     registry = api.get_service(SERVICE_KEY)
     if not isinstance(registry, TriggerRegistry):
         raise RuntimeError(

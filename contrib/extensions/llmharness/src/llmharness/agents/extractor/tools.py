@@ -1268,7 +1268,7 @@ _BUILDERS = [
 ]
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: ExtractorToolsConfig) -> None:
     from .context import STATE_SERVICE_KEY as _CTX_KEY
 
     state = api.get_service(_CTX_KEY)

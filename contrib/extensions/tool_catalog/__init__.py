@@ -12,14 +12,16 @@ from typing import Any
 from agentm.core.abi.extension import ExtensionAPI
 
 from .browse import MANIFEST as BROWSE_MANIFEST
+from .browse import ToolCatalogBrowseConfig
 from .browse import install as install_browse
 from .mutate import MANIFEST as MUTATE_MANIFEST
+from .mutate import ToolCatalogMutateConfig
 from .mutate import install as install_mutate
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    install_browse(api, config)
-    install_mutate(api, config)
+    install_browse(api, ToolCatalogBrowseConfig.model_validate(config))
+    install_mutate(api, ToolCatalogMutateConfig.model_validate(config))
 
 
 __all__ = [

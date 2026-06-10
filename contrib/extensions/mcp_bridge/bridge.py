@@ -26,34 +26,30 @@ from .client import (
     consume_test_session_factory,
     parse_server_spec,
 )
+from .manifest import MCPBridgeConfig
 from .tool import MCPTool
 
 
 _DEFAULT_NAMING = "mcp__{server}__{tool}"
 
 
-async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+async def install(api: ExtensionAPI, config: MCPBridgeConfig) -> None:
     """Connect, snapshot, register. Async per design §4.2."""
 
-    servers_raw = config.get("servers")
-    if not isinstance(servers_raw, list) or not servers_raw:
-        raise ValueError(
-            "mcp_bridge: 'servers' must be a non-empty list of server "
-            "specifications"
-        )
     # Parse first; consume the test seam only on the path where it is
     # actually used. Previously ``consume_test_session_factory`` ran
     # before ``parse_server_spec`` — a malformed spec would silently
     # drain the factory and the next ``install()`` would get nothing.
-    specs: list[ServerSpec] = [parse_server_spec(s) for s in servers_raw]
+    specs: list[ServerSpec] = [
+        parse_server_spec(s.model_dump(exclude_none=True)) for s in config.servers
+    ]
 
-    naming_template = str(config.get("naming") or _DEFAULT_NAMING)
-    timeout_seconds = config.get("timeout_seconds")
+    naming_template = config.naming or _DEFAULT_NAMING
     timeout: float | None
-    if timeout_seconds is None:
+    if config.timeout_seconds is None:
         timeout = 30.0
     else:
-        timeout = float(timeout_seconds)
+        timeout = config.timeout_seconds
 
     # Module-level test hook (single-shot, consumed here). Production
     # callers never set this; the public config schema rejects it.

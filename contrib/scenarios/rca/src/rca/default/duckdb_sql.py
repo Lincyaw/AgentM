@@ -63,30 +63,30 @@ from typing import Any
 
 import duckdb  # type: ignore[import-not-found,import-untyped]
 
+from pydantic import BaseModel
+
 from agentm.core.abi.messages import TextContent
 from agentm.core.abi import FunctionTool, ToolResult
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 
+class DuckdbSqlConfig(BaseModel):
+    data_dir: str | None = None
+    endpoint: str | None = None
+    bucket: str | None = None
+    dataset: str | None = None
+    prefix: str | None = None
+    keys: list[str] | None = None
+    exclude: list[str] = []
+    row_limit: int | None = None
+    token_limit: int | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="duckdb_sql",
     description="DuckDB SQL access to parquet files for RCA investigation.",
     registers=("tool:list_tables", "tool:query_sql"),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "data_dir": {"type": "string"},
-            "endpoint": {"type": "string"},
-            "bucket": {"type": "string"},
-            "dataset": {"type": "string"},
-            "prefix": {"type": "string"},
-            "keys": {"type": "array", "items": {"type": "string"}},
-            "exclude": {"type": "array", "items": {"type": "string"}},
-            "row_limit": {"type": "integer", "minimum": 1},
-            "token_limit": {"type": "integer", "minimum": 100},
-        },
-        "additionalProperties": False,
-    },
+    config_schema=DuckdbSqlConfig,
 )
 
 _WRITE_KEYWORDS = re.compile(
@@ -316,8 +316,8 @@ class _DuckDBState:
         return result
 
 
-def _resolve_data_dir(config: dict[str, Any]) -> Path:
-    raw = config.get("data_dir") or os.environ.get("AGENTM_RCA_DATA_DIR")
+def _resolve_data_dir(config: DuckdbSqlConfig) -> Path:
+    raw = config.data_dir or os.environ.get("AGENTM_RCA_DATA_DIR")
     if not raw:
         raise ValueError(
             "duckdb_sql requires config.data_dir or AGENTM_RCA_DATA_DIR env var"
@@ -481,25 +481,24 @@ class _RemoteState:
         return _scrub(text, self._secrets)
 
 
-def _resolve_remote(config: dict[str, Any]) -> _RemoteState | None:
+def _resolve_remote(config: DuckdbSqlConfig) -> _RemoteState | None:
     """Build a ``_RemoteState`` iff an endpoint is configured, else ``None``.
 
     ``None`` means local mode — the caller falls back to ``data_dir``
     resolution exactly as before.
     """
-    endpoint = config.get("endpoint") or os.environ.get("AGENTM_DUCKDB_ENDPOINT")
+    endpoint = config.endpoint or os.environ.get("AGENTM_DUCKDB_ENDPOINT")
     if not endpoint:
         return None
-    bucket = config.get("bucket") or os.environ.get("AGENTM_DUCKDB_BUCKET")
+    bucket = config.bucket or os.environ.get("AGENTM_DUCKDB_BUCKET")
     if not bucket:
         raise ValueError(
             "remote duckdb_sql requires config.bucket or AGENTM_DUCKDB_BUCKET"
         )
-    keys_raw = config.get("keys")
-    keys = [str(k) for k in keys_raw] if keys_raw else None
+    keys = list(config.keys) if config.keys else None
     prefix = (
-        config.get("prefix")
-        or config.get("dataset")
+        config.prefix
+        or config.dataset
         or os.environ.get("AGENTM_DUCKDB_DATASET")
     )
     if keys is None and prefix is None:
@@ -513,19 +512,19 @@ def _resolve_remote(config: dict[str, Any]) -> _RemoteState | None:
         prefix=str(prefix) if prefix is not None else None,
         keys=keys,
         token=os.environ.get("AGENTM_DUCKDB_TOKEN"),
-        row_limit=int(config.get("row_limit") or _DEFAULT_ROW_LIMIT),
-        token_limit=int(config.get("token_limit") or _DEFAULT_TOKEN_LIMIT),
+        row_limit=config.row_limit or _DEFAULT_ROW_LIMIT,
+        token_limit=config.token_limit or _DEFAULT_TOKEN_LIMIT,
     )
 
 
 def _build_local_handlers(
-    config: dict[str, Any],
+    config: DuckdbSqlConfig,
 ) -> tuple[Any, Any]:
     state = _DuckDBState(
         data_dir=_resolve_data_dir(config),
-        exclude=set(config.get("exclude") or []),
-        row_limit=int(config.get("row_limit") or _DEFAULT_ROW_LIMIT),
-        token_limit=int(config.get("token_limit") or _DEFAULT_TOKEN_LIMIT),
+        exclude=set(config.exclude),
+        row_limit=config.row_limit or _DEFAULT_ROW_LIMIT,
+        token_limit=config.token_limit or _DEFAULT_TOKEN_LIMIT,
     )
 
     async def _list(_: dict[str, Any]) -> ToolResult:
@@ -708,7 +707,7 @@ def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
     return _list, _query
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: DuckdbSqlConfig) -> None:
     remote = _resolve_remote(config)
     if remote is not None:
         _list, _query = _build_remote_handlers(remote)

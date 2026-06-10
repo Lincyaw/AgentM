@@ -33,6 +33,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import (
     DecideTurnActionEvent,
     Inject,
@@ -49,6 +51,10 @@ from agentm.core.abi import (
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 
+class FinalizeConfig(BaseModel):
+    continuation_instruction: str | None = None
+
+
 MANIFEST = ExtensionManifest(
     name="finalize",
     description=(
@@ -56,6 +62,7 @@ MANIFEST = ExtensionManifest(
         "to end the investigation. Otherwise the loop continues."
     ),
     registers=("tool:submit_final_report",),
+    config_schema=FinalizeConfig,
 )
 
 
@@ -80,16 +87,14 @@ class _State:
     submitted: bool = False
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
     # Imported lazily so ``import rca.finalize`` does not
     # require rcabench-platform at module-load time (e.g. for static
     # analysis or tooling without the SDK installed).
     from rcabench_platform.v3.sdk.evaluation.v2 import AgentRCAOutput
 
     state = _State()
-    instruction = str(
-        config.get("continuation_instruction") or _DEFAULT_INSTRUCTION
-    )
+    instruction = config.continuation_instruction or _DEFAULT_INSTRUCTION
 
     async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:
         try:

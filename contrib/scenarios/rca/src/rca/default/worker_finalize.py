@@ -33,6 +33,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi import (
     DecideTurnActionEvent,
     Inject,
@@ -47,6 +49,15 @@ from agentm.core.abi import (
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 
+_DEFAULT_WARN_THRESHOLD = 0.6
+_DEFAULT_FORCE_THRESHOLD = 0.85
+
+
+class WorkerFinalizeConfig(BaseModel):
+    warn_threshold: float = _DEFAULT_WARN_THRESHOLD
+    force_threshold: float = _DEFAULT_FORCE_THRESHOLD
+
+
 MANIFEST = ExtensionManifest(
     name="worker_finalize",
     description=(
@@ -56,11 +67,8 @@ MANIFEST = ExtensionManifest(
         "tools until their budget runs out and emit no summary."
     ),
     registers=("tool:return_response",),
+    config_schema=WorkerFinalizeConfig,
 )
-
-
-_DEFAULT_WARN_THRESHOLD = 0.6
-_DEFAULT_FORCE_THRESHOLD = 0.85
 
 
 @dataclass
@@ -70,14 +78,10 @@ class _State:
     forced: bool = False
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: WorkerFinalizeConfig) -> None:
     state = _State()
-    warn_threshold = float(
-        config.get("warn_threshold", _DEFAULT_WARN_THRESHOLD)
-    )
-    force_threshold = float(
-        config.get("force_threshold", _DEFAULT_FORCE_THRESHOLD)
-    )
+    warn_threshold = config.warn_threshold
+    force_threshold = config.force_threshold
 
     async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:
         text = args.get("text")

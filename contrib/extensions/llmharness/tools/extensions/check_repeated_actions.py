@@ -20,11 +20,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from ..runtime.registry import SERVICE_KEY, AuditCheckRegistry, CheckContext
 from ..schema import EventKind, Finding
+
+class CheckRepeatedActionsConfig(BaseModel):
+    model_config = {"extra": "allow"}
+
 
 MANIFEST = ExtensionManifest(
     name="check_repeated_actions",
@@ -34,11 +40,7 @@ MANIFEST = ExtensionManifest(
         "via the llmharness.audit_registry service."
     ),
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": True,
-    },
+    config_schema=CheckRepeatedActionsConfig,
     api_version=1,
     tier=1,
 )
@@ -80,10 +82,8 @@ class _RepeatedActionsCheck:
         return findings
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: CheckRepeatedActionsConfig) -> None:
     """Register the repeated-actions check on the parent audit registry."""
-
-    del config  # no configuration knobs
     registry = api.get_service(SERVICE_KEY)
     if not isinstance(registry, AuditCheckRegistry):
         raise RuntimeError(
