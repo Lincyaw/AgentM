@@ -35,13 +35,9 @@ from pydantic import BaseModel
 
 from . import schema as _et
 from .agents import auditor_scenario, extractor_scenario
-from .agents.auditor.tools import (
-    SUBMIT_VERDICT_TOOL_NAME,
-    AuditorOutputError,
-    RawVerdictOutput,
-)
+from .agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
 from .agents.extractor.tools import GraphOp, parse_op
-from .schema import Edge, Event, Phase, Reminder
+from .schema import Edge, Event, Phase, Reminder, Verdict
 
 
 class ProviderConfig(BaseModel):
@@ -59,8 +55,6 @@ class LLMHarnessConfig(BaseModel):
     prompt_override_auditor: str | None = None
     extractor_prompt: str = "default"
     auditor_prompt: str = "minimal"
-    auditor_profile: str = "minimal"
-    auditor_tools: list[str] | None = None
     shutdown_timeout_s: float = 600.0
     extractor_provider: ProviderConfig | None = None
     auditor_provider: ProviderConfig | None = None
@@ -444,25 +438,16 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                         "prompt_name": cfg.auditor_prompt,
                         "trajectory_snapshot": trajectory,
                     },
-                    "auditor_tools": {
-                        "profile": cfg.auditor_profile,
-                        **({"tools": list(cfg.auditor_tools)} if cfg.auditor_tools else {}),
-                        "trajectory_snapshot": trajectory,
-                        "events": [e.to_dict() for e in events],
-                        "edges": [ed.to_dict() for ed in edges],
-                    },
+                    "auditor_tools": {},
                 },
                 provider=auditor_provider,
             )
             if child_msgs is not None:
                 args = _terminal_tool_args(child_msgs, SUBMIT_VERDICT_TOOL_NAME)
                 if args is not None:
-                    try:
-                        raw = RawVerdictOutput.from_dict(args)
-                        verdict = raw.to_verdict()
-                    except AuditorOutputError:
-                        _log.warning("auditor output malformed")
-                    else:
+                    verdict_raw = args.get("verdict")
+                    if isinstance(verdict_raw, dict):
+                        verdict = Verdict.from_dict(verdict_raw)
                         cumulative.absorb_auditor_verdict(verdict.to_dict())
                         api.session.append_entry(_et.VERDICT, verdict.to_dict())
                         if verdict.surface_reminder and verdict.reminder_text:
