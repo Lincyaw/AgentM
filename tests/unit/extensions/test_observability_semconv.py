@@ -228,7 +228,7 @@ async def test_writer_emits_session_header_and_message_appended_logs(
     in the body. This is the contract SessionManager._load reads from.
     """
     api = _build_api(tmp_path)
-    observability.install(api, {"include_handler_records": False})
+    observability.install(api, observability.ObservabilityConfig(include_handler_records=False))
 
     header = SessionHeader(
         type="session",

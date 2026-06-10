@@ -75,8 +75,8 @@ async def test_openai_stream_fn_retries_typed_rate_limit(monkeypatch: pytest.Mon
             return False
 
     api = _Api()
-    retry_policy.install(cast(Any, api), {"max_retries": 1, "base_delay": 0})
-    openai.install(api, {"model": "fake"})
+    retry_policy.install(cast(Any, api), retry_policy.RetryPolicyConfig(max_retries=1, base_delay=0))
+    openai.install(api, openai.LlmOpenaiConfig(model="fake"))
     stream_fn = api.provider.stream_fn
     stream_fn.client = cast(Any, client)
     stream_fn.clock = lambda: 0.0
@@ -172,10 +172,7 @@ def test_openai_verify_ssl_false_emits_warning_once() -> None:
 
     openai.install(
         _Api(),
-        {
-            "model": "fake",
-            "verify_ssl": False,
-        },
+        openai.LlmOpenaiConfig(model="fake", verify_ssl=False),
     )
 
     warnings = [item for item in diagnostics if item.level == "warning"]

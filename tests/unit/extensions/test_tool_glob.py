@@ -14,6 +14,7 @@ from typing import Any
 
 from agentm.core.abi.operations import ExecResult
 from agentm.extensions.builtin import file_tools
+from agentm.extensions.builtin.file_tools import FileToolsConfig
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +76,7 @@ class _FakeApi:
 
 
 def _install(api: _FakeApi) -> None:
-    file_tools.install(api, {"require_read": False})  # type: ignore[arg-type]
+    file_tools.install(api, FileToolsConfig(require_read=False))  # type: ignore[arg-type]
 
 
 def _run(api: _FakeApi, **kwargs: Any) -> tuple[str, bool]:

@@ -162,7 +162,7 @@ async def test_observability_strips_messages_from_before_send_to_llm(
     therefore cannot reach the trace via this channel by construction.
     """
     api = _api(tmp_path)
-    observability.install(api, {})
+    observability.install(api, observability.ObservabilityConfig())
     event = _build_before_send_event(f"leak: {_LEAK_SECRET}")
     await api.events.emit(BeforeSendToLlmEvent.CHANNEL, event)
     await api.events.emit(

@@ -66,7 +66,8 @@ def _drive(
 
     atom = _load_atom()
     api = _FakeAPI(cfg)
-    atom.install(api, {"warn_within": warn_within})
+    from agentm.extensions.builtin.turn_reminder import TurnReminderConfig
+    atom.install(api, TurnReminderConfig(warn_within=warn_within))
 
     def fire(channel: str, event: Any) -> None:
         for fn in api.handlers.get(channel, []):

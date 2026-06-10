@@ -23,11 +23,7 @@ MANIFEST = ExtensionManifest(
         "tool:list_history",
         "tool:list_atoms",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {"root": {"type": "string"}},
-        "additionalProperties": False,
-    },
+    config_schema=None,
     api_version=1,
     affects=(),
     tier=1,

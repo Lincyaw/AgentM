@@ -85,7 +85,6 @@ MANIFEST = ExtensionManifest(
     name="_stub_provider_no_ops",
     description="test stub",
     registers=("provider:stub",),
-    config_schema={"type": "object", "properties": {}, "additionalProperties": False},
 )
 
 

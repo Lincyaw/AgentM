@@ -30,34 +30,34 @@ class _Evt:
 
 
 def test_resolve_prompt_inline() -> None:
-    assert sp._resolve_prompt({"prompt": "hi"}) == "hi"
+    assert sp._resolve_prompt(sp.SystemPromptConfig(prompt="hi")) == "hi"
 
 
 def test_resolve_prompt_from_file(tmp_path) -> None:
     p = tmp_path / "sp.md"
     p.write_text("FILE PROMPT", encoding="utf-8")
-    assert sp._resolve_prompt({"prompt_file": str(p)}) == "FILE PROMPT"
+    assert sp._resolve_prompt(sp.SystemPromptConfig(prompt_file=str(p))) == "FILE PROMPT"
 
 
 def test_resolve_prompt_file_wins_over_inline(tmp_path) -> None:
     p = tmp_path / "sp.md"
     p.write_text("FROM FILE", encoding="utf-8")
-    assert sp._resolve_prompt({"prompt": "inline", "prompt_file": str(p)}) == "FROM FILE"
+    assert sp._resolve_prompt(sp.SystemPromptConfig(prompt="inline", prompt_file=str(p))) == "FROM FILE"
 
 
 def test_resolve_prompt_empty() -> None:
-    assert sp._resolve_prompt({}) == ""
+    assert sp._resolve_prompt(sp.SystemPromptConfig()) == ""
 
 
 def test_install_empty_registers_no_handler() -> None:
     api = _FakeAPI()
-    sp.install(api, {})  # type: ignore[arg-type]
+    sp.install(api, sp.SystemPromptConfig())
     assert api.handlers == {}
 
 
 def test_install_inline_prepends() -> None:
     api = _FakeAPI()
-    sp.install(api, {"prompt": "ROLE"})  # type: ignore[arg-type]
+    sp.install(api, sp.SystemPromptConfig(prompt="ROLE"))
     handlers = api.handlers[BeforeAgentStartEvent.CHANNEL]
     assert len(handlers) == 1
     evt = _Evt(system="BASE")
@@ -69,7 +69,7 @@ def test_install_from_file_prepends(tmp_path) -> None:
     p = tmp_path / "sp.md"
     p.write_text("FILEROLE", encoding="utf-8")
     api = _FakeAPI()
-    sp.install(api, {"prompt_file": str(p)})  # type: ignore[arg-type]
+    sp.install(api, sp.SystemPromptConfig(prompt_file=str(p)))
     evt = _Evt(system="")
     api.handlers[BeforeAgentStartEvent.CHANNEL][0](evt)
     assert evt.system == "FILEROLE"

@@ -23,6 +23,7 @@ from agentm.extensions.builtin.file_tools import (
     relativize_paths,
 )
 from agentm.extensions.builtin import file_tools
+from agentm.extensions.builtin.file_tools import FileToolsConfig
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ class _FakeApi:
 
 
 def _install(api: _FakeApi, **config: Any) -> None:
-    file_tools.install(api, {"require_read": False, **config})  # type: ignore[arg-type]
+    file_tools.install(api, FileToolsConfig(require_read=False, **config))  # type: ignore[arg-type]
 
 
 def _run(api: _FakeApi, args: dict[str, Any]) -> tuple[str, bool]:

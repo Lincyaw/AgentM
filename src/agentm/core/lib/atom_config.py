@@ -105,6 +105,12 @@ def _load_manifest(module_path: str) -> ExtensionManifest | None:
 
 
 def _properties(schema: Any) -> dict[str, Any]:
+    from pydantic import BaseModel as _PydanticBaseModel
+
+    if isinstance(schema, type) and issubclass(schema, _PydanticBaseModel):
+        json_schema = schema.model_json_schema()
+        props = json_schema.get("properties")
+        return props if isinstance(props, dict) else {}
     if not isinstance(schema, dict):
         return {}
     props = schema.get("properties")

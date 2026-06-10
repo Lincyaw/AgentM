@@ -28,11 +28,7 @@ MANIFEST = ExtensionManifest(
         "tool:unload_atom",
         "tool:reload_atom",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {"root": {"type": "string"}},
-        "additionalProperties": False,
-    },
+    config_schema=None,
     api_version=1,
     affects=(),
     tier=1,
