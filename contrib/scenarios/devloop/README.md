@@ -3,31 +3,42 @@
 Requirement → spec → design review → test writing → development →
 test verification (with retry) → code review.
 
+A self-contained AgentM workflow template. Fork this as a starting point
+for your own development automation.
+
 ## Structure
 
 ```
 devloop/
-  agents/                    ← agent unit definitions (extensible)
-    coder/                   ← coding agent: file_tools + bash
+  pyproject.toml             ← uv project, agentm as library dependency
+  agents/
+    coder/                   ← coding agent: file_tools + bash + skills
       manifest.yaml
       devloop_context.py
-  workflow/                  ← workflow definition
-    types.py                 ← TypedDict + JSON Schemas
-    prompts.py               ← prompt construction functions
-    devloop_workflow.py      ← pure orchestration logic
+  skills/                    ← domain skills (evolve per project)
+    coding-guidelines/SKILL.md
+  workflow/
+    types.py                 ← Pydantic models (args + structured output)
+    prompts.py               ← prompt construction
+    devloop_workflow.py      ← pure orchestration
 ```
 
 ## Quick start
 
 ```bash
-cd /path/to/your/project
+cd contrib/scenarios/devloop
+uv sync
 
-agentm workflow run /path/to/AgentM/contrib/scenarios/devloop/workflow/devloop_workflow.py \
+# Run against a target project directory
+agentm workflow run workflow/devloop_workflow.py \
   --args '{"requirement": "Implement a Stack class with push, pop, peek, is_empty, and size methods."}' \
-  --model doubao
+  --model doubao \
+  --cwd /path/to/your/project
 ```
 
 ## Args
+
+Defined in `workflow/types.py` as `DevloopArgs`:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -36,23 +47,31 @@ agentm workflow run /path/to/AgentM/contrib/scenarios/devloop/workflow/devloop_w
 | `test_framework` | str | `"pytest"` | Test framework |
 | `max_rounds` | int | `3` | Max develop+test iterations |
 | `skip_review` | bool | `false` | Skip final code review stage |
+| `agent_timeout_seconds` | float | `900` | Per-agent wall-clock timeout |
 
 ## Pipeline
 
-1. **Spec** — generates a structured spec with interfaces and acceptance criteria
+1. **Spec** — generates a structured `ImplementationSpec` with interfaces and acceptance criteria
 2. **Design review** — validates every AC is testable; revises if rejected
-3. **Test writing** — writes test files from the spec (before implementation)
+3. **Test writing** — writes test files from the spec (TDD: tests before implementation)
 4. **Development** — implements the code to pass the tests
-5. **Test verification** — runs the test suite; on failure, feeds errors back and retries (up to `max_rounds`)
+5. **Test verification** — runs the test suite; on failure, feeds errors back and retries
 6. **Code review** — verifies implementation against spec (skippable)
 
-## Adding agent types
+## Skills
 
-Add a new directory under `agents/` with a `manifest.yaml`. Reference it
-from the workflow as `scenario="devloop/agents/<name>"`.
+The `skills/` directory contains domain-specific knowledge that the coder
+agent loads on demand. Skills evolve per project — add new ones as you
+discover patterns, remove ones that don't help.
 
-## Validate without running
+Example: after repeated Playwright failures, create
+`skills/playwright-setup/SKILL.md` with the startup configuration that
+works for your stack.
 
-```bash
-agentm workflow validate contrib/scenarios/devloop/workflow/devloop_workflow.py
-```
+## Customization
+
+- **Add agent types**: new directory under `agents/` with a `manifest.yaml`
+- **Add skills**: new directory under `skills/` with a `SKILL.md`
+- **Change prompts**: edit `workflow/prompts.py`
+- **Change pipeline**: edit `workflow/devloop_workflow.py`
+- **Change output schemas**: edit `workflow/types.py`
