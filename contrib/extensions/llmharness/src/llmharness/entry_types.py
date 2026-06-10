@@ -1,6 +1,6 @@
 """Shared entry-type constants for cognitive-audit session entries.
 
-The runtime adapter (``llmharness.adapter``) writes these
+The runtime adapter (``llmharness.atom``) writes these
 ``SessionEntry.type`` strings into the AgentM session log; the offline
 hydration path and dataset exporter read them back. Centralising the
 literals prevents silent drift between the writer and the readers.

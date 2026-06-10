@@ -2,8 +2,8 @@
 
 Core package — agent definitions + composable primitives.
 
-The runtime entry point is ``llmharness.adapter``, loaded via
-``AgentSessionConfig(extensions=[("llmharness.adapter", {})])``.
+The runtime entry point is ``llmharness.atom``, loaded via
+``AgentSessionConfig(extensions=[("llmharness.atom", {})])``.
 
 Orchestration tools (replay, distill, aggregate, eval) live outside
 this package under ``tools/`` and compose from the primitives exported

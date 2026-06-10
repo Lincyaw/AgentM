@@ -7,7 +7,7 @@ includes:
   - overlays/runtime-context.yaml
 
 extensions:
-  - module: llmharness.adapter
+  - module: llmharness.atom
     config:
       mode: sync
       extractor_interval_turns: 5

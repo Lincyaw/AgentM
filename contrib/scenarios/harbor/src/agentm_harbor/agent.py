@@ -59,7 +59,7 @@ extensions:
   - module: agentm.extensions.builtin.runtime_context
   - module: agentm.extensions.builtin.llm_compaction
   - module: agentm.extensions.builtin.read_history
-  - module: llmharness.adapter
+  - module: llmharness.atom
     config:
       mode: sync
       extractor_interval_turns: 5

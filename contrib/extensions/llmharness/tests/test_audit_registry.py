@@ -8,7 +8,7 @@ round-trips — is framework guarantee and not tested here.
 
 from __future__ import annotations
 
-from llmharness.runtime.registry import AuditCheckRegistry, CheckContext
+from llmharness.registry import AuditCheckRegistry, CheckContext
 from llmharness.schema import Finding
 
 

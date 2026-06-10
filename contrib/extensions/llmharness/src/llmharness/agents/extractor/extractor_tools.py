@@ -38,7 +38,7 @@ from typing import Any
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from llmharness.runtime.constants import EXTRACTOR_STATE_SERVICE_KEY
+from llmharness.agents.constants import EXTRACTOR_STATE_SERVICE_KEY
 
 from .state import ExtractionState
 from .tools.delete_edge import DELETE_EDGE_TOOL_NAME, build_delete_edge_tool

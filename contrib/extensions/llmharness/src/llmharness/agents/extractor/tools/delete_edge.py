@@ -15,11 +15,11 @@ from typing import Any, Literal
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from pydantic import BaseModel, ConfigDict, Field
 
-from llmharness.runtime.decorator import harness_tool
-from llmharness.validation.witness_errors import format_witness_error
+from llmharness.agents.decorator import harness_tool
 
 from ..state import ExtractionState
 from ..state_echo import state_echo
+from ..validation.witness_errors import format_witness_error
 
 DELETE_EDGE_TOOL_NAME = "delete_edge"
 

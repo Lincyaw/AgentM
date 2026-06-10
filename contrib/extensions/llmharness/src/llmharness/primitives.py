@@ -244,7 +244,7 @@ def _render_message_text(msg: AgentMessage) -> str:
 
 
 def _serialize_message(msg: AgentMessage, *, index: int) -> dict[str, Any] | None:
-    from .runtime.child_collect import serialize_block
+    from .child_collect import serialize_block
 
     content = getattr(msg, "content", None)
     if not isinstance(content, list):
@@ -284,7 +284,7 @@ def build_extractor_input(
 
     Returns ``None`` if the trajectory window is empty.
     """
-    from .runtime.directive import build_extractor_directive
+    from .agents.directive import build_extractor_directive
 
     window_lo = max(cumulative.cursor_last_turn_index + 1, 0)
     window_hi = len(messages) - 1

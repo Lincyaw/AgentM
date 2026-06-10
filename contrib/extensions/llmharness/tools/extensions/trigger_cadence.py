@@ -61,7 +61,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     registry = api.get_service(SERVICE_KEY)
     if not isinstance(registry, TriggerRegistry):
         raise RuntimeError(
-            "trigger registry service not published; mount llmharness.adapter first"
+            "trigger registry service not published; mount llmharness.atom first"
         )
     registry.register_trigger(_CadenceTrigger(interval))
 
