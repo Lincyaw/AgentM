@@ -104,26 +104,7 @@ class Event:
     )
 
     def to_otel(self, telemetry: "SessionTelemetry") -> None:
-        """Translate this event into OTel spans / log records.
-
-        **Declarative mapping.** Each concrete event subclass overrides this
-        method to emit whatever spans or log records the wire format
-        requires. The observability atom is reduced to a thin dispatcher:
-        it subscribes to every channel and calls ``event.to_otel(telemetry)``
-        — the per-event class owns its own translation. This eliminates the
-        big switch-on-channel that observability.py used to carry and makes
-        "every Event has an OTel meaning" enforceable: new Event subclasses
-        either declare a mapping or inherit this no-op default.
-
-        Start/End span pairs use :meth:`SessionTelemetry.open_span` and
-        :meth:`SessionTelemetry.pop_span` for lifecycle pairing — see those
-        methods' docstrings for the contract.
-
-        The base implementation is a no-op: events that have no OTel
-        meaning (or whose translation is owned by the bus-observer layer,
-        like ``agentm.event.dispatch`` / ``agentm.handler.invoke``) simply
-        do not override it.
-        """
+        """No-op base; concrete overrides live in ``runtime.event_otel``."""
         del telemetry
 
 

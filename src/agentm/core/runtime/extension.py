@@ -69,20 +69,7 @@ from agentm.core.runtime.services import (
 
 
 class _OperationsHolder:
-    """Mutable single-slot container for the session's ``Operations`` bundle.
-
-    Operations is the **strict-register** axis: the substrate has no sensible
-    "no-op shell" default, so an atom must call
-    :meth:`ExtensionAPI.register_operations` exactly once before freeze or
-    the session refuses to start. All :class:`_ExtensionAPIImpl` instances
-    built for a session share the same holder so that whichever atom
-    registers Operations is visible to every subsequent atom regardless of
-    api capture order.
-
-    Contrast :class:`_ResourceWriterHolder` below, which is **default-pluggable**.
-    See ``.claude/designs/pluggable-architecture.md`` §"Port-default pattern"
-    for the rule that picks between the two shapes.
-    """
+    """Strict-register slot: must be set exactly once before freeze."""
 
     __slots__ = ("bundle",)
 
@@ -91,27 +78,7 @@ class _OperationsHolder:
 
 
 class _ResourceWriterHolder:
-    """Mutable single-slot container for the session's ``ResourceWriter``.
-
-    ResourceWriter is a **default-pluggable** axis: the substrate itself
-    depends on a working writer (catalog freeze, atom reload, etc. — all
-    substrate-side bookkeeping that runs before any atom-driven write), so
-    it pre-populates the slot with :class:`GitBackedResourceWriter` against
-    the host filesystem. An atom may overwrite the slot once via
-    :meth:`ExtensionAPI.register_resource_writer` to redirect writes (e.g.
-    into a sandbox). Catalog and project-layout follow the same shape.
-
-    The ``replaced`` flag exists solely to enforce "register-once": without
-    it, ``register_resource_writer`` couldn't distinguish "an atom is
-    overwriting the substrate default" (allowed) from "a second atom is
-    overwriting an earlier atom's writer" (rejected). The Operations holder
-    doesn't need this because it has no substrate default to disambiguate
-    from.
-
-    Sharing the holder across every :class:`_ExtensionAPIImpl` instance for
-    a session means the override is visible to every downstream consumer,
-    including ``AtomReloader``.
-    """
+    """Default-pluggable slot: pre-populated by substrate, overridable once."""
 
     __slots__ = ("writer", "replaced")
 
@@ -184,30 +151,7 @@ SessionTelemetryFactory = Callable[[], SessionTelemetry]
 
 
 class _SessionTelemetryHolder:
-    """Mutable single-slot container for the session's :class:`SessionTelemetry`.
-
-    Telemetry is a **default-pluggable** axis like :class:`_ResourceWriterHolder`:
-    the substrate has a working default (``setup_session_telemetry`` from
-    :mod:`agentm.core.runtime.otel_export`, which attaches a per-session
-    SpanProcessor + LogRecordProcessor to the **process-level** OTel
-    providers — PR-H), so the slot pre-populates with a *factory* rather
-    than a live handle — construction is deferred to the first
-    :meth:`_ExtensionAPIImpl.get_session_telemetry` call so tests / sessions
-    that never read telemetry pay no cost.
-
-    On first construction the holder also installs a ``SessionShutdownEvent``
-    handler on the session bus that calls :meth:`SessionTelemetry.shutdown`,
-    so the per-session batch processors drain and are removed from the
-    global providers when the session ends. The providers themselves
-    outlive the session and are torn down once at process exit by an
-    ``atexit`` hook registered inside ``setup_process_telemetry``.
-    ``SessionTelemetry.shutdown`` is itself idempotent so an explicit
-    shutdown by the atom + the bus-driven teardown is safe.
-
-    Sharing one holder across every :class:`_ExtensionAPIImpl` instance for
-    a session means later atoms see the same telemetry handle as the first
-    consumer (typically the observability atom).
-    """
+    """Lazy-constructed slot: factory invoked on first access, auto-shutdown on session end."""
 
     __slots__ = ("_factory", "_bus", "_telemetry", "_shutdown_handler_registered")
 
@@ -280,16 +224,7 @@ def _default_session_telemetry_factory(
 
 @dataclass(frozen=True, slots=True)
 class ExtensionAPIScope:
-    """Session-scoped bundle handed to every ``_ExtensionAPIImpl``.
-
-    One scope is built per :class:`AgentSession` and reused for every
-    ``_make_api(owner)`` call; only :attr:`_ExtensionAPIImpl._owner_name`
-    varies per atom. Bundling here keeps the impl constructor from growing
-    a kwarg every time a new pluggability axis lands.
-
-    Build via :func:`build_extension_api_scope` so defaults stay in one
-    place — direct construction is fine but every field is then mandatory.
-    """
+    """Session-scoped bundle shared by all ``_ExtensionAPIImpl`` instances."""
 
     bus: EventBus
     cwd: str
