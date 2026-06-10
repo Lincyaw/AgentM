@@ -1,34 +1,4 @@
-"""AgentSession orchestrator: the fat-but-thin v2 façade.
-
-Implements §4 (AgentSession) of ``.claude/designs/extension-as-scenario.md``.
-The session holds references to every subsystem (event bus, session manager,
-resource loader, registries) and wires events. It runs no business logic:
-each "feature" is an extension that registers handlers on the bus.
-
-Lifecycle (``AgentSession.create`` → ``prompt`` → ``shutdown``):
-
-1. Build :class:`EventBus`, :class:`SessionManager`, :class:`ResourceLoader`,
-   internal ``_ExtensionAPIImpl``.
-2. Load every extension in order; await coroutine returns. The provider
-   extension is loaded last so the picked-up provider reflects any earlier
-   replacement attempts (last registration wins).
-3. Append ``initial_messages`` (if any) into the session manager.
-
-On ``prompt(text)``:
-
-1. Build a :class:`UserMessage`, append it as a session entry.
-2. Assemble the system prompt from context files + skill descriptions
-   (placeholder; full skill-body expansion comes in a later phase).
-3. Emit ``before_agent_start``; handlers may return ``{"system": "..."}``
-   replacing the system prompt (last non-None wins, mirroring the kernel
-   ``_collect_replacement`` convention).
-4. Run ``AgentLoop.run``.
-5. Append every new assistant + tool_result message as session entries.
-6. Return the full updated message list.
-
-Hard rule: this module imports only stdlib + ``agentm.core.abi`` + the
-three sibling v2 modules.
-"""
+"""AgentSession: thin façade over the event bus, session manager, and agent loop."""
 
 from __future__ import annotations
 
@@ -270,31 +240,7 @@ class AgentSession:
                 )
 
     def _drain_inbox_on_early_return(self, reason: str) -> None:
-        """Drain (discard) the inbox after a pre-context-event early return.
-
-        The kernel's ``context`` event only fires from inside ``_loop.run``;
-        any path that leaves ``_run_one_round`` BEFORE the loop is entered
-        (a sticky veto from ``before_agent_start``, an exception during
-        context build or ``before_agent_start`` itself, etc.) leaves the
-        originating push queued — ``_nonempty`` stays set, ``wait_nonempty``
-        returns immediately on the next driver iteration, and the driver
-        tight-loops on the same failure (burning CPU even though the
-        prompt waiter already saw an ``agent_end``). Every such site
-        MUST call this helper after emitting ``agent_end`` / failing the
-        waiter so the next iteration parks until a fresh push arrives.
-
-        Discard semantics match the existing exception path: the user's
-        prompt waiter has already been resolved (cleanly via ``agent_end``
-        or with the exception via ``_fail_end_waiters``), so silently
-        re-running the vetoed/failed work on the queued message would be
-        wrong. If the user wants to try again they re-push.
-
-        **Trace fidelity (B2 boundary-review fix)**: the discarded items are
-        also appended as a structured ``inbox.discarded`` custom entry on the
-        session log so the prompt text is not silently lost to the warning
-        log only. Replay tooling and post-hoc auditors can now distinguish
-        "vetoed user input" from "no user input ever arrived".
-        """
+        """Drain the inbox after a pre-context-event early return to prevent driver spin."""
 
         drained = self._inbox.drain()
         if not drained:
@@ -365,13 +311,6 @@ class AgentSession:
 
     @property
     def inbox(self) -> SessionInbox:
-        """Read-only handle to the session's :class:`SessionInbox`.
-
-        Exposed so a test or embedding host can push items without reaching
-        into the private ``_inbox`` attribute. Atoms should keep using
-        :meth:`ExtensionAPI.post_inbox` — same backing inbox, with the
-        scope's ``ExtensionStaleError`` guard.
-        """
         return self._inbox
 
     @property
@@ -393,50 +332,18 @@ class AgentSession:
 
     @property
     def extension_api(self) -> Any:
-        """Read-only handle to the session's primary ``ExtensionAPI``.
-
-        Exposed so an embedding host can reach the API without touching the
-        private ``_extension_api`` attribute (the single-process gateway's
-        ``CommandContext`` uses it to mount/unmount atoms for
-        ``/atom:install``). Returns ``None`` for a session built with no
-        extensions.
-        """
         return self._extension_api
 
     def get_service(self, name: str) -> Any | None:
         return self._services.get(name)
 
     def set_service(self, name: str, obj: Any) -> None:
-        """Publish a host-supplied service into the session's registry.
-
-        Mirrors :meth:`ExtensionAPI.set_service` but is callable from the
-        embedding process (the runtime host), not just from inside an
-        atom. The single-process gateway's ``SessionManager`` uses it to
-        inject the ``wire_outbound`` sink, ``session_key``, ``turn_context``
-        and ``approval_manager`` services the ``wire_driver`` atom reads.
-        Refuses to clobber an existing entry — keep service ownership
-        unambiguous (matches the atom-side contract).
-        """
         if name in self._services:
             raise KeyError(f"service {name!r} is already registered")
         self._services[name] = obj
 
     def install_atom(self, name: str, config: dict[str, Any] | None = None) -> None:
-        """Mount a builtin atom into this *already-created* session.
-
-        Callable from the embedding host (not just from inside an atom). The
-        single-process gateway's ``SessionManager`` uses it to mount
-        ``wire_driver`` *after* it has injected the ``wire_outbound`` /
-        ``session_key`` / ``turn_context`` / ``approval_manager`` services
-        the atom reads — so the install cannot happen at create time.
-
-        Loads ``agentm.extensions.builtin.<name>`` and runs its
-        ``install(api, config)`` against this session's live extension scope,
-        which shares the session bus and service registry. Only sync-install
-        atoms are supported on this synchronous host path (``wire_driver``
-        is sync); an awaitable install raises rather than being silently
-        dropped.
-        """
+        """Mount a builtin atom into this already-created session (sync only)."""
         import inspect
 
         from agentm.core.runtime.extension import load_extension
@@ -459,19 +366,10 @@ class AgentSession:
 
     @property
     def session_id(self) -> str:
-        """Stable random id assigned at ``create``. Appears in
-        :class:`ChildSessionStartEvent` / :class:`ChildSessionEndEvent`
-        payloads when this session is a child of another. Equals the
-        session-root OTel ``span_id`` — see :attr:`root_session_id` for
-        the OTel ``trace_id`` shared across the whole agent tree."""
         return self._session_id
 
     @property
     def root_session_id(self) -> str:
-        """OTel ``trace_id`` shared by this session and every transitive
-        child. For a root session the substrate generates a fresh 32-hex
-        uuid; spawned children inherit it verbatim so the entire agent
-        tree shows up as a single trace in any OTel-compatible store."""
         return self._root_session_id
 
     # --- prompt -----------------------------------------------------------
@@ -483,51 +381,13 @@ class AgentSession:
         images: list[ImageContent] | None = None,
         signal: asyncio.Event | None = None,
     ) -> list[AgentMessage]:
-        """Push one user turn onto the inbox and await the driver's reply.
-
-        Sugar over the session inbox + persistent driver (see
-        session-inbox.md, step-5 §"Persistent driver + prompt-as-sugar"):
-        slash-commands fast-path first; otherwise push a ``source="user"``
-        inbox item, subscribe a one-shot waiter for the next ``agent_end``,
-        block until the driver finishes that round, and return the live
-        message list. The driver is the SOLE caller of ``_loop.run`` — this
-        method does no LLM work itself.
-
-        **Concurrent prompts are FIFO-serialized** by
-        :attr:`_prompt_lock` (A4 boundary-review fix). Without the lock, two
-        concurrent ``prompt`` callers both subscribe a waiter for the same
-        upcoming ``agent_end`` and each return the same final message list,
-        attributing the FIRST prompt's reply to the SECOND caller. The lock
-        guarantees each ``prompt`` sees the message list ending in its OWN
-        turn's reply. ``tick`` is intentionally NOT locked: it must remain
-        callable mid-prompt by resume-atoms that fire a synthetic
-        ``decide_turn_action`` to inject work.
-
-        Optional ``signal``: if the caller passes an :class:`asyncio.Event`,
-        it's one-directionally forwarded into the session's own ``_signal``
-        (preempting the in-flight run with :class:`SignalAborted`, same shape
-        :meth:`interrupt` uses). This keeps the legacy per-call abort path
-        (e.g. ``sub_agent``'s child-task ``abort_signal``) working unchanged
-        without giving callers the ability to clobber the driver-owned
-        kernel signal directly.
-        """
+        """Push one user turn and await the driver's reply. FIFO-serialized."""
 
         async with self._prompt_lock:
-            # 0. Slash-command dispatch / input preprocessing. Code commands
-            # win; otherwise ``input`` handlers may rewrite slash-prefixed
-            # text before it falls through to the agent loop. Done inside the
-            # lock so a slash-handled prompt does not starve later prompts
-            # (it does no LLM work but may still synchronously append
-            # messages we don't want to interleave with another prompt's
-            # turn).
             text, slash_handled = await self._preprocess_input(text)
             if slash_handled is not None:
                 return slash_handled
 
-            # 1. Subscribe a waiter BEFORE the push: if the driver was
-            # already awake from a prior wake the run could finish between
-            # push and subscribe, and we'd hang on a fulfilled event we
-            # never registered for.
             waiter = self._subscribe_end_waiter()
             forwarder = self._spawn_signal_forwarder(signal)
             self._inbox.push(
@@ -544,38 +404,7 @@ class AgentSession:
             return self._session_manager.get_messages()
 
     async def idle(self, timeout: float | None = None) -> bool:
-        """Block until the session is truly at rest (#179), bounded (#201).
-
-        "At rest" means three conditions hold *together*: the driver is parked
-        (no round in flight), the inbox is empty (nothing waiting to be drained
-        on the next turn), and no tracked background unit is still running (an
-        auto-backgrounded tool or child subagent that could post a LATE
-        completion). A one-shot host (``agentm -p``) awaits this BEFORE exiting
-        so a completion that lands after the agent's last turn is delivered into
-        a still-running loop rather than dropped onto a dead process.
-
-        The three signals can flip independently, so we re-check after each
-        wait: a background unit may finish and post a completion (waking the
-        driver for one more round) just as we observed "parked". The loop
-        settles once a parked observation coincides with an empty inbox and no
-        pending work — at which point nothing can produce another inbox item
-        without an external ``push`` (which a one-shot host no longer issues).
-
-        Returns ``True`` once at rest (or ``_closed`` — a closed session is, by
-        definition, not going to run more rounds). With ``timeout=None``
-        (default) the wait is unbounded, preserving the original #179
-        semantics. With a positive ``timeout`` the *total* wait is bounded: if
-        the deadline passes before the session reaches rest this returns
-        ``False`` WITHOUT raising, leaving the caller (the one-shot CLI) to log
-        a warning and exit anyway. This is the #201 defense-in-depth — a leaked
-        ``track_background`` counter or a genuinely stuck background unit turns
-        a silent permanent hang into a recoverable, observable warning.
-
-        Note (design invariant kept): recurring signals (monitor condition
-        polls, tickers) deliberately do NOT count as pending work, so they
-        never hold ``idle`` open; the timeout only bounds the wait on *finite*
-        tracked work and does not change that rule.
-        """
+        """Block until parked + inbox empty + no tracked background work."""
 
         clock = asyncio.get_running_loop().time
         deadline = None if timeout is None else clock() + timeout
@@ -616,14 +445,6 @@ class AgentSession:
     def _spawn_signal_forwarder(
         self, external: asyncio.Event | None
     ) -> asyncio.Task[None] | None:
-        """One-way bridge from a caller-supplied abort event into ``_signal``.
-
-        Mirrors the ``background_exec`` forwarder pattern: setting the
-        external event sets the session's ``_signal`` (the driver-owned
-        kernel signal), but setting ``_signal`` directly never touches the
-        external one. The bridge is cancelled when ``prompt`` returns so it
-        never outlives its prompt.
-        """
 
         if external is None:
             return None
@@ -644,33 +465,12 @@ class AgentSession:
         *,
         signal: asyncio.Event | None = None,
     ) -> list[AgentMessage]:
-        """Advance the session by one decide-cycle without new user input.
-
-        Two paths preserve today's tick contract:
-
-        * **Inbox non-empty** (e.g. an atom pre-pushed a ``send_user_message``
-          /``post_inbox`` item before tick) — wake the driver and wait for
-          the next ``agent_end``. Same path ``prompt`` takes.
-        * **Inbox empty** — fire a synthetic :class:`DecideTurnActionEvent`
-          so resume-atoms (e.g. ``llmharness.replay.reminder_seed``) get
-          their one chance to ``Inject``. If a handler injects, persist the
-          messages into the session log and kick the driver — the next
-          ``_loop.run`` rebuilds context from the log and sees them. If no
-          handler injects, emit a synthetic ``agent_end(NoPendingInput)``
-          and return — no LLM call, unchanged message list.
-
-        Optional ``signal``: same one-way bridge :meth:`prompt` honours.
-        """
+        """Advance by one decide-cycle without new user input."""
 
         forwarder = self._spawn_signal_forwarder(signal)
         launched_run = False
         try:
             if not self._inbox.is_empty():
-                # C1 boundary-review fix: NO ``kick`` here. The inbox is
-                # already non-empty, so the driver's ``wait_nonempty`` is
-                # already past the await (or returns immediately on the
-                # next loop turn); an extra ``kick`` is a no-op
-                # (``asyncio.Event.set`` on an already-set event).
                 waiter = self._subscribe_end_waiter()
                 launched_run = True
                 await waiter
@@ -733,26 +533,7 @@ class AgentSession:
     # --- interrupt --------------------------------------------------------
 
     def interrupt(self) -> None:
-        """Preempt the in-flight ``_loop.run`` round (Claude-Code style).
-
-        Sets the kernel abort event the driver passed into ``_loop.run`` —
-        the loop terminates with ``SignalAborted`` (``final=True``, so no
-        floor / no Inject can override). The driver's bottom-of-loop clear
-        wipes ``_signal`` after the round returns; the next push drives a
-        fresh run with full conversation context preserved (the session
-        log is untouched).
-
-        Major-1 review fix: this is a NO-OP when no round is in flight
-        (``_in_run`` is False). Previously an idle-time ``interrupt()``
-        latched ``_signal``; the next ``prompt`` push woke the driver, the
-        kernel's per-turn signal check (``loop.py:440``) fired
-        ``SignalAborted`` before any real work happened. With the no-op
-        guard, idle interrupts are silently dropped — which is the right
-        semantic ("interrupt what's running" — nothing is running, so
-        nothing to interrupt). Within one round multiple calls are
-        idempotent (``asyncio.Event.set`` on an already-set event is a
-        no-op).
-        """
+        """No-op when idle; sets the abort signal when a round is in flight."""
 
         if self._in_run:
             self._signal.set()
@@ -760,22 +541,7 @@ class AgentSession:
     # --- driver -----------------------------------------------------------
 
     async def _driver(self) -> None:
-        """Persistent always-on owner of ``_loop.run``.
-
-        Body: block on ``inbox.wait_nonempty`` until either an item is
-        pushed (or ``kick``-ed); run one round; loop. Catches every
-        exception per-round so a transient ``run`` failure (provider
-        glitch, atom bug) doesn't kill the driver — the next push still
-        drives a new run. The only clean exit is ``shutdown`` flipping
-        ``_closed`` and kicking the inbox.
-
-        Any in-flight ``prompt`` / ``tick`` waiters that were attached
-        BEFORE the round's exception are resolved with that exception, so
-        the caller sees the failure rather than hanging on a waiter no
-        ``agent_end`` will ever fulfill. A hard task cancellation
-        (CancelledError) propagates to those waiters AND aborts the
-        driver — the rest of the session is being torn down anyway.
-        """
+        """Block on inbox; run one round; loop. Catches per-round exceptions."""
 
         while not self._closed:
             # #179: parked = idle, blocked on the next item. SET before the
@@ -794,18 +560,12 @@ class AgentSession:
             try:
                 await self._run_one_round()
             except asyncio.CancelledError as exc:
-                # Hard cancellation: surface it to any in-flight waiter so
-                # ``prompt`` raises rather than hangs, then propagate so the
-                # driver task itself enters CANCELLED.
                 self._fail_end_waiters(exc)
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "agentm session driver: round raised; continuing"
                 )
-                # Wake any in-flight waiter with the exception — they're
-                # never going to see ``agent_end`` (the run died before
-                # emitting it).
                 self._fail_end_waiters(exc)
                 # Pre-context-event failure: drain the originating push so
                 # the driver parks instead of tight-looping on the same
@@ -984,37 +744,13 @@ class AgentSession:
     # --- Lifecycle --------------------------------------------------------
 
     async def shutdown(self, *, strict: bool = False) -> None:
-        """Signal extensions and clear handlers.
-
-        Order matters:
-        1. Flip ``_closed`` and kick the inbox so the driver's
-           ``wait_nonempty`` returns and the loop exits cleanly.
-        2. ``interrupt()`` any in-flight run so a long-running tool doesn't
-           hold the driver hostage past the grace window.
-        3. ``await`` the driver task under a bounded grace; cancel + gather
-           if it overruns (same shape as the atom-level shutdown drains in
-           ``background_exec`` / ``sub_agent``).
-        4. Emit ``session_shutdown`` (atoms see the bus alive) → notify
-           parent → clear bus → catalog index.
-
-        Idempotent: a second ``shutdown`` call is a no-op (the driver task is
-        already terminal and ``_closed`` is sticky).
-
-        ``strict``: when ``True``, a captured driver exception is re-raised
-        AFTER the bus is drained / parent is notified / catalog is indexed —
-        the cleanup still runs, but the embedding host gets the failure to
-        propagate. ``False`` (the default, CLI-friendly) swallows + logs
-        the same way prior versions did. B6 boundary-review fix.
-        """
+        """Idempotent teardown: stop driver, emit session_shutdown, clear bus."""
 
         if self._closed:
             return
         self._closed = True
         self._signal.set()
         self._inbox.kick()
-        # Captured driver exception, re-raised in strict mode AFTER the
-        # remainder of shutdown runs so the embedding host gets cleanup +
-        # failure both.
         driver_exc: BaseException | None = None
         try:
             await asyncio.wait_for(
@@ -1029,19 +765,12 @@ class AgentSession:
         except asyncio.CancelledError:
             pass
         except Exception as exc:  # noqa: BLE001
-            # Log the exception class explicitly so an embedding host can
-            # tell "clean shutdown" from "driver crashed during shutdown"
-            # from the log line alone (``logger.exception`` still attaches
-            # the traceback). Captured for ``strict=True`` re-raise below.
             logger.exception(
                 "agentm session driver: shutdown await raised (%s); continuing",
                 type(exc).__name__,
             )
             driver_exc = exc
 
-        # Any prompt/tick still parked on a waiter will never see its
-        # agent_end (the driver is gone). Cancel them so the caller surfaces
-        # a clean CancelledError rather than hanging forever.
         for fut in self._end_waiters:
             if not fut.done():
                 fut.cancel()
@@ -1051,9 +780,6 @@ class AgentSession:
             SessionShutdownEvent.CHANNEL, SessionShutdownEvent(cwd=self._cwd)
         )
 
-        # Notify the parent (if any) BEFORE clearing handlers so that an
-        # extension subscribed on the parent bus can still observe the end
-        # event with an accurate message count.
         if self._parent_bus is not None:
             await self._parent_bus.emit(
                 ChildSessionEndEvent.CHANNEL,
