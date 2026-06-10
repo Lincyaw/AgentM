@@ -34,8 +34,8 @@ from agentm.extensions import ExtensionManifest
 from agentm.core.abi.extension import ExtensionAPI
 
 
-_DEFAULT_TOOL_RESULT_MAX_CHARS: Final = 8_000
-_DEFAULT_TOTAL_MAX_CHARS: Final = 60_000
+_DEFAULT_TOOL_RESULT_MAX_CHARS: Final = 20_000
+_DEFAULT_TOTAL_MAX_CHARS: Final = 200_000
 
 
 MANIFEST = ExtensionManifest(
