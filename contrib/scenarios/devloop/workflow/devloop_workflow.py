@@ -5,6 +5,7 @@ development → test verification (with retry) → code review.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from .types import (
 )
 
 CODER = "devloop/agents/coder"
+SUPERVISOR = "supervisor"
 
 
 def _find_project_root() -> Path:
@@ -79,6 +81,12 @@ REVIEW_BUDGET = [
     ("agentm.extensions.builtin.loop_budget", {
         "max_turns": 30,
         "max_tool_calls": 80,
+    }),
+]
+SUPERVISE_BUDGET = [
+    ("agentm.extensions.builtin.loop_budget", {
+        "max_turns": 30,
+        "max_tool_calls": 60,
     }),
 ]
 
@@ -273,7 +281,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         else:
             ctx.log(f"Code review: {len(code_review.findings)} finding(s)")
 
-    return {
+    result = {
         "spec": spec.model_dump(),
         "design_review": review.model_dump(),
         "test_files": test_files,
@@ -284,3 +292,39 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             args.skip_review or code_review is None or code_review.approved
         ),
     }
+
+    # ── Stage 7: Supervisor Reflection ────────────────────────
+
+    ctx.phase("supervise")
+    ctx.log("Supervisor reflecting on execution")
+
+    result_summary = {
+        "success": result["success"],
+        "rounds": result["rounds"],
+        "test_passed": test_result.passed,
+        "test_total": test_result.total,
+        "review_approved": code_review.approved if code_review else None,
+        "review_findings": len(code_review.findings) if code_review else 0,
+    }
+
+    skills_dir = str(_PROJECT_ROOT / "skills")
+    await ctx.agent(
+        f"A devloop workflow just completed. Analyze the result and "
+        f"decide whether to create or update skills.\n\n"
+        f"## Result\n```json\n{json.dumps(result_summary, indent=2)}\n```\n\n"
+        f"## Skills directory\n{skills_dir}\n\n"
+        f"Read the skills directory to see existing skills. "
+        f"If the workflow struggled or failed, diagnose why and write "
+        f"a skill to prevent the same issue next time. If it succeeded "
+        f"cleanly, note any inefficiencies you see from the result.\n\n"
+        f"Keep skills focused (one concept each, under 60 lines). "
+        f"Do not create a skill if the existing ones already cover the issue.",
+        scenario=SUPERVISOR,
+        tool_allowlist=["read", "write", "edit", "glob", "grep", "bash"],
+        extra_extensions=SUPERVISE_BUDGET,
+        atom_config=_SKILL_CONFIG,
+        timeout=args.agent_timeout_seconds,
+    )
+
+    ctx.log("Supervisor reflection complete")
+    return result
