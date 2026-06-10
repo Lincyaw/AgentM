@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from llmharness.audit.auditor.prompt import build_auditor_system_prompt
+from llmharness.agents.auditor.prompt import build_auditor_system_prompt
 from llmharness.audit.registry import AuditCheckRegistry, CheckContext
 from llmharness.schema import Finding
 

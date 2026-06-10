@@ -1,40 +1,58 @@
-"""System prompt assembly for the Phase 2 auditor child session.
+"""System prompt assembly for the auditor child session.
 
-The framing text — trust-asymmetry, reminder bar, lenses, verdict
-shape — lives in markdown files under :mod:`audit.auditor.prompts`.
-Pick a variant by name (e.g. ``"minimal"``) or by an absolute path.
-The dynamic per-firing data (events / edges / phases / findings /
-continuation notes) is appended on top of the chosen framing inside
-:func:`build_auditor_system_prompt`.
+The framing text lives in markdown files under ``prompts/`` (sibling to
+this module). Pick a variant by name (e.g. ``"minimal"``) or by an
+absolute path. The dynamic per-firing data is appended on top of the
+chosen framing inside :func:`build_auditor_system_prompt`.
 
 Available named variants:
 
 * ``minimal`` (default) — pairs with the ``minimal`` profile (only
   ``submit_verdict``). No drill-down references.
 
-Drop in a new variant by adding ``audit/auditor/prompts/auditor_<name>.md``
-and pointing the adapter config at it; no code change needed.
+Drop in a new variant by adding ``prompts/auditor_<name>.md``.
 """
 
 from __future__ import annotations
 
 import json
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
-from ...schema import Edge, Event, Finding, Phase
-from ..toolkit.prompt_loader import load_prompt
+from llmharness.schema import Edge, Event, Finding, Phase
+
+_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 DEFAULT_PROMPT_NAME = "minimal"
 TRAJECTORY_PROMPT_NAME = "trajectory"
 
 
-def load_auditor_prompt(name_or_path: str = DEFAULT_PROMPT_NAME) -> str:
-    """Load the auditor framing text for the given variant.
+def _resolve(name_or_path: str) -> Path:
+    candidate = name_or_path.strip()
+    if not candidate:
+        raise ValueError("empty prompt spec for auditor")
+    if "/" in candidate or "\\" in candidate:
+        path = Path(candidate).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"prompt file not found: {path}")
+        return path
+    for fname in (f"{candidate}.md", f"auditor_{candidate}.md"):
+        path = _PROMPTS_DIR / fname
+        if path.is_file():
+            return path
+    available = sorted(p.name for p in _PROMPTS_DIR.glob("*.md"))
+    raise FileNotFoundError(f"unknown auditor prompt {candidate!r}; available: {available}")
 
-    Result is cached by :func:`_prompt_loader.load_prompt`, so repeated
-    calls for the same name skip the disk read.
-    """
-    return load_prompt("auditor", name_or_path, filename_prefix="auditor")
+
+@lru_cache(maxsize=64)
+def _read(path_str: str) -> str:
+    return Path(path_str).read_text(encoding="utf-8")
+
+
+def load_auditor_prompt(name_or_path: str = DEFAULT_PROMPT_NAME) -> str:
+    """Load the auditor framing text for the given variant."""
+    return _read(str(_resolve(name_or_path)))
 
 
 def _degrade_event(ev_dict: dict[str, object]) -> dict[str, object]:
@@ -66,21 +84,7 @@ def build_auditor_system_prompt(
     summary_threshold: int = 30,
     base_prompt: str | None = None,
 ) -> str:
-    """Assemble the auditor system prompt for one firing.
-
-    ``base_prompt`` defaults to the ``minimal`` variant loaded via
-    :func:`load_auditor_prompt`. The dynamic sections are appended
-    after the framing in this order: PHASES (optional), GRAPH,
-    FINDINGS, CONTINUATION_NOTES.
-
-    Degrade behaviour is independent of the framing: when
-    ``len(events) > summary_threshold``, witness fields are stripped
-    from the embedded event / edge records and a ``degraded`` flag is
-    surfaced in the GRAPH header. The framing file is expected to
-    explain to the auditor what to do about it (e.g. the ``full``
-    framing tells the auditor to use drill-down tools; the ``minimal``
-    framing tells it to reason from what is embedded).
-    """
+    """Assemble the auditor system prompt for one firing."""
     framing = base_prompt if base_prompt is not None else load_auditor_prompt(DEFAULT_PROMPT_NAME)
     degraded = len(events) > summary_threshold
 
@@ -147,15 +151,7 @@ def build_auditor_trajectory_prompt(
     continuation_notes: list[str],
     base_prompt: str | None = None,
 ) -> str:
-    """Assemble the auditor system prompt for a trajectory-mode firing.
-
-    Used by the skip-extractor ablation: the raw conversation trajectory
-    is embedded directly instead of the extractor-produced graph.  No
-    GRAPH, FINDINGS, or PHASES sections are emitted.
-
-    ``base_prompt`` defaults to the ``trajectory`` variant loaded via
-    :func:`load_auditor_prompt`.
-    """
+    """Assemble the auditor system prompt for a trajectory-mode firing."""
     framing = (
         base_prompt
         if base_prompt is not None

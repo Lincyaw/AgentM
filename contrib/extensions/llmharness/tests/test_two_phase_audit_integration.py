@@ -55,7 +55,8 @@ from agentm.core.abi.extension import ProviderConfig
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 
-from llmharness.audit.auditor import SUBMIT_VERDICT_TOOL_NAME
+from llmharness.agents.auditor.auditor_tools import SUBMIT_VERDICT_TOOL_NAME
+from llmharness.agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
 from llmharness.audit.entry_types import (
     AUDIT_GRAPH_OP,
     EXTRACTOR_CURSOR,
@@ -63,7 +64,6 @@ from llmharness.audit.entry_types import (
     EXTRACTOR_NO_CALL,
     EXTRACTOR_PARTIAL,
 )
-from llmharness.audit.extractor import FINALIZE_EXTRACTION_TOOL_NAME
 
 # --- shared constants -------------------------------------------------------
 

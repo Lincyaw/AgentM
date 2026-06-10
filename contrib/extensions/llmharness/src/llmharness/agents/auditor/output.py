@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ...schema import Verdict
+from llmharness.schema import Verdict
 
 
 class AuditorOutputError(Exception):

@@ -19,11 +19,10 @@ from agentm.core.abi import (
 )
 from agentm.core.abi.messages import AgentMessage
 
-from llmharness.audit.extractor.state import ExtractionState
+from llmharness.agents.extractor.state import ExtractionState
 from llmharness.audit.graph.ops import NodeUpsert
 from llmharness.audit.runner import AuditorSettings, ExtractorSettings
 from llmharness.audit.seams.offline import InMemorySink
-from llmharness.audit.toolkit.atom_constants import EXTRACTOR_TOOLS_MODULE
 from llmharness.replay.offline_driver import replay_pipeline_over_trajectory
 from llmharness.schema import Event
 
@@ -206,7 +205,7 @@ async def test_replay_pipeline_breaks_on_first_surface(tmp_path: Path) -> None:
     stub = _SurfacingStubChildRunner()
 
     extractor_settings = ExtractorSettings(
-        extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
+
         compose_kwargs={"base_prompt": "stub-extractor-prompt"},
         base_prompt="stub-extractor-prompt",
     )
@@ -266,7 +265,7 @@ async def test_historical_source_turn_texts_elided_from_payload(tmp_path: Path) 
     stub = _StubChildRunner()
 
     extractor_settings = ExtractorSettings(
-        extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
+
         compose_kwargs={"base_prompt": "stub-extractor-prompt"},
         base_prompt="stub-extractor-prompt",
     )

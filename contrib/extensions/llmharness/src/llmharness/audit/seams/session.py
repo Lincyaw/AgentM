@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..extractor.state import ExtractionState
+from ...agents.extractor.state import ExtractionState
 from ..toolkit.atom_constants import (
     EXTRACTOR_STATE_SERVICE_KEY,
     EXTRACTOR_TOOLS_MODULE,

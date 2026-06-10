@@ -38,7 +38,8 @@ from typing import Any
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from ..toolkit.atom_constants import EXTRACTOR_STATE_SERVICE_KEY
+from llmharness.audit.toolkit.atom_constants import EXTRACTOR_STATE_SERVICE_KEY
+
 from .state import ExtractionState
 from .tools.delete_edge import DELETE_EDGE_TOOL_NAME, build_delete_edge_tool
 from .tools.delete_node import DELETE_NODE_TOOL_NAME, build_delete_node_tool

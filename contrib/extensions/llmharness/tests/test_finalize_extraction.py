@@ -26,8 +26,8 @@ from __future__ import annotations
 import pytest
 from agentm.core.abi import ToolResult, ToolTerminate
 
-from llmharness.audit.extractor.state import ExtractionState
-from llmharness.audit.extractor.tools.finalize_extraction import (
+from llmharness.agents.extractor.state import ExtractionState
+from llmharness.agents.extractor.tools.finalize_extraction import (
     FINALIZE_EXTRACTION_REASON,
     build_finalize_extraction_tool,
 )

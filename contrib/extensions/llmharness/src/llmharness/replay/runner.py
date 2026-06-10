@@ -15,14 +15,12 @@ import contextlib
 import json
 from typing import Any
 
-from ..audit.auditor import SUBMIT_VERDICT_TOOL_NAME, compose_auditor_extensions
-from ..audit.extractor import (
-    FINALIZE_EXTRACTION_TOOL_NAME,
-    ExtractionState,
-    RawExtractorOutput,
-)
+from ..agents.auditor.prompt import build_auditor_system_prompt
+from ..agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
+from ..agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
+from ..agents.extractor.output import RawExtractorOutput
+from ..agents.extractor.state import ExtractionState
 from ..audit.runner import AuditorSettings, ExtractorSettings
-from ..audit.seams.session import bind_extractor_state
 from ..audit.toolkit.extractor_directive import build_extractor_directive
 from ..schema import Edge, Event, Finding, Phase
 from ..tools.engine import PhaseResult, run_phase_standalone
@@ -141,7 +139,21 @@ async def replay_extractor_record(
     state.recent_edges_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
     state._refold()
 
-    extensions = bind_extractor_state(settings.extensions, state=state)
+    _EXT_TOOLS = "llmharness.agents.extractor.extractor_tools"
+    _OBS = "agentm.extensions.builtin.observability"
+    _OPS = "agentm.extensions.builtin.operations"
+    _SYS = "agentm.extensions.builtin.system_prompt"
+    extensions: list[tuple[str, dict[str, Any]]] = [
+        (_OBS, {}), (_OPS, {}),
+        (_EXT_TOOLS, {"state": state, "llmharness.extractor_state": state}),
+        (_SYS, {"prompt": settings.base_prompt}),
+    ]
+    if settings.tool_call_budget is not None:
+        budget = int(settings.tool_call_budget)
+        extensions.extend([
+            ("agentm.extensions.builtin.loop_budget", {"max_tool_calls": budget}),
+            ("agentm.extensions.builtin.turn_reminder", {"warn_within": budget}),
+        ])
 
     result = await run_phase_standalone(
         cwd=cwd,
@@ -190,19 +202,31 @@ async def replay_auditor_record(
     )
 
     ck = record.compose_kwargs or {}
-    extensions = compose_auditor_extensions(
-        base_prompt=settings.base_prompt or None,
-        observability_config=settings.observability_config,
-        trajectory_snapshot=ck.get("trajectory_snapshot"),
-        events=tuple(_coerce_schema_list(Event, ck.get("events") or [])),
-        edges=tuple(_coerce_schema_list(Edge, ck.get("edges") or [])),
-        phases=tuple(_coerce_schema_list(Phase, ck.get("phases") or [])),
+    events_t = tuple(_coerce_schema_list(Event, ck.get("events") or []))
+    edges_t = tuple(_coerce_schema_list(Edge, ck.get("edges") or []))
+    phases_t = tuple(_coerce_schema_list(Phase, ck.get("phases") or []))
+    prompt_text = build_auditor_system_prompt(
+        events=events_t,
+        edges=edges_t,
+        phases=phases_t,
         findings=_coerce_schema_list(Finding, ck.get("findings") or []),
         check_errors=dict(ck.get("check_errors") or {}),
         continuation_notes=list(ck.get("continuation_notes") or []),
         summary_threshold=settings.summary_threshold,
-        tools=settings.tools or None,
+        base_prompt=settings.base_prompt or None,
     )
+    tools_config: dict[str, Any] = {"tools": list(settings.tools or (SUBMIT_VERDICT_TOOL_NAME,))}
+    _AUDITOR_TOOLS = "llmharness.agents.auditor.auditor_tools"
+    _OBS = "agentm.extensions.builtin.observability"
+    _OPS = "agentm.extensions.builtin.operations"
+    _SYS = "agentm.extensions.builtin.system_prompt"
+    extensions: list[tuple[str, dict[str, Any]]] = []
+    obs_cfg = settings.observability_config
+    if obs_cfg is not None:
+        extensions.append((_OBS, dict(obs_cfg)))
+    extensions.append((_OPS, {}))
+    extensions.append((_AUDITOR_TOOLS, dict(tools_config)))
+    extensions.append((_SYS, {"prompt": prompt_text}))
     return await run_phase_standalone(
         cwd=cwd,
         extensions=extensions,

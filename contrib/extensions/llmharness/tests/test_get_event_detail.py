@@ -18,7 +18,7 @@ from llmharness.schema import Edge, EdgeKind, Event, EventKind
 
 def _install_and_capture(*, events: list[Event], edges: list[Edge]) -> Any:
     """Return the registered tool's ``fn`` callback."""
-    from llmharness.audit.auditor.get_event_detail import build_get_event_detail_tool
+    from llmharness.agents.auditor.get_event_detail import build_get_event_detail_tool
 
     return build_get_event_detail_tool(events, edges).fn
 

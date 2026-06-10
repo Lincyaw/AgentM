@@ -24,22 +24,18 @@ import json
 import logging
 from typing import Any
 
+from ...agents.auditor.output import AuditorOutputError, RawVerdictOutput
+from ...agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
+from ...agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
+from ...agents.extractor.state import ExtractionState
 from ...schema import Event
 from ...tools.engine import run_phase_standalone
-from ..auditor import (
-    SUBMIT_VERDICT_TOOL_NAME,
-    AuditorOutputError,
-    RawVerdictOutput,
-)
-from ..extractor import FINALIZE_EXTRACTION_TOOL_NAME, compose_extractor_extensions
-from ..extractor.state import ExtractionState
 from ..graph.ops import GraphOp
 from ..runner import (
     AuditorChildResult,
     ExtractorSpawnError,
     _flatten_assistant_blocks,
 )
-from ..seams.session import bind_extractor_state
 from ..toolkit.extractor_directive import build_extractor_directive
 
 _logger = logging.getLogger(__name__)
@@ -90,12 +86,21 @@ class StandaloneChildRunner:
         else (including ``no_call``) is signalled via ``terminator_called=False``.
         """
         del turn_window  # surfaced by the runner via append_failure context
-        base_extensions = compose_extractor_extensions(
-            base_prompt=prompt_text,
-            observability_config={},
-            tool_call_budget=tool_call_budget,
-        )
-        extensions = bind_extractor_state(base_extensions, state=state)
+        _EXT_TOOLS = "llmharness.agents.extractor.extractor_tools"
+        _OBS = "agentm.extensions.builtin.observability"
+        _OPS = "agentm.extensions.builtin.operations"
+        _SYS = "agentm.extensions.builtin.system_prompt"
+        extensions: list[tuple[str, dict[str, Any]]] = [
+            (_OBS, {}), (_OPS, {}),
+            (_EXT_TOOLS, {"state": state, "llmharness.extractor_state": state}),
+            (_SYS, {"prompt": prompt_text}),
+        ]
+        if tool_call_budget is not None:
+            budget = int(tool_call_budget)
+            extensions.extend([
+                ("agentm.extensions.builtin.loop_budget", {"max_tool_calls": budget}),
+                ("agentm.extensions.builtin.turn_reminder", {"warn_within": budget}),
+            ])
 
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
         directive = build_extractor_directive(payload)
@@ -136,17 +141,15 @@ class StandaloneChildRunner:
         responsibility — offline drivers route through ``InMemorySink``
         which has no diagnostic channel to emit on.
         """
-        # Reconstruct the extension list from domain params. The prompt_text
-        # is already fully built; tools_config goes into the auditor atom.
-        from ..seams.compose import compose_audit_extensions
-
-        _AUDITOR_TOOLS_MODULE = "llmharness.audit.auditor.atom"
-        extensions = compose_audit_extensions(
-            submit_tool_module=_AUDITOR_TOOLS_MODULE,
-            default_prompt=prompt_text,
-            observability_config={},
-            submit_tool_config=tools_config,
-        )
+        _AUD_TOOLS = "llmharness.agents.auditor.auditor_tools"
+        _OBS = "agentm.extensions.builtin.observability"
+        _OPS = "agentm.extensions.builtin.operations"
+        _SYS = "agentm.extensions.builtin.system_prompt"
+        extensions: list[tuple[str, dict[str, Any]]] = [
+            (_OBS, {}), (_OPS, {}),
+            (_AUD_TOOLS, dict(tools_config)),
+            (_SYS, {"prompt": prompt_text}),
+        ]
 
         payload: dict[str, Any] = {
             "graph": [e.to_dict() for e in graph_events],

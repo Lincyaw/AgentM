@@ -38,16 +38,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from ..audit.auditor.prompt import (
+from ..agents.auditor.prompt import (
     DEFAULT_PROMPT_NAME as _AUDITOR_DEFAULT_PROMPT_NAME,
 )
-from ..audit.auditor.prompt import load_auditor_prompt
-from ..audit.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
-from ..audit.extractor.atom import EXTRACTOR_TOOL_NAMES
-from ..audit.extractor.prompt import (
+from ..agents.auditor.prompt import load_auditor_prompt
+from ..agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
+from ..agents.extractor.extractor_tools import EXTRACTOR_TOOL_NAMES
+from ..agents.extractor.prompt import (
     DEFAULT_PROMPT_NAME as _EXTRACTOR_DEFAULT_PROMPT_NAME,
 )
-from ..audit.extractor.prompt import load_extractor_prompt
+from ..agents.extractor.prompt import load_extractor_prompt
 
 Phase = Literal["extractor", "auditor"]
 

@@ -25,7 +25,7 @@ from agentm.core.abi import ToolResult
 
 def _get_turn_fn(snapshot: list[dict[str, Any]]) -> Any:
     """Mint a ``get_turn`` tool over ``snapshot`` and return its ``fn``."""
-    from llmharness.audit.auditor.get_turn import build_get_turn_tool
+    from llmharness.agents.auditor.get_turn import build_get_turn_tool
 
     return build_get_turn_tool(snapshot).fn
 

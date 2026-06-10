@@ -26,7 +26,8 @@ from typing import Any
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..toolkit.decorator import harness_tool
+from llmharness.audit.toolkit.decorator import harness_tool
+
 from .output import AuditorOutputError, RawVerdictOutput
 
 SUBMIT_VERDICT_TOOL_NAME = "submit_verdict"

@@ -10,12 +10,12 @@ merge produces no advisory.
 
 See ``_compute_degree_warning`` and
 ``ExtractionState.compute_degree_warning`` in
-``llmharness.audit.extractor.state``.
+``llmharness.agents.extractor.state``.
 """
 
 from __future__ import annotations
 
-from llmharness.audit.extractor.state import (
+from llmharness.agents.extractor.state import (
     ExtractionState,
     _compute_degree_warning,
 )

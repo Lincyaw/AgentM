@@ -6,7 +6,7 @@ bug here corrupts every extracted graph downstream.
 
 from __future__ import annotations
 
-from llmharness.audit.extractor.witness import normalize, witness_data, witness_ref
+from llmharness.agents.extractor.witness import normalize, witness_data, witness_ref
 
 
 def test_normalize_is_case_and_whitespace_insensitive() -> None:
