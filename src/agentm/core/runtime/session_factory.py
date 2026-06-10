@@ -11,6 +11,7 @@ from typing import Any
 
 from agentm.core.abi import AgentLoop, EventBus, LoopConfig, Model, Tool
 from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.lib.ref import Ref
 from agentm.core.abi.roles import (
     COMMAND_PARSER,
     COMPACTION_PROMPTS,
@@ -178,48 +179,23 @@ async def create_agent_session(
 
         services[MODEL_RESOLVER_SERVICE] = _resolve_model
 
-    active_provider_box: dict[str, ProviderConfig | None] = {"value": None}
-    loop_box: dict[str, AgentLoop | None] = {"value": None}
-    # Effective loop budget is resolved after atoms install: the ``loop_budget``
-    # atom (when a scenario lists it) registers a ``LoopConfig`` under
-    # ``LOOP_BUDGET_SERVICE``; the substrate reads it just before building the
-    # loop. Precedence: explicit caller override (CLI ``--max-turns`` / SDK
-    # ``loop_config=``) > loop_budget atom > ``LoopConfig()`` default (no cap).
-    # Seed with the explicit override or the default; the atom layer is applied
-    # below once the service registry is populated.
-    loop_config_box: dict[str, LoopConfig] = {
-        "value": config.loop_config or LoopConfig()
-    }
+    active_provider_ref: Ref[ProviderConfig | None] = Ref(None)
+    loop_ref: Ref[AgentLoop | None] = Ref(None)
+    loop_config_ref: Ref[LoopConfig] = Ref(config.loop_config or LoopConfig())
     provider_resolver = config.provider_resolver or LastRegisteredWins()
     child_provider_factory = (
         config.child_provider_factory or default_child_provider_factory
     )
 
     def _model_getter() -> Model | None:
-        cur = active_provider_box["value"]
+        cur = active_provider_ref.value
         return cur.model if cur is not None else None
 
     def _provider_getter() -> ProviderConfig | None:
-        return active_provider_box["value"]
+        return active_provider_ref.value
 
-    # OTel-native identity:
-    #   * ``session_id`` is this session's *span_id* — 8 bytes / 16 hex.
-    #   * ``root_session_id`` is the *trace_id* shared across the whole
-    #     agent tree — 16 bytes / 32 hex. For a fresh root session we
-    #     generate a new trace_id; child sessions inherit their parent's
-    #     (the spawn factory below threads it onto ``spec.root_session_id``).
-    #   * ``parent_session_id`` is the parent's span_id and only matters
-    #     for children (root sessions get ``None``).
-    # Honour caller-supplied ids so external systems can reuse their own
-    # trace / span identifiers verbatim — the JSONL filename becomes
-    # ``<session_id>.jsonl`` and the OTel ``trace_id`` field on every
-    # event is the caller's trace_id. Falls back to fresh uuid hex of the
-    # appropriate length when no id is supplied.
-    # Single-event-log merge: observability writes the merged event log to
-    # ``<cwd>/.agentm/observability/<session_id>.jsonl`` and SessionManager
-    # is the authoritative source of the session header id, so the filename
-    # lines up with what ``continue_recent`` looks for. Pull from the
-    # manager when no caller-supplied id was provided.
+    # session_id = OTel span_id (16 hex); root_session_id = OTel trace_id
+    # (32 hex) shared across the agent tree. Honour caller-supplied ids.
     session_id = (
         config.session_id
         or session_manager.get_session_id()
@@ -228,7 +204,7 @@ async def create_agent_session(
     root_session_id = config.root_session_id or uuid.uuid4().hex
     session_view: ReadonlySession = SessionView(
         session_manager,
-        loop_config_getter=lambda: loop_config_box["value"],
+        loop_config_getter=lambda: loop_config_ref.value,
         bus=bus,
     )
     from agentm.core.runtime.resource_writer import DEFAULT_PROTECTED_BRANCHES
@@ -249,15 +225,15 @@ async def create_agent_session(
     _migrate_catalog(config.cwd)
 
     def _refresh_active_provider() -> None:
-        active_provider_box["value"] = (
+        active_provider_ref.value = (
             resolve_provider_config(
                 providers, provider_resolver, provider_path="<resolver>"
             )
             if providers
             else None
         )
-        loop = loop_box["value"]
-        active = active_provider_box["value"]
+        loop = loop_ref.value
+        active = active_provider_ref.value
         if loop is not None and active is not None:
             loop.set_stream_fn(active.stream_fn)
 
@@ -452,7 +428,7 @@ async def create_agent_session(
     active_provider = resolve_provider_config(
         providers, provider_resolver, provider_path=provider_path
     )
-    active_provider_box["value"] = active_provider
+    active_provider_ref.value = active_provider
 
     # Apply the loop_budget atom's registration, if any. An explicit caller
     # override (CLI flag / SDK ``loop_config=``) wins wholesale and is left
@@ -460,14 +436,14 @@ async def create_agent_session(
     if config.loop_config is None:
         registered_loop = services.get(LOOP_BUDGET_SERVICE)
         if isinstance(registered_loop, LoopConfig):
-            loop_config_box["value"] = registered_loop
+            loop_config_ref.value = registered_loop
 
     loop = AgentLoop(
         stream_fn=active_provider.stream_fn,
         bus=bus,
-        config=loop_config_box["value"],
+        config=loop_config_ref.value,
     )
-    loop_box["value"] = loop
+    loop_ref.value = loop
 
     # Single-event-log merge (.claude/designs/single-event-log.md):
     # SessionManager no longer writes its own JSONL. Attaching it to the
@@ -500,7 +476,7 @@ async def create_agent_session(
         session_manager=session_manager,
         resource_loader=resource_loader,
         loop=loop,
-        active_provider_box=active_provider_box,
+        active_provider_ref=active_provider_ref,
         tools=tools,
         commands=commands,
         providers=providers,

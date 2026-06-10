@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agentm.core.abi import AgentLoop, EventBus, Tool
+from agentm.core.lib.ref import Ref
 from agentm.core.runtime.atom_reloader import AtomReloader
 from agentm.core.runtime.extension import (
     CommandSpec,
@@ -24,7 +25,7 @@ class SessionRuntime:
     session_manager: SessionManager
     resource_loader: ResourceLoader
     loop: AgentLoop
-    active_provider_box: dict[str, ProviderConfig | None]
+    active_provider_ref: Ref[ProviderConfig | None]
     tools: list[Tool]
     commands: dict[str, CommandSpec]
     providers: dict[str, ProviderConfig]
