@@ -99,23 +99,16 @@ class _NodeAddingStubChildRunner:
     async def run_extractor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        state: ExtractionState,
+        prompt_text: str,
         provider: tuple[str, dict[str, Any]] | None,
         payload: dict[str, Any],
         turn_window: list[int],
+        tool_call_budget: int | None = None,
     ) -> tuple[bool, list[dict[str, Any]]]:
-        del provider
+        del provider, prompt_text, tool_call_budget
         self.extractor_calls += 1
         self.extractor_payloads.append(payload)
-
-        state: ExtractionState | None = None
-        for module, cfg in extensions:
-            if module == EXTRACTOR_TOOLS_MODULE:
-                candidate = cfg.get("state")
-                if isinstance(candidate, ExtractionState):
-                    state = candidate
-                    break
-        assert state is not None
 
         node_id = state.next_event_id
         state.pending_ops.append(
@@ -133,13 +126,15 @@ class _NodeAddingStubChildRunner:
     async def run_auditor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        prompt_text: str,
+        tools_config: dict[str, Any],
         provider: tuple[str, dict[str, Any]] | None,
         graph_events: list[Any],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
     ) -> Any:
-        del extensions, provider, recent_verdicts, continuation_notes_from_prior_firing
+        del prompt_text, tools_config, provider
+        del recent_verdicts, continuation_notes_from_prior_firing
         del graph_events
         self.auditor_calls += 1
         verdict = Verdict(
@@ -170,6 +165,7 @@ async def test_replay_pipeline_honors_seed_cumulative_and_start_turn(
     extractor_settings = ExtractorSettings(
         extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
         compose_kwargs={"base_prompt": "stub"},
+        base_prompt="stub",
     )
     auditor_settings = AuditorSettings(
         base_prompt="stub",
@@ -220,13 +216,15 @@ class _SurfacingTwiceStub(_NodeAddingStubChildRunner):
     async def run_auditor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        prompt_text: str,
+        tools_config: dict[str, Any],
         provider: tuple[str, dict[str, Any]] | None,
         graph_events: list[Any],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
     ) -> Any:
-        del extensions, provider, recent_verdicts, continuation_notes_from_prior_firing
+        del prompt_text, tools_config, provider
+        del recent_verdicts, continuation_notes_from_prior_firing
         del graph_events
         self.auditor_calls += 1
         verdict = Verdict(

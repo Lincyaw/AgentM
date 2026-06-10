@@ -31,13 +31,15 @@ from ..auditor import (
     AuditorOutputError,
     RawVerdictOutput,
 )
-from ..extractor import FINALIZE_EXTRACTION_TOOL_NAME
+from ..extractor import FINALIZE_EXTRACTION_TOOL_NAME, compose_extractor_extensions
+from ..extractor.state import ExtractionState
 from ..graph.ops import GraphOp
 from ..runner import (
     AuditorChildResult,
     ExtractorSpawnError,
     _flatten_assistant_blocks,
 )
+from ..seams.session import bind_extractor_state
 from ..toolkit.extractor_directive import build_extractor_directive
 
 _logger = logging.getLogger(__name__)
@@ -49,7 +51,9 @@ _logger = logging.getLogger(__name__)
 class StandaloneChildRunner:
     """:class:`ChildRunner` impl driven by :func:`run_phase_standalone`.
 
-    Same return signatures and failure routing as
+    Accepts domain-level parameters (state, prompt text, tool config)
+    from the runner and composes extension lists internally for replay
+    compatibility. Same return signatures and failure routing as
     :class:`llmharness.audit.seams.live.LiveChildRunner`, but spawns a
     top-level session per phase. There is no parent ``ExtensionAPI``;
     ``cwd`` is the working directory the child sessions execute in.
@@ -69,26 +73,30 @@ class StandaloneChildRunner:
     async def run_extractor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        state: ExtractionState,
+        prompt_text: str,
         provider: tuple[str, dict[str, Any]] | None,
         payload: dict[str, Any],
         turn_window: list[int],
+        tool_call_budget: int | None = None,
     ) -> tuple[bool, list[dict[str, Any]]]:
         """Run one extractor firing as a top-level session.
 
-        The directive preamble is built here via
-        :func:`build_extractor_directive` and prepended to the JSON
-        payload before being passed to :func:`run_phase_standalone` as
-        a verbatim string. :func:`run_phase_standalone` no longer
-        builds any preamble — both the live and offline extractor
-        children now see the same byte-identical user message, which
-        is what the design's invariant #1 (live === offline) requires.
+        Composes the extension list internally from domain-level params,
+        then delegates to :func:`run_phase_standalone`.
 
         Returns ``(terminator_called, raw_assistant_blocks)``. Spawn /
         prompt failures raise :class:`ExtractorSpawnError`; everything
         else (including ``no_call``) is signalled via ``terminator_called=False``.
         """
         del turn_window  # surfaced by the runner via append_failure context
+        base_extensions = compose_extractor_extensions(
+            base_prompt=prompt_text,
+            observability_config={},
+            tool_call_budget=tool_call_budget,
+        )
+        extensions = bind_extractor_state(base_extensions, state=state)
+
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
         directive = build_extractor_directive(payload)
         result = await run_phase_standalone(
@@ -109,7 +117,8 @@ class StandaloneChildRunner:
     async def run_auditor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        prompt_text: str,
+        tools_config: dict[str, Any],
         provider: tuple[str, dict[str, Any]] | None,
         graph_events: list[Event],
         recent_verdicts: list[dict[str, Any]],
@@ -117,10 +126,9 @@ class StandaloneChildRunner:
     ) -> AuditorChildResult:
         """Run one auditor firing as a top-level session.
 
-        Mirrors :meth:`LiveChildRunner.run_auditor` — composes the
-        ``{graph, recent_verdicts, continuation_notes_from_prior_firing}``
-        payload and parses the terminal tool's args via
-        :class:`RawVerdictOutput`. Returns an :class:`AuditorChildResult`
+        Composes the extension list internally from domain-level params
+        (``prompt_text`` and ``tools_config``), then delegates to
+        :func:`run_phase_standalone`. Returns an :class:`AuditorChildResult`
         with ``verdict=None`` for every failure mode (spawn / prompt /
         no-call / malformed); ``error`` / ``latency_ms`` are taken
         verbatim from :func:`run_phase_standalone`'s
@@ -128,6 +136,18 @@ class StandaloneChildRunner:
         responsibility — offline drivers route through ``InMemorySink``
         which has no diagnostic channel to emit on.
         """
+        # Reconstruct the extension list from domain params. The prompt_text
+        # is already fully built; tools_config goes into the auditor atom.
+        from ..seams.compose import compose_audit_extensions
+
+        _AUDITOR_TOOLS_MODULE = "llmharness.audit.auditor.atom"
+        extensions = compose_audit_extensions(
+            submit_tool_module=_AUDITOR_TOOLS_MODULE,
+            default_prompt=prompt_text,
+            observability_config={},
+            submit_tool_config=tools_config,
+        )
+
         payload: dict[str, Any] = {
             "graph": [e.to_dict() for e in graph_events],
             "recent_verdicts": list(recent_verdicts),

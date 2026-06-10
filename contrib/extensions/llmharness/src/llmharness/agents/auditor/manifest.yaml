@@ -1,0 +1,12 @@
+name: auditor
+description: >
+  Cognitive audit auditor: judges reasoning drift over the event graph.
+  Emits a verdict via submit_verdict.
+
+extensions:
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.operations
+  - module: llmharness.audit.auditor.atom
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
