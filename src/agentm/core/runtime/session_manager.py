@@ -1,10 +1,8 @@
 """Tree-shaped session storage, context reconstruction, and persistence.
 
-AgentM's v2 runtime session model: append-only entries with parent
-pointers, a movable active leaf, branch-aware context reconstruction,
-and optional JSONL persistence.
-
-Layer purity: stdlib + ``agentm.core.abi`` only.
+Append-only entries with parent pointers, a movable active leaf,
+branch-aware context reconstruction, and OTLP/JSON persistence via
+the session telemetry SDK.
 """
 
 from __future__ import annotations
@@ -285,11 +283,6 @@ class SessionManager:
         self._entries: dict[str, SessionEntry] = {}
         self._order: list[str] = []
         self._leaf_id: str | None = None
-        # Event-log merge (.claude/designs/single-event-log.md): SessionManager
-        # no longer owns its own JSONL file. Trajectory rows go to the
-        # observability sink via :class:`MessageAppendedEvent` /
-        # :class:`SessionHeaderEmittedEvent`. Until an EventBus is attached,
-        # emits buffer here and replay on ``attach_bus``.
         self._bus: "EventBus | None" = None
         self._pending_emits: list[tuple[str, Any]] = []
 
@@ -354,14 +347,7 @@ class SessionManager:
 
     @staticmethod
     def default_session_dir(cwd: str) -> Path:
-        """Per-cwd session log directory.
-
-        Single-event-log merge (.claude/designs/single-event-log.md): the
-        session JSONL now lives alongside (and equals) the observability
-        log under ``<cwd>/.agentm/observability/``. The legacy
-        ``~/.agentm/sessions/--<cwd>--/`` path is gone; nothing else in the
-        codebase should rely on it.
-        """
+        """Per-cwd session log directory (``<cwd>/.agentm/observability/``)."""
 
         from agentm.core.runtime.otel_export import resolve_observability_dir
 
@@ -501,10 +487,6 @@ class SessionManager:
             parent_session=parent_session,
         )
         if self._persist and self._session_file is None and self._session_dir is not None:
-            # Filename is now session-id-only — the observability sink owns the
-            # write path, and child IDs collide with the legacy ``<ts>_<id>``
-            # form anyway. Kept here so JsonlSessionStore.open() can locate the
-            # file by id without consulting the bus.
             self._session_file = self._session_dir / f"{self._header.id}.jsonl"
         self._emit(
             SessionHeaderEmittedEvent.CHANNEL,
@@ -903,10 +885,6 @@ class JsonlSessionStore:
         directory = self._session_dir or SessionManager.default_session_dir(
             str(self._cwd or Path.cwd())
         )
-        # Merged single-event-log filenames are ``<session_id>.jsonl`` —
-        # the legacy ``<timestamp>_<id>.jsonl`` shape is gone. The trailing
-        # glob still tolerates the old form so existing on-disk fixtures
-        # resolve until they roll over.
         direct = directory / f"{id}.jsonl"
         if direct.is_file():
             return SessionManager.open(direct)
