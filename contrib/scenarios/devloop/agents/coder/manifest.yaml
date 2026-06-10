@@ -19,12 +19,17 @@ extensions:
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.skill_loader
+    config:
+      include_defaults: false
+      inherit_claude: false
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
         You are a software developer. Read the context sections below
         for your specific assignment. Use the available tools to
         complete the task. Work in the current directory.
+        Load relevant skills from the available skills list before starting.
   - local: devloop_context
 
   - module: agentm.extensions.builtin.turn_reminder

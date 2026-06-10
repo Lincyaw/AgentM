@@ -32,6 +32,21 @@ from .types import (
 
 CODER = "devloop/agents/coder"
 
+
+def _find_project_root() -> Path:
+    d = Path(__file__).resolve().parent
+    while d != d.parent:
+        if (d / "pyproject.toml").exists():
+            return d
+        d = d.parent
+    return Path(__file__).resolve().parent.parent
+
+
+_PROJECT_ROOT = _find_project_root()
+_SKILL_CONFIG: dict[str, Any] = {
+    "skill_loader": {"skill_paths": [str(_PROJECT_ROOT / "skills")]},
+}
+
 STRUCTURED_ONLY_TOOLS = ["submit_result"]
 CODING_TOOLS = ["read", "write", "edit", "glob", "grep", "bash"]
 TEST_RUN_TOOLS = ["bash", "submit_result"]
@@ -148,7 +163,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         scenario=CODER,
         tool_allowlist=[*CODING_TOOLS, "submit_result"],
         extra_extensions=TEST_WRITING_BUDGET,
-        atom_config={"devloop_context": {
+        atom_config={**_SKILL_CONFIG, "devloop_context": {
             "task": test_writing_task(args.test_framework, spec_json),
             "spec": spec_json,
         }},
@@ -188,7 +203,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             scenario=CODER,
             tool_allowlist=CODING_TOOLS,
             extra_extensions=DEVELOP_BUDGET,
-            atom_config={"devloop_context": dev_context},
+            atom_config={**_SKILL_CONFIG, "devloop_context": dev_context},
             timeout=args.agent_timeout_seconds,
         )
 
@@ -217,7 +232,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             scenario=CODER,
             tool_allowlist=TEST_RUN_TOOLS,
             extra_extensions=TEST_RUN_BUDGET,
-            atom_config={"devloop_context": {
+            atom_config={**_SKILL_CONFIG, "devloop_context": {
                 "task": test_run_task(args.test_framework, test_files),
             }},
             retry=3, timeout=args.agent_timeout_seconds,
@@ -246,7 +261,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             scenario=CODER,
             tool_allowlist=REVIEW_TOOLS,
             extra_extensions=REVIEW_BUDGET,
-            atom_config={"devloop_context": {
+            atom_config={**_SKILL_CONFIG, "devloop_context": {
                 "task": CODE_REVIEW_TASK,
                 "spec": spec_json,
             }},
