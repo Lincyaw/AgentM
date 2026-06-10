@@ -26,47 +26,39 @@ Invariants (cf. design §4):
 
 from __future__ import annotations
 
-import collections
-import contextlib
-import copy
-import json
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Protocol
 
-from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolResultMessage
-from agentm.core.abi.session import SessionEntry
+from agentm.core.abi.messages import AgentMessage
 
 from .. import entry_types as _et
-from ..agents.auditor.output import AuditorOutputError, RawVerdictOutput
-from ..agents.auditor.profiles import (
-    TOOL_GET_EVENT_DETAIL,
-    TOOL_GET_TURN,
-    TOOL_SUBMIT_VERDICT,
-)
+from ..agents.auditor.profiles import TOOL_GET_EVENT_DETAIL, TOOL_GET_TURN, TOOL_SUBMIT_VERDICT
 from ..agents.auditor.prompt import (
     build_auditor_system_prompt,
     build_auditor_trajectory_prompt,
     load_auditor_prompt,
 )
 from ..agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
-from ..agents.extractor.extractor_tools import (
-    FINALIZE_EXTRACTION_TOOL_NAME,
-)
+from ..agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
 from ..agents.extractor.output import RawExtractorOutput
 from ..agents.extractor.state import ExtractionState
-from ..graph.fold import fold_graph
-from ..graph.ops import GraphOp, parse_op
+from ..graph.ops import GraphOp
 from ..graph.phase import merge_to_phases
-from ..replay.record import ReplayRecord, now_ns, write_record
-from ..schema import Edge, Event, Phase, Reminder, Verdict
-from .child_collect import (
-    flatten_assistant_blocks as _flatten_assistant_blocks,
+from ..primitives import (
+    CumulativeAuditState,
+    _render_message_text,
+    window_is_non_trivial,
 )
-from .child_collect import serialize_block as _serialize_block
-from .registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
+from ..primitives import (
+    _serialize_message as _serialize_message_for_extractor,
+)
+from ..primitives import (
+    serialize_full_trajectory as _serialize_full_trajectory,
+)
+from ..replay.record import ReplayRecord, now_ns, write_record
+from ..schema import Event, Reminder, Verdict
 from .registry import AuditCheckRegistry, CheckContext
 from .triggers import TriggerContext, TriggerRegistry
 
@@ -188,165 +180,7 @@ class AuditorSettings:
         )
 
 
-# --- cumulative state -------------------------------------------------------
-
-
-def _bool_safe_int(raw: Any) -> int | None:
-    """Coerce ``int`` while rejecting ``bool`` (which is an ``int`` subclass)."""
-    if isinstance(raw, int) and not isinstance(raw, bool):
-        return raw
-    return None
-
-
-@dataclass
-class CumulativeAuditState:
-    """Event-sourced graph state + auditor side-channel state.
-
-    Single source of truth for the cumulative view: ops accumulate across
-    firings; :meth:`graph_view` folds them on demand into the
-    ``(events, edges, phases)`` tuple consumed by the auditor and by the
-    extractor's ``recent_graph`` payload.
-    """
-
-    ops: list[GraphOp] = field(default_factory=list)
-    cursor_last_turn_index: int = -1
-    recent_verdicts: collections.deque[dict[str, Any]] = field(
-        default_factory=lambda: collections.deque(maxlen=_DEFAULT_RECENT_VERDICTS)
-    )
-    last_continuation_notes: list[str] = field(default_factory=list)
-    firing_id_counter: int = 0
-    # Cached fold view; invalidated whenever ``len(ops)`` changes.
-    _cached_len: int = -1
-    _cached_view: tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]] | None = None
-    # Phases live outside the op-log: they are produced by the mechanical
-    # ``merge_to_phases`` pass per firing. We accumulate them so the
-    # auditor sees the full phase history without re-reading the log.
-    _phases: list[Phase] = field(default_factory=list)
-
-    def graph_view(self) -> tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]]:
-        """Return ``(events, edges, phases)`` for the current cumulative state."""
-        if self._cached_view is not None and self._cached_len == len(self.ops):
-            return self._cached_view
-        folded = fold_graph(self.ops)
-        events = tuple(folded.nodes_list())
-        edges = tuple(folded.edges_list())
-        phases = tuple(self._phases)
-        self._cached_view = (events, edges, phases)
-        self._cached_len = len(self.ops)
-        return self._cached_view
-
-    def next_event_id(self) -> int:
-        events, _edges, _phases = self.graph_view()
-        return max((e.id for e in events), default=0) + 1
-
-    def _invalidate_cache(self) -> None:
-        self._cached_view = None
-        self._cached_len = -1
-
-    def absorb_extractor_firing(
-        self,
-        *,
-        firing_ops: Sequence[GraphOp],
-        firing_cursor: int,
-        firing_id: int,
-        firing_phases: Sequence[Phase] = (),
-    ) -> None:
-        self.ops.extend(firing_ops)
-        self.cursor_last_turn_index = firing_cursor
-        self._phases.extend(firing_phases)
-        # Bump the counter to one past this firing's id so the next
-        # ops-bearing firing gets a fresh slot. Failed / empty firings
-        # don't burn an id (the caller controls when to bump via
-        # ``firing_id_counter`` directly).
-        if firing_id >= self.firing_id_counter:
-            self.firing_id_counter = firing_id + 1
-        self._invalidate_cache()
-
-    def absorb_auditor_verdict(self, verdict: dict[str, Any], *, is_silent: bool) -> None:
-        del is_silent  # currently informational only; both shapes append
-        self.recent_verdicts.append(verdict)
-        raw_notes = verdict.get("continuation_notes")
-        if isinstance(raw_notes, list):
-            self.last_continuation_notes = [n for n in raw_notes if isinstance(n, str)]
-
-    @classmethod
-    def fresh(cls) -> CumulativeAuditState:
-        """Offline-mode seed: empty state."""
-        return cls()
-
-    def snapshot(self) -> CumulativeAuditState:
-        """Return an independent deep copy of this cumulative state.
-
-        Used by the fork-tree driver to capture the auditor state *as of*
-        a surface point: the snapshot is handed to a child fork as its
-        ``seed_cumulative`` and must not change when the backbone replay
-        keeps mutating the live state afterward. Every mutable container
-        (``ops``, ``recent_verdicts``, ``last_continuation_notes``,
-        ``_phases``) is copied; the frozen :class:`GraphOp` / :class:`Phase`
-        elements are safe to share but ``deepcopy`` copies them too. The
-        ``recent_verdicts`` deque's ``maxlen`` is preserved.
-        """
-        return copy.deepcopy(self)
-
-    @classmethod
-    def hydrate_from_session_log(cls, branch: list[SessionEntry]) -> CumulativeAuditState:
-        """Live-mode seed: walk session entries, populate ops + verdicts + cursor.
-
-        Reads the v4 entry shape only:
-
-        * ``AUDIT_GRAPH_OP`` → :func:`parse_op`-decoded :class:`GraphOp`.
-        * ``VERDICT`` → recent-verdicts deque (bounded).
-        * ``EXTRACTOR_CURSOR`` → ``cursor_last_turn_index``.
-
-        Phases are not persisted to the entry tree — they are derived at
-        ``graph_view()`` time from the folded ops.
-        """
-        ops: list[GraphOp] = []
-        verdicts_all: list[dict[str, Any]] = []
-        cursor_last_turn_index = -1
-
-        for entry in branch:
-            payload = entry.payload
-            if not isinstance(payload, dict):
-                continue
-            if entry.type == _et.AUDIT_GRAPH_OP:
-                try:
-                    ops.append(parse_op(payload))
-                except (KeyError, ValueError, TypeError):
-                    continue
-            elif entry.type == _et.VERDICT:
-                verdicts_all.append(payload)
-            elif entry.type == _et.EXTRACTOR_CURSOR:
-                raw = _bool_safe_int(payload.get("last_turn_index"))
-                if raw is not None:
-                    cursor_last_turn_index = raw
-
-        last_notes: list[str] = []
-        if verdicts_all:
-            raw_notes = verdicts_all[-1].get("continuation_notes")
-            if isinstance(raw_notes, list):
-                last_notes = [n for n in raw_notes if isinstance(n, str)]
-
-        recent: collections.deque[dict[str, Any]] = collections.deque(
-            maxlen=_DEFAULT_RECENT_VERDICTS
-        )
-        for v in verdicts_all[-_DEFAULT_RECENT_VERDICTS:]:
-            recent.append(v)
-
-        # Known limitation: ``firing_id_counter`` resets to 0 on every
-        # hydrate, so after a session restart a new firing can reuse a
-        # firing_id already present in the persisted ops. firing_id is not
-        # part of the atom hash or evidence attribution, so the collision
-        # is currently benign; seeding the counter from the max persisted
-        # firing_id is a separate behavior change.
-        state = cls(
-            ops=ops,
-            cursor_last_turn_index=cursor_last_turn_index,
-            recent_verdicts=recent,
-            last_continuation_notes=last_notes,
-            firing_id_counter=0,
-        )
-        return state
+# CumulativeAuditState lives in primitives.py; imported at the top.
 
 
 # --- protocols --------------------------------------------------------------
@@ -544,59 +378,6 @@ class StepResult:
     short-circuited before producing a record (e.g. an empty
     window)."""
 
-
-# --- helpers ----------------------------------------------------------------
-
-
-def _window_is_non_trivial(messages_slice: list[AgentMessage]) -> bool:
-    """True iff the slice contains any AssistantMessage or ToolResultMessage."""
-    return any(isinstance(msg, (AssistantMessage, ToolResultMessage)) for msg in messages_slice)
-
-
-def _render_message_text(msg: AgentMessage) -> str:
-    """Concatenate every text-bearing block; mirror the live adapter exactly."""
-    parts: list[str] = []
-    content = getattr(msg, "content", None)
-    if isinstance(content, list):
-        for block in content:
-            text = getattr(block, "text", None)
-            if isinstance(text, str) and text:
-                parts.append(text)
-                continue
-            inner = getattr(block, "content", None)
-            if isinstance(inner, list):
-                for sub in inner:
-                    sub_text = getattr(sub, "text", None)
-                    if isinstance(sub_text, str) and sub_text:
-                        parts.append(sub_text)
-            args = getattr(block, "arguments", None)
-            if isinstance(args, dict):
-                with contextlib.suppress(TypeError, ValueError):
-                    parts.append(json.dumps(args, ensure_ascii=False, default=str))
-    return " ".join(parts)
-
-
-def _serialize_message_for_extractor(msg: AgentMessage, *, index: int) -> dict[str, Any] | None:
-    content = getattr(msg, "content", None)
-    if not isinstance(content, list):
-        return None
-    blocks = [b for b in (_serialize_block(blk) for blk in content) if b is not None]
-    if not blocks:
-        return None
-    return {
-        "index": index,
-        "role": getattr(msg, "role", "unknown"),
-        "content": blocks,
-    }
-
-
-def _serialize_full_trajectory(messages: list[AgentMessage]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for i, msg in enumerate(messages):
-        serialized = _serialize_message_for_extractor(msg, index=i)
-        if serialized is not None:
-            out.append(serialized)
-    return out
 
 
 # --- runner -----------------------------------------------------------------
@@ -901,7 +682,7 @@ class HarnessRunner:
             # Genuinely empty firing: no graph work to salvage. Only here
             # does the terminator matter, and only for failure-entry
             # attribution.
-            if _window_is_non_trivial(window_messages):
+            if window_is_non_trivial(window_messages):
                 failure_kind = (
                     _et.EXTRACTOR_NO_CALL if not terminator_called else _et.EXTRACTOR_EMPTY
                 )
@@ -1167,23 +948,11 @@ class HarnessRunner:
 
 # Re-exported helpers — the adapter imports these so they stay in one place.
 __all__ = [
-    "AUDIT_REGISTRY_SERVICE_KEY",
-    "FINALIZE_EXTRACTION_TOOL_NAME",
-    "SUBMIT_VERDICT_TOOL_NAME",
-    "AuditorChildResult",
-    "AuditorOutputError",
-    "AuditorSettings",
     "ChildRunner",
-    "CumulativeAuditState",
     "ExtractorSettings",
     "ExtractorSpawnError",
     "HarnessRunner",
     "OpSink",
-    "RawExtractorOutput",
-    "RawVerdictOutput",
     "SidecarWriter",
     "StepResult",
-    "TriggerRegistry",
-    "_flatten_assistant_blocks",
-    "_serialize_full_trajectory",
 ]
