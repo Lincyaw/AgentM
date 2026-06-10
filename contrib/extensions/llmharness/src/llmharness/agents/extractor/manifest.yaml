@@ -7,7 +7,7 @@ description: >
 extensions:
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.operations
-  - module: llmharness.audit.extractor.atom
+  - module: llmharness.agents.extractor.extractor_tools
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: ""

@@ -50,17 +50,17 @@ The runtime entry point is the AgentM extension at
 ``AgentSessionConfig(extensions=[("llmharness.adapters.agentm", {})])``.
 """
 
-from .audit.auditor import (
+from .agents.auditor.auditor_tools import (
     AUDITOR_TERMINATION_REASON,
     AUDITOR_TOOL_NAMES,
     AUDITOR_TOOLS,
-    load_auditor_prompt,
 )
-from .audit.extractor import (
+from .agents.auditor.prompt import load_auditor_prompt
+from .agents.extractor.extractor_tools import (
     EXTRACTOR_TERMINATION_REASON,
     EXTRACTOR_TOOL_NAMES,
-    load_extractor_prompt,
 )
+from .agents.extractor.prompt import load_extractor_prompt
 from .audit.runner import AuditorSettings, ExtractorSettings
 from .replay.fork_tree import (
     FORK_TREE_HEADER_KEY,

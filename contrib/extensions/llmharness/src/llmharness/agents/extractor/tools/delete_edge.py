@@ -15,8 +15,9 @@ from typing import Any, Literal
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...toolkit.decorator import harness_tool
-from ...validation.witness_errors import format_witness_error
+from llmharness.audit.toolkit.decorator import harness_tool
+from llmharness.audit.validation.witness_errors import format_witness_error
+
 from ..state import ExtractionState
 from ..state_echo import state_echo
 

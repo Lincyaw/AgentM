@@ -38,7 +38,7 @@ from agentm.core.abi.messages import (
     UserMessage,
 )
 
-from llmharness.audit.extractor.state import ExtractionState
+from llmharness.agents.extractor.state import ExtractionState
 from llmharness.audit.graph.ops import NodeUpsert
 from llmharness.audit.runner import (
     AuditorChildResult,
@@ -48,7 +48,6 @@ from llmharness.audit.runner import (
     StepResult,
 )
 from llmharness.audit.seams.offline import InMemorySink
-from llmharness.audit.toolkit.atom_constants import EXTRACTOR_TOOLS_MODULE
 from llmharness.replay import fork_tree as _fork_tree_mod
 from llmharness.replay.fork_tree import (
     FORK_TREE_HEADER_KEY,
@@ -163,7 +162,7 @@ async def test_replay_pipeline_honors_seed_cumulative_and_start_turn(
     stub = _NodeAddingStubChildRunner()
 
     extractor_settings = ExtractorSettings(
-        extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
+
         compose_kwargs={"base_prompt": "stub"},
         base_prompt="stub",
     )
@@ -259,7 +258,7 @@ async def test_full_tree_run_captures_independent_surface_snapshots(
         session_id="node-y",
         provider=None,
         extractor_settings=ExtractorSettings(
-            extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
+
             compose_kwargs={"base_prompt": "stub"},
         ),
         auditor_settings=AuditorSettings(
@@ -316,7 +315,7 @@ async def test_child_resume_past_boundary_skips_fork_turn_firing(
     stub = _SurfacingTwiceStub()
     settings_kw = dict(
         extractor_settings=ExtractorSettings(
-            extensions=[(EXTRACTOR_TOOLS_MODULE, {})],
+
             compose_kwargs={"base_prompt": "stub"},
         ),
         auditor_settings=AuditorSettings(

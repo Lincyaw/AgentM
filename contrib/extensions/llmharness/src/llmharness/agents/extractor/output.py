@@ -10,7 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ...schema import Edge, Event
+from llmharness.schema import Edge, Event
+
 from .state import ExtractionState
 
 

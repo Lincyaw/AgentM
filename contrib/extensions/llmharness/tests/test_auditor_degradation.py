@@ -18,7 +18,7 @@ dynamically; it lives in the chosen framing file. See
 
 from __future__ import annotations
 
-from llmharness.audit.auditor.prompt import build_auditor_system_prompt
+from llmharness.agents.auditor.prompt import build_auditor_system_prompt
 from llmharness.schema import Edge, EdgeKind, Event, EventKind
 
 

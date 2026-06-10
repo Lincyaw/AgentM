@@ -33,16 +33,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ....schema import Edge, EdgeKind, Event
-from ...graph.fold import Graph, fold_graph
-from ...graph.ops import (
+from llmharness.audit.graph.fold import Graph, fold_graph
+from llmharness.audit.graph.ops import (
     EdgeDelete,
     EdgeUpsert,
     GraphOp,
     NodeDelete,
     NodeUpsert,
 )
-from ...validation.enum_schema import EDGE_KIND_VALUES
+from llmharness.audit.validation.enum_schema import EDGE_KIND_VALUES
+from llmharness.schema import Edge, EdgeKind, Event
+
 from ..witness import witness_ref
 from .validate import (
     _coerce_int,

@@ -6,7 +6,7 @@ description: >
 extensions:
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.operations
-  - module: llmharness.audit.auditor.atom
+  - module: llmharness.agents.auditor.auditor_tools
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: ""

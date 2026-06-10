@@ -39,6 +39,23 @@ from typing import Any, Final, Protocol
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, ToolResultMessage
 from agentm.core.abi.session import SessionEntry
 
+from ...agents.auditor.output import AuditorOutputError, RawVerdictOutput
+from ...agents.auditor.profiles import (
+    TOOL_GET_EVENT_DETAIL,
+    TOOL_GET_TURN,
+    TOOL_SUBMIT_VERDICT,
+)
+from ...agents.auditor.prompt import (
+    build_auditor_system_prompt,
+    build_auditor_trajectory_prompt,
+    load_auditor_prompt,
+)
+from ...agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
+from ...agents.extractor.extractor_tools import (
+    FINALIZE_EXTRACTION_TOOL_NAME,
+)
+from ...agents.extractor.output import RawExtractorOutput
+from ...agents.extractor.state import ExtractionState
 from ...child_collect import (
     flatten_assistant_blocks as _flatten_assistant_blocks,
 )
@@ -46,26 +63,6 @@ from ...child_collect import serialize_block as _serialize_block
 from ...replay.record import ReplayRecord, now_ns, write_record
 from ...schema import Edge, Event, Phase, Reminder, Verdict
 from .. import entry_types as _et
-from ..auditor import (
-    SUBMIT_VERDICT_TOOL_NAME,
-    AuditorOutputError,
-    RawVerdictOutput,
-)
-from ..auditor.profiles import (
-    TOOL_GET_EVENT_DETAIL,
-    TOOL_GET_TURN,
-    TOOL_SUBMIT_VERDICT,
-)
-from ..auditor.prompt import (
-    build_auditor_system_prompt,
-    build_auditor_trajectory_prompt,
-    load_auditor_prompt,
-)
-from ..extractor import (
-    FINALIZE_EXTRACTION_TOOL_NAME,
-    ExtractionState,
-    RawExtractorOutput,
-)
 from ..graph.fold import fold_graph
 from ..graph.ops import GraphOp, parse_op
 from ..graph.phase import merge_to_phases
@@ -83,15 +80,13 @@ _DEFAULT_RECENT_VERDICTS: Final[int] = _et.RECENT_VERDICTS_FOR_AUDITOR
 
 @dataclass(frozen=True)
 class ExtractorSettings:
-    """Per-install knobs for assembling a per-firing extractor extension list.
+    """Per-install knobs for the extractor child session.
 
     ``base_prompt`` and ``tool_call_budget`` are the domain-level parameters
-    the runner passes to the :class:`ChildRunner`. ``extensions`` is kept
-    for sidecar recording and replay compatibility but is no longer passed
-    to the child runner on the live path.
+    the runner passes to the :class:`ChildRunner`. ``compose_kwargs`` is
+    kept for sidecar recording and replay compatibility.
     """
 
-    extensions: list[tuple[str, dict[str, Any]]]
     compose_kwargs: dict[str, Any]
     base_prompt: str = ""
     tool_call_budget: int | None = None
@@ -103,15 +98,7 @@ class ExtractorSettings:
         *,
         prompt_override: str | None = None,
     ) -> ExtractorSettings:
-        """Build an ``ExtractorSettings`` from a record's ``compose_kwargs``.
-
-        Used by single-firing replay (:func:`replay_extractor_record`) and
-        the strict-A/B offline driver — both extract the per-firing
-        compose state from a recorded :class:`ReplayRecord`. Honours the
-        legacy ``prompt_override`` key from pre-profile replay sidecars.
-        """
-        from ..extractor import compose_extractor_extensions
-
+        """Build from a replay record's ``compose_kwargs``."""
         ck = dict(compose_kwargs or {})
         effective_prompt = (
             prompt_override
@@ -120,13 +107,7 @@ class ExtractorSettings:
         )
         tcb_raw = ck.get("tool_call_budget")
         tcb = int(tcb_raw) if isinstance(tcb_raw, int) and not isinstance(tcb_raw, bool) else None
-        extensions = compose_extractor_extensions(
-            base_prompt=effective_prompt,
-            observability_config=ck.get("observability_config"),
-            tool_call_budget=tcb,
-        )
         return cls(
-            extensions=extensions,
             compose_kwargs=ck,
             base_prompt=effective_prompt or "",
             tool_call_budget=tcb,
@@ -134,36 +115,12 @@ class ExtractorSettings:
 
     @classmethod
     def default(cls) -> ExtractorSettings:
-        """Built-in extractor defaults — same prompt + empty configs the live
-        ``rca:harness.sync`` variant uses when no overrides are supplied.
-
-        Used by callers (notably ``agentm_rca`` ``chained_fork`` with a
-        ``rca:baseline`` control) that need to drive the offline runner
-        without a recorded sidecar to crib settings from.
-
-        Observability is **enabled** by default (``observability_config={}``
-        rather than ``None``): the per-firing extractor child session
-        writes OTLP/JSON ndjson to ``<cwd>/.agentm/observability/<sid>.jsonl``
-        just like the live path does, so downstream consumers see
-        symmetric traces for live and offline runs. Passing ``None``
-        suppresses the atom entirely and breaks offline-trace parity.
-        """
-        from ..extractor import compose_extractor_extensions
-        from ..extractor.prompt import load_extractor_prompt
+        """Built-in extractor defaults."""
+        from ...agents.extractor.prompt import load_extractor_prompt
 
         base_prompt = load_extractor_prompt("default")
-        compose_kwargs: dict[str, Any] = {
-            "base_prompt": base_prompt,
-            "observability_config": {},
-        }
-        extensions = compose_extractor_extensions(
-            base_prompt=base_prompt,
-            observability_config={},
-            tool_call_budget=None,
-        )
         return cls(
-            extensions=extensions,
-            compose_kwargs=compose_kwargs,
+            compose_kwargs={"base_prompt": base_prompt, "observability_config": {}},
             base_prompt=base_prompt,
             tool_call_budget=None,
         )
@@ -221,7 +178,7 @@ class AuditorSettings:
         same OTLP/JSON trace shape a live auditor would. See the
         symmetric note on :meth:`ExtractorSettings.default`.
         """
-        from ..auditor.prompt import load_auditor_prompt
+        from ...agents.auditor.prompt import load_auditor_prompt
 
         return cls(
             base_prompt=load_auditor_prompt("minimal"),

@@ -83,11 +83,10 @@ from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import AgentMessage
 from agentm.extensions import ExtensionManifest
 
+from ..agents.auditor.profiles import resolve_tools as _resolve_auditor_tools
+from ..agents.auditor.prompt import load_auditor_prompt
+from ..agents.extractor.prompt import load_extractor_prompt
 from ..audit import entry_types as _et
-from ..audit.auditor.profiles import resolve_tools as _resolve_auditor_tools
-from ..audit.auditor.prompt import load_auditor_prompt
-from ..audit.extractor import compose_extractor_extensions
-from ..audit.extractor.prompt import load_extractor_prompt
 from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from ..audit.registry import AuditCheckRegistry
 from ..audit.runner import (
@@ -400,18 +399,12 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if isinstance(extractor_tcb_raw, int) and not isinstance(extractor_tcb_raw, bool)
         else None
     )
-    extractor_extensions = compose_extractor_extensions(
-        base_prompt=extractor_base_prompt,
-        observability_config=obs_cfg,
-        tool_call_budget=extractor_tcb,
-    )
     extractor_compose_kwargs: dict[str, Any] = {
         "base_prompt": extractor_base_prompt,
         "observability_config": obs_cfg,
         "tool_call_budget": extractor_tcb,
     }
     extractor_settings = ExtractorSettings(
-        extensions=extractor_extensions,
         compose_kwargs=extractor_compose_kwargs,
         base_prompt=extractor_base_prompt,
         tool_call_budget=extractor_tcb,

@@ -20,17 +20,14 @@ from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.extension import ExtensionAPI
 
 from ...agents import auditor_scenario, extractor_scenario
+from ...agents.auditor.output import AuditorOutputError, RawVerdictOutput
+from ...agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
+from ...agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
+from ...agents.extractor.state import ExtractionState
 from ...child_collect import flatten_assistant_blocks
 from ...child_task import run_child_task
 from ...schema import Event
 from .. import entry_types as _et
-from ..auditor import (
-    SUBMIT_VERDICT_TOOL_NAME,
-    AuditorOutputError,
-    RawVerdictOutput,
-)
-from ..extractor import FINALIZE_EXTRACTION_TOOL_NAME
-from ..extractor.state import ExtractionState
 from ..graph.ops import GraphOp
 from ..runner import (
     AuditorChildResult,
