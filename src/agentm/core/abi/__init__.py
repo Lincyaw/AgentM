@@ -109,30 +109,9 @@ from .termination import (
 )
 from .tool import Tool, ToolContinue, ToolOutcome, ToolResult, ToolTerminate
 
-# ``FunctionTool`` is a concrete adapter — it lives outside the ABI surface
-# proper (under ``core/_internal/tools.py``) but is re-exported here for
-# ergonomic access from atoms and tests. Importing _internal from the abi
-# __init__ is allowed: this module is itself part of the constitution.
 from agentm.core._internal.tools import FunctionTool  # noqa: E402
 
-# ``SessionTelemetry`` is similarly a runtime-side service object (file
-# exporters + batch processors live in ``core.runtime.otel_export``), but
-# atoms need the *type* to annotate handler captures of
-# ``api.get_session_telemetry()``. Re-exporting through the ABI is the
-# established service-facade pattern (cf. ``FunctionTool`` above) and lets
-# the §11 validator stay strict about atoms importing
-# ``agentm.core.runtime.*`` directly.
-#
-# ``TraceReader`` is the canonical reader API for the OTLP/JSON event log
-# (`.claude/designs/single-event-log.md` PR-G). Atoms cannot import
-# ``core.runtime.*`` directly under §11, so we re-export the read-only
-# surface — class + dataclass views + the ``attr`` helper — through the
-# ABI. The runtime impl stays in ``core.runtime.trace_reader``.
-#
-# Both are imported lazily via ``__getattr__`` to break a circular import
-# chain: ``agentm.extensions`` -> ``core.abi`` -> ``core.runtime.*`` ->
-# ``agentm.extensions`` (see audit finding 1). TYPE_CHECKING keeps static
-# analysers happy; __getattr__ resolves them at runtime on first access.
+# Lazy re-exports from runtime (break circular import chain).
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -156,107 +135,32 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
-    # loop
-    "AgentLoop",
-    "LoopConfig",
-    # extension manifest (atom-facing declaration record)
-    "ExtensionManifest",
-    # presenter view contract
-    "PHASE_GLYPHS",
-    "Phase",
-    # provider
-    "ProviderConfig",
-    "ProviderManifest",
-    "ProviderResolver",
-    # retry
-    "RetryPolicy",
-    # session store
-    "SessionState",
-    "SessionStore",
-    # telemetry (re-exported from core.runtime.otel_export — see comment
-    # in __init__ body for the service-facade rationale).
-    "SessionTelemetry",
-    # trace reader (re-exported from core.runtime.trace_reader — atoms
-    # use this to read the OTLP/JSON event log without violating §11).
-    "LogRecord",
-    "SessionIdentity",
-    "Span",
-    "TraceReader",
-    "attr",
-    # messages
-    "AgentMessage",
-    "AssistantContent",
-    "AssistantMessage",
-    "ImageContent",
-    "TextContent",
-    "ThinkingBlock",
-    "ToolCallBlock",
-    "ToolResultBlock",
-    "ToolResultMessage",
-    "Usage",
-    "UserMessage",
-    "text_message",
-    "tool_result",
-    # tool
-    "FunctionTool",
-    "Tool",
-    "ToolContinue",
-    "ToolOutcome",
-    "ToolResult",
-    "ToolTerminate",
-    # events
-    "AgentEndEvent",
-    "AgentStartEvent",
-    "BeforeSendToLlmEvent",
-    "BudgetExhausted",
-    "BusPriority",
-    "ContextEvent",
-    "DecideTurnActionEvent",
-    "Event",
-    "EventBus",
-    "EventBusObserver",
-    "Inject",
-    "LlmRequestEndEvent",
-    "LlmRequestStartEvent",
-    "LoopAction",
-    "Handler",
-    "ObserverCallback",
-    "ObserverRegistration",
-    "MaxTurnsExhausted",
-    "ModelEndTurn",
+    "Aborted", "AgentEndEvent", "AgentLoop", "AgentMessage", "AgentStartEvent",
+    "AssistantContent", "AssistantMessage", "AssistantStreamEvent",
+    "BeforeSendToLlmEvent", "BudgetExhausted", "BusPriority",
+    "ContextEvent", "DecideTurnActionEvent",
+    "EndTurn", "Event", "EventBus", "EventBusObserver", "ExtensionManifest",
+    "FunctionTool", "Handler",
+    "ImageContent", "Inject",
+    "LlmRequestEndEvent", "LlmRequestStartEvent",
+    "LogRecord", "LoopAction", "LoopConfig",
+    "MaxTokens", "MaxTurnsExhausted", "MessageEnd", "Model", "ModelEndTurn",
     "NoPendingInput",
-    "ProviderProtocolViolation",
+    "ObserverCallback", "ObserverRegistration",
+    "PHASE_GLYPHS", "PauseTurn", "Phase", "ProviderConfig", "ProviderError",
+    "ProviderManifest", "ProviderProtocolViolation", "ProviderResolver",
     "ProviderTruncated",
-    "SignalAborted",
-    "Step",
-    "Stop",
-    "StreamDeltaEvent",
-    "TerminationCause",
-    "ToolCallEvent",
-    "ToolErrorEvent",
-    "ToolResultEvent",
-    "ToolTerminated",
-    "TurnEndEvent",
-    "TurnObservation",
-    "TurnStartEvent",
-    # stream
-    "AssistantStreamEvent",
-    "MessageEnd",
-    "Model",
-    "StreamFn",
-    "TextDelta",
-    "ThinkingDelta",
-    "ToolCallArgsDelta",
-    "ToolCallArgsParseError",
-    "ToolCallEnd",
-    "ToolCallStart",
-    # termination
-    "Aborted",
-    "EndTurn",
-    "MaxTokens",
-    "PauseTurn",
-    "ProviderError",
-    "TerminationHint",
-    "ToolUseExpected",
-    "VendorSpecific",
+    "RetryPolicy",
+    "SessionIdentity", "SessionState", "SessionStore", "SessionTelemetry",
+    "SignalAborted", "Span", "Step", "Stop", "StreamDeltaEvent", "StreamFn",
+    "TerminationCause", "TerminationHint",
+    "TextContent", "TextDelta", "ThinkingBlock", "ThinkingDelta",
+    "Tool", "ToolCallArgsDelta", "ToolCallArgsParseError", "ToolCallBlock",
+    "ToolCallEnd", "ToolCallEvent", "ToolCallStart",
+    "ToolContinue", "ToolErrorEvent", "ToolOutcome", "ToolResult",
+    "ToolResultBlock", "ToolResultEvent", "ToolResultMessage",
+    "ToolTerminate", "ToolTerminated", "ToolUseExpected",
+    "TraceReader", "TurnEndEvent", "TurnObservation", "TurnStartEvent",
+    "Usage", "UserMessage", "VendorSpecific",
+    "attr", "text_message", "tool_result",
 ]
