@@ -5,11 +5,21 @@ Each model serves as both the runtime type AND the JSON Schema source
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from agentm.core.lib import pydantic_to_tool_schema
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _STRICT = ConfigDict(extra="forbid")
+
+
+# ── Workflow Args ─────────────────────────────────────────────
+
+class DevloopArgs(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    requirement: str = Field(description="Natural-language feature requirement.")
+    language: str = Field(default="python", description="Target language.")
+    test_framework: str = Field(default="pytest", description="Test framework.")
+    max_rounds: int = Field(default=3, description="Max develop+test iterations.")
+    skip_review: bool = Field(default=False, description="Skip final code review.")
+    agent_timeout_seconds: float = Field(default=900.0, description="Per-agent wall-clock timeout.")
 
 
 # ── Spec ───────────────────────────────────────────────────────
@@ -49,6 +59,11 @@ class ReviewIssue(BaseModel):
     model_config = _STRICT
     ac_id: str = Field(default="", description="Which AC is affected.")
     issue: str = Field(default="", description="What's wrong.")
+
+    @field_validator("ac_id", "issue", mode="before")
+    @classmethod
+    def _none_to_empty(cls, value: object) -> object:
+        return "" if value is None else value
 
 
 class DesignReview(BaseModel):
@@ -103,11 +118,3 @@ class CodeReview(BaseModel):
     verdicts: list[ACVerdict] = Field(default_factory=list, description="Per-AC verdicts.")
     findings: list[Finding] = Field(default_factory=list, description="Code quality findings.")
 
-
-# ── Derived JSON Schemas (for schema= on agent()) ─────────────
-
-SPEC_SCHEMA = pydantic_to_tool_schema(ImplementationSpec)
-REVIEW_SCHEMA = pydantic_to_tool_schema(DesignReview)
-TEST_INFO_SCHEMA = pydantic_to_tool_schema(TestInfo)
-TEST_RESULT_SCHEMA = pydantic_to_tool_schema(TestResult)
-CODE_REVIEW_SCHEMA = pydantic_to_tool_schema(CodeReview)
