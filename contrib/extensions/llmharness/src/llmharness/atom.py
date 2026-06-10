@@ -1,10 +1,3 @@
-"""§11 atom: two-phase cognitive audit (extractor + auditor).
-
-Parent orchestrator — hooks turn_end / decide_turn_action, spawns
-extractor and auditor child sessions with raw data, reads back
-outputs, manages cumulative state, and injects reminders.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -243,70 +236,40 @@ class CumulativeAuditState:
 # ---------------------------------------------------------------------------
 
 
-def _serialize_block(block: Any) -> dict[str, Any] | None:
-    text = getattr(block, "text", None)
-    if isinstance(text, str) and text:
-        block_type = getattr(block, "type", None)
-        return {
-            "type": block_type if isinstance(block_type, str) and block_type else "text",
-            "text": text,
-        }
-    name = getattr(block, "name", None)
-    arguments = getattr(block, "arguments", None)
-    if isinstance(name, str) and isinstance(arguments, dict):
-        return {"type": "tool_call", "id": getattr(block, "id", None), "name": name, "arguments": dict(arguments)}
-    tool_call_id = getattr(block, "tool_call_id", None)
-    inner_content = getattr(block, "content", None)
-    if isinstance(tool_call_id, str) and isinstance(inner_content, list):
-        inner_blocks: list[dict[str, Any]] = []
-        for inner in inner_content:
-            inner_text = getattr(inner, "text", None)
-            if isinstance(inner_text, str):
-                inner_blocks.append({"type": "text", "text": inner_text})
-            else:
-                inner_blocks.append({"type": getattr(inner, "type", inner.__class__.__name__), "repr": repr(inner)})
-        return {"type": "tool_result", "tool_call_id": tool_call_id, "content": inner_blocks, "is_error": bool(getattr(block, "is_error", False))}
-    return {"type": getattr(block, "type", block.__class__.__name__), "repr": repr(block)}
-
-
 def _render_message_text(msg: AgentMessage) -> str:
+    """Extract all text from a message into one string (for witness validation)."""
     parts: list[str] = []
     content = getattr(msg, "content", None)
-    if isinstance(content, list):
-        for block in content:
-            text = getattr(block, "text", None)
-            if isinstance(text, str) and text:
-                parts.append(text)
-                continue
-            inner = getattr(block, "content", None)
-            if isinstance(inner, list):
-                for sub in inner:
-                    sub_text = getattr(sub, "text", None)
-                    if isinstance(sub_text, str) and sub_text:
-                        parts.append(sub_text)
-            args = getattr(block, "arguments", None)
-            if isinstance(args, dict):
-                with contextlib.suppress(TypeError, ValueError):
-                    parts.append(json.dumps(args, ensure_ascii=False, default=str))
+    if not isinstance(content, list):
+        return ""
+    for block in content:
+        text = getattr(block, "text", None)
+        if isinstance(text, str) and text:
+            parts.append(text)
+            continue
+        inner = getattr(block, "content", None)
+        if isinstance(inner, list):
+            for sub in inner:
+                sub_text = getattr(sub, "text", None)
+                if isinstance(sub_text, str) and sub_text:
+                    parts.append(sub_text)
+        args = getattr(block, "arguments", None)
+        if isinstance(args, dict):
+            with contextlib.suppress(TypeError, ValueError):
+                parts.append(json.dumps(args, ensure_ascii=False, default=str))
     return " ".join(parts)
 
 
-def _serialize_message(msg: AgentMessage, *, index: int) -> dict[str, Any] | None:
-    content = getattr(msg, "content", None)
-    if not isinstance(content, list):
-        return None
-    blocks = [b for b in (_serialize_block(blk) for blk in content) if b is not None]
-    if not blocks:
-        return None
-    return {"index": index, "role": getattr(msg, "role", "unknown"), "content": blocks}
-
-
-def serialize_full_trajectory(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+def _serialize_trajectory(
+    messages: list[AgentMessage], *, start_index: int = 0,
+) -> list[dict[str, Any]]:
+    from agentm.core.lib import to_jsonable
     out: list[dict[str, Any]] = []
-    for i, msg in enumerate(messages):
-        serialized = _serialize_message(msg, index=i)
-        if serialized is not None:
-            out.append(serialized)
+    for i, msg in enumerate(messages, start=start_index):
+        d = to_jsonable(msg)
+        if isinstance(d, dict):
+            d["index"] = i
+            out.append(d)
     return out
 
 
@@ -333,12 +296,7 @@ def _prepare_extractor_data(
     for t in {t for e in events_cum for t in e.source_turns}:
         if str(t) not in turn_texts and 0 <= t < len(messages):
             turn_texts[str(t)] = _render_message_text(messages[t])
-    new_turns = [
-        s for s in (
-            _serialize_message(msg, index=i)
-            for i, msg in enumerate(window_messages, start=window_lo)
-        ) if s is not None
-    ]
+    new_turns = _serialize_trajectory(window_messages, start_index=window_lo)
     return {
         "turn_texts": turn_texts,
         "recent_graph": [e.to_dict() for e in events_cum],
@@ -512,7 +470,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:  # type: ignor
         # --- Auditor ---
         if auditor_due:
             events, edges, phases = cumulative.graph_view()
-            trajectory = serialize_full_trajectory(list(messages))
+            trajectory = _serialize_trajectory(list(messages))
 
             child_msgs = await _run_child(
                 api,
