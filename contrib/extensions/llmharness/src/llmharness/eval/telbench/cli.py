@@ -31,7 +31,7 @@ def _resolve_provider(provider_spec: str | None) -> tuple[str, dict[str, Any]] |
     when no explicit spec is given.
     """
     if not provider_spec:
-        from llmharness.replay.cli import (  # type: ignore[import-not-found]
+        from llmharness.replay.cli import (  # type: ignore[import-untyped]
             resolve_default_provider_spec,
         )
 
