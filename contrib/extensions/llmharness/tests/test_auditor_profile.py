@@ -59,5 +59,5 @@ def test_minimal_prompt_does_not_reference_drill_down_tools() -> None:
 def test_unknown_prompt_name_raises() -> None:
     import pytest
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ValueError):
         load_auditor_prompt("totally-bogus-variant")

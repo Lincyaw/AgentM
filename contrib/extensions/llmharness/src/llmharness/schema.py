@@ -1,33 +1,4 @@
-"""Typed payloads for the cognitive-audit pipeline.
-
-These dataclasses describe the verdict / event / edge / reminder / finding
-shapes the audit child session emits and the adapter consumes.
-Persistence lives on the session entry tree
-(``api.session.append_entry``); this module is just the typed contract
-between the audit prompt schemas, the phase parsers
-(``audit.extractor.RawExtractorOutput`` /
-``audit.auditor.RawVerdictOutput``), and the adapter.
-
-Current wire shape (v4):
-- ``EventKind`` is ``task`` | ``hyp`` | ``act`` | ``dec`` | ``concl``.
-  A linear investigation block collapses to ONE ``act`` node whose
-  ``summary`` records both the probes the agent issued AND the results
-  that came back, in time order.
-- ``Edge`` / ``EdgeKind`` are first-class records persisted as
-  ``llmharness.audit_graph_op`` entries. Edges carry witness fields
-  (``cited_entities``, ``cited_quote``) and per-side source-turn
-  tuples.
-- ``Finding`` is the output shape for scenario-registered audit checks
-  (see ``audit/registry.py``).
-- ``Verdict`` carries ``surface_reminder`` / ``reminder_text`` /
-  ``continuation_notes`` / ``matched_event_ids``.
-- ``finalize_extraction`` always commits a witness-valid graph; the
-  chain-link advisory surfaces as a soft warning. See
-  :func:`llmharness.audit.extractor.state._compute_degree_warning`.
-
-Pre-v4 records are not supported — see git history for migration
-details.
-"""
+"""Shared data types and entry-type constants for the cognitive-audit pipeline."""
 
 from __future__ import annotations
 
@@ -37,7 +8,7 @@ from typing import Any
 
 
 class EventKind(str, Enum):
-    """Action-signature classification of an extracted event (design §3)."""
+    """Action-signature classification of an extracted event."""
 
     TASK = "task"
     HYP = "hyp"
@@ -47,11 +18,7 @@ class EventKind(str, Enum):
 
 
 class EdgeKind(str, Enum):
-    """Kind of edge between two events (design §4.c, §7.1).
-
-    ``DATA`` — content/data flow (e.g. evidence supports a hypothesis).
-    ``REF`` — referential mention (e.g. a decision references a prior task).
-    """
+    """Kind of edge between two events."""
 
     DATA = "data"
     REF = "ref"
@@ -59,19 +26,7 @@ class EdgeKind(str, Enum):
 
 @dataclass(frozen=True)
 class ExternalRef:
-    """A reference from a new event back into ``recent_graph`` — i.e. to
-    an event extracted by a PRIOR firing.
-
-    Stored on :class:`Event` (not as a free-standing ``Edge``) because the
-    referenced event has only a local id from its own firing at the time
-    the extractor submits. The aggregator resolves these to real edges
-    in the cumulative global id space (see ``aggregate.collector``).
-
-    Witnesses are validated by the live harness, same rules as in-firing
-    refs: ``data`` requires non-empty ``cited_entities``; ``ref`` requires
-    a non-empty ``cited_quote``; anchors must appear in at least one
-    endpoint's source-turns text.
-    """
+    """Cross-firing reference from this event to a prior-firing event."""
 
     to_recent_event_id: int  # global event id from a recent_graph[i].id
     kind: EdgeKind
@@ -101,13 +56,7 @@ class ExternalRef:
 
 @dataclass(frozen=True)
 class Event:
-    """A compressed semantic event extracted from one or more turns.
-
-    In-firing refs are emitted as separate :class:`Edge` records (see
-    ``audit.registry.CheckContext``). Cross-firing refs live on the
-    event itself as ``external_refs`` and are resolved into edges by
-    the offline aggregator (`_accumulate_graph`).
-    """
+    """A semantic event extracted from one or more turns."""
 
     id: int
     kind: EventKind
@@ -139,15 +88,7 @@ class Event:
 
 @dataclass(frozen=True)
 class Edge:
-    """A directed witness-bearing edge between two events (design §7.1).
-
-    Mirrors the witness-bearing ref the extractor LLM emits inside an
-    event's ``refs[]`` (V3.1 ``submit_events`` payload): each ref
-    carries entities and/or a verbatim quote that the witness layer
-    verifies against the source turns. The adapter persists each
-    accepted edge as a single ``llmharness.audit_edge`` entry whose
-    payload is :meth:`to_dict`.
-    """
+    """A directed witness-bearing edge between two events."""
 
     src: int
     dst: int
@@ -186,15 +127,7 @@ class Edge:
 
 @dataclass(frozen=True)
 class Finding:
-    """Advisory finding emitted by a scenario-registered audit check.
-
-    Per design §4.c, registered checks (see ``audit/registry.py``) run
-    over a frozen :class:`~llmharness.runtime.registry.CheckContext`
-    snapshot at auditor firing time and return a list of
-    :class:`Finding` records. The auditor folds these into its prompt
-    block as advisory signals — it may ignore, contradict, or extend
-    them.
-    """
+    """Advisory finding from a scenario-registered audit check."""
 
     category: str
     description: str
@@ -218,12 +151,7 @@ class Finding:
 
 @dataclass(frozen=True)
 class Verdict:
-    """Auditor output (V2 shape — design §6.2; preserved in v3).
-
-    ``surface_reminder=False`` means stay silent. When ``True``,
-    ``reminder_text`` must be non-empty and will be injected before the
-    next agent turn.
-    """
+    """Auditor verdict. surface_reminder=True triggers reminder injection."""
 
     surface_reminder: bool
     reminder_text: str = ""
@@ -257,25 +185,7 @@ class Reminder:
 
 @dataclass(frozen=True)
 class Phase:
-    """A merged "basic block" over consecutive raw events.
-
-    Raw events are extracted one-per-turn; phases group consecutive
-    ``act`` events into a single block while keeping
-    ``task`` / ``hyp`` / ``dec`` / ``concl`` as singleton phases. The
-    adapter persists phases as ``llmharness.audit_phase`` entries
-    alongside raw events; the auditor reads the phase view for
-    high-level reasoning and drills back to raw events via
-    ``get_event_detail`` when needed.
-
-    ``id`` is per-firing fresh-numbered (1, 2, 3, ...) — same convention
-    as raw event ids.
-
-    ``kind`` is one of the :class:`EventKind` values for singleton
-    phases (``task`` / ``hyp`` / ``dec`` / ``concl`` / ``act``), plus
-    the merged-run sentinel ``act_run`` when two or more ``act`` events
-    are coalesced. Free-text rather than enum so future merge rules can
-    introduce new run types without a schema bump.
-    """
+    """A merged basic block over consecutive raw events."""
 
     id: int
     kind: str

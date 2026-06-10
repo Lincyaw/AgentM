@@ -8,7 +8,7 @@ too aggressively, drill-down loses turn-level provenance.
 
 from __future__ import annotations
 
-from llmharness.graph.phase import merge_to_phases
+from llmharness.agents.extractor.tools import merge_to_phases
 from llmharness.schema import Event, EventKind
 
 

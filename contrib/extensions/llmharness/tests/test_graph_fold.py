@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import pytest
 
-from llmharness.graph.fold import fold_graph
-from llmharness.graph.ops import (
+from llmharness.agents.extractor.tools import (
     EdgeDelete,
     EdgeUpsert,
     NodeDelete,
     NodeUpsert,
+    fold_graph,
     parse_op,
 )
 from llmharness.schema import EventKind
