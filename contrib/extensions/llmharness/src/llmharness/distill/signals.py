@@ -175,7 +175,7 @@ def tool_events_from_phase_result(result: PhaseResult) -> list[ToolEvent]:
     ``error_text=None`` so the rollout's step count stays honest.
 
     The pairing strategy intentionally mirrors what the live audit loop
-    does — see :func:`llmharness.child_collect.terminal_tool_arguments`;
+    does — see :func:`llmharness.runtime.child_collect.terminal_tool_arguments`;
     here we keep every tool_call, not just the terminal one.
     """
     # Local import: keeping ``agentm.core.abi`` out of module-load time

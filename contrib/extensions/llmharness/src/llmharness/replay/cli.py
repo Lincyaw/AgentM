@@ -28,9 +28,9 @@ from typing import Annotated, Any, cast
 
 import typer
 
-from ..tools.engine import PhaseResult
-from ..tools.prefix_replay import PrefixReplayError, make_plan
 from .chain import ChainResult, PhaseFilter, chain_replay_sync
+from .engine import PhaseResult
+from .prefix_replay import PrefixReplayError, make_plan
 from .record import Phase, ReplayRecord, iter_records
 from .runner import replay_auditor_record, replay_extractor_record
 
@@ -455,7 +455,7 @@ def agent_from_reminder(
     1. Opens the source main-agent session JSONL.
     2. Picks the leaf entry that ends turn ``t`` (the ``t``-th
        ``message`` entry on the active branch — same indexing convention
-       as ``llmharness.adapters.agentm``).
+       as ``llmharness.adapter``).
     3. Calls ``SessionManager.create_branched_session`` to materialise
        a new persisted session whose tree mirrors the original prefix
        and whose header carries ``parent_session`` pointing at the

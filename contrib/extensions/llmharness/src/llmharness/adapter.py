@@ -51,14 +51,14 @@ Reminder delivery (unified path):
 
 P1 refactor (2026-05-23). All of cadence / windowing / cumulative-state
 threading / payload composition / sidecar emission has moved to
-:class:`llmharness.audit.runner.HarnessRunner`. The adapter constructs
+:class:`llmharness.runtime.runner.HarnessRunner`. The adapter constructs
 exactly one runner per install (seeded by
 :meth:`CumulativeAuditState.hydrate_from_session_log`) and routes
 ``TurnEndEvent`` through ``runner.on_trajectory_progress``. The async
 worker now drains :class:`_RunnerStepJob` jobs; the body of the legacy
 ``_drain_extractor`` / ``_drain_auditor`` / ``_spawn_extractor_child`` /
 ``_run_auditor`` lives inside the runner and
-:mod:`llmharness.audit.seams.live` (:class:`LiveChildRunner` +
+:mod:`llmharness.runtime.live` (:class:`LiveChildRunner` +
 :class:`LiveOpSink`).
 """
 
@@ -83,13 +83,17 @@ from agentm.core.abi.extension import ExtensionAPI
 from agentm.core.abi.messages import AgentMessage
 from agentm.extensions import ExtensionManifest
 
-from ..agents.auditor.profiles import resolve_tools as _resolve_auditor_tools
-from ..agents.auditor.prompt import load_auditor_prompt
-from ..agents.extractor.prompt import load_extractor_prompt
-from ..audit import entry_types as _et
-from ..audit.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
-from ..audit.registry import AuditCheckRegistry
-from ..audit.runner import (
+from . import entry_types as _et
+from .agents.auditor.profiles import resolve_tools as _resolve_auditor_tools
+from .agents.auditor.prompt import load_auditor_prompt
+from .agents.extractor.prompt import load_extractor_prompt
+from .replay.record import audit_session_id, replay_log_path
+from .runtime.live import LiveChildRunner, LiveOpSink
+from .runtime.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
+from .runtime.registry import AuditCheckRegistry
+from .runtime.reminder import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
+from .runtime.reminder import build_reminder_message
+from .runtime.runner import (
     AuditorSettings,
     CumulativeAuditState,
     ExtractorSettings,
@@ -98,13 +102,9 @@ from ..audit.runner import (
     _flatten_assistant_blocks,
     _serialize_full_trajectory,
 )
-from ..audit.seams.live import LiveChildRunner, LiveOpSink
-from ..audit.toolkit.reminder_format import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
-from ..audit.toolkit.reminder_format import build_reminder_message
-from ..audit.triggers import SERVICE_KEY as TRIGGER_SERVICE_KEY
-from ..audit.triggers import TriggerRegistry
-from ..replay.record import audit_session_id, replay_log_path
-from ..schema import Reminder
+from .runtime.triggers import SERVICE_KEY as TRIGGER_SERVICE_KEY
+from .runtime.triggers import TriggerRegistry
+from .schema import Reminder
 
 _logger = logging.getLogger(__name__)
 
@@ -322,7 +322,7 @@ _Job = _RunnerStepJob | _ShutdownJob
 
 def _extract_tool_names(event: TurnEndEvent) -> frozenset[str]:
     """Return all tool names from the turn's AssistantMessage."""
-    from ..audit.triggers import tool_names_from_message
+    from .runtime.triggers import tool_names_from_message
 
     return tool_names_from_message(event.message)
 

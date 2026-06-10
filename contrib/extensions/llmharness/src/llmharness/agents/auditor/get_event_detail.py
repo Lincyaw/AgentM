@@ -39,7 +39,7 @@ from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.lib import pydantic_to_tool_schema
 from pydantic import BaseModel, ConfigDict, Field
 
-from llmharness.audit.toolkit.decorator import harness_tool
+from llmharness.runtime.decorator import harness_tool
 from llmharness.schema import Edge, Event
 
 GET_EVENT_DETAIL_TOOL_NAME = "get_event_detail"

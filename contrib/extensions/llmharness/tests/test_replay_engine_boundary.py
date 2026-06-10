@@ -11,8 +11,8 @@ contract.
 Atoms are identified by exporting a top-level ``MANIFEST`` symbol of
 type :class:`agentm.extensions.ExtensionManifest`. This test walks
 every ``.py`` file under ``src/llmharness/`` looking for one of those,
-and asserts none of them import from ``llmharness.tools.engine`` or
-``llmharness.tools.prefix_replay`` (directly or via relative path).
+and asserts none of them import from ``llmharness.replay.engine`` or
+``llmharness.replay.prefix_replay`` (directly or via relative path).
 
 Why fail-stop: if a future atom adds
 ``from ..tools.{engine,prefix_replay} import …`` and CI ever runs
@@ -31,8 +31,8 @@ import pytest
 _SRC_ROOT = Path(__file__).parent.parent / "src" / "llmharness"
 
 _ENGINE_TARGETS = {
-    "llmharness.tools.engine",
-    "llmharness.tools.prefix_replay",
+    "llmharness.replay.engine",
+    "llmharness.replay.prefix_replay",
     "..tools.engine",
     "..tools.prefix_replay",
 }

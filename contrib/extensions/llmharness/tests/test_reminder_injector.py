@@ -31,7 +31,7 @@ from agentm.core.abi import (
     TurnObservation,
 )
 
-from llmharness.adapters.agentm import _make_reminder_injector
+from llmharness.adapter import _make_reminder_injector
 from llmharness.schema import Reminder
 
 

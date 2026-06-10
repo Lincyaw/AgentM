@@ -18,7 +18,7 @@ from agentm.core.abi.messages import (
 )
 
 from llmharness import tool_events_from_phase_result
-from llmharness.tools.engine import PhaseResult
+from llmharness.replay.engine import PhaseResult
 
 
 def _assistant_with_call(call_id: str, name: str, args: dict[str, object]) -> AssistantMessage:

@@ -1,10 +1,10 @@
 """Offline seams for :class:`HarnessRunner`.
 
-Symmetric to :mod:`llmharness.audit.seams.live` but for paths that drive
+Symmetric to :mod:`llmharness.runtime.live` but for paths that drive
 the audit pipeline without a parent :class:`ExtensionAPI`:
 
 * :class:`StandaloneChildRunner` — spawns a top-level audit child via
-  :func:`llmharness.tools.engine.run_phase_standalone` (no
+  :func:`llmharness.replay.engine.run_phase_standalone` (no
   ``api.spawn_child_session``). Used by
   :mod:`llmharness.replay.offline_driver` for full-trajectory offline
   replay. (Single-firing replay calls ``run_phase_standalone`` directly
@@ -24,19 +24,19 @@ import json
 import logging
 from typing import Any
 
-from ...agents.auditor.output import AuditorOutputError, RawVerdictOutput
-from ...agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
-from ...agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
-from ...agents.extractor.state import ExtractionState
-from ...schema import Event
-from ...tools.engine import run_phase_standalone
+from ..agents.auditor.output import AuditorOutputError, RawVerdictOutput
+from ..agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
+from ..agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
+from ..agents.extractor.state import ExtractionState
 from ..graph.ops import GraphOp
-from ..runner import (
+from ..replay.engine import run_phase_standalone
+from ..schema import Event
+from .directive import build_extractor_directive
+from .runner import (
     AuditorChildResult,
     ExtractorSpawnError,
     _flatten_assistant_blocks,
 )
-from ..toolkit.extractor_directive import build_extractor_directive
 
 _logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class StandaloneChildRunner:
     Accepts domain-level parameters (state, prompt text, tool config)
     from the runner and composes extension lists internally for replay
     compatibility. Same return signatures and failure routing as
-    :class:`llmharness.audit.seams.live.LiveChildRunner`, but spawns a
+    :class:`llmharness.runtime.live.LiveChildRunner`, but spawns a
     top-level session per phase. There is no parent ``ExtensionAPI``;
     ``cwd`` is the working directory the child sessions execute in.
     """

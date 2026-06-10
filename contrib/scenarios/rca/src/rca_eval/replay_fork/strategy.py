@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi.messages import AgentMessage
-from llmharness.audit.triggers import TriggerRegistry
+from llmharness.runtime.triggers import TriggerRegistry
 
 from .case_source import ReplayCase
 

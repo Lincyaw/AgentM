@@ -72,7 +72,7 @@ _EMPTY_AGENT_RCA_OUTPUT: dict[str, list[Any]] = {
 # Detection is by manifest composition (see :func:`_scenario_mounts_harness`),
 # not by scenario name — string-sniffing the scenario id silently breaks
 # when new variants are added.
-_HARNESS_ADAPTER_MODULE = "llmharness.adapters.agentm"
+_HARNESS_ADAPTER_MODULE = "llmharness.adapter"
 
 
 def _provider_name_from_base_url(base_url: str) -> str:
@@ -613,7 +613,7 @@ def _scenario_mounts_harness(scenario: str) -> bool:
     """True iff ``scenario`` mounts the llmharness cognitive-audit adapter.
 
     Detected by loading the resolved scenario manifest and looking for
-    ``llmharness.adapters.agentm`` in its extensions list. Replaces the
+    ``llmharness.adapter`` in its extensions list. Replaces the
     historical ``"harness" in scenario_name`` string-sniff so new harness
     variants (or renames) don't silently miss the distill-binding wire-up.
 

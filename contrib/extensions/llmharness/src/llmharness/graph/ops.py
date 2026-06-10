@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...schema import EdgeKind, EventKind, ExternalRef
+from llmharness.schema import EdgeKind, EventKind, ExternalRef
 
 
 @dataclass(frozen=True)

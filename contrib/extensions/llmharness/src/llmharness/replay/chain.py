@@ -30,10 +30,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from ..audit.graph.ops import parse_op
-from ..audit.runner import CumulativeAuditState
+from ..graph.ops import parse_op
+from ..runtime.runner import CumulativeAuditState
 from ..schema import Verdict
-from ..tools.engine import PhaseResult
+from .engine import PhaseResult
 from .record import Phase, ReplayRecord, iter_records
 from .runner import replay_auditor_record, replay_extractor_record
 

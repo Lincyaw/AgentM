@@ -21,7 +21,7 @@ from typing import Any
 from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
-from ..audit.registry import SERVICE_KEY, AuditCheckRegistry, CheckContext
+from ..runtime.registry import SERVICE_KEY, AuditCheckRegistry, CheckContext
 from ..schema import EventKind, Finding
 
 MANIFEST = ExtensionManifest(
@@ -83,7 +83,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     registry = api.get_service(SERVICE_KEY)
     if not isinstance(registry, AuditCheckRegistry):
         raise RuntimeError(
-            "audit registry service not published; mount llmharness.adapters.agentm first"
+            "audit registry service not published; mount llmharness.adapter first"
         )
     registry.register_check(_PrematureConclusionCheck())
 

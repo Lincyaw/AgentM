@@ -20,7 +20,7 @@ from typing import Any
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
 from pydantic import BaseModel, ConfigDict
 
-from llmharness.audit.toolkit.decorator import harness_tool
+from llmharness.runtime.decorator import harness_tool
 
 from ..state import ExtractionState
 

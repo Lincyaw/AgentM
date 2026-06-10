@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import pytest
 
-from llmharness.audit.graph.fold import fold_graph
-from llmharness.audit.graph.ops import (
+from llmharness.graph.fold import fold_graph
+from llmharness.graph.ops import (
     EdgeDelete,
     EdgeUpsert,
     NodeDelete,

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from llmharness.audit.validation.enum_schema import EVENT_KIND_VALUES
 from llmharness.schema import Edge, Event, EventKind
+from llmharness.validation.enum_schema import EVENT_KIND_VALUES
 
 
 def _coerce_int(value: Any) -> int | None:

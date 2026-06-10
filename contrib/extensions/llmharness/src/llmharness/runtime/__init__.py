@@ -4,7 +4,7 @@ A single module — :mod:`.runner` — holds :class:`HarnessRunner` together
 with the settings dataclasses, cumulative state, Protocols, and
 serialization helpers it depends on (a one-way DAG: the runner depends on
 them, never the reverse). This init re-exports the public surface so
-importers can write ``from llmharness.audit.runner import HarnessRunner``.
+importers can write ``from llmharness.runtime.runner import HarnessRunner``.
 
 ``_flatten_assistant_blocks`` / ``_serialize_full_trajectory`` are
 re-exported because the live/offline seams and the adapter import them by

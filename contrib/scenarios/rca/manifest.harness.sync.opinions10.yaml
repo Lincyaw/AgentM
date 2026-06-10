@@ -8,7 +8,7 @@ includes:
   - overlays/runtime-context.yaml
 
 extensions:
-  - module: llmharness.adapters.agentm
+  - module: llmharness.adapter
     config:
       mode: sync
       extractor_interval_turns: 10

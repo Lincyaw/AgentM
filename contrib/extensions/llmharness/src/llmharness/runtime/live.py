@@ -19,21 +19,21 @@ from typing import Any, Final, Literal
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.extension import ExtensionAPI
 
-from ...agents import auditor_scenario, extractor_scenario
-from ...agents.auditor.output import AuditorOutputError, RawVerdictOutput
-from ...agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
-from ...agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
-from ...agents.extractor.state import ExtractionState
-from ...child_collect import flatten_assistant_blocks
-from ...child_task import run_child_task
-from ...schema import Event
 from .. import entry_types as _et
+from ..agents import auditor_scenario, extractor_scenario
+from ..agents.auditor.output import AuditorOutputError, RawVerdictOutput
+from ..agents.auditor.submit_verdict import SUBMIT_VERDICT_TOOL_NAME
+from ..agents.extractor.extractor_tools import FINALIZE_EXTRACTION_TOOL_NAME
+from ..agents.extractor.state import ExtractionState
 from ..graph.ops import GraphOp
-from ..runner import (
+from ..schema import Event
+from .child_collect import flatten_assistant_blocks
+from .child_task import run_child_task
+from .directive import build_extractor_directive
+from .runner import (
     AuditorChildResult,
     ExtractorSpawnError,
 )
-from ..toolkit.extractor_directive import build_extractor_directive
 
 _logger = logging.getLogger(__name__)
 
@@ -200,7 +200,7 @@ class LiveChildRunner:
 class LiveOpSink:
     """:class:`OpSink` impl that appends to the live session log.
 
-    All entry-type literals come from :mod:`llmharness.audit.entry_types`;
+    All entry-type literals come from :mod:`llmharness.entry_types`;
     failure entries route through :func:`_record_failure` so a
     :class:`DiagnosticEvent` is co-emitted.
     """

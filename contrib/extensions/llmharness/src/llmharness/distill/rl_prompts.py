@@ -5,7 +5,7 @@ teacher targets. The downstream trainer (rca-autorl GRPO/PPO) samples a
 row, re-hydrates it via :meth:`ReplayRecord.from_dict`, feeds it straight
 into :func:`replay_extractor_record` / :func:`replay_auditor_record` to
 produce a fresh rollout, and scores the rollout with
-:mod:`llmharness.train_signals`. The trainer never sees the teacher's
+:mod:`llmharness.distill.signals`. The trainer never sees the teacher's
 output trajectory.
 
 Stripped fields (would leak teacher behavior into the policy's input)::
