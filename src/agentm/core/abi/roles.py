@@ -76,6 +76,12 @@ SLASH_COMMAND_DISPATCHER_SERVICE: Final = "slash_commands"
 slash commands programmatically look it up via
 ``api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)``."""
 
+SESSION_STORE_SERVICE: Final = "session_store"
+"""``service_registry`` key under which the session factory publishes
+the :class:`~agentm.core.abi.session_store.SessionStore`. Atoms that
+need to resume existing sessions (e.g. workflow ``agent(session_id=)``)
+look it up via ``api.get_service(SESSION_STORE_SERVICE)``."""
+
 LOOP_BUDGET_SERVICE: Final = "loop_budget"
 """``service_registry`` key under which the ``loop_budget`` atom publishes a
 :class:`~agentm.core.abi.loop.LoopConfig`. The session factory reads it just
@@ -92,6 +98,7 @@ __all__ = [
     "PARENT_PROVIDER_CONFIG_KEY",
     "PROMPT_REGISTRY",
     "PROVIDER_INHERITOR",
+    "SESSION_STORE_SERVICE",
     "SLASH_COMMAND_DISPATCHER_SERVICE",
     "SUB_AGENT_RUNTIME",
     "SYSTEM_PROMPT_PROVIDER",

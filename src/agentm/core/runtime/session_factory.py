@@ -16,6 +16,7 @@ from agentm.core.abi.roles import (
     COMPACTION_PROMPTS,
     LOOP_BUDGET_SERVICE,
     PROMPT_REGISTRY,
+    SESSION_STORE_SERVICE,
     SLASH_COMMAND_DISPATCHER_SERVICE,
     SUB_AGENT_RUNTIME,
     SYSTEM_PROMPT_PROVIDER,
@@ -155,6 +156,9 @@ async def create_agent_session(
     # Seed caller-supplied services BEFORE atoms install.
     # See AgentSessionConfig.initial_services.
     services.update(config.initial_services)
+    if SESSION_STORE_SERVICE not in services:
+        from agentm.core.runtime.session_bootstrap import make_default_session_store
+        services[SESSION_STORE_SERVICE] = make_default_session_store(config.cwd)
 
     active_provider_box: dict[str, ProviderConfig | None] = {"value": None}
     loop_box: dict[str, AgentLoop | None] = {"value": None}

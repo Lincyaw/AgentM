@@ -420,6 +420,9 @@ class _WorkflowRun:
     agents_failed: int = 0
     agents_retried: int = 0
     args_payload: dict[str, Any] = field(default_factory=dict)
+    cwd_override: str | None = None
+    provider_override: tuple[str, dict[str, Any]] | None = None
+    progress: list[dict[str, str]] = field(default_factory=list)
     _agent_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _bg_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
 
@@ -437,6 +440,7 @@ class _WorkflowRun:
         atom_config: AtomConfigMap | None = None,
         retry: int = 0,
         timeout: float | None = None,
+        session_id: str | None = None,
     ) -> AgentResult:
         """Spawn one child agent session, drive it to completion, return its
         output. Journaled by ``hash(prompt, opts)`` — a re-run resumes from
@@ -454,6 +458,10 @@ class _WorkflowRun:
 
         ``timeout=`` (seconds) caps wall-clock time for the agent call.
         ``TimeoutError`` is raised on expiry (counts as a retryable failure).
+
+        ``session_id=`` resumes an existing session instead of starting
+        fresh. The prompt is appended to the session's history. The resumed
+        session retains its full prior context.
         """
 
         # Resolve Pydantic model → JSON Schema dict.
@@ -505,6 +513,7 @@ class _WorkflowRun:
                         extra_extensions=extra_extensions,
                         atom_config=atom_config,
                         schema=json_schema,
+                        session_id=session_id,
                     )
                     if timeout is not None:
                         result = await asyncio.wait_for(coro, timeout=timeout)
@@ -605,6 +614,7 @@ class _WorkflowRun:
     # --- internals -----------------------------------------------------------
 
     def _emit_phase(self, kind: Literal["phase", "log"], text: str) -> None:
+        self.progress.append({"kind": kind, "text": text})
         # Fire-and-forget: schedule the emit on the running loop and hold a
         # reference so it is not GC'd mid-flight.
         with contextlib.suppress(RuntimeError):
@@ -627,6 +637,7 @@ class _WorkflowRun:
         extra_extensions: list[ExtensionEntry] | None = None,
         atom_config: AtomConfigMap | None = None,
         schema: JsonSchema | None = None,
+        session_id: str | None = None,
     ) -> str:
         extensions: list[ExtensionEntry] = []
         atom_config_overrides: AtomConfigMap = dict(atom_config or {})
@@ -659,20 +670,27 @@ class _WorkflowRun:
         if extra_extensions:
             extensions.extend(extra_extensions)
 
+        session_manager: Any = None
+        if session_id is not None:
+            from agentm.core.abi.roles import SESSION_STORE_SERVICE
+            store = self.api.get_service(SESSION_STORE_SERVICE)
+            if store is None:
+                raise RuntimeError(
+                    "workflow: session_id requires the session_store service, "
+                    "but it is not available in this session"
+                )
+            session_manager = store.open(session_id)
+
         config = AgentSessionConfig(
-            cwd=self.api.cwd,
-            provider=None,  # inherit parent's provider (spawn auto-wires it)
-            # Default the worker to the orchestrator's own scenario (a clean
-            # reload of that curated atom set) rather than letting scenario=None
-            # auto-discover ALL builtins — which would hand every worker the
-            # full heavy toolset (bash/install_atom/…) and, on strict providers,
-            # break tool-call grammar generation. Explicit arg > atom config >
-            # parent scenario.
+            cwd=self.cwd_override or self.api.cwd,
+            provider=self.provider_override,  # None = inherit parent's provider
             scenario=scenario or self.default_scenario or self.api.scenario,
             extra_extensions=extensions,
             atom_config_overrides=atom_config_overrides,
             tool_allowlist=tool_allowlist,
             purpose=_WORKER_PURPOSE,
+            session_manager=session_manager,
+            session_id=session_id,
         )
         try:
             child: _ChildSession = await self.api.spawn_child_session(config)
@@ -737,6 +755,7 @@ class WorkflowContext:
         atom_config: AtomConfigMap | None = ...,
         retry: int = ...,
         timeout: float | None = ...,
+        session_id: str | None = ...,
     ) -> _M: ...
 
     @overload
@@ -752,6 +771,7 @@ class WorkflowContext:
         atom_config: AtomConfigMap | None = ...,
         retry: int = ...,
         timeout: float | None = ...,
+        session_id: str | None = ...,
     ) -> AgentResult: ...
 
     async def agent(
@@ -766,12 +786,14 @@ class WorkflowContext:
         atom_config: AtomConfigMap | None = None,
         retry: int = 0,
         timeout: float | None = None,
+        session_id: str | None = None,
     ) -> AgentResult:
         """Spawn one child agent session and return its output.
 
         ``schema=PydanticModel`` returns a validated model instance.
         ``retry=N`` retries on agent failure or validation failure.
         ``timeout=`` caps wall-clock seconds for the agent call.
+        ``session_id=`` resumes an existing session with the prompt.
         """
         return await self._run.agent(
             prompt,
@@ -783,6 +805,7 @@ class WorkflowContext:
             atom_config=atom_config,
             retry=retry,
             timeout=timeout,
+            session_id=session_id,
         )
 
     async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
@@ -1026,6 +1049,26 @@ def _validate_module(tree: ast.Module) -> list[ScriptIssue]:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_model_to_provider(
+    model_name: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """Resolve a config.toml profile name to a ``(provider_id, build_config)``
+    tuple suitable for ``AgentSessionConfig.provider``.  Returns ``None`` when
+    the profile is unknown."""
+    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.lib.user_config import resolve_model_profile
+
+    profile = resolve_model_profile(model_name)
+    if profile is None:
+        return None
+    build_config = profile.to_build_config()
+    provider_id = profile.provider
+    try:
+        return DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
+    except KeyError:
+        return None
+
+
 def _error(message: str) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=message)],
@@ -1185,6 +1228,20 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
             "description": "Arbitrary JSON payload exposed to the script as args.",
             "additionalProperties": True,
         },
+        "cwd": {
+            "type": "string",
+            "description": (
+                "Working directory for child agent sessions spawned by "
+                "the workflow. Defaults to the caller's cwd."
+            ),
+        },
+        "model": {
+            "type": "string",
+            "description": (
+                "Model name or config.toml profile for child agent "
+                "sessions. Defaults to the caller's model."
+            ),
+        },
     },
     "additionalProperties": False,
 }
@@ -1239,6 +1296,10 @@ class WorkflowRunner:
         return self._last_run.budget_svc.snapshot()
 
     @property
+    def last_progress(self) -> list[dict[str, str]]:
+        return self._last_run.progress if self._last_run else []
+
+    @property
     def last_run_summary(self) -> RunSummary:
         if self._last_run is None:
             return RunSummary(
@@ -1259,10 +1320,69 @@ class WorkflowRunner:
             wall_clock_s=self._last_wall_clock_s,
         )
 
+    async def _emit_delivery(
+        self,
+        run: _WorkflowRun,
+        result: WorkflowResult,
+        *,
+        source_path: Path | None,
+        args_payload: dict[str, Any],
+    ) -> None:
+        """Persist a ``workflow_delivery`` artifact with execution metadata.
+
+        Best-effort: failures are logged, never raised."""
+        store: _ArtifactStore | None = self._api.get_service(
+            _ARTIFACT_STORE_SERVICE,
+        )
+        if store is None:
+            return
+
+        success: bool | None = None
+        if isinstance(result, dict):
+            success = result.get("success")
+
+        summary = self.last_run_summary
+        delivery: dict[str, Any] = {
+            "script": str(source_path) if source_path else None,
+            "trace_id": self._api.root_session_id,
+            "session_id": self._api.session_id,
+            "success": success,
+            "execution": {
+                "wall_clock_s": summary["wall_clock_s"],
+                "agents_spawned": summary["agents_spawned"],
+                "agents_succeeded": summary["agents_succeeded"],
+                "agents_failed": summary["agents_failed"],
+                "tokens": summary["budget"],
+            },
+            "progress": run.progress,
+            "args": args_payload,
+            "result": result,
+        }
+
+        title = source_path.stem if source_path else "inline"
+        tags = ["workflow_delivery"]
+        if source_path:
+            tags.append(source_path.stem)
+        if isinstance(success, bool):
+            tags.append("success" if success else "failure")
+
+        try:
+            await store.write_artifact(
+                kind="workflow_delivery",
+                title=f"delivery:{title}",
+                body=json.dumps(delivery, ensure_ascii=False, default=str),
+                tags=tags,
+            )
+        except Exception:
+            _log.debug("workflow_delivery artifact write failed", exc_info=True)
+
     async def run_file(
         self,
         path: str | Path,
         args: dict[str, Any] | None = None,
+        *,
+        cwd: str | None = None,
+        provider: tuple[str, dict[str, Any]] | None = None,
     ) -> WorkflowResult:
         """Run a pre-written workflow script file."""
         sp = Path(path)
@@ -1272,17 +1392,26 @@ class WorkflowRunner:
         if not sp.is_file():
             raise FileNotFoundError(f"workflow script not found: {sp}")
         script = sp.read_text(encoding="utf-8")
-        return await self._execute(script, args or {}, source_path=sp)
+        return await self._execute(
+            script, args or {}, source_path=sp,
+            cwd=cwd, provider=provider,
+        )
 
     async def run_script(
         self,
         script: str,
         args: dict[str, Any] | None = None,
+        *,
+        cwd: str | None = None,
+        provider: tuple[str, dict[str, Any]] | None = None,
     ) -> WorkflowResult:
         """Run an inline workflow script string."""
         if not script.strip():
             raise ValueError("workflow: empty script")
-        return await self._execute(script, args or {})
+        return await self._execute(
+            script, args or {},
+            cwd=cwd, provider=provider,
+        )
 
     async def _execute(
         self,
@@ -1290,6 +1419,8 @@ class WorkflowRunner:
         args_payload: dict[str, Any],
         *,
         source_path: Path | None = None,
+        cwd: str | None = None,
+        provider: tuple[str, dict[str, Any]] | None = None,
     ) -> WorkflowResult:
         # --- pre-execution validation ---
         mode = _detect_script_mode(script)
@@ -1313,6 +1444,8 @@ class WorkflowRunner:
             default_scenario=self._default_scenario,
             max_agents=self._max_agents,
             args_payload=dict(args_payload),
+            cwd_override=cwd,
+            provider_override=provider,
         )
 
         try:
@@ -1333,7 +1466,15 @@ class WorkflowRunner:
                 raw = await coro
         self._last_wall_clock_s = time.monotonic() - t0
 
-        return _auto_parse(_coerce_result(raw))
+        result = _auto_parse(_coerce_result(raw))
+
+        await self._emit_delivery(
+            run, result,
+            source_path=source_path,
+            args_payload=args_payload,
+        )
+
+        return result
 
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
@@ -1388,22 +1529,27 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 "workflow: 'script' and 'script_path' are mutually exclusive"
             )
 
-        # Capture progress events so the agent can observe the execution
-        # trajectory (phases, log lines) — not just the final result.
-        progress: list[dict[str, str]] = []
+        cwd_arg = args.get("cwd")
+        cwd: str | None = str(cwd_arg) if isinstance(cwd_arg, str) and cwd_arg.strip() else None
 
-        async def _capture_phase(event: WorkflowPhaseEvent) -> None:
-            progress.append({"kind": event.kind, "text": event.text})
-
-        unsub = api.events.on(WorkflowPhaseEvent.CHANNEL, _capture_phase)
+        model_arg = args.get("model")
+        provider: tuple[str, dict[str, Any]] | None = None
+        if isinstance(model_arg, str) and model_arg.strip():
+            provider = _resolve_model_to_provider(model_arg.strip())
+            if provider is None:
+                return _error(f"workflow: unknown model profile '{model_arg}'")
 
         try:
             if isinstance(script_path_raw, str) and script_path_raw.strip():
                 result = await runner.run_file(
                     script_path_raw, args.get("args"),
+                    cwd=cwd, provider=provider,
                 )
             elif isinstance(script, str) and script.strip():
-                result = await runner.run_script(script, args.get("args"))
+                result = await runner.run_script(
+                    script, args.get("args"),
+                    cwd=cwd, provider=provider,
+                )
             else:
                 return _error(
                     "workflow: either 'script' or 'script_path' is required"
@@ -1421,15 +1567,13 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             return _error(
                 f"workflow script error: {type(exc).__name__}: {exc}"
             )
-        finally:
-            unsub()
 
         return ToolResult(
             content=[TextContent(
                 type="text", text=_coerce_result(result),
             )],
             extras={
-                "progress": progress,
+                "progress": runner.last_progress,
                 "summary": runner.last_run_summary,
             },
         )
