@@ -136,12 +136,6 @@ async def create_agent_session(
         if config.session_manager is not None
         else InMemorySessionManager(cwd=config.cwd)
     )
-    # SDK default is empty — no filesystem walks, no implicit context.
-    # Callers that want disk-resident skills / prompt templates /
-    # AGENTS.md / CLAUDE.md must construct ``DefaultResourceLoader(cwd=...)``
-    # explicitly. The CLI does this; embedded SDK and child sessions
-    # get a clean slate so their LLM context isn't contaminated by
-    # whatever happens to be in the parent project's ``CLAUDE.md``.
     resource_loader: ResourceLoader = (
         config.resource_loader
         if config.resource_loader is not None
@@ -155,8 +149,6 @@ async def create_agent_session(
     inbox = SessionInbox()
     apis: dict[str, _ExtensionAPIImpl] = {}
     services: dict[str, Any] = {}
-    # Seed caller-supplied services BEFORE atoms install.
-    # See AgentSessionConfig.initial_services.
     services.update(config.initial_services)
     if SESSION_STORE_SERVICE not in services:
         from agentm.core.runtime.session_bootstrap import make_default_session_store
@@ -260,10 +252,6 @@ async def create_agent_session(
         spec = AgentSessionConfig(**{**child_config.__dict__})
         spec.parent_bus = bus
         spec.parent_session_id = session_id
-        # Child inherits the *parent's* trace_id (root_session_id) so the
-        # whole agent tree shares one OTel trace. Never fall back to the
-        # parent's session_id — that would mint a fresh trace per child
-        # and undo the unification.
         spec.root_session_id = root_session_id
         if spec.provider is None:
             parent_provider = _provider_getter()
@@ -274,16 +262,6 @@ async def create_agent_session(
                 )
             spec.provider = child_provider_factory(parent_provider)
 
-        # Give extensions on the parent bus a chance to contribute atoms
-        # to the child's load order. ``emit_sync`` because we need the
-        # contributions resolved BEFORE ``session_cls.create`` runs; the
-        # event is delivered on the parent bus only — child sessions don't
-        # observe their own extending pass.
-        #
-        # We clone the extensions list before emit so a misbehaving
-        # handler mutating ``ev.child_config.extensions`` in place cannot
-        # affect what the factory sees: only the substrate-controlled
-        # ``spec.extensions`` is honoured below.
         returns = bus.emit_sync(
             ChildSessionExtendingEvent.CHANNEL,
             ChildSessionExtendingEvent(
@@ -430,9 +408,6 @@ async def create_agent_session(
     )
     active_provider_ref.value = active_provider
 
-    # Apply the loop_budget atom's registration, if any. An explicit caller
-    # override (CLI flag / SDK ``loop_config=``) wins wholesale and is left
-    # untouched; otherwise the atom-supplied budget replaces the default.
     if config.loop_config is None:
         registered_loop = services.get(LOOP_BUDGET_SERVICE)
         if isinstance(registered_loop, LoopConfig):
@@ -445,23 +420,11 @@ async def create_agent_session(
     )
     loop_ref.value = loop
 
-    # Single-event-log merge (.claude/designs/single-event-log.md):
-    # SessionManager no longer writes its own JSONL. Attaching it to the
-    # bus here — after the extension-load loop installed observability —
-    # flushes any SessionHeaderEmittedEvent buffered during
-    # SessionManager.__init__ before any message rows, and routes every
-    # subsequent ``append_message`` through the merged log.
     session_manager.attach_bus(bus)
 
     for msg in config.initial_messages:
         session_manager.append_message(msg)
 
-    # Apply ``atom_source_overrides`` BEFORE building the AgentSession
-    # façade so the running atoms reflect the overridden source by the
-    # time the loop is invoked. The helper redirects each atom's
-    # ``file_path`` to ``.agentm/eval-sandbox/<id>/`` (classified as
-    # ``unmanaged`` by ResourceWriter — no git mutation). Cleaned up by
-    # ``AgentSession.shutdown``.
     eval_sandbox = await apply_atom_source_overrides(
         reloader=reloader,
         bus=bus,
@@ -504,11 +467,6 @@ async def create_agent_session(
             command_names=tuple(commands.keys()),
             extension_module_paths=tuple(module_path for module_path, _ in to_load),
             model=active_provider.model,
-            # Use the canonical ``root_session_id`` computed at line 119
-            # (uuid4().hex when not supplied) — falling back to
-            # ``session_id`` here would emit a 16-hex trace_id on the
-            # bus while the observability sink writes the 32-hex one,
-            # silently breaking any consumer that joins both.
             root_session_id=root_session_id,
             task_id=config.task_id,
             persona=config.persona,

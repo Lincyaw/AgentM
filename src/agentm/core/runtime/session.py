@@ -162,78 +162,23 @@ class AgentSession:
         self._closed: bool = False
         self._signal: asyncio.Event = asyncio.Event()
         self._in_run: bool = False
-        # #179: SET while the driver is parked on ``wait_nonempty`` (idle, no
-        # round in flight); CLEARED the instant it wakes to run a round. A
-        # one-shot host (``agentm -p``) reads this in :meth:`idle` to tell
-        # "agent truly at rest" from "between turns". Starts cleared — the
-        # driver sets it on its first park.
+        # SET while the driver is parked; CLEARED when it wakes to run.
         self._parked: asyncio.Event = asyncio.Event()
-        # One-shot waiters subscribed by ``prompt``/``tick`` for the next
-        # ``agent_end``. The handler set below fulfills each future once and
-        # drops them, so a follow-up prompt subscribes a fresh waiter.
         self._end_waiters: list[asyncio.Future[None]] = []
-        # Serializes ``prompt`` callers (A4 boundary-review fix): two
-        # concurrent ``prompt``s would otherwise both subscribe a waiter on
-        # the same upcoming ``agent_end``, race past the push, and each
-        # return the live message list with whichever prompt's reply landed
-        # last — giving the second caller stale data attributed to its own
-        # turn. The lock FIFO-queues prompts; the driver still owns
-        # ``_loop.run`` exclusively (``tick`` is NOT locked because resume-
-        # atom semantics need to fire a synthetic ``decide_turn_action``
-        # concurrently with an in-flight prompt to deliver injected work).
+        # FIFO-serializes concurrent prompt() callers.
         self._prompt_lock: asyncio.Lock = asyncio.Lock()
-
-        # #177: terminate-from-background. A backgrounded tool whose detached
-        # completion is a ``ToolTerminate`` posts a ``terminal=True`` inbox
-        # item. The ``context`` drain seam records the terminate cause here; the
-        # keep-alive floor consumes it at the next turn boundary and returns
-        # ``Stop(ToolTerminated)`` so the loop ends after delivering the
-        # terminal tool's final result, instead of keeping the agent alive on
-        # the (now empty) inbox. ``None`` between fires.
+        # Latched by a terminal=True inbox item; consumed at turn boundary.
         self._pending_terminate: ToolTerminated | None = None
 
-        # Real-time persistence: the loop emits MessagePersistedEvent for
-        # every durable addition (assistant turn / tool_result / injected
-        # message). Routing each event through the SessionManager here —
-        # rather than diffing the loop's return value at the end — means a
-        # mid-loop kill still leaves every completed turn on disk.
         self._bus.on(
             MessagePersistedEvent.CHANNEL, self._on_message_persisted
         )
 
-        # SessionInbox spine (see .claude/designs/session-inbox.md, step 1).
-        # Two runtime-owned handlers, registered as closures over the inbox +
-        # session_manager — NOT atoms (the inbox is substrate). They reuse the
-        # existing loop seams without modifying the kernel ``AgentLoop``:
-        #
-        #  * ``context`` (turn start, loop.py:466): the single message-entry
-        #    point. Drains the inbox and appends every rendered message to the
-        #    turn's message list in place, so the LLM sees pending input on the
-        #    very next turn.
-        #  * ``decide_turn_action`` (turn end): keep-alive floor. If the inbox
-        #    is non-empty, return ``Step()`` so the loop runs another turn
-        #    whose ``context`` will drain it. This generalizes sub_agent's
-        #    lifecycle floor; ``final=True`` causes still hard-win via the
-        #    resolve lattice (loop.py:301).
         self._bus.on(ContextEvent.CHANNEL, self._on_context_drain_inbox)
         self._bus.on(
             DecideTurnActionEvent.CHANNEL, self._on_decide_inbox_keep_alive
         )
-        # ``prompt``/``tick`` wait on the next ``agent_end`` to know the
-        # driver finished their round. Hooked before the driver starts so a
-        # racy push-then-await never misses the wake.
         self._bus.on(AgentEndEvent.CHANNEL, self._on_agent_end_wake_waiters)
-
-        # Step 5a: start the persistent driver task. We are constructed inside
-        # the running event loop (the async factory awaits ``create``), so
-        # ``create_task`` is safe here. The driver runs forever until
-        # ``shutdown`` flips ``_closed`` and kicks the inbox.
-        #
-        # Footgun guard: anyone bypassing the ``AgentSession.create`` factory
-        # to construct synchronously will hit ``RuntimeError: no running
-        # event loop`` from ``create_task`` below. Surface that contract
-        # explicitly so the failure says WHY rather than dumping a stdlib
-        # backtrace at the caller.
         try:
             asyncio.get_running_loop()
         except RuntimeError as exc:
