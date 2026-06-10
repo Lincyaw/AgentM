@@ -394,19 +394,27 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         tools=auditor_tools_raw if isinstance(auditor_tools_raw, list) else None,
     )
 
+    extractor_tcb_raw = config.get("extractor_tool_call_budget")
+    extractor_tcb: int | None = (
+        int(extractor_tcb_raw)
+        if isinstance(extractor_tcb_raw, int) and not isinstance(extractor_tcb_raw, bool)
+        else None
+    )
     extractor_extensions = compose_extractor_extensions(
         base_prompt=extractor_base_prompt,
         observability_config=obs_cfg,
-        tool_call_budget=config.get("extractor_tool_call_budget"),
+        tool_call_budget=extractor_tcb,
     )
-    extractor_compose_kwargs = {
+    extractor_compose_kwargs: dict[str, Any] = {
         "base_prompt": extractor_base_prompt,
         "observability_config": obs_cfg,
-        "tool_call_budget": config.get("extractor_tool_call_budget"),
+        "tool_call_budget": extractor_tcb,
     }
     extractor_settings = ExtractorSettings(
         extensions=extractor_extensions,
         compose_kwargs=extractor_compose_kwargs,
+        base_prompt=extractor_base_prompt,
+        tool_call_budget=extractor_tcb,
     )
     auditor_settings = AuditorSettings(
         base_prompt=auditor_base_prompt,

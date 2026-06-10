@@ -3,9 +3,10 @@
 Wraps a parent :class:`ExtensionAPI` so the runner's :class:`ChildRunner`
 and :class:`OpSink` protocols can be satisfied against the live AgentM
 session. :class:`LiveChildRunner` spawns extractor / auditor children
-via ``api.spawn_child_session``; :class:`LiveOpSink` is a thin wrapper
-over ``api.session.append_entry`` plus a :class:`DiagnosticEvent` emit
-on failures.
+via ``api.spawn_child_session`` using declarative scenario manifests
+(``AgentSessionConfig(scenario=...)``); :class:`LiveOpSink` is a thin
+wrapper over ``api.session.append_entry`` plus a :class:`DiagnosticEvent`
+emit on failures.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any, Final, Literal
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.extension import ExtensionAPI
 
+from ...agents import auditor_scenario, extractor_scenario
 from ...child_collect import flatten_assistant_blocks
 from ...child_task import run_child_task
 from ...schema import Event
@@ -28,6 +30,7 @@ from ..auditor import (
     RawVerdictOutput,
 )
 from ..extractor import FINALIZE_EXTRACTION_TOOL_NAME
+from ..extractor.state import ExtractionState
 from ..graph.ops import GraphOp
 from ..runner import (
     AuditorChildResult,
@@ -44,30 +47,58 @@ _FAILURE_DIAGNOSTIC_LEVEL: Final[Literal["warning"]] = "warning"
 
 
 class LiveChildRunner:
-    """:class:`ChildRunner` impl that spawns children via ``api.spawn_child_session``."""
+    """:class:`ChildRunner` impl that spawns children via ``api.spawn_child_session``.
+
+    Uses declarative agent manifests (scenario-based spawning) with
+    ``atom_config_overrides`` and ``extra_extensions`` to configure
+    per-firing state, prompt text, and optional budget atoms.
+    """
 
     def __init__(self, api: ExtensionAPI) -> None:
         self._api = api
+        self._extractor_scenario = extractor_scenario()
+        self._auditor_scenario = auditor_scenario()
 
     async def run_extractor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        state: ExtractionState,
+        prompt_text: str,
         provider: tuple[str, dict[str, Any]] | None,
         payload: dict[str, Any],
         turn_window: list[int],
+        tool_call_budget: int | None = None,
     ) -> tuple[bool, list[dict[str, Any]]]:
-        """Spawn the extractor child, drive it, return ``(terminator_called, raw_blocks)``.
+        """Spawn the extractor child via scenario manifest.
 
-        Spawn / prompt failures raise :class:`ExtractorSpawnError` so the
-        runner can route them to ``EXTRACTOR_ERROR`` + sidecar.
+        Configures the child via ``atom_config_overrides`` for the
+        extractor_tools state and system_prompt text. Optional budget
+        atoms are appended via ``extra_extensions``.
+
+        Returns ``(terminator_called, raw_blocks)``. Spawn / prompt
+        failures raise :class:`ExtractorSpawnError` so the runner can
+        route them to ``EXTRACTOR_ERROR`` + sidecar.
         """
         del turn_window  # surfaced by the runner via append_failure context
+        overrides: dict[str, dict[str, Any]] = {
+            "extractor_tools": {"state": state},
+            "system_prompt": {"prompt": prompt_text},
+        }
+        extra: list[tuple[str, dict[str, Any]]] = []
+        if tool_call_budget is not None:
+            budget = int(tool_call_budget)
+            extra.extend([
+                ("agentm.extensions.builtin.loop_budget", {"max_tool_calls": budget}),
+                ("agentm.extensions.builtin.turn_reminder", {"warn_within": budget}),
+            ])
+
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
         directive = build_extractor_directive(payload)
         result = await run_child_task(
             self._api,
-            extensions=extensions,
+            scenario=self._extractor_scenario,
+            atom_config_overrides=overrides,
+            extra_extensions=extra,
             provider=provider,
             prompt=directive + payload_json,
             purpose="cognitive_audit_extractor",
@@ -80,13 +111,17 @@ class LiveChildRunner:
     async def run_auditor(
         self,
         *,
-        extensions: list[tuple[str, dict[str, Any]]],
+        prompt_text: str,
+        tools_config: dict[str, Any],
         provider: tuple[str, dict[str, Any]] | None,
         graph_events: list[Event],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
     ) -> AuditorChildResult:
-        """Run one auditor firing.
+        """Run one auditor firing via scenario manifest.
+
+        Configures the child via ``atom_config_overrides`` for the
+        auditor_tools config and system_prompt text.
 
         Returns an :class:`AuditorChildResult` with ``verdict=None`` for
         spawn / prompt / no-call / malformed paths. Failures are recorded
@@ -94,6 +129,10 @@ class LiveChildRunner:
         ``latency_ms`` / ``error`` are propagated so the runner can
         surface them on the synthetic auditor record.
         """
+        overrides: dict[str, dict[str, Any]] = {
+            "auditor_tools": tools_config,
+            "system_prompt": {"prompt": prompt_text},
+        }
         payload = {
             "graph": [e.to_dict() for e in graph_events],
             "recent_verdicts": list(recent_verdicts),
@@ -101,7 +140,8 @@ class LiveChildRunner:
         }
         result = await run_child_task(
             self._api,
-            extensions=extensions,
+            scenario=self._auditor_scenario,
+            atom_config_overrides=overrides,
             provider=provider,
             prompt=json.dumps(payload, ensure_ascii=False, default=str),
             purpose="cognitive_audit_auditor",
