@@ -30,9 +30,27 @@ description: >
 - Never modify test files to make tests pass — fix the implementation.
 - After fixing, run a targeted smoke check, then return control to the workflow.
 
+## Floating-Point and Time-Dependent Testing
+
+- **Never assert exact equality on time-dependent values.** `time.monotonic()` and
+  `time.sleep()` have inherent jitter; a token count that should be 0.0 may be
+  `1.19e-06` due to sub-millisecond clock advance between refill and assertion.
+- Use `pytest.approx()` for float comparisons: `assert bucket.tokens == pytest.approx(0.0, abs=1e-4)`.
+- For "tokens should be exactly N" assertions after a consume, prefer `abs=1e-4`
+  to absorb micro-refills.
+- For throughput/rate tests, use a generous relative tolerance (e.g., `rel=0.15`
+  for ±15%) and run for at least 5–10 seconds to average out scheduling jitter.
+- When draining a bucket to 0, accept that `tokens` may be a tiny positive
+  epsilon rather than exactly 0.0 — the refill clock never stops.
+- Structure tests so that the implementation's refill-on-every-call pattern
+  doesn't cause spurious failures: check `tokens <= expected + epsilon`, not
+  `tokens == expected`.
+
 ## Common Pitfalls
 
 - Forgetting to handle the empty/zero/nil case.
 - Off-by-one errors in boundary checks.
 - Race conditions in concurrent code — use locks or atomic operations.
 - Forgetting to close resources (files, connections, locks).
+- Using exact float equality (`== 0.0`, `== 9.0`) on values derived from
+  `time.monotonic()` — always use `pytest.approx()` with an absolute tolerance.

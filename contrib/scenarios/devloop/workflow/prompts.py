@@ -73,6 +73,13 @@ def test_writing_task(
         f"The tests should be runnable (import the modules that will "
         f"be implemented) but are expected to FAIL right now since "
         f"no implementation exists yet.\n\n"
+        f"Testing rules:\n"
+        f"- Never assert exact float equality on time-dependent values "
+        f"(tokens, elapsed time). Use pytest.approx() with abs=1e-4.\n"
+        f"- For throughput/rate tests, use a generous relative tolerance "
+        f"(e.g., rel=0.15) and run for at least 5 seconds.\n"
+        f"- When draining a bucket to 0, accept that tokens may be a tiny "
+        f"positive epsilon — the refill clock never stops.\n\n"
         f"## Spec\n{spec_json}"
     )
 
