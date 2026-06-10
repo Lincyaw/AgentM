@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Any, Final, TypedDict
 
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
@@ -11,6 +11,19 @@ from agentm.extensions import ExtensionManifest
 from llmharness.schema import Edge, Event
 
 from .tools import ExtractionState
+
+
+class ExtractorContextConfig(TypedDict, total=False):
+    turn_texts: dict[str, str]
+    recent_graph: list[dict[str, Any]]
+    recent_edges: list[dict[str, Any]]
+    next_event_id: int
+    new_turns: list[dict[str, Any]]
+    tool_call_budget: int | None
+    window_hi: int
+    ops_file: str
+    prompt_name: str
+    prompt_text: str
 
 STATE_SERVICE_KEY: Final = "llmharness.extractor_state"
 
@@ -71,7 +84,7 @@ def _build_directive(
     return "Below is the firing input. Workflow:\n" + numbered
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:  # type: ignore[override]
     turn_texts: dict[int, str] = {
         int(k): str(v) for k, v in (config.get("turn_texts") or {}).items()
     }

@@ -1,52 +1,35 @@
-"""Fail-stop tests for the auditor profile + prompt-variant machinery.
-
-The default ``minimal`` profile mounts only ``submit_verdict``. The
-``with_drill_down`` profile additionally mounts ``get_event_detail``
-and ``get_turn``. Prompt variants are loaded from
-``agents/auditor/prompts/auditor_<name>.md``.
-
-Why fail-stop: if minimal accidentally pulls in drill-down tools, the
-small-model SFT target diverges from the deployed inference surface.
-If prompt loading drifts, training/inference framing diverges silently.
-"""
+"""Fail-stop tests for the auditor profile + prompt-variant machinery."""
 
 from __future__ import annotations
 
-from llmharness.agents.auditor.profiles import (
-    DEFAULT_PROFILE,
-    PROFILES,
-    TOOL_GET_EVENT_DETAIL,
-    TOOL_GET_TURN,
-    TOOL_SUBMIT_VERDICT,
-    resolve_tools,
-)
 from llmharness.agents.auditor.prompt import load_auditor_prompt
-
-# --- profile resolution -----------------------------------------------------
+from llmharness.agents.auditor.tools import (
+    GET_EVENT_DETAIL_TOOL_NAME,
+    GET_TURN_TOOL_NAME,
+    PROFILES,
+    SUBMIT_VERDICT_TOOL_NAME,
+    _resolve_tools,
+)
 
 
 def test_default_profile_is_minimal_and_only_has_submit() -> None:
-    assert DEFAULT_PROFILE == "minimal"
-    assert PROFILES["minimal"] == (TOOL_SUBMIT_VERDICT,)
+    assert PROFILES["minimal"] == (SUBMIT_VERDICT_TOOL_NAME,)
 
 
 def test_resolve_unknown_profile_falls_back_to_default() -> None:
-    assert resolve_tools(profile="does-not-exist", tools=None) == (TOOL_SUBMIT_VERDICT,)
+    assert _resolve_tools({"profile": "does-not-exist"}) == (SUBMIT_VERDICT_TOOL_NAME,)
 
 
 def test_resolve_explicit_tools_overrides_profile() -> None:
-    out = resolve_tools(profile="with_drill_down", tools=[TOOL_GET_TURN])
-    assert TOOL_SUBMIT_VERDICT in out
-    assert TOOL_GET_TURN in out
-    assert TOOL_GET_EVENT_DETAIL not in out
+    out = _resolve_tools({"profile": "with_drill_down", "tools": [GET_TURN_TOOL_NAME]})
+    assert SUBMIT_VERDICT_TOOL_NAME in out
+    assert GET_TURN_TOOL_NAME in out
+    assert GET_EVENT_DETAIL_TOOL_NAME not in out
 
 
 def test_submit_verdict_is_force_included_even_when_omitted() -> None:
-    out = resolve_tools(profile=None, tools=[])
-    assert TOOL_SUBMIT_VERDICT in out
-
-
-# --- prompt-file loading ----------------------------------------------------
+    out = _resolve_tools({"tools": []})
+    assert SUBMIT_VERDICT_TOOL_NAME in out
 
 
 def test_minimal_prompt_does_not_reference_drill_down_tools() -> None:

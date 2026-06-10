@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from agentm.core.abi.events import BeforeAgentStartEvent
 from agentm.core.abi.extension import ExtensionAPI
@@ -16,6 +16,19 @@ from .prompt import (
     load_auditor_prompt,
 )
 
+
+class AuditorContextConfig(TypedDict, total=False):
+    events: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
+    phases: list[dict[str, Any]]
+    findings: list[dict[str, Any]]
+    check_errors: dict[str, str]
+    continuation_notes: list[str]
+    summary_threshold: int
+    prompt_name: str
+    trajectory_snapshot: list[dict[str, Any]]
+    mode: Literal["graph", "trajectory"]
+
 MANIFEST = ExtensionManifest(
     name="auditor_context",
     description="Build the auditor system prompt from raw graph data.",
@@ -24,7 +37,7 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:  # type: ignore[override]
     if not config:
         return
 
