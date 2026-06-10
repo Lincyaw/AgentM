@@ -24,12 +24,34 @@ from .scoring import AggregateScores, SpanScores, aggregate_scores
 app = typer.Typer(help="TELBench span-level error localization evaluation.")
 
 
-def _resolve_provider(provider_spec: str | None) -> tuple[str, dict[str, Any]] | None:
-    """Resolve a provider from a CLI spec or from env vars.
+def _resolve_provider(
+    provider_spec: str | None,
+    model_name: str | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Resolve a provider from a ``--model`` profile name, explicit spec, or env.
 
-    Delegates to :func:`llmharness.replay.cli.resolve_default_provider_spec`
-    when no explicit spec is given.
+    Resolution order:
+
+    1. ``model_name`` — matched against ``~/.agentm/config.toml`` profiles
+       (e.g. ``litellm-dsv4flash``).
+    2. ``provider_spec`` with ``"module:{json}"`` — explicit config.
+    3. ``provider_spec`` bare name — registry lookup.
+    4. ``None`` — fall back to ``AGENTM_PROVIDER`` / ``AGENTM_MODEL`` env vars.
     """
+    if model_name:
+        try:
+            from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+            from agentm.core.lib.user_config import resolve_model_profile
+
+            profile = resolve_model_profile(model_name)
+            if profile is not None:
+                registry = DEFAULT_PROVIDER_REGISTRY
+                return registry.build(
+                    profile.provider, profile.to_build_config(), env=os.environ
+                )
+        except ImportError:
+            pass
+
     if not provider_spec:
         from llmharness.replay.cli import (  # type: ignore[import-untyped]
             resolve_default_provider_spec,
@@ -85,6 +107,10 @@ def telbench(
     ] = 5,
     limit: Annotated[int | None, typer.Option("--limit", help="Max instances to evaluate")] = None,
     difficulty: Annotated[str, typer.Option("--difficulty", help="easy | hard | all")] = "all",
+    answer_status: Annotated[
+        str, typer.Option("--answer-status", help="correct | incorrect | all")
+    ] = "all",
+    offset: Annotated[int, typer.Option("--offset", help="Skip first N instances")] = 0,
     output: Annotated[
         Path | None, typer.Option("--output", help="Write per-instance results as JSONL")
     ] = None,
@@ -92,6 +118,9 @@ def telbench(
         "."
     ),
     provider: Annotated[str | None, typer.Option("--provider", help="LLM provider spec")] = None,
+    model: Annotated[
+        str | None, typer.Option("--model", help="config.toml profile name")
+    ] = None,
 ) -> None:
     """Run TELBench evaluation with the cognitive-audit pipeline."""
     if mode not in ("posthoc", "online"):
@@ -105,11 +134,19 @@ def telbench(
         instances = [i for i in instances if i.meta.get("difficulty") == difficulty]
         typer.echo(f"Filtered to {len(instances)} instances (difficulty={difficulty})")
 
+    if answer_status != "all":
+        instances = [i for i in instances if i.meta.get("answer_status") == answer_status]
+        typer.echo(f"Filtered to {len(instances)} instances (answer_status={answer_status})")
+
+    if offset > 0:
+        instances = instances[offset:]
+        typer.echo(f"Skipped {offset}, {len(instances)} remaining")
+
     if limit is not None:
         instances = instances[:limit]
         typer.echo(f"Limited to {len(instances)} instances")
 
-    resolved_provider = _resolve_provider(provider)
+    resolved_provider = _resolve_provider(provider, model_name=model)
     resolved_cwd = str(cwd.resolve())
 
     # Validate mode literal for the type checker.
