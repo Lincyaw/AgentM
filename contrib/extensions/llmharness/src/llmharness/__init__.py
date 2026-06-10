@@ -1,53 +1,13 @@
 """LLM-as-harness: cognitive-audit AgentM extension.
 
-Public surface — kept deliberately small. Re-export rule: a symbol
-appears here only if at least one in-tree consumer (rca eval, the
-strict-A/B test suite, smoke tests) OR an out-of-tree trainer
-(rca-autorl) imports it through the top-level package. Everything else
-stays reachable via its submodule path and gets promoted on demand.
+Core package — agent definitions + composable primitives.
 
-Phase contract surface — exposed for external trainers that RL-train
-either child agent. Both extractor and auditor phase faces are now
-mounted here. The extractor's tool surface lives at
-:mod:`llmharness.audit.extractor.atom`; the auditor's lives at
-:mod:`llmharness.audit.auditor.atom`.
-
-Currently exported:
-
-* Wire-type dataclasses from :mod:`llmharness.schema` —
-  ``Event`` / ``EventKind`` / ``Edge`` / ``EdgeKind`` / ``Finding`` /
-  ``Phase`` / ``Reminder`` / ``Verdict``. These define the
-  replay-record / audit-graph data model and are the typed view every
-  consumer needs.
-* :class:`ReplayRecord` + :func:`iter_records` / :func:`write_record`
-  — replay sidecar record format and I/O. Used directly by both the
-  strict-A/B helpers and downstream consumers that read sidecars.
-* Fork-tree experiment orchestration —
-  :func:`run_fork_tree_experiment`, :class:`ForkTask`, :class:`ForkNode`,
-  :class:`Surface`, :class:`ForkTreeExperiment`, :class:`SessionPayload`,
-  :func:`write_fork_tree_replay`, :func:`forktree_replay_path`,
-  :data:`FORK_TREE_HEADER_KEY`, :func:`read_fork_tree_header`. The primary
-  entry points the rca eval driver calls. (Replaced the old linear
-  ``run_chained_fork_experiment`` / ``ChainSegment`` surface — the tree
-  engine subsumes the linear chain as a degenerate
-  ``max_surfaces_per_node=1`` policy.)
-
-* Replay drivers — :func:`replay_extractor_record`,
-  :func:`replay_auditor_record`, plus the shared :class:`PhaseResult` /
-  :class:`Status` types. These are the entry points for "drive one
-  child session standalone given a recorded firing"; online-RL
-  trainers (e.g. rca-autorl GRPO/PPO) call them per sampled
-  ``ReplayRecord`` to score a fresh rollout.
-
-Other helpers (``AuditorOutputError``, ``RawVerdictOutput``,
-``merge_to_phases``, ``flatten_assistant_blocks``,
-``serialize_full_trajectory``, ``now_ns``) remain available via their
-submodules. Promote them here when an in-tree caller actually needs
-them through the top-level surface.
-
-The runtime entry point is the AgentM extension at
-``llmharness.adapter``, loaded via
+The runtime entry point is ``llmharness.adapter``, loaded via
 ``AgentSessionConfig(extensions=[("llmharness.adapter", {})])``.
+
+Orchestration tools (replay, distill, aggregate, eval) live outside
+this package under ``tools/`` and compose from the primitives exported
+here.
 """
 
 from .agents.auditor.auditor_tools import (
@@ -61,29 +21,20 @@ from .agents.extractor.extractor_tools import (
     EXTRACTOR_TOOL_NAMES,
 )
 from .agents.extractor.prompt import load_extractor_prompt
-from .distill.signals import (
-    ToolEvent,
-    auditor_process_reward,
-    extractor_process_reward,
-    tool_events_from_phase_result,
-)
-from .replay.engine import PhaseResult
-from .replay.fork_tree import (
-    FORK_TREE_HEADER_KEY,
-    ForkNode,
-    ForkTask,
-    ForkTreeExperiment,
-    SessionFactory,
-    SessionPayload,
-    Surface,
-    forktree_replay_path,
-    read_fork_tree_header,
-    run_fork_tree_experiment,
-    write_fork_tree_replay,
+from .primitives import (
+    AuditorInput,
+    AuditorOutput,
+    AuditorSettings,
+    CumulativeAuditState,
+    ExtractorInput,
+    ExtractorOutput,
+    build_auditor_input,
+    build_extractor_input,
+    process_auditor_output,
+    process_extractor_output,
+    serialize_full_trajectory,
 )
 from .replay.record import ReplayRecord, Status, iter_records, write_record
-from .replay.runner import replay_auditor_record, replay_extractor_record
-from .runtime.runner import AuditorSettings, ExtractorSettings
 from .schema import (
     Edge,
     EdgeKind,
@@ -101,38 +52,29 @@ __all__ = [
     "AUDITOR_TOOL_NAMES",
     "EXTRACTOR_TERMINATION_REASON",
     "EXTRACTOR_TOOL_NAMES",
-    "FORK_TREE_HEADER_KEY",
+    "AuditorInput",
+    "AuditorOutput",
     "AuditorSettings",
+    "CumulativeAuditState",
     "Edge",
     "EdgeKind",
     "Event",
     "EventKind",
-    "ExtractorSettings",
+    "ExtractorInput",
+    "ExtractorOutput",
     "Finding",
-    "ForkNode",
-    "ForkTask",
-    "ForkTreeExperiment",
     "Phase",
-    "PhaseResult",
     "Reminder",
     "ReplayRecord",
-    "SessionFactory",
-    "SessionPayload",
     "Status",
-    "Surface",
-    "ToolEvent",
     "Verdict",
-    "auditor_process_reward",
-    "extractor_process_reward",
-    "forktree_replay_path",
+    "build_auditor_input",
+    "build_extractor_input",
     "iter_records",
     "load_auditor_prompt",
     "load_extractor_prompt",
-    "read_fork_tree_header",
-    "replay_auditor_record",
-    "replay_extractor_record",
-    "run_fork_tree_experiment",
-    "tool_events_from_phase_result",
-    "write_fork_tree_replay",
+    "process_auditor_output",
+    "process_extractor_output",
+    "serialize_full_trajectory",
     "write_record",
 ]

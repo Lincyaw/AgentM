@@ -87,7 +87,10 @@ from . import entry_types as _et
 from .agents.auditor.profiles import resolve_tools as _resolve_auditor_tools
 from .agents.auditor.prompt import load_auditor_prompt
 from .agents.extractor.prompt import load_extractor_prompt
+from .primitives import CumulativeAuditState
+from .primitives import serialize_full_trajectory as _serialize_full_trajectory
 from .replay.record import audit_session_id, replay_log_path
+from .runtime.child_collect import flatten_assistant_blocks as _flatten_assistant_blocks
 from .runtime.live import LiveChildRunner, LiveOpSink
 from .runtime.registry import SERVICE_KEY as AUDIT_REGISTRY_SERVICE_KEY
 from .runtime.registry import AuditCheckRegistry
@@ -95,12 +98,9 @@ from .runtime.reminder import REMINDER_PREAMBLE as _SHARED_REMINDER_PREAMBLE
 from .runtime.reminder import build_reminder_message
 from .runtime.runner import (
     AuditorSettings,
-    CumulativeAuditState,
     ExtractorSettings,
     HarnessRunner,
     SidecarWriter,
-    _flatten_assistant_blocks,
-    _serialize_full_trajectory,
 )
 from .runtime.triggers import SERVICE_KEY as TRIGGER_SERVICE_KEY
 from .runtime.triggers import TriggerRegistry
