@@ -9,6 +9,13 @@ extensions:
     config:
       backend: local
   - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      # Structured workflow handoffs (submit_result with a full spec/review/test
+      # report) can legitimately exceed the default 8k preview. Keep enough in
+      # context for the parent workflow to parse instead of receiving a spill
+      # notice string.
+      max_chars: 200000
+      preview_chars: 200000
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability

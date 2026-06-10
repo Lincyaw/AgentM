@@ -10,9 +10,11 @@ The script is plain ``async`` Python, run as a coroutine on the host event
 loop with a **curated namespace** that exposes only an orchestration SDK —
 bound to *already-existing* APIs:
 
-- ``agent(prompt, *, schema=, scenario=, isolation=, tool_allowlist=, extra_extensions=, atom_config=)`` —
+- ``agent(prompt, *, schema=, scenario=, isolation=, tool_allowlist=, extra_extensions=, atom_config=, retry=, timeout=)`` —
   :meth:`ExtensionAPI.spawn_child_session` → ``child.prompt`` → last
-  ``AssistantMessage`` text → ``child.shutdown``. Returns the text. A worker
+  ``AssistantMessage`` text → ``child.shutdown``. ``schema=PydanticModel``
+  returns a validated model instance (auto-retry on validation failure).
+  ``timeout=`` caps wall-clock seconds. A worker
   defaults to the **orchestrator's own scenario** (a clean reload of that
   curated atom set), not an auto-discovery of every builtin — so workers are
   slim and never carry the ``workflow`` tool themselves (anti-recursion is also
@@ -63,7 +65,9 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Final, Literal, Protocol, TypedDict, TypeVar
+from typing import Any, ClassVar, Final, Literal, Protocol, TypedDict, TypeVar, overload
+
+from pydantic import BaseModel, ValidationError
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.core.abi.events import (
@@ -82,6 +86,7 @@ from agentm.extensions import ExtensionManifest
 
 _log = logging.getLogger(__name__)
 _T = TypeVar("_T")
+_M = TypeVar("_M", bound=BaseModel)
 
 # ---------------------------------------------------------------------------
 # Public type aliases — sharpen signatures beyond bare ``dict[str, Any]``.
@@ -96,7 +101,7 @@ AtomConfigMap = dict[str, dict[str, Any]]
 ExtensionEntry = tuple[str, dict[str, Any]]
 """``(module_path, config)`` pair for ``extra_extensions``."""
 
-AgentResult = str | dict[str, Any] | list[Any]
+AgentResult = str | dict[str, Any] | list[Any] | BaseModel
 """Return type of ``agent()`` — ``dict``/``list`` for structured output,
 ``str`` for free-text."""
 
@@ -424,38 +429,49 @@ class _WorkflowRun:
         self,
         prompt: str,
         *,
-        schema: JsonSchema | None = None,
+        schema: type[BaseModel] | JsonSchema | None = None,
         scenario: str | None = None,
         isolation: str | None = None,
         tool_allowlist: list[str] | None = None,
         extra_extensions: list[ExtensionEntry] | None = None,
         atom_config: AtomConfigMap | None = None,
         retry: int = 0,
+        timeout: float | None = None,
     ) -> AgentResult:
         """Spawn one child agent session, drive it to completion, return its
         output. Journaled by ``hash(prompt, opts)`` — a re-run resumes from
         cache without re-spawning.
 
-        Return type depends on the agent's output:
+        ``schema=`` accepts a Pydantic BaseModel subclass. The atom converts
+        it to a JSON Schema, injects a ``submit_result`` terminal tool into
+        the child, validates the result with ``model_validate``, and returns
+        the validated model instance. On validation failure the agent is
+        re-prompted with the error (counts against ``retry``).
 
-        - If the agent ends via a ``ToolTerminate`` finalize tool (e.g.
-          ``submit_hop_verdict``, ``submit_result`` from ``schema=``), the
-          tool result is returned as a parsed ``dict``/``list``.
-        - Otherwise, the last assistant text is returned as ``str``.
+        ``retry=N`` retries on agent failure (empty output, ``_error``) AND
+        on structured-output validation failure. Failed attempts are not
+        journaled — only the final result is recorded.
 
-        ``schema=`` injects a ``submit_result`` terminal tool shaped by the
-        schema — it's one way to get structured output but not the only way.
-        Agents with their own finalize tools (via ``ToolTerminate``) return
-        structured data without needing ``schema=``.
+        ``timeout=`` (seconds) caps wall-clock time for the agent call.
+        ``TimeoutError`` is raised on expiry (counts as a retryable failure).
+        """
 
-        ``retry=N`` retries the agent up to N times on failure (empty output
-        or ``_error`` result). Failed attempts are not journaled — only the
-        final result is recorded."""
+        # Resolve Pydantic model → JSON Schema dict.
+        from agentm.core.lib.tool_schema import pydantic_to_tool_schema
 
-        # Exclude retry from the journal key — it's execution policy, not
-        # semantic identity.
+        model_cls: type[BaseModel] | None = None
+        json_schema: JsonSchema | None = None
+        if schema is not None:
+            if isinstance(schema, type) and issubclass(schema, BaseModel):
+                model_cls = schema
+                json_schema = pydantic_to_tool_schema(schema)
+            else:
+                json_schema = schema
+
+        # Exclude retry/timeout from the journal key — execution policy,
+        # not semantic identity.
         opts: dict[str, Any] = {
-            "schema": schema,
+            "schema": json_schema,
             "scenario": scenario,
             "isolation": isolation,
             "tool_allowlist": tool_allowlist,
@@ -465,50 +481,93 @@ class _WorkflowRun:
         key = _Journal.key(prompt, opts)
         cached = await self.journal.lookup(key)
         if cached is not None:
-            return _auto_parse(cached)
+            parsed = _auto_parse(cached)
+            if model_cls is not None and isinstance(parsed, dict):
+                return model_cls.model_validate(parsed)
+            return parsed
 
-        async with self._agent_lock:
-            if self.agents_spawned >= self.max_agents:
-                raise RuntimeError(
-                    f"workflow agent-count backstop reached "
-                    f"({self.max_agents}); aborting runaway script"
+        current_prompt = prompt
+        last_error: Exception | None = None
+
+        for attempt in range(max(retry, 0) + 1):
+            async with self._agent_lock:
+                if self.agents_spawned >= self.max_agents:
+                    raise RuntimeError(
+                        f"workflow agent-count backstop reached "
+                        f"({self.max_agents}); aborting runaway script"
+                    )
+                self.agents_spawned += 1
+
+            try:
+                async with self.semaphore:
+                    coro = self._spawn_and_drive(
+                        current_prompt, scenario, isolation, tool_allowlist,
+                        extra_extensions=extra_extensions,
+                        atom_config=atom_config,
+                        schema=json_schema,
+                    )
+                    if timeout is not None:
+                        result = await asyncio.wait_for(coro, timeout=timeout)
+                    else:
+                        result = await coro
+            except TimeoutError as exc:
+                last_error = exc
+                if attempt < retry:
+                    _log.warning(
+                        "workflow agent timed out (prompt=%.60s…), "
+                        "retrying (%d left)", prompt, retry - attempt,
+                    )
+                    self.agents_retried += 1
+                    current_prompt = _structured_retry_prompt(
+                        prompt, exc, attempt + 1,
+                    )
+                    continue
+                self.agents_failed += 1
+                raise
+
+            parsed = _auto_parse(result)
+
+            if _is_agent_error(parsed) and attempt < retry:
+                _log.warning(
+                    "workflow agent failed (prompt=%.60s…), retrying (%d left)",
+                    prompt, retry - attempt,
                 )
-            self.agents_spawned += 1
+                self.agents_retried += 1
+                continue
 
-        async with self.semaphore:
-            result = await self._spawn_and_drive(
-                prompt, scenario, isolation, tool_allowlist,
-                extra_extensions=extra_extensions,
-                atom_config=atom_config,
-                schema=schema,
-            )
+            # Validate against Pydantic model if provided.
+            if model_cls is not None and not _is_agent_error(parsed):
+                try:
+                    validated = model_cls.model_validate(parsed)
+                except (ValidationError, TypeError) as exc:
+                    last_error = exc
+                    if attempt < retry:
+                        _log.warning(
+                            "workflow structured output invalid for %s "
+                            "(prompt=%.60s…), retrying (%d left)",
+                            model_cls.__name__, prompt, retry - attempt,
+                        )
+                        self.agents_retried += 1
+                        current_prompt = _structured_retry_prompt(
+                            prompt, exc, attempt + 1,
+                        )
+                        continue
+                    self.agents_failed += 1
+                    raise
+                self.agents_succeeded += 1
+                await self.journal.record(key, result)
+                return validated
 
-        parsed = _auto_parse(result)
+            if _is_agent_error(parsed):
+                self.agents_failed += 1
+            else:
+                self.agents_succeeded += 1
 
-        if _is_agent_error(parsed) and retry > 0:
-            _log.warning(
-                "workflow agent failed (prompt=%.60s…), retrying (%d left)",
-                prompt, retry,
-            )
-            self.agents_retried += 1
-            return await self.agent(
-                prompt,
-                schema=schema,
-                scenario=scenario,
-                isolation=isolation,
-                tool_allowlist=tool_allowlist,
-                extra_extensions=extra_extensions,
-                atom_config=atom_config,
-                retry=retry - 1,
-            )
+            await self.journal.record(key, result)
+            return parsed
 
-        if _is_agent_error(parsed):
-            self.agents_failed += 1
-        else:
-            self.agents_succeeded += 1
-
-        await self.journal.record(key, result)
-        return parsed
+        assert last_error is not None
+        raise last_error
 
     async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
         """Barrier fan-out: await every awaitable, return results in order.
@@ -665,24 +724,54 @@ class WorkflowContext:
         """Read-only token-spend view."""
         return _Budget(self._run.budget_svc)
 
+    @overload
     async def agent(
         self,
         prompt: str,
         *,
-        schema: JsonSchema | None = None,
+        schema: type[_M],
+        scenario: str | None = ...,
+        isolation: str | None = ...,
+        tool_allowlist: list[str] | None = ...,
+        extra_extensions: list[ExtensionEntry] | None = ...,
+        atom_config: AtomConfigMap | None = ...,
+        retry: int = ...,
+        timeout: float | None = ...,
+    ) -> _M: ...
+
+    @overload
+    async def agent(
+        self,
+        prompt: str,
+        *,
+        schema: None = ...,
+        scenario: str | None = ...,
+        isolation: str | None = ...,
+        tool_allowlist: list[str] | None = ...,
+        extra_extensions: list[ExtensionEntry] | None = ...,
+        atom_config: AtomConfigMap | None = ...,
+        retry: int = ...,
+        timeout: float | None = ...,
+    ) -> AgentResult: ...
+
+    async def agent(
+        self,
+        prompt: str,
+        *,
+        schema: type[BaseModel] | JsonSchema | None = None,
         scenario: str | None = None,
         isolation: str | None = None,
         tool_allowlist: list[str] | None = None,
         extra_extensions: list[ExtensionEntry] | None = None,
         atom_config: AtomConfigMap | None = None,
         retry: int = 0,
+        timeout: float | None = None,
     ) -> AgentResult:
         """Spawn one child agent session and return its output.
 
-        Returns ``dict``/``list`` when the agent has a finalize tool or
-        ``schema=`` is set; ``str`` otherwise.
-
-        ``retry=N`` retries the agent up to N times on failure.
+        ``schema=PydanticModel`` returns a validated model instance.
+        ``retry=N`` retries on agent failure or validation failure.
+        ``timeout=`` caps wall-clock seconds for the agent call.
         """
         return await self._run.agent(
             prompt,
@@ -693,6 +782,7 @@ class WorkflowContext:
             extra_extensions=extra_extensions,
             atom_config=atom_config,
             retry=retry,
+            timeout=timeout,
         )
 
     async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
@@ -734,6 +824,17 @@ def _build_agent_error_info(messages: list[AgentMessage]) -> dict[str, Any]:
                             info["last_tool_error"] = text[:500]
                             return info
     return info
+
+
+def _structured_retry_prompt(original: str, exc: Exception, attempt: int) -> str:
+    return (
+        f"{original}\n\n"
+        f"## Structured-output retry #{attempt}\n"
+        f"Your previous response did not produce a valid structured result.\n"
+        f"Error: {str(exc)[:2000]}\n\n"
+        f"You MUST call the submit_result tool exactly once with a valid "
+        f"`result` object conforming to the required JSON schema."
+    )
 
 
 def _is_agent_error(result: AgentResult) -> bool:
@@ -782,7 +883,7 @@ def _final_session_output(messages: list[AgentMessage]) -> str:
     return ""
 
 
-def _auto_parse(text: str) -> AgentResult:
+def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
     """Parse JSON if possible, otherwise return raw string.
 
     Every ToolTerminate finalize tool (``submit_hop_verdict``,
