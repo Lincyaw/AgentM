@@ -83,7 +83,7 @@ MANIFEST = ExtensionManifest(
         "properties": {
             "enabled": {"type": "boolean", "default": True},
             "reserve_tokens": {"type": "integer", "minimum": 1, "default": 16_384},
-            "tool_result_max_chars": {"type": "integer", "minimum": 1, "default": 2_000},
+            "tool_result_max_chars": {"type": "integer", "minimum": 1, "default": 8_000},
             "custom_instructions": {"type": "string"},
         },
         "additionalProperties": False,
@@ -98,7 +98,7 @@ MANIFEST = ExtensionManifest(
 # Per issue #76 the engine keeps **zero** literal English prompt text: prompts
 # are passed in as parameters by the caller (resolved via the prompt registry).
 
-DEFAULT_TOOL_RESULT_MAX_CHARS = 2_000
+DEFAULT_TOOL_RESULT_MAX_CHARS = 8_000
 
 
 # A flexible tool-registry shape for ``extract_file_ops_from_message``:
@@ -532,7 +532,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     settings = CompactionSettings(
         enabled=bool(config.get("enabled", True)),
         reserve_tokens=int(config.get("reserve_tokens", 16_384)),
-        tool_result_max_chars=int(config.get("tool_result_max_chars", 2_000)),
+        tool_result_max_chars=int(config.get("tool_result_max_chars", 8_000)),
     )
     custom_instructions = config.get("custom_instructions")
     if not isinstance(custom_instructions, str):
@@ -574,17 +574,25 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             prompts=prompts,
         )
 
-        # The entry records only ``covered_through_turn`` (the chaining
-        # cursor): full-compress keeps no verbatim tail, so it omits the
-        # kernel's optional ``first_kept_entry_id`` seam and lets
-        # ``build_session_context`` rebuild the context as ``[user(summary)]``
-        # plus anything appended after this entry.
+        session_meta_lines = [
+            "<!-- session-metadata",
+            f"session_id: {api.session_id}",
+            f"trace_id: {api.root_session_id}",
+        ]
+        if api.scenario:
+            session_meta_lines.append(f"scenario: {api.scenario}")
+        session_meta_lines.append(
+            f"covered_through_turn: {result.covered_through_turn}"
+        )
+        session_meta_lines.append("-->")
+        final_summary = "\n".join(session_meta_lines) + "\n\n" + result.summary
+
         details = {
             "reason": reason,
             "reserve_tokens": settings.reserve_tokens,
             "covered_through_turn": result.covered_through_turn,
             "estimated_tokens_before": est_tokens,
-            "summary": result.summary,
+            "summary": final_summary,
             "read_files": result.details.read_files,
             "modified_files": result.details.modified_files,
         }
@@ -595,7 +603,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         await api.events.emit(
             AfterCompactEvent.CHANNEL,
             AfterCompactEvent(
-                summary=result.summary,
+                summary=final_summary,
                 kept_message_count=len(rebuilt_messages),
                 discarded_message_count=max(0, len(session_messages) - len(rebuilt_messages)),
                 details=details,

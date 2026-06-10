@@ -14,7 +14,7 @@ from dataclasses import dataclass
 class CompactionSettings:
     enabled: bool = True
     reserve_tokens: int = 16_384
-    tool_result_max_chars: int = 2_000
+    tool_result_max_chars: int = 8_000
     """Per-tool-result truncation cap used when rendering tool outputs into
     the summary prompt. Larger values preserve more verbatim tool detail at
     the cost of summary tokens."""
