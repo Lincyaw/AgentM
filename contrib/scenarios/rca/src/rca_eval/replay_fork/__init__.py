@@ -8,11 +8,16 @@ Built on two primitives:
 - ``llmharness.offline_audit()`` — find where the auditor would intervene
 """
 
+from .api import ReplayResult, ReplaySummary, replay_batch, replay_one
 from .judge import JudgeOutcome, RcabenchJudge
 from .providers import build_profile_provider
 
 __all__ = [
     "JudgeOutcome",
     "RcabenchJudge",
+    "ReplayResult",
+    "ReplaySummary",
     "build_profile_provider",
+    "replay_batch",
+    "replay_one",
 ]
