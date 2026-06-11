@@ -248,12 +248,6 @@ def _check_imports(
             )
         ]
 
-    # When validating a package, determine the package's own dotted
-    # namespace so we can skip intra-package absolute imports.
-    _package_namespace: str | None = None
-    if package_root is not None:
-        _package_namespace = package_root.name
-
     for node in ast.walk(tree):
         names: list[str] = []
         imported_names: list[str] = []
@@ -825,19 +819,31 @@ def _build_reachability_graph(
             if node.level > 0:
                 # Relative import: resolve from current file's directory.
                 base = current.parent
-                # Walk up (level - 1) directories for multi-level relative.
                 for _ in range(node.level - 1):
                     base = base.parent
                 if node.module:
+                    # `from .foo import X` — resolve foo as module/package.
                     parts = node.module.split(".")
                     candidate = base / "/".join(parts)
+                    if (candidate / "__init__.py").is_file():
+                        resolved = (candidate / "__init__.py").resolve()
+                    elif candidate.with_suffix(".py").is_file():
+                        resolved = candidate.with_suffix(".py").resolve()
                 else:
-                    candidate = base
-                # Try as package (__init__.py) then as module (.py).
-                if (candidate / "__init__.py").is_file():
-                    resolved = (candidate / "__init__.py").resolve()
-                elif candidate.with_suffix(".py").is_file():
-                    resolved = candidate.with_suffix(".py").resolve()
+                    # `from . import a, b, c` — each name may be a module.
+                    for alias in (node.names or []):
+                        sub = base / alias.name
+                        sub_resolved: Path | None = None
+                        if (sub / "__init__.py").is_file():
+                            sub_resolved = (sub / "__init__.py").resolve()
+                        elif sub.with_suffix(".py").is_file():
+                            sub_resolved = sub.with_suffix(".py").resolve()
+                        if sub_resolved is not None and sub_resolved not in visited:
+                            try:
+                                sub_resolved.relative_to(resolved_root)
+                            except ValueError:
+                                continue
+                            stack.append(sub_resolved)
             elif node.module is not None and node.level == 0:
                 # Absolute import targeting the same package namespace.
                 parts = node.module.split(".")
