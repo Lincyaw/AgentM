@@ -135,7 +135,7 @@ class EdgeDelete:
 
 GraphOp = NodeUpsert | NodeDelete | EdgeUpsert | EdgeDelete
 
-_OP_TABLE: dict[str, type] = {
+_OP_TABLE: Final[dict[str, type]] = {
     "node_upsert": NodeUpsert,
     "node_delete": NodeDelete,
     "edge_upsert": EdgeUpsert,
@@ -1213,10 +1213,11 @@ MANIFEST = ExtensionManifest(
         "tool:reset_extraction",
         "tool:finalize_extraction",
     ),
+    requires=("extractor_context",),
     config_schema=ExtractorToolsConfig,
 )
 
-_BUILDERS = [
+_BUILDERS: Final = [
     build_upsert_node_tool,
     build_upsert_edge_tool,
     build_delete_node_tool,
