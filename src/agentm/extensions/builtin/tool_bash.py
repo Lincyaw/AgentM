@@ -7,21 +7,22 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.operations import BashOperations
+from agentm.core.abi import (
+    BashOperations,
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 120.0
-
 
 class ToolBashConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     bash_ops: Any = None
     default_timeout: float = _DEFAULT_TIMEOUT_SECONDS
-
 
 MANIFEST = ExtensionManifest(
     name="tool_bash",
@@ -40,7 +41,6 @@ _PARAMETERS: Final[dict[str, Any]] = {
     "required": ["cmd"],
     "additionalProperties": False,
 }
-
 
 def install(api: ExtensionAPI, config: ToolBashConfig) -> None:
     bash_ops = _coerce_bash_ops(api, config.bash_ops)
@@ -84,10 +84,8 @@ def install(api: ExtensionAPI, config: ToolBashConfig) -> None:
         )
     )
 
-
 def _coerce_bash_ops(api: ExtensionAPI, candidate: Any) -> BashOperations:
     return candidate if candidate is not None else api.get_operations().bash
-
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

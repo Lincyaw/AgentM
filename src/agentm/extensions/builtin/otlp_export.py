@@ -39,10 +39,9 @@ from typing import Any, Final
 from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError
+from agentm.core.abi import ExtensionAPI, ExtensionLoadError
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-
 
 class OtlpExportConfig(BaseModel):
     endpoint: str | None = None
@@ -50,7 +49,6 @@ class OtlpExportConfig(BaseModel):
     headers: str | None = None
     insecure: bool | None = None
     timeout: float | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="otlp_export",
@@ -66,13 +64,11 @@ MANIFEST = ExtensionManifest(
     tier=1,
 )
 
-
 # Process-level guard. ``install`` may run once per session in one Python
 # process; the global TracerProvider only wants the OTLP processor attached
 # once or every export would be duplicated.
 _lock = threading.Lock()
 _attached = False
-
 
 def _parse_headers(raw: str | None) -> dict[str, str] | None:
     if not raw:
@@ -88,7 +84,6 @@ def _parse_headers(raw: str | None) -> dict[str, str] | None:
         if key:
             out[key] = value
     return out or None
-
 
 def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
     # Reach the process-level SDK TracerProvider + LoggerProvider through
@@ -192,6 +187,5 @@ def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
 
         atexit.register(_shutdown)
         _attached = True
-
 
 __all__: Final = ["MANIFEST", "install"]

@@ -16,8 +16,7 @@ import re
 from pathlib import Path
 from typing import Required, TypedDict
 
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
@@ -70,11 +69,9 @@ _FAULT_DOC_ALIAS = {
     "containerkill": "podfailure",
 }
 
-
 def _norm_fault(name: str) -> str:
     key = re.sub(r"[^a-z0-9]", "", name.lower())
     return _FAULT_DOC_ALIAS.get(key, key)
-
 
 def _load_fault_doc(fault_kind: str) -> str:
     if not fault_kind:
@@ -87,7 +84,6 @@ def _load_fault_doc(fault_kind: str) -> str:
         if _norm_fault(doc.stem) == target:
             return doc.read_text().strip()
     return ""
-
 
 # ---------------------------------------------------------------
 # Prompt construction
@@ -114,7 +110,6 @@ _REL_DESCRIPTIONS = {
                         "has NO spans of its own — its calls live inside {frm}.",
 }
 
-
 class UpstreamEvidence(TypedDict, total=False):
     source: str
     normal_avg_ms: float
@@ -122,7 +117,6 @@ class UpstreamEvidence(TypedDict, total=False):
     ratio: float
     rationale: str
     symptom_evidence: list[dict[str, str]]
-
 
 class HopContextConfig(TypedDict, total=False):
     from_service: Required[str]
@@ -134,7 +128,6 @@ class HopContextConfig(TypedDict, total=False):
     fault_docs: dict[str, str]
     is_infra: bool
     upstream_evidence: UpstreamEvidence | None
-
 
 def _fault_context(
     all_faults: list[tuple[str, str, str]],
@@ -155,7 +148,6 @@ def _fault_context(
         f"Do not assume a single fault is responsible."
     )
     return "\n".join(lines)
-
 
 def _format_upstream_evidence(evidence: UpstreamEvidence) -> str:
     lines: list[str] = []
@@ -181,7 +173,6 @@ def _format_upstream_evidence(evidence: UpstreamEvidence) -> str:
             if sql:
                 lines.append(f"  ```sql\n  {sql}\n  ```")
     return "\n".join(lines)
-
 
 def _build_hop_prompt(
     from_service: str,
@@ -251,7 +242,6 @@ def _build_hop_prompt(
     )
     return "\n".join(parts)
 
-
 # ---------------------------------------------------------------
 # Atom install
 # ---------------------------------------------------------------
@@ -294,6 +284,5 @@ def install(api: ExtensionAPI, config: HopContextConfig) -> None:
         event.system = f"{current}\n\n{context}" if current else context
 
     api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)
-
 
 __all__ = ["MANIFEST", "install"]

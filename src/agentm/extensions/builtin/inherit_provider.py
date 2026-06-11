@@ -13,16 +13,19 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi.roles import PARENT_PROVIDER_CONFIG_KEY, PROVIDER_INHERITOR
+from agentm.core.abi import (
+    ExtensionAPI,
+    ExtensionLoadError,
+    PARENT_PROVIDER_CONFIG_KEY,
+    PROVIDER_INHERITOR,
+    ProviderConfig,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError, ProviderConfig
-
 
 class InheritProviderConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     provider: Any  # ProviderConfig, injected by the spawn factory
-
 
 MANIFEST = ExtensionManifest(
     name="inherit_provider",
@@ -39,7 +42,6 @@ MANIFEST = ExtensionManifest(
     provides_role=(PROVIDER_INHERITOR,),
 )
 
-
 def install(api: ExtensionAPI, config: InheritProviderConfig) -> None:
     provider = config.provider
     if not isinstance(provider, ProviderConfig):
@@ -54,6 +56,5 @@ def install(api: ExtensionAPI, config: InheritProviderConfig) -> None:
             ),
         )
     api.register_provider(provider.name, provider)
-
 
 __all__: Final = ["MANIFEST", "install"]

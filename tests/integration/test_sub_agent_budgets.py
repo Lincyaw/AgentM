@@ -20,8 +20,8 @@ from agentm.core.abi import (
     ToolCallBlock,
     ToolResult,
 )
-from agentm.core.abi.extension import ProviderConfig
-from agentm.core.abi.events import ResolveSubagentEvent
+from agentm.core.abi import ProviderConfig
+from agentm.core.abi import ResolveSubagentEvent
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession

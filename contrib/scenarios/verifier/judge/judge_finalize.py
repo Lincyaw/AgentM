@@ -7,9 +7,13 @@ from typing import Any, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from agentm.core.abi import FunctionTool, ToolResult, ToolTerminate
-from agentm.core.abi.messages import TextContent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
+)
 from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
@@ -24,7 +28,6 @@ MANIFEST = ExtensionManifest(
 )
 
 _STRICT = ConfigDict(extra="forbid")
-
 
 class JudgeReview(BaseModel):
     """Whole-graph review verdict."""
@@ -44,16 +47,13 @@ class JudgeReview(BaseModel):
         description="Per-service justification for each remove/add, citing data."
     )
 
-
 class JudgeFinalizeConfig(TypedDict):
     pass
-
 
 class JudgeReviewPayload(TypedDict):
     remove: list[str]
     add: list[str]
     rationale: str
-
 
 def install(api: ExtensionAPI, config: JudgeFinalizeConfig) -> None:
     async def _submit_judge(args: dict[str, Any]) -> ToolResult | ToolTerminate:
@@ -93,6 +93,5 @@ def install(api: ExtensionAPI, config: JudgeFinalizeConfig) -> None:
             fn=_submit_judge,
         )
     )
-
 
 __all__ = ["MANIFEST", "install"]

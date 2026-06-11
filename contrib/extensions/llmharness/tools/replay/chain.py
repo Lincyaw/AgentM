@@ -32,10 +32,10 @@ from typing import Any, Literal
 
 from llmharness.agents.extractor.tools import parse_op
 from llmharness.atom import CumulativeAuditState
+from llmharness.replay.record import Phase, ReplayRecord, iter_records
 from llmharness.schema import Verdict
 
 from .engine import PhaseResult
-from llmharness.replay.record import Phase, ReplayRecord, iter_records
 from .runner import replay_auditor_record, replay_extractor_record
 
 PhaseFilter = Phase | Literal["both"]

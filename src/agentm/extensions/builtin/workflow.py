@@ -69,19 +69,20 @@ from typing import Any, ClassVar, Final, Literal, Protocol, TypedDict, TypeVar, 
 
 from pydantic import BaseModel, ValidationError
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.events import (
+from agentm.core.abi import (
+    AgentMessage,
+    AgentSessionConfig,
+    AssistantMessage,
     Event,
     EventBus,
+    ExtensionAPI,
+    ExtensionStaleError,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolResultMessage,
     TurnEndEvent,
 )
-from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
-from agentm.core.abi.messages import (
-    AgentMessage,
-    AssistantMessage,
-    ToolResultMessage,
-)
-from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 
 _log = logging.getLogger(__name__)
@@ -108,12 +109,10 @@ AgentResult = str | dict[str, Any] | list[Any] | BaseModel
 WorkflowResult = str | dict[str, Any] | list[Any]
 """Return type of a workflow run."""
 
-
 # ``Any`` is used deliberately only for genuinely arbitrary script values
 # (the ``args`` payload, decoded-JSON tool params, the pipeline item / result
 # types). Every host-side object reached through ``ExtensionAPI`` is given a
 # real type or a minimal structural ``Protocol`` below.
-
 
 class _ChildSession(Protocol):
     """The slice of a spawned child session this atom drives.
@@ -126,7 +125,6 @@ class _ChildSession(Protocol):
 
     async def prompt(self, message: str) -> list[AgentMessage]: ...
     async def shutdown(self) -> None: ...
-
 
 class _ArtifactStore(Protocol):
     """The ``artifact_store`` service surface used for the resume journal."""
@@ -142,7 +140,6 @@ class _ArtifactStore(Protocol):
         tags: list[str] | None = None,
     ) -> dict[str, str]: ...
 
-
 class BudgetSnapshot(TypedDict):
     """Aggregated child token spend (also returned in the tool ``extras``)."""
 
@@ -151,7 +148,6 @@ class BudgetSnapshot(TypedDict):
     output_tokens: int
     total: int | None
     remaining: int | None
-
 
 class RunSummary(TypedDict):
     """Post-execution summary of a workflow run."""
@@ -163,14 +159,12 @@ class RunSummary(TypedDict):
     budget: BudgetSnapshot
     wall_clock_s: float
 
-
 class WorkflowConfig(BaseModel):
     max_concurrency: int | None = None
     max_agents: int | None = None
     wall_clock_timeout_s: float | None = None
     default_scenario: str | None = None
     budget_tokens: int | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="workflow",
@@ -190,7 +184,6 @@ MANIFEST = ExtensionManifest(
     requires=("artifact_store",),
     conflicts=(),
 )
-
 
 # Name of the service that backs the workflow-local resume journal.
 _ARTIFACT_STORE_SERVICE: Final[str] = "artifact_store"
@@ -224,7 +217,6 @@ _STRUCTURED_OUTPUT_ATOM_MODULE: Final[str] = (
 )
 _STRUCTURED_OUTPUT_ATOM: Final[str] = _STRUCTURED_OUTPUT_ATOM_MODULE.rsplit(".", 1)[-1]
 
-
 # Curated builtins handed to the script: data-manipulation only. This is a
 # guardrail (keeps honest scripts on the SDK + off the filesystem), NOT an
 # escape-proof sandbox — see the module docstring. ``open`` / ``__import__`` /
@@ -243,7 +235,6 @@ _SAFE_BUILTINS: Final[dict[str, Any]] = {
     name: getattr(_builtins, name) for name in _SAFE_BUILTIN_NAMES
 }
 
-
 @dataclass(slots=True)
 class WorkflowPhaseEvent(Event):
     """A workflow surfacing a named phase or a free-text log line.
@@ -257,7 +248,6 @@ class WorkflowPhaseEvent(Event):
     CHANNEL: ClassVar[Literal["workflow_phase"]] = "workflow_phase"
     kind: Literal["phase", "log"] = "log"
     text: str = ""
-
 
 @dataclass(slots=True)
 class _BudgetService:
@@ -308,7 +298,6 @@ class _BudgetService:
             "remaining": remaining,
         }
 
-
 @dataclass(frozen=True, slots=True)
 class _Budget:
     """Read-only ``budget`` view injected into the script."""
@@ -327,7 +316,6 @@ class _Budget:
         if total is None:
             return None
         return max(0, total - self.spent())
-
 
 @dataclass(slots=True)
 class _Journal:
@@ -391,11 +379,9 @@ class _Journal:
             tags=[key],
         )
 
-
 def _default_concurrency() -> int:
     cpu = os.cpu_count() or 2
     return max(1, min(16, cpu - 2))
-
 
 @dataclass(slots=True)
 class _WorkflowRun:
@@ -460,7 +446,7 @@ class _WorkflowRun:
         """
 
         # Resolve Pydantic model → JSON Schema dict.
-        from agentm.core.lib.tool_schema import pydantic_to_tool_schema
+        from agentm.core.lib import pydantic_to_tool_schema
 
         model_cls: type[BaseModel] | None = None
         json_schema: JsonSchema | None = None
@@ -667,7 +653,7 @@ class _WorkflowRun:
 
         session_manager: Any = None
         if session_id is not None:
-            from agentm.core.abi.roles import SESSION_STORE_SERVICE
+            from agentm.core.abi import SESSION_STORE_SERVICE
             store = self.api.get_service(SESSION_STORE_SERVICE)
             if store is None:
                 raise RuntimeError(
@@ -709,7 +695,6 @@ class _WorkflowRun:
                 "_error": type(exc).__name__,
                 "detail": str(exc)[:500],
             })
-
 
 class WorkflowContext:
     """Typed interface for module-mode workflow scripts.
@@ -824,11 +809,9 @@ class WorkflowContext:
         """Start a named phase (groups subsequent agents in the progress view)."""
         self._run.phase(name)
 
-
 # ---------------------------------------------------------------------------
 # Output extraction / error helpers
 # ---------------------------------------------------------------------------
-
 
 def _build_agent_error_info(messages: list[AgentMessage]) -> dict[str, Any]:
     """Build a structured error dict when a child agent produces no output."""
@@ -844,7 +827,6 @@ def _build_agent_error_info(messages: list[AgentMessage]) -> dict[str, Any]:
                             return info
     return info
 
-
 def _structured_retry_prompt(original: str, exc: Exception, attempt: int) -> str:
     return (
         f"{original}\n\n"
@@ -855,7 +837,6 @@ def _structured_retry_prompt(original: str, exc: Exception, attempt: int) -> str
         f"`result` object conforming to the required JSON schema."
     )
 
-
 def _is_agent_error(result: AgentResult) -> bool:
     """True if the result represents an agent failure."""
     if isinstance(result, dict) and "_error" in result:
@@ -863,7 +844,6 @@ def _is_agent_error(result: AgentResult) -> bool:
     if isinstance(result, str) and not result:
         return True
     return False
-
 
 def _final_session_output(messages: list[AgentMessage]) -> str:
     """Extract the agent's final output from a completed session.
@@ -901,7 +881,6 @@ def _final_session_output(messages: list[AgentMessage]) -> str:
     )
     return ""
 
-
 def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
     """Parse JSON if possible, otherwise return raw string.
 
@@ -920,7 +899,6 @@ def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
         pass
     return text
 
-
 # ---------------------------------------------------------------------------
 # Pre-execution validation
 # ---------------------------------------------------------------------------
@@ -931,7 +909,6 @@ _SDK_NAMES: Final[frozenset[str]] = frozenset({
 })
 _EXEC_KNOWN_NAMES: Final[frozenset[str]] = frozenset(_SAFE_BUILTIN_NAMES) | _SDK_NAMES
 
-
 @dataclass(frozen=True, slots=True)
 class ScriptIssue:
     """One validation finding: ``error`` blocks execution, ``warning`` is advisory."""
@@ -940,7 +917,6 @@ class ScriptIssue:
     message: str
     severity: Literal["error", "warning"]
 
-
 class WorkflowValidationError(Exception):
     """Raised when pre-execution validation finds blocking issues."""
 
@@ -948,7 +924,6 @@ class WorkflowValidationError(Exception):
         self.issues = issues
         detail = "\n".join(f"  line {i.line}: {i.message}" for i in issues)
         super().__init__(f"workflow script validation failed:\n{detail}")
-
 
 def _detect_script_mode(source: str) -> Literal["exec", "module"]:
     """``module`` if the source defines a top-level ``async def run(...)``."""
@@ -960,7 +935,6 @@ def _detect_script_mode(source: str) -> Literal["exec", "module"]:
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "run":
             return "module"
     return "exec"
-
 
 def _validate_script(
     source: str,
@@ -981,11 +955,9 @@ def _validate_script(
         return _validate_exec(tree)
     return _validate_module(tree)
 
-
 _FORBIDDEN_CALLS: Final[frozenset[str]] = frozenset({
     "open", "__import__", "eval", "exec", "compile", "input", "getattr",
 })
-
 
 def _validate_exec(tree: ast.Module) -> list[ScriptIssue]:
     issues: list[ScriptIssue] = []
@@ -1015,7 +987,6 @@ def _validate_exec(tree: ast.Module) -> list[ScriptIssue]:
                 ))
     return issues
 
-
 def _validate_module(tree: ast.Module) -> list[ScriptIssue]:
     issues: list[ScriptIssue] = []
     run_func: ast.AsyncFunctionDef | None = None
@@ -1039,18 +1010,15 @@ def _validate_module(tree: ast.Module) -> list[ScriptIssue]:
         ))
     return issues
 
-
 # ---------------------------------------------------------------------------
 # Script execution — exec mode (inline / LLM-generated)
 # ---------------------------------------------------------------------------
-
 
 def _error(message: str) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=message)],
         is_error=True,
     )
-
 
 def _coerce_result(raw: object) -> str:
     if isinstance(raw, str):
@@ -1061,7 +1029,6 @@ def _coerce_result(raw: object) -> str:
         return json.dumps(raw, ensure_ascii=False, default=str)
     except TypeError:
         return str(raw)
-
 
 def _build_namespace(run: _WorkflowRun) -> dict[str, Any]:
     """The curated globals the script runs against — only the SDK + safe
@@ -1079,7 +1046,6 @@ def _build_namespace(run: _WorkflowRun) -> dict[str, Any]:
         "phase": run.phase,
     }
 
-
 async def _run_user_script(script: str, ns: dict[str, Any]) -> object:
     """Compile the script as the body of an ``async def`` and await it, so the
     script can ``await agent(...)`` / ``parallel(...)`` directly. ``return`` in
@@ -1090,11 +1056,9 @@ async def _run_user_script(script: str, ns: dict[str, Any]) -> object:
     exec(code, ns)  # noqa: S102 - curated namespace; same authority as the agent
     return await ns["__workflow__"]()
 
-
 # ---------------------------------------------------------------------------
 # Script execution — module mode (developer-written file scripts)
 # ---------------------------------------------------------------------------
-
 
 async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
     """Import a file script as a Python module and call ``run(ctx)``.
@@ -1170,7 +1134,6 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
         finally:
             sys.modules.pop(module_name, None)
 
-
 _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
@@ -1222,9 +1185,7 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
-
 _WORKFLOW_RUNNER_SERVICE: Final[str] = "workflow_runner"
-
 
 class WorkflowRunner:
     """Programmatic entry point for running workflow scripts.
@@ -1452,7 +1413,6 @@ class WorkflowRunner:
 
         return result
 
-
 def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
     if api.purpose == _WORKER_PURPOSE:
         return
@@ -1479,7 +1439,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
         else None
     )
 
-    from agentm.core.abi.roles import MODEL_RESOLVER_SERVICE
+    from agentm.core.abi import MODEL_RESOLVER_SERVICE
 
     model_resolver = api.get_service(MODEL_RESOLVER_SERVICE)
 

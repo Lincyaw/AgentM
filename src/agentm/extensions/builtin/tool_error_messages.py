@@ -20,10 +20,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.abi import TextContent, ToolErrorEvent
+from agentm.core.abi import ExtensionAPI, TextContent, ToolErrorEvent
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 MANIFEST = ExtensionManifest(
     name="tool_error_messages",
@@ -35,7 +33,6 @@ MANIFEST = ExtensionManifest(
     config_schema=None,
     requires=(),  # Leaf atom: formats tool_error events only.
 )
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     def _on_tool_error(event: ToolErrorEvent) -> None:

@@ -28,20 +28,16 @@ from typing import Any, Final
 from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ExtensionAPI
-
+from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 
 _DEFAULT_FILES: Final = ("SOUL.md", "IDENTITY.md", "USER.md")
 _DEFAULT_MAX_CHARS: Final = 12000
-
 
 class PersonaConfig(BaseModel):
     dir: str | None = None
     files: list[str] | None = None
     max_chars: int = _DEFAULT_MAX_CHARS
     defaults: dict[str, str] | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="persona",
@@ -57,17 +53,14 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-
 def _resolve_dir(cwd: str, raw: str) -> Path:
     path = Path(raw).expanduser()
     return path if path.is_absolute() else (Path(cwd) / path).resolve()
-
 
 def _heading(filename: str) -> str:
     """`SOUL.md` -> `## Soul`; keeps the label human and source-traceable."""
     stem = Path(filename).stem.replace("_", " ").replace("-", " ").strip()
     return f"## {stem.title()}" if stem else f"## {filename}"
-
 
 async def _read_file(file_ops: Any, path: Path, max_chars: int) -> str | None:
     """Return trimmed file text, or ``None`` when absent / empty / unreadable."""
@@ -85,7 +78,6 @@ async def _read_file(file_ops: Any, path: Path, max_chars: int) -> str | None:
         text = text[:max_chars] + f"\n... ({dropped} more chars truncated)"
     return text
 
-
 async def _build_block(
     file_ops: Any, base: Path, files: tuple[str, ...], max_chars: int
 ) -> str:
@@ -99,13 +91,11 @@ async def _build_block(
         return ""
     return "# Persona\n\n" + "\n\n".join(sections)
 
-
 def _cwd_relative(path: Path, cwd: str) -> str:
     try:
         return str(path.resolve().relative_to(Path(cwd).resolve()))
     except ValueError:
         return str(path)
-
 
 async def _seed_defaults(
     file_ops: Any,
@@ -137,7 +127,6 @@ async def _seed_defaults(
             )
         except Exception:
             continue
-
 
 def install(api: ExtensionAPI, config: PersonaConfig) -> None:
     base = _resolve_dir(api.cwd, config.dir or ".")

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
 
@@ -35,7 +34,6 @@ MANIFEST = ExtensionManifest(
     registers=("event:before_agent_start",),
     config_schema=ExtractorContextConfig,
 )
-
 
 def _build_directive(
     next_event_id: int,
@@ -84,7 +82,6 @@ def _build_directive(
     )
     numbered = "".join(f"({i}) {step}" for i, step in enumerate(steps, start=1))
     return "Below is the firing input. Workflow:\n" + numbered
-
 
 def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:
     turn_texts: dict[int, str] = {int(k): str(v) for k, v in config.turn_texts.items()}

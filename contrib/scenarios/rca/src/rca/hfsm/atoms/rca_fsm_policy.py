@@ -38,18 +38,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from agentm.core.abi import AgentStartEvent
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import AgentStartEvent, BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from rca.hfsm.scheduler import pick_next
 
-
 FSMState = Literal[
     "INTAKE", "OBSERVE", "HYPOTHESIZE", "VERIFY", "JUDGE", "FINALIZE", "BLOCKED",
 ]
-
 
 MANIFEST = ExtensionManifest(
     name="rca_fsm_policy",
@@ -71,11 +67,9 @@ MANIFEST = ExtensionManifest(
     requires=("rca_hgraph_store", "rca_falsification_gate"),
 )
 
-
 _PROMPTS_DIR: Final[Path] = (
     Path(__file__).resolve().parent.parent.parent.parent.parent / "prompts" / "hfsm"
 )
-
 
 # Per-state visible tool sets. ``None`` in the value means "no filter".
 # FINALIZE is the only fully-locked state (only submit_final_report). The
@@ -112,7 +106,6 @@ _PER_STATE_TOOLS: Final[dict[str, frozenset[str]]] = {
     }),
 }
 
-
 @dataclass
 class FSMStateContainer:
     """Per-session FSM state.
@@ -134,7 +127,6 @@ class FSMStateContainer:
             return
         self.state = new_state
         self.history.append(new_state)
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

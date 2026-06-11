@@ -24,19 +24,20 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 # ---------------------------------------------------------------------------
 # MANIFEST
 # ---------------------------------------------------------------------------
 
-
 class AtomManagementConfig(BaseModel):
     pass
-
 
 MANIFEST = ExtensionManifest(
     name="atom_management",
@@ -49,7 +50,6 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -57,10 +57,8 @@ MANIFEST = ExtensionManifest(
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
 
-
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
-
 
 # ---------------------------------------------------------------------------
 # Tool parameter schemas
@@ -128,7 +126,6 @@ _LIST_PARAMETERS: Final = {
     "properties": {},
     "additionalProperties": False,
 }
-
 
 # ---------------------------------------------------------------------------
 # install()

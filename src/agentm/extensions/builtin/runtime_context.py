@@ -16,13 +16,10 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ExtensionAPI
-
+from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 
 class RuntimeContextConfig(BaseModel):
     pass
-
 
 MANIFEST = ExtensionManifest(
     name="runtime_context",
@@ -31,7 +28,6 @@ MANIFEST = ExtensionManifest(
     config_schema=RuntimeContextConfig,
     requires=(),  # Leaf atom: reads only api.cwd + stdlib platform.
 )
-
 
 def _build_block(cwd: str) -> str:
     workspace = str(Path(cwd).expanduser().resolve())
@@ -51,7 +47,6 @@ def _build_block(cwd: str) -> str:
         "guess and do not fall back to a home directory. All shell commands "
         "run with this as cwd."
     )
-
 
 def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:
     block = _build_block(api.cwd)

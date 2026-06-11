@@ -14,9 +14,7 @@ from pathlib import Path
 from signal import SIGKILL
 from typing import Any
 
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.operations import ExecResult, FileStat
-
+from agentm.core.abi import ExecResult, ExtensionAPI, FileStat
 
 class LocalFileOperations:
     """Default filesystem implementation backed by local stdlib I/O.
@@ -80,7 +78,6 @@ class LocalFileOperations:
     async def makedirs(self, path: str, exist_ok: bool = True) -> None:
         resolved = self._resolve(path)
         await asyncio.to_thread(resolved.mkdir, parents=True, exist_ok=exist_ok)
-
 
 class LocalBashOperations:
     """Default shell implementation backed by ``asyncio`` subprocesses."""
@@ -175,7 +172,6 @@ class LocalBashOperations:
             os.killpg(pgid, SIGKILL)
         except ProcessLookupError:
             return
-
 
 def install_local(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

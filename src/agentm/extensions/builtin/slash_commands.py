@@ -6,16 +6,18 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import BusPriority
-from agentm.core.abi.roles import COMMAND_PARSER, SLASH_COMMAND_DISPATCHER_SERVICE
+from agentm.core.abi import (
+    BusPriority,
+    COMMAND_PARSER,
+    CommandDispatchedEvent,
+    CommandDispatcher,
+    ExtensionAPI,
+    SLASH_COMMAND_DISPATCHER_SERVICE,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import CommandDispatchedEvent
-from agentm.core.abi.extension import CommandDispatcher, ExtensionAPI
-
 
 class SlashCommandsConfig(BaseModel):
     pass
-
 
 MANIFEST = ExtensionManifest(
     name="slash_commands",
@@ -27,7 +29,6 @@ MANIFEST = ExtensionManifest(
     tier=1,
     provides_role=(COMMAND_PARSER,),
 )
-
 
 def install(api: ExtensionAPI, config: SlashCommandsConfig) -> None:
     del config

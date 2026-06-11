@@ -49,7 +49,6 @@ auto-discovered from ``<cwd>/.agentm/atoms/`` are imported under
 ``reload_atom``, or ``unload_atom`` call sees the same module identity it
 would have synthesised itself."""
 
-
 @dataclass(frozen=True, slots=True)
 class BuiltinEntry:
     """One discovered built-in extension."""
@@ -66,10 +65,8 @@ class BuiltinEntry:
 
     manifest: ExtensionManifest
 
-
 _CACHE: dict[str, BuiltinEntry] | None = None
 _LAST_DISCOVERY_FAILURES: list[tuple[str, BaseException]] = []
-
 
 def reset_cache() -> None:
     """Drop the memoized discovery result. Tests that mutate the catalog
@@ -78,7 +75,6 @@ def reset_cache() -> None:
     global _CACHE
     _CACHE = None
     _LAST_DISCOVERY_FAILURES.clear()
-
 
 def last_discovery_failures() -> list[tuple[str, BaseException]]:
     """Return ``(module_path, exception)`` for every atom that failed to
@@ -91,7 +87,6 @@ def last_discovery_failures() -> list[tuple[str, BaseException]]:
     """
 
     return list(_LAST_DISCOVERY_FAILURES)
-
 
 def discover_builtin() -> dict[str, BuiltinEntry]:
     """Return ``name → BuiltinEntry`` for every module under
@@ -184,7 +179,6 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
 
     _CACHE = entries
     return entries
-
 
 def _discover_flat_atoms(
     atoms_dir: Path, *, module_prefix: str, label: str
@@ -285,7 +279,6 @@ def _discover_flat_atoms(
         )
     return entries
 
-
 def discover_by_role() -> dict[str, BuiltinEntry]:
     """Return ``role → BuiltinEntry`` over every builtin + contrib + home +
     entrypoint atom.
@@ -326,7 +319,6 @@ def discover_by_role() -> dict[str, BuiltinEntry]:
                 entries[role] = entry
     return entries
 
-
 def discover_user_atoms(cwd: Path) -> dict[str, BuiltinEntry]:
     """Atoms previously committed by ``api.install_atom`` to
     ``<cwd>/.agentm/atoms/<name>.py``. Auto-loaded so the catalog and the
@@ -338,7 +330,6 @@ def discover_user_atoms(cwd: Path) -> dict[str, BuiltinEntry]:
         module_prefix=USER_ATOM_MODULE_PREFIX,
         label="user atom",
     )
-
 
 def _agentm_repo_root() -> Path | None:
     """Return the AgentM source-checkout root, or ``None`` when running
@@ -356,7 +347,6 @@ def _agentm_repo_root() -> Path | None:
         return None
     candidate = Path(pkg_init).resolve().parent.parent.parent
     return candidate if (candidate / "contrib" / "extensions").is_dir() else None
-
 
 def discover_contrib_atoms() -> dict[str, BuiltinEntry]:
     """Research-line / scenario-bound atoms shipped under
@@ -376,7 +366,6 @@ def discover_contrib_atoms() -> dict[str, BuiltinEntry]:
         label="contrib atom",
     )
 
-
 def discover_home_atoms() -> dict[str, BuiltinEntry]:
     """Extensions installed by the user into ``~/.agentm/contrib/extensions/``.
 
@@ -386,14 +375,13 @@ def discover_home_atoms() -> dict[str, BuiltinEntry]:
     ``install``) into ``~/.agentm/contrib/extensions/`` and they auto-discover.
     """
 
-    from agentm.core.lib.user_config import agentm_home_dir
+    from agentm.core.lib import agentm_home_dir
 
     return _discover_flat_atoms(
         agentm_home_dir() / "contrib" / "extensions",
         module_prefix=HOME_ATOM_MODULE_PREFIX,
         label="home atom",
     )
-
 
 def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
     """Atoms published by any installed distribution via the ``agentm.atoms``
@@ -458,7 +446,6 @@ def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
             manifest=manifest_obj,
         )
     return entries
-
 
 __all__ = [
     "BuiltinEntry",

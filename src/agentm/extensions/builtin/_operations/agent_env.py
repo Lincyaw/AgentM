@@ -55,16 +55,16 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.operations import ExecResult, FileStat
-from agentm.core.abi.resource import (
+from agentm.core.abi import (
     BatchHandle,
+    ExecResult,
+    ExtensionAPI,
+    FileStat,
     PathClass,
+    SessionShutdownEvent,
     WriteResult,
     WriterAuthor,
 )
-
 
 class AgentEnvConfig(BaseModel):
     image: str | None = None
@@ -76,7 +76,6 @@ class AgentEnvConfig(BaseModel):
     timeout: float | None = None
     idle_timeout_seconds: int | None = None
 
-
 def _resolve_str(value: str | None, env_var: str, default: str | None) -> str | None:
     if isinstance(value, str) and value:
         return value
@@ -84,7 +83,6 @@ def _resolve_str(value: str | None, env_var: str, default: str | None) -> str | 
     if env_value:
         return env_value
     return default
-
 
 # Versioning-token script. Emits ``<mtime_ns>-<sha16>`` for files up to
 # ``_MTIME_TOKEN_SIZE_CAP`` bytes, ``<mtime_ns>-size<size>`` for larger
@@ -106,7 +104,6 @@ _MTIME_TOKEN_SCRIPT = (
     '  printf "%s-size%s" "$MNS" "$SZ"; '
     "fi"
 )
-
 
 class _AgentEnvBashOperations:
     """``BashOperations`` impl that executes commands inside an ARL sandbox.
@@ -175,7 +172,6 @@ class _AgentEnvBashOperations:
             exit_code=result.output.exit_code,
             timed_out=timed_out,
         )
-
 
 class _AgentEnvFileOperations:
     """``FileOperations`` impl that reads through the sandbox's shell.
@@ -271,7 +267,6 @@ class _AgentEnvFileOperations:
         _, stderr, code = await self._run(cmd)
         if code != 0 and not exist_ok:
             raise OSError(f"makedirs failed: {stderr.decode('utf-8', 'replace')}")
-
 
 class _AgentEnvResourceWriter:
     """``ResourceWriter`` impl whose writes land inside the ARL sandbox.
@@ -573,11 +568,9 @@ class _AgentEnvResourceWriter:
 
         return _ctx()
 
-
 def _sh_quote(value: str) -> str:
     """POSIX-safe single-quote escape for a string interpolated into a shell command."""
     return "'" + value.replace("'", "'\"'\"'") + "'"
-
 
 def _pod_exec(session: Any, cmd: str, work_dir: str) -> tuple[str, str, int]:
     """Run ``bash -lc cmd`` in the sandbox; return (stdout, stderr, exit_code)."""
@@ -586,7 +579,6 @@ def _pod_exec(session: Any, cmd: str, work_dir: str) -> tuple[str, str, int]:
         return "", "agent-env returned no results", 1
     out = resp.results[0].output
     return out.stdout, out.stderr, out.exit_code
-
 
 def _upload_to_pod(gateway_url: str, session_id: str, rel_path: str, payload: bytes) -> None:
     """Upload bytes to ``rel_path`` (relative to work_dir) via the gateway."""
@@ -599,7 +591,6 @@ def _upload_to_pod(gateway_url: str, session_id: str, rel_path: str, payload: by
     )
     with urllib.request.urlopen(req, timeout=300) as resp:  # noqa: S310
         resp.read()
-
 
 def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
     """Clone the target repo into the sandbox and checkout the issue branch."""
@@ -636,7 +627,6 @@ def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
     )
     print(f"INFO: [agent_env_sync] cloned {repo} into {work_dir}", file=sys.stderr)
 
-
 def _inject_gh_token(session: Any, work_dir: str) -> None:
     """Make GH_TOKEN available in the sandbox so agents can use `gh` CLI."""
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -649,7 +639,6 @@ def _inject_gh_token(session: Any, work_dir: str) -> None:
     )
     _pod_exec(session, setup_cmd, work_dir)
     print("INFO: [agent_env_sync] injected GH_TOKEN into sandbox", file=sys.stderr)
-
 
 def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> None:
     """Upload SKILL.md files from ``AGENTM_SKILLS_DIR`` into the sandbox."""
@@ -684,7 +673,6 @@ def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> 
                 print(f"WARNING: [agent_env_sync] skill upload failed for {entry}: {exc}", file=sys.stderr)
     if count:
         print(f"INFO: [agent_env_sync] uploaded {count} skill(s) to {target_base}/", file=sys.stderr)
-
 
 def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     # Deferred import keeps the SDK truly optional — atoms that never run

@@ -7,9 +7,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.tool import ToolTerminate
-
+from agentm.core.abi import (
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
+)
 
 # ---------------------------------------------------------------------------
 # browse_reports — read divergence reports
@@ -18,7 +21,6 @@ from agentm.core.abi.tool import ToolTerminate
 class BrowseReportsArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     idx: int = Field(description="0-based index of the failure report to read.")
-
 
 def build_browse_reports_tool(reports: list[dict[str, Any]]) -> FunctionTool:
     """Read one failure report by index."""
@@ -52,14 +54,12 @@ def build_browse_reports_tool(reports: list[dict[str, Any]]) -> FunctionTool:
         fn=_fn,
     )
 
-
 # ---------------------------------------------------------------------------
 # get_report_summary — overview of all reports
 # ---------------------------------------------------------------------------
 
 class GetReportSummaryArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
 
 def build_get_report_summary_tool(summary: str) -> FunctionTool:
     """Return aggregated stats of all failure reports."""
@@ -80,14 +80,12 @@ def build_get_report_summary_tool(summary: str) -> FunctionTool:
         fn=_fn,
     )
 
-
 # ---------------------------------------------------------------------------
 # get_existing_skills — list current evolved skills
 # ---------------------------------------------------------------------------
 
 class GetExistingSkillsArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
 
 def build_get_existing_skills_tool(
     existing_skills: list[dict[str, Any]],
@@ -113,7 +111,6 @@ def build_get_existing_skills_tool(
         fn=_fn,
     )
 
-
 # ---------------------------------------------------------------------------
 # submit_skill — terminal tool (create / update / retire)
 # ---------------------------------------------------------------------------
@@ -133,7 +130,6 @@ class SubmitSkillArgs(BaseModel):
     trigger_patterns: list[str] = Field(default_factory=list, description="Situations that should activate this skill.")
     body: str = Field(default="", description="Markdown body of the SKILL.md (≤300 words, required for create/update).")
     reason: str = Field(default="", description="Why this action (especially important for update/retire).")
-
 
 def build_submit_skill_tool() -> FunctionTool:
     """Terminal tool — create, update, or retire a skill."""

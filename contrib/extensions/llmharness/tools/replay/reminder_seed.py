@@ -22,12 +22,17 @@ import logging
 import time
 from typing import Any
 
-from pydantic import BaseModel, Field
-
-from agentm.core.abi import DecideTurnActionEvent, Inject, LoopAction, Stop
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.messages import UserMessage, text_message
+from agentm.core.abi import (
+    DecideTurnActionEvent,
+    ExtensionAPI,
+    Inject,
+    LoopAction,
+    Stop,
+    UserMessage,
+    text_message,
+)
 from agentm.extensions import ExtensionManifest
+from pydantic import BaseModel, Field
 
 from llmharness.schema import REMINDER_DELIVERED
 
@@ -37,10 +42,8 @@ _logger = logging.getLogger(__name__)
 # byte-identical to what the live adapter would have produced.
 REMINDER_PREAMBLE = "[system reminder — automated review of your investigation so far]\n"
 
-
 def _build_reminder_message(text: str) -> UserMessage:
     return text_message(REMINDER_PREAMBLE + text, timestamp=time.time())
-
 
 class ReplayReminderSeedConfig(BaseModel):
     text: str = Field(
@@ -51,7 +54,6 @@ class ReplayReminderSeedConfig(BaseModel):
             "prepended automatically; pass only the body."
         ),
     )
-
 
 MANIFEST = ExtensionManifest(
     name="replay_reminder_seed",
@@ -73,7 +75,6 @@ MANIFEST = ExtensionManifest(
     api_version=1,
     tier=1,
 )
-
 
 def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
     """Wire the one-shot reminder seeder."""
@@ -108,6 +109,5 @@ def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
         return Inject(messages=[message])
 
     unsubscribe.append(api.on(DecideTurnActionEvent.CHANNEL, _on_decide))
-
 
 __all__ = ["MANIFEST", "install"]

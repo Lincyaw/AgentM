@@ -16,16 +16,18 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi.prompt_template import PromptRegistry, PromptTemplateRecord
-from agentm.core.abi.roles import PROMPT_REGISTRY
-from agentm.core.lib.frontmatter import parse_frontmatter
+from agentm.core.abi import (
+    ExtensionAPI,
+    PROMPT_REGISTRY,
+    PromptRegistry,
+    PromptTemplateRecord,
+    ResourcesDiscoverEvent,
+    SessionReadyEvent,
+)
+from agentm.core.lib import parse_frontmatter
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import ResourcesDiscoverEvent, SessionReadyEvent
-from agentm.core.abi.extension import ExtensionAPI
-
 
 # --- Module-level helpers (private) ----------------------------------------
-
 
 def _parse_command_args(args_string: str) -> list[str]:
     args: list[str] = []
@@ -53,7 +55,6 @@ def _parse_command_args(args_string: str) -> list[str]:
         args.append("".join(current))
     return args
 
-
 def _substitute_args(body: str, args: list[str]) -> str:
     result = body
 
@@ -79,7 +80,6 @@ def _substitute_args(body: str, args: list[str]) -> str:
     result = result.replace("$@", all_args)
     return result
 
-
 def _normalize_path(raw_path: str, cwd: str) -> str:
     expanded = raw_path.strip()
     if expanded == "~":
@@ -92,7 +92,6 @@ def _normalize_path(raw_path: str, cwd: str) -> str:
         return expanded
     return os.path.abspath(os.path.join(cwd, expanded))
 
-
 def _fallback_description(body: str) -> str:
     for line in body.split("\n"):
         stripped = line.strip()
@@ -100,7 +99,6 @@ def _fallback_description(body: str) -> str:
             continue
         return f"{stripped[:60]}..." if len(stripped) > 60 else stripped
     return ""
-
 
 def _load_template_file(file_path: str, source: str) -> PromptTemplateRecord | None:
     try:
@@ -131,7 +129,6 @@ def _load_template_file(file_path: str, source: str) -> PromptTemplateRecord | N
         source=source,
     )
 
-
 def _load_templates_from_dir(
     directory: str,
     source: str,
@@ -154,9 +151,7 @@ def _load_templates_from_dir(
             templates.append(template)
     return templates
 
-
 # --- Registry --------------------------------------------------------------
-
 
 class _PromptRegistry:
     """In-memory implementation of :class:`PromptRegistry`.
@@ -224,14 +219,11 @@ class _PromptRegistry:
     def get_prompt(self, name: str) -> str | None:
         return self._registry.get(name)
 
-
 # --- Manifest + install ----------------------------------------------------
-
 
 class PromptTemplatesConfig(BaseModel):
     prompt_paths: list[str] = []
     include_defaults: bool = True
-
 
 MANIFEST = ExtensionManifest(
     name="prompt_templates",
@@ -241,7 +233,6 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Leaf atom: loads prompt templates from resources.
     provides_role=(PROMPT_REGISTRY,),
 )
-
 
 async def install(api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
     include_defaults = config.include_defaults

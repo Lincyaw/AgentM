@@ -57,7 +57,7 @@ from agentm.core.abi.operations import (
 from agentm.core.abi.project_layout import ProjectLayout
 from agentm.core.abi.resource import ResourceWriter
 from agentm.core.runtime.session_inbox import InboxItem, SessionInbox
-from agentm.core.runtime.otel_export import (
+from agentm.core.observability.otel_export import (
     SessionTelemetry,
     setup_session_telemetry,
 )

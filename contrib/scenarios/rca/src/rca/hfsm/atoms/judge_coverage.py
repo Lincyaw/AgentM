@@ -39,6 +39,7 @@ from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
     AssistantStreamEvent,
+    ExtensionAPI,
     FunctionTool,
     MessageEnd,
     Model,
@@ -48,7 +49,6 @@ from agentm.core.abi import (
     ToolResult,
     UserMessage,
 )
-from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from rca.hfsm.judges import (
@@ -60,24 +60,20 @@ from rca.hfsm.judges import (
     make_unclear,
 )
 
-
 _KIND = "coverage"
 _SERVICE_NAME = f"rca.judge.{_KIND}"
 _PROMPT_RELPATH = f"contrib/scenarios/rca/prompts/hfsm/judges/{_KIND}.md"
 _LRU_MAX = 256
-
 
 class _ScriptedVerdict(BaseModel):
     verdict: str
     reason: str
     confidence: str
 
-
 class JudgeCoverageConfig(BaseModel):
     mode: str = "llm"
     model: str | None = None
     scripted: list[_ScriptedVerdict] = []
-
 
 MANIFEST = ExtensionManifest(
     name="judge_coverage",
@@ -90,11 +86,9 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-
 async def _inert_execute(args: dict[str, Any]) -> ToolResult:
     del args
     return ToolResult(content=[TextContent(type="text", text="ok")])
-
 
 def _build_tool() -> Tool:
     schema = build_submit_verdict_tool_schema(_KIND)
@@ -105,7 +99,6 @@ def _build_tool() -> Tool:
         fn=_inert_execute,
     )
 
-
 def _format_user_message(ctx: JudgeContext) -> str:
     return (
         "graph_slice:\n"
@@ -113,7 +106,6 @@ def _format_user_message(ctx: JudgeContext) -> str:
         + "\n\noperands:\n"
         + json.dumps(ctx.operands, indent=2, sort_keys=True, default=str)
     )
-
 
 def _load_prompt(cwd: str) -> str:
     for candidate in (
@@ -123,7 +115,6 @@ def _load_prompt(cwd: str) -> str:
         if candidate.exists():
             return candidate.read_text(encoding="utf-8")
     raise FileNotFoundError(f"judge_{_KIND}: prompt file not found")
-
 
 def _parse_submit_verdict(message: AssistantMessage) -> Verdict:
     for block in message.content:
@@ -144,7 +135,6 @@ def _parse_submit_verdict(message: AssistantMessage) -> Verdict:
         return Verdict(verdict=verdict, reason=reason, confidence=confidence)
     raise ValueError("assistant message contained no submit_verdict tool call")
 
-
 def _run_coro(coro: Any) -> Any:
     try:
         asyncio.get_running_loop()
@@ -152,7 +142,6 @@ def _run_coro(coro: Any) -> Any:
         return asyncio.run(coro)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
         return ex.submit(asyncio.run, coro).result()
-
 
 class _StubJudge:
     def __init__(self, kind: str, scripted: list[dict[str, Any]]) -> None:
@@ -183,7 +172,6 @@ class _StubJudge:
         if len(self._cache) > _LRU_MAX:
             self._cache.popitem(last=False)
         return verdict
-
 
 class _LlmJudge:
     def __init__(
@@ -256,7 +244,6 @@ class _LlmJudge:
             max_output_tokens=default.max_output_tokens,
             metadata=dict(getattr(default, "metadata", {})),
         )
-
 
 def install(api: ExtensionAPI, config: JudgeCoverageConfig) -> None:
     mode = config.mode.lower()

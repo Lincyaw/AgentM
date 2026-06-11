@@ -14,19 +14,23 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.lib import to_jsonable
-from agentm.core.lib.artifact_files import (
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    SessionReadyEvent,
+    TextContent,
+    ToolResult,
+)
+from agentm.core.lib import (
     ArtifactCreator,
     ArtifactMetadata,
     artifacts_dir_for,
     find_metadata_files,
     list_artifacts_for_task,
     scan_artifact_metadata,
+    to_jsonable,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import SessionReadyEvent
-from agentm.core.abi.extension import ExtensionAPI
 
 _DEFAULT_INLINE_BYTES = 8 * 1024
 _DEFAULT_LIST_LIMIT = 50
@@ -36,7 +40,6 @@ _NEXT_ID_WIDTH = 3
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _KIND_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
-
 class ArtifactStoreConfig(BaseModel):
     inline_max_bytes: int = _DEFAULT_INLINE_BYTES
     max_inline_bytes: int = _DEFAULT_INLINE_BYTES
@@ -45,7 +48,6 @@ class ArtifactStoreConfig(BaseModel):
     root_session_id: str | None = None
     task_id: str | None = None
     persona: str | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="artifact_store",
@@ -60,7 +62,6 @@ MANIFEST = ExtensionManifest(
     config_schema=ArtifactStoreConfig,
     requires=(),  # Leaf atom: registers its own tools and service.
 )
-
 
 @dataclass(slots=True)
 class _StoreContext:
@@ -77,7 +78,6 @@ class _StoreContext:
     @property
     def artifacts_dir(self) -> Path:
         return artifacts_dir_for(self.layout, self.root_session_id)
-
 
 class ArtifactStore:
     def __init__(self, api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
@@ -323,7 +323,6 @@ class ArtifactStore:
     def _scan_metadata(self) -> list[ArtifactMetadata]:
         return scan_artifact_metadata(self._ctx.artifacts_dir)
 
-
 def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
     store = ArtifactStore(api, config)
     api.set_service("artifact_store", store)
@@ -432,13 +431,11 @@ def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
         )
     )
 
-
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp")
     tmp_path.write_text(text, encoding="utf-8")
     os.replace(tmp_path, path)
-
 
 def _allocate_id_sync(artifacts_dir: Path) -> str:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -467,7 +464,6 @@ def _allocate_id_sync(artifacts_dir: Path) -> str:
         except FileNotFoundError:
             pass
 
-
 def _coerce_tags(value: Any) -> list[str]:
     if value is None:
         return []
@@ -479,7 +475,6 @@ def _coerce_tags(value: Any) -> list[str]:
         if text:
             tags.append(text)
     return tags
-
 
 def _coerce_parent_ids(value: Any) -> list[str]:
     if value is None:
@@ -493,7 +488,6 @@ def _coerce_parent_ids(value: Any) -> list[str]:
             ids.append(text)
     return ids
 
-
 def _read_default(raw: bytes, cap: int) -> str:
     if len(raw) <= cap:
         return raw.decode("utf-8", errors="replace")
@@ -503,7 +497,6 @@ def _read_default(raw: bytes, cap: int) -> str:
         "Call artifact_read again with range={bytes:[start,end]} or a line range.]"
     )
     return head + marker
-
 
 def _read_range(raw: bytes, range_arg: Any) -> str:
     if not isinstance(range_arg, dict):
@@ -534,7 +527,6 @@ def _read_range(raw: bytes, range_arg: Any) -> str:
     count = max(1, int(range_arg["tail"]))
     return "\n".join(lines[-count:])
 
-
 def _parse_since(value: Any) -> float | None:
     if value is None:
         return None
@@ -551,16 +543,13 @@ def _parse_since(value: Any) -> float | None:
             return datetime.fromisoformat(iso).timestamp()
     raise ValueError("since must be a unix timestamp or ISO-8601 string")
 
-
 def _slugify(title: str) -> str:
     slug = _SLUG_RE.sub("-", title.lower()).strip("-")
     return slug or "artifact"
 
-
 def _sanitize_kind(kind: str) -> str:
     clean = _KIND_RE.sub("_", kind).strip("_")
     return clean or "artifact"
-
 
 def _maybe_str(value: Any) -> str | None:
     if value is None:
@@ -568,21 +557,17 @@ def _maybe_str(value: Any) -> str | None:
     text = str(value).strip()
     return text or None
 
-
 def _file_size(meta: ArtifactMetadata) -> int:
     try:
         return Path(str(meta["path"])).stat().st_size
     except OSError:
         return 0
 
-
-
 def _ok(payload: dict[str, Any]) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(to_jsonable(payload), ensure_ascii=False))],
         extras=payload,
     )
-
 
 def _error(message: str) -> ToolResult:
     payload = {"error": message}

@@ -7,15 +7,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
+)
+from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.extensions import ExtensionManifest
 
 class DistillSubmitRewriterConfig(BaseModel):
     model_config = {"extra": "allow"}
-
 
 MANIFEST = ExtensionManifest(
     name="distill_submit_rewriter",
@@ -72,7 +76,6 @@ SUBMIT_REWRITE_PARAMETERS: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-
 def install(api: ExtensionAPI, config: DistillSubmitRewriterConfig) -> None:
 
     async def _submit(args: dict[str, Any]) -> ToolTerminate:
@@ -93,6 +96,5 @@ def install(api: ExtensionAPI, config: DistillSubmitRewriterConfig) -> None:
             fn=_submit,
         )
     )
-
 
 __all__ = ["MANIFEST", "SUBMIT_REWRITE_TOOL_NAME", "install"]

@@ -28,8 +28,7 @@ from typing import Any
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from agentm.core.abi import EventBus  # noqa: E402
-from agentm.core.abi.tool import Tool  # noqa: E402
+from agentm.core.abi import EventBus, Tool  # noqa: E402
 from agentm.core.runtime.extension import (  # noqa: E402
     _ExtensionAPIImpl,
     build_extension_api_scope,
@@ -38,7 +37,6 @@ from agentm.core.runtime.session_inbox import SessionInbox  # noqa: E402
 
 from contrib.extensions.mcp_bridge import install  # noqa: E402
 from contrib.extensions.mcp_bridge.client import MCPSessionManager  # noqa: E402
-
 
 class _SessionView:
     """Minimum surface ``_ExtensionAPIImpl`` needs (matches test_e2e.py)."""
@@ -67,7 +65,6 @@ class _SessionView:
     ) -> str:
         del type, payload, parent_id
         return "entry"
-
 
 async def main() -> int:
     tools: list[Tool] = []
@@ -130,7 +127,6 @@ async def main() -> int:
     if is_error or not blocks:
         return 1
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))

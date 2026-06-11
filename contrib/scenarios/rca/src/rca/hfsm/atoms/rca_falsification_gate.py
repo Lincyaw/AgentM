@@ -71,7 +71,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from rca.hfsm.judges import Judge, JudgeContext, Verdict
@@ -84,7 +84,6 @@ from rca.hfsm.updates import (
     check_refine,
     check_split,
 )
-
 
 MANIFEST = ExtensionManifest(
     name="rca_falsification_gate",
@@ -103,7 +102,6 @@ MANIFEST = ExtensionManifest(
     requires=("rca_hgraph_store",),
 )
 
-
 # Canonical verdict strings the judges' prompts ask the LLM to emit. These
 # constants are NOT lemma matches against free-text — they are equality
 # checks against the structured ``Verdict.verdict`` field, which the judge
@@ -114,13 +112,11 @@ _COVERS = "covers"
 _INDEPENDENT = "independent"
 _GENUINE_ATTEMPT = "genuine_attempt"
 
-
 # ---------------------------------------------------------------------------
 # Gate implementation. ``_Gate`` is intentionally instance-scoped — the gate
 # state (write handle, graph view, judge handles) lives on the instance the
 # install builds, never as module-level mutable globals (§11.4.D3).
 # ---------------------------------------------------------------------------
-
 
 @dataclass
 class _JudgeBundle:
@@ -130,7 +126,6 @@ class _JudgeBundle:
     coverage: Judge
     independence: Judge
     falsified_genuinely: Judge
-
 
 @dataclass
 class _Gate:
@@ -510,13 +505,11 @@ class _Gate:
             applied_id=None,
         )
 
-
 # ---------------------------------------------------------------------------
 # Pure helpers — graph-slice constructors and structural traversal.
 # Free of regex / lemma matching by construction; they pass structured
 # data to the judges and return judges' free-text verdicts unchanged.
 # ---------------------------------------------------------------------------
-
 
 def _hypothesis_slice(h: Hypothesis) -> dict[str, Any]:
     return {
@@ -528,7 +521,6 @@ def _hypothesis_slice(h: Hypothesis) -> dict[str, Any]:
         "rationale": h.rationale,
     }
 
-
 def _prediction_slice(p: Prediction) -> dict[str, Any]:
     return {
         "id": p.id,
@@ -538,7 +530,6 @@ def _prediction_slice(p: Prediction) -> dict[str, Any]:
         "test_plan": p.test_plan,
         "checks": [_check_slice(c) for c in p.checks],
     }
-
 
 def _check_slice(c: CheckResult) -> dict[str, Any]:
     interpretation = c.interpretation
@@ -568,7 +559,6 @@ def _check_slice(c: CheckResult) -> dict[str, Any]:
         ],
     }
 
-
 def _all_checks(h: Hypothesis) -> list[CheckResult]:
     """Flatten every check on every prediction of ``h``."""
 
@@ -576,7 +566,6 @@ def _all_checks(h: Hypothesis) -> list[CheckResult]:
     for p in h.predictions:
         out.extend(p.checks)
     return out
-
 
 def _collect_supporting_checks(h: Hypothesis) -> list[CheckResult]:
     """Return all checks attached to positive predictions, in order.
@@ -600,7 +589,6 @@ def _collect_supporting_checks(h: Hypothesis) -> list[CheckResult]:
         out.extend(p.checks)
     return out
 
-
 def _observation_log_slice(h: Hypothesis) -> list[dict[str, Any]]:
     """The observation set attached to any of ``h``'s checks.
 
@@ -622,7 +610,6 @@ def _observation_log_slice(h: Hypothesis) -> list[dict[str, Any]]:
                 )
     return obs
 
-
 def _judge_reason(kind: str, verdict: Verdict) -> str:
     """Compose a downgrade reason from a judge's verdict.
 
@@ -634,7 +621,6 @@ def _judge_reason(kind: str, verdict: Verdict) -> str:
     """
 
     return f"judge={kind} verdict={verdict.verdict} reason={verdict.reason}"
-
 
 def _find_hypothesis_owning_prediction(
     graph: GraphView, prediction_id: str
@@ -653,7 +639,6 @@ def _find_hypothesis_owning_prediction(
                 return h
     return None
 
-
 def _unique_child_id(graph: GraphView, base: str) -> str:
     if graph.get_hypothesis(base) is None:
         return base
@@ -662,11 +647,9 @@ def _unique_child_id(graph: GraphView, base: str) -> str:
         counter += 1
     return f"{base}.{counter}"
 
-
 # ---------------------------------------------------------------------------
 # install — wire the gate into the scenario.
 # ---------------------------------------------------------------------------
-
 
 def _required_judge(api: ExtensionAPI, service_name: str) -> Judge:
     impl = api.get_service(service_name)
@@ -677,7 +660,6 @@ def _required_judge(api: ExtensionAPI, service_name: str) -> Judge:
             "the gate"
         )
     return impl  # type: ignore[no-any-return]
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

@@ -74,7 +74,6 @@ _EMPTY_AGENT_RCA_OUTPUT: dict[str, list[Any]] = {
 # when new variants are added.
 _HARNESS_ADAPTER_MODULE = "llmharness.atom"
 
-
 def _provider_name_from_base_url(base_url: str) -> str:
     """Derive a stable provider registry slug from a base URL.
 
@@ -89,19 +88,17 @@ def _provider_name_from_base_url(base_url: str) -> str:
     host = urlparse(base_url).hostname or "openai-compat"
     return host.replace(".", "-")
 
-
 def _env_bool(name: str, *, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
         return default
     return raw.strip().lower() not in {"false", "0", "no", "off", ""}
 
-
 def _try_resolve_profile(model: str) -> tuple[str, dict[str, Any]] | None:
     """Attempt to resolve ``model`` as a ``~/.agentm/config.toml`` profile."""
     try:
         from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-        from agentm.core.lib.user_config import resolve_model_profile
+        from agentm.core.lib import resolve_model_profile
 
         profile = resolve_model_profile(model)
         if profile is None:
@@ -111,7 +108,6 @@ def _try_resolve_profile(model: str) -> tuple[str, dict[str, Any]] | None:
         )
     except Exception:  # noqa: BLE001
         return None
-
 
 def _build_provider(
     provider: str, model: str
@@ -153,7 +149,6 @@ def _build_provider(
         f"unknown provider {provider!r}; expected 'anthropic' or 'openai'"
     )
 
-
 def _coerce_max_turns(value: Any, fallback: int) -> int:
     if value is None:
         return fallback
@@ -162,7 +157,6 @@ def _coerce_max_turns(value: Any, fallback: int) -> int:
     except (TypeError, ValueError):
         return fallback
     return result if result > 0 else fallback
-
 
 def _coerce_max_interventions(value: Any, fallback: int) -> int:
     """Coerce ``--ak max_interventions=...`` to a non-negative int.
@@ -181,7 +175,6 @@ def _coerce_max_interventions(value: Any, fallback: int) -> int:
         return fallback
     return result if result >= 0 else fallback
 
-
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
@@ -193,7 +186,6 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     if text in {"0", "false", "no", "off", ""}:
         return False
     return default
-
 
 @dataclass(frozen=True)
 class _SessionRun:
@@ -207,7 +199,6 @@ class _SessionRun:
     root_session_id: str
     session_log_id: str
     audit_replay_path: str
-
 
 class AgentMAgent(BaseAgent):
     """Run an RCA investigation through an in-process AgentM session."""
@@ -428,13 +419,13 @@ class AgentMAgent(BaseAgent):
         **kwargs: Any,
     ) -> _SessionRun:
         from agentm.core.abi import (
+            AgentSessionConfig,
             BeforeSendToLlmEvent,
             EventBus,
+            LoopConfig,
+            TextContent as _TextContent,
             ToolResultEvent,
         )
-        from agentm.core.abi.messages import TextContent as _TextContent
-        from agentm.core.abi.loop import LoopConfig
-        from agentm.core.abi.session_config import AgentSessionConfig
         from agentm.core.runtime.session import AgentSession
         from agentm.core.runtime.session_factory import create_agent_session
         from rcabench_platform.v3.sdk.evaluation.v2 import AgentRCAOutput
@@ -608,7 +599,6 @@ class AgentMAgent(BaseAgent):
             audit_replay_path=audit_replay_path,
         )
 
-
 def _scenario_mounts_harness(scenario: str) -> bool:
     """True iff ``scenario`` mounts the llmharness cognitive-audit adapter.
 
@@ -645,8 +635,6 @@ def _scenario_mounts_harness(scenario: str) -> bool:
         raise
     return any(module == _HARNESS_ADAPTER_MODULE for module, _ in extensions)
 
-
-
 def _run_metadata(run: _SessionRun) -> dict[str, Any]:
     return {
         "response": run.response,
@@ -658,7 +646,6 @@ def _run_metadata(run: _SessionRun) -> dict[str, Any]:
         "audit_replay_path": run.audit_replay_path,
     }
 
-
 def _build_trajectory(
     *,
     agent_name: str,
@@ -666,7 +653,7 @@ def _build_trajectory(
     final_messages: list[Any],
 ) -> Trajectory:
     """Translate AgentM's session messages to rcabench's Message schema."""
-    from agentm.core.abi.messages import (
+    from agentm.core.abi import (
         AssistantMessage,
         TextContent,
         ToolCallBlock,
@@ -728,6 +715,5 @@ def _build_trajectory(
             )
         ]
     )
-
 
 __all__ = ["AgentMAgent"]

@@ -10,15 +10,19 @@ from typing import Any, Final, TypeVar
 
 from pydantic import BaseModel as PydanticBaseModel
 
-from agentm.core.abi import AssistantStreamEvent, Model, RetryPolicy
-from agentm.core.abi.events import DiagnosticEvent
-from agentm.core.abi.tool import Tool
+from agentm.core.abi import (
+    ApiRegisterEvent,
+    AssistantStreamEvent,
+    DiagnosticEvent,
+    ExtensionAPI,
+    Model,
+    ProviderConfig,
+    RetryPolicy,
+    Tool,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import ApiRegisterEvent
-from agentm.core.abi.extension import ExtensionAPI, ProviderConfig
 
 T = TypeVar("T")
-
 
 class RetryPolicyConfig(PydanticBaseModel):
     max_retries: int = 7
@@ -27,7 +31,6 @@ class RetryPolicyConfig(PydanticBaseModel):
     jitter: float = 0.0
     retry_streaming: bool = False
     wrap_providers: bool = False
-
 
 MANIFEST = ExtensionManifest(
     name="retry_policy",
@@ -40,7 +43,6 @@ MANIFEST = ExtensionManifest(
     requires=(),
     tier=1,
 )
-
 
 @dataclass(slots=True)
 class ExponentialBackoffRetry:
@@ -68,7 +70,6 @@ class ExponentialBackoffRetry:
                 if sleep_for > 0:
                     await asyncio.sleep(sleep_for)
                 delay *= self.factor
-
 
 @dataclass(slots=True)
 class _RetryingStreamFn:
@@ -140,11 +141,9 @@ class _RetryingStreamFn:
             yielded = True
             yield event
 
-
 def _is_generic_retryable(exc: BaseException) -> bool:
     status_code = getattr(exc, "status_code", None)
     return status_code == 429
-
 
 def _wrap_provider(
     provider: ProviderConfig,
@@ -162,7 +161,6 @@ def _wrap_provider(
             retry_streaming=retry_streaming,
         ),
     )
-
 
 def install(api: ExtensionAPI, config: RetryPolicyConfig) -> None:
     policy = ExponentialBackoffRetry(
@@ -216,6 +214,5 @@ def install(api: ExtensionAPI, config: RetryPolicyConfig) -> None:
             api.register_provider(current.name, wrapped_provider)
 
     api.on(ApiRegisterEvent.CHANNEL, _on_register)
-
 
 __all__: Final = ["ExponentialBackoffRetry", "MANIFEST", "install"]

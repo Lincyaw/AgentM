@@ -46,10 +46,14 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.lib.frontmatter import parse_frontmatter
+from agentm.core.abi import (
+    BeforeAgentStartEvent,
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
+from agentm.core.lib import parse_frontmatter
 from agentm.extensions import ExtensionManifest
 
 logger = logging.getLogger(__name__)
@@ -58,12 +62,10 @@ _VALID_TYPES: Final[tuple[str, ...]] = ("feedback", "project", "user", "referenc
 _NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
 _DEFAULT_MAX_INDEX_LINES: Final[int] = 200
 
-
 class MemoryConfig(BaseModel):
     path: str = ".agentm/memory"
     index_in_system_prompt: bool = True
     max_index_lines: int = _DEFAULT_MAX_INDEX_LINES
-
 
 MANIFEST = ExtensionManifest(
     name="memory",
@@ -82,7 +84,6 @@ MANIFEST = ExtensionManifest(
     config_schema=MemoryConfig,
     requires=(),
 )
-
 
 _SAVE_PARAMS: Final[dict[str, Any]] = {
     "type": "object",
@@ -115,7 +116,6 @@ _SAVE_PARAMS: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
-
 _READ_PARAMS: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
@@ -130,7 +130,6 @@ _READ_PARAMS: Final[dict[str, Any]] = {
     "required": ["name"],
     "additionalProperties": False,
 }
-
 
 _SEARCH_PARAMS: Final[dict[str, Any]] = {
     "type": "object",
@@ -151,7 +150,6 @@ _SEARCH_PARAMS: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
-
 _DELETE_PARAMS: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
@@ -163,7 +161,6 @@ _DELETE_PARAMS: Final[dict[str, Any]] = {
     "required": ["name"],
     "additionalProperties": False,
 }
-
 
 def install(api: ExtensionAPI, config: MemoryConfig) -> None:
     base_path = _resolve_base(api.cwd, config.path)
@@ -323,16 +320,13 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         )
     )
 
-
 def _resolve_base(cwd: str, raw_path: str) -> Path:
     raw = Path(raw_path).expanduser()
     return raw if raw.is_absolute() else (Path(cwd) / raw).resolve()
 
-
 def _memory_relpath(base: Path, mem_type: str, name: str, cwd: str) -> str:
     abs_path = base / f"{mem_type}_{name}.md"
     return _to_cwd_relative(abs_path, cwd)
-
 
 def _to_cwd_relative(path: Path, cwd: str) -> str:
     cwd_path = Path(cwd).resolve()
@@ -340,7 +334,6 @@ def _to_cwd_relative(path: Path, cwd: str) -> str:
         return str(path.resolve().relative_to(cwd_path))
     except ValueError:
         return str(path)
-
 
 def _serialize_memory(mem_type: str, name: str, description: str, content: str) -> str:
     body = content if content.endswith("\n") else content + "\n"
@@ -352,7 +345,6 @@ def _serialize_memory(mem_type: str, name: str, description: str, content: str) 
         "---\n\n"
         f"{body}"
     )
-
 
 async def _list_memory_files(file_ops: Any, base: Path) -> list[Path]:
     try:
@@ -367,7 +359,6 @@ async def _list_memory_files(file_ops: Any, base: Path) -> list[Path]:
         out.append(base / entry)
     return sorted(out)
 
-
 async def _resolve_memory_path(file_ops: Any, base: Path, name: str) -> Path | None:
     """Find ``<type>_<name>.md`` without forcing the caller to know the type."""
 
@@ -379,7 +370,6 @@ async def _resolve_memory_path(file_ops: Any, base: Path, name: str) -> Path | N
         except Exception:
             continue
     return None
-
 
 async def _build_index_block(file_ops: Any, base: Path, max_lines: int) -> str:
     index_path = base / "MEMORY.md"
@@ -400,7 +390,6 @@ async def _build_index_block(file_ops: Any, base: Path, max_lines: int) -> str:
         truncated = f"\n... ({len(text.splitlines()) - max_lines} more lines, use memory_search)"
     body = "\n".join(lines) + truncated
     return f"<memory_index>\n{body}\n</memory_index>"
-
 
 async def _rewrite_index(
     file_ops: Any,
@@ -433,7 +422,6 @@ async def _rewrite_index(
     except Exception as exc:
         return f"index rebuild failed: {exc}"
     return None
-
 
 async def _record_access(
     file_ops: Any,
@@ -469,10 +457,8 @@ async def _record_access(
     except Exception:
         return
 
-
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
-
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

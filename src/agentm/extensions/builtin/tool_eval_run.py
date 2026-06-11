@@ -38,12 +38,16 @@ import yaml
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult, TraceReader
-from agentm.core.abi.messages import AssistantMessage
+from agentm.core.abi import (
+    AgentSessionConfig,
+    AssistantMessage,
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    TraceReader,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.session_config import AgentSessionConfig
-
 
 class ToolEvalRunConfig(BaseModel):
     model_config = {"extra": "allow"}
@@ -52,7 +56,6 @@ class ToolEvalRunConfig(BaseModel):
     eval_dir: str | None = None
     max_cost_usd: float | None = None
     rollouts_budget: int | None = None
-
 
 class GradeResult(TypedDict):
     """mu_f feedback function output (design §3.2). Graders may return
@@ -73,12 +76,10 @@ class GradeResult(TypedDict):
     module_feedback: dict[str, str]
     failure_kind: str | None
 
-
 # Cap on the feedback_corpus written to the eval-run summary. Without a
 # cap a long run with chatty graders blows the JSONL line size; 200 is a
 # soft ceiling that covers typical eval suites (40 tasks x 5 samples).
 _FEEDBACK_CORPUS_CAP = 200
-
 
 MANIFEST = ExtensionManifest(
     name="tool_eval_run",
@@ -90,7 +91,6 @@ MANIFEST = ExtensionManifest(
     registers=("tool:eval_run",),
     config_schema=ToolEvalRunConfig,
 )
-
 
 _PARAMETERS: Final[dict[str, Any]] = {
     "type": "object",
@@ -136,7 +136,6 @@ _PARAMETERS: Final[dict[str, Any]] = {
     },
     "additionalProperties": False,
 }
-
 
 def install(api: ExtensionAPI, config: ToolEvalRunConfig) -> None:
     target_scenario = config.target_scenario
@@ -384,14 +383,11 @@ def install(api: ExtensionAPI, config: ToolEvalRunConfig) -> None:
         )
     )
 
-
 # ---------------------------------------------------------------------------
-
 
 def _resolve_eval_dir(cwd: Path, value: str) -> Path:
     p = Path(value)
     return p.resolve() if p.is_absolute() else (cwd / value).resolve()
-
 
 def _load_tasks(tasks_dir: Path) -> list[dict[str, Any]]:
     if not tasks_dir.is_dir():
@@ -407,14 +403,12 @@ def _load_tasks(tasks_dir: Path) -> list[dict[str, Any]]:
             out.append(payload)
     return out
 
-
 def _detect_task_class(tasks: list[dict[str, Any]]) -> str | None:
     for task in tasks:
         tc = task.get("task_class")
         if isinstance(tc, str) and tc:
             return tc
     return None
-
 
 def _load_grader(grader_path: Path) -> Any:
     """Import ``grader.py`` and return its ``grade(task, output) -> float``
@@ -435,7 +429,6 @@ def _load_grader(grader_path: Path) -> Any:
         return None
     fn = getattr(module, "grade", None)
     return fn if callable(fn) else None
-
 
 async def _run_single_sample(
     *,
@@ -524,7 +517,6 @@ async def _run_single_sample(
         "session_id": child_session_id,
     }
 
-
 def _task_declares_env(task: dict[str, Any]) -> bool:
     """True if the task YAML declares a non-empty top-level ``env`` mapping.
 
@@ -541,7 +533,6 @@ def _task_declares_env(task: dict[str, Any]) -> bool:
         return False
     return any(isinstance(k, str) and k for k in explicit)
 
-
 def _extract_user_message(task: dict[str, Any]) -> str:
     inp = task.get("input") or {}
     if isinstance(inp, dict):
@@ -551,7 +542,6 @@ def _extract_user_message(task: dict[str, Any]) -> str:
     if isinstance(task.get("user_message"), str):
         return str(task["user_message"])
     return json.dumps(inp) if inp else ""
-
 
 def _scenario_key(target_scenario: str | None) -> str:
     """Map ``target_scenario`` (which may be a path or a name) to a stable
@@ -565,10 +555,8 @@ def _scenario_key(target_scenario: str | None) -> str:
         return p.name or "default"
     return target_scenario
 
-
 def _budget_path(cwd: Path, scenario_key: str) -> Path:
     return cwd / ".agentm" / "decisions" / scenario_key / "budget.json"
-
 
 def _load_budget(cwd: Path, scenario_key: str) -> dict[str, Any]:
     """Load ``budget.json`` for the scenario or return a fresh zeroed
@@ -602,7 +590,6 @@ def _load_budget(cwd: Path, scenario_key: str) -> dict[str, Any]:
         "updated_at": float(data.get("updated_at") or 0.0),
     }
 
-
 def _save_budget(cwd: Path, scenario_key: str, budget: dict[str, Any]) -> None:
     """Atomic write via temp + os.replace. Race semantics for concurrent
     eval runs are last-writer-wins (B-6 hardens this)."""
@@ -615,7 +602,6 @@ def _save_budget(cwd: Path, scenario_key: str, budget: dict[str, Any]) -> None:
         json.dump(budget, fh, indent=2, sort_keys=True)
     os.replace(tmp, path)
 
-
 def _read_trace_cost_usd(cwd: Path, session_id: str) -> float:
     """Sum ``cost_usd`` across every ``agentm.turn.summary`` log record in
     the child session's OTLP/JSON observability log.
@@ -626,7 +612,7 @@ def _read_trace_cost_usd(cwd: Path, session_id: str) -> float:
     themselves via a turn_end handler that mutates the message usage or
     publishes an extension event). Budget under-counts rather than aborts.
     """
-    from agentm.core.lib.observability_dir import resolve_observability_dir
+    from agentm.core.lib import resolve_observability_dir
 
     trace_path = resolve_observability_dir(cwd) / f"{session_id}.jsonl"
     if not trace_path.is_file():
@@ -637,7 +623,6 @@ def _read_trace_cost_usd(cwd: Path, session_id: str) -> float:
         if isinstance(cost, (int, float)):
             total += float(cost)
     return total
-
 
 def _normalize_grade(value: Any) -> GradeResult:
     """Adapt a grader return value to the μ_f shape (design §3.2).
@@ -707,18 +692,15 @@ def _normalize_grade(value: Any) -> GradeResult:
         "failure_kind": None,
     }
 
-
 def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
     return float(sum(values)) / float(len(values))
 
-
 def _stddev(values: list[float]) -> float:
     if len(values) < 2:
         return 0.0
     return float(statistics.pstdev(values))
-
 
 def _stderr_of_mean(values: list[float], total_samples: int) -> float:
     """Standard error of the mean, used by tool_propose_change for the
@@ -728,7 +710,6 @@ def _stderr_of_mean(values: list[float], total_samples: int) -> float:
         return 0.0
     sigma = _stddev(values)
     return sigma / math.sqrt(max(1, total_samples))
-
 
 def _append_run_records(
     path: Path,
@@ -779,10 +760,8 @@ def _append_run_records(
                 + "\n"
             )
 
-
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
-
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

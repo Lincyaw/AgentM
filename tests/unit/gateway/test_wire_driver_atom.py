@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from agentm.core.abi.events import (
+from agentm.core.abi import (
     DiagnosticEvent,
     ExtensionReloadEvent,
     StreamDeltaEvent,
@@ -23,7 +23,7 @@ from agentm.core.abi.events import (
     ToolResultEvent,
     TurnEndEvent,
 )
-from agentm.core.abi.messages import AssistantMessage, TextContent, Usage
+from agentm.core.abi import AssistantMessage, TextContent, Usage
 from agentm.core.abi.stream import TextDelta, ThinkingDelta
 from agentm.core.abi.tool import ToolResult
 

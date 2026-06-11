@@ -20,14 +20,22 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
-from agentm.core.abi.roles import SUB_AGENT_RUNTIME
 from agentm.core.abi import (
+    ChildSessionEndEvent,
     DecideTurnActionEvent,
+    ExtensionAPI,
+    ExtensionLoadError,
+    ExtensionStaleError,
     FunctionTool,
     Inject,
     LoopAction,
     LoopConfig,
     ModelEndTurn,
+    ProviderConfig,
+    ResolveSubagentEvent,
+    SUB_AGENT_RUNTIME,
+    SessionReadyEvent,
+    SessionShutdownEvent,
     Stop,
     TextContent,
     ToolCallEvent,
@@ -35,29 +43,18 @@ from agentm.core.abi import (
     ToolTerminated,
     UserMessage,
 )
-from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, to_jsonable
-from agentm.core.lib.artifact_files import list_artifacts_for_task
-from agentm.core.lib.background_tasks import (
+from agentm.core.lib import (
     BackgroundTask,
     BackgroundTaskRegistry,
+    DEFAULT_SHUTDOWN_GRACE_SECONDS,
     SlotLimitReached,
+    list_artifacts_for_task,
+    to_jsonable,
 )
 from pydantic import BaseModel as PydanticBaseModel
 
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
-from agentm.core.abi.events import (
-    ChildSessionEndEvent,
-    ResolveSubagentEvent,
-    SessionReadyEvent,
-    SessionShutdownEvent,
-)
-from agentm.core.abi.extension import (
-    ExtensionAPI,
-    ExtensionLoadError,
-    ExtensionStaleError,
-    ProviderConfig,
-)
 
 _RUNNING: Literal["running"] = "running"
 _COMPLETED: Literal["completed"] = "completed"
@@ -70,7 +67,6 @@ class SubAgentConfig(PydanticBaseModel):
     available_inherited_extensions: dict[str, Any] = {}
     max_workers: int = 4
     shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
-
 
 MANIFEST = ExtensionManifest(
     name="sub_agent",
@@ -94,7 +90,6 @@ MANIFEST = ExtensionManifest(
     provides_role=(SUB_AGENT_RUNTIME,),
 )
 
-
 @dataclass(slots=True, kw_only=True)
 class _ChildTask(BackgroundTask):
     """A dispatched child session, carried as a :class:`BackgroundTask`.
@@ -115,10 +110,8 @@ class _ChildTask(BackgroundTask):
     error: str | None = None
     applied_budget: dict[str, int] = field(default_factory=dict)
 
-
 class _ChildAborted(RuntimeError):
     pass
-
 
 def _final_assistant_text(messages: list[Any] | None) -> str | None:
     """Pull the worker's terminal response text out of its final messages.
@@ -169,7 +162,6 @@ def _final_assistant_text(messages: list[Any] | None) -> str | None:
             return "\n".join(chunks)
     return None
 
-
 def _extract_return_response_text(messages: list[Any]) -> str | None:
     """Walk back through messages to find the last ``return_response``
     tool call and return its ``text`` argument."""
@@ -204,7 +196,6 @@ def _extract_return_response_text(messages: list[Any]) -> str | None:
                     return text
     return None
 
-
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(to_jsonable(payload)))],
@@ -212,10 +203,8 @@ def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResu
         extras=payload,
     )
 
-
 def _is_terminal(status: _Status) -> bool:
     return status in {_COMPLETED, _ABORTED, _ERROR}
-
 
 def _xml_attr(value: str) -> str:
     return (
@@ -224,7 +213,6 @@ def _xml_attr(value: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
-
 
 def _summary_text(state: _ChildTask) -> str | None:
     if state.summary:
@@ -236,7 +224,6 @@ def _summary_text(state: _ChildTask) -> str | None:
     if state.error:
         return state.error
     return None
-
 
 def _format_subagent_result(state: _ChildTask) -> str:
     lines = [
@@ -260,7 +247,6 @@ def _format_subagent_result(state: _ChildTask) -> str:
     lines.append("</subagent_result>")
     return "\n".join(lines)
 
-
 def _notification_message(
     *,
     pending: list[_ChildTask],
@@ -281,7 +267,6 @@ def _notification_message(
         timestamp=time.time(),
     )
 
-
 def _task_payload(state: _ChildTask) -> dict[str, Any]:
     return {
         "task_id": state.task_id,
@@ -295,7 +280,6 @@ def _task_payload(state: _ChildTask) -> dict[str, Any]:
         "artifact_ids": list(state.artifact_ids),
         "budget": dict(state.applied_budget),
     }
-
 
 def _last_assistant_text(messages: list[Any]) -> str:
     if not messages:
@@ -315,7 +299,6 @@ def _last_assistant_text(messages: list[Any]) -> str:
             chunks.append(text)
     return "\n".join(chunks).strip()
 
-
 def _normalize_extension_spec(spec: Any) -> tuple[str, dict[str, Any]]:
     if (
         isinstance(spec, Sequence)
@@ -334,14 +317,12 @@ def _normalize_extension_spec(spec: Any) -> tuple[str, dict[str, Any]]:
         "{'module': str, 'config': dict} objects"
     )
 
-
 def _coerce_extension_specs(raw_specs: Any) -> list[tuple[str, dict[str, Any]]]:
     if raw_specs is None:
         return []
     if not isinstance(raw_specs, list):
         raise ValueError("extensions must be a list")
     return [_normalize_extension_spec(spec) for spec in raw_specs]
-
 
 def _resolve_inherited_extensions(
     names: list[str],
@@ -362,7 +343,6 @@ def _resolve_inherited_extensions(
             config = dict(loaded)
         resolved.append((module_path, config))
     return resolved
-
 
 def _persona_prompt_with_budget(
     *,
@@ -393,7 +373,6 @@ def _persona_prompt_with_budget(
     )
     return f"{body}\n\n{block}" if body else block
 
-
 def _coerce_budget(raw: Any) -> dict[str, int]:
     if not isinstance(raw, dict):
         return {}
@@ -403,7 +382,6 @@ def _coerce_budget(raw: Any) -> dict[str, int]:
         if isinstance(value, int) and value > 0:
             budget[key] = value
     return budget
-
 
 def _resolve_child_loop_config(
     *,
@@ -432,13 +410,11 @@ def _resolve_child_loop_config(
         applied_budget,
     )
 
-
 def _get_active_provider(api: ExtensionAPI) -> ProviderConfig:
     provider = api.provider
     if provider is None:
         raise RuntimeError("sub_agent requires an active provider")
     return provider
-
 
 async def _shutdown_child_with_error(
     child: Any,
@@ -460,7 +436,6 @@ async def _shutdown_child_with_error(
         ),
     )
     child.bus.clear()
-
 
 class _ChildTaskManager:
     """Per-session registry + lifecycle for dispatched child agents."""
@@ -976,7 +951,6 @@ class _ChildTaskManager:
                 if child.task in still_running:
                     child.abort_signal.set()
             await asyncio.gather(*still_running, return_exceptions=True)
-
 
 async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
     inherit_extensions = list(config.inherit_extensions)

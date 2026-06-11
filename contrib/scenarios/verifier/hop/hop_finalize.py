@@ -9,9 +9,13 @@ from typing import Any, Literal, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from agentm.core.abi import FunctionTool, ToolResult, ToolTerminate
-from agentm.core.abi.messages import TextContent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
+)
 from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
@@ -27,12 +31,10 @@ MANIFEST = ExtensionManifest(
 
 _STRICT = ConfigDict(extra="forbid")
 
-
 class SqlEvidence(BaseModel):
     model_config = _STRICT
     sql: str = Field(description="DuckDB SELECT comparing normal vs abnormal windows.")
     claim: str = Field(description="<=25-word assertion the rows justify.")
-
 
 class HopVerdict(BaseModel):
     model_config = _STRICT
@@ -52,15 +54,12 @@ class HopVerdict(BaseModel):
     )
     claim: str = Field(description="One-line summary of the hop.")
 
-
 class HopFinalizeConfig(TypedDict, total=False):
     data_dir: str
-
 
 class SqlEvidencePayload(TypedDict):
     sql: str
     claim: str
-
 
 class HopVerdictPayload(TypedDict):
     verdict: Literal["confirmed", "rejected"]
@@ -68,7 +67,6 @@ class HopVerdictPayload(TypedDict):
     symptom_evidence: list[SqlEvidencePayload]
     relationship_sql: str
     claim: str
-
 
 def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
     try:
@@ -145,7 +143,6 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
     conn.close()
     return failures
 
-
 def install(api: ExtensionAPI, config: HopFinalizeConfig) -> None:
     raw_dir = config.get("data_dir")
     data_dir = Path(raw_dir) if raw_dir else None
@@ -205,6 +202,5 @@ def install(api: ExtensionAPI, config: HopFinalizeConfig) -> None:
             fn=_submit,
         )
     )
-
 
 __all__ = ["MANIFEST", "install"]

@@ -23,7 +23,6 @@ from rca_evolution.observer import DivergenceReport, observe_case
 
 _logger = logging.getLogger(__name__)
 
-
 @dataclass
 class IterationResult:
     iteration: int
@@ -33,7 +32,6 @@ class IterationResult:
     accepted: bool
     reports: list[DivergenceReport] = field(default_factory=list)
 
-
 @dataclass
 class EvolutionResult:
     iterations: list[IterationResult] = field(default_factory=list)
@@ -41,16 +39,14 @@ class EvolutionResult:
     initial_accuracy: float = 0.0
     final_accuracy: float = 0.0
 
-
 def _resolve_provider(model_profile: str) -> tuple[str, dict[str, Any]]:
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib.user_config import resolve_model_profile
+    from agentm.core.lib import resolve_model_profile
 
     profile = resolve_model_profile(model_profile)
     if profile is None:
         raise ValueError(f"no ~/.agentm/config.toml profile: {model_profile!r}")
     return DEFAULT_PROVIDER_REGISTRY.build(profile.provider, profile.to_build_config())
-
 
 def _run_eval(
     *,
@@ -109,7 +105,6 @@ def _run_eval(
     finally:
         os.unlink(rendered_path)
 
-
 def _query_results(db_path: str, exp_id: str) -> list[dict[str, Any]]:
     """Read judged results from eval.db for an experiment."""
     con = sqlite3.connect(db_path)
@@ -122,12 +117,10 @@ def _query_results(db_path: str, exp_id: str) -> list[dict[str, Any]]:
     con.close()
     return [dict(r) for r in rows]
 
-
 def _accuracy(results: list[dict[str, Any]]) -> float:
     if not results:
         return 0.0
     return sum(1 for r in results if r.get("correct")) / len(results)
-
 
 def _write_eval_config(
     *,
@@ -150,7 +143,6 @@ def _write_eval_config(
     os.write(fd, result.stdout.encode())
     os.close(fd)
     return path
-
 
 async def run_evolution_loop(
     *,

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from agentm.core.abi import AssistantMessage, TextContent, ToolResult
-from agentm.core.abi.messages import ToolResultBlock, ToolResultMessage, UserMessage
+from agentm.core.abi import ToolResultBlock, ToolResultMessage, UserMessage
 from agentm.core.runtime.catalog import _layout
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader
 from agentm.core.abi.session_config import AgentSessionConfig
@@ -23,7 +23,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from agentm.core.abi import AssistantMessage, MessageEnd, Model, TextContent, ToolCallBlock
-from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi import ProviderConfig
 
 
 class _Stream:
@@ -71,9 +71,8 @@ def _tool_source(name: str, text: str) -> str:
     return f'''
 from __future__ import annotations
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import ExtensionAPI, FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name={name!r},

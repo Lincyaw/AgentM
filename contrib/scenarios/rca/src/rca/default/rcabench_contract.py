@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.abi import (
+    BeforeAgentStartEvent,
+    DiagnosticEvent,
+    ExtensionAPI,
+    SessionReadyEvent,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import BeforeAgentStartEvent, SessionReadyEvent
-from agentm.core.abi.extension import ExtensionAPI
-
 
 MANIFEST = ExtensionManifest(
     name="rcabench_contract",
@@ -21,7 +23,6 @@ MANIFEST = ExtensionManifest(
     config_schema={"type": "object", "additionalProperties": False},
     tier=2,
 )
-
 
 async def _load_agent_contract_block(api: ExtensionAPI) -> str:
     try:
@@ -52,7 +53,6 @@ async def _load_agent_contract_block(api: ExtensionAPI) -> str:
         "</agent_contract>"
     )
 
-
 def _xml_attr(value: str) -> str:
     return (
         value.replace("&", "&amp;")
@@ -60,7 +60,6 @@ def _xml_attr(value: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
-
 
 async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
     cached_contract = ""

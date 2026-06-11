@@ -36,8 +36,8 @@ from agentm.core.abi import (
     Model,
     TextContent,
 )
-from agentm.core.abi.messages import AssistantMessage
-from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi import AssistantMessage
+from agentm.core.abi import ProviderConfig
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 

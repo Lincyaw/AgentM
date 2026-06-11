@@ -32,52 +32,47 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
-from agentm.core.abi.messages import (
+from agentm.core.abi import (
+    Aborted,
     AgentMessage,
     AssistantContent,
     AssistantMessage,
+    AssistantStreamEvent,
+    EndTurn,
     ImageContent,
+    MaxTokens,
+    MessageEnd,
+    Model,
+    PauseTurn,
+    ProviderConfig,
+    RetryPolicy,
+    TerminationHint,
     TextContent,
+    TextDelta,
     ThinkingBlock,
+    ThinkingDelta,
+    Tool,
+    ToolCallArgsDelta,
     ToolCallBlock,
+    ToolCallEnd,
+    ToolCallStart,
     ToolResultBlock,
     ToolResultMessage,
+    ToolUseExpected,
     Usage,
     UserMessage,
+    VendorSpecific,
 )
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi.provider import ProviderConfig
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.retry import RetryPolicy
-from agentm.core.abi.termination import (
-    Aborted,
-    EndTurn,
-    MaxTokens,
-    PauseTurn,
-    TerminationHint,
-    ToolUseExpected,
-    VendorSpecific,
-)
-from agentm.core.abi.stream import (
-    AssistantStreamEvent,
-    MessageEnd,
-    Model,
-    TextDelta,
-    ThinkingDelta,
-    ToolCallArgsDelta,
-    ToolCallEnd,
-    ToolCallStart,
-)
-from agentm.core.abi.tool import Tool
 
-from agentm.core.lib.stream import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from anthropic import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
-
 
 class LlmAnthropicConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -90,7 +85,6 @@ class LlmAnthropicConfig(BaseModel):
     max_output_tokens: int | None = None
     thinking_budgets: dict[str, int] | None = None
 
-
 MANIFEST = ExtensionManifest(
     name="llm_anthropic",
     description="Register an Anthropic Messages API LLM stream provider.",
@@ -98,7 +92,6 @@ MANIFEST = ExtensionManifest(
     config_schema=LlmAnthropicConfig,
     requires=("retry_policy",),
 )
-
 
 def _is_anthropic_retryable(exc: BaseException) -> bool:
     try:
@@ -118,7 +111,6 @@ def _is_anthropic_retryable(exc: BaseException) -> bool:
     )
     return bool(retryable_types) and isinstance(exc, retryable_types)
 
-
 class _IdentityRetryPolicy:
     async def run(
         self,
@@ -129,9 +121,7 @@ class _IdentityRetryPolicy:
         del is_retryable
         return await fn()
 
-
 # --- Model registry ---------------------------------------------------------
-
 
 def _build_model(
     model_id: str,
@@ -157,9 +147,7 @@ def _build_model(
         max_output_tokens=max_output_tokens,
     )
 
-
 # --- Message / tool serialization ------------------------------------------
-
 
 def _encode_image(image: ImageContent) -> dict[str, Any]:
     """Convert kernel ``ImageContent`` to an Anthropic image content block."""
@@ -173,7 +161,6 @@ def _encode_image(image: ImageContent) -> dict[str, Any]:
         },
     }
 
-
 def _encode_user_content(
     blocks: list[TextContent | ImageContent],
 ) -> list[dict[str, Any]]:
@@ -186,7 +173,6 @@ def _encode_user_content(
         else:  # pragma: no cover - exhaustive over the union
             raise TypeError(f"unexpected user content type: {type(block)!r}")
     return out
-
 
 def _encode_assistant_content(
     blocks: list[AssistantContent],
@@ -213,7 +199,6 @@ def _encode_assistant_content(
             raise TypeError(f"unexpected assistant content type: {type(block)!r}")
     return out
 
-
 def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
     return {
         "type": "tool_result",
@@ -221,7 +206,6 @@ def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
         "content": _encode_user_content(list(block.content)),
         "is_error": block.is_error,
     }
-
 
 def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]:
     """Convert kernel messages to the Anthropic Messages API request shape.
@@ -261,7 +245,6 @@ def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]
             raise TypeError(f"unsupported message type: {type(msg)!r}")
     return out
 
-
 @dataclass(frozen=True)
 class AnthropicToolSpecAdapter(ToolSpecAdapter):
     """Convert AgentM tools to Anthropic Messages API tool specs."""
@@ -276,14 +259,11 @@ class AnthropicToolSpecAdapter(ToolSpecAdapter):
     def encode_tool_args(self, args: Mapping[str, Any]) -> str:
         return encode_tool_args(args)
 
-
 def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
     adapter = AnthropicToolSpecAdapter()
     return [adapter.vendor_spec(t) for t in tools]
 
-
 # --- Streaming bridge -------------------------------------------------------
-
 
 @dataclass
 class _StreamState:
@@ -294,7 +274,6 @@ class _StreamState:
     usage: Usage | None = None
     stop_reason: str | None = None
     termination: TerminationHint | None = None
-
 
 def _map_stop_reason(raw: str | None) -> TerminationHint | None:
     """Translate Anthropic ``stop_reason`` into a kernel ``TerminationHint``."""
@@ -314,7 +293,6 @@ def _map_stop_reason(raw: str | None) -> TerminationHint | None:
         return PauseTurn()
     return VendorSpecific(raw=raw)
 
-
 def _extract_usage(message_obj: Any) -> Usage | None:
     """Pull ``Usage`` out of an Anthropic ``Message`` (or partial)."""
 
@@ -327,7 +305,6 @@ def _extract_usage(message_obj: Any) -> Usage | None:
         cache_read=int(getattr(raw, "cache_read_input_tokens", 0) or 0),
         cache_write=int(getattr(raw, "cache_creation_input_tokens", 0) or 0),
     )
-
 
 def _finalize_block(state: _StreamState, index: int) -> None:
     """Flush provider scratch for one Anthropic content block."""
@@ -349,9 +326,7 @@ def _finalize_block(state: _StreamState, index: int) -> None:
             index=index,
         )
 
-
 # --- Public callable -------------------------------------------------------
-
 
 @dataclass
 class AnthropicStreamFn:
@@ -518,7 +493,6 @@ class AnthropicStreamFn:
             yield parse_error
         yield MessageEnd(message=assembled)
 
-
 async def _translate_event(
     event: Any,
     state: _StreamState,
@@ -644,9 +618,7 @@ async def _translate_event(
     # Unknown events are ignored on purpose; the SDK occasionally adds new ones.
     return
 
-
 # --- Extension entrypoint --------------------------------------------------
-
 
 def install(api: Any, config: LlmAnthropicConfig) -> None:
     """Provider extension entrypoint.
@@ -695,6 +667,5 @@ def install(api: Any, config: LlmAnthropicConfig) -> None:
         "anthropic",
         ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
     )
-
 
 __all__ = ("AnthropicStreamFn", "MANIFEST", "install")

@@ -36,54 +36,50 @@ import traceback
 from typing import Any
 
 from agentm.core.abi import (
-    BeforeSendToLlmEvent,
-    EventBusObserver,
-    LlmRequestEndEvent,
-    LlmRequestStartEvent,
-    StreamDeltaEvent,
-    ToolCallEvent,
-    ToolResultEvent,
-)
-from agentm.core.lib.otel_dispatch import dispatch_otel
-from agentm.core.abi.catalog import ActiveSetFingerprint
-from agentm.core.abi.events import (
+    ActiveSetFingerprint,
     AgentEndEvent,
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
     BeforeAgentStartEvent,
     BeforeCompactEvent,
+    BeforeSendToLlmEvent,
     ContextEvent,
     DiagnosticEvent,
     Event,
+    EventBusObserver,
+    ExtensionAPI,
     ExtensionInstallEvent,
     ExtensionReloadEvent,
     ExtensionUnloadEvent,
+    Handler,
+    LlmRequestEndEvent,
+    LlmRequestStartEvent,
     MessageAppendedEvent,
     SessionHeaderEmittedEvent,
     SessionReadyEvent,
     SessionShutdownEvent,
+    SessionTelemetry,
+    StreamDeltaEvent,
+    ToolCallEvent,
+    ToolResultEvent,
     TurnEndEvent,
     TurnStartEvent,
 )
+from agentm.core.observability.otel_dispatch import dispatch_otel
 from pydantic import BaseModel
 
-from agentm.core.abi.extension import ExtensionAPI, Handler
-from agentm.core.abi.telemetry import SessionTelemetry
 from agentm.core.lib import redact_messages, to_jsonable
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 from opentelemetry._logs import SeverityNumber
 
-
 logger = logging.getLogger(__name__)
-
 
 # Channels whose per-emission dispatch records add no diagnostic value over
 # the higher-level spans/records this atom writes — ``stream_delta`` fires
 # once per LLM token chunk; the assembled assistant message lands on
 # ``agentm.message.appended`` so the raw deltas are pure bloat.
 _DEFAULT_EXCLUDE_CHANNELS: frozenset[str] = frozenset({StreamDeltaEvent.CHANNEL})
-
 
 # Channels whose serialized event payload can carry user-supplied prompt
 # content. When ``redact_prompts=True`` (default), :func:`redact_messages`
@@ -98,7 +94,6 @@ _REDACTED_CHANNELS: frozenset[str] = frozenset(
     }
 )
 
-
 # Mutable channels we diff for handler.invoke "what changed" attribute. Same
 # set the old writer tracked; restricting the diff to these avoids O(N·M)
 # double-serialization on every handler invocation.
@@ -111,7 +106,6 @@ _MUTABLE_CHANNELS = frozenset(
         BeforeCompactEvent.CHANNEL,
     }
 )
-
 
 # Channels whose translation lives on :meth:`Event.to_otel`. The atom
 # subscribes a uniform delegator per channel; if a new Event class lands
@@ -136,13 +130,11 @@ _TO_OTEL_CHANNELS: tuple[str, ...] = (
     TurnEndEvent.CHANNEL,
 )
 
-
 class ObservabilityConfig(BaseModel):
     include_handler_records: bool = True
     include_mutation_diff: bool = True
     exclude_channels: list[str] | None = None
     redact_prompts: bool = True
-
 
 MANIFEST = ExtensionManifest(
     name="observability",
@@ -175,21 +167,17 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-
 _HANDLER_OWNER_ATTR = "_agentm_obs_owner"
-
 
 def _handler_label(handler: Handler) -> str:
     mod = getattr(handler, "__module__", None) or "<unknown>"
     qual = getattr(handler, "__qualname__", None) or repr(handler)
     return f"{mod}.{qual}"
 
-
 def _format_traceback(exc: BaseException | None) -> str | None:
     if exc is None or exc.__traceback__ is None:
         return None
     return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-
 
 def _deep_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
     if before == after:
@@ -226,7 +214,6 @@ def _deep_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
                 break
         return out2
     return [{"path": path or "<root>", "before": before, "after": after}]
-
 
 def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
     telemetry: SessionTelemetry = api.get_session_telemetry()
@@ -535,7 +522,6 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
     api.on(SessionReadyEvent.CHANNEL, _on_session_ready_fingerprint)
     api.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
     api.on(ExtensionReloadEvent.CHANNEL, _on_extension_reload)
-
 
 # Keep ``logger`` referenced (used implicitly by the SDK in error paths).
 _ = logger

@@ -19,8 +19,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..replay.engine import run_phase_standalone
 from llmharness.schema import Edge, Event, Finding
+
+from ..replay.engine import run_phase_standalone
 
 # Module paths for standard builtin atoms.
 OBSERVABILITY_MODULE = "agentm.extensions.builtin.observability"

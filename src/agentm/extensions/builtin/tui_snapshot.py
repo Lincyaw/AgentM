@@ -22,16 +22,18 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
-
 
 class TuiSnapshotConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     dump_path: str | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="tui_snapshot",
@@ -78,10 +80,8 @@ _PARAMETERS: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
-
 def _strip_ansi(text: str) -> str:
     return _CSI_RE.sub("", _OSC_RE.sub("", text))
-
 
 def _resolve_path(configured: str | None, arg: Any) -> str:
     if isinstance(arg, str) and arg:
@@ -89,7 +89,6 @@ def _resolve_path(configured: str | None, arg: Any) -> str:
     if configured:
         return configured
     return os.environ.get("AGENTM_TUI_DUMP") or _DEFAULT_DUMP_PATH
-
 
 def install(api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
     configured_path = config.dump_path
@@ -137,10 +136,8 @@ def install(api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
         )
     )
 
-
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
-
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

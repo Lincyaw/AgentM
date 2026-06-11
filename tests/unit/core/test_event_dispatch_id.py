@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 
-from agentm.core.abi.events import Event, EventBus
+from agentm.core.abi import Event, EventBus
 
 
 @dataclass(slots=True)

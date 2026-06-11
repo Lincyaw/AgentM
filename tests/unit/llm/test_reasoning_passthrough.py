@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from agentm.core.abi.messages import TextContent, UserMessage
+from agentm.core.abi import TextContent, UserMessage
 from agentm.core.abi.stream import Model
 from agentm.extensions.builtin.llm_anthropic import AnthropicStreamFn
 from agentm.extensions.builtin.llm_openai import OpenAIStreamFn

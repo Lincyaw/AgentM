@@ -227,43 +227,12 @@ class GitBackedResourceWriter:
         rationale: str,
         author: WriterAuthor = "agent",
     ) -> WriteResult:
-        await asyncio.to_thread(self._lazy_setup)
-        path_class = self.classify(path)
-        resolved = self._resolve_path(path)
-        if path_class == "constitution":
-            return WriteResult(
-                path=path,
-                path_class=path_class,
-                committed=False,
-                commit_sha_before=None,
-                commit_sha_after=None,
-                error=f"Refusing to modify constitution path {path!r}",
-            )
-        if path_class == "unmanaged" or self._advisory_mode:
-            try:
-                await asyncio.to_thread(self._write_bytes, resolved, content)
-            except Exception as exc:  # noqa: BLE001
-                return WriteResult(
-                    path=path,
-                    path_class=path_class,
-                    committed=False,
-                    commit_sha_before=None,
-                    commit_sha_after=None,
-                    error=str(exc),
-                )
-            return WriteResult(
-                path=path,
-                path_class=path_class,
-                committed=False,
-                commit_sha_before=None,
-                commit_sha_after=None,
-            )
-
-        return await self._commit_single_path(
+        return await self._classified_write(
             path=path,
             rationale=rationale,
             author=author,
-            write_op=lambda resolved: self._write_bytes(resolved, content),
+            raw_op=lambda r: self._write_bytes(r, content),
+            commit_op=lambda r: self._write_bytes(r, content),
         )
 
     async def replace(
@@ -279,53 +248,25 @@ class GitBackedResourceWriter:
         path_class = self.classify(path)
         resolved = self._resolve_path(path)
         if path_class == "constitution":
-            return WriteResult(
-                path=path,
-                path_class=path_class,
-                committed=False,
-                commit_sha_before=None,
-                commit_sha_after=None,
-                error=f"Refusing to modify constitution path {path!r}",
+            return WriteResult._error(
+                path, path_class, f"Refusing to modify constitution path {path!r}"
             )
         try:
             current = await asyncio.to_thread(resolved.read_bytes)
         except Exception as exc:  # noqa: BLE001
-            return WriteResult(
-                path=path,
-                path_class=path_class,
-                committed=False,
-                commit_sha_before=None,
-                commit_sha_after=None,
-                error=str(exc),
-            )
+            return WriteResult._error(path, path_class, str(exc))
         if current != old:
-            return WriteResult(
-                path=path,
-                path_class=path_class,
-                committed=False,
-                commit_sha_before=None,
-                commit_sha_after=None,
-                error=f"Current bytes for {path!r} no longer match expected content",
+            return WriteResult._error(
+                path,
+                path_class,
+                f"Current bytes for {path!r} no longer match expected content",
             )
         if path_class == "unmanaged" or self._advisory_mode:
             try:
                 await asyncio.to_thread(self._write_bytes, resolved, new)
             except Exception as exc:  # noqa: BLE001
-                return WriteResult(
-                    path=path,
-                    path_class=path_class,
-                    committed=False,
-                    commit_sha_before=None,
-                    commit_sha_after=None,
-                    error=str(exc),
-                )
-            return WriteResult(
-                path=path,
-                path_class=path_class,
-                committed=False,
-                commit_sha_before=None,
-                commit_sha_after=None,
-            )
+                return WriteResult._error(path, path_class, str(exc))
+            return WriteResult._uncommitted(path, path_class)
 
         return await self._commit_single_path(
             path=path,
@@ -341,43 +282,12 @@ class GitBackedResourceWriter:
         rationale: str,
         author: WriterAuthor = "agent",
     ) -> WriteResult:
-        await asyncio.to_thread(self._lazy_setup)
-        path_class = self.classify(path)
-        resolved = self._resolve_path(path)
-        if path_class == "constitution":
-            return WriteResult(
-                path=path,
-                path_class=path_class,
-                committed=False,
-                commit_sha_before=None,
-                commit_sha_after=None,
-                error=f"Refusing to modify constitution path {path!r}",
-            )
-        if path_class == "unmanaged" or self._advisory_mode:
-            try:
-                await asyncio.to_thread(self._delete_path, resolved)
-            except Exception as exc:  # noqa: BLE001
-                return WriteResult(
-                    path=path,
-                    path_class=path_class,
-                    committed=False,
-                    commit_sha_before=None,
-                    commit_sha_after=None,
-                    error=str(exc),
-                )
-            return WriteResult(
-                path=path,
-                path_class=path_class,
-                committed=False,
-                commit_sha_before=None,
-                commit_sha_after=None,
-            )
-
-        return await self._commit_single_path(
+        return await self._classified_write(
             path=path,
             rationale=rationale,
             author=author,
-            write_op=lambda resolved: self._delete_path(resolved),
+            raw_op=lambda r: self._delete_path(r),
+            commit_op=lambda r: self._delete_path(r),
         )
 
     def classify(self, path: str) -> PathClass:
@@ -543,6 +453,43 @@ class GitBackedResourceWriter:
                 ),
             )
 
+    async def _classified_write(
+        self,
+        *,
+        path: str,
+        rationale: str,
+        author: WriterAuthor,
+        raw_op: Callable[[Path], None],
+        commit_op: Callable[[Path], None],
+    ) -> WriteResult:
+        """Common classify-then-dispatch for write/delete.
+
+        ``raw_op`` runs for unmanaged/advisory paths, ``commit_op`` runs
+        inside a managed git commit.  ``replace`` has extra pre-validation
+        (read + compare) that doesn't fit this shape, so it calls the
+        individual pieces directly.
+        """
+        await asyncio.to_thread(self._lazy_setup)
+        path_class = self.classify(path)
+        resolved = self._resolve_path(path)
+        if path_class == "constitution":
+            return WriteResult._error(
+                path, path_class, f"Refusing to modify constitution path {path!r}"
+            )
+        if path_class == "unmanaged" or self._advisory_mode:
+            try:
+                await asyncio.to_thread(raw_op, resolved)
+            except Exception as exc:  # noqa: BLE001
+                return WriteResult._error(path, path_class, str(exc))
+            return WriteResult._uncommitted(path, path_class)
+
+        return await self._commit_single_path(
+            path=path,
+            rationale=rationale,
+            author=author,
+            write_op=commit_op,
+        )
+
     async def _commit_single_path(
         self,
         *,
@@ -557,14 +504,7 @@ class GitBackedResourceWriter:
         try:
             await asyncio.to_thread(self._check_protected_branch)
         except ProtectedBranchError as exc:
-            return WriteResult(
-                path=path,
-                path_class="managed",
-                committed=False,
-                commit_sha_before=None,
-                commit_sha_after=None,
-                error=str(exc),
-            )
+            return WriteResult._error(path, "managed", str(exc))
         await asyncio.to_thread(self._ensure_git_ready)
         pre_sha = await asyncio.to_thread(self._head_sha)
         restore_exists = resolved.exists()
@@ -575,10 +515,8 @@ class GitBackedResourceWriter:
             await asyncio.to_thread(self._stage_paths, [relative_posix])
             if await asyncio.to_thread(self._is_index_clean_for_paths, [relative_posix]):
                 current_sha = await asyncio.to_thread(self._head_sha)
-                return WriteResult(
-                    path=path,
-                    path_class="managed",
-                    committed=False,
+                return WriteResult._uncommitted(
+                    path, "managed",
                     commit_sha_before=pre_sha,
                     commit_sha_after=current_sha,
                 )
@@ -593,13 +531,8 @@ class GitBackedResourceWriter:
                 pre_sha,
                 relative_posix,
             )
-            return WriteResult(
-                path=path,
-                path_class="managed",
-                committed=False,
-                commit_sha_before=pre_sha,
-                commit_sha_after=None,
-                error=str(exc),
+            return WriteResult._error(
+                path, "managed", str(exc), commit_sha_before=pre_sha
             )
 
         await self._bus.emit(

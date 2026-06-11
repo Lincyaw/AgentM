@@ -52,14 +52,12 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from agentm.core.abi import (
-    FunctionTool,
-    TextContent,
-    ToolResult,
-)
-from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.abi.extension import (
     ExtensionAPI,
     ExtensionStaleError,
+    FunctionTool,
+    SessionShutdownEvent,
+    TextContent,
+    ToolResult,
     Unsubscribe,
 )
 from pydantic import BaseModel
@@ -143,12 +141,10 @@ _KERNEL_CONTROL_CHANNELS: frozenset[str] = frozenset(
     }
 )
 
-
 class MonitorConfig(BaseModel):
     shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
     event_summary_max_chars: int = _DEFAULT_EVENT_SUMMARY_MAX
     condition_poll_min_seconds: float = _DEFAULT_CONDITION_POLL_MIN
-
 
 MANIFEST = ExtensionManifest(
     name="monitor",
@@ -167,7 +163,6 @@ MANIFEST = ExtensionManifest(
     config_schema=MonitorConfig,
     requires=(),
 )
-
 
 @dataclass(slots=True, kw_only=True)
 class _Monitor:
@@ -191,14 +186,12 @@ class _Monitor:
     task: asyncio.Task[Any] | None = None  # wakeup sleep / condition poll task
     unsubscribe: Unsubscribe | None = None  # channel's bus unsubscribe
 
-
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(to_jsonable(payload)))],
         is_error=is_error,
         extras=payload,
     )
-
 
 def _event_summary(event: Any, *, max_chars: int) -> str:
     """Short, bounded repr of a bus event for the inbox payload.
@@ -213,7 +206,6 @@ def _event_summary(event: Any, *, max_chars: int) -> str:
     if len(text) > max_chars:
         text = text[: max(0, max_chars - 3)] + "..."
     return text
-
 
 def _monitor_view(state: _Monitor) -> dict[str, Any]:
     view: dict[str, Any] = {
@@ -232,7 +224,6 @@ def _monitor_view(state: _Monitor) -> dict[str, Any]:
     if state.note is not None:
         view["note"] = state.note
     return view
-
 
 class _MonitorManager:
     """Per-session registry + asyncio/bus handles for live monitors.
@@ -634,7 +625,6 @@ class _MonitorManager:
         # Gather so any CancelledError / late exception is retrieved cleanly
         # (no "Task exception was never retrieved" past shutdown).
         await asyncio.gather(*wakeup_tasks, return_exceptions=True)
-
 
 def install(api: ExtensionAPI, config: MonitorConfig) -> None:
     manager = _MonitorManager(

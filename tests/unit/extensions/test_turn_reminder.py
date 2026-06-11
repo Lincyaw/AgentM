@@ -15,13 +15,13 @@ from typing import Any
 import pytest
 
 from agentm.core.abi import LoopConfig, TextContent, ToolResultMessage, UserMessage
-from agentm.core.abi.events import (
+from agentm.core.abi import (
     AgentStartEvent,
     BeforeSendToLlmEvent,
     ToolResultEvent,
     TurnStartEvent,
 )
-from agentm.core.abi.messages import ToolResultBlock
+from agentm.core.abi import ToolResultBlock
 from agentm.extensions import discover
 
 

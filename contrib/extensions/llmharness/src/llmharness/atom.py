@@ -13,23 +13,21 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from agentm.core.abi import (
+    AgentMessage,
+    AgentSessionConfig,
+    AssistantMessage,
     DecideTurnActionEvent,
+    ExtensionAPI,
     Inject,
     LoopAction,
+    SessionEntry,
+    SessionShutdownEvent,
     Stop,
-    TurnEndEvent,
-)
-from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.messages import (
-    AgentMessage,
-    AssistantMessage,
     ToolCallBlock,
+    TurnEndEvent,
     UserMessage,
     text_message,
 )
-from agentm.core.abi.session import SessionEntry
-from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
 
@@ -43,7 +41,6 @@ from .schema import Edge, Event, Phase, Reminder, Verdict
 class ProviderConfig(BaseModel):
     module: str
     config: dict[str, Any] = {}
-
 
 class LLMHarnessConfig(BaseModel):
     mode: Literal["async", "sync"] = "async"
@@ -77,17 +74,14 @@ MANIFEST = ExtensionManifest(
     tier=1,
 )
 
-
 # ---------------------------------------------------------------------------
 # CumulativeAuditState
 # ---------------------------------------------------------------------------
-
 
 def _bool_safe_int(raw: Any) -> int | None:
     if isinstance(raw, int) and not isinstance(raw, bool):
         return raw
     return None
-
 
 @dataclass
 class CumulativeAuditState:
@@ -190,11 +184,9 @@ class CumulativeAuditState:
             firing_id_counter=0,
         )
 
-
 # ---------------------------------------------------------------------------
 # Message serialization
 # ---------------------------------------------------------------------------
-
 
 def _render_message_text(msg: AgentMessage) -> str:
     """Extract all text from a message into one string (for witness validation)."""
@@ -219,7 +211,6 @@ def _render_message_text(msg: AgentMessage) -> str:
                 parts.append(json.dumps(args, ensure_ascii=False, default=str))
     return " ".join(parts)
 
-
 def _serialize_trajectory(
     messages: list[AgentMessage], *, start_index: int = 0,
 ) -> list[dict[str, Any]]:
@@ -232,11 +223,9 @@ def _serialize_trajectory(
             out.append(d)
     return out
 
-
 # ---------------------------------------------------------------------------
 # Data preparation
 # ---------------------------------------------------------------------------
-
 
 def _prepare_extractor_data(
     messages: list[AgentMessage],
@@ -267,7 +256,6 @@ def _prepare_extractor_data(
         "window_hi": window_hi,
     }
 
-
 def _read_ops_file(path: Path) -> list[GraphOp]:
     if not path.exists():
         return []
@@ -282,11 +270,9 @@ def _read_ops_file(path: Path) -> list[GraphOp]:
             _log.warning("skipping malformed op line in %s", path)
     return ops
 
-
 # ---------------------------------------------------------------------------
 # Child session helper
 # ---------------------------------------------------------------------------
-
 
 async def _run_child(
     api: ExtensionAPI,
@@ -318,7 +304,6 @@ async def _run_child(
         _log.exception("child session failed (purpose=%s)", purpose)
         return None
 
-
 def _terminal_tool_args(
     messages: list[AgentMessage], tool_name: str,
 ) -> dict[str, Any] | None:
@@ -330,11 +315,9 @@ def _terminal_tool_args(
                 return dict(block.arguments)
     return None
 
-
 # ---------------------------------------------------------------------------
 # install
 # ---------------------------------------------------------------------------
-
 
 def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     cfg = config
@@ -539,5 +522,4 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     if enable_reminders:
         api.on(DecideTurnActionEvent.CHANNEL, _on_decide)
     api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)
-
 

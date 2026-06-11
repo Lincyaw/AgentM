@@ -14,12 +14,16 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi import BeforeSendToLlmEvent, BudgetExhausted, TurnEndEvent
-from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.abi import (
+    BeforeAgentStartEvent,
+    BeforeSendToLlmEvent,
+    BudgetExhausted,
+    CostBudgetExceededEvent,
+    DiagnosticEvent,
+    ExtensionAPI,
+    TurnEndEvent,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import BeforeAgentStartEvent, CostBudgetExceededEvent
-from agentm.core.abi.extension import ExtensionAPI
-
 
 # ---------------------------------------------------------------------------
 # Cost-query service contract — inlined from the former
@@ -28,16 +32,13 @@ from agentm.core.abi.extension import ExtensionAPI
 # lookup, not via Protocol import, so this stays scoped to the atom.
 # ---------------------------------------------------------------------------
 
-
 @dataclass(frozen=True, slots=True)
 class CostBreakdown:
     amount: float
     currency: str = "usd"
 
-
 class CostQueryService(Protocol):
     def estimate(self, usage: Any, *, provider: str | None = None) -> CostBreakdown: ...
-
 
 class CostBudgetConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -45,7 +46,6 @@ class CostBudgetConfig(BaseModel):
     limit: float
     currency: str = "usd"
     pricing: dict[str, Any] | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="cost_budget",
@@ -61,7 +61,6 @@ MANIFEST = ExtensionManifest(
     tier=2,
 )
 
-
 def _serialize(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):
         return {
@@ -74,11 +73,9 @@ def _serialize(value: Any) -> Any:
         return [_serialize(item) for item in value]
     return value
 
-
 def _estimate_input_tokens(messages: list[Any]) -> int:
     encoded = json.dumps(_serialize(messages), default=str, sort_keys=True)
     return len(encoded) // 4
-
 
 def _coerce_pricing(raw: Any) -> dict[str, tuple[float, float]]:
     if not isinstance(raw, dict):
@@ -89,7 +86,6 @@ def _coerce_pricing(raw: Any) -> dict[str, tuple[float, float]]:
             continue
         pricing[str(provider)] = (float(pair[0]), float(pair[1]))
     return pricing
-
 
 def install(api: ExtensionAPI, config: CostBudgetConfig) -> None:
     limit = config.limit

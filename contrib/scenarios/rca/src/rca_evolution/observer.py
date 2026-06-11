@@ -15,14 +15,12 @@ from typing import Any
 
 _logger = logging.getLogger(__name__)
 
-
 @dataclass
 class DivergencePoint:
     turn_index: int
     description: str
     should_have_done: str
     category: str
-
 
 @dataclass
 class DivergenceReport:
@@ -47,7 +45,6 @@ class DivergenceReport:
             "key_lesson": self.key_lesson,
         }
 
-
 def _extract_gt_services(data_dir: str) -> tuple[list[str], list[str]]:
     injection_path = Path(data_dir) / "injection.json"
     causal_graph_path = Path(data_dir) / "causal_graph.json"
@@ -70,7 +67,6 @@ def _extract_gt_services(data_dir: str) -> tuple[list[str], list[str]]:
 
     return injected_apps, fault_types
 
-
 def _extract_agent_services(response: str) -> list[str]:
     try:
         data = json.loads(response)
@@ -81,7 +77,6 @@ def _extract_agent_services(response: str) -> list[str]:
         for rc in data.get("root_causes", [])
         if isinstance(rc, dict) and rc.get("service")
     ]
-
 
 def _build_trajectory_snapshot(trajectory_path: str) -> list[dict[str, Any]]:
     """Parse OTLP JSONL into a list of turn dicts for get_turn."""
@@ -105,7 +100,6 @@ def _build_trajectory_snapshot(trajectory_path: str) -> list[dict[str, Any]]:
         pass
     return turns
 
-
 def _build_trajectory_summary(snapshot: list[dict[str, Any]]) -> str:
     """Condensed overview of tool calls for get_trajectory_summary."""
     parts: list[str] = []
@@ -120,7 +114,6 @@ def _build_trajectory_summary(snapshot: list[dict[str, Any]]) -> str:
         elif "assistant" in rtype.lower():
             parts.append(f"[T{turn}] ASSISTANT message")
     return "\n".join(parts) if parts else "(could not parse trajectory)"
-
 
 _OBSERVER_PROMPT = """\
 You are an expert RCA evaluator. An RCA agent investigated a microservice \
@@ -139,7 +132,6 @@ Focus on identifying the EARLIEST point where the investigation went off \
 track, and categorize each divergence point.
 """
 
-
 async def observe_case(
     *,
     case_id: str,
@@ -149,9 +141,12 @@ async def observe_case(
     provider_tuple: tuple[str, dict[str, Any]],
 ) -> DivergenceReport:
     """Spawn an observer agent session to analyze one failed case."""
-    from agentm.core.abi.session_config import AgentSessionConfig
-    from agentm.core.abi.loop import LoopConfig
-    from agentm.core.abi.messages import AssistantMessage, ToolCallBlock
+    from agentm.core.abi import (
+        AgentSessionConfig,
+        AssistantMessage,
+        LoopConfig,
+        ToolCallBlock,
+    )
     from agentm.core.runtime.session import AgentSession
     from agentm.core.runtime.session_factory import create_agent_session
 

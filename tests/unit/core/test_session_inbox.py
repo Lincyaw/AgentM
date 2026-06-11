@@ -39,8 +39,8 @@ from agentm.core.abi import (
     TextContent,
     ToolTerminated,
 )
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi import BeforeAgentStartEvent
+from agentm.core.abi import ProviderConfig
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 from agentm.core.runtime.session_inbox import (

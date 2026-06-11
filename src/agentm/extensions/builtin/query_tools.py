@@ -23,19 +23,21 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult, TraceReader
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    TraceReader,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 # ---------------------------------------------------------------------------
 # MANIFEST
 # ---------------------------------------------------------------------------
 
-
 class QueryToolsConfig(BaseModel):
     default_scenario: str = ""
-
 
 MANIFEST = ExtensionManifest(
     name="query_tools",
@@ -51,7 +53,6 @@ MANIFEST = ExtensionManifest(
     config_schema=QueryToolsConfig,
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -59,10 +60,8 @@ MANIFEST = ExtensionManifest(
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
 
-
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
-
 
 # ---------------------------------------------------------------------------
 # query_traces helpers
@@ -109,7 +108,6 @@ _TRACES_PARAMETERS: Final[dict[str, Any]] = {
     "required": ["task_class"],
     "additionalProperties": False,
 }
-
 
 def _summarize_trace(path: Path) -> dict[str, Any] | None:
     """Walk an OTLP/JSON trace once and extract load-bearing identity fields."""
@@ -181,14 +179,12 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
         "fingerprint_atoms": fingerprint_atoms,
     }
 
-
 def _ns_to_iso(value: Any) -> str | None:
     if not isinstance(value, (int, float)):
         return None
     import datetime as dt
 
     return dt.datetime.fromtimestamp(value / 1e9, tz=dt.timezone.utc).isoformat()
-
 
 # ---------------------------------------------------------------------------
 # query_candidates helpers
@@ -208,7 +204,6 @@ _CANDIDATES_PARAMETERS: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
-
 def _load_candidates(candidates_dir: Path) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for p in sorted(candidates_dir.glob("c_*.json")):
@@ -224,7 +219,6 @@ def _load_candidates(candidates_dir: Path) -> dict[str, dict[str, Any]]:
             continue
         out[cid] = rec
     return out
-
 
 def _compute_win_tasks(
     records: dict[str, dict[str, Any]],
@@ -252,7 +246,6 @@ def _compute_win_tasks(
             wins[best_holders[0]].append(tid)
     return wins
 
-
 def _coerce_parent_ids(rec: dict[str, Any]) -> list[str]:
     """B-4 schema migration: accept both ``parent_ids`` and ``parent_id``."""
     raw = rec.get("parent_ids")
@@ -263,7 +256,6 @@ def _coerce_parent_ids(rec: dict[str, Any]) -> list[str]:
         return [legacy]
     return []
 
-
 def _score_summary(rec: dict[str, Any]) -> dict[str, float]:
     scores = rec.get("per_task_scores") or {}
     if not isinstance(scores, dict) or not scores:
@@ -271,7 +263,6 @@ def _score_summary(rec: dict[str, Any]) -> dict[str, float]:
     values = [float(v) for v in scores.values() if isinstance(v, (int, float))]
     aggregate = sum(values) / len(values) if values else 0.0
     return {"aggregate": aggregate, "task_count": float(len(values))}
-
 
 # ---------------------------------------------------------------------------
 # query_module_feedback helpers
@@ -298,7 +289,6 @@ _FEEDBACK_PARAMETERS: Final[dict[str, Any]] = {
     },
     "additionalProperties": False,
 }
-
 
 def _load_run(
     path: Path,
@@ -327,7 +317,6 @@ def _load_run(
         return None, []
     return summary, tasks
 
-
 # ---------------------------------------------------------------------------
 # install()
 # ---------------------------------------------------------------------------
@@ -336,7 +325,7 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
     default_scenario = config.default_scenario
     cwd = Path(api.cwd)
 
-    from agentm.core.lib.observability_dir import resolve_observability_dir
+    from agentm.core.lib import resolve_observability_dir
 
     obs_dir = resolve_observability_dir(cwd)
 

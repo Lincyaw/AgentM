@@ -23,8 +23,8 @@ from typing import cast
 import pytest
 
 from agentm.core.abi import ToolCallEvent
-from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import SessionShutdownEvent
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions.builtin.sub_agent import SubAgentConfig, _ChildTask, _ChildTaskManager
 from tests.unit.extensions._fake_api import FakeExtensionAPI
 

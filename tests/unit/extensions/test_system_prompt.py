@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.abi.events import BeforeAgentStartEvent
+from agentm.core.abi import BeforeAgentStartEvent
 from agentm.extensions.builtin import system_prompt as sp
 
 

@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 
 from rca_evolution.observer_tools import (
     build_get_gt_info_tool,
@@ -27,7 +27,6 @@ class EvolutionObserverConfig(BaseModel):
     gt_info: dict[str, Any] = {}
     trajectory_summary: str = "(no summary)"
 
-
 MANIFEST = ExtensionManifest(
     name="evolution_observer",
     description="Observer tools for self-evolution divergence analysis.",
@@ -39,7 +38,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=EvolutionObserverConfig,
 )
-
 
 async def install(api: ExtensionAPI, config: EvolutionObserverConfig) -> None:
     snapshot = config.trajectory_snapshot

@@ -40,54 +40,50 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from agentm.core.abi.messages import (
+from agentm.core.abi import (
+    Aborted,
     AgentMessage,
     AssistantMessage,
+    AssistantStreamEvent,
+    DiagnosticEvent,
+    EndTurn,
+    EventBus,
     ImageContent,
+    MaxTokens,
+    MessageEnd,
+    Model,
+    PauseTurn,
+    ProviderConfig,
+    ProviderError,
+    RetryPolicy,
+    TerminationHint,
     TextContent,
+    TextDelta,
     ThinkingBlock,
+    ThinkingDelta,
+    Tool,
+    ToolCallArgsDelta,
     ToolCallBlock,
+    ToolCallEnd,
+    ToolCallStart,
     ToolResultBlock,
     ToolResultMessage,
+    ToolUseExpected,
     Usage,
     UserMessage,
+    VendorSpecific,
 )
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi.events import DiagnosticEvent, EventBus
-from agentm.core.abi.provider import ProviderConfig
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.retry import RetryPolicy
-from agentm.core.abi.termination import (
-    Aborted,
-    EndTurn,
-    MaxTokens,
-    PauseTurn,
-    ProviderError,
-    TerminationHint,
-    ToolUseExpected,
-    VendorSpecific,
-)
-from agentm.core.abi.stream import (
-    AssistantStreamEvent,
-    MessageEnd,
-    Model,
-    TextDelta,
-    ThinkingDelta,
-    ToolCallArgsDelta,
-    ToolCallEnd,
-    ToolCallStart,
-)
-from agentm.core.abi.tool import Tool
 
-from agentm.core.lib.stream import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 from agentm.core.lib.tool_schema import _force_strict
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
-
 
 class LlmOpenaiConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -103,7 +99,6 @@ class LlmOpenaiConfig(BaseModel):
     max_output_tokens: int | None = None
     thinking_round_trip: Literal["drop", "system_note", "raise"] | None = None
 
-
 MANIFEST = ExtensionManifest(
     name="llm_openai",
     description="Register an OpenAI Chat Completions API LLM stream provider.",
@@ -111,7 +106,6 @@ MANIFEST = ExtensionManifest(
     config_schema=LlmOpenaiConfig,
     requires=("retry_policy",),
 )
-
 
 def _is_openai_retryable(exc: BaseException) -> bool:
     try:
@@ -145,7 +139,6 @@ def _is_openai_retryable(exc: BaseException) -> bool:
             return True
     return False
 
-
 # Keywords that XGrammar-based constrained-decoding engines (Volcengine Ark,
 # vLLM, SGLang) cannot compile into an EBNF grammar. Leaving them in the
 # schema triggers ``Invalid decoding guidance syntax`` 400 errors. Safe to
@@ -158,7 +151,6 @@ _XGRAMMAR_UNSUPPORTED = frozenset({
     "prefixItems",
 })
 
-
 def _strip_validation_constraints(node: Any) -> None:
     """Remove XGrammar-unsupported keywords from a schema in-place."""
     if isinstance(node, dict):
@@ -169,7 +161,6 @@ def _strip_validation_constraints(node: Any) -> None:
     elif isinstance(node, list):
         for value in node:
             _strip_validation_constraints(value)
-
 
 def _default_httpx_client(*, verify: bool) -> Any:
     import httpx
@@ -187,9 +178,7 @@ def _default_httpx_client(*, verify: bool) -> Any:
     )
     return httpx.AsyncClient(verify=verify, timeout=timeout)
 
-
 # --- Model registry ---------------------------------------------------------
-
 
 def _build_model(
     model_id: str,
@@ -214,9 +203,7 @@ def _build_model(
         max_output_tokens=max_output_tokens,
     )
 
-
 # --- Message / tool serialization ------------------------------------------
-
 
 def _encode_image(image: ImageContent) -> dict[str, Any]:
     """Convert kernel ``ImageContent`` to an OpenAI multimodal content part.
@@ -229,7 +216,6 @@ def _encode_image(image: ImageContent) -> dict[str, Any]:
         "type": "image_url",
         "image_url": {"url": f"data:{image.mime_type};base64,{encoded}"},
     }
-
 
 def _encode_user_content(
     blocks: list[TextContent | ImageContent],
@@ -249,7 +235,6 @@ def _encode_user_content(
         else:  # pragma: no cover - exhaustive over the union
             raise TypeError(f"unexpected user content type: {type(block)!r}")
     return parts
-
 
 def _encode_assistant_message(
     msg: AssistantMessage,
@@ -313,7 +298,6 @@ def _encode_assistant_message(
         return [note, out]
     return [out]
 
-
 def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
     """One ``ToolResultBlock`` → one OpenAI ``tool``-role message.
 
@@ -328,7 +312,6 @@ def _encode_tool_result_block(block: ToolResultBlock) -> dict[str, Any]:
         "tool_call_id": block.tool_call_id,
         "content": text,
     }
-
 
 def _to_openai_messages(
     messages: list[AgentMessage],
@@ -367,7 +350,6 @@ def _to_openai_messages(
             raise TypeError(f"unsupported message type: {type(msg)!r}")
     return out
 
-
 @dataclass(frozen=True)
 class OpenAIToolSpecAdapter(ToolSpecAdapter):
     """Convert AgentM tools to OpenAI function-tool specs.
@@ -399,16 +381,13 @@ class OpenAIToolSpecAdapter(ToolSpecAdapter):
     def encode_tool_args(self, args: Mapping[str, Any]) -> str:
         return encode_tool_args(args)
 
-
 def _to_openai_tools(
     tools: list[Tool], *, strict: bool = True,
 ) -> list[dict[str, Any]]:
     adapter = OpenAIToolSpecAdapter(strict=strict)
     return [adapter.vendor_spec(t) for t in tools]
 
-
 # --- Streaming bridge -------------------------------------------------------
-
 
 @dataclass
 class _StreamState:
@@ -444,7 +423,6 @@ def _map_finish_reason(raw: str | None) -> TerminationHint | None:
         return PauseTurn()
     return VendorSpecific(raw=raw)
 
-
 def _extract_usage(usage_obj: Any) -> Usage | None:
     """Pull ``Usage`` out of an OpenAI ``CompletionUsage`` (or partial)."""
 
@@ -464,7 +442,6 @@ def _extract_usage(usage_obj: Any) -> Usage | None:
         cache_write=0,
     )
 
-
 def _flush_tool_call(state: _StreamState, index: int) -> None:
     scratch = state.tool_scratch.get(index)
     if scratch is None or scratch.get("flushed"):
@@ -476,9 +453,7 @@ def _flush_tool_call(state: _StreamState, index: int) -> None:
     )
     scratch["flushed"] = True
 
-
 # --- Public callable -------------------------------------------------------
-
 
 @dataclass
 class OpenAIStreamFn:
@@ -687,7 +662,6 @@ class OpenAIStreamFn:
             yield parse_error
         yield MessageEnd(message=assembled)
 
-
 class _IdentityRetryPolicy:
     async def run(
         self,
@@ -697,7 +671,6 @@ class _IdentityRetryPolicy:
     ) -> Any:
         del is_retryable
         return await fn()
-
 
 async def _translate_chunk(
     chunk: Any,
@@ -795,9 +768,7 @@ async def _translate_chunk(
             state.stop_reason = finish_reason
             state.termination = _map_finish_reason(finish_reason)
 
-
 # --- Extension entrypoint --------------------------------------------------
-
 
 def install(api: Any, config: LlmOpenaiConfig) -> None:
     """Provider extension entrypoint.
@@ -886,7 +857,6 @@ def install(api: Any, config: LlmOpenaiConfig) -> None:
         ProviderConfig(stream_fn=stream_fn, model=model, name=name),
     )
 
-
 # Canonical OpenAI base URLs — anything else is treated as a custom endpoint
 # (LiteLLM, DeepSeek, Doubao, vLLM, Ollama, ...). When ``name`` is omitted for
 # such an endpoint the provider would otherwise silently register under the
@@ -900,14 +870,12 @@ _CANONICAL_OPENAI_BASE_URLS: frozenset[str] = frozenset(
     }
 )
 
-
 def _is_non_canonical_base_url(base_url: object) -> bool:
     if base_url is None:
         return False
     if not isinstance(base_url, str) or not base_url.strip():
         return False
     return base_url.rstrip("/") not in {url.rstrip("/") for url in _CANONICAL_OPENAI_BASE_URLS}
-
 
 class DuplicateProviderError(ValueError):
     """Raised when an OpenAI-compatible provider would shadow an existing one.
@@ -920,6 +888,5 @@ class DuplicateProviderError(ValueError):
       collide with another custom endpoint registered in the same session.
     * The session already has a provider registered under the requested name.
     """
-
 
 __all__ = ("DuplicateProviderError", "MANIFEST", "OpenAIStreamFn", "install")

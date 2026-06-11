@@ -6,11 +6,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agentm.core.abi.messages import TextContent
-from agentm.core.abi import FunctionTool, ToolResult
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    SessionReadyEvent,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import SessionReadyEvent
-from agentm.core.abi.extension import ExtensionAPI
 
 MANIFEST = ExtensionManifest(
     name="hypothesis_tools",
@@ -38,17 +41,14 @@ _SUGGESTED_STATUSES = (
     "inconclusive",
 )
 
-
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
-
 
 def _err(msg: str) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps({"error": msg}))],
         is_error=True,
     )
-
 
 def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
     # Defer the artifact_store lookup to ``session_ready`` — by then every
@@ -275,12 +275,10 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
         )
     )
 
-
 def _maybe_str(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
-
 
 __all__ = ["MANIFEST", "install"]

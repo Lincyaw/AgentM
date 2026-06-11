@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 
 from rca_evolution.distiller_tools import (
     build_browse_reports_tool,
@@ -27,7 +27,6 @@ class EvolutionDistillerConfig(BaseModel):
     report_summary: str = "(no summary)"
     existing_skills: list[Any] = []
 
-
 MANIFEST = ExtensionManifest(
     name="evolution_distiller",
     description="Distiller tools for self-evolution skill synthesis.",
@@ -39,7 +38,6 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=EvolutionDistillerConfig,
 )
-
 
 async def install(api: ExtensionAPI, config: EvolutionDistillerConfig) -> None:
     reports = config.reports

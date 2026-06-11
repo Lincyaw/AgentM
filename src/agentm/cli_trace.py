@@ -90,11 +90,11 @@ def _resolve_source(
     if file is not None:
         path = file
     elif session is not None:
-        from agentm.core.runtime.otel_export import resolve_observability_dir
+        from agentm.core.observability.otel_export import resolve_observability_dir
 
         path = resolve_observability_dir(cwd) / f"{session}.jsonl"
     else:
-        from agentm.core.runtime.otel_export import resolve_observability_dir
+        from agentm.core.observability.otel_export import resolve_observability_dir
 
         obs_dir = resolve_observability_dir(cwd)
         if not obs_dir.is_dir():
@@ -1263,7 +1263,7 @@ def index_cmd(
     if directory is not None:
         obs_dir = directory
     else:
-        from agentm.core.runtime.otel_export import resolve_observability_dir
+        from agentm.core.observability.otel_export import resolve_observability_dir
 
         obs_dir = resolve_observability_dir(cwd)
     if not obs_dir.is_dir():

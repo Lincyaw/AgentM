@@ -49,17 +49,18 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import AssistantMessage, TextContent
-from agentm.core.abi.events import (
+from agentm.core.abi import (
     AfterCompactEvent,
     AgentEndEvent,
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
+    AssistantMessage,
     ChildSessionEndEvent,
     ChildSessionStartEvent,
     CommandDispatchedEvent,
     CostBudgetExceededEvent,
     DiagnosticEvent,
+    ExtensionAPI,
     ExtensionInstallEvent,
     ExtensionReloadEvent,
     ExtensionUnloadEvent,
@@ -67,13 +68,14 @@ from agentm.core.abi.events import (
     ResourceWriteEvent,
     SessionReadyEvent,
     StreamDeltaEvent,
+    TextContent,
+    TextDelta,
+    ThinkingDelta,
     ToolCallEvent,
     ToolResultEvent,
     TurnEndEvent,
     TurnStartEvent,
 )
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.stream import TextDelta, ThinkingDelta
 from agentm.core.lib import to_jsonable
 from agentm.extensions import ExtensionManifest
 
@@ -87,7 +89,6 @@ _PREVIEW_LIMIT = 4000
 
 class WireDriverConfig(BaseModel):
     model_config = {"extra": "allow"}
-
 
 MANIFEST = ExtensionManifest(
     name="wire_driver",
@@ -128,14 +129,12 @@ MANIFEST = ExtensionManifest(
     config_schema=WireDriverConfig,
 )
 
-
 def _assistant_text(message: AssistantMessage) -> str:
     return "\n".join(
         block.text
         for block in message.content
         if isinstance(block, TextContent) and block.text
     )
-
 
 def _content_text(blocks: Any, limit: int = _PREVIEW_LIMIT) -> str:
     """Best-effort text view of a content-block list (tool results, injected
@@ -152,13 +151,10 @@ def _content_text(blocks: Any, limit: int = _PREVIEW_LIMIT) -> str:
         return str(blocks)[:limit]
     return "\n".join(parts)[:limit]
 
-
 # --- projectors (pure: event -> JSON-safe body) ----------------------------
-
 
 def _p_turn_start(ev: TurnStartEvent) -> ProjectorResult:
     return {"kind": "turn_start", "turn_id": ev.turn_id, "turn_index": ev.turn_index}
-
 
 def _p_stream_delta(ev: StreamDeltaEvent) -> ProjectorResult:
     delta = ev.delta
@@ -178,7 +174,6 @@ def _p_stream_delta(ev: StreamDeltaEvent) -> ProjectorResult:
     # tool_call / tool_result / turn_end channels instead.
     return None
 
-
 def _p_tool_call(ev: ToolCallEvent) -> ProjectorResult:
     return {
         "kind": "tool_call",
@@ -186,7 +181,6 @@ def _p_tool_call(ev: ToolCallEvent) -> ProjectorResult:
         "name": ev.tool_name,
         "args": to_jsonable(ev.args),
     }
-
 
 def _p_tool_result(ev: ToolResultEvent) -> ProjectorResult:
     # Covers both success and error: an errored tool still flows through
@@ -200,7 +194,6 @@ def _p_tool_result(ev: ToolResultEvent) -> ProjectorResult:
         "ok": not ev.result.is_error,
         "content": _content_text(ev.result.content),
     }
-
 
 def _p_turn_end(ev: TurnEndEvent) -> ProjectorResult:
     bodies: list[dict[str, Any]] = []
@@ -221,14 +214,12 @@ def _p_turn_end(ev: TurnEndEvent) -> ProjectorResult:
         )
     return bodies or None
 
-
 def _p_child_start(ev: ChildSessionStartEvent) -> ProjectorResult:
     return {
         "kind": "child_start",
         "child_id": ev.child_session_id,
         "purpose": ev.purpose,
     }
-
 
 def _p_child_end(ev: ChildSessionEndEvent) -> ProjectorResult:
     return {
@@ -238,7 +229,6 @@ def _p_child_end(ev: ChildSessionEndEvent) -> ProjectorResult:
         "error": ev.error,
     }
 
-
 def _p_diagnostic(ev: DiagnosticEvent) -> ProjectorResult:
     if ev.level == "warning":
         return {"kind": "diagnostic_warning", "content": ev.message, "source": ev.source}
@@ -246,10 +236,8 @@ def _p_diagnostic(ev: DiagnosticEvent) -> ProjectorResult:
         return {"kind": "diagnostic_error", "content": ev.message, "source": ev.source}
     return None  # info is not surfaced
 
-
 def _p_agent_end(ev: AgentEndEvent) -> ProjectorResult:
     return {"kind": "agent_end", "cause": type(ev.cause).__name__}
-
 
 def _p_extension_install(ev: ExtensionInstallEvent) -> ProjectorResult:
     return {
@@ -260,7 +248,6 @@ def _p_extension_install(ev: ExtensionInstallEvent) -> ProjectorResult:
         "error": ev.error,
     }
 
-
 def _p_extension_reload(ev: ExtensionReloadEvent) -> ProjectorResult:
     return {
         "kind": "extension_reload",
@@ -270,7 +257,6 @@ def _p_extension_reload(ev: ExtensionReloadEvent) -> ProjectorResult:
         "error": ev.error,
     }
 
-
 def _p_extension_unload(ev: ExtensionUnloadEvent) -> ProjectorResult:
     return {
         "kind": "extension_unload",
@@ -278,7 +264,6 @@ def _p_extension_unload(ev: ExtensionUnloadEvent) -> ProjectorResult:
         "trigger": ev.trigger,
         "error": ev.error,
     }
-
 
 def _p_api_register(ev: ApiRegisterEvent) -> ProjectorResult:
     # ``reg_kind`` (not ``kind``) so it does not collide with the wire
@@ -290,14 +275,12 @@ def _p_api_register(ev: ApiRegisterEvent) -> ProjectorResult:
         "extension": ev.extension,
     }
 
-
 def _p_api_send_user_message(ev: ApiSendUserMessageEvent) -> ProjectorResult:
     return {
         "kind": "api_send_user_message",
         "extension": ev.extension,
         "content": _content_text(ev.content),
     }
-
 
 def _p_resource_write(ev: ResourceWriteEvent) -> ProjectorResult:
     return {
@@ -308,10 +291,8 @@ def _p_resource_write(ev: ResourceWriteEvent) -> ProjectorResult:
         "post_sha": ev.post_sha,
     }
 
-
 def _p_plan_submitted(ev: PlanSubmittedEvent) -> ProjectorResult:
     return {"kind": "plan_submitted", "plan_id": ev.plan_id, "content": ev.plan_text}
-
 
 def _p_after_compact(ev: AfterCompactEvent) -> ProjectorResult:
     return {
@@ -321,7 +302,6 @@ def _p_after_compact(ev: AfterCompactEvent) -> ProjectorResult:
         "content": ev.summary,
     }
 
-
 def _p_cost_budget(ev: CostBudgetExceededEvent) -> ProjectorResult:
     return {
         "kind": "cost_budget_exceeded",
@@ -329,7 +309,6 @@ def _p_cost_budget(ev: CostBudgetExceededEvent) -> ProjectorResult:
         "limit": ev.limit,
         "currency": ev.currency,
     }
-
 
 def _p_session_ready(ev: SessionReadyEvent) -> ProjectorResult:
     return {
@@ -339,7 +318,6 @@ def _p_session_ready(ev: SessionReadyEvent) -> ProjectorResult:
         "model": ev.model.id if ev.model is not None else None,
     }
 
-
 def _p_command_dispatched(ev: CommandDispatchedEvent) -> ProjectorResult:
     return {
         "kind": "command_dispatched",
@@ -347,7 +325,6 @@ def _p_command_dispatched(ev: CommandDispatchedEvent) -> ProjectorResult:
         "args": ev.args,
         "owner": ev.owner,
     }
-
 
 # Channels dispatched via async ``bus.emit`` — async handlers preserve order
 # and backpressure on the streaming hot path.
@@ -383,7 +360,6 @@ _SYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
     (SessionReadyEvent.CHANNEL, _p_session_ready),
     (CommandDispatchedEvent.CHANNEL, _p_command_dispatched),
 )
-
 
 def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG001
     outbound_sink = api.get_service("wire_outbound")

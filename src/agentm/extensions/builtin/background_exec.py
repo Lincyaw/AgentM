@@ -44,7 +44,10 @@ from typing import Any, Literal
 
 from agentm.core.abi import (
     AgentStartEvent,
+    ExtensionAPI,
+    ExtensionStaleError,
     FunctionTool,
+    SessionShutdownEvent,
     TextContent,
     Tool,
     ToolContinue,
@@ -52,16 +55,15 @@ from agentm.core.abi import (
     ToolResult,
     ToolTerminate,
 )
-from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, to_jsonable
-from pydantic import BaseModel
-
-from agentm.core.lib.background_tasks import (
+from agentm.core.lib import (
     BackgroundTask,
     BackgroundTaskRegistry,
+    DEFAULT_SHUTDOWN_GRACE_SECONDS,
+    to_jsonable,
 )
+from pydantic import BaseModel
+
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
 
 _RUNNING: Literal["running"] = "running"
 _COMPLETED: Literal["completed"] = "completed"
@@ -77,14 +79,12 @@ _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_HEARTBEAT = 120.0
 _DEFAULT_SILENCE_WARNING = 300.0
 
-
 class BackgroundExecConfig(BaseModel):
     timeout: float = _DEFAULT_TIMEOUT
     heartbeat_interval: float = _DEFAULT_HEARTBEAT
     silence_warning: float = _DEFAULT_SILENCE_WARNING
     denylist: list[str] = []
     shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
-
 
 MANIFEST = ExtensionManifest(
     name="background_exec",
@@ -102,7 +102,6 @@ MANIFEST = ExtensionManifest(
     config_schema=BackgroundExecConfig,
     requires=(),  # Defers wrapping to agent_start so tool atoms may load in any order.
 )
-
 
 @dataclass(slots=True, kw_only=True)
 class _BgTask(BackgroundTask):
@@ -131,14 +130,12 @@ class _BgTask(BackgroundTask):
     # tracking was skipped (atom reloaded mid-dispatch).
     work_bracket: AbstractContextManager[None] | None = None
 
-
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(to_jsonable(payload)))],
         is_error=is_error,
         extras=payload,
     )
-
 
 def _outcome_result(outcome: ToolResult | ToolOutcome) -> ToolResult:
     """Extract the :class:`ToolResult` from any tool return shape.
@@ -155,7 +152,6 @@ def _outcome_result(outcome: ToolResult | ToolOutcome) -> ToolResult:
         return outcome.result
     raise TypeError(f"unexpected tool outcome: {type(outcome).__name__}")
 
-
 def _result_text(result: ToolResult) -> str:
     chunks = [
         block.text
@@ -163,7 +159,6 @@ def _result_text(result: ToolResult) -> str:
         if isinstance(block, TextContent)
     ]
     return "\n".join(chunks).strip()
-
 
 def _completion_note(state: _BgTask) -> str:
     """Human-readable completion / error note for the background inbox item."""
@@ -186,7 +181,6 @@ def _completion_note(state: _BgTask) -> str:
         )
     return f"Background task {state.task_id} ({state.tool_name}): {state.status}."
 
-
 def _task_payload(state: _BgTask) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "task_id": state.task_id,
@@ -200,7 +194,6 @@ def _task_payload(state: _BgTask) -> dict[str, Any]:
         payload["result"] = _result_text(_outcome_result(state.outcome))
     return payload
 
-
 async def _forward_abort(source: asyncio.Event, target: asyncio.Event) -> None:
     """Set ``target`` once ``source`` fires (one-directional bridge).
 
@@ -213,7 +206,6 @@ async def _forward_abort(source: asyncio.Event, target: asyncio.Event) -> None:
 
     await source.wait()
     target.set()
-
 
 class _BgTool:
     """Transparent auto-bg shim wrapping one registered tool.
@@ -270,7 +262,6 @@ class _BgTool:
             abort_signal=abort,
             forwarder=forwarder,
         )
-
 
 class _BgManager:
     """Per-session registry + ticker/completion machinery for backgrounded
@@ -653,7 +644,6 @@ class _BgManager:
         # is a no-op. Guarantees the "exit always runs" invariant on shutdown.
         for state in states:
             self._exit_work_tracking(state)
-
 
 def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
     manager = _BgManager(

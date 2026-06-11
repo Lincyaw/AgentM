@@ -36,8 +36,8 @@ from agentm.core.abi import (
     ToolResult,
     UserMessage,
 )
-from agentm.core.abi.events import MessageAppendedEvent
-from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi import MessageAppendedEvent
+from agentm.core.abi import ProviderConfig
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 

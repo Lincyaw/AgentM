@@ -26,6 +26,41 @@ class WriteResult:
     commit_sha_after: str | None
     error: str | None = None
 
+    @classmethod
+    def _error(
+        cls,
+        path: str,
+        path_class: PathClass,
+        error: str,
+        *,
+        commit_sha_before: str | None = None,
+    ) -> WriteResult:
+        return cls(
+            path=path,
+            path_class=path_class,
+            committed=False,
+            commit_sha_before=commit_sha_before,
+            commit_sha_after=None,
+            error=error,
+        )
+
+    @classmethod
+    def _uncommitted(
+        cls,
+        path: str,
+        path_class: PathClass,
+        *,
+        commit_sha_before: str | None = None,
+        commit_sha_after: str | None = None,
+    ) -> WriteResult:
+        return cls(
+            path=path,
+            path_class=path_class,
+            committed=False,
+            commit_sha_before=commit_sha_before,
+            commit_sha_after=commit_sha_after,
+        )
+
 
 class BatchHandle(Protocol):
     async def write(self, path: str, content: bytes) -> None: ...

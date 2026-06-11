@@ -12,21 +12,23 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import ImageContent, TextContent, ToolResult, ToolResultEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import (
+    ExtensionAPI,
+    ImageContent,
+    TextContent,
+    ToolResult,
+    ToolResultEvent,
+)
 from agentm.extensions import ExtensionManifest
-
 
 class ToolResultCapConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     max_chars: int = 8000
     preview_chars: int = 2000
-
 
 MANIFEST = ExtensionManifest(
     name="tool_result_cap",
@@ -38,7 +40,6 @@ MANIFEST = ExtensionManifest(
     config_schema=ToolResultCapConfig,
     requires=(),
 )
-
 
 def install(api: ExtensionAPI, config: ToolResultCapConfig) -> None:
     max_chars = max(0, config.max_chars)

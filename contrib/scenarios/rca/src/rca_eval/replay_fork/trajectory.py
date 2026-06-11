@@ -25,7 +25,7 @@ import json
 import logging
 from typing import Any
 
-from agentm.core.abi.messages import (
+from agentm.core.abi import (
     AgentMessage,
     AssistantContent,
     AssistantMessage,
@@ -45,7 +45,6 @@ _logger = logging.getLogger(__name__)
 _REPLAY_TS = 0.0
 
 __all__ = ["openai_chat_to_agentm"]
-
 
 def openai_chat_to_agentm(
     messages: list[dict[str, Any]],
@@ -84,7 +83,6 @@ def openai_chat_to_agentm(
             )
     return "\n\n".join(system_parts), out
 
-
 def _to_assistant(raw: dict[str, Any]) -> AssistantMessage:
     blocks: list[AssistantContent] = []
     text = _as_text(raw.get("content"))
@@ -107,7 +105,6 @@ def _to_assistant(raw: dict[str, Any]) -> AssistantMessage:
         blocks.append(TextContent(type="text", text=""))
     return AssistantMessage(role="assistant", content=blocks, timestamp=_REPLAY_TS)
 
-
 def _to_tool_result(raw: dict[str, Any]) -> ToolResultMessage:
     return ToolResultMessage(
         role="tool_result",
@@ -121,7 +118,6 @@ def _to_tool_result(raw: dict[str, Any]) -> ToolResultMessage:
         ],
         timestamp=_REPLAY_TS,
     )
-
 
 def _parse_arguments(arguments: Any, *, call_id: Any) -> dict[str, Any]:
     """Coerce an OpenAI ``tool_calls[].function.arguments`` to a dict.
@@ -143,7 +139,6 @@ def _parse_arguments(arguments: Any, *, call_id: Any) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
-
 
 def _as_text(content: Any) -> str:
     """Flatten an OpenAI ``content`` field to plain text.

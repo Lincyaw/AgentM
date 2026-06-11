@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from agentm.core.abi.extension import ExtensionAPI
+    from agentm.core.abi import ExtensionAPI
 
 Phase = Literal["extractor", "auditor"]
 Status = Literal["ok", "no_call", "spawn_error", "prompt_error"]
@@ -40,7 +40,6 @@ __all__ = [
     "replay_log_path",
     "write_record",
 ]
-
 
 @dataclass
 class ReplayRecord:
@@ -148,7 +147,6 @@ class ReplayRecord:
             raw_assistant_messages=raw_blocks,
         )
 
-
 def replay_log_path(cwd: str | os.PathLike[str], session_id: str) -> Path:
     """Canonical sidecar path for a given session.
 
@@ -157,7 +155,6 @@ def replay_log_path(cwd: str | os.PathLike[str], session_id: str) -> Path:
     and its meta share a stem with the observability log.
     """
     return Path(cwd) / ".agentm" / "audit_replay" / f"{session_id}.jsonl"
-
 
 def audit_session_id(api: ExtensionAPI) -> str:
     """The per-session id used to key sidecars: the persisted session_id,
@@ -182,7 +179,6 @@ def audit_session_id(api: ExtensionAPI) -> str:
         sid = ""
     return sid or api.root_session_id
 
-
 def write_record(path: Path, record: ReplayRecord) -> None:
     """Append one record; create the parent dir if missing.
 
@@ -200,7 +196,6 @@ def write_record(path: Path, record: ReplayRecord) -> None:
         logging.getLogger(__name__).warning(
             "llmharness replay-log write failed: %s", path, exc_info=True
         )
-
 
 def iter_records(path: Path) -> Iterator[ReplayRecord]:
     """Yield every record in a sidecar file. Skips malformed lines.
@@ -231,7 +226,6 @@ def iter_records(path: Path) -> Iterator[ReplayRecord]:
             except (KeyError, ValueError):
                 continue
 
-
 def read_records(
     path: Path,
     *,
@@ -247,7 +241,6 @@ def read_records(
             continue
         out.append(rec)
     return out
-
 
 def now_ns() -> int:
     return time.time_ns()

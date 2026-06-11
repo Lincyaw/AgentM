@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from agentm.core.abi import EventBus
-from agentm.core.abi.extension import ExtensionLoadError
+from agentm.core.abi import ExtensionLoadError
 from agentm.core.runtime.extension import (
     _ExtensionAPIImpl,
     build_extension_api_scope,

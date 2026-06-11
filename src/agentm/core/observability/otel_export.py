@@ -82,7 +82,7 @@ __all__ = [
 ]
 
 from agentm.core.lib.observability_dir import resolve_observability_dir  # noqa: E402
-from agentm.core.lib.otlp import (  # noqa: E402
+from agentm.core.observability.otlp import (  # noqa: E402
     iter_log_records,
     iter_spans,
     otlp_unwrap,
@@ -115,56 +115,37 @@ def _wait_for_queue_space(batch_processor: object) -> None:
         time.sleep(_BACKPRESSURE_POLL_SECONDS)
 
 
-class BlockingBatchSpanProcessor(BatchSpanProcessor):
-    """:class:`BatchSpanProcessor` that blocks the producer on overflow.
+class _SessionFilterMixin:
+    """Adds session_id_filter and backpressure to batch processors."""
 
-    When ``session_id_filter`` is set, the processor drops spans whose
-    ``agentm.session.id`` attribute does not match — this is how
-    per-session file partitioning survives a shared process-level
-    ``TracerProvider``. Spans without the attribute also drop (the
-    observability atom is required to stamp it; bare SDK calls in
-    tests can opt in by passing ``agentm.session.id`` in span attributes).
-    """
+    _session_id_filter: str | None
 
-    def __init__(
-        self,
-        *args: Any,
-        session_id_filter: str | None = None,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, *args: Any, session_id_filter: str | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._session_id_filter = session_id_filter
 
+    def _should_drop(self, attrs: Any) -> bool:
+        if self._session_id_filter is None:
+            return False
+        return (attrs or {}).get("agentm.session.id") != self._session_id_filter
+
+
+class BlockingBatchSpanProcessor(_SessionFilterMixin, BatchSpanProcessor):
+    """Batch span processor with session filtering and backpressure."""
+
     def on_end(self, span: ReadableSpan) -> None:  # type: ignore[override]
-        if self._session_id_filter is not None:
-            attrs = span.attributes or {}
-            if attrs.get("agentm.session.id") != self._session_id_filter:
-                return
+        if self._should_drop(span.attributes):
+            return
         _wait_for_queue_space(self)
         super().on_end(span)
 
 
-class BlockingBatchLogRecordProcessor(BatchLogRecordProcessor):
-    """:class:`BatchLogRecordProcessor` that blocks the producer on overflow.
-
-    Symmetric ``session_id_filter`` behaviour — see
-    :class:`BlockingBatchSpanProcessor`.
-    """
-
-    def __init__(
-        self,
-        *args: Any,
-        session_id_filter: str | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        self._session_id_filter = session_id_filter
+class BlockingBatchLogRecordProcessor(_SessionFilterMixin, BatchLogRecordProcessor):
+    """Batch log processor with session filtering and backpressure."""
 
     def on_emit(self, log_record):  # type: ignore[override, no-untyped-def]
-        if self._session_id_filter is not None:
-            attrs = getattr(log_record, "log_record", log_record).attributes or {}
-            if attrs.get("agentm.session.id") != self._session_id_filter:
-                return
+        if self._should_drop(getattr(log_record, "log_record", log_record).attributes):
+            return
         _wait_for_queue_space(self)
         super().on_emit(log_record)
 
@@ -184,15 +165,16 @@ def _open_append(path: Path) -> IO[str]:
     return path.open("a", encoding="utf-8")
 
 
-class FileSpanExporter(SpanExporter):
-    """Writes OTLP ``ResourceSpans`` elements as ndjson, one per line.
+class _FileOtlpExporter:
+    """Shared ndjson-file writer for OTLP spans and logs.
 
-    Each call to :meth:`export` serializes the batch through the standard
-    OTLP proto encoder, then splits ``ExportTraceServiceRequest.resource_spans``
-    into individual lines. The file handle is held open for the lifetime of
-    the exporter and protected by a lock so concurrent batch-processor
-    threads do not interleave bytes.
+    Subclasses only set ``_encode``, ``_payload_key``, and result-type
+    constants — the serialization, file I/O, locking, and lifecycle are
+    identical for both signal types.
     """
+
+    _encode: Any  # set by subclass
+    _payload_key: str  # "resourceSpans" or "resourceLogs"
 
     def __init__(self, file_path: Path) -> None:
         self._path = Path(file_path)
@@ -200,89 +182,27 @@ class FileSpanExporter(SpanExporter):
         self._fh = _open_append(self._path)
         self._closed = False
 
-    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        if not spans:
-            return SpanExportResult.SUCCESS
+    def _export_batch(self, batch: Sequence[Any], *, success: Any, failure: Any) -> Any:
+        if not batch:
+            return success
         try:
-            request = encode_spans(spans)
+            request = self._encode(batch)
             payload = MessageToDict(
                 request,
                 preserving_proto_field_name=False,
                 use_integers_for_enums=False,
             )
         except Exception:  # pragma: no cover — encoder bugs are unexpected
-            return SpanExportResult.FAILURE
+            return failure
         lines = [
-            json.dumps(rs, separators=(",", ":"), ensure_ascii=False)
-            for rs in payload.get("resourceSpans", [])
+            json.dumps(item, separators=(",", ":"), ensure_ascii=False)
+            for item in payload.get(self._payload_key, [])
         ]
         if not lines:
-            return SpanExportResult.SUCCESS
+            return success
         with self._lock:
             if self._closed:
-                return SpanExportResult.FAILURE
-            for line in lines:
-                self._fh.write(line)
-                self._fh.write("\n")
-            self._fh.flush()
-            try:
-                os.fsync(self._fh.fileno())
-            except (OSError, ValueError):  # pragma: no cover — pipe / closed fd
-                pass
-        return SpanExportResult.SUCCESS
-
-    def force_flush(self, timeout_millis: int = 30_000) -> bool:
-        with self._lock:
-            if self._closed:
-                return True
-            self._fh.flush()
-        return True
-
-    def shutdown(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            try:
-                self._fh.flush()
-                self._fh.close()
-            finally:
-                self._closed = True
-
-
-class FileLogExporter(LogRecordExporter):
-    """Writes OTLP ``ResourceLogs`` elements as ndjson, one per line.
-
-    Symmetric to :class:`FileSpanExporter` — same on-disk wire shape, just
-    the log path of the OTLP schema.
-    """
-
-    def __init__(self, file_path: Path) -> None:
-        self._path = Path(file_path)
-        self._lock = threading.Lock()
-        self._fh = _open_append(self._path)
-        self._closed = False
-
-    def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
-        if not batch:
-            return LogRecordExportResult.SUCCESS
-        try:
-            request = encode_logs(batch)
-            payload = MessageToDict(
-                request,
-                preserving_proto_field_name=False,
-                use_integers_for_enums=False,
-            )
-        except Exception:  # pragma: no cover
-            return LogRecordExportResult.FAILURE
-        lines = [
-            json.dumps(rl, separators=(",", ":"), ensure_ascii=False)
-            for rl in payload.get("resourceLogs", [])
-        ]
-        if not lines:
-            return LogRecordExportResult.SUCCESS
-        with self._lock:
-            if self._closed:
-                return LogRecordExportResult.FAILURE
+                return failure
             for line in lines:
                 self._fh.write(line)
                 self._fh.write("\n")
@@ -291,7 +211,7 @@ class FileLogExporter(LogRecordExporter):
                 os.fsync(self._fh.fileno())
             except (OSError, ValueError):  # pragma: no cover
                 pass
-        return LogRecordExportResult.SUCCESS
+        return success
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
         with self._lock:
@@ -309,6 +229,30 @@ class FileLogExporter(LogRecordExporter):
                 self._fh.close()
             finally:
                 self._closed = True
+
+
+class FileSpanExporter(_FileOtlpExporter, SpanExporter):
+    """OTLP ``ResourceSpans`` → ndjson file."""
+
+    _encode = staticmethod(encode_spans)
+    _payload_key = "resourceSpans"
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        return self._export_batch(
+            spans, success=SpanExportResult.SUCCESS, failure=SpanExportResult.FAILURE,
+        )
+
+
+class FileLogExporter(_FileOtlpExporter, LogRecordExporter):
+    """OTLP ``ResourceLogs`` → ndjson file."""
+
+    _encode = staticmethod(encode_logs)
+    _payload_key = "resourceLogs"
+
+    def export(self, batch: Sequence[ReadableLogRecord]) -> LogRecordExportResult:
+        return self._export_batch(
+            batch, success=LogRecordExportResult.SUCCESS, failure=LogRecordExportResult.FAILURE,
+        )
 
 
 # --- Process-level providers ------------------------------------------------

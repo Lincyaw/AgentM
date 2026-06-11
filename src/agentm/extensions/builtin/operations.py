@@ -18,9 +18,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
-
 
 class OperationsConfig(BaseModel):
     backend: Literal["local", "agent_env"] = "local"
@@ -34,7 +33,6 @@ class OperationsConfig(BaseModel):
     timeout: float | None = None
     idle_timeout_seconds: int | None = None
 
-
 MANIFEST = ExtensionManifest(
     name="operations",
     description=(
@@ -45,7 +43,6 @@ MANIFEST = ExtensionManifest(
     config_schema=OperationsConfig,
     requires=(),
 )
-
 
 async def install(api: ExtensionAPI, config: OperationsConfig) -> None:
     # Sub-installers expect a plain dict; forward the full model dump.

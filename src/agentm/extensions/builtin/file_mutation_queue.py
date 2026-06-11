@@ -8,14 +8,18 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import AgentStartEvent, Tool, ToolOutcome, ToolResult
+from agentm.core.abi import (
+    AgentStartEvent,
+    ExtensionAPI,
+    ExtensionLoadError,
+    Tool,
+    ToolOutcome,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI, ExtensionLoadError
-
 
 class FileMutationQueueConfig(BaseModel):
     tools: list[str] = ["edit", "write"]
-
 
 MANIFEST = ExtensionManifest(
     name="file_mutation_queue",
@@ -26,7 +30,6 @@ MANIFEST = ExtensionManifest(
 )
 
 _PATH_KEYS = ("path", "file_path", "filepath", "target")
-
 
 class _QueuedTool:
     def __init__(self, wrapped: Tool, locks: dict[str, asyncio.Lock]) -> None:
@@ -46,7 +49,6 @@ class _QueuedTool:
         async with lock:
             return await self._wrapped.execute(args, signal=signal)
 
-
 def _normalize_path(args: dict[str, Any]) -> str:
     raw = None
     for key in _PATH_KEYS:
@@ -57,7 +59,6 @@ def _normalize_path(args: dict[str, Any]) -> str:
     if raw is None:
         return "<missing-path>"
     return os.path.abspath(raw)
-
 
 def install(api: ExtensionAPI, config: FileMutationQueueConfig) -> None:
     target_names = tuple(config.tools)

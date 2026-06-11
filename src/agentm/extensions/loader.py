@@ -42,12 +42,10 @@ from typing import Any
 import yaml
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionLoadError
-
+from agentm.core.abi import ExtensionLoadError
 
 class ScenarioLoadError(ExtensionLoadError):
     """Raised when a scenario YAML cannot be resolved or validated."""
-
 
 def _candidate_roots() -> list[Path]:
     """Return search roots for ``contrib/scenarios/...`` resolution.
@@ -73,7 +71,7 @@ def _candidate_roots() -> list[Path]:
     # Scenarios installed here are resolved as
     # <home>/contrib/scenarios/<name>/manifest.yaml.
     try:
-        from agentm.core.lib.user_config import agentm_home_dir
+        from agentm.core.lib import agentm_home_dir
 
         home = agentm_home_dir()
         if (home / "contrib").is_dir():
@@ -102,12 +100,10 @@ def _candidate_roots() -> list[Path]:
         pass
     return roots
 
-
 # Conservative cap: src/agentm → src → worktree-root covers the editable
 # install case in two steps; doubled to absorb wheel layouts that nest
 # the package one level deeper. Bump only when a real layout demands it.
 _PACKAGE_WALK_DEPTH = 4
-
 
 def _resolve_scenario_manifest(name_or_path: str, relative: Path) -> Path:
     """Find ``relative`` under any of :func:`_candidate_roots`.
@@ -128,7 +124,6 @@ def _resolve_scenario_manifest(name_or_path: str, relative: Path) -> Path:
             "scenario manifest not found. Tried: " + ", ".join(str(p) for p in tried)
         ),
     )
-
 
 def _resolve_scenario_entrypoint(name: str) -> Path | None:
     """Resolve a scenario *name* to an on-disk ``manifest.yaml`` via an
@@ -188,7 +183,6 @@ def _resolve_scenario_entrypoint(name: str) -> Path | None:
             return concrete
     return None
 
-
 def load_scenario(name_or_path: str) -> list[tuple[str, dict[str, Any]]]:
     """Resolve and parse a scenario manifest.
 
@@ -199,7 +193,6 @@ def load_scenario(name_or_path: str) -> list[tuple[str, dict[str, Any]]]:
 
     extensions, _meta = load_scenario_with_meta(name_or_path)
     return extensions
-
 
 def load_scenario_with_meta(
     name_or_path: str,
@@ -265,7 +258,6 @@ def load_scenario_with_meta(
                 meta[key] = payload[key]
     return extensions, meta
 
-
 def _load_from_path(path: Path) -> list[tuple[str, dict[str, Any]]]:
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -281,7 +273,6 @@ def _load_from_path(path: Path) -> list[tuple[str, dict[str, Any]]]:
         scenario_dir=scenario_dir,
         scenario_name=scenario_name,
     )
-
 
 def _resolve_scenario_name(
     payload: Any,
@@ -313,7 +304,6 @@ def _resolve_scenario_name(
             ),
         )
     return declared
-
 
 def _parse_extensions(
     payload: Any,
@@ -443,7 +433,6 @@ def _parse_extensions(
 
     return sort_extensions_by_requires(extensions, source=source)
 
-
 # Atoms the session factory auto-mounts as floor atoms regardless of whether a
 # scenario lists them (see ``session_factory.ensure_floor_atom``). An atom may
 # ``requires`` one of these without the scenario manifest redundantly listing
@@ -453,7 +442,6 @@ def _parse_extensions(
 _FLOOR_ATOM_NAMES: frozenset[str] = frozenset(
     {"prompt_templates", "compaction_prompts", "slash_commands", "system_prompt"}
 )
-
 
 def sort_extensions_by_requires(
     extensions: list[tuple[str, dict[str, Any]]],
@@ -533,7 +521,6 @@ def sort_extensions_by_requires(
 
     return sorted_entries
 
-
 def _validate_module(source: str, index: int, module: str) -> None:
     spec = importlib.util.find_spec(module)
     if spec is None:
@@ -558,7 +545,6 @@ def _validate_module(source: str, index: int, module: str) -> None:
             ),
         )
 
-
 def _find_project_root(start: Path) -> Path | None:
     """Locate the topmost project root above ``start``.
 
@@ -582,12 +568,10 @@ def _find_project_root(start: Path) -> Path | None:
             highest_with_marker = candidate
     return highest_with_marker
 
-
 def _prepend_sys_path(path: Path) -> None:
     text = str(path)
     if text not in sys.path:
         sys.path.insert(0, text)
-
 
 def _ensure_scenario_import_roots(scenario_dir: Path) -> None:
     """Make in-tree scenario packages importable during manifest load.
@@ -618,7 +602,6 @@ def _ensure_scenario_import_roots(scenario_dir: Path) -> None:
     project_root = _find_project_root(scenario_dir)
     if project_root is not None:
         _prepend_sys_path(project_root)
-
 
 def _register_local(
     *,
@@ -707,9 +690,7 @@ def _register_local(
         )
     return synthetic
 
-
 def _entry_error(index: int, detail: str) -> str:
     return f"extensions[{index}] {detail}"
-
 
 __all__ = ["ScenarioLoadError", "load_scenario", "load_scenario_with_meta", "sort_extensions_by_requires"]

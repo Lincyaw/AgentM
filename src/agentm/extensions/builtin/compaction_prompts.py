@@ -32,25 +32,22 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi.roles import COMPACTION_PROMPTS
 from agentm.core.abi import (
     AgentMessage,
-    AssistantMessage,
     AssistantContent,
-    TextContent,
-    ToolResultMessage,
-    UserMessage,
-)
-from agentm.core.abi.session import (
+    AssistantMessage,
+    COMPACTION_PROMPTS,
     ENTRY_MATERIALIZERS,
     ENTRY_TYPE_BRANCH_SUMMARY,
     ENTRY_TYPE_COMPACTION,
     ENTRY_TYPE_MESSAGE,
+    ExtensionAPI,
     SessionEntry,
+    TextContent,
+    ToolResultMessage,
+    UserMessage,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 # --- Prompt names -----------------------------------------------------------
 #
@@ -63,7 +60,6 @@ PROMPT_SUMMARIZATION = "compaction.summarization"
 PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
 PROMPT_BRANCH_SUMMARY = "compaction.branch_summary"
 PROMPT_BRANCH_SUMMARY_PREAMBLE = "compaction.branch_summary_preamble"
-
 
 # --- Default prompt bodies --------------------------------------------------
 
@@ -240,9 +236,7 @@ _BRANCH_SUMMARY_PREAMBLE = (
     "Summary of that exploration:\n\n"
 )
 
-
 # --- EntryMaterializer implementations --------------------------------------
-
 
 @dataclass(frozen=True, slots=True)
 class _MessageEntryMaterializer:
@@ -250,7 +244,6 @@ class _MessageEntryMaterializer:
         if isinstance(entry.payload, (UserMessage, AssistantMessage, ToolResultMessage)):
             return entry.payload
         return None
-
 
 @dataclass(frozen=True, slots=True)
 class _BranchSummaryEntryMaterializer:
@@ -269,7 +262,6 @@ class _BranchSummaryEntryMaterializer:
             stop_reason="end_turn",
         )
 
-
 @dataclass(frozen=True, slots=True)
 class _CompactionEntryMaterializer:
     def to_message(self, entry: SessionEntry) -> AgentMessage | None:
@@ -286,9 +278,7 @@ class _CompactionEntryMaterializer:
             timestamp=entry.timestamp,
         )
 
-
 # --- Manifest + install -----------------------------------------------------
-
 
 class CompactionPromptsConfig(BaseModel):
     model_config = {"extra": "allow"}
@@ -298,7 +288,6 @@ class CompactionPromptsConfig(BaseModel):
     update_summarization: str | None = None
     branch_summary: str | None = None
     branch_summary_preamble: str | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="compaction_prompts",
@@ -314,7 +303,6 @@ MANIFEST = ExtensionManifest(
     requires=("prompt_templates",),
     provides_role=(COMPACTION_PROMPTS,),
 )
-
 
 def install(api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
     bodies: dict[str, str] = {
@@ -339,7 +327,6 @@ def install(api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
     ENTRY_MATERIALIZERS[ENTRY_TYPE_MESSAGE] = _MessageEntryMaterializer()
     ENTRY_MATERIALIZERS[ENTRY_TYPE_BRANCH_SUMMARY] = _BranchSummaryEntryMaterializer()
     ENTRY_MATERIALIZERS[ENTRY_TYPE_COMPACTION] = _CompactionEntryMaterializer()
-
 
 def _override(config: dict[str, Any], key: str, default: str) -> str:
     candidate = config.get(key)

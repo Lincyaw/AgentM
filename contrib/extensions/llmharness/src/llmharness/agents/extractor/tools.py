@@ -9,8 +9,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
+)
 from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -19,7 +24,6 @@ from llmharness.schema import Edge, EdgeKind, Event, EventKind, ExternalRef, Pha
 # ---------------------------------------------------------------------------
 # Section 2: Graph ops
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True)
 class NodeUpsert:
@@ -53,7 +57,6 @@ class NodeUpsert:
             ),
         )
 
-
 @dataclass(frozen=True)
 class NodeDelete:
     """Delete an event node by id; cascades to incident edges at fold time."""
@@ -66,7 +69,6 @@ class NodeDelete:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> NodeDelete:
         return cls(id=int(data["id"]))
-
 
 @dataclass(frozen=True)
 class EdgeUpsert:
@@ -107,7 +109,6 @@ class EdgeUpsert:
             dst_turns=tuple(int(t) for t in (data.get("dst_turns") or [])),
         )
 
-
 @dataclass(frozen=True)
 class EdgeDelete:
     """Delete an edge by (src, dst, kind); kind is mandatory for unambiguous selection."""
@@ -132,7 +133,6 @@ class EdgeDelete:
             kind=str(data["kind"]),
         )
 
-
 GraphOp = NodeUpsert | NodeDelete | EdgeUpsert | EdgeDelete
 
 _OP_TABLE: dict[str, type] = {
@@ -141,7 +141,6 @@ _OP_TABLE: dict[str, type] = {
     "edge_upsert": EdgeUpsert,
     "edge_delete": EdgeDelete,
 }
-
 
 def parse_op(data: dict[str, Any]) -> GraphOp:
     """Dispatch on the ``"op"`` discriminator to build the right op."""
@@ -153,11 +152,9 @@ def parse_op(data: dict[str, Any]) -> GraphOp:
         raise ValueError(f"unknown graph op discriminator {op!r}")
     return cls.from_dict(data)  # type: ignore[attr-defined,no-any-return]
 
-
 # ---------------------------------------------------------------------------
 # Section 3: Graph fold
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True)
 class Graph:
@@ -173,7 +170,6 @@ class Graph:
     def edges_list(self) -> list[Edge]:
         """Edges in insertion order."""
         return list(self.edges.values())
-
 
 def fold_graph(ops: Iterable[GraphOp]) -> Graph:
     """Fold an op iterable into a Graph. Pure, no I/O."""
@@ -210,7 +206,6 @@ def fold_graph(ops: Iterable[GraphOp]) -> Graph:
             raise TypeError(f"unknown graph op type: {type(op).__name__}")
     return Graph(nodes=nodes, edges=edges)
 
-
 # ---------------------------------------------------------------------------
 # Section 4: Phase merge
 # ---------------------------------------------------------------------------
@@ -222,7 +217,6 @@ _RUN_KINDS: frozenset[EventKind] = frozenset({EventKind.ACT})
 _MAX_RUN_SUMMARY_CHARS = 1200
 _RUN_SUMMARY_SEPARATOR = " | "
 _RUN_KIND_LABEL = "act_run"
-
 
 def merge_to_phases(events: Sequence[Event]) -> list[Phase]:
     """Collapse consecutive act runs into phases."""
@@ -284,18 +278,15 @@ def merge_to_phases(events: Sequence[Event]) -> list[Phase]:
     _flush_run()
     return phases
 
-
 # ---------------------------------------------------------------------------
 # Section 5: Witness validation
 # ---------------------------------------------------------------------------
 
 _WS_RUN = re.compile(r"\s+")
 
-
 def normalize(s: str) -> str:
     """Lowercase + collapse runs of whitespace to a single space."""
     return _WS_RUN.sub(" ", s.lower()).strip()
-
 
 def witness_data(
     cited_entities: list[str],
@@ -318,7 +309,6 @@ def witness_data(
             )
     return None
 
-
 def witness_ref(
     cited_quote: str,
     src_text: str,
@@ -339,11 +329,9 @@ def witness_ref(
         )
     return None
 
-
 # ---------------------------------------------------------------------------
 # Section 6: Error formatting
 # ---------------------------------------------------------------------------
-
 
 def format_witness_error(
     *,
@@ -372,11 +360,9 @@ def format_witness_error(
         "  next options:\n" + "\n".join(labelled)
     )
 
-
 # ---------------------------------------------------------------------------
 # Section 7: State echo
 # ---------------------------------------------------------------------------
-
 
 def _state_echo(state: ExtractionState) -> str:
     """One-line summary of the currently-folded graph for this firing."""
@@ -393,7 +379,6 @@ def _state_echo(state: ExtractionState) -> str:
         f"last accepted: id={last.id} kind={last.kind.value}"
     )
 
-
 # ---------------------------------------------------------------------------
 # Section 8: ExtractionState
 # ---------------------------------------------------------------------------
@@ -401,14 +386,12 @@ def _state_echo(state: ExtractionState) -> str:
 EVENT_KIND_VALUES: Final[list[str]] = [k.value for k in EventKind]
 EDGE_KIND_VALUES: Final[list[str]] = [k.value for k in EdgeKind]
 
-
 def _coerce_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
         return value
     return None
-
 
 def _validate_event_shape(idx: int, raw: dict[str, Any]) -> tuple[str | None, Event | None]:
     """Validate one node payload from upsert_node / apply_node_upsert."""
@@ -447,7 +430,6 @@ def _validate_event_shape(idx: int, raw: dict[str, Any]) -> tuple[str | None, Ev
         source_turns.append(t)
     return None, Event(id=eid_raw, kind=kind, summary=summary_raw, source_turns=source_turns)
 
-
 def _compute_degree_warning(
     events: list[Event],
     edges: list[Edge],
@@ -481,7 +463,6 @@ def _compute_degree_warning(
         "just to satisfy this heuristic.\n"
         "Chain-link events:\n" + "\n".join(lines)
     )
-
 
 @dataclass
 class ExtractionState:
@@ -755,7 +736,6 @@ class ExtractionState:
     def _concat_turn_texts(self, turn_indices: list[int] | tuple[int, ...]) -> str:
         return " ".join(self.turn_texts.get(idx, "") for idx in turn_indices)
 
-
 # ---------------------------------------------------------------------------
 # Section 9: Tool Pydantic models + builders
 # ---------------------------------------------------------------------------
@@ -771,9 +751,7 @@ FINALIZE_EXTRACTION_REASON = "llmharness:finalize_extraction"
 _EventKindLiteral = Literal["task", "hyp", "act", "dec", "concl"]
 _EdgeKindLiteral = Literal["data", "ref"]
 
-
 # -- upsert_node ------------------------------------------------------------
-
 
 class UpsertNodeArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -817,14 +795,12 @@ class UpsertNodeArgs(BaseModel):
         ),
     )
 
-
 def _upsert_node_attempt_echo(args: UpsertNodeArgs) -> str:
     summary_preview = args.summary[:40] + ("..." if len(args.summary) > 40 else "")
     return (
         f"upsert_node(id={args.id}, kind={args.kind}, "
         f"source_turns={args.source_turns}, summary={summary_preview!r})"
     )
-
 
 def build_upsert_node_tool(state: ExtractionState) -> FunctionTool:
     """Build a FunctionTool for upsert_node closing over state."""
@@ -875,9 +851,7 @@ def build_upsert_node_tool(state: ExtractionState) -> FunctionTool:
         fn=_handler,
     )
 
-
 # -- upsert_edge ------------------------------------------------------------
-
 
 class UpsertEdgeArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -920,7 +894,6 @@ class UpsertEdgeArgs(BaseModel):
         ),
     )
 
-
 def _upsert_edge_attempt_echo(args: UpsertEdgeArgs) -> str:
     if args.kind == "data":
         return (
@@ -929,7 +902,6 @@ def _upsert_edge_attempt_echo(args: UpsertEdgeArgs) -> str:
         )
     quote_preview = args.cited_quote[:60] + ("..." if len(args.cited_quote) > 60 else "")
     return f"upsert_edge(src={args.src}, dst={args.dst}, kind=ref, cited_quote={quote_preview!r})"
-
 
 def build_upsert_edge_tool(state: ExtractionState) -> FunctionTool:
     """Build a FunctionTool for upsert_edge closing over state."""
@@ -996,9 +968,7 @@ def build_upsert_edge_tool(state: ExtractionState) -> FunctionTool:
         fn=_handler,
     )
 
-
 # -- delete_node -------------------------------------------------------------
-
 
 class DeleteNodeArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -1010,7 +980,6 @@ class DeleteNodeArgs(BaseModel):
             "NodeDelete cascades to all incident edges at fold time."
         ),
     )
-
 
 def build_delete_node_tool(state: ExtractionState) -> FunctionTool:
     """Build a FunctionTool for delete_node closing over state."""
@@ -1060,9 +1029,7 @@ def build_delete_node_tool(state: ExtractionState) -> FunctionTool:
         fn=_handler,
     )
 
-
 # -- delete_edge -------------------------------------------------------------
-
 
 class DeleteEdgeArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -1077,7 +1044,6 @@ class DeleteEdgeArgs(BaseModel):
             "op log."
         ),
     )
-
 
 def build_delete_edge_tool(state: ExtractionState) -> FunctionTool:
     """Build a FunctionTool for delete_edge closing over state."""
@@ -1129,13 +1095,10 @@ def build_delete_edge_tool(state: ExtractionState) -> FunctionTool:
         fn=_handler,
     )
 
-
 # -- reset_extraction --------------------------------------------------------
-
 
 class ResetExtractionArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
 
 def build_reset_extraction_tool(state: ExtractionState) -> FunctionTool:
     """Build a FunctionTool for reset_extraction closing over state."""
@@ -1183,13 +1146,10 @@ def build_reset_extraction_tool(state: ExtractionState) -> FunctionTool:
         fn=_handler,
     )
 
-
 # -- finalize_extraction -----------------------------------------------------
-
 
 class FinalizeExtractionArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
 
 def build_finalize_extraction_tool(state: ExtractionState) -> FunctionTool:
     """Build a FunctionTool for finalize_extraction closing over state."""
@@ -1233,7 +1193,6 @@ def build_finalize_extraction_tool(state: ExtractionState) -> FunctionTool:
         metadata={"terminates": True},
     )
 
-
 # ---------------------------------------------------------------------------
 # Section 10: Atom (MANIFEST + install)
 # ---------------------------------------------------------------------------
@@ -1242,7 +1201,6 @@ STATE_SERVICE_KEY = "llmharness.extractor_state"
 
 class ExtractorToolsConfig(BaseModel):
     model_config = {"extra": "allow"}
-
 
 MANIFEST = ExtensionManifest(
     name="extractor_tools",
@@ -1266,7 +1224,6 @@ _BUILDERS = [
     build_reset_extraction_tool,
     build_finalize_extraction_tool,
 ]
-
 
 def install(api: ExtensionAPI, config: ExtractorToolsConfig) -> None:
     from .context import STATE_SERVICE_KEY as _CTX_KEY

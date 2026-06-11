@@ -32,7 +32,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from rca.hfsm.schema import (
@@ -41,7 +41,6 @@ from rca.hfsm.schema import (
     Observation,
     Symptom,
 )
-
 
 MANIFEST = ExtensionManifest(
     name="rca_hgraph_store",
@@ -59,7 +58,6 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-
 # ---------------------------------------------------------------------------
 # State held inside a single install. Each ``install()`` call constructs one
 # ``_StoreState`` and registers a token in the module-level pending registry
@@ -67,14 +65,12 @@ MANIFEST = ExtensionManifest(
 # importing this module's atom-internal types.
 # ---------------------------------------------------------------------------
 
-
 @dataclass
 class _StoreState:
     symptoms: dict[str, Symptom] = field(default_factory=dict)
     hypotheses: dict[str, Hypothesis] = field(default_factory=dict)
     observations: list[Observation] = field(default_factory=list)
     obs_by_signature: dict[str, Observation] = field(default_factory=dict)
-
 
 class _ReadHandle:
     """Read API published as ``rca.hgraph.read``.
@@ -155,7 +151,6 @@ class _ReadHandle:
     def get_observation_by_signature(self, signature: str) -> Observation | None:
         return self._state.obs_by_signature.get(signature)
 
-
 class _WriteHandle:
     """Write API surfaced only via :func:`claim_write_handle`.
 
@@ -204,7 +199,6 @@ class _WriteHandle:
                     return
         raise KeyError(f"unknown prediction: {prediction_id}")
 
-
 # ---------------------------------------------------------------------------
 # Single-writer token registry. Module-level because the gate atom does not
 # import this module (§11 atom-to-atom rule); it reaches the write handle
@@ -213,10 +207,8 @@ class _WriteHandle:
 # which :func:`install` publishes — no sibling-atom import involved.
 # ---------------------------------------------------------------------------
 
-
 _pending: Final[dict[str, _WriteHandle]] = {}
 _claimed: Final[set[str]] = set()
-
 
 def claim_write_handle(token: str) -> _WriteHandle:
     """Return the write handle for the install whose token matches ``token``.
@@ -252,7 +244,6 @@ def claim_write_handle(token: str) -> _WriteHandle:
     _claimed.add(token)
     return handle
 
-
 def _reset_for_tests() -> None:
     """Wipe the token registry between tests.
 
@@ -262,7 +253,6 @@ def _reset_for_tests() -> None:
 
     _pending.clear()
     _claimed.clear()
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

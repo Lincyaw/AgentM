@@ -5,16 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from pydantic import BaseModel
 
-from agentm.core.abi.roles import SYSTEM_PROMPT_PROVIDER
+from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI, SYSTEM_PROMPT_PROVIDER
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ExtensionAPI
-
 
 class SystemPromptConfig(BaseModel):
     prompt: str | None = None
     prompt_file: str | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="system_prompt",
@@ -36,7 +32,6 @@ MANIFEST = ExtensionManifest(
     provides_role=(SYSTEM_PROMPT_PROVIDER,),
 )
 
-
 def _resolve_prompt(config: SystemPromptConfig) -> str:
     """Resolve the prompt text from config: ``prompt_file`` (read) or ``prompt``.
 
@@ -47,7 +42,6 @@ def _resolve_prompt(config: SystemPromptConfig) -> str:
     if config.prompt_file:
         return Path(config.prompt_file).read_text(encoding="utf-8")
     return config.prompt or ""
-
 
 def install(api: ExtensionAPI, config: SystemPromptConfig) -> None:
     prompt = _resolve_prompt(config)

@@ -28,9 +28,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
-
 
 MANIFEST = ExtensionManifest(
     name="rca_brief_builder",
@@ -47,7 +46,6 @@ MANIFEST = ExtensionManifest(
     requires=("rca_hgraph_store",),
 )
 
-
 _FALSIFICATION_PREFIX = (
     "Your task is to find a piece of evidence that **refutes** "
     "(contradicts) the following prediction. Do NOT try to confirm it."
@@ -61,7 +59,6 @@ _ADVERSARIAL_PREFIX = (
     "Your task is to find one piece of evidence that **contradicts** the "
     "leading hypothesis. Return observations only — no proposed update."
 )
-
 
 @dataclass
 class _BriefBuilder:
@@ -185,7 +182,6 @@ class _BriefBuilder:
             f"{h.claim} (refuted)"
             for h in refuted
         ]
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

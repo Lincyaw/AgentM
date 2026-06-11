@@ -7,14 +7,14 @@ import uuid
 
 import pytest
 
-from agentm.core.abi.messages import (
+from agentm.core.abi import (
     AssistantMessage,
     TextContent,
     ToolResultBlock,
     ToolResultMessage,
     UserMessage,
 )
-from agentm.core.abi.extension import ExtensionStaleError
+from agentm.core.abi import ExtensionStaleError
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader
 from agentm.core.runtime.atom_reloader import LoadedAtom as _LoadedAtom
 from agentm.core.abi.session_config import AgentSessionConfig
@@ -38,7 +38,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from agentm.core.abi import AssistantMessage, MessageEnd, Model, TextContent, ToolCallBlock
-from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi import ProviderConfig
 
 
 class _Stream:
@@ -92,7 +92,7 @@ from __future__ import annotations
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 {state_import}
 
 MANIFEST = ExtensionManifest(
@@ -126,7 +126,7 @@ def _raising_source(name: str) -> str:
 from __future__ import annotations
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name={name!r}, description="boom", registers=("tool:demo",))
 
@@ -157,7 +157,7 @@ from __future__ import annotations
 from reload_state_shared import EVENTS
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 
 MANIFEST = ExtensionManifest(name={name!r}, description="observer", registers=())
 
@@ -380,7 +380,7 @@ from typing import Any
 
 from agentm.core.abi import FunctionTool, MessageEnd, Model, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import CommandSpec, ExtensionAPI, ProviderConfig
+from agentm.core.abi import CommandSpec, ExtensionAPI, ProviderConfig
 
 MANIFEST = ExtensionManifest(
     name="tool_demo",

@@ -100,22 +100,22 @@ from typing import Any
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
 
-from agentm.core.abi.events import (
+from agentm.core.abi import (
     ChildSessionEndEvent,
     ChildSessionExtendingEvent,
     ChildSessionStartEvent,
     EntryAppendedEvent,
     EventBusObserver,
+    ExtensionAPI,
+    Handler,
     SessionShutdownEvent,
 )
-from agentm.core.abi.extension import ExtensionAPI, Handler
 from pydantic import BaseModel
 
 from agentm.core.lib import to_jsonable
 from agentm.extensions import ExtensionManifest
 
 logger = logging.getLogger(__name__)
-
 
 class LiveInspectorConfig(BaseModel):
     bind: str = "127.0.0.1"
@@ -124,7 +124,6 @@ class LiveInspectorConfig(BaseModel):
     role: str = "root"
     parent_root: str | None = None
     parent_port: int | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="live_inspector",
@@ -143,16 +142,13 @@ MANIFEST = ExtensionManifest(
     config_schema=LiveInspectorConfig,
 )
 
-
 # Channels whose payloads we skip from the broadcast — pure per-token noise
 # (``stream_delta``) that would otherwise dominate the wire.
 _NOISY_CHANNELS: frozenset[str] = frozenset({"stream_delta"})
 
-
 # Per-connection outbound queue cap. Exceeding this drops the NEWEST message
 # so a slow client never starves the broadcaster.
 _QUEUE_HIGHWATER: int = 256
-
 
 # Process-level registry: one server per root_session_id. Child sessions in
 # the same process share the parent's server by looking up their root id
@@ -160,18 +156,14 @@ _QUEUE_HIGHWATER: int = 256
 _SERVERS: dict[str, _Server] = {}
 _SERVERS_LOCK = threading.Lock()
 
-
 def _now() -> float:
     return time.time()
-
 
 # Sentinel pushed onto a client's outbound queue to signal "drain & close".
 class _CloseSentinel:
     __slots__ = ()
 
-
 _CLOSE: _CloseSentinel = _CloseSentinel()
-
 
 @dataclass(eq=False)
 class _Client:
@@ -180,7 +172,6 @@ class _Client:
     # make the class unhashable and ``set.add`` would raise.
     queue: asyncio.Queue[Any]
     dropped: int = 0
-
 
 @dataclass
 class _Server:
@@ -425,7 +416,6 @@ class _Server:
             if existing is self:
                 _SERVERS.pop(self.root_session_id, None)
 
-
 async def _only_inspect_path(connection: ServerConnection, request: Any) -> Any:
     """Reject any HTTP path that isn't ``/inspect``.
 
@@ -439,7 +429,6 @@ async def _only_inspect_path(connection: ServerConnection, request: Any) -> Any:
     if base != "/inspect":
         return connection.respond(404, "not found\n")
     return None
-
 
 def _get_or_create_server(
     root_session_id: str,
@@ -475,7 +464,6 @@ def _get_or_create_server(
                     "live_inspector: failed to write url_file=%s", url_file
                 )
     return srv
-
 
 class _BusObserver(EventBusObserver):
     """Captures every ``EventBus.emit`` on this session's bus."""
@@ -522,7 +510,6 @@ class _BusObserver(EventBusObserver):
                 "payload": payload,
             }
         )
-
 
 def install(api: ExtensionAPI, config: LiveInspectorConfig) -> None:
     bind = config.bind
