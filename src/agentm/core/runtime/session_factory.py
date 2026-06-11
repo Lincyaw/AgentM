@@ -435,6 +435,7 @@ async def create_agent_session(
         try:
             await install(module_path, ext_cfg)
         except Exception as exc:  # noqa: BLE001
+            logger.error("extension install failed: %s: %s", module_path, exc)
             await bus.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(
