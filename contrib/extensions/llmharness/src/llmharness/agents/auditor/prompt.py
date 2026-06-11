@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from llmharness.schema import Edge, Event, Finding, Phase
 
@@ -251,14 +251,14 @@ no supporting tool result is not evidence.
 
 Call `submit_verdict` exactly once.
 
-- `surface_reminder`: set to **true** if you found any events with missing or
-  conflicting support chains. Your job is forensic analysis — identify all
-  problems, do not stay silent.
-- `reminder_text`: brief diagnostic report listing the unsupported or
-  conflicting claims you found, written so a reader understands the reasoning
-  gaps without needing to see the graph.
+- `surface_reminder`: always set to **true**. This is a post-hoc audit — there
+  is no "stay silent" option. You are diagnosing, not deciding whether to
+  intervene.
 - `matched_event_ids`: list ALL event ids that introduced, propagated, or
   finalized an unsupported claim. This is the primary output — be thorough.
+  Every event with missing or conflicting support must be listed.
+- `reminder_text`: brief diagnostic report listing the unsupported or
+  conflicting claims you found.
 - `continuation_notes`: at least one note summarizing your assessment.
 
 Before submitting, self-check:
@@ -955,7 +955,7 @@ Before `surface_reminder=true`, triple-check:
 Default: silent.
 """
 
-_PROMPTS: dict[str, str] = {
+_PROMPTS: Final[dict[str, str]] = {
     "minimal": PROMPT_MINIMAL,
     "bench": PROMPT_BENCH,
     "telbench": PROMPT_TELBENCH,
@@ -1098,7 +1098,7 @@ def build_auditor_trajectory_prompt(
     return "\n".join(sections)
 
 
-__all__ = [
+__all__: Final = [
     "build_auditor_system_prompt",
     "build_auditor_trajectory_prompt",
     "load_auditor_prompt",
