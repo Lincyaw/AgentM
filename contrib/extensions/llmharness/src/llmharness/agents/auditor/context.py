@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
@@ -67,4 +67,4 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
 
     api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
 
-__all__ = ["MANIFEST", "install"]
+__all__: Final = ["MANIFEST", "install"]
