@@ -71,7 +71,6 @@ from agentm.core.abi.session_config import (  # noqa: E402
 
 
 class AgentSession:
-    """Top-level v2 session façade. Construct via :meth:`create`."""
 
     def __init__(
         self,

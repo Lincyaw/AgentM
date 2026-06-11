@@ -96,50 +96,22 @@ logic belongs in an atom or prompt-builder co-located with the manifest.
 
 ---
 
-## 2. Programmatic session invocation (SDK)
+## 2. Session creation — who uses what
 
-When running AgentM sessions from Python (eval harnesses, batch runners,
-multi-agent orchestrators), use the SDK directly — **never shell out** to
-`agentm -p`.
+Your position in the architecture determines which API you use:
 
-```python
-from agentm.core.runtime.session import AgentSession
-from agentm.core.abi.session_config import AgentSessionConfig, LoopConfig
+| You are writing… | Use this |
+|------------------|----------|
+| **Atom** code | `api.spawn_child_session()` — inherits trace + provider from parent |
+| **Workflow** script | `agent()` — wraps spawn with journal, budget, structured output |
+| **Host program** (CLI, gateway, eval harness) | `AgentSession.create()` — cold-starts a full session |
 
-session = await AgentSession.create(AgentSessionConfig(
-    cwd=str(work_dir),
-    scenario="verifier_hop",
-    loop_config=LoopConfig(max_tool_calls=15),
-    atom_config_overrides={
-        "hop_finalize": {"data_dir": str(data_dir)},
-    },
-))
-messages = await session.prompt(prompt_text)
-await session.shutdown()
-```
+The most common mistake is using `AgentSession.create()` inside an atom.
+Atoms cannot import `core.runtime`; use `api.spawn_child_session()`
+instead — it gives you trace and provider inheritance for free.
 
-### Why SDK over subprocess
-
-| subprocess.run | AgentSession.create |
-|----------------|---------------------|
-| Must build CLI args, manage fallbacks | Direct Python call |
-| Must stuff env vars for config | Pass via `atom_config_overrides` |
-| Must parse obs JSONL to extract results | Read from returned messages |
-| Must manage stdout/stderr log files | Events/logging handled by session |
-| Spawns a new process per invocation | In-process, lighter |
-
-### Threading with async sessions
-
-If your orchestrator uses `ThreadPoolExecutor`, wrap the async session
-in `asyncio.run()` per thread:
-
-```python
-def _run_one_hop(args) -> dict:
-    return asyncio.run(_async_run_hop(args))
-
-with ThreadPoolExecutor(max_workers=4) as pool:
-    futures = [pool.submit(_run_one_hop, a) for a in hop_args]
-```
+For detailed API signatures, examples, threading patterns, and common
+mistakes, read `references/session-creation.md`.
 
 ---
 
@@ -208,7 +180,10 @@ if result.get("verdict") == "confirmed":
 
 ## 4. The atom contract
 
-Every atom is a single `.py` file that exports:
+Every atom exports `MANIFEST` + `install()`. Builtin atoms are single
+`.py` files; contrib atoms may be packages (directories with
+`__init__.py`). The atom contract applies to all code **reachable from
+install()** — including intra-package modules that `install()` imports.
 
 ```python
 MANIFEST = ExtensionManifest(
@@ -229,7 +204,19 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
 | `agentm.core.abi.*` | `agentm.core.runtime.*` |
 | `agentm.core.lib.*` | other atoms (`agentm.extensions.builtin.X`) |
 | `agentm.extensions.ExtensionManifest` | `agentm.core._internal` |
-| stdlib, third-party libs | |
+| `agentm.ai` (provider metadata) | cross-contrib imports |
+| stdlib, third-party libs | `langchain` |
+
+These rules are enforced at three levels:
+1. **Static check** — `agentm validate` (run like ruff/mypy before execution)
+2. **Runtime load-time** — `load_extension()` blocks non-compliant atoms
+3. **Reload/install** — `AtomReloader` validates before hot-swapping
+
+For package atoms, the validator builds an AST import-reachability graph
+from `install()` to determine which files are atom code (contract
+enforced) vs host-level code (not enforced). A file in the package that is not
+reachable from `install()` is free to import `core.runtime` — it is a
+host-level tool, not atom code.
 
 ### Config resolution
 
@@ -287,14 +274,17 @@ Rules:
 | Inject system prompt content | Handle `BeforeAgentStartEvent` |
 | Inject per-turn context | Handle `ContextEvent` |
 | JSON Schema from Pydantic | `pydantic_to_tool_schema(Model)` |
-| Spawn a child agent | `api.spawn_child_session(config)` |
-| Run a session from Python | `AgentSession.create(AgentSessionConfig(...))` |
+| Spawn a child agent (from atom) | `api.spawn_child_session(config)` |
+| Spawn a child agent (from workflow) | `agent(prompt, scenario=..., atom_config=...)` |
+| Boot a session from host code | `AgentSession.create(AgentSessionConfig(...))` |
 | Orchestrate multiple agents | Dynamic workflow (`agent()` + `parallel()`) |
 | Run a pre-written workflow | `workflow_runner.run_file(path, args)` |
+| Validate atom contract compliance | `agentm validate all` (CLI) |
 | Emit user-visible diagnostic | Emit `DiagnosticEvent` |
 | Log for debugging | `logging.getLogger(__name__)` |
 
 For detailed API signatures, read `references/api.md`.
+For session creation APIs, read `references/session-creation.md`.
 For provider layer, CLI conventions, and logging, read
 `references/provider-and-cli.md`.
 
@@ -341,6 +331,8 @@ For provider layer, CLI conventions, and logging, read
   `AgentSession.create()` or dynamic workflow `agent()`.
 - **Parsing obs JSONL to extract results** — Use session return values
   or workflow `agent()` return values.
+- **Wrong session API for your layer** — See §2 and
+  `references/session-creation.md` for the full decision table.
 
 ### Miscellaneous
 
