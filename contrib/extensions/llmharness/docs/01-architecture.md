@@ -1,60 +1,74 @@
 # Architecture
 
-llmharness has two layers stacked on top of AgentM:
+llmharness has two layers stacked on top of AgentM, plus offline
+tooling that consumes the replay sidecar:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  distill/   (offline)                                            │
-│    cli.py · oracle.py · causal.py · gt.py · binding.py · ...     │
+│  tools/  (offline, dev-checkout only)                            │
+│    replay/   distill/   aggregate/   extensions/   eval/         │
 ├──────────────────────────────────────────────────────────────────┤
-│  adapter + audit children   (live)                               │
-│    adapters/agentm.py                                            │
-│    audit/extractor/   audit/auditor/   audit/registry.py         │
-│    replay/  (sidecar JSONL writer)                               │
+│  src/llmharness/  (core library, shipped in wheel)               │
+│    atom.py  (main adapter)                                       │
+│    agents/extractor/   agents/auditor/                           │
+│    replay/  (record I/O)   eval/telbench/                        │
+│    schema.py                                                     │
 ├──────────────────────────────────────────────────────────────────┤
 │  AgentM substrate (core.abi, core.runtime — provided by parent)  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-This doc covers both layers and how they connect through the replay
-sidecar.
-
 ---
 
 ## 1. Components
 
+### Core library (`src/llmharness/`)
+
 | Component | File | Job |
 |---|---|---|
-| **Adapter** | `adapters/agentm.py` | Subscribes to `TurnEndEvent` and `DecideTurnActionEvent` on the main agent's bus. Drives the two phases below. Persists results onto the session entry tree and (optionally) the replay sidecar. |
-| **Extractor child** | `audit/extractor/` | Phase 1. Per-turn LLM-driven graph builder. Single terminal tool `submit_events` emits typed events with embedded `refs[]`; the witness layer validates entities + verbatim quotes against the source turns and unrolls refs into `Edge` records. Framing is a swappable prompt file under `audit/extractor/prompts/`. |
-| **Auditor child** | `audit/auditor/` | Phase 2. Every k turns. Reads the live graph (events + edges + scenario findings + recent verdicts + continuation_notes from the prior firing). Tool surface is controlled by the **auditor profile** (default `minimal` = just `submit_verdict`; `with_drill_down` adds `get_event_detail` + `get_turn`). Framing is a swappable prompt file under `audit/auditor/prompts/`. |
-| **Check registry** | `audit/registry.py` | Service published by the adapter under key `llmharness.audit_registry`. Scenario atoms register pure graph checks; the adapter snapshots a frozen `CheckContext` at every auditor firing and folds emitted `Finding`s into the auditor prompt as advisory signals. |
-| **Reference checks** | `extensions/check_*.py` | Three reference §11 atoms: `check_repeated_actions`, `check_open_branches`, `check_premature_conclusion`. Each is one file (MANIFEST + install), mounted with `--extension`. |
-| **Replay writer** | `replay/record.py` | Appends one JSONL record per phase invocation to `<cwd>/.agentm/audit_replay/<session_id>.jsonl`. Best-effort; failures never break the live agent. |
-| **Replay CLI** | `replay/cli.py` | `llmharness-replay {extractor,auditor} --record <line>` rebuilds the exact extension list + payload from a sidecar record and re-runs the child with a different provider/prompt for A/B. |
-| **Distill binding** | `distill/binding.py` | §11 atom mounted on the **main agent**. At install time writes a `<session_id>.meta.json` sidecar next to the replay log, carrying `sample_id` + dataset coordinates. The labeler joins replay records to ground truth through this file. |
-| **Distill labeler** | `distill/oracle.py`, `distill/cli.py` | Offline. For each auditor replay record, causally masks the graph to turn t, then runs two children: a GT-aware **oracle** (which findings matter given GT) and a GT-blind **rewriter** (can this selection be justified from the graph alone). Drops samples that fail the justifiability gate. |
-| **Causal mask** | `distill/causal.py` | Pure function. `events: max(source_turns)≤t`; `edges: both endpoints kept AND max(src_turns|dst_turns)≤t`; `findings: all related_event_ids kept`. Load-bearing — without it the oracle uses post-hoc evidence and the student can't reproduce. |
-| **Distill exporter** | `distill/export.py` | Labeled rows + extractor replay records → `sft/{extractor,auditor,dropped}.jsonl`. Extractor records pass through (already produced by the live teacher); auditor records carry only the rewriter-approved fields. |
+| **Main atom** | `atom.py` | The orchestrator. Subscribes to `TurnEndEvent`, `DecideTurnActionEvent`, `SessionShutdownEvent` on the main agent's bus. Manages `CumulativeAuditState` (event-sourced from session entries). Spawns extractor/auditor children at configured intervals. Persists results and queues reminders. MANIFEST name: `"llmharness"`. |
+| **Schema** | `schema.py` | All shared data types (`Event`, `Edge`, `Finding`, `Verdict`, `Phase`, `Reminder`, `ExternalRef`) plus session-entry-type constants. The public contract for downstream consumers. |
+| **Extractor child** | `agents/extractor/` | Phase 1. Builds an incremental logic-flow graph from new conversation turns. Uses 6 tools (`upsert_node`, `upsert_edge`, `delete_node`, `delete_edge`, `reset_extraction`, `finalize_extraction`). Witness validation ensures edge citations appear in source text. |
+| **Auditor child** | `agents/auditor/` | Phase 2. Reads the graph snapshot (events + edges + phases + findings + continuation notes) and emits a `Verdict` via `submit_verdict`. 10 prompt variants for different domains. |
+| **Replay record** | `replay/record.py` | `ReplayRecord` dataclass + read/write helpers. One JSONL line per phase invocation at `<cwd>/.agentm/audit_replay/<session_id>.jsonl`. |
+| **TELBench eval** | `eval/telbench/` | Offline evaluation harness for trajectory-error localization: loads TELBench dataset, runs extractor+auditor per instance, scores span-level P/R/F1/FEA. |
+| **Agent path resolvers** | `agents/__init__.py` | `extractor_scenario()` / `auditor_scenario()` return absolute paths to the child scenario directories. |
+
+### Offline tooling (`tools/`)
+
+| Component | File | Job |
+|---|---|---|
+| **Replay CLI** | `tools/replay/cli.py` | `llmharness-replay {extractor,auditor,chain,list,agent-from-reminder}`. Rebuilds extension list + payload from a sidecar record and re-runs with different provider/prompt for A/B. |
+| **Replay engine** | `tools/replay/engine.py` | `run_phase_standalone` — constructs a standalone AgentM session for offline child execution. May import `agentm.core.runtime.*`. |
+| **Chain replay** | `tools/replay/chain.py` | Bulk-replay every record in order, threading cumulative graph state across firings. |
+| **Prefix replay** | `tools/replay/prefix_replay.py` | Branch a session at turn t, resume with reminder seeded. |
+| **Reminder seed** | `tools/replay/reminder_seed.py` | §11 atom mounted on resumed sessions to inject a recorded reminder. |
+| **Distill CLI** | `tools/distill/cli.py` | `llmharness-distill {label,export}`. Drives the oracle + rewriter pipeline. |
+| **Distill oracle** | `tools/distill/oracle.py` | For each auditor firing: causal-mask the graph to turn t, run GT-aware oracle + GT-blind rewriter, drop unjustifiable samples. |
+| **Causal mask** | `tools/distill/causal.py` | Pure function. Filters events/edges/findings to those causally available at turn t. |
+| **GT loader** | `tools/distill/gt.py` | Loads ground-truth labels from the dataset. |
+| **SFT exporter** | `tools/distill/export.py` | Labeled rows → `sft/{extractor,auditor,dropped}.jsonl`. |
+| **Distill binding** | `tools/distill/binding.py` | §11 atom mounted on the main agent during distill runs. Writes `<session_id>.meta.json` next to the replay sidecar. |
+| **Aggregate CLI** | `tools/aggregate/cli.py` | `llmharness-aggregate {replay,one}`. Folds sidecar(s) into per-case directories. |
+| **Reference checks** | `tools/extensions/check_*.py` | Three §11 atoms: `check_premature_conclusion`, `check_repeated_actions`, `check_open_branches`. Mounted with `--extension`. |
 
 ---
 
-## 2. Live runtime flow (Phase 1 + Phase 2)
+## 2. Live runtime flow
 
 ```
                        ┌───────────────────────────┐
-   TurnEndEvent ──────▶│ Adapter                   │
-                       │  scan branch → window     │
-                       │  spawn extractor child    │
+   TurnEndEvent ──────▶│ atom.py (main adapter)    │
+                       │  hydrate CumulativeState   │
+                       │  compute due intervals     │
+                       │  spawn extractor child     │
                        └──────────┬────────────────┘
                                   │ child.prompt(payload)
                                   ▼
                        ┌───────────────────────────┐
-                       │ Extractor child           │
-                       │  submit_events([Event{    │
-                       │     refs:[{dst, kind, ... │
-                       │            cited_quote}]  │
-                       │   }, ...])                │
+                       │ Extractor child            │
+                       │  upsert_node / upsert_edge │
+                       │  finalize_extraction       │
                        └──────────┬────────────────┘
                                   │
                 ┌─────────────────┴─────────────────┐
@@ -62,56 +76,69 @@ sidecar.
                 │  quote must appear in src_turns)   │
                 └─────────────────┬──────────────────┘
                                   ▼
-            entries: audit_event, audit_edge, extractor_cursor
-                                  +
-                replay sidecar: ReplayRecord(phase="extractor", ...)
+            entries: audit_graph_op, extractor_cursor
+            sidecar: ReplayRecord(phase="extractor", ...)
 
    (every k turns, after a successful extractor firing)
                                   │
                                   ▼
                        ┌───────────────────────────┐
-                       │ Adapter                   │
-                       │  rebuild graph from       │
-                       │  entries; run checks;     │
-                       │  spawn auditor child      │
+                       │ atom.py                    │
+                       │  rebuild graph from state  │
+                       │  spawn auditor child       │
                        └──────────┬────────────────┘
                                   ▼
                        ┌───────────────────────────┐
-                       │ Auditor child             │
-                       │  get_event_detail(ids)    │
-                       │  get_turn(idx)            │
-                       │  submit_verdict({surface, │
-                       │     reminder_text, ...})  │
+                       │ Auditor child              │
+                       │  submit_verdict({surface,  │
+                       │     reminder_text, ...})   │
                        └──────────┬────────────────┘
                                   ▼
             entries: verdict
-                                  +
-                replay sidecar: ReplayRecord(phase="auditor", ...)
+            sidecar: ReplayRecord(phase="auditor", ...)
                                   │
-                                  ▼  (only when surface_reminder=true
-                                  │   AND adapter config enable_reminders=true)
+                                  ▼  (when surface_reminder=true
+                                  │   AND enable_reminders=true)
    DecideTurnActionEvent ─────▶ Inject([reminder_msg])
 ```
 
-Failure paths (typed entries, never silent):
+Failure paths (typed session entries, never silent):
 `extractor_no_call`, `extractor_empty`, `extractor_error`,
 `extractor_partial`, `audit_no_call`, `audit_error`. Every failure
-also emits a `DiagnosticEvent` so the observability JSONL has
-evidence. The cursor advances only on success or partial.
+also emits a `DiagnosticEvent` on the observability JSONL.
+
+### Async vs sync mode
+
+- **sync** (`mode: "sync"`): extractor/auditor children run directly in
+  the `TurnEndEvent` handler. Simpler but blocks the main agent loop.
+- **async** (`mode: "async"`, default): uses `asyncio.Queue` + a
+  background worker task. Queue guarantees extractor-before-auditor
+  ordering. On shutdown, drains with a configurable timeout.
+
+### CumulativeAuditState
+
+Event-sourced in-memory state in `atom.py`. Rebuilt on startup from
+session entries via `hydrate_from_session_log()`. Maintains:
+
+- `ops: list[GraphOp]` — the append-only op log
+- `cursor_last_turn_index` — last turn consumed by extractor
+- `recent_verdicts: deque[dict]` (maxlen 5) — recent auditor verdicts
+- `last_continuation_notes` — carried into the next auditor firing
+- Lazy `graph_view()` via `fold_graph(ops)` → `(events, edges, phases)`
 
 ---
 
 ## 3. Distill flow (offline)
 
 ```
-  Stage 0  live run with knobs flipped for clean collection
+  Stage 0  live run with distill knobs
     enable_reminders=false               (auditor still fires;
                                           no main-agent side effect)
-    + distill_binding extension          (writes <sid>.meta.json)
+    + tools/distill/binding.py atom      (writes <sid>.meta.json)
                   │
                   ▼  produces
-    <cwd>/.agentm/audit_replay/<sid>.jsonl       ← ReplayRecords
-    <cwd>/.agentm/audit_replay/<sid>.meta.json   ← sample_id + dataset
+    .agentm/audit_replay/<sid>.jsonl       ← ReplayRecords
+    .agentm/audit_replay/<sid>.meta.json   ← sample_id + dataset
 
   Stage 1  llmharness-distill label
     for each auditor replay record at turn t:
@@ -127,15 +154,11 @@ evidence. The cursor advances only on success or partial.
                                     drop_reason)
                   │
                   ▼
-      <sid>.labels.jsonl  (one row per auditor firing,
-                           with drop flag + rewriter-approved target)
+      <sid>.labels.jsonl  (one row per auditor firing)
 
   Stage 2  llmharness-distill export
     extractor records  ────▶ sft/extractor.jsonl
-                              (replay output re-packaged as one
-                               submit_events tool call)
     labeled rows       ────▶ sft/auditor.jsonl
-                              (rewriter-approved fields only)
     dropped rows       ────▶ sft/dropped.jsonl  (audit trail)
 ```
 
@@ -143,83 +166,83 @@ evidence. The cursor advances only on success or partial.
 
 ## 4. Static dependency graph
 
-Arrows mean "imports from / uses". Dashed arrows are runtime
-service lookups (not static imports).
+Arrows mean "imports from / uses". Service lookups are at install time
+only (no module-level coupling between atoms).
 
 ```
                     ┌──────────────────────┐
-                    │ schema.py            │  Event/Edge/Finding/
-                    │                      │  Verdict/Phase/Reminder
+                    │ schema.py            │  Event / Edge / Finding /
+                    │                      │  Verdict / Phase / Reminder
                     └──────────┬───────────┘
                                ▲
        ┌───────────────────────┼─────────────────────────┐
        │                       │                         │
-       │                       │                         │
 ┌──────┴────────┐    ┌─────────┴───────┐         ┌───────┴────────────┐
-│ audit/        │    │ audit/registry. │         │ replay/record.py   │
-│  extractor/   │    │  py             │         │                    │
-│  auditor/     │    │   AuditCheck    │         └────────────────────┘
-│  _compose.py  │    │   Registry      │                  ▲
-└──────┬────────┘    └─────────┬───────┘                  │
-       │                       ▲                          │
-       │                       │ (service lookup)         │
+│ agents/       │    │ atom.py         │         │ replay/record.py   │
+│  extractor/   │    │  CumulativeState│         │                    │
+│  auditor/     │    │  install()      │         └────────────────────┘
+└──────┬────────┘    └─────────┬───────┘                  ▲
        │                       │                          │
+       │        (spawns child sessions)                   │
        ▼                       │                          │
-┌──────────────────────────────┴──────────────────────────┴─────────┐
-│ adapters/agentm.py                                                │
-│   ExtensionManifest "agentm"                                      │
-│   - publishes the audit_registry service                          │
-│   - subscribes to TurnEndEvent / DecideTurnActionEvent            │
-│   - persists entries + writes replay sidecar                      │
-└────────────────────────┬──────────────────────────────────────────┘
-                         ▲ (mount via --extension)
-                         │
-              ┌──────────┴──────────┐
-              │ extensions/check_*  │   reference checks
-              │ (one file each)     │   register against registry
-              └─────────────────────┘
-
-  distill/  (offline, no live-adapter import)
-  ────────
-  cli.py ──▶ oracle.py ──▶ tools/engine.run_phase_standalone
-              │   ├──▶ causal.py
-              │   ├──▶ gt.py            (loads rca-shaped dataset)
-              │   ├──▶ _submit_oracle.py   (§11 atom)
-              │   ├──▶ _submit_rewriter.py (§11 atom)
-              │   └──▶ prompts/{oracle,rewriter}.md
-              └──▶ export.py ──▶ schema.py (re-uses Event/Edge shapes)
-
-  binding.py  (§11 atom, mounted on main agent — NOT imported by
-               the adapter; reads from env at install time only)
+  manifest.yaml ◄──────────────┘                          │
+  (scenario for child)                                    │
+                                                          │
+  ┌───────────────────────────────────────────────────────┘
+  │ (tools/ layer — offline, may use core.runtime)
+  │
+  ├── tools/replay/     cli.py ──▶ runner.py ──▶ engine.py
+  │                                                ▲
+  ├── tools/distill/    cli.py ──▶ oracle.py ──▶ engine
+  │                      │
+  │                      ├──▶ causal.py
+  │                      ├──▶ gt.py
+  │                      └──▶ export.py ──▶ schema.py
+  │
+  ├── tools/aggregate/  cli.py ──▶ collector.py ──▶ writer.py
+  │
+  └── tools/extensions/ check_*.py  (§11 atoms, no cross-imports)
 ```
 
 Key invariants:
 
-* Adapter never imports anything under `distill/`. Distill is a
-  pure offline consumer of the replay sidecar.
-* Extractor and auditor children share no module-level state; they
+* **atom.py never imports from `tools/`**. The tools layer is a pure
+  offline consumer of the replay sidecar.
+* **Extractor and auditor children share no module-level state**; they
   communicate through the session entry tree and the replay sidecar.
-* `schema.py` is the only module both layers share. Anything that
-  needs to round-trip between live and distill goes through it.
-* The check registry is resolved through `api.get_service` at
-  install time, not imported. That keeps reference checks single-
-  file §11-compliant (no atom-to-atom imports).
+* **`schema.py` is the only module both layers share**. Anything that
+  needs to round-trip between live and offline goes through it.
+* **No atom-to-atom imports** (§11 contract). Atoms communicate through
+  the service registry (`api.set_service` / `api.get_service`).
 
 ---
 
-## 5. `tools/` vs the rest — host-side drivers are not atoms
+## 5. `src/` vs `tools/` boundary
 
-| Subpackage | Role | May import `agentm.core.runtime.*`? |
+| Layer | Role | May import `agentm.core.runtime.*`? |
 |---|---|---|
-| `audit/`, `adapters/`, `replay/` (atoms + sidecar I/O), `extensions/check_*`, `distill/_submit_*` | §11 atoms or modules consumed by atoms — single-file contract, no `core.runtime.*` import, no atom-to-atom imports | No |
-| `tools/` (`tools/engine.py`, `tools/prefix_replay.py`) | **Host-side drivers** that construct standalone AgentM sessions for offline replay / fork-and-replay | Yes — that is what `tools/` exists for |
-| `replay/chained_fork.py` | Orchestration helper that combines `tools/engine` runs with `replay/` sidecar I/O; called by host code (e.g. rca eval), not by atoms | No direct `core.runtime.*` import — it composes through the `tools/` helpers |
-| `distill/` (the labeler / exporter) | Offline CLIs; not loaded into a live session | Yes (drives standalone children via `tools/engine`) |
+| `src/llmharness/` (atoms, schema, replay record) | §11 atoms or modules consumed by atoms — single-file contract, no `core.runtime.*` import, no atom-to-atom imports | No |
+| `tools/` (replay engine, distill driver, aggregate) | Host-side drivers that construct standalone AgentM sessions for offline operations | Yes — that is what `tools/` exists for |
 
-Structural rule: nothing under `llmharness/audit/`, `llmharness/adapters/`,
-`llmharness/atoms/`, or `llmharness/extensions/` may import from
-`llmharness.tools.*`. The boundary test
-`tests/test_replay_engine_boundary.py` enforces this — `tools/` is the
-explicit "host driver, not atom surface" marker. When a future workflow
-needs to spawn standalone sessions offline, add the module under
-`tools/`, not under `audit/` or `replay/`.
+Structural rule: nothing under `src/llmharness/agents/` may import from
+`tools/`. The boundary test enforces this — `tools/` is the explicit
+"host driver, not atom surface" marker.
+
+---
+
+## 6. TELBench evaluation (`eval/telbench/`)
+
+Standalone evaluation harness for trajectory-error localization on the
+TELBench dataset. Lives in `src/llmharness/eval/telbench/` (shipped in
+the wheel).
+
+- **adapter.py**: Loads TELBench JSONL, converts spans to synthetic
+  `AgentMessage` objects.
+- **runner.py**: Per-instance eval driver. Creates
+  `CumulativeAuditState.fresh()`, walks turns, fires extractor/auditor
+  at configured cadence. Maps `matched_event_ids` → `source_turns` →
+  predicted span indices.
+- **scoring.py**: Span-level precision / recall / F1 + FEA (First Error
+  Accuracy). Macro-aggregation across instances.
+- **cli.py**: `llmharness-eval telbench` with filters for difficulty,
+  answer-status, concurrency, and provider/model overrides.

@@ -18,7 +18,7 @@ edges when later evidence changes the graph.
 - A replay sidecar:
   `<cwd>/.agentm/audit_replay/<session_id>.jsonl`
 - Optional prompt edits:
-  `src/llmharness/audit/extractor/prompts/extractor_default.md`
+  `src/llmharness/agents/extractor/prompt.py (PROMPT_DEFAULT)`
 - A target model profile from `~/.agentm/config.toml`, for example
   `kimi` (`K2.6`) or another provider override.
 - A blob prefix for the review set, for example:

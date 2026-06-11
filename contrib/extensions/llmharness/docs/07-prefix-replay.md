@@ -71,7 +71,7 @@ clarity):
 agentm \
   --cwd <orig-session-cwd> \
   --resume <new-sid> \
-  --extension 'llmharness.adapters.agentm:{"enable_reminders":false,"enable_auditor":true}' \
+  --extension 'llmharness.atom:{"enable_reminders":false,"enable_auditor":true}' \
   --extension 'llmharness.replay.reminder_seed:{"text":"..."}'
 ```
 
@@ -80,7 +80,7 @@ auditor *observing* (verdicts still get persisted as evidence and the
 audit graph keeps growing) while preventing a second live reminder from
 masking the experimental seed. If you want a clean dataset-collection
 run with no auditor at all, pass
-``'llmharness.adapters.agentm:{"enable_reminders":false,"enable_auditor":false}'``
+``'llmharness.atom:{"enable_reminders":false,"enable_auditor":false}'``
 instead.
 
 ## When NOT to use this
@@ -95,8 +95,7 @@ instead.
 
 ## Constraint: train/inference parity
 
-The reminder message format is single-sourced in
-`audit/_reminder_format.py` and imported by both the live adapter and
-the seed atom. The test suite pins the format (see
+The reminder message format is single-sourced as the `REMINDER_PREAMBLE`
+constant in `atom.py` and used by both the live adapter and the seed atom. The test suite pins the format (see
 ``tests/test_reminder_seed_atom.py`` + ``tests/test_reminder_injector.py``);
 do not duplicate the preamble string anywhere else.

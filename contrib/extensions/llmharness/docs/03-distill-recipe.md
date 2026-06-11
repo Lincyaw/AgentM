@@ -48,9 +48,9 @@ LLMHARNESS_DISTILL_DATASET_NAME="$DATASET_NAME" \
   agentm \
     --cwd "$RUN_DIR" \
     --scenario rca \
-    --extension llmharness.adapters.agentm \
+    --extension llmharness.atom \
     --extension llmharness.distill.binding \
-    --extension-config llmharness.adapters.agentm='{
+    --extension-config llmharness.atom='{
         "enable_reminders": false,
         "enable_auditor": true,
         "enable_replay_log": true,

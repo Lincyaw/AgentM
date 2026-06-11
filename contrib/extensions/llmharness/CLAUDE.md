@@ -1,19 +1,36 @@
 # llmharness
 
-Claude Code plugin + Python package + AgentM extension providing async,
-non-blocking supervision for the main agent. Hook/event-driven turn stream +
-AgentM-backed drift detection.
+Two-phase cognitive audit extension for AgentM: watches an agent's
+conversation, extracts a logic-flow graph (extractor), audits it for
+reasoning drift (auditor), and optionally injects a reminder.
 
-Lives at `<AgentM-root>/contrib/extensions/llmharness/`. Mounted onto a
-running agent via `agentm --extension llmharness.adapters.agentm`
-(repeatable; stacks on top of `--scenario` or auto-discovery).
+Lives at `<AgentM-root>/contrib/extensions/llmharness/`. Mounted via
+`agentm --extension llmharness.atom` or by adding `llmharness.atom` to
+a scenario manifest's `extensions:` list.
 
 Downstream consumer: **rca-autorl** installs this package via path, e.g.
-`pip install -e <AgentM-root>/contrib/extensions/llmharness` (no AgentM Python
-dependency required for that path).
+`pip install -e <AgentM-root>/contrib/extensions/llmharness`.
 
-Design reference: see `README.md` and (in the rca-autorl repo)
-`.doc/designs/llm-harness.md`.
+## Repo layout (quick map)
+
+```
+src/llmharness/          ← Core library (shipped in wheel)
+  atom.py                  Main adapter atom (MANIFEST: "llmharness")
+  schema.py                Public data types + entry-type constants
+  agents/extractor/        Extractor child (graph builder, 6 tools)
+  agents/auditor/          Auditor child (verdict emitter, 10 prompt variants)
+  replay/record.py         ReplayRecord dataclass + sidecar I/O
+  eval/telbench/           TELBench offline evaluation
+
+tools/                   ← Offline tooling (NOT in wheel, dev-only)
+  replay/                  llmharness-replay CLI + engine + chain + prefix-replay
+  distill/                 llmharness-distill CLI + oracle + causal mask + exporter
+  aggregate/               llmharness-aggregate CLI + case writer
+  extensions/              Reference audit checks (§11 atoms)
+```
+
+Design reference: see `README.md` for the full architecture and
+`docs/01-architecture.md` for dependency graph + runtime flow.
 
 <!-- auto-harness:begin -->
 ## Core principles
@@ -72,7 +89,7 @@ Secondary: simpler code that maps clearly to a requirement > clever abstractions
 - **Python**: 3.10+, `src/` layout, type hints required on every function in `src/`. `mypy --strict` is the gate.
 - **Lint/format**: `ruff` (no black, no isort, no flake8 — single tool).
 - **Hook scripts**: every `scripts/*.sh` must `set -euo pipefail` at the top. No bashisms beyond what shellcheck accepts.
-- **AgentM mount point**: this package's adapter (`llmharness.adapters.agentm`) is loaded onto a session via `agentm --extension llmharness.adapters.agentm`. There is no scenario manifest under this directory — keep it as a Python package + extension only.
+- **AgentM mount point**: the main atom (`llmharness.atom`) is loaded onto a session via `agentm --extension llmharness.atom` or by listing it in a scenario manifest. There is no scenario manifest under this directory — keep it as a Python package + extension only.
 - **No commits to main**: feature branches only. Use `gh` (HTTPS) for any GitHub operations — never ssh URLs.
 - **Schema stability**: `src/llmharness/schema.py` is a public contract for rca-autorl. Breaking changes require bumping `version` in `pyproject.toml` and a note in the requirement description. v3 (issue #134) introduced `Edge`/`EdgeKind`/`Finding` as first-class records, removed `Event.refs`, renamed `EventKind` values to short forms, and added the `llmharness.audit_registry` service — all breaking from v2.
 - **No silent failures in hooks**: hook scripts may fail-open (return 0) on unrecognized payloads, but only after `parse_hook_payload` returns `None` — never via blanket `try/except`.

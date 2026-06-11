@@ -2,7 +2,7 @@
 
 Three concerns — **extractor**, **auditor**, **reminder injection** —
 are decoupled at the function/composer layer and re-wired only by
-`adapters/agentm.py`. This doc spells out which knobs flip which
+`atom.py`. This doc spells out which knobs flip which
 piece, how to run them separately, how to combine them, and where to
 plug an SFT-trained model.
 
@@ -14,16 +14,16 @@ If you only want a quick mental model: read §1 and skim §5.
 
 | Piece | Composer | Where it runs | Inputs | Outputs |
 |---|---|---|---|---|
-| Extractor | `audit/extractor/extensions.py: compose_extractor_extensions` | child session (live: `spawn_child_session`; offline: `tools/engine.py: run_phase_standalone`) | trajectory window `{new_turns, recent_graph}` | `events[] + edges[]` written into the parent session entry tree + replay sidecar |
-| Auditor | `audit/auditor/extensions.py: compose_auditor_extensions` | child session, same two execution paths | `{events, edges, phases, findings, continuation_notes}` — **graph only**, trajectory used only by the optional `get_turn` drill-down tool | `Verdict` (incl. `surface_reminder?`) into entry tree + sidecar |
-| Reminder injection | `adapters/agentm.py:_make_reminder_injector` (live) and `replay/reminder_seed.py` (offline / prefix-replay) | on the **main** agent's bus via `DecideTurnActionEvent` → `Inject([reminder_msg])` | the `surface_reminder` text from a Verdict | one synthetic user message + `REMINDER_DELIVERED` entry |
+| Extractor | `agents/extractor/ (scenario manifest + context + tools)` | child session (live: `spawn_child_session`; offline: `tools/engine.py: run_phase_standalone`) | trajectory window `{new_turns, recent_graph}` | `events[] + edges[]` written into the parent session entry tree + replay sidecar |
+| Auditor | `agents/auditor/ (scenario manifest + context + tools)` | child session, same two execution paths | `{events, edges, phases, findings, continuation_notes}` — **graph only**, trajectory used only by the optional `get_turn` drill-down tool | `Verdict` (incl. `surface_reminder?`) into entry tree + sidecar |
+| Reminder injection | `atom.py:_make_reminder_injector` (live) and `replay/reminder_seed.py` (offline / prefix-replay) | on the **main** agent's bus via `DecideTurnActionEvent` → `Inject([reminder_msg])` | the `surface_reminder` text from a Verdict | one synthetic user message + `REMINDER_DELIVERED` entry |
 
 The single source of truth for the reminder message shape is
-`audit/_reminder_format.py: build_reminder_message`; both call sites
+`atom.py: REMINDER_PREAMBLE constant`; both call sites
 import from there so train-time and inference-time messages stay
 byte-identical.
 
-### Live adapter knobs (`adapters/agentm.py`)
+### Live adapter knobs (`atom.py`)
 
 | Config key | Default | Effect |
 |---|---|---|
@@ -43,7 +43,7 @@ the adapter because auditor depends on the graph it builds.
 
 ```bash
 agentm --cwd "$RUN_DIR" \
-       --extension 'llmharness.adapters.agentm:{"enable_auditor":false,"enable_reminders":false,"enable_replay_log":true}' \
+       --extension 'llmharness.atom:{"enable_auditor":false,"enable_reminders":false,"enable_replay_log":true}' \
        "<your prompt>"
 ```
 
@@ -59,7 +59,7 @@ Produces `<RUN_DIR>/.agentm/audit_replay/<sid>.jsonl` containing only
 ```bash
 llmharness-replay extractor \
     --record runs/.../audit_replay/<sid>.jsonl:7    # turn_index=7
-    --prompt audit/extractor/prompts/<variant>.md
+    --prompt agents/extractor/prompt.py variants: <variant>.md
     --provider 'openai:{"model":"gpt-4o"}'
 ```
 
@@ -73,7 +73,7 @@ extractor sidecar can feed it.
 ```bash
 llmharness-replay auditor \
     --record runs/.../audit_replay/<sid>.jsonl:11
-    --prompt audit/auditor/prompts/<variant>.md
+    --prompt agents/auditor/prompt.py variants: <variant>.md
     --provider 'openai:{"model":"gpt-4o"}'
 ```
 
@@ -124,7 +124,7 @@ unchanged.
 Default mode — every knob defaults to `true`:
 
 ```bash
-agentm --extension llmharness.adapters.agentm -p "<prompt>"
+agentm --extension llmharness.atom -p "<prompt>"
 ```
 
 For data collection (live full pipeline, no reminder side-effects on
@@ -135,7 +135,7 @@ LLMHARNESS_DISTILL_SAMPLE_ID="$SAMPLE_ID" \
 LLMHARNESS_DISTILL_DATASET="$DATASET_PATH" \
   agentm --cwd "$RUN_DIR" \
          --scenario rca \
-         --extension 'llmharness.adapters.agentm:{"enable_reminders":false,"enable_auditor":true,"enable_replay_log":true,"audit_interval_turns":3}' \
+         --extension 'llmharness.atom:{"enable_reminders":false,"enable_auditor":true,"enable_replay_log":true,"audit_interval_turns":3}' \
          --extension llmharness.distill.binding \
          "$PROMPT"
 ```
@@ -165,7 +165,7 @@ SFT'd 4B can drop into any one of them.
 Wire those into the unified `--extension` flag:
 
 ```bash
-agentm --extension 'llmharness.adapters.agentm:{
+agentm --extension 'llmharness.atom:{
   "extractor_provider": {"module":"openai","config":{"base_url":"http://vllm:8000","model":"sft-extractor-4b"}},
   "auditor_provider":   {"module":"openai","config":{"base_url":"http://vllm:8000","model":"sft-auditor-4b"}}
 }' "<prompt>"
