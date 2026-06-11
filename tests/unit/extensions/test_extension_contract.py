@@ -418,13 +418,13 @@ def test_validate_atom_package_clean_package_passes(tmp_path: Path) -> None:
 
     pkg_dir = _make_package(tmp_path, {
         "__init__.py": (
-            "from agentm.core.abi.extension import ExtensionAPI\n"
+            "from agentm.core.abi import ExtensionAPI\n"
             "from .worker import helper\n"
             "def install(api, config): pass\n"
         ),
         "worker.py": (
             "import json\n"
-            "from agentm.core.lib.render import final_summary\n"
+            "from agentm.core.lib import to_jsonable\n"
             "def helper(): pass\n"
         ),
     })
