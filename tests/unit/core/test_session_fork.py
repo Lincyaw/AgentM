@@ -109,3 +109,36 @@ class TestFork:
         store = JsonlSessionStore(session_dir=tmp_path)
         with pytest.raises(FileNotFoundError):
             store.fork("nonexistent")
+
+    def test_session_config_persists_and_reloads(self, tmp_path: Path) -> None:
+        mgr = SessionManager(cwd=str(tmp_path), session_dir=tmp_path, persist=True)
+        mgr.set_session_config({
+            "scenario": "rca:baseline",
+            "provider": ["agentm.extensions.builtin.llm_openai", {"model": "test"}],
+            "extensions": [["mod.a", {"k": "v"}]],
+        })
+
+        reloaded = SessionManager.open(mgr.session_file)  # type: ignore[arg-type]
+        header = reloaded.get_header()
+        assert header is not None
+        assert header.config is not None
+        assert header.config["scenario"] == "rca:baseline"
+        assert header.config["provider"][1]["model"] == "test"
+        assert header.config["extensions"] == [["mod.a", {"k": "v"}]]
+
+    def test_fork_inherits_source_config(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path)
+        source.set_session_config({"scenario": "rca:baseline", "custom": "data"})
+
+        store = JsonlSessionStore(session_dir=tmp_path)
+        forked = store.fork(source.get_session_id(), up_to=2)
+
+        # Forked session gets its own header (parent_session set), but
+        # does NOT copy the source's config — it's a new session that
+        # will get its own config when create_agent_session runs.
+        header = forked.get_header()
+        assert header is not None
+        assert header.parent_session == source.get_session_id()
+        # The source's config is still readable for the CLI to use as defaults
+        source_reloaded = store.open(source.get_session_id())
+        assert source_reloaded.get_header().config["scenario"] == "rca:baseline"  # type: ignore[index]

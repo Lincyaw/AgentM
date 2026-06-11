@@ -89,6 +89,7 @@ def _infer_cwd_from_log(file_path: Path) -> str | None:
 
 
 def _header_from_record(record: dict[str, Any]) -> SessionHeader:
+    raw_config = record.get("config")
     return SessionHeader(
         type="session",
         version=int(record.get("version", CURRENT_SESSION_VERSION)),
@@ -100,6 +101,7 @@ def _header_from_record(record: dict[str, Any]) -> SessionHeader:
             if record.get("parent_session") is not None
             else None
         ),
+        config=raw_config if isinstance(raw_config, dict) else None,
     )
 
 
@@ -346,6 +348,23 @@ class SessionManager:
             SessionHeaderEmittedEvent(record=_header_to_record(self._header)),
         )
         return str(self._session_file) if self._session_file is not None else None
+
+    def set_session_config(self, config: dict[str, Any]) -> None:
+        """Persist resolved session config (scenario, provider, extensions, env).
+
+        Replaces the header with an updated copy and re-emits it so the
+        JSONL on disk carries the config. Called by the session factory
+        after extension resolution — framework-level, no atom involvement.
+        """
+        from dataclasses import replace as _replace
+
+        if self._header is None:
+            return
+        self._header = _replace(self._header, config=config)
+        self._emit(
+            SessionHeaderEmittedEvent.CHANNEL,
+            SessionHeaderEmittedEvent(record=_header_to_record(self._header)),
+        )
 
     def _load(self) -> None:
         """Reconstruct in-memory state from the merged OTLP/JSON event log.

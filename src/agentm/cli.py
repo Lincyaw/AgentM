@@ -357,6 +357,14 @@ def _resolve_session_state(
         ) from exc
 
 
+def _get_stored_session_config(session_state: Any) -> dict[str, Any] | None:
+    """Read the persisted session config from a resumed/forked session."""
+    header = getattr(session_state, "get_header", lambda: None)()
+    if header is None:
+        return None
+    return getattr(header, "config", None)
+
+
 def _make_install_warner() -> Any:
     def _on_install(event: ExtensionInstallEvent) -> None:
         if event.phase != "error":
@@ -483,13 +491,26 @@ def _build_session_config(
         fork_up_to=config.fork_up_to,
         session_store=store,
     )
+
+    # Restore config from source session for fork/resume when not
+    # explicitly overridden on the CLI.
+    stored = _get_stored_session_config(session_state)
+    scenario = config.scenario
+    if scenario is None and stored:
+        scenario = stored.get("scenario")
+    provider_to_use = config.provider
+    if stored and stored.get("provider") and config.profile is None:
+        stored_prov = stored["provider"]
+        if isinstance(stored_prov, list) and len(stored_prov) == 2:
+            provider_to_use = provider_to_use or stored_prov[1].get("name", config.provider)
+
     try:
         if config.profile is not None:
             build_config = config.profile.to_build_config()
         else:
             build_config = {"model": config.model}
         apply_reasoning_effort(build_config, config.reasoning_effort)
-        provider_spec = provider_registry.build(config.provider, build_config)
+        provider_spec = provider_registry.build(provider_to_use, build_config)
     except KeyError as exc:
         raise typer.BadParameter(str(exc)) from exc
     from agentm.core.runtime.resource_loader import DefaultResourceLoader
@@ -514,7 +535,7 @@ def _build_session_config(
         AgentSessionConfig(
             cwd=config.cwd,
             provider=provider_spec,
-            scenario=config.scenario,
+            scenario=scenario,
             extra_extensions=config.extra_extensions,
             atom_config_overrides=config.atom_config_overrides,
             no_extensions=config.no_extensions,
