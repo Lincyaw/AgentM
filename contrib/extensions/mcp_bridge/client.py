@@ -17,7 +17,7 @@ import os
 import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 
 # --- Config dataclasses ----------------------------------------------------
@@ -265,7 +265,7 @@ class MCPSessionManager:
         self._servers.clear()
 
 
-__all__ = [
+__all__: Final = [
     "HttpServerSpec",
     "MCPSessionManager",
     "ServerSpec",

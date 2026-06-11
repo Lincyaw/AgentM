@@ -10,7 +10,7 @@ rationale.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, Field
 
@@ -57,4 +57,4 @@ MANIFEST = ExtensionManifest(
 )
 
 
-__all__ = ["MANIFEST", "MCPBridgeConfig"]
+__all__: Final = ["MANIFEST", "MCPBridgeConfig"]

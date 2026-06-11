@@ -7,7 +7,7 @@ package module as a compatibility shim that installs both.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import ExtensionAPI
 
@@ -22,7 +22,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     install_browse(api, ToolCatalogBrowseConfig.model_validate(config))
     install_mutate(api, ToolCatalogMutateConfig.model_validate(config))
 
-__all__ = [
+__all__: Final = [
     "BROWSE_MANIFEST",
     "MUTATE_MANIFEST",
     "install",

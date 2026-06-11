@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import ImageContent, TextContent, ToolResult
 
@@ -153,4 +153,4 @@ def _translate_content_blocks(
     return out
 
 
-__all__ = ["MCPTool", "_translate_content_blocks"]
+__all__: Final = ["MCPTool", "_translate_content_blocks"]
