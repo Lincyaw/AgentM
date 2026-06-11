@@ -66,7 +66,7 @@ def install(api: ExtensionAPI, config: dict) -> None:
     if not isinstance(registry, AuditCheckRegistry):
         raise RuntimeError(
             "audit registry service not published; "
-            "mount llmharness.adapters.agentm first"
+            "mount llmharness.atom first"
         )
     registry.register_check(_FooCheck())
 ```
@@ -75,7 +75,7 @@ Mount:
 
 ```bash
 agentm \
-  --extension llmharness.adapters.agentm \
+  --extension llmharness.atom \
   --extension my_pkg.check_foo
 ```
 

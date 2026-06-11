@@ -105,8 +105,8 @@ Simple wrapper for an injection payload. `Reminder(text=str)`.
 
 ## 2. Session-entry types (live persistence)
 
-Persisted on the AgentM session entry tree by the adapter. Names
-live in `audit/entry_types.py`; payloads are `<X>.to_dict()`.
+Persisted on the AgentM session entry tree by the adapter. Entry-type
+constants live in `schema.py`; payloads are `<X>.to_dict()`.
 
 | Entry type | Payload | Written when |
 |---|---|---|

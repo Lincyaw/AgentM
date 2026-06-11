@@ -5,7 +5,7 @@ without touching code:
 
 | Knob | Picks | Where it lives |
 |---|---|---|
-| **profile** | tool set (which `register_tool`s the child mounts) | `audit/auditor/profiles.py` |
+| **profile** | tool set (which `register_tool`s the child mounts) | `agents/auditor/prompt.py` |
 | **prompt** | framing text | `audit/<phase>/prompts/*.md` |
 
 The two are intentionally orthogonal — you can pair the `minimal`
@@ -23,8 +23,8 @@ framing helps even without drill-down), or vice versa.
 All four knobs are read at adapter install time:
 
 ```bash
-agentm --extension llmharness.adapters.agentm \
-  --extension-config llmharness.adapters.agentm='{
+agentm --extension llmharness.atom \
+  --extension-config llmharness.atom='{
     "extractor_prompt": "default",
     "auditor_profile":  "minimal",
     "auditor_prompt":   "minimal"
@@ -33,10 +33,10 @@ agentm --extension llmharness.adapters.agentm \
 
 | Key | Default | Effect |
 |---|---|---|
-| `extractor_prompt` | `"default"` | Named variant (file under `audit/extractor/prompts/`) or absolute path. |
-| `auditor_profile` | `"minimal"` | Resolves to a tool tuple from `audit/auditor/profiles.py::PROFILES`. |
+| `extractor_prompt` | `"default"` | Named variant (file under `agents/extractor/ (prompt variants in prompt.py): `) or absolute path. |
+| `auditor_profile` | `"minimal"` | Resolves to a tool tuple from `agents/auditor/prompt.py::PROFILES`. |
 | `auditor_tools` | `null` | Explicit list overriding the profile. `submit_verdict` is force-included. |
-| `auditor_prompt` | `"minimal"` | Named variant (file under `audit/auditor/prompts/`) or absolute path. |
+| `auditor_prompt` | `"minimal"` | Named variant (file under `agents/auditor/ (prompt variants in prompt.py): `) or absolute path. |
 
 The legacy `prompt_override_extractor` / `prompt_override_auditor`
 keys still work and trump the named lookup — pass raw text when you
@@ -61,13 +61,13 @@ bound for larger teacher models.
 
 ## 3. Built-in prompts
 
-### Extractor (`audit/extractor/prompts/`)
+### Extractor (`agents/extractor/ (prompt variants in prompt.py): `)
 
 | Name | When to use |
 |---|---|
 | `default` | Production prompt; covers EventKind classification, witness rules, procedure. |
 
-### Auditor (`audit/auditor/prompts/`)
+### Auditor (`agents/auditor/ (prompt variants in prompt.py): `)
 
 | Name | When to use |
 |---|---|
@@ -91,7 +91,7 @@ for.
 
 ### New tool profile
 
-Edit `audit/auditor/profiles.py` (or the extractor sibling) and add
+Edit `agents/auditor/prompt.py` (or the extractor sibling) and add
 an entry to `PROFILES`:
 
 ```python
@@ -105,18 +105,18 @@ That's it. The resolver picks it up by name. No other code changes.
 
 ### New prompt variant
 
-Drop a markdown file under `audit/auditor/prompts/` (or
-`audit/extractor/prompts/`) named `<phase>_<variant>.md` — e.g.
+Drop a markdown file under `agents/auditor/ (prompt variants in prompt.py): ` (or
+`agents/extractor/ (prompt variants in prompt.py): `) named `<phase>_<variant>.md` — e.g.
 `auditor_terse.md`. Reference it as:
 
 ```bash
---extension-config llmharness.adapters.agentm='{"auditor_prompt": "terse"}'
+--extension-config llmharness.atom='{"auditor_prompt": "terse"}'
 ```
 
 Or use an absolute path:
 
 ```bash
---extension-config llmharness.adapters.agentm='{"auditor_prompt": "/abs/path/to/my_prompt.md"}'
+--extension-config llmharness.atom='{"auditor_prompt": "/abs/path/to/my_prompt.md"}'
 ```
 
 The loader resolves `<name>.md` first, then `<phase>_<name>.md`.
