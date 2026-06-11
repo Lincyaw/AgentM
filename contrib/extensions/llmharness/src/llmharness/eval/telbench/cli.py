@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -122,6 +121,9 @@ def telbench(
     auditor_prompt: Annotated[
         str, typer.Option("--auditor-prompt", help="Auditor prompt variant name")
     ] = "telbench",
+    concurrency: Annotated[
+        int, typer.Option("--concurrency", "-j", help="Max parallel instances")
+    ] = 1,
 ) -> None:
     """Run TELBench evaluation with the cognitive-audit pipeline."""
     if mode not in ("posthoc", "online"):
@@ -149,47 +151,63 @@ def telbench(
 
     resolved_provider = _resolve_provider(provider, model_name=model)
     resolved_cwd = str(cwd.resolve())
+    total = len(instances)
+    typer.echo(f"Running {total} instances with concurrency={concurrency}")
 
     eval_mode: Any = mode
 
-    instance_scores: list[SpanScores] = []
-    output_lines: list[str] = []
+    async def _run_all() -> tuple[list[SpanScores], list[str]]:
+        sem = asyncio.Semaphore(concurrency)
+        scores: list[SpanScores | None] = [None] * total
+        lines: list[str | None] = [None] * total
+        done_count = 0
 
-    for idx, inst in enumerate(instances):
-        typer.echo(
-            f"\n[{idx + 1}/{len(instances)}] {inst.id} ({len(inst.spans)} spans) ...", nl=False
+        async def _run_one(idx: int, inst: Any) -> None:
+            nonlocal done_count
+            async with sem:
+                inst_cwd = str(Path(resolved_cwd) / f"inst-{inst.id}")
+                Path(inst_cwd).mkdir(parents=True, exist_ok=True)
+                try:
+                    result = await evaluate_instance(
+                        inst,
+                        mode=eval_mode,
+                        provider=resolved_provider,
+                        cwd=inst_cwd,
+                        extractor_interval=extractor_interval,
+                        audit_interval=audit_interval,
+                        auditor_prompt=auditor_prompt,
+                    )
+                    scores[idx] = result.scores
+                    done_count += 1
+                    fea = "Y" if result.scores.first_error_accurate else "N"
+                    typer.echo(
+                        f"  [{done_count}/{total}] {inst.id} "
+                        f"P={result.scores.precision:.3f} R={result.scores.recall:.3f} "
+                        f"F1={result.scores.f1:.3f} FEA={fea}"
+                    )
+                    if output is not None:
+                        lines[idx] = json.dumps({
+                            "instance_id": result.instance_id,
+                            "predicted_error_indices": sorted(result.predicted_error_indices),
+                            "gold_error_indices": sorted(result.gold_error_indices),
+                            "n_spans": result.n_spans,
+                            "precision": result.scores.precision,
+                            "recall": result.scores.recall,
+                            "f1": result.scores.f1,
+                            "first_error_accurate": result.scores.first_error_accurate,
+                            "n_verdicts": len(result.verdicts),
+                        }, ensure_ascii=False)
+                except Exception as exc:
+                    done_count += 1
+                    typer.echo(f"  [{done_count}/{total}] {inst.id} ERROR: {exc}", err=True)
+
+        await asyncio.gather(*[_run_one(i, inst) for i, inst in enumerate(instances)])
+        return (
+            [s for s in scores if s is not None],
+            [ln for ln in lines if ln is not None],
         )
-        sys.stdout.flush()
-        try:
-            result = asyncio.run(
-                evaluate_instance(
-                    inst,
-                    mode=eval_mode,
-                    provider=resolved_provider,
-                    cwd=resolved_cwd,
-                    extractor_interval=extractor_interval,
-                    audit_interval=audit_interval,
-                    auditor_prompt=auditor_prompt,
-                )
-            )
-            instance_scores.append(result.scores)
-            typer.echo(f"  {_format_scores(result.scores)}")
 
-            if output is not None:
-                record = {
-                    "instance_id": result.instance_id,
-                    "predicted_error_indices": sorted(result.predicted_error_indices),
-                    "gold_error_indices": sorted(result.gold_error_indices),
-                    "n_spans": result.n_spans,
-                    "precision": result.scores.precision,
-                    "recall": result.scores.recall,
-                    "f1": result.scores.f1,
-                    "first_error_accurate": result.scores.first_error_accurate,
-                    "n_verdicts": len(result.verdicts),
-                }
-                output_lines.append(json.dumps(record, ensure_ascii=False))
-        except Exception as exc:
-            typer.echo(f"  ERROR: {exc}", err=True)
+    instance_scores, output_lines = asyncio.run(_run_all())
 
     if output is not None and output_lines:
         output.parent.mkdir(parents=True, exist_ok=True)

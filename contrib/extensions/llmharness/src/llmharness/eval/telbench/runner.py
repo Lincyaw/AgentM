@@ -63,7 +63,6 @@ async def evaluate_instance(
         eff_extractor_interval = extractor_interval
         eff_audit_interval = audit_interval
 
-    session_id = f"telbench-{instance.id}"
     ext_scenario = extractor_scenario()
     aud_scenario = auditor_scenario()
 
