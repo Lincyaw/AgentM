@@ -237,10 +237,8 @@ async def install(api: ExtensionAPI, config: PromptLoaderConfig) -> None:
     def _inject_prompt(event: BeforeAgentStartEvent) -> dict[str, str] | None:
         if not cached_system:
             return None
-        existing = event.system or ""
-        merged = f"{cached_system}\n\n{existing}" if existing else cached_system
-        event.system = merged
-        return {"system": merged}
+        event.system = cached_system
+        return {"system": cached_system}
 
     def _resolve(payload: Any) -> dict[str, Any] | None:
         if not enable_personas:

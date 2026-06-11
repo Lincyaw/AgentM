@@ -2,6 +2,8 @@
 # Restricted to scenario-local skills (include_defaults: false, inherit_claude: false).
 extensions:
   - module: rca.default.worker_skills
+    config:
+      subdir: curated/diagnose-sql
   - module: agentm.extensions.builtin.skill_loader
     config:
       include_defaults: false

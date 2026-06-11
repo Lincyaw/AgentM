@@ -11,5 +11,6 @@ extensions:
   - module: rca.default.rcabench_contract
   - module: rca.default.prompt_loader
     config:
-      prompt: investigator.md
+      prompt: default/default.md
       personas: false
+  - module: agentm.extensions.builtin.tool_index

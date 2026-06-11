@@ -59,7 +59,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import duckdb  # type: ignore[import-not-found,import-untyped]
 
@@ -727,4 +727,4 @@ def install(api: ExtensionAPI, config: DuckdbSqlConfig) -> None:
         )
     )
 
-__all__ = ["MANIFEST", "install"]
+__all__: Final = ["MANIFEST", "install"]

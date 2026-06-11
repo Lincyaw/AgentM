@@ -547,8 +547,10 @@ async def run(
         config, bus=bus, loop_config=loop_config,
     )
     if not config.quiet and session_manager.session_file is not None:
+        sid = session_manager.get_session_id()
         print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
-        print(f"INFO: session id: {session_manager.get_session_id()}", file=sys.stderr)
+        print(f"INFO: session id: {sid}", file=sys.stderr)
+        print(f"INFO: trace:  agentm trace messages --session {sid} --format text", file=sys.stderr)
 
     session = await AgentSession.create(session_config)
     try:
@@ -591,6 +593,10 @@ async def run(
         if sid:
             print(
                 f'session_id={sid}  (resume with: agentm --resume {sid} -p "<prompt>")',
+                file=output,
+            )
+            print(
+                f"trace:  agentm trace messages --session {sid} --format text",
                 file=output,
             )
     return 1 if diagnostic_state["error_seen"] else 0

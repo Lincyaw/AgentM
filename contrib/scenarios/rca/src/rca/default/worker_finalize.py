@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel
 
@@ -193,4 +193,4 @@ def install(api: ExtensionAPI, config: WorkerFinalizeConfig) -> None:
         )
     )
 
-__all__ = ["MANIFEST", "install"]
+__all__: Final = ["MANIFEST", "install"]

@@ -94,20 +94,23 @@ def _before_agent_start_to_otel(
     parent_ctx = _remote_parent_context(
         telemetry.obs_root_session_id, telemetry.obs_parent_session_id
     )
+    attrs: dict[str, str | None] = {
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.agent.name": scenario_label,
+        "gen_ai.conversation.id": session_id,
+        "agentm.session.id": session_id,
+        "agentm.session.root_id": telemetry.obs_root_session_id,
+        "agentm.session.parent_id": telemetry.obs_parent_session_id,
+        "agentm.session.purpose": telemetry.obs_purpose,
+        "agentm.session.scenario": telemetry.obs_scenario,
+    }
+    if self.system:
+        attrs["agentm.system_prompt"] = self.system
     span = telemetry.tracer.start_span(
         f"invoke_agent {scenario_label}",
         context=parent_ctx,
         kind=SpanKind.INTERNAL,
-        attributes={
-            "gen_ai.operation.name": "invoke_agent",
-            "gen_ai.agent.name": scenario_label,
-            "gen_ai.conversation.id": session_id,
-            "agentm.session.id": session_id,
-            "agentm.session.root_id": telemetry.obs_root_session_id,
-            "agentm.session.parent_id": telemetry.obs_parent_session_id,
-            "agentm.session.purpose": telemetry.obs_purpose,
-            "agentm.session.scenario": telemetry.obs_scenario,
-        },
+        attributes=attrs,
     )
     telemetry.open_span(_SPAN_INVOKE_AGENT, session_id, span)
 

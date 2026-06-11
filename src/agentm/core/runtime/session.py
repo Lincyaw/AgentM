@@ -622,7 +622,7 @@ class AgentSession:
         self._in_run = True
         try:
             messages = self._session_manager.build_session_context().messages
-            system_prompt = self._build_system_prompt()
+            system_prompt = ""
             before_returns = await self._bus.emit(
                 BeforeAgentStartEvent.CHANNEL,
                 BeforeAgentStartEvent(messages=messages, system=system_prompt),
@@ -829,26 +829,6 @@ class AgentSession:
 
     # --- Helpers ----------------------------------------------------------
 
-    def _build_system_prompt(self) -> str:
-        """Concatenate context files + skill names/descriptions.
-
-        Placeholder implementation (per design §4): full skill-body expansion
-        (lazy injection on invocation) is deferred to a later phase. For v0
-        we surface skill descriptions in the system prompt so the model knows
-        they exist.
-        """
-
-        parts: list[str] = []
-        for cf in self._resources.get_context_files():
-            parts.append(cf.body.rstrip())
-
-        skills = self._resources.get_skills()
-        if skills:
-            parts.append("# Available skills")
-            for skill in skills:
-                parts.append(f"- {skill.name}: {skill.description}")
-
-        return "\n\n".join(parts)
 
 
 __all__ = [

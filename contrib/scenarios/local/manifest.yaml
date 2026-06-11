@@ -10,8 +10,6 @@ extensions:
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.system_prompt
-    config:
-      prompt: ""
   - module: agentm.extensions.builtin.runtime_context
   - module: agentm.extensions.builtin.skill_loader
   - module: agentm.extensions.builtin.prompt_templates

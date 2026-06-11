@@ -25,27 +25,20 @@ Guide for querying OpenTelemetry observability data in DuckDB during root cause 
 All data comes in **paired tables**: `abnormal_*` (incident window) vs `normal_*` (baseline).
 An anomaly only exists if the delta between the two periods is significant.
 
-## Sub-Skills (load before querying)
+## Sub-skills (load before querying)
 
-| Skill path | Signal | Use when |
-|------------|--------|----------|
-| `traces.md` | Traces | Building topology, latency delta, error rates, span drill-down |
-| `logs.md` | Logs | Error scanning, pattern grouping, keyword search, log-trace joins |
-| `metrics.md` | Metrics | Resource health scan (MANDATORY per service), JVM, DB pools, network |
-| `correlation.md` | Cross-signal | Choosing entry signal, cause vs victim, cross-signal reasoning |
+| Name | Signal | Use when |
+|------|--------|----------|
+| `traces` | Traces | Building topology, latency delta, error rates, span drill-down |
+| `logs` | Logs | Error scanning, pattern grouping, keyword search, log-trace joins |
+| `metrics` | Metrics | Resource health scan (MANDATORY per service), JVM, DB pools, network |
+| `correlation` | Cross-signal | Choosing entry signal, cause vs victim, cross-signal reasoning |
 
-**IMPORTANT**: This index provides ground rules only. The sub-skills contain actual SQL recipes
-with correct column names, JOIN patterns, and standard filters. **Load the sub-skill matching
-your primary signal BEFORE writing your first query for that signal type.** Ad-hoc SQL without
-consulting the recipes is the #1 cause of measurement errors.
-
-**No signal has priority.** Traces, logs, and metrics are equal investigative channels.
-Which to start with depends on what lead you have — see `correlation.md` (in this skill
-directory) for guidance on choosing your entry signal.
-
-The signal-specific recipes are sibling files under the same skill directory:
-`traces.md`, `metrics.md`, `logs.md`, `correlation.md`. The skill loader injects them
-alongside this entry, so you can reference them directly without a vault lookup.
+**IMPORTANT**: This index provides ground rules only. The sub-skills contain
+actual SQL recipes with correct column names, JOIN patterns, and standard filters.
+**Call `load_skill` with the sub-skill name (e.g. `traces`) BEFORE writing your
+first query for that signal type.** Ad-hoc SQL without consulting the recipes is
+the #1 cause of measurement errors.
 
 ## Ground Rules
 
