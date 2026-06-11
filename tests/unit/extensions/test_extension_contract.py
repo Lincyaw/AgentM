@@ -346,6 +346,25 @@ def test_build_reachability_graph_handles_cycle(tmp_path: Path) -> None:
     assert {"__init__.py", "a.py", "b.py"} == reachable_names
 
 
+def test_build_reachability_graph_from_dot_import(tmp_path: Path) -> None:
+    """``from . import agents, commands`` resolves each name to its module."""
+
+    pkg_dir = _make_package(tmp_path, {
+        "__init__.py": "from . import agents, commands\ndef install(api, config): pass\n",
+        "agents.py": "x = 1\n",
+        "commands.py": "y = 2\n",
+        "unreachable.py": "z = 3\n",
+    })
+    init_file = pkg_dir / "__init__.py"
+    reachable = _build_reachability_graph(init_file, pkg_dir)
+
+    reachable_names = {p.name for p in reachable}
+    assert "__init__.py" in reachable_names
+    assert "agents.py" in reachable_names
+    assert "commands.py" in reachable_names
+    assert "unreachable.py" not in reachable_names
+
+
 def test_validate_atom_package_catches_forbidden_import_in_reachable(tmp_path: Path) -> None:
     """A forbidden import in a reachable file is flagged."""
 

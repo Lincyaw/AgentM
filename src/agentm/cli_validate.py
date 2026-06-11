@@ -1,7 +1,7 @@
 """``agentm validate`` subcommand -- check S11 atom contract compliance.
 
 ``agentm validate all``
-  Discover and validate builtin + contrib + home atoms.
+  Discover and validate builtin + contrib atoms.
 
 ``agentm validate file <path>...``
   Validate specific atom files.
@@ -32,12 +32,6 @@ app = typer.Typer(
 )
 
 
-def _format_issue(issue: ValidationIssue, *, path: str = "") -> str:
-    """Format one issue in ruff-style ``path:line: rule message`` form."""
-    prefix = f"{path}: " if path else ""
-    return f"{prefix}{issue.rule} {issue.message}"
-
-
 def _print_issues(issues: list[ValidationIssue]) -> int:
     """Print issues and return exit code (0 = clean, 1 = violations)."""
     if not issues:
@@ -60,7 +54,7 @@ def _print_issues(issues: list[ValidationIssue]) -> int:
 
 @app.command(name="all")
 def validate_all() -> None:
-    """Discover and validate all builtin + contrib + home atom packages."""
+    """Discover and validate all builtin + contrib atom packages."""
     all_issues: list[ValidationIssue] = []
 
     # Builtin atoms (single-file).
