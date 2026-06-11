@@ -1,302 +1,322 @@
 # llmharness
 
 LLM-as-harness for AgentM: a two-phase cognitive audit pipeline
-(extractor + auditor) that supervises a main agent, plus an offline
-distill workflow that turns recorded sessions into SFT data for
-training a small (~4B) model into the same harness role.
+(extractor + auditor) that supervises a main agent, plus offline
+tooling for replay, distill (SFT data generation), evaluation, and
+case aggregation.
 
-## Two product surfaces
+Version 0.6.0 &middot; Python &ge;3.12 &middot; `uv` only
 
-1. **Live supervision.** Mount the adapter onto a session; every
-   `TurnEnd` triggers an extractor child (graph builder), every k
-   turns triggers an auditor child (verdict producer). The auditor's
-   verdict, if it says so, is injected as a one-line advisory before
-   the next agent turn.
+## What it does
 
-   ```bash
-   agentm --extension llmharness.adapters.agentm
-   ```
+An agent running an investigation (or any multi-turn task) can drift —
+follow dead leads, forget earlier findings, converge prematurely.
+llmharness watches the agent's turns and periodically:
 
-2. **Distill data collection.** Run the live pipeline with reminders
-   off + sample-id binding to record clean trajectories, then run
-   `llmharness-distill {label, export}` offline to produce
-   `extractor.jsonl` + `auditor.jsonl` SFT files.
+1. **Extracts** a logic-flow graph from the conversation (nodes =
+   semantic events like hypotheses / actions / decisions; edges =
+   causal or referential links with witness citations).
+2. **Audits** the graph for reasoning faults (drift, blind spots,
+   premature conclusions) and optionally injects a one-line reminder
+   into the main agent's next turn.
 
-   ```bash
-   LLMHARNESS_DISTILL_SAMPLE_ID=<id> \
-   LLMHARNESS_DISTILL_DATASET=<dataset.jsonl> \
-     agentm --extension llmharness.adapters.agentm \
-            --extension llmharness.distill.binding \
-            --scenario rca ...
-
-   llmharness-distill label  --replay-dir <cwd>/.agentm/audit_replay \
-                             --dataset    <dataset.jsonl> \
-                             --out        ./distill_labels
-   llmharness-distill export --labels ./distill_labels \
-                             --replay-dir <cwd>/.agentm/audit_replay \
-                             --out  ./sft
-   ```
-
-## Mounting on a scenario (consumer's view)
-
-### Manifest entries
-
-A scenario opts into llmharness by adding the adapter (and optionally the
-sample-id binding) to its manifest. There is **no** name-based detection —
-nothing keys off the scenario name containing "harness"; the wiring is
-purely manifest-driven.
-
-```yaml
-# contrib/scenarios/<your-scenario>/manifest.<variant>.yaml
-extensions:
-  # ... your scenario's atoms ...
-
-  - module: llmharness.adapters.agentm
-    config:
-      mode: sync                       # or "async"
-      extractor_interval_turns: 5
-      audit_interval_turns: 5
-      enable_auditor: true             # default true
-      enable_reminders: true           # default true; false = opinions-only
-
-  # Optional: write the distill-binding sidecar so offline labeler can join
-  # replay records back to a sample id (driven by LLMHARNESS_DISTILL_* env).
-  - module: llmharness.distill.binding
-
-  # Optional: enable the prefix-replay flow (mounted only on resumed
-  # sessions emitted by `llmharness-replay agent-from-reminder`).
-  - module: llmharness.replay.reminder_seed
-```
-
-Adapter knobs are documented in
-[docs/08-running-modes.md §1](docs/08-running-modes.md#1-decoupling-matrix).
-For a concrete reference, see the rca scenario's
-`contrib/scenarios/rca/manifest.harness*.yaml` family +
-`contrib/scenarios/rca/_VARIANTS.md` for the variant matrix.
-
-### Public API
-
-Importable from the top-level package only — everything else is internal.
-Promote a symbol to the top level on demand when an in-tree caller needs
-it (see `src/llmharness/__init__.py` for the contract).
-
-| Symbol | Purpose |
-|---|---|
-| `Event`, `EventKind`, `Edge`, `EdgeKind`, `Finding`, `Phase`, `Verdict`, `Reminder` | Wire-type dataclasses (see [docs/02-schemas.md](docs/02-schemas.md)). |
-| `ReplayRecord`, `iter_records`, `write_record` | Replay sidecar format and I/O. |
-| `ChainSegment`, `ChainSegmentPayload`, `ChainedForkExperiment`, `SessionFactory`, `run_chained_fork_experiment`, `write_chained_replay`, `chained_replay_path` | Chained-fork experiment orchestration. Used by the rca eval driver. |
-
-Atom authors who write new audit checks (rare) additionally import
-`SERVICE_KEY`, `AuditCheckRegistry`, and `CheckContext` from
-`llmharness.audit.registry` — the one documented submodule import,
-covered in [docs/04-extending.md §1](docs/04-extending.md).
-
-### Events the adapter subscribes to
-
-The adapter binds three handlers on the main agent's `EventBus`:
-
-| Event | Handler | What it does |
-|---|---|---|
-| `TurnEndEvent` | `_on_turn_end` | Computes extractor / auditor due. Spawns extractor child (always when due); spawns auditor child (every k turns, only after a successful extractor firing). Persists results to the session entry tree and replay sidecar. |
-| `DecideTurnActionEvent` | `_on_decide` | If a verdict surfaced a reminder, returns an `Inject([reminder_msg])` action so the kernel re-opens the loop. |
-| `SessionShutdownEvent` | `_on_shutdown` | Drains pending audit work (async mode only) and closes the sidecar. |
-
-No tools are exposed to the main agent — model-visible surface is
-unchanged. The only main-agent side effect is the optional reminder
-injection, gated on `enable_reminders=true`.
-
-### What the auditor injects
-
-When `Verdict.surface_reminder=true`, the auditor's `reminder_text` is
-wrapped by `audit/_reminder_format.py:build_reminder_message` and
-injected as a synthetic user message before the next agent turn. Format
-is single-sourced so live and offline (prefix-replay) paths stay
-byte-identical. Verdicts always persist to the entry tree and sidecar;
-`enable_reminders=false` only suppresses delivery.
+Both the extractor and auditor run as AgentM child sessions with their
+own prompts, tools, and provider configs — the main agent's tool
+surface is unchanged.
 
 ---
 
-## Sequence diagrams
+## Quick start
 
-Three views of how the moving parts fit together. Read these before
-diving into `docs/01-architecture.md` if you prefer time-ordered to
-component-ordered narration.
+Mount llmharness onto any AgentM session:
 
-### 1. Live supervision per turn
-
-What the adapter does on every `TurnEndEvent` and how a surfaced
-reminder makes it back to the main agent.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Main as Main agent loop
-    participant Bus as EventBus
-    participant Adapter as Adapter adapters_agentm
-    participant Ext as Extractor child
-    participant Aud as Auditor child
-    participant Reg as AuditCheckRegistry
-    participant Repl as Replay sidecar
-    participant Entries as Session entry tree
-
-    Main->>Bus: TurnEnd(messages, turn_count)
-    Bus->>Adapter: _on_turn_end(event)
-    Note over Adapter: compute extractor_due and auditor_due
-    Note over Adapter: auditor_due forces extractor to run too
-
-    alt extractor_due
-        Adapter->>Adapter: scan branch, slice new-turn window
-        Adapter->>Ext: spawn child, prompt(payload)
-        Ext-->>Adapter: submit_events(events, refs)
-        Adapter->>Entries: append audit_event / audit_edge / extractor_cursor
-        Adapter->>Repl: write extractor record
-    end
-
-    opt auditor_due AND extractor_ok
-        Adapter->>Reg: run_all(CheckContext(events, edges))
-        Reg-->>Adapter: findings, check_errors
-        Adapter->>Aud: spawn child with composed prompt (graph + findings + notes)
-        Aud-->>Adapter: submit_verdict(verdict)
-        Adapter->>Entries: append verdict
-        Adapter->>Repl: write auditor record
-        opt verdict.surface_reminder
-            Adapter->>Adapter: pending_reminders.append(Reminder)
-        end
-    end
-
-    Main->>Bus: DecideTurnAction(default_action)
-    Bus->>Adapter: _on_decide(event)
-    alt pending_reminders AND default is Step or non-final Stop
-        Adapter-->>Main: Inject(reminder_msg)
-        Note right of Main: kernel extends messages and re-opens the loop
-        Adapter->>Entries: append reminder_delivered
-    else final-cause Stop (MaxTurns / SignalAborted)
-        Note over Adapter: warn + leave reminder pending (no safe re-open)
-    end
+```bash
+agentm --extension llmharness.atom --scenario <your-scenario> -p "..."
 ```
 
-Notes worth carrying in your head while reading the code:
+Or add it to a scenario manifest:
 
-- The **cursor** lives on the session entry tree (`extractor_cursor`),
-  not in the adapter — that's why a `_drain_extractor` returning
-  `False` (no_call/empty/error) silently holds the cursor and the next
-  firing re-tries the same window.
-- In **async mode** the same logic moves into a serial worker
-  (`_drain_queue`); the queue guarantees extractor-before-auditor
-  ordering, and if the preceding extractor held the cursor the
-  auditor for that turn is skipped (`_last_extractor_held_cursor`).
-- The reminder path goes through `Inject` rather than a direct
-  message append so that the prefix-replay seed atom
-  (`replay/reminder_seed.py`) and the live path stay byte-identical.
-
-### 2. Offline replay (A/B a recorded firing)
-
-What `llmharness-replay {extractor,auditor}` actually does. The
-sidecar is the contract: anything captured in `compose_kwargs` +
-`payload` can be re-run with a different provider/prompt.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant User
-    participant CLI as llmharness-replay
-    participant Sidecar as Replay sidecar JSONL
-    participant Runner as replay/runner.py
-    participant Engine as tools/engine.py
-    participant Child as Extractor or Auditor child
-
-    User->>CLI: replay extractor or auditor with overrides
-    CLI->>Sidecar: read one ReplayRecord
-    CLI->>Runner: replay_extractor_record / replay_auditor_record
-    Note over Runner: rebuild compose_extensions with recorded kwargs
-    Note over Runner: extractor mints fresh ExtractionState
-    Note over Runner: auditor reuses recorded graph payload
-    Runner->>Engine: run_phase_standalone(extensions, payload)
-    Engine->>Child: top-level session.prompt(payload)
-    Child-->>Engine: assistant messages and tool calls
-    Engine-->>Runner: PhaseResult(messages, output, status)
-    Runner-->>CLI: PhaseResult
-    CLI-->>User: print or diff output
+```yaml
+# contrib/scenarios/<your-scenario>/manifest.yaml
+extensions:
+  # ... your scenario's atoms ...
+  - module: llmharness.atom
+    config:
+      mode: async                      # or "sync"
+      extractor_interval_turns: 1      # extract every turn
+      audit_interval_turns: 3          # audit every 3 turns
+      enable_auditor: true
+      enable_reminders: true           # false = opinions-only, no injection
 ```
 
-The same machinery backs the **strict A/B fork**: the eval driver
-runs a no-auditor control session, then feeds each extractor
-sidecar line into `replay_auditor_record` to reconstruct what the
-auditor *would have* said, picks the first surfaced reminder, and
-forks a branch session that seeds it via
-`replay/reminder_seed.py`. See
-`contrib/scenarios/rca/src/agentm_rca/eval/agent.py` and
-`docs/07-prefix-replay.md`.
+For distill data collection (reminders off, with sample-id binding):
 
-### 3. Aggregation (one case = one viewable folder)
+```bash
+LLMHARNESS_DISTILL_SAMPLE_ID=<id> \
+LLMHARNESS_DISTILL_DATASET=<dataset.jsonl> \
+  agentm --extension llmharness.atom \
+         --extension llmharness.distill.binding \
+         --scenario rca ...
 
-How `llmharness-aggregate` turns the per-session sidecar into the
-shape the web case viewer / training-data export expect.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant User
-    participant CLI as llmharness-aggregate
-    participant Sidecar as Replay sidecar JSONL
-    participant Meta as Meta sidecar (optional, distill.binding)
-    participant Coll as aggregate/collector.py
-    participant Writer as aggregate/writer.py
-    participant Case as Case directory
-
-    User->>CLI: aggregate --replay PATH
-    CLI->>Sidecar: iter_records(...)
-    CLI->>Meta: read_sample_meta(...) if present
-    CLI->>Coll: collect_case(replay, meta, overrides)
-    Coll->>Coll: partition records by phase
-    Coll->>Coll: _attach_auditor_graph_refs pairs each auditor with its graph snapshot
-    Coll->>Coll: _accumulate_graph(extractor_firings) yields one GraphSnapshot per firing
-    Coll->>Coll: stitch main_agent_messages from latest auditor snapshot plus extractor tails
-    Coll-->>CLI: CaseData(meta, firings, snapshots, verdicts)
-    CLI->>Writer: write_case(case_data, out_dir)
-    Writer->>Case: write meta.json, firings/, graph/, verdicts/, messages/
-    Case-->>User: human-reviewable folder
+llmharness-distill label  --replay-dir .agentm/audit_replay \
+                          --dataset <dataset.jsonl> --out ./labels
+llmharness-distill export --labels ./labels \
+                          --replay-dir .agentm/audit_replay --out ./sft
 ```
 
-The graph-pairing step is load-bearing: every auditor firing carries a
-`graph_snapshot_ref` pointing at the most recent extractor firing
-that strictly precedes it in **both** `ts_ns` and `turn_index` (PR
-#159 fix). Without that pairing the viewer mis-attributes verdicts
-to the wrong graph version.
+---
 
-## Docs
+## Repository layout
 
-| File | When to read it |
+```
+contrib/extensions/llmharness/
+├── src/llmharness/              # Core library (shipped in wheel)
+│   ├── __init__.py              #   Public API (re-exports from schema)
+│   ├── schema.py                #   Data types + entry-type constants
+│   ├── atom.py                  #   Main extension atom (the orchestrator)
+│   ├── state.py                 #   CumulativeAuditState (event-sourced graph state)
+│   ├── agents/                  #   Child session scenarios
+│   │   ├── __init__.py          #     Path resolvers (extractor_scenario, auditor_scenario)
+│   │   ├── extractor/           #     Extractor child: graph builder
+│   │   │   ├── manifest.yaml    #       Scenario manifest for extractor child
+│   │   │   ├── graph.py         #       Graph ops model, fold, phase merge
+│   │   │   ├── context.py       #       Context injection atom
+│   │   │   ├── prompt.py        #       Prompt templates
+│   │   │   └── tools.py         #       Witness validation, ExtractionState, tool builders
+│   │   └── auditor/             #     Auditor child: verdict emitter
+│   │       ├── manifest.yaml    #       Scenario manifest for auditor child
+│   │       ├── context.py       #       Context injection atom
+│   │       ├── prompt.py        #       10 prompt variants (minimal, bench, telbench, trajectory_*)
+│   │       └── tools.py         #       submit_verdict tool
+│   ├── replay/                  #   Replay record I/O
+│   │   └── record.py            #     ReplayRecord dataclass, read/write helpers
+│   └── eval/                    #   Offline evaluation
+│       └── telbench/            #     TELBench trajectory-error evaluation
+│           ├── adapter.py       #       Dataset loader + span→message converter
+│           ├── runner.py        #       Per-instance eval driver
+│           ├── scoring.py       #       P/R/F1/FEA scoring
+│           └── cli.py           #       `llmharness-eval telbench` entry point
+│
+├── tools/                       # Offline tooling (NOT in wheel, dev-checkout only)
+│   ├── replay/                  #   Replay CLI + offline replay engine
+│   │   ├── cli.py               #     `llmharness-replay` entry point
+│   │   ├── runner.py            #     Replay orchestrator
+│   │   ├── engine.py            #     Standalone session runner
+│   │   ├── chain.py             #     Bulk-replay with cumulative graph state
+│   │   ├── prefix_replay.py     #     Branch + resume from a specific turn
+│   │   ├── fork_tree.py         #     Fork-tree experiment helpers
+│   │   ├── reminder_seed.py     #     Reminder-seeding atom for prefix-replay
+│   │   └── offline.py / offline_driver.py
+│   ├── distill/                 #   Distill pipeline (SFT data generation)
+│   │   ├── cli.py               #     `llmharness-distill` entry point
+│   │   ├── oracle.py            #     GT-aware labeling
+│   │   ├── causal.py            #     Causal masking (graph → turn t)
+│   │   ├── gt.py                #     Ground-truth loader
+│   │   ├── export.py            #     SFT JSONL exporter
+│   │   ├── binding.py           #     Distill-binding atom (meta sidecar writer)
+│   │   ├── dpo_pairs.py         #     DPO pair construction
+│   │   ├── rl_prompts.py        #     RL prompt templates
+│   │   ├── signals.py           #     Signal extraction helpers
+│   │   ├── _submit_oracle.py    #     Oracle tool atom
+│   │   └── _submit_rewriter.py  #     Rewriter tool atom
+│   ├── aggregate/               #   Case aggregation for review + export
+│   │   ├── cli.py               #     `llmharness-aggregate` entry point
+│   │   ├── collector.py         #     Per-case data collection
+│   │   ├── case.py              #     Case data model
+│   │   └── writer.py            #     Directory layout writer
+│   ├── extensions/              #   Reference audit checks (§11 atoms)
+│   │   ├── check_premature_conclusion.py
+│   │   ├── check_repeated_actions.py
+│   │   └── check_open_branches.py
+│   └── eval/telbench/           #   (Legacy eval location)
+│
+├── docs/                        # Design and reference docs
+├── references/papers/           # Related academic papers
+├── pyproject.toml               # Package config (hatchling build)
+└── eval.db                      # Local eval database
+```
+
+Key boundary: `src/llmharness/` is the pip-installable library;
+`tools/` is host-side offline tooling that may import
+`agentm.core.runtime.*` and is only available from a dev checkout
+(not shipped in the wheel).
+
+---
+
+## How it works
+
+### The main atom (`atom.py`)
+
+The `llmharness` atom (MANIFEST name: `"llmharness"`) installs onto the
+main agent's `EventBus` and drives the two-phase pipeline:
+
+| Event | What happens |
 |---|---|
-| [docs/01-architecture.md](docs/01-architecture.md) | Components, static dependency graph, runtime data flow. Read this first. |
-| [docs/02-schemas.md](docs/02-schemas.md) | Authoritative shapes: `Event` / `Edge` / `Finding` / `Verdict`, `ReplayRecord`, meta sidecar, SFT JSONL. Use as a reference. |
-| [docs/03-distill-recipe.md](docs/03-distill-recipe.md) | End-to-end recipe: from a labeled fault-injection dataset to `sft/{extractor,auditor}.jsonl`. Includes the six design decisions that make the labels safe to learn from. |
-| [docs/04-extending.md](docs/04-extending.md) | Registering a new audit check; adapting the distill flow to a non-rca dataset. |
-| [docs/05-profiles-and-prompts.md](docs/05-profiles-and-prompts.md) | Pluggable tool profiles + prompt variants for the extractor / auditor children. Read this when running A/B experiments. |
-| [docs/06-case-aggregation.md](docs/06-case-aggregation.md) | Per-case directory layout produced by `llmharness-aggregate`. Read this for human review of a run or before exporting trajectories. |
-| [docs/07-prefix-replay.md](docs/07-prefix-replay.md) | Iterate on auditor / reminder behaviour without re-running the whole trajectory: branch a session at the verdict-firing turn and replay only the tail. |
-| [docs/08-running-modes.md](docs/08-running-modes.md) | How extractor / auditor / reminder injection decouple and recombine, and where to plug an SFT-trained model in (live + offline). Start here if you want to run the pieces separately. |
-| [docs/09-extractor-strategy-iteration.md](docs/09-extractor-strategy-iteration.md) | Fixed workflow for extractor prompt/model strategy iteration: threaded replay, aggregate conversion, blob upload, and `aegis-ui` review. |
+| `TurnEndEvent` | Computes whether extractor / auditor are due based on interval configs. Spawns child sessions as needed. Persists results to the session entry tree. |
+| `DecideTurnActionEvent` | If a verdict with `surface_reminder=true` is pending, returns `Inject([reminder_msg])` so the kernel re-opens the loop with the reminder. |
+| `SessionShutdownEvent` | Drains the async worker queue (async mode) with a configurable timeout. |
+
+No tools are exposed to the main agent — the audit runs silently
+alongside the conversation.
+
+### Config knobs
+
+| Knob | Default | Effect |
+|---|---|---|
+| `mode` | `"async"` | `"sync"` fires children in the event handler; `"async"` uses a background worker queue |
+| `extractor_interval_turns` | 1 | Run extractor every N turns |
+| `audit_interval_turns` | 3 | Run auditor every N turns (only after successful extraction) |
+| `enable_auditor` | `true` | Set `false` to run extractor-only |
+| `enable_reminders` | `true` | Set `false` for opinions-only (verdicts recorded but not injected) |
+| `extractor_prompt` / `auditor_prompt` | `"default"` / `"minimal"` | Named prompt variant or absolute file path |
+| `extractor_provider` / `auditor_provider` | `null` | Override the LLM provider for child sessions |
+| `audit_summary_threshold` | 30 | Degrade witness fields when event count exceeds this |
+
+### Extractor child
+
+Runs as an AgentM child session with scenario
+`agents/extractor/manifest.yaml`. The extractor maintains an
+**event-sourced logic-flow graph** via an append-only op log:
+
+- **Graph ops**: `NodeUpsert`, `NodeDelete`, `EdgeUpsert`, `EdgeDelete`
+- **Event kinds**: `task`, `hyp` (hypothesis), `act` (action), `dec`
+  (decision), `concl` (conclusion)
+- **Edge kinds**: `data` (causal/data dependency), `ref` (referential)
+- **Witness validation**: every edge must cite entities or a verbatim
+  quote that appears in the source turn text. Invalid edges are dropped.
+- **Tools**: `upsert_node`, `upsert_edge`, `delete_node`, `delete_edge`,
+  `reset_extraction`, `finalize_extraction` (terminal)
+
+The graph is rebuilt deterministically via `fold_graph(ops)` — pure
+fold over the op sequence.
+
+### Auditor child
+
+Runs as an AgentM child session with scenario
+`agents/auditor/manifest.yaml`. Reads the current graph snapshot
+(events + edges + phases + findings + continuation notes) and emits a
+verdict via the `submit_verdict` tool:
+
+```python
+Verdict(
+    surface_reminder=True,       # whether to inject
+    reminder_text="...",         # the one-liner for the main agent
+    continuation_notes=["..."],  # passed to the NEXT auditor firing
+    matched_event_ids=[2, 7],    # events that justify the verdict
+)
+```
+
+10 prompt variants available (selected via `auditor_prompt` config):
+`minimal`, `bench`, `telbench`, `trajectory`, `trajectory_cascade`,
+`trajectory_coverage`, `trajectory_dual`, `trajectory_receipt`,
+`trajectory_reflect`, `trajectory_sniper`.
+
+### Cumulative state
+
+`CumulativeAuditState` (in `atom.py`) is the adapter's in-memory graph
+state. It is **event-sourced** from the session entry tree — on startup,
+`hydrate_from_session_log(branch)` replays all persisted
+`audit_graph_op` / `verdict` / `extractor_cursor` entries. This means
+the graph survives session restarts and can be rebuilt from the log alone.
+
+---
+
+## Public API
+
+Importable from `llmharness` top-level only — everything else is
+internal:
+
+| Symbol | Source |
+|---|---|
+| `Event`, `EventKind`, `Edge`, `EdgeKind` | `schema.py` |
+| `Finding`, `Phase`, `Verdict`, `Reminder` | `schema.py` |
+
+Replay I/O (from `replay.record`):
+
+| Symbol | Purpose |
+|---|---|
+| `ReplayRecord` | One line per phase firing in the sidecar |
+| `iter_records(path)` | Lazy iterator over sidecar JSONL |
+| `read_records(path, phase, turn_index)` | Eager filtered read |
+| `write_record(path, record)` | Append one record |
+
+---
 
 ## CLI entry points
 
-| Script | Purpose |
-|---|---|
-| `llmharness-replay extractor` / `llmharness-replay auditor` | replay one recorded phase with a different provider/prompt (A/B bisection) |
-| `llmharness-replay chain` | bulk-replay every record in order; threads cumulative graph state across firings |
-| `llmharness-replay list` | index records in a sidecar by phase / turn / status / latency |
-| `llmharness-replay agent-from-reminder` | branch a main-agent session at the end of turn t and emit a resume command that seeds the recorded auditor reminder (see [docs/07-prefix-replay.md](docs/07-prefix-replay.md)) |
-| `llmharness-aggregate replay` / `llmharness-aggregate one` | fold replay sidecar(s) into per-case directories for review and training-data export |
-| `llmharness-distill {label,export}` | distill pipeline driver |
+| Script | Module | Purpose |
+|---|---|---|
+| `llmharness-eval` | `llmharness.eval.telbench.cli` | TELBench offline evaluation |
+| `llmharness-replay` | `tools/replay/cli.py` | Replay recorded firings with different provider/prompt |
+| `llmharness-distill` | `tools/distill/cli.py` | SFT data generation pipeline |
+| `llmharness-aggregate` | `tools/aggregate/cli.py` | Case aggregation for review |
 
-There is no top-level `llmharness` console-script. Cases are exported
-via `llmharness-aggregate` and consumed by downstream tools
-(`aegisctl blob` for sharing, the aegis-ui Case Review sub-app for
-human review).
+### Replay subcommands
+
+| Subcommand | What it does |
+|---|---|
+| `llmharness-replay extractor` / `auditor` | Replay one recorded phase with overrides (A/B bisection) |
+| `llmharness-replay chain` | Bulk-replay every record; threads cumulative graph state |
+| `llmharness-replay list` | Index records by phase / turn / status / latency |
+| `llmharness-replay agent-from-reminder` | Branch a main-agent session at turn t, seed with recorded reminder |
+
+---
+
+## Sequence diagram: live supervision
+
+```
+TurnEndEvent
+  │
+  ├─ extractor_due? ──▶ spawn extractor child
+  │                        │
+  │                        ▼
+  │                     tools: upsert_node/edge, finalize_extraction
+  │                        │
+  │                        ▼
+  │                     persist: graph ops → session entries
+  │                              replay record → sidecar JSONL
+  │
+  ├─ auditor_due? ──▶ spawn auditor child (graph + findings + notes)
+  │                        │
+  │                        ▼
+  │                     tool: submit_verdict
+  │                        │
+  │                        ▼
+  │                     persist: verdict → session entries + sidecar
+  │                     if surface_reminder → queue Reminder
+  │
+  ▼
+DecideTurnActionEvent
+  │
+  └─ pending reminder? ──▶ Inject([reminder_msg])
+                              kernel re-opens the loop
+```
+
+---
 
 ## Schema stability
 
 `src/llmharness/schema.py` is the public contract for downstream
-consumers (e.g. rca-autorl). Breaking changes bump the package
-version in `pyproject.toml`; the module docstring lists the current
-v4 wire shape. Pre-v4 records are not supported.
+consumers (e.g. rca-autorl). Breaking changes bump the package version
+in `pyproject.toml`. Current version: v4 wire shape. Pre-v4 records are
+not supported.
+
+See [docs/02-schemas.md](docs/02-schemas.md) for the full schema
+reference (in-memory types, session entries, replay sidecar, distill
+labels, SFT JSONL).
+
+---
+
+## Docs index
+
+| File | When to read it |
+|---|---|
+| [docs/01-architecture.md](docs/01-architecture.md) | Components, dependency graph, runtime data flow |
+| [docs/02-schemas.md](docs/02-schemas.md) | All wire types, entry types, sidecar + SFT JSONL shapes |
+| [docs/03-distill-recipe.md](docs/03-distill-recipe.md) | End-to-end SFT data generation recipe |
+| [docs/04-extending.md](docs/04-extending.md) | Adding audit checks; adapting to non-rca datasets |
+| [docs/05-profiles-and-prompts.md](docs/05-profiles-and-prompts.md) | Prompt variants + provider overrides for A/B |
+| [docs/06-case-aggregation.md](docs/06-case-aggregation.md) | Per-case directory layout for review |
+| [docs/07-prefix-replay.md](docs/07-prefix-replay.md) | Iterate on auditor/reminder without full re-run |
+| [docs/08-running-modes.md](docs/08-running-modes.md) | Decoupling extractor / auditor / reminder injection |
+| [docs/09-extractor-strategy-iteration.md](docs/09-extractor-strategy-iteration.md) | Extractor prompt/model strategy iteration workflow |

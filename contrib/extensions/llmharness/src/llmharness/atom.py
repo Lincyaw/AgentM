@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import collections
 import contextlib
-import copy
 import json
 import logging
 import time
-from collections.abc import Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -20,7 +16,6 @@ from agentm.core.abi import (
     ExtensionAPI,
     Inject,
     LoopAction,
-    SessionEntry,
     SessionShutdownEvent,
     Stop,
     ToolCallBlock,
@@ -34,13 +29,15 @@ from pydantic import BaseModel
 from . import schema as _et
 from .agents import auditor_scenario, extractor_scenario
 from .agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-from .agents.extractor.tools import GraphOp, parse_op
-from .schema import Edge, Event, Phase, Reminder, Verdict
+from .agents.extractor.graph import GraphOp, parse_op
+from .schema import Reminder, Verdict
+from .state import CumulativeAuditState
 
 
 class ProviderConfig(BaseModel):
     module: str
     config: dict[str, Any] = {}
+
 
 class LLMHarnessConfig(BaseModel):
     mode: Literal["async", "sync"] = "async"
@@ -55,14 +52,15 @@ class LLMHarnessConfig(BaseModel):
     shutdown_timeout_s: float = 600.0
     extractor_provider: ProviderConfig | None = None
     auditor_provider: ProviderConfig | None = None
+    extractor_model: str | None = None
+    auditor_model: str | None = None
     enable_auditor: bool = True
     enable_reminders: bool = True
+
 
 _log = logging.getLogger(__name__)
 
 REMINDER_PREAMBLE: Final = "[system reminder — automated review of your investigation so far]\n"
-
-_DEFAULT_RECENT_VERDICTS: Final[int] = _et.RECENT_VERDICTS_FOR_AUDITOR
 
 MANIFEST = ExtensionManifest(
     name="llmharness",
@@ -74,119 +72,47 @@ MANIFEST = ExtensionManifest(
     tier=1,
 )
 
+
 # ---------------------------------------------------------------------------
-# CumulativeAuditState
+# Provider resolution
 # ---------------------------------------------------------------------------
 
-def _bool_safe_int(raw: Any) -> int | None:
-    if isinstance(raw, int) and not isinstance(raw, bool):
-        return raw
+
+def _resolve_provider(
+    model_name: str | None,
+    legacy: ProviderConfig | None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Resolve a provider config from a config.toml profile name or legacy ProviderConfig."""
+    if model_name is not None:
+        from agentm.ai import DEFAULT_PROVIDER_DESCRIPTORS
+        from agentm.core.lib.user_config import resolve_model_profile
+
+        profile = resolve_model_profile(model_name)
+        if profile is None:
+            _log.warning("model profile %r not found in config.toml", model_name)
+            return None
+        ext_module: str | None = None
+        for desc in DEFAULT_PROVIDER_DESCRIPTORS:
+            if desc.id == profile.provider:
+                ext_module = desc.extension_module
+                break
+        if ext_module is None:
+            _log.warning(
+                "provider %r (from model %r) has no extension module",
+                profile.provider,
+                model_name,
+            )
+            return None
+        return (ext_module, dict(profile.to_build_config()))
+    if legacy is not None:
+        return (legacy.module, dict(legacy.config))
     return None
 
-@dataclass
-class CumulativeAuditState:
-    """Event-sourced graph state + auditor side-channel state across firings."""
-
-    ops: list[GraphOp] = field(default_factory=list)
-    cursor_last_turn_index: int = -1
-    recent_verdicts: collections.deque[dict[str, Any]] = field(
-        default_factory=lambda: collections.deque(maxlen=_DEFAULT_RECENT_VERDICTS)
-    )
-    last_continuation_notes: list[str] = field(default_factory=list)
-    firing_id_counter: int = 0
-    _cached_len: int = -1
-    _cached_view: tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]] | None = None
-    _phases: list[Phase] = field(default_factory=list)
-
-    def graph_view(self) -> tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]]:
-        if self._cached_view is not None and self._cached_len == len(self.ops):
-            return self._cached_view
-        from .agents.extractor.tools import fold_graph
-        folded = fold_graph(self.ops)
-        events = tuple(folded.nodes_list())
-        edges = tuple(folded.edges_list())
-        phases = tuple(self._phases)
-        self._cached_view = (events, edges, phases)
-        self._cached_len = len(self.ops)
-        return self._cached_view
-
-    def next_event_id(self) -> int:
-        events, _edges, _phases = self.graph_view()
-        return max((e.id for e in events), default=0) + 1
-
-    def _invalidate_cache(self) -> None:
-        self._cached_view = None
-        self._cached_len = -1
-
-    def absorb_extractor_firing(
-        self,
-        *,
-        firing_ops: Sequence[GraphOp],
-        firing_cursor: int,
-        firing_id: int,
-        firing_phases: Sequence[Phase] = (),
-    ) -> None:
-        self.ops.extend(firing_ops)
-        self.cursor_last_turn_index = firing_cursor
-        self._phases.extend(firing_phases)
-        if firing_id >= self.firing_id_counter:
-            self.firing_id_counter = firing_id + 1
-        self._invalidate_cache()
-
-    def absorb_auditor_verdict(self, verdict: dict[str, Any]) -> None:
-        self.recent_verdicts.append(verdict)
-        raw_notes = verdict.get("continuation_notes")
-        if isinstance(raw_notes, list):
-            self.last_continuation_notes = [n for n in raw_notes if isinstance(n, str)]
-
-    @classmethod
-    def fresh(cls) -> CumulativeAuditState:
-        return cls()
-
-    def snapshot(self) -> CumulativeAuditState:
-        return copy.deepcopy(self)
-
-    @classmethod
-    def hydrate_from_session_log(cls, branch: list[SessionEntry]) -> CumulativeAuditState:
-        ops: list[GraphOp] = []
-        verdicts_all: list[dict[str, Any]] = []
-        cursor_last_turn_index = -1
-        for entry in branch:
-            payload = entry.payload
-            if not isinstance(payload, dict):
-                continue
-            if entry.type == _et.AUDIT_GRAPH_OP:
-                try:
-                    ops.append(parse_op(payload))
-                except (KeyError, ValueError, TypeError):
-                    continue
-            elif entry.type == _et.VERDICT:
-                verdicts_all.append(payload)
-            elif entry.type == _et.EXTRACTOR_CURSOR:
-                raw = _bool_safe_int(payload.get("last_turn_index"))
-                if raw is not None:
-                    cursor_last_turn_index = raw
-        last_notes: list[str] = []
-        if verdicts_all:
-            raw_notes = verdicts_all[-1].get("continuation_notes")
-            if isinstance(raw_notes, list):
-                last_notes = [n for n in raw_notes if isinstance(n, str)]
-        recent: collections.deque[dict[str, Any]] = collections.deque(
-            maxlen=_DEFAULT_RECENT_VERDICTS
-        )
-        for v in verdicts_all[-_DEFAULT_RECENT_VERDICTS:]:
-            recent.append(v)
-        return cls(
-            ops=ops,
-            cursor_last_turn_index=cursor_last_turn_index,
-            recent_verdicts=recent,
-            last_continuation_notes=last_notes,
-            firing_id_counter=0,
-        )
 
 # ---------------------------------------------------------------------------
 # Message serialization
 # ---------------------------------------------------------------------------
+
 
 def _render_message_text(msg: AgentMessage) -> str:
     """Extract all text from a message into one string (for witness validation)."""
@@ -211,10 +137,14 @@ def _render_message_text(msg: AgentMessage) -> str:
                 parts.append(json.dumps(args, ensure_ascii=False, default=str))
     return " ".join(parts)
 
+
 def _serialize_trajectory(
-    messages: list[AgentMessage], *, start_index: int = 0,
+    messages: list[AgentMessage],
+    *,
+    start_index: int = 0,
 ) -> list[dict[str, Any]]:
     from agentm.core.lib import to_jsonable
+
     out: list[dict[str, Any]] = []
     for i, msg in enumerate(messages, start=start_index):
         d = to_jsonable(msg)
@@ -223,9 +153,11 @@ def _serialize_trajectory(
             out.append(d)
     return out
 
+
 # ---------------------------------------------------------------------------
 # Data preparation
 # ---------------------------------------------------------------------------
+
 
 def _prepare_extractor_data(
     messages: list[AgentMessage],
@@ -256,6 +188,7 @@ def _prepare_extractor_data(
         "window_hi": window_hi,
     }
 
+
 def _read_ops_file(path: Path) -> list[GraphOp]:
     if not path.exists():
         return []
@@ -270,9 +203,11 @@ def _read_ops_file(path: Path) -> list[GraphOp]:
             _log.warning("skipping malformed op line in %s", path)
     return ops
 
+
 # ---------------------------------------------------------------------------
 # Child session helper
 # ---------------------------------------------------------------------------
+
 
 async def _run_child(
     api: ExtensionAPI,
@@ -304,8 +239,10 @@ async def _run_child(
         _log.exception("child session failed (purpose=%s)", purpose)
         return None
 
+
 def _terminal_tool_args(
-    messages: list[AgentMessage], tool_name: str,
+    messages: list[AgentMessage],
+    tool_name: str,
 ) -> dict[str, Any] | None:
     for msg in reversed(messages):
         if not isinstance(msg, AssistantMessage):
@@ -315,9 +252,11 @@ def _terminal_tool_args(
                 return dict(block.arguments)
     return None
 
+
 # ---------------------------------------------------------------------------
 # install
 # ---------------------------------------------------------------------------
+
 
 def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     cfg = config
@@ -330,8 +269,8 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     summary_threshold = cfg.audit_summary_threshold
     tool_call_budget = cfg.extractor_tool_call_budget
 
-    extractor_provider = (cfg.extractor_provider.module, dict(cfg.extractor_provider.config)) if cfg.extractor_provider else None
-    auditor_provider = (cfg.auditor_provider.module, dict(cfg.auditor_provider.config)) if cfg.auditor_provider else None
+    extractor_provider = _resolve_provider(cfg.extractor_model, cfg.extractor_provider)
+    auditor_provider = _resolve_provider(cfg.auditor_model, cfg.auditor_provider)
 
     # State
     cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
@@ -361,10 +300,18 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
 
                 extra: list[tuple[str, dict[str, Any]]] = []
                 if tool_call_budget is not None:
-                    extra.extend([
-                        ("agentm.extensions.builtin.loop_budget", {"max_tool_calls": tool_call_budget}),
-                        ("agentm.extensions.builtin.turn_reminder", {"warn_within": tool_call_budget}),
-                    ])
+                    extra.extend(
+                        [
+                            (
+                                "agentm.extensions.builtin.loop_budget",
+                                {"max_tool_calls": tool_call_budget},
+                            ),
+                            (
+                                "agentm.extensions.builtin.turn_reminder",
+                                {"warn_within": tool_call_budget},
+                            ),
+                        ]
+                    )
 
                 ctx_config = dict(data)
                 ctx_config["ops_file"] = str(ops_path)
@@ -405,11 +352,17 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             child_msgs = await _run_child(
                 api,
                 scenario=aud_scenario,
-                prompt=json.dumps({
-                    "graph": [e.to_dict() for e in events],
-                    "recent_verdicts": list(cumulative.recent_verdicts),
-                    "continuation_notes_from_prior_firing": list(cumulative.last_continuation_notes),
-                }, ensure_ascii=False, default=str),
+                prompt=json.dumps(
+                    {
+                        "graph": [e.to_dict() for e in events],
+                        "recent_verdicts": list(cumulative.recent_verdicts),
+                        "continuation_notes_from_prior_firing": list(
+                            cumulative.last_continuation_notes
+                        ),
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
                 purpose="cognitive_audit_auditor",
                 atom_config_overrides={
                     "auditor_context": {
@@ -460,6 +413,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         return Inject(messages=injected)
 
     if cfg.mode == "sync":
+
         async def _on_turn_end_sync(event: TurnEndEvent) -> None:
             nonlocal turn_count
             turn_count += 1
@@ -522,4 +476,3 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     if enable_reminders:
         api.on(DecideTurnActionEvent.CHANNEL, _on_decide)
     api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)
-
