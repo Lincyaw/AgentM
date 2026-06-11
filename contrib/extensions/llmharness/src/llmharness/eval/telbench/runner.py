@@ -178,12 +178,11 @@ async def evaluate_instance(
     events, _edges, _phases = cumulative.graph_view()
     event_by_id: dict[int, Any] = {e.id: e for e in events}
 
-    surfaced_verdicts: list[dict[str, Any]] = []
+    all_verdicts: list[dict[str, Any]] = []
     matched_event_ids: set[int] = set()
     for v in cumulative.recent_verdicts:
-        if v.get("surface_reminder"):
-            surfaced_verdicts.append(v)
-            matched_event_ids.update(v.get("matched_event_ids", []))
+        all_verdicts.append(v)
+        matched_event_ids.update(v.get("matched_event_ids", []))
 
     predicted_span_indices: set[int] = set()
     for eid in matched_event_ids:
@@ -204,7 +203,7 @@ async def evaluate_instance(
         predicted_error_indices=predicted_span_indices,
         gold_error_indices=gold,
         scores=scores,
-        verdicts=surfaced_verdicts,
+        verdicts=all_verdicts,
         n_spans=n_spans,
     )
 
