@@ -634,6 +634,8 @@ def load_extension(
     module_path: str,
     api: ExtensionAPI,
     config: dict[str, Any],
+    *,
+    validate: bool = True,
 ) -> None | Awaitable[None]:
     """Import ``module_path`` and invoke its ``install(api, config)``.
 
@@ -642,7 +644,8 @@ def load_extension(
     - An awaitable for async extensions (caller must await).
 
     Raises ``ExtensionLoadError`` on any failure (missing module, missing
-    ``install`` symbol, exception thrown by ``install`` itself).
+    ``install`` symbol, exception thrown by ``install`` itself, or
+    S11 contract violation when *validate* is ``True``).
 
     While ``install`` runs, ``current_installing_extension()`` returns
     ``module_path`` so observers can attribute side effects.
@@ -659,6 +662,12 @@ def load_extension(
             module_path,
             AttributeError(f"module {module_path!r} has no callable 'install' symbol"),
         )
+
+    # §11 contract validation on initial load. The atom_reloader's
+    # _finish_install path validates separately, so it passes validate=False
+    # to avoid double-checking.
+    if validate:
+        _validate_on_load(module, module_path)
 
     # Auto-validate config via MANIFEST.config_schema (Pydantic model class).
     resolved_config: Any = config
@@ -692,6 +701,48 @@ def load_extension(
             _INSTALLING_EXTENSION.reset(inner_token)
 
     return _await_install()
+
+
+def _validate_on_load(module: Any, module_path: str) -> None:
+    """Run §11 AST validation on *module*'s source before ``install`` runs.
+
+    Raises ``ExtensionLoadError`` if any error-severity issue is found.
+    """
+
+    from agentm.extensions.validate import validate_atom_file, validate_atom_package
+
+    src_file_str = getattr(module, "__file__", None)
+    if src_file_str is None:
+        return
+    src_file = Path(src_file_str)
+
+    # Pass empty known_extension_names: at initial load time the full
+    # atom set is not yet available (atoms load sequentially), so the
+    # D4 peer-literal heuristic would produce false positives. The
+    # import-allow-list check — the primary gate here — is independent
+    # of known names.
+    if src_file.name == "__init__.py":
+        # Package atom — validate the whole package.
+        package_dir = src_file.parent
+        issues = validate_atom_package(
+            package_dir, module_path=module_path,
+            known_extension_names=set(),
+        )
+    else:
+        issues = validate_atom_file(
+            src_file, module_path=module_path,
+            known_extension_names=set(),
+        )
+
+    blocking = [i for i in issues if i.severity == "error"]
+    if blocking:
+        msg = "; ".join(
+            f"[{i.rule}] {i.message}" for i in blocking[:5]
+        )
+        raise ExtensionLoadError(
+            module_path,
+            RuntimeError(f"§11 contract violation: {msg}"),
+        )
 
 
 __all__ = [

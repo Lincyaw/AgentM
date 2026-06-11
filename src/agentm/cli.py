@@ -999,6 +999,12 @@ def _workflow_main() -> None:
     workflow_main()
 
 
+def _validate_main() -> None:
+    from agentm.cli_validate import main as validate_main
+
+    validate_main()
+
+
 # Subcommands whose own Typer app owns argv parsing, help, and exit codes.
 # The importer is called only when that subcommand is actually dispatched, so
 # the default prompt path and ``agentm --help`` never import the ``trace`` /
@@ -1031,6 +1037,10 @@ _LAZY_SUBCOMMANDS: dict[str, tuple[Any, str]] = {
     "workflow": (
         _workflow_main,
         "Run or validate workflow scripts.",
+    ),
+    "validate": (
+        _validate_main,
+        "Validate S11 atom contract compliance.",
     ),
 }
 

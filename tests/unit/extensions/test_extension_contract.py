@@ -21,6 +21,8 @@ from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import BuiltinEntry, reset_cache
 from agentm.extensions.validate import (
     ValidationIssue,
+    _build_reachability_graph,
+    validate_atom_package,
     validate_builtin,
 )
 
@@ -288,5 +290,258 @@ def test_D7_warns_on_undeclared_api_registry_mutation(tmp_path: Path) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Package-aware validation tests: _build_reachability_graph,
+# validate_atom_package, and runtime load_extension hard-block.
+# ---------------------------------------------------------------------------
+
+
+def _make_package(tmp_path: Path, files: dict[str, str]) -> Path:
+    """Create a temporary atom package under *tmp_path*.
+
+    *files* maps relative paths (``__init__.py``, ``helper.py``) to source.
+    Returns the package root directory.
+    """
+    pkg_dir = tmp_path / "fake_atom"
+    pkg_dir.mkdir()
+    for rel_path, content in files.items():
+        target = pkg_dir / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return pkg_dir
+
+
+def test_build_reachability_graph_includes_reachable(tmp_path: Path) -> None:
+    """_build_reachability_graph includes files imported from __init__.py
+    (both directly and transitively) but excludes unreachable files."""
+
+    pkg_dir = _make_package(tmp_path, {
+        "__init__.py": "from .helper import greet\ndef install(api, config): pass\n",
+        "helper.py": "from .util import x\ndef greet(): pass\n",
+        "util.py": "x = 1\n",
+        "unreachable.py": "import os\n",
+    })
+    init_file = pkg_dir / "__init__.py"
+    reachable = _build_reachability_graph(init_file, pkg_dir)
+
+    reachable_names = {p.name for p in reachable}
+    assert "__init__.py" in reachable_names
+    assert "helper.py" in reachable_names
+    assert "util.py" in reachable_names
+    assert "unreachable.py" not in reachable_names
+
+
+def test_build_reachability_graph_handles_cycle(tmp_path: Path) -> None:
+    """Cyclic imports between modules do not cause infinite loops."""
+
+    pkg_dir = _make_package(tmp_path, {
+        "__init__.py": "from .a import x\ndef install(api, config): pass\n",
+        "a.py": "from .b import y\nx = 1\n",
+        "b.py": "from .a import x\ny = 2\n",
+    })
+    init_file = pkg_dir / "__init__.py"
+    reachable = _build_reachability_graph(init_file, pkg_dir)
+
+    reachable_names = {p.name for p in reachable}
+    assert {"__init__.py", "a.py", "b.py"} == reachable_names
+
+
+def test_validate_atom_package_catches_forbidden_import_in_reachable(tmp_path: Path) -> None:
+    """A forbidden import in a reachable file is flagged."""
+
+    pkg_dir = _make_package(tmp_path, {
+        "__init__.py": "from .worker import do_thing\ndef install(api, config): pass\n",
+        "worker.py": "from agentm.core.runtime.session import AgentSession\ndef do_thing(): pass\n",
+    })
+    issues = validate_atom_package(
+        pkg_dir,
+        module_path="test.fake_atom",
+        known_extension_names=set(),
+    )
+    error_issues = [i for i in issues if i.severity == "error"]
+    assert any(i.rule == "11.4.5-import" for i in error_issues), (
+        f"expected forbidden import to be caught; got: {error_issues}"
+    )
+
+
+def test_validate_atom_package_skips_unreachable_file(tmp_path: Path) -> None:
+    """A forbidden import in an unreachable file (host-driver) is not flagged."""
+
+    pkg_dir = _make_package(tmp_path, {
+        "__init__.py": "from .clean import ok\ndef install(api, config): pass\n",
+        "clean.py": "ok = True\n",
+        "host_driver.py": "from agentm.core.runtime.session import AgentSession\n",
+    })
+    issues = validate_atom_package(
+        pkg_dir,
+        module_path="test.fake_atom",
+        known_extension_names=set(),
+    )
+    error_issues = [i for i in issues if i.severity == "error"]
+    assert not error_issues, (
+        f"unreachable host-driver violations should not appear; got: {error_issues}"
+    )
+
+
+def test_validate_atom_package_missing_init(tmp_path: Path) -> None:
+    """A package directory without __init__.py is rejected."""
+
+    pkg_dir = tmp_path / "no_init_pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "helper.py").write_text("x = 1\n", encoding="utf-8")
+
+    issues = validate_atom_package(pkg_dir, module_path="test.no_init")
+    assert any(i.rule == "11.4.pkg-entry" for i in issues)
+
+
+def test_validate_atom_package_clean_package_passes(tmp_path: Path) -> None:
+    """A clean package with only allowed imports passes validation."""
+
+    pkg_dir = _make_package(tmp_path, {
+        "__init__.py": (
+            "from agentm.core.abi.extension import ExtensionAPI\n"
+            "from .worker import helper\n"
+            "def install(api, config): pass\n"
+        ),
+        "worker.py": (
+            "import json\n"
+            "from agentm.core.lib.render import final_summary\n"
+            "def helper(): pass\n"
+        ),
+    })
+    issues = validate_atom_package(
+        pkg_dir,
+        module_path="test.clean_atom",
+        known_extension_names=set(),
+    )
+    error_issues = [i for i in issues if i.severity == "error"]
+    assert not error_issues, (
+        f"clean package should have no errors; got: {error_issues}"
+    )
+
+
+def test_runtime_load_extension_blocks_bad_atom(tmp_path: Path) -> None:
+    """load_extension with validate=True rejects an atom with a forbidden import."""
+
+    import sys
+    from unittest.mock import MagicMock
+
+    from agentm.core.abi.extension import ExtensionLoadError
+    from agentm.core.runtime.extension import load_extension
+
+    # Write a bad atom file that imports a forbidden module.
+    atom_file = tmp_path / "bad_atom.py"
+    atom_file.write_text(
+        "from agentm.core.runtime.session import AgentSession\n"
+        "def install(api, config): pass\n",
+        encoding="utf-8",
+    )
+
+    # Synthetically register the module so importlib.import_module works.
+    import importlib.util
+
+    module_name = f"_agentm_test_bad_atom_{id(atom_file)}"
+    spec = importlib.util.spec_from_file_location(module_name, atom_file)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except ImportError:
+        # The forbidden import will fail — that's fine, we already seeded
+        # sys.modules so import_module returns it. The __file__ is set.
+        pass
+
+    api = MagicMock()
+    try:
+        with pytest.raises(ExtensionLoadError) as exc_info:
+            load_extension(module_name, api, {}, validate=True)
+        assert "contract violation" in str(exc_info.value).lower() or "11.4.5" in str(exc_info.value)
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_runtime_load_extension_skips_validation_when_disabled(tmp_path: Path) -> None:
+    """load_extension with validate=False does not run §11 checks."""
+
+    import sys
+    from unittest.mock import MagicMock
+
+    from agentm.core.runtime.extension import load_extension
+
+    atom_file = tmp_path / "ok_atom.py"
+    atom_file.write_text(
+        "def install(api, config): pass\n",
+        encoding="utf-8",
+    )
+
+    import importlib.util
+
+    module_name = f"_agentm_test_ok_atom_{id(atom_file)}"
+    spec = importlib.util.spec_from_file_location(module_name, atom_file)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+
+    api = MagicMock()
+    try:
+        result = load_extension(module_name, api, {}, validate=False)
+        # Should succeed (install is sync, returns None).
+        assert result is None
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_existing_contrib_packages_pass_import_validation() -> None:
+    """All existing contrib extension packages pass §11 import validation.
+
+    This is a regression gate for the package-aware reachability graph:
+    contrib packages must not have forbidden imports in reachable files.
+    Pre-existing AST hygiene violations (D3 mutable-global, etc.) in
+    contrib code are excluded -- those are tracked separately.
+    """
+
+    from agentm.extensions.discover import _agentm_repo_root
+
+    repo_root = _agentm_repo_root()
+    if repo_root is None:
+        pytest.skip("not running from the agentm repo checkout")
+
+    contrib_dir = repo_root / "contrib" / "extensions"
+    if not contrib_dir.is_dir():
+        pytest.skip("contrib/extensions/ not found")
+
+    validated = 0
+    all_issues: list[ValidationIssue] = []
+    for child in sorted(contrib_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith("_") or child.name == "tests":
+            continue
+        init = child / "__init__.py"
+        if not init.is_file():
+            continue
+        module_path = f"contrib.extensions.{child.name}"
+        issues = validate_atom_package(
+            child, module_path=module_path, known_extension_names=set()
+        )
+        all_issues.extend(issues)
+        validated += 1
+
+    # Only check import-related rules (the package-aware validation's
+    # contribution). AST hygiene rules (D3, D7, etc.) have pre-existing
+    # violations in contrib code that are tracked separately.
+    import_issues = [
+        i for i in all_issues
+        if i.severity == "error" and i.rule.startswith("11.4.5")
+    ]
+    assert not import_issues, (
+        "contrib packages have forbidden import violations:\n"
+        + "\n".join(
+            f"  - {i.module_path} [{i.rule}]: {i.message}" for i in import_issues
+        )
+    )
+    assert validated > 0, "expected at least one contrib package to validate"
 
 
