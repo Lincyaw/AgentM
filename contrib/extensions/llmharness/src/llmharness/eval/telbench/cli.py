@@ -31,7 +31,7 @@ def _resolve_provider(
     if model_name:
         try:
             from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-            from agentm.core.lib.user_config import resolve_model_profile
+            from agentm.core.lib import resolve_model_profile
 
             profile = resolve_model_profile(model_name)
             if profile is not None:
@@ -45,7 +45,7 @@ def _resolve_provider(
     if not provider_spec:
         try:
             from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-            from agentm.core.lib.user_config import resolve_model_profile
+            from agentm.core.lib import resolve_model_profile
 
             profile = resolve_model_profile(None)
             if profile is not None:
