@@ -345,7 +345,10 @@ class AtomReloader:
         api: _ExtensionAPIImpl,
         ext_cfg: dict[str, Any],
     ) -> None:
-        result = load_extension(module_path, api, ext_cfg)
+        # validate=False: the reloader validates atom source separately via
+        # _validate_reload_source / _validate_install_source before reaching
+        # here, so skip the load-time §11 check to avoid double work.
+        result = load_extension(module_path, api, ext_cfg, validate=False)
         if inspect.isawaitable(result):
             await result
 

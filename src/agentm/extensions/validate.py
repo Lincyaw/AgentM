@@ -222,9 +222,19 @@ def validate_builtin() -> list[ValidationIssue]:
 
 
 def _check_imports(
-    module_path: str, src_file: Path
+    module_path: str,
+    src_file: Path,
+    *,
+    package_root: Path | None = None,
 ) -> list[ValidationIssue]:
-    """Parse the module source and flag any import outside the allow-list."""
+    """Parse the module source and flag any import outside the allow-list.
+
+    When *package_root* is set, relative imports (``node.level > 0``) that
+    resolve to files inside the package are treated as intra-package wiring
+    and are always allowed — the referenced file will be checked separately
+    via the reachability graph. Absolute imports targeting the same package
+    namespace are also skipped.
+    """
 
     issues: list[ValidationIssue] = []
     try:
@@ -238,22 +248,30 @@ def _check_imports(
             )
         ]
 
+    # When validating a package, determine the package's own dotted
+    # namespace so we can skip intra-package absolute imports.
+    _package_namespace: str | None = None
+    if package_root is not None:
+        _package_namespace = package_root.name
+
     for node in ast.walk(tree):
         names: list[str] = []
         imported_names: list[str] = []
         if isinstance(node, ast.Import):
             names = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
-            if node.module is not None and node.level == 0:
+            if node.level > 0:
+                # Relative import — intra-package wiring, always allowed
+                # when we're validating inside a package context.
+                if package_root is not None:
+                    continue
+                # Outside package context, skip relative imports (original
+                # behaviour — they can't be classified without a package).
+                continue
+            if node.module is not None:
                 names = [node.module]
                 imported_names = [alias.name for alias in node.names]
         elif isinstance(node, ast.Call):
-            # Catch ``importlib.import_module("agentm.core.runtime.session")``
-            # and ``__import__("agentm.core.runtime.session")`` — dynamic imports
-            # bypass the static check above and have been used in the past
-            # (sub_agent before A2) to silently slip past the §11.4.5
-            # forbidden list. We only flag *constant* arguments; expressions
-            # are out of scope for AST-only checking.
             target = _dynamic_import_target(node)
             if target is not None:
                 names = [target]
@@ -772,6 +790,125 @@ def _check_peer_literal_requires(
     ]
 
 
+def _build_reachability_graph(
+    entry_file: Path, package_root: Path
+) -> set[Path]:
+    """Static AST-only import graph traversal starting from *entry_file*.
+
+    Returns all ``.py`` files reachable through intra-package imports
+    (both relative and absolute targeting the same package namespace).
+    The entry file itself is included in the result.
+    """
+
+    visited: set[Path] = set()
+    stack: list[Path] = [entry_file.resolve()]
+    pkg_name = package_root.name
+    resolved_root = package_root.resolve()
+
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+
+        try:
+            tree = ast.parse(current.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+
+            resolved: Path | None = None
+
+            if node.level > 0:
+                # Relative import: resolve from current file's directory.
+                base = current.parent
+                # Walk up (level - 1) directories for multi-level relative.
+                for _ in range(node.level - 1):
+                    base = base.parent
+                if node.module:
+                    parts = node.module.split(".")
+                    candidate = base / "/".join(parts)
+                else:
+                    candidate = base
+                # Try as package (__init__.py) then as module (.py).
+                if (candidate / "__init__.py").is_file():
+                    resolved = (candidate / "__init__.py").resolve()
+                elif candidate.with_suffix(".py").is_file():
+                    resolved = candidate.with_suffix(".py").resolve()
+            elif node.module is not None and node.level == 0:
+                # Absolute import targeting the same package namespace.
+                parts = node.module.split(".")
+                if parts[0] == pkg_name:
+                    candidate = resolved_root / "/".join(parts[1:])
+                    if (candidate / "__init__.py").is_file():
+                        resolved = (candidate / "__init__.py").resolve()
+                    elif candidate.with_suffix(".py").is_file():
+                        resolved = candidate.with_suffix(".py").resolve()
+
+            if resolved is not None and resolved not in visited:
+                # Only follow files inside the package root.
+                try:
+                    resolved.relative_to(resolved_root)
+                except ValueError:
+                    continue
+                stack.append(resolved)
+
+    return visited
+
+
+def validate_atom_package(
+    package_root: Path,
+    *,
+    module_path: str = "<package>",
+    known_extension_names: set[str] | None = None,
+) -> list[ValidationIssue]:
+    """Validate a multi-file atom package against the S11 contract.
+
+    Finds the entry point (``__init__.py`` containing ``install``), builds
+    the reachability graph of intra-package imports, and validates each
+    reachable file for forbidden imports and AST rules.
+    """
+
+    issues: list[ValidationIssue] = []
+    resolved_root = package_root.resolve()
+
+    # Find the entry point.
+    init_file = resolved_root / "__init__.py"
+    if not init_file.is_file():
+        issues.append(
+            ValidationIssue(
+                module_path=module_path,
+                rule="11.4.pkg-entry",
+                message=f"package {package_root} has no __init__.py",
+            )
+        )
+        return issues
+
+    # Build the reachability graph from the entry point.
+    reachable = _build_reachability_graph(init_file, resolved_root)
+
+    for src_file in sorted(reachable):
+        # Build a human-readable module path for each file.
+        try:
+            rel = src_file.relative_to(resolved_root)
+        except ValueError:
+            continue
+        parts = list(rel.with_suffix("").parts)
+        if parts and parts[-1] == "__init__":
+            parts = parts[:-1]
+        file_module = f"{module_path}.{'.'.join(parts)}" if parts else module_path
+
+        issues.extend(
+            _check_imports(file_module, src_file, package_root=resolved_root)
+        )
+        issues.extend(_check_ast_rules(file_module, src_file))
+
+    return issues
+
+
 def validate_atom_file(
     path: str | Path,
     *,
@@ -1022,6 +1159,7 @@ def validate_extension_contract(
 __all__ = [
     "ValidationIssue",
     "validate_atom_file",
+    "validate_atom_package",
     "validate_extension_contract",
     "validate_builtin",
 ]
