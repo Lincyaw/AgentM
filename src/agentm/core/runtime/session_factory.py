@@ -431,6 +431,12 @@ async def create_agent_session(
     await _prime_contrib_discovery(config, bus)
     to_load = await _resolve_extensions(config, bus)
 
+    session_manager.set_session_config({
+        "scenario": config.scenario,
+        "provider": list(config.provider) if config.provider else None,
+        "extensions": [[mod, cfg] for mod, cfg in to_load],
+    })
+
     for module_path, ext_cfg in to_load:
         try:
             await install(module_path, ext_cfg)

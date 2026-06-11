@@ -44,6 +44,7 @@ class SessionHeader:
     timestamp: float
     cwd: str
     parent_session: str | None = None
+    config: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
