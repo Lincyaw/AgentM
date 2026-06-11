@@ -30,8 +30,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentm.core.abi.messages import AssistantMessage
-from agentm.core.abi.session import ENTRY_TYPE_MESSAGE, SessionEntry
+from agentm.core.abi import ENTRY_TYPE_MESSAGE, AssistantMessage, SessionEntry
 from agentm.core.runtime.session_manager import SessionManager
 
 from llmharness.replay.record import ReplayRecord, iter_records
@@ -45,9 +44,7 @@ class PrefixReplayError(RuntimeError):
     uniformly without leaking ``RuntimeError`` to users.
     """
 
-
 # --- record selection -------------------------------------------------------
-
 
 def pick_auditor_reminder_record(audit_replay_path: Path, *, turn: int) -> ReplayRecord:
     """Return the auditor record at ``turn`` that carries a reminder.
@@ -71,7 +68,6 @@ def pick_auditor_reminder_record(audit_replay_path: Path, *, turn: int) -> Repla
         )
     return latest
 
-
 def _extract_reminder_text(record: ReplayRecord) -> str | None:
     output = record.output
     if not isinstance(output, dict):
@@ -91,9 +87,7 @@ def _extract_reminder_text(record: ReplayRecord) -> str | None:
         return None
     return text
 
-
 # --- session location -------------------------------------------------------
-
 
 def locate_source_session_file(*, session_dir: Path, session_id: str) -> Path:
     """Find the session JSONL whose id matches ``session_id``.
@@ -113,9 +107,7 @@ def locate_source_session_file(*, session_dir: Path, session_id: str) -> Path:
         raise PrefixReplayError(f"no session file matching {session_id} under {session_dir}")
     return matches[0]
 
-
 # --- leaf-entry selection ---------------------------------------------------
-
 
 def find_leaf_entry_for_turn(manager: SessionManager, *, turn: int) -> SessionEntry:
     """Pick the entry that ends turn ``turn`` on the active branch.
@@ -145,9 +137,7 @@ def find_leaf_entry_for_turn(manager: SessionManager, *, turn: int) -> SessionEn
         f"branch has only {message_count} message entries; cannot end turn {turn}"
     )
 
-
 # --- command composition ----------------------------------------------------
-
 
 @dataclass(frozen=True)
 class PrefixReplayPlan:
@@ -158,7 +148,6 @@ class PrefixReplayPlan:
     branched_session_id: str
     reminder_text: str
     command: str
-
 
 def materialise_branched_session(
     *,
@@ -186,7 +175,6 @@ def materialise_branched_session(
         )
     branched_mgr = SessionManager.open(branched_path)
     return record, branched_mgr, leaf_entry.id
-
 
 def build_prefix_replay_command(
     *,
@@ -223,7 +211,6 @@ def build_prefix_replay_command(
     ]
     return " ".join(parts)
 
-
 def make_plan(
     *,
     audit_replay_path: Path,
@@ -256,7 +243,6 @@ def make_plan(
         command=command,
     )
 
-
 # Re-export for convenience to keep ``cli.py`` imports tidy.
 def assistant_message_count(branch: list[SessionEntry]) -> int:
     """Count assistant messages on ``branch`` — used by tests / introspection."""
@@ -267,7 +253,6 @@ def assistant_message_count(branch: list[SessionEntry]) -> int:
         if isinstance(entry.payload, AssistantMessage):
             n += 1
     return n
-
 
 __all__ = [
     "PrefixReplayError",

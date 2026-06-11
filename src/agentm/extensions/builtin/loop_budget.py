@@ -21,20 +21,15 @@ substrate default (``LoopConfig()`` — no cap) applies.
 
 from __future__ import annotations
 
-from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import LoopConfig
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.roles import LOOP_BUDGET_SERVICE
+from agentm.core.abi import ExtensionAPI, LOOP_BUDGET_SERVICE, LoopConfig
 from agentm.extensions import ExtensionManifest
-
 
 class LoopBudgetConfig(BaseModel):
     max_turns: int | None = None
     max_tool_calls: int | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="loop_budget",
@@ -44,7 +39,6 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-
 def install(api: ExtensionAPI, config: LoopBudgetConfig) -> None:
     max_turns = _positive_int_or_none_from_model(config.max_turns, "max_turns")
     max_tool_calls = _positive_int_or_none_from_model(config.max_tool_calls, "max_tool_calls")
@@ -52,7 +46,6 @@ def install(api: ExtensionAPI, config: LoopBudgetConfig) -> None:
         LOOP_BUDGET_SERVICE,
         LoopConfig(max_turns=max_turns, max_tool_calls=max_tool_calls),
     )
-
 
 def _positive_int_or_none_from_model(value: int | None, key: str) -> int | None:
     """Validate a value as a positive int (``None`` ⇒ no cap).

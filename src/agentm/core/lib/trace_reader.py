@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from agentm.core.lib.otlp import (
+from agentm.core.observability.otlp import (
     iter_log_records as _iter_log_records_on_line,
     iter_spans as _iter_spans_on_line,
     otlp_unwrap,

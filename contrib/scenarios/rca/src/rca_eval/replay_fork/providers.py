@@ -17,7 +17,6 @@ from typing import Any
 
 __all__ = ["build_profile_provider"]
 
-
 def build_profile_provider(name: str) -> tuple[str, dict[str, Any]]:
     """Resolve a config.toml profile name to a ``(module, config)`` provider.
 
@@ -26,7 +25,7 @@ def build_profile_provider(name: str) -> tuple[str, dict[str, Any]]:
     agent's provider.
     """
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib.user_config import resolve_model_profile
+    from agentm.core.lib import resolve_model_profile
 
     profile = resolve_model_profile(name)
     if profile is None:

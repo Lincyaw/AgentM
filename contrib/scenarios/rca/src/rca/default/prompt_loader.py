@@ -23,21 +23,19 @@ from xml.sax.saxutils import escape
 
 from pydantic import BaseModel
 
-from agentm.core.lib.frontmatter import parse_frontmatter
+from agentm.core.lib import parse_frontmatter
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import (
+from agentm.core.abi import (
     BeforeAgentStartEvent,
+    ExtensionAPI,
     ResolveSubagentEvent,
     SessionReadyEvent,
 )
-from agentm.core.abi.extension import ExtensionAPI
-
 
 from rca import SCENARIO_ROOT
 
 _PROMPTS_DIR = SCENARIO_ROOT / "prompts"
 _AGENTS_DIR = _PROMPTS_DIR / "agents"
-
 
 # ---------------------------------------------------------------------------
 # available_agents XML rendering — inlined from the former
@@ -46,12 +44,10 @@ _AGENTS_DIR = _PROMPTS_DIR / "agents"
 # that the shared core.lib helper is gone.
 # ---------------------------------------------------------------------------
 
-
 def _field(persona: Any, name: str, default: Any = "") -> Any:
     if isinstance(persona, Mapping):
         return persona.get(name, default)
     return getattr(persona, name, default)
-
 
 def _text(value: Any) -> str:
     if value is None:
@@ -60,14 +56,12 @@ def _text(value: Any) -> str:
         return value.strip()
     return str(value).strip()
 
-
 def _tools(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
         return ", ".join(str(item).strip() for item in value if str(item).strip())
     return ""
-
 
 def _agent_items(personas: Any) -> list[tuple[str, Any]]:
     if isinstance(personas, Mapping):
@@ -78,7 +72,6 @@ def _agent_items(personas: Any) -> list[tuple[str, Any]]:
         if name:
             items.append((name, persona))
     return sorted(items, key=lambda item: item[0])
-
 
 def available_agents_block(
     personas: Any,
@@ -120,11 +113,9 @@ def available_agents_block(
     lines.append("</available_agents>")
     return "\n".join(lines)
 
-
 class PromptLoaderConfig(BaseModel):
     prompt: str
     personas: bool = False
-
 
 MANIFEST = ExtensionManifest(
     name="prompt_loader",
@@ -145,7 +136,6 @@ MANIFEST = ExtensionManifest(
     # manifest.
 )
 
-
 def _parse_tools(raw: Any) -> list[str] | None:
     if isinstance(raw, list):
         tools = [str(item).strip() for item in raw if str(item).strip()]
@@ -155,12 +145,10 @@ def _parse_tools(raw: Any) -> list[str] | None:
         return tools or None
     return None
 
-
 def _parse_string_list(raw: Any) -> list[str]:
     if isinstance(raw, list):
         return [str(item).strip() for item in raw if str(item).strip()]
     return []
-
 
 def _parse_input_schema(raw: Any) -> dict[str, list[str]] | None:
     if not isinstance(raw, dict):
@@ -171,7 +159,6 @@ def _parse_input_schema(raw: Any) -> dict[str, list[str]] | None:
         return None
     return {"required": required, "optional": optional}
 
-
 def _parse_budget_defaults(raw: Any) -> dict[str, int] | None:
     if not isinstance(raw, dict):
         return None
@@ -181,7 +168,6 @@ def _parse_budget_defaults(raw: Any) -> dict[str, int] | None:
         if isinstance(value, int) and value > 0:
             budget[key] = value
     return budget or None
-
 
 def _load_personas() -> dict[str, dict[str, Any]]:
     personas: dict[str, dict[str, Any]] = {}
@@ -218,7 +204,6 @@ def _load_personas() -> dict[str, dict[str, Any]]:
             ),
         }
     return personas
-
 
 async def install(api: ExtensionAPI, config: PromptLoaderConfig) -> None:
     prompt_name = config.prompt.strip()

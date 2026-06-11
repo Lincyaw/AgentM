@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentm.core.abi.messages import AgentMessage, AssistantMessage
+from agentm.core.abi import AgentMessage, AssistantMessage
 
 from llmharness.atom import CumulativeAuditState
 from llmharness.schema import Reminder
@@ -31,7 +31,6 @@ __all__ = [
     "replay_pipeline_over_trajectory",
 ]
 
-
 @dataclass(frozen=True)
 class SurfaceFiring:
     """One auditor firing that surfaced a reminder during an offline replay."""
@@ -39,7 +38,6 @@ class SurfaceFiring:
     turn_index: int
     reminder_text: str
     cumulative_snapshot: CumulativeAuditState
-
 
 @dataclass
 class OfflineRunResult:
@@ -51,7 +49,6 @@ class OfflineRunResult:
     all_step_results: list[dict[str, Any]] = field(default_factory=list)
     surfaces: list[SurfaceFiring] = field(default_factory=list)
 
-
 def _turn_end_prefix_lengths(messages: list[AgentMessage]) -> list[int]:
     """Message-prefix length at the end of each agent *turn*."""
     assistant_idxs = [i for i, m in enumerate(messages) if isinstance(m, AssistantMessage)]
@@ -62,7 +59,6 @@ def _turn_end_prefix_lengths(messages: list[AgentMessage]) -> list[int]:
         nxt = assistant_idxs[j + 1] if j + 1 < len(assistant_idxs) else len(messages)
         bounds.append(nxt)
     return bounds
-
 
 async def replay_pipeline_over_trajectory(
     *,
@@ -111,11 +107,10 @@ async def replay_pipeline_over_trajectory(
     surfaces: list[SurfaceFiring] = []
     reminder: Reminder | None = None
 
-    from llmharness.agents.extractor.tools import ExtractionState
-    from llmharness.agents.extractor.prompt import load_extractor_prompt
     from llmharness.agents.auditor.prompt import build_auditor_system_prompt
     from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-    from llmharness.schema import Verdict
+    from llmharness.agents.extractor.prompt import load_extractor_prompt
+    from llmharness.agents.extractor.tools import ExtractionState
 
     for turn_number, prefix_len in enumerate(_turn_end_prefix_lengths(messages), start=1):
         if prefix_len < start_turn:
@@ -136,7 +131,9 @@ async def replay_pipeline_over_trajectory(
 
         # --- Extractor ---
         if extractor_due:
-            from llmharness.atom import _prepare_extractor_data, _render_message_text, _serialize_trajectory
+            from llmharness.atom import (
+                _prepare_extractor_data,
+            )
 
             data = _prepare_extractor_data(prefix, cumulative, None)
             if data is not None:
@@ -151,7 +148,7 @@ async def replay_pipeline_over_trajectory(
                         pass
 
                 recent_graph_raw = data.get("recent_graph") or []
-                from llmharness.schema import Event, Edge
+                from llmharness.schema import Edge, Event
                 recent_events: list[Event] = []
                 for entry in recent_graph_raw:
                     if isinstance(entry, dict):

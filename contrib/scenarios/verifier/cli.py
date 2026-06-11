@@ -55,15 +55,12 @@ from injection import (  # noqa: E402
 REPO = Path(__file__).resolve().parents[3]
 WORKFLOW_SCRIPT = Path(__file__).resolve().parent / "eval" / "propagation_workflow.py"
 
-
 # ------------------------------------------------------------------
 # Provider helpers
 # ------------------------------------------------------------------
 
-
 ProviderSpec = tuple[str, dict[str, Any]]
 ExtensionSpec = tuple[str, dict[str, Any]]
-
 
 class WorkflowArgs(TypedDict, total=False):
     data_dir: str
@@ -79,11 +76,10 @@ class WorkflowArgs(TypedDict, total=False):
     skip_judge: bool
     existing_propagation: dict[str, Any]
 
-
 def _resolve_provider() -> ProviderSpec:
     """Build a provider spec from the environment (config.toml profile)."""
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib.user_config import resolve_model_profile
+    from agentm.core.lib import resolve_model_profile
 
     model_name = os.environ.get("AGENTM_MODEL")
     profile = resolve_model_profile(model_name)
@@ -97,11 +93,9 @@ def _resolve_provider() -> ProviderSpec:
 
     return DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
 
-
 # ------------------------------------------------------------------
 # Workflow invocation
 # ------------------------------------------------------------------
-
 
 _WORKFLOW_EXTENSIONS: list[ExtensionSpec] = [
     ("agentm.extensions.builtin.operations", {"backend": "local"}),
@@ -110,13 +104,12 @@ _WORKFLOW_EXTENSIONS: list[ExtensionSpec] = [
     ("agentm.extensions.builtin.workflow", {}),
 ]
 
-
 async def _run_workflow_async(
     workflow_args: WorkflowArgs,
     out_dir: Path,
 ) -> dict[str, Any]:
     """Run a workflow script via the WorkflowRunner service."""
-    from agentm.core.abi.session_config import AgentSessionConfig
+    from agentm.core.abi import AgentSessionConfig
     from agentm.core.runtime.session import AgentSession
 
     os.environ["AGENTM_PROJECT_ROOT"] = str(REPO)
@@ -137,7 +130,6 @@ async def _run_workflow_async(
         return result if isinstance(result, dict) else {}
     finally:
         await session.shutdown()
-
 
 # ------------------------------------------------------------------
 # Judge
@@ -190,11 +182,9 @@ def run_judge(
     result = asyncio.run(_run_workflow_async(workflow_args, out))
     return result.get("judge") or {}
 
-
 # ------------------------------------------------------------------
 # Output
 # ------------------------------------------------------------------
-
 
 def build_report(
     result: dict, injections: list[dict[str, str]],
@@ -229,7 +219,6 @@ def build_report(
             "claim": ev.get("claim", ""),
         })
     return report
-
 
 def run_one_case(
     case_dir: Path,
@@ -342,7 +331,6 @@ def run_one_case(
         "rounds": result["rounds"],
     }
 
-
 # ------------------------------------------------------------------
 # Batch runner
 # ------------------------------------------------------------------
@@ -371,7 +359,6 @@ def _read_cached_summary(out_dir: Path, case_name: str) -> dict | None:
         "rounds": trace.get("rounds", 0),
         "cached": True,
     }
-
 
 def _run_or_cache(
     dataset_dir: Path,
@@ -406,7 +393,6 @@ def _run_or_cache(
     except Exception as exc:  # noqa: BLE001
         print(f"  [{name}] EXCEPTION: {exc}", flush=True)
         return {"case": name, "error": str(exc)}
-
 
 def run_batch(
     dataset_dir: Path,
@@ -471,7 +457,6 @@ def run_batch(
 
     return summaries
 
-
 # ------------------------------------------------------------------
 # CLI
 # ------------------------------------------------------------------
@@ -484,11 +469,9 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 
-
 def _set_model(model: str | None) -> None:
     if model:
         os.environ["AGENTM_MODEL"] = model
-
 
 @app.command()
 def run(
@@ -503,7 +486,6 @@ def run(
     summary = run_one_case(case_dir, out_dir, budget=budget)
     if "error" in summary:
         raise typer.Exit(1)
-
 
 @app.command()
 def batch(
@@ -529,7 +511,6 @@ def batch(
         case_filter=case_filter,
     )
 
-
 @app.command()
 def judge(
     case_dir: Annotated[Path, typer.Argument(help="single case directory")],
@@ -553,7 +534,6 @@ def judge(
         print(f"\nFinal propagation: {len(final['confirmed_nodes'])} services "
               f"(-{len(removed)} pruned, +{len(added)} promoted)")
         print(f"Output: {final_path}")
-
 
 def _run_judge_or_skip(
     dataset_dir: Path,
@@ -583,7 +563,6 @@ def _run_judge_or_skip(
     except Exception as exc:  # noqa: BLE001
         print(f"  [{name}] EXCEPTION: {exc}", flush=True)
         return {"case": name, "error": str(exc)}
-
 
 @app.command(name="judge-batch")
 def judge_batch(
@@ -628,7 +607,6 @@ def judge_batch(
     print(f"\n{'='*50}")
     print(f"Total: {total}  OK: {ok}  Cached: {cached}  "
           f"Pruned: {pruned}  Promoted: {promoted}")
-
 
 @app.command()
 def diff(
@@ -693,7 +671,6 @@ def diff(
             typer.echo(f"  {s}: {n}")
 
     typer.echo(f"\nPer-case diff: {diff_path}")
-
 
 if __name__ == "__main__":
     app()

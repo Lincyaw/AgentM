@@ -20,8 +20,8 @@ from typing import Any, cast
 import pytest
 
 from agentm.core.abi import TextContent, ToolResult
-from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
+from agentm.core.abi import SessionShutdownEvent
+from agentm.core.abi import ExtensionAPI, ExtensionStaleError
 from agentm.core.runtime.session_inbox import InboxItem, render_item
 from agentm.extensions.builtin import monitor
 from agentm.extensions.builtin.monitor import MonitorConfig, _MonitorManager

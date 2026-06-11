@@ -15,10 +15,8 @@ session.
 
 from __future__ import annotations
 
-from typing import Any
 
-from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI, SessionShutdownEvent
 
 from .client import (
     MCPSessionManager,
@@ -29,9 +27,7 @@ from .client import (
 from .manifest import MCPBridgeConfig
 from .tool import MCPTool
 
-
 _DEFAULT_NAMING = "mcp__{server}__{tool}"
-
 
 async def install(api: ExtensionAPI, config: MCPBridgeConfig) -> None:
     """Connect, snapshot, register. Async per design §4.2."""
@@ -79,7 +75,6 @@ async def install(api: ExtensionAPI, config: MCPBridgeConfig) -> None:
         await manager.aclose()
 
     api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)
-
 
 async def _snapshot_and_register(
     *,
@@ -149,6 +144,5 @@ async def _snapshot_and_register(
         "mcp.tools.snapshotted",
         {"server": server_name, "tools": tuple(names)},
     )
-
 
 __all__ = ["install"]

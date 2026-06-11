@@ -10,27 +10,24 @@ from xml.sax.saxutils import escape
 from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import (
+from agentm.core.abi import (
     BeforeAgentStartEvent,
+    ExtensionAPI,
     ResourcesDiscoverEvent,
     SessionReadyEvent,
 )
-from agentm.core.abi.extension import ExtensionAPI
 
 from ._md_skills import AgentRecord, parse_md_agent_records
-
 
 # ---------------------------------------------------------------------------
 # available_agents XML rendering — inlined from the former
 # agentm.core.lib.available_agents (this extension is one of two consumers).
 # ---------------------------------------------------------------------------
 
-
 def _field(persona: Any, name: str, default: Any = "") -> Any:
     if isinstance(persona, Mapping):
         return persona.get(name, default)
     return getattr(persona, name, default)
-
 
 def _text(value: Any) -> str:
     if value is None:
@@ -39,14 +36,12 @@ def _text(value: Any) -> str:
         return value.strip()
     return str(value).strip()
 
-
 def _tools(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
         return ", ".join(str(item).strip() for item in value if str(item).strip())
     return ""
-
 
 def _agent_items(personas: Any) -> list[tuple[str, Any]]:
     if isinstance(personas, Mapping):
@@ -57,7 +52,6 @@ def _agent_items(personas: Any) -> list[tuple[str, Any]]:
         if name:
             items.append((name, persona))
     return sorted(items, key=lambda item: item[0])
-
 
 def available_agents_block(
     personas: Any,
@@ -99,13 +93,11 @@ def available_agents_block(
     lines.append("</available_agents>")
     return "\n".join(lines)
 
-
 class AgentsConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     agent_paths: list[str] = []
     inherit_claude: bool = True
-
 
 MANIFEST = ExtensionManifest(
     name="agents",
@@ -121,13 +113,11 @@ MANIFEST = ExtensionManifest(
     tier=2,
 )
 
-
 def _default_roots(cwd: str) -> list[Path]:
     return [
         Path.home() / ".claude" / "agents",
         Path(cwd) / ".claude" / "agents",
     ]
-
 
 def _format_block(agents: list[AgentRecord]) -> str:
     block = available_agents_block(agents)
@@ -142,7 +132,6 @@ def _format_block(agents: list[AgentRecord]) -> str:
             block,
         )
     )
-
 
 async def install(api: ExtensionAPI, config: AgentsConfig) -> None:
     inherit_claude = config.inherit_claude
@@ -185,6 +174,5 @@ async def install(api: ExtensionAPI, config: AgentsConfig) -> None:
 
     api.on(SessionReadyEvent.CHANNEL, _populate)
     api.on(BeforeAgentStartEvent.CHANNEL, _inject)
-
 
 __all__ = ("MANIFEST", "install")

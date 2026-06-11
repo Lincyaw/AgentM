@@ -20,7 +20,7 @@ from agentm.core.abi import (
     Model,
     TextContent,
 )
-from agentm.core.abi.extension import ProviderConfig
+from agentm.core.abi import ProviderConfig
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader
 from agentm.core.runtime.resource_writer import GitBackedResourceWriter
 from agentm.core.abi.session_config import AgentSessionConfig

@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Self
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
+)
 from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 SUBMIT_VERDICT_TOOL_NAME = "submit_verdict"
-
 
 class _VerdictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -34,11 +38,9 @@ class _VerdictModel(BaseModel):
             raise ValueError("reminder_text must be non-empty when surface_reminder=true")
         return self
 
-
 class SubmitVerdictArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     verdict: _VerdictModel
-
 
 async def _submit_handler(args: dict[str, Any]) -> ToolTerminate | ToolResult:
     try:
@@ -53,7 +55,6 @@ async def _submit_handler(args: dict[str, Any]) -> ToolTerminate | ToolResult:
         reason="llmharness:submit_verdict",
     )
 
-
 SUBMIT_VERDICT_TOOL = FunctionTool(
     name=SUBMIT_VERDICT_TOOL_NAME,
     description="Submit the cognitive-audit verdict. Call exactly ONCE per firing as your final action.",
@@ -62,13 +63,11 @@ SUBMIT_VERDICT_TOOL = FunctionTool(
     metadata={"terminates": True},
 )
 
-
 MANIFEST = ExtensionManifest(
     name="auditor_tools",
     description="Register the auditor submit_verdict tool.",
     registers=("tool:submit_verdict",),
 )
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_tool(SUBMIT_VERDICT_TOOL)

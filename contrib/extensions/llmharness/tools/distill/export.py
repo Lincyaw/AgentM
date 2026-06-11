@@ -42,12 +42,12 @@ from llmharness.agents.auditor.prompt import load_auditor_prompt
 from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
 from llmharness.agents.extractor.prompt import load_extractor_prompt
 from llmharness.agents.extractor.tools import (
-    UPSERT_NODE_TOOL_NAME,
-    UPSERT_EDGE_TOOL_NAME,
-    DELETE_NODE_TOOL_NAME,
     DELETE_EDGE_TOOL_NAME,
-    RESET_EXTRACTION_TOOL_NAME,
+    DELETE_NODE_TOOL_NAME,
     FINALIZE_EXTRACTION_TOOL_NAME,
+    RESET_EXTRACTION_TOOL_NAME,
+    UPSERT_EDGE_TOOL_NAME,
+    UPSERT_NODE_TOOL_NAME,
 )
 
 # Tool names the extractor can call — used to filter valid steps in SFT export.

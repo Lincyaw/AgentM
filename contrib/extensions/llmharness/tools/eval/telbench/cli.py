@@ -23,7 +23,6 @@ from .scoring import AggregateScores, SpanScores, aggregate_scores
 
 app = typer.Typer(help="TELBench span-level error localization evaluation.")
 
-
 def _resolve_provider(
     provider_spec: str | None,
     model_name: str | None = None,
@@ -41,7 +40,7 @@ def _resolve_provider(
     if model_name:
         try:
             from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-            from agentm.core.lib.user_config import resolve_model_profile
+            from agentm.core.lib import resolve_model_profile
 
             profile = resolve_model_profile(model_name)
             if profile is not None:
@@ -79,11 +78,9 @@ def _resolve_provider(
     except (KeyError, ImportError):
         return provider_spec, {}
 
-
 def _format_scores(scores: SpanScores) -> str:
     fea = "Y" if scores.first_error_accurate else "N"
     return f"P={scores.precision:.3f}  R={scores.recall:.3f}  F1={scores.f1:.3f}  FEA={fea}"
-
 
 def _format_aggregate(agg: AggregateScores) -> str:
     return (
@@ -93,7 +90,6 @@ def _format_aggregate(agg: AggregateScores) -> str:
         f"  first_error_accuracy: {agg.first_error_accuracy:.4f}\n"
         f"  n_instances:          {agg.n_instances}"
     )
-
 
 @app.command()
 def telbench(
@@ -205,10 +201,8 @@ def telbench(
     typer.echo(f"\n--- Aggregate ({agg.n_instances} instances, mode={mode}) ---")
     typer.echo(_format_aggregate(agg))
 
-
 def main() -> None:
     """Entry point for the ``llmharness-eval`` script."""
     app()
-
 
 __all__ = ["app", "main"]

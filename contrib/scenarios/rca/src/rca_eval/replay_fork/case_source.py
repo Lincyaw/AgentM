@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from agentm.core.abi.messages import (
+from agentm.core.abi import (
     AgentMessage,
     AssistantContent,
     AssistantMessage,
@@ -28,16 +28,15 @@ from agentm.core.abi.messages import (
     ToolCallBlock,
     ToolResultBlock,
     ToolResultMessage,
+    TraceReader,
     UserMessage,
 )
-from agentm.core.abi import TraceReader
 
 from .trajectory import _REPLAY_TS, openai_chat_to_agentm
 
 _logger = logging.getLogger(__name__)
 
 __all__ = ["CaseSource", "EvalDbCaseSource", "ReplayCase", "SessionFileCaseSource"]
-
 
 @dataclass(frozen=True)
 class ReplayCase:
@@ -61,14 +60,12 @@ class ReplayCase:
     control_correct: bool | None = None
     meta: dict[str, Any] = field(default_factory=dict)
 
-
 @runtime_checkable
 class CaseSource(Protocol):
     """A stream of recorded baseline cases to replay-and-fork."""
 
     def cases(self) -> Iterator[ReplayCase]:
         ...
-
 
 class EvalDbCaseSource:
     """Recorded baselines pulled from an ``evaluation_data`` SQLite table.
@@ -150,7 +147,6 @@ class EvalDbCaseSource:
             meta=meta,
         )
 
-
 def _extract_messages(trajectories_raw: Any) -> list[dict[str, Any]] | None:
     """Pull the flat OpenAI message list out of the eval.db trajectories blob.
 
@@ -173,7 +169,6 @@ def _extract_messages(trajectories_raw: Any) -> list[dict[str, Any]] | None:
         return None
     return [m for m in msgs if isinstance(m, dict)]
 
-
 def _parse_meta(meta_raw: Any) -> dict[str, Any]:
     if not isinstance(meta_raw, str):
         return {}
@@ -182,7 +177,6 @@ def _parse_meta(meta_raw: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return obj if isinstance(obj, dict) else {}
-
 
 def _resolve_data_dir(path: Any) -> str | None:
     """Resolve a recorded data_dir to the canonical case directory.
@@ -200,11 +194,9 @@ def _resolve_data_dir(path: Any) -> str | None:
         return None
     return resolved
 
-
 # ---------------------------------------------------------------------------
 # Session-file case source
 # ---------------------------------------------------------------------------
-
 
 class SessionFileCaseSource:
     """Recorded baselines parsed from agentm OTLP/JSON session files.
@@ -270,7 +262,6 @@ class SessionFileCaseSource:
             meta={"source_file": str(path)},
         )
 
-
 # -- Session-file payload deserialization ------------------------------------
 # The payload dicts in ``agentm.message.appended`` records use AgentM's
 # native format (``{role, content: [{type, ...}], ...}``).  The canonical
@@ -284,7 +275,6 @@ class SessionFileCaseSource:
 # the output ABI block constructors and the ``_REPLAY_TS`` constant (imported
 # from ``trajectory`` to keep one definition).
 
-
 def _records_to_messages(records: list[dict[str, Any]]) -> list[AgentMessage]:
     """Convert ``agentm.message.appended`` record dicts to AgentM messages."""
     out: list[AgentMessage] = []
@@ -296,7 +286,6 @@ def _records_to_messages(records: list[dict[str, Any]]) -> list[AgentMessage]:
         if msg is not None:
             out.append(msg)
     return out
-
 
 def _payload_to_message(payload: dict[str, Any]) -> AgentMessage | None:
     role = payload.get("role")
@@ -321,7 +310,6 @@ def _payload_to_message(payload: dict[str, Any]) -> AgentMessage | None:
         )
     return None
 
-
 def _deserialize_user_blocks(raw: Any) -> list[TextContent | ImageContent]:
     if not isinstance(raw, list):
         return []
@@ -333,7 +321,6 @@ def _deserialize_user_blocks(raw: Any) -> list[TextContent | ImageContent]:
         if kind == "text":
             blocks.append(TextContent(type="text", text=str(item.get("text", ""))))
     return blocks
-
 
 def _deserialize_assistant_blocks(raw: Any) -> list[AssistantContent]:
     if not isinstance(raw, list):
@@ -366,7 +353,6 @@ def _deserialize_assistant_blocks(raw: Any) -> list[AssistantContent]:
             )
     return blocks
 
-
 def _deserialize_tool_result_blocks(raw: Any) -> list[ToolResultBlock]:
     if not isinstance(raw, list):
         return []
@@ -384,7 +370,6 @@ def _deserialize_tool_result_blocks(raw: Any) -> list[ToolResultBlock]:
             )
         )
     return blocks
-
 
 def _extract_control_response(messages: list[AgentMessage]) -> str | None:
     """Find the ``submit_final_report`` tool call and return its ``text`` arg.

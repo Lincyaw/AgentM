@@ -19,7 +19,9 @@ import json
 from typing import Any, Final
 
 from agentm.core.abi import (
+    AgentMessage,
     AssistantMessage,
+    ExtensionAPI,
     FunctionTool,
     TextContent,
     ThinkingBlock,
@@ -28,23 +30,18 @@ from agentm.core.abi import (
     ToolResultMessage,
     UserMessage,
 )
-from agentm.core.abi.messages import AgentMessage
 from pydantic import BaseModel
 
 from agentm.core.lib import Turn, enumerate_turns
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 # Higher than llm_compaction's 8k: the agent explicitly requested this detail.
 _DEFAULT_TOOL_RESULT_MAX_CHARS: Final = 20_000
 _DEFAULT_TOTAL_MAX_CHARS: Final = 200_000
 
-
 class ReadHistoryConfig(BaseModel):
     tool_result_max_chars: int = _DEFAULT_TOOL_RESULT_MAX_CHARS
     total_max_chars: int = _DEFAULT_TOTAL_MAX_CHARS
-
 
 MANIFEST = ExtensionManifest(
     name="read_history",
@@ -56,7 +53,6 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Leaf atom: reads the session branch only.
     config_schema=ReadHistoryConfig,
 )
-
 
 _PARAMETERS: Final[dict[str, Any]] = {
     "type": "object",
@@ -77,7 +73,6 @@ _PARAMETERS: Final[dict[str, Any]] = {
     "required": ["start"],
     "additionalProperties": False,
 }
-
 
 def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
     tool_result_cap = config.tool_result_max_chars
@@ -125,13 +120,11 @@ def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
         )
     )
 
-
 def _render_turn(turn: Turn, tool_result_cap: int) -> str:
     lines = [f"=== Turn {turn.index} ==="]
     for message in turn.messages:
         lines.append(_render_message(message, tool_result_cap))
     return "\n".join(lines)
-
 
 def _render_message(message: AgentMessage, tool_result_cap: int) -> str:
     if isinstance(message, UserMessage):
@@ -163,23 +156,19 @@ def _render_message(message: AgentMessage, tool_result_cap: int) -> str:
 
     return ""
 
-
 def _dump(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return repr(value)
 
-
 def _cap(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}\n[... {len(text) - max_chars} more chars truncated]"
 
-
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
-
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

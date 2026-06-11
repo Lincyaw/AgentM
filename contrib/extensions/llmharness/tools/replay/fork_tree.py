@@ -45,7 +45,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from agentm.core.abi.messages import (
+from agentm.core.abi import (
     AgentMessage,
     AssistantMessage,
     ToolCallBlock,
@@ -53,11 +53,11 @@ from agentm.core.abi.messages import (
 )
 
 from llmharness.atom import CumulativeAuditState
+from llmharness.replay.record import ReplayRecord, write_record
 
 from .offline import InMemorySink, StandaloneChildRunner
 from .offline_driver import SurfaceFiring, replay_pipeline_over_trajectory
 from .runner import AuditorSettings, ExtractorSettings
-from llmharness.replay.record import ReplayRecord, write_record
 
 _logger = logging.getLogger(__name__)
 
@@ -75,7 +75,6 @@ __all__ = [
     "write_fork_tree_replay",
 ]
 
-
 class SessionPayload(Protocol):
     """The seam between the experiment driver and the host session.
 
@@ -89,7 +88,6 @@ class SessionPayload(Protocol):
     session_log_id: str
     final_messages: list[AgentMessage]
 
-
 SessionFactory = Callable[..., Awaitable[SessionPayload]]
 """Coroutine: ``(*, initial_messages, seed_reminder_text) -> SessionPayload``.
 
@@ -97,7 +95,6 @@ The root (control) backbone is invoked with ``initial_messages=None`` and
 ``seed_reminder_text=None``; each forked child receives the parent
 trajectory prefix up to the fork point and the surfaced reminder text.
 """
-
 
 @dataclass(frozen=True)
 class Surface:
@@ -115,7 +112,6 @@ class Surface:
     fork_message_index: int
     reminder_text: str
     cumulative_snapshot: CumulativeAuditState
-
 
 @dataclass(frozen=True)
 class ForkTask:
@@ -151,7 +147,6 @@ class ForkTask:
     """Intervention provenance: the reminder texts applied from the root
     down to (and including) this task's seed. Empty for the root."""
 
-
 @dataclass
 class ForkNode:
     """Product of consuming one :class:`ForkTask`.
@@ -176,7 +171,6 @@ class ForkNode:
     consumer reaches through this for the submission / AgentResult side
     table keyed by ``session_log_id``."""
 
-
 @dataclass(frozen=True)
 class ForkTreeExperiment:
     """Outcome of one :func:`run_fork_tree_experiment` invocation.
@@ -197,7 +191,6 @@ class ForkTreeExperiment:
     def root(self) -> ForkNode:
         return self.nodes[0]
 
-
 def forktree_replay_path(cwd: str | Path, root_session_log_id: str) -> Path:
     """Canonical sidecar path for a fork-tree replay.
 
@@ -207,7 +200,6 @@ def forktree_replay_path(cwd: str | Path, root_session_log_id: str) -> Path:
     ``audit_replay_path`` metadata) keeps finding it.
     """
     return Path(cwd) / ".agentm" / "audit_replay" / f"{root_session_log_id}.chained.jsonl"
-
 
 def _fork_prefix(parent_messages: list[AgentMessage], turn_index: int) -> list[AgentMessage]:
     """Return the parent-trajectory prefix that ends *cleanly* at ``turn_index``.
@@ -249,7 +241,6 @@ def _fork_prefix(parent_messages: list[AgentMessage], turn_index: int) -> list[A
             cut += 1
     return list(parent_messages[:cut])
 
-
 def _collect_surfaces(run_surfaces: list[SurfaceFiring]) -> list[Surface]:
     """Map the offline driver's per-firing surfaces onto :class:`Surface`.
 
@@ -265,7 +256,6 @@ def _collect_surfaces(run_surfaces: list[SurfaceFiring]) -> list[Surface]:
         for firing in run_surfaces
     ]
 
-
 def _rebind_record(record: ReplayRecord, *, session_id: str) -> ReplayRecord:
     """Return a copy of ``record`` re-keyed under a new session_id.
 
@@ -275,7 +265,6 @@ def _rebind_record(record: ReplayRecord, *, session_id: str) -> ReplayRecord:
     else (timing, payload, output) stays verbatim.
     """
     return replace(record, session_id=session_id)
-
 
 async def run_fork_tree_experiment(
     *,
@@ -487,7 +476,6 @@ async def run_fork_tree_experiment(
     sidecar = write_fork_tree_replay(nodes, out_path=resolved_out, header=header)
     return ForkTreeExperiment(nodes=nodes, forktree_replay_path=sidecar, header=header)
 
-
 FORK_TREE_HEADER_KEY = "__fork_tree_header__"
 """JSON key marking the fork-tree replay sidecar's header line.
 
@@ -498,7 +486,6 @@ consumers can reconstruct the tree from the per-firing
 :class:`ReplayRecord` stream without re-running the driver. See
 :func:`_build_fork_tree_header` for the field layout and
 :func:`read_fork_tree_header` for the matching reader."""
-
 
 def _node_to_header_dict(node: ForkNode) -> dict[str, Any]:
     """JSON-safe summary of one node, as it appears in the sidecar header."""
@@ -514,7 +501,6 @@ def _node_to_header_dict(node: ForkNode) -> dict[str, Any]:
         "surface_turns": [s.fork_message_index for s in node.surfaces],
         "msg_count": len(node.payload.final_messages),
     }
-
 
 def _build_fork_tree_header(
     *,
@@ -550,7 +536,6 @@ def _build_fork_tree_header(
         "nodes": [_node_to_header_dict(n) for n in nodes],
     }
 
-
 def read_fork_tree_header(path: Path) -> dict[str, Any] | None:
     """Return the tree-topology header from a fork-tree replay sidecar.
 
@@ -577,7 +562,6 @@ def read_fork_tree_header(path: Path) -> dict[str, Any] | None:
         return None
     return header
 
-
 def _node_window(node: ForkNode) -> tuple[int, int | None]:
     """Return the ``[turn_lo, turn_hi]`` window of records this node owns.
 
@@ -594,7 +578,6 @@ def _node_window(node: ForkNode) -> tuple[int, int | None]:
     if node.parent_id is None or node.fork_turn_index is None:
         return 0, None
     return node.fork_turn_index + 1, None
-
 
 def write_fork_tree_replay(
     nodes: list[ForkNode],

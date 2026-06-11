@@ -14,21 +14,16 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.abi import DiagnosticEvent, ExtensionAPI, ResourcesDiscoverEvent
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import ResourcesDiscoverEvent
-from agentm.core.abi.extension import ExtensionAPI
-
 
 _RECOGNIZED_SCOPES: frozenset[str] = frozenset({"user", "project"})
-
 
 class PluginsConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     registry_path: str | None = None
     exclude: list[str] = []
-
 
 MANIFEST = ExtensionManifest(
     name="plugins",
@@ -41,10 +36,8 @@ MANIFEST = ExtensionManifest(
     tier=2,
 )
 
-
 def _default_registry_path() -> Path:
     return Path.home() / ".claude" / "plugins" / "installed_plugins.json"
-
 
 def _resolve_install_paths(
     registry_path: Path,
@@ -92,7 +85,6 @@ def _resolve_install_paths(
                 result.append(path)
     return result, unknown_scopes
 
-
 def install(api: ExtensionAPI, config: PluginsConfig) -> None:
     registry_path = Path(config.registry_path) if config.registry_path else _default_registry_path()
     exclude = set(config.exclude)
@@ -132,6 +124,5 @@ def install(api: ExtensionAPI, config: PluginsConfig) -> None:
         return {key: value for key, value in resource_dirs.items() if value} or None
 
     api.on(ResourcesDiscoverEvent.CHANNEL, _on_discover)
-
 
 __all__ = ("MANIFEST", "install")

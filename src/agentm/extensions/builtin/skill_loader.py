@@ -19,27 +19,27 @@ import re
 from pathlib import Path
 from typing import Any
 
-from agentm.core.abi import FunctionTool, ToolResult
-from agentm.core.abi.events import DiagnosticEvent
-from agentm.core.abi.messages import TextContent
-from pydantic import BaseModel
-
-from agentm.core.abi.skill import SkillDiagnostic, SkillRecord
-from agentm.core.lib.frontmatter import parse_frontmatter
-from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import (
+from agentm.core.abi import (
     BeforeAgentStartEvent,
+    DiagnosticEvent,
+    ExtensionAPI,
+    FunctionTool,
     ResourcesDiscoverEvent,
     SessionReadyEvent,
+    SkillDiagnostic,
+    SkillRecord,
+    TextContent,
+    ToolResult,
 )
-from agentm.core.abi.extension import ExtensionAPI
+from pydantic import BaseModel
 
+from agentm.core.lib import parse_frontmatter
+from agentm.extensions import ExtensionManifest
 
 class SkillLoaderConfig(BaseModel):
     skill_paths: list[str] = []
     include_defaults: bool = True
     inherit_claude: bool | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="skill_loader",
@@ -54,13 +54,11 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Leaf atom: consumes resource-discovery responses from any peer.
 )
 
-
 # === Skills engine (inlined; previously core/_internal/skills.py) ==========
 
 DEFAULT_MAX_NAME_LENGTH = 64
 DEFAULT_MAX_DESCRIPTION_LENGTH = 1024
 _NAME_PATTERN = r"^[a-z0-9-]+$"
-
 
 def _normalize_path(raw_path: str, cwd: str) -> str:
     expanded = raw_path.strip()
@@ -73,7 +71,6 @@ def _normalize_path(raw_path: str, cwd: str) -> str:
     if os.path.isabs(expanded):
         return expanded
     return os.path.abspath(os.path.join(cwd, expanded))
-
 
 def _validate_name(
     name: str, parent_dir_name: str, *, max_name_length: int
@@ -95,7 +92,6 @@ def _validate_name(
         issues.append("name must not contain consecutive hyphens")
     return issues
 
-
 def _validate_description(
     description: str | None, *, max_description_length: int
 ) -> list[str]:
@@ -108,7 +104,6 @@ def _validate_description(
             f"({len(description)})"
         )
     return issues
-
 
 def _parse_skill_file(
     file_path: str,
@@ -172,7 +167,6 @@ def _parse_skill_file(
         ),
         diagnostics,
     )
-
 
 def _load_skills_from_dir(
     directory: str,
@@ -240,7 +234,6 @@ def _load_skills_from_dir(
             diagnostics.extend(skill_diags)
 
     return skills, diagnostics
-
 
 def load_skills(
     *,
@@ -334,7 +327,6 @@ def load_skills(
 
     return discovered, diagnostics
 
-
 def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
     visible_skills = [skill for skill in skills if not skill.disable_model_invocation]
     if not visible_skills:
@@ -359,9 +351,7 @@ def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
     lines.append("</available_skills>")
     return "\n".join(lines)
 
-
 # === Atom install ==========================================================
-
 
 async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
     include_defaults = config.include_defaults

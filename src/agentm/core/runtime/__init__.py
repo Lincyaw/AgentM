@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from agentm.core.abi import FunctionTool
 from agentm.core.abi import events
-import agentm.core.runtime.event_otel as _event_otel  # noqa: F401 — populates OTel registry
+import agentm.core.observability.event_otel as _event_otel  # noqa: F401 — populates OTel registry
 from agentm.core.abi.events import (
     ApiRegisterEvent,
     ApiSendUserMessageEvent,

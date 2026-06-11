@@ -38,13 +38,16 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from agentm.core.abi import FunctionTool, ToolResult, ToolTerminate
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.messages import TextContent
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
+)
 from agentm.extensions import ExtensionManifest
 
 from rca.hfsm.judges import JudgeContext
-
 
 MANIFEST = ExtensionManifest(
     name="rca_finalize",
@@ -62,7 +65,6 @@ MANIFEST = ExtensionManifest(
     },
     requires=("rca_hgraph_store",),
 )
-
 
 _PARAMS: Final[dict[str, Any]] = {
     "type": "object",
@@ -96,17 +98,13 @@ _PARAMS: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
-
 _GENUINE = "genuine_investigation"
-
 
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
 
-
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
-
 
 def _hypothesis_summary(read_handle: Any) -> list[dict[str, Any]]:
     """Compose a structured summary of every hypothesis the store knows.
@@ -151,7 +149,6 @@ def _hypothesis_summary(read_handle: Any) -> list[dict[str, Any]]:
                 "checks_count": checks_count,
             }
     return list(seen.values())
-
 
 def _build_judge_context(
     read_handle: Any,
@@ -198,7 +195,6 @@ def _build_judge_context(
         },
     }
     return JudgeContext(graph_slice=graph_slice, operands={})
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

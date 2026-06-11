@@ -13,7 +13,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 
 from . import agents, commands, plugins
 
@@ -23,7 +23,6 @@ class CCConfig(BaseModel):
     plugins: dict[str, Any] = {}
     commands: dict[str, Any] = {}
     agents: dict[str, Any] = {}
-
 
 MANIFEST = ExtensionManifest(
     name="cc",
@@ -43,7 +42,6 @@ MANIFEST = ExtensionManifest(
 
 MANIFESTS = (agents.MANIFEST, commands.MANIFEST, plugins.MANIFEST)
 
-
 async def install(api: ExtensionAPI, config: CCConfig) -> None:
     plugin_config = plugins.PluginsConfig.model_validate(config.plugins)
     command_config = commands.CommandsConfig.model_validate(config.commands)
@@ -51,6 +49,5 @@ async def install(api: ExtensionAPI, config: CCConfig) -> None:
     plugins.install(api, plugin_config)
     await commands.install(api, command_config)
     await agents.install(api, agent_config)
-
 
 __all__ = ("MANIFEST", "MANIFESTS", "install", "agents", "commands", "plugins")

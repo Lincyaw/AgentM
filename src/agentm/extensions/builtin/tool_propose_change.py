@@ -71,10 +71,13 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 class PromotionConfig(BaseModel):
     model_config = {"extra": "allow"}
@@ -82,7 +85,6 @@ class PromotionConfig(BaseModel):
     threshold_relative: float = 0.05
     guard_tolerance: float = 0.10
     stop_after_no_improvement: int | None = 3
-
 
 class ToolProposeChangeConfig(BaseModel):
     model_config = {"extra": "allow"}
@@ -92,7 +94,6 @@ class ToolProposeChangeConfig(BaseModel):
     rollouts_budget: int | None = None
     usd_budget: float | None = None
     transfer_to: list[str] = []
-
 
 def mad_confidence(
     values: list[float], baseline: float, candidate: float
@@ -134,7 +135,6 @@ def mad_confidence(
         tier = "noise"
     return {"ratio": float(ratio), "tier": tier}
 
-
 MANIFEST = ExtensionManifest(
     name="tool_propose_change",
     description=(
@@ -147,7 +147,6 @@ MANIFEST = ExtensionManifest(
     registers=("tool:propose_change",),
     config_schema=ToolProposeChangeConfig,
 )
-
 
 # ``"system_prompt"`` here is the *change-kind label*, not a reference to the
 # system_prompt atom; constructed via concat to dodge the §11.4-D4 validator
@@ -248,11 +247,9 @@ _PARAMETERS: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
-
 _DEFAULT_THRESHOLD_RELATIVE = 0.05
 _DEFAULT_GUARD_TOLERANCE = 0.10
 _DEFAULT_STOP_AFTER_NO_IMPROVEMENT = 3
-
 
 def install(api: ExtensionAPI, config: ToolProposeChangeConfig) -> None:
     target_scenario = config.target_scenario
@@ -817,9 +814,7 @@ def install(api: ExtensionAPI, config: ToolProposeChangeConfig) -> None:
         )
     )
 
-
 # ---------------------------------------------------------------------------
-
 
 def _find_atom_info(api: ExtensionAPI, name: str) -> dict[str, Any] | None:
     for info in api.list_atoms():
@@ -831,7 +826,6 @@ def _find_atom_info(api: ExtensionAPI, name: str) -> dict[str, Any] | None:
                 "source_path": getattr(info, "source_path", None),
             }
     return None
-
 
 def _find_atom_on_disk(
     cwd: Path, scenario: str, atom_name: str
@@ -878,7 +872,6 @@ def _find_atom_on_disk(
                         }
     return None
 
-
 async def _write_cross_session(
     api: ExtensionAPI,
     source_path: str | None,
@@ -919,7 +912,6 @@ async def _write_cross_session(
     except Exception as exc:  # noqa: BLE001
         return False, None, None, str(exc)
 
-
 def _git_head_sha_for_path(source_path: str | None) -> str | None:
     """B-10: return ``git rev-parse HEAD`` for the repo containing
     ``source_path``. Returns None when git is unavailable, the file is
@@ -958,12 +950,10 @@ def _git_head_sha_for_path(source_path: str | None) -> str | None:
             return s
     return None
 
-
 def _decisions_path(cwd: Path, scenario: str) -> Path:
     out = cwd / ".agentm" / "decisions" / scenario / "activations.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     return out
-
 
 def _append_decision_record(path: Path, record: dict[str, Any]) -> None:
     """Append ``record`` to ``activations.jsonl``. Bypasses ResourceWriter
@@ -973,7 +963,6 @@ def _append_decision_record(path: Path, record: dict[str, Any]) -> None:
     """
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
-
 
 def _write_candidate_record(decisions_dir: Path, record: dict[str, Any]) -> None:
     """Write ``record`` to ``candidates/<candidate_id>.json`` under
@@ -987,7 +976,6 @@ def _write_candidate_record(decisions_dir: Path, record: dict[str, Any]) -> None
     path = candidates_dir / f"{candidate_id}.json"
     with path.open("w", encoding="utf-8") as fh:
         json.dump(record, fh, indent=2, sort_keys=True)
-
 
 def _last_candidate_id(activations_path: Path) -> str | None:
     """Scan ``activations.jsonl`` for the most recent record carrying a
@@ -1012,7 +1000,6 @@ def _last_candidate_id(activations_path: Path) -> str | None:
     except OSError:
         return None
     return last
-
 
 def _load_eval_run_per_task(cwd: Path, run_id: str) -> list[dict[str, Any]]:
     """Read ``.agentm/eval_runs/<run_id>.jsonl`` and return the
@@ -1040,7 +1027,6 @@ def _load_eval_run_per_task(cwd: Path, run_id: str) -> list[dict[str, Any]]:
         return []
     return out
 
-
 def _per_task_score_map(
     records: list[dict[str, Any]], *, holdout: bool
 ) -> dict[str, float]:
@@ -1055,7 +1041,6 @@ def _per_task_score_map(
         if isinstance(task_id, str) and isinstance(score, (int, float)):
             out[task_id] = float(score)
     return out
-
 
 def _load_eval_run_summary(cwd: Path, run_id: str) -> dict[str, Any] | None:
     run_path = cwd / ".agentm" / "eval_runs" / f"{run_id}.jsonl"
@@ -1073,7 +1058,6 @@ def _load_eval_run_summary(cwd: Path, run_id: str) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return None
-
 
 def _apply_deployment_gate(
     *,
@@ -1167,7 +1151,6 @@ def _apply_deployment_gate(
         "relative": relative,
     }
 
-
 def _load_validator(api: ExtensionAPI, kind: str) -> Any:
     """Look up the per-kind ``ChangeSpec`` validator on the
     ``changespec_validators`` service. Returns ``None`` when no validator
@@ -1191,10 +1174,8 @@ def _load_validator(api: ExtensionAPI, kind: str) -> Any:
     fn = registry.get(safe_kind)
     return fn if callable(fn) else None
 
-
 def _budget_path(cwd: Path, scenario: str) -> Path:
     return cwd / ".agentm" / "decisions" / scenario / "budget.json"
-
 
 def _read_budget(cwd: Path, scenario: str) -> dict[str, Any]:
     path = _budget_path(cwd, scenario)
@@ -1218,7 +1199,6 @@ def _read_budget(cwd: Path, scenario: str) -> dict[str, Any]:
         "updated_at": float(data.get("updated_at") or 0.0),
     }
 
-
 def _write_budget(cwd: Path, scenario: str, budget: dict[str, Any]) -> None:
     import os
 
@@ -1228,7 +1208,6 @@ def _write_budget(cwd: Path, scenario: str, budget: dict[str, Any]) -> None:
     with tmp.open("w", encoding="utf-8") as fh:
         json.dump(budget, fh, indent=2, sort_keys=True)
     os.replace(tmp, path)
-
 
 def _check_budget(
     cwd: Path,
@@ -1258,7 +1237,6 @@ def _check_budget(
         )
     return None
 
-
 def _bump_budget_rollouts(cwd: Path, scenario: str) -> None:
     """Increment ``rollouts_used`` by one. Called once per propose_change
     call (B-6). The eval_run atom continues to be the sole writer of
@@ -1267,7 +1245,6 @@ def _bump_budget_rollouts(cwd: Path, scenario: str) -> None:
     budget["rollouts_used"] = int(budget["rollouts_used"]) + 1
     budget["updated_at"] = time.time()
     _write_budget(cwd, scenario, budget)
-
 
 def _append_tree_edge(
     decisions_dir: Path, *, child: str, parent: str | None
@@ -1280,7 +1257,6 @@ def _append_tree_edge(
     record = {"child": child, "parent": parent, "at": time.time()}
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
-
 
 def _prune_dominated_candidates(decisions_dir: Path) -> None:
     """Pareto pruning (B-1). A candidate is on the frontier iff it is the
@@ -1354,7 +1330,6 @@ def _prune_dominated_candidates(decisions_dir: Path) -> None:
                 except OSError:
                     pass
 
-
 def _count_consecutive_rejections(activations_path: Path) -> int:
     """B-9: walk ``activations.jsonl`` from the most recent entry backward
     and count contiguous ``kind == "rejected"`` records. The walk stops on
@@ -1399,7 +1374,6 @@ def _count_consecutive_rejections(activations_path: Path) -> int:
         break
     return consec
 
-
 def _collect_pool_scores(
     decisions_dir: Path, *, exclude_candidate_id: str | None = None
 ) -> list[float]:
@@ -1434,10 +1408,8 @@ def _collect_pool_scores(
                 out.append(float(v))
     return out
 
-
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
-
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

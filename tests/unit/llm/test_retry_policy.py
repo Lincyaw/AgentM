@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 
 from agentm.core.abi import EventBus, MessageEnd, Model, text_message
-from agentm.core.abi.events import DiagnosticEvent
+from agentm.core.abi import DiagnosticEvent
 from agentm.extensions.builtin import retry_policy
 from agentm.extensions.builtin.retry_policy import ExponentialBackoffRetry
 from agentm.extensions.builtin import llm_anthropic as anthropic, llm_openai as openai

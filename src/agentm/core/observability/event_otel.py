@@ -45,7 +45,7 @@ from agentm.core.abi.events import (
     TurnStartEvent,
 )
 from agentm.core.abi.messages import ToolCallBlock
-from agentm.core.lib.otel_dispatch import register_otel
+from agentm.core.observability.otel_dispatch import register_otel
 
 # Span-kind keys for ``SessionTelemetry.span_tracker``.
 _SPAN_INVOKE_AGENT = "invoke_agent"

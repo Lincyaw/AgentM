@@ -15,7 +15,7 @@ Tests assert the three invariants:
 
 from __future__ import annotations
 
-from agentm.core.lib.redact import (
+from agentm.core.observability.redact import (
     redact_messages,
 )
 

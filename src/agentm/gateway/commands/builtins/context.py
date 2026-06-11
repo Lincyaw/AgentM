@@ -28,7 +28,7 @@ class ContextCommand:
         if not session_id:
             return CommandResult(outbound=[ctx.reply("No active session.")])
 
-        from agentm.core.runtime.otel_export import resolve_observability_dir
+        from agentm.core.observability.otel_export import resolve_observability_dir
 
         trace_path = resolve_observability_dir(ctx.cwd) / f"{session_id}.jsonl"
         if not trace_path.exists():

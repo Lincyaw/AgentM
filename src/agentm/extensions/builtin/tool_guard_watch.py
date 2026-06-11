@@ -44,9 +44,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import TraceReader
-from agentm.core.abi.events import SessionReadyEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI, SessionReadyEvent, TraceReader
 from agentm.extensions import ExtensionManifest
 
 logger = logging.getLogger(__name__)
@@ -55,7 +53,6 @@ _DEFAULT_RECENT_N = 20
 _DEFAULT_MIN_SAMPLES = 5
 _DEFAULT_REGRESSION_THRESHOLD = 0.20  # tool_error_rate (errors / turns)
 _DEFAULT_COOLDOWN_SECONDS = 24 * 3600.0
-
 
 class ToolGuardWatchConfig(BaseModel):
     model_config = {"extra": "allow"}
@@ -68,7 +65,6 @@ class ToolGuardWatchConfig(BaseModel):
     cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS
     disabled: bool = False
 
-
 MANIFEST = ExtensionManifest(
     name="tool_guard_watch",
     description=(
@@ -80,7 +76,6 @@ MANIFEST = ExtensionManifest(
     registers=("event:session_ready",),
     config_schema=ToolGuardWatchConfig,
 )
-
 
 def install(api: ExtensionAPI, config: ToolGuardWatchConfig) -> None:
     if config.disabled:
@@ -125,10 +120,8 @@ def install(api: ExtensionAPI, config: ToolGuardWatchConfig) -> None:
 
     api.on(SessionReadyEvent.CHANNEL, _on_ready)
 
-
 # ---------------------------------------------------------------------------
 # core algorithm — pure, easy to unit-test
-
 
 def _evaluate_and_maybe_rollback(
     *,
@@ -162,7 +155,7 @@ def _evaluate_and_maybe_rollback(
             return
 
     # Collect recent production trace files, newest first by mtime.
-    from agentm.core.lib.observability_dir import resolve_observability_dir
+    from agentm.core.lib import resolve_observability_dir
 
     obs_dir = resolve_observability_dir(cwd)
     if not obs_dir.is_dir():
@@ -243,10 +236,8 @@ def _evaluate_and_maybe_rollback(
     }
     _append_decision_record(decisions_path, rollback_record)
 
-
 # ---------------------------------------------------------------------------
 # helpers
-
 
 def _summarize_trace(path: Path) -> dict[str, Any] | None:
     """Heuristic tool_error_rate extractor for one OTLP/JSON trace file.
@@ -275,7 +266,6 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
         "tool_error_rate": rate,
     }
 
-
 def _load_activations(path: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     try:
@@ -294,7 +284,6 @@ def _load_activations(path: Path) -> list[dict[str, Any]]:
         return []
     return out
 
-
 def _last_kind_in(
     records: list[dict[str, Any]], *, kinds: set[str]
 ) -> dict[str, Any] | None:
@@ -302,7 +291,6 @@ def _last_kind_in(
         if rec.get("kind") in kinds:
             return rec
     return None
-
 
 def _prior_activate(
     records: list[dict[str, Any]], *, current: dict[str, Any]
@@ -320,19 +308,16 @@ def _prior_activate(
             return rec
     return None
 
-
 def _append_decision_record(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
-
 
 def _coerce_int(value: Any, default: int) -> int:
     try:
         return int(value) if value is not None else default
     except (TypeError, ValueError):
         return default
-
 
 def _coerce_float(value: Any, default: float) -> float:
     try:

@@ -7,16 +7,19 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
 
 from ._git_log import list_history
 from ._paths import catalog_root, resolve_catalog_path
 
 class ToolCatalogBrowseConfig(BaseModel):
     root: str | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="tool_catalog_browse",
@@ -111,7 +114,6 @@ _LIST_ATOMS_PARAMS: Final = {
     "properties": {},
     "additionalProperties": False,
 }
-
 
 def install(api: ExtensionAPI, config: ToolCatalogBrowseConfig) -> None:
     root = catalog_root(api, config.root)
@@ -220,7 +222,6 @@ def install(api: ExtensionAPI, config: ToolCatalogBrowseConfig) -> None:
         )
     )
 
-
 def _json_result(payload: Any) -> ToolResult:
     return ToolResult(
         content=[
@@ -231,7 +232,6 @@ def _json_result(payload: Any) -> ToolResult:
         ],
         extras=payload,
     )
-
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

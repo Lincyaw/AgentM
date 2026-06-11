@@ -6,7 +6,9 @@ import inspect
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +146,146 @@ def apply_child_session_contributions(
     return result
 
 
+def _default_model_resolver(model_name: str) -> tuple[str, dict[str, Any]] | None:
+    """Resolve a model name via the default provider registry + user config."""
+    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.lib.user_config import resolve_model_profile
+
+    profile = resolve_model_profile(model_name)
+    if profile is None:
+        return None
+    build_config = profile.to_build_config()
+    provider_id = profile.provider
+    try:
+        return DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
+    except KeyError:
+        return None
+
+
+def _refresh_active_provider(
+    active_provider_ref: Ref[ProviderConfig | None],
+    providers: dict[str, ProviderConfig],
+    provider_resolver: Any,
+    loop_ref: Ref[AgentLoop | None],
+) -> None:
+    """Re-resolve the active provider after a registration change."""
+    active_provider_ref.value = (
+        resolve_provider_config(
+            providers, provider_resolver, provider_path="<resolver>"
+        )
+        if providers
+        else None
+    )
+    loop = loop_ref.value
+    active = active_provider_ref.value
+    if loop is not None and active is not None:
+        loop.set_stream_fn(active.stream_fn)
+
+
+async def _spawn_child_session(
+    child_config: Any,
+    *,
+    bus: EventBus,
+    session_id: str,
+    root_session_id: str,
+    child_provider_factory: Callable[..., tuple[str, dict[str, Any]]],
+    provider_getter: Callable[[], ProviderConfig | None],
+    session_cls: type[Any],
+) -> Any:
+    """Create a child session, inheriting trace identity and provider."""
+    if isinstance(child_config, dict):
+        child_config = AgentSessionConfig(**child_config)
+    if not isinstance(child_config, AgentSessionConfig):
+        raise TypeError(
+            "spawn_child_session expects an AgentSessionConfig or kwargs dict; "
+            f"got {type(child_config).__name__}"
+        )
+    spec = AgentSessionConfig(**{**child_config.__dict__})
+    spec.parent_bus = bus
+    spec.parent_session_id = session_id
+    spec.root_session_id = root_session_id
+    if spec.provider is None:
+        parent_provider = provider_getter()
+        if parent_provider is None:
+            raise RuntimeError(
+                "spawn_child_session: AgentSessionConfig.provider is None but "
+                "the parent session has no active provider to inherit."
+            )
+        spec.provider = child_provider_factory(parent_provider)
+
+    returns = bus.emit_sync(
+        ChildSessionExtendingEvent.CHANNEL,
+        ChildSessionExtendingEvent(
+            parent_session_id=session_id,
+            child_config=spec,
+        ),
+    )
+    spec.extensions = apply_child_session_contributions(
+        list(spec.extensions), returns
+    )
+
+    return await session_cls.create(spec)
+
+
+def _make_api(
+    owner: str,
+    *,
+    scope: Any,
+    reloader: AtomReloader,
+    apis: dict[str, _ExtensionAPIImpl],
+) -> _ExtensionAPIImpl:
+    """Build and register an ``_ExtensionAPIImpl`` for *owner*."""
+    api = _ExtensionAPIImpl(scope, owner_name=owner)
+    reloader.wrap_api_on(api, owner)
+    apis[owner] = api
+    return api
+
+
+async def _install_with_events(
+    module_path: str,
+    ext_cfg: dict[str, Any],
+    *,
+    bus: EventBus,
+    api_factory: Callable[[str], _ExtensionAPIImpl],
+    reloader: AtomReloader,
+    is_provider: bool = False,
+) -> None:
+    """Load an extension, bracketed by install lifecycle events."""
+    await bus.emit(
+        ExtensionInstallEvent.CHANNEL,
+        ExtensionInstallEvent(
+            module_path=module_path, config=dict(ext_cfg), phase="start"
+        ),
+    )
+    t0 = time.perf_counter_ns()
+    try:
+        result = load_extension(module_path, api_factory(module_path), ext_cfg)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as exc:
+        await bus.emit(
+            ExtensionInstallEvent.CHANNEL,
+            ExtensionInstallEvent(
+                module_path=module_path,
+                config=dict(ext_cfg),
+                phase="error",
+                duration_ns=time.perf_counter_ns() - t0,
+                error=repr(exc),
+            ),
+        )
+        raise
+    reloader.record_loaded_atom(module_path, ext_cfg, is_provider=is_provider)
+    await bus.emit(
+        ExtensionInstallEvent.CHANNEL,
+        ExtensionInstallEvent(
+            module_path=module_path,
+            config=dict(ext_cfg),
+            phase="end",
+            duration_ns=time.perf_counter_ns() - t0,
+        ),
+    )
+
+
 async def create_agent_session(
     session_cls: type[Any], config: AgentSessionConfig
 ) -> Any:
@@ -174,21 +316,7 @@ async def create_agent_session(
         services[SESSION_STORE_SERVICE] = make_default_session_store(config.cwd)
 
     if MODEL_RESOLVER_SERVICE not in services:
-        def _resolve_model(model_name: str) -> tuple[str, dict[str, Any]] | None:
-            from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-            from agentm.core.lib.user_config import resolve_model_profile
-
-            profile = resolve_model_profile(model_name)
-            if profile is None:
-                return None
-            build_config = profile.to_build_config()
-            provider_id = profile.provider
-            try:
-                return DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
-            except KeyError:
-                return None
-
-        services[MODEL_RESOLVER_SERVICE] = _resolve_model
+        services[MODEL_RESOLVER_SERVICE] = _default_model_resolver
 
     active_provider_ref: Ref[ProviderConfig | None] = Ref(None)
     loop_ref: Ref[AgentLoop | None] = Ref(None)
@@ -198,12 +326,12 @@ async def create_agent_session(
         config.child_provider_factory or default_child_provider_factory
     )
 
-    def _model_getter() -> Model | None:
-        cur = active_provider_ref.value
-        return cur.model if cur is not None else None
-
     def _provider_getter() -> ProviderConfig | None:
         return active_provider_ref.value
+
+    def _model_getter() -> Model | None:
+        cur = _provider_getter()
+        return cur.model if cur is not None else None
 
     # session_id = OTel span_id (16 hex); root_session_id = OTel trace_id
     # (32 hex) shared across the agent tree. Honour caller-supplied ids.
@@ -235,19 +363,6 @@ async def create_agent_session(
     _configure_manifest(config.cwd)
     _migrate_catalog(config.cwd)
 
-    def _refresh_active_provider() -> None:
-        active_provider_ref.value = (
-            resolve_provider_config(
-                providers, provider_resolver, provider_path="<resolver>"
-            )
-            if providers
-            else None
-        )
-        loop = loop_ref.value
-        active = active_provider_ref.value
-        if loop is not None and active is not None:
-            loop.set_stream_fn(active.stream_fn)
-
     reloader = AtomReloader(
         cwd=config.cwd,
         resource_writer=resource_writer,
@@ -257,42 +372,21 @@ async def create_agent_session(
         providers=providers,
         renderers=renderers,
         apis=apis,
-        on_provider_changed=_refresh_active_provider,
+        on_provider_changed=partial(
+            _refresh_active_provider,
+            active_provider_ref, providers, provider_resolver, loop_ref,
+        ),
     )
 
-    async def _spawn_child_session(child_config: Any) -> Any:
-        if isinstance(child_config, dict):
-            child_config = AgentSessionConfig(**child_config)
-        if not isinstance(child_config, AgentSessionConfig):
-            raise TypeError(
-                "spawn_child_session expects an AgentSessionConfig or kwargs dict; "
-                f"got {type(child_config).__name__}"
-            )
-        spec = AgentSessionConfig(**{**child_config.__dict__})
-        spec.parent_bus = bus
-        spec.parent_session_id = session_id
-        spec.root_session_id = root_session_id
-        if spec.provider is None:
-            parent_provider = _provider_getter()
-            if parent_provider is None:
-                raise RuntimeError(
-                    "spawn_child_session: AgentSessionConfig.provider is None but "
-                    "the parent session has no active provider to inherit."
-                )
-            spec.provider = child_provider_factory(parent_provider)
-
-        returns = bus.emit_sync(
-            ChildSessionExtendingEvent.CHANNEL,
-            ChildSessionExtendingEvent(
-                parent_session_id=session_id,
-                child_config=spec,
-            ),
-        )
-        spec.extensions = apply_child_session_contributions(
-            list(spec.extensions), returns
-        )
-
-        return await session_cls.create(spec)
+    child_session_fn = partial(
+        _spawn_child_session,
+        bus=bus,
+        session_id=session_id,
+        root_session_id=root_session_id,
+        child_provider_factory=child_provider_factory,
+        provider_getter=_provider_getter,
+        session_cls=session_cls,
+    )
 
     scope = build_extension_api_scope(
         bus=bus,
@@ -311,18 +405,13 @@ async def create_agent_session(
         model_getter=_model_getter,
         provider_getter=_provider_getter,
         gateway=reloader,
-        child_session_factory=_spawn_child_session,
+        child_session_factory=child_session_fn,
         resource_writer=resource_writer,
         service_registry=services,
     )
 
-    def _make_api(owner: str) -> _ExtensionAPIImpl:
-        api = _ExtensionAPIImpl(scope, owner_name=owner)
-        reloader.wrap_api_on(api, owner)
-        apis[owner] = api
-        return api
-
-    reloader.set_api_factory(_make_api)
+    api_factory = partial(_make_api, scope=scope, reloader=reloader, apis=apis)
+    reloader.set_api_factory(api_factory)
     command_parser_entry = discover_mod.discover_by_role().get(COMMAND_PARSER)
     services[SLASH_COMMAND_DISPATCHER_SERVICE] = HarnessCommandDispatcher(
         commands=commands,
@@ -335,52 +424,16 @@ async def create_agent_session(
         ),
     )
 
-    async def _install_with_events(
-        module_path: str,
-        ext_cfg: dict[str, Any],
-        *,
-        is_provider: bool = False,
-    ) -> None:
-        await bus.emit(
-            ExtensionInstallEvent.CHANNEL,
-            ExtensionInstallEvent(
-                module_path=module_path, config=dict(ext_cfg), phase="start"
-            ),
-        )
-        t0 = time.perf_counter_ns()
-        try:
-            result = load_extension(module_path, _make_api(module_path), ext_cfg)
-            if inspect.isawaitable(result):
-                await result
-        except Exception as exc:
-            await bus.emit(
-                ExtensionInstallEvent.CHANNEL,
-                ExtensionInstallEvent(
-                    module_path=module_path,
-                    config=dict(ext_cfg),
-                    phase="error",
-                    duration_ns=time.perf_counter_ns() - t0,
-                    error=repr(exc),
-                ),
-            )
-            raise
-        reloader.record_loaded_atom(module_path, ext_cfg, is_provider=is_provider)
-        await bus.emit(
-            ExtensionInstallEvent.CHANNEL,
-            ExtensionInstallEvent(
-                module_path=module_path,
-                config=dict(ext_cfg),
-                phase="end",
-                duration_ns=time.perf_counter_ns() - t0,
-            ),
-        )
+    install = partial(
+        _install_with_events, bus=bus, api_factory=api_factory, reloader=reloader,
+    )
 
     await _prime_contrib_discovery(config, bus)
     to_load = await _resolve_extensions(config, bus)
 
     for module_path, ext_cfg in to_load:
         try:
-            await _install_with_events(module_path, ext_cfg)
+            await install(module_path, ext_cfg)
         except Exception as exc:  # noqa: BLE001
             await bus.emit(
                 DiagnosticEvent.CHANNEL,
@@ -401,7 +454,7 @@ async def create_agent_session(
             ),
         )
     provider_path, provider_cfg = config.provider
-    await _install_with_events(provider_path, provider_cfg, is_provider=True)
+    await install(provider_path, provider_cfg, is_provider=True)
 
     if not providers:
         raise ExtensionLoadError(

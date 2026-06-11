@@ -48,8 +48,18 @@ from agentm.extensions.discover import discover_builtin
 _ALLOWED_PREFIXES: tuple[str, ...] = (
     "agentm.core.abi",
     "agentm.core.lib",
+    "agentm.core.observability",
     "agentm.ai",
     "agentm.extensions",
+)
+
+# Atoms must import from the *package* surface (``from agentm.core.abi import X``),
+# not from sub-modules (``from agentm.core.abi.events import X``). This keeps the
+# public API auditable via ``__init__.__all__``. Private symbols (``_force_strict``)
+# that cannot be on the package surface are the only exception.
+_PACKAGE_ONLY_PREFIXES: tuple[str, ...] = (
+    "agentm.core.abi",
+    "agentm.core.lib",
 )
 
 # Imports that are explicitly forbidden — listed for clearer error messages
@@ -230,11 +240,13 @@ def _check_imports(
 
     for node in ast.walk(tree):
         names: list[str] = []
+        imported_names: list[str] = []
         if isinstance(node, ast.Import):
             names = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
             if node.module is not None and node.level == 0:
                 names = [node.module]
+                imported_names = [alias.name for alias in node.names]
         elif isinstance(node, ast.Call):
             # Catch ``importlib.import_module("agentm.core.runtime.session")``
             # and ``__import__("agentm.core.runtime.session")`` — dynamic imports
@@ -246,7 +258,7 @@ def _check_imports(
             if target is not None:
                 names = [target]
         for imported in names:
-            issues.extend(_classify_import(module_path, imported))
+            issues.extend(_classify_import(module_path, imported, imported_names))
 
     return issues
 
@@ -780,7 +792,9 @@ def validate_atom_file(
 
 
 def _classify_import(
-    module_path: str, imported: str
+    module_path: str,
+    imported: str,
+    all_names: list[str] | None = None,
 ) -> list[ValidationIssue]:
     # Allow stdlib by default — anything that does not start with "agentm."
     # and is not an explicitly-forbidden third party (langchain et al.) is
@@ -810,6 +824,23 @@ def _classify_import(
                     ),
                 )
             ]
+    for pkg_prefix in _PACKAGE_ONLY_PREFIXES:
+        if imported.startswith(pkg_prefix + ".") and imported != pkg_prefix:
+            sub = imported[len(pkg_prefix) + 1:]
+            if "." not in sub:
+                if all_names and all(n.startswith("_") for n in all_names):
+                    continue
+                return [
+                    ValidationIssue(
+                        module_path=module_path,
+                        rule="11.4.6-submodule",
+                        message=(
+                            f"import {imported!r}: use "
+                            f"'from {pkg_prefix} import ...' instead of "
+                            f"importing from sub-modules directly"
+                        ),
+                    )
+                ]
     if imported.startswith("agentm."):
         if not any(
             imported == prefix or imported.startswith(prefix + ".")

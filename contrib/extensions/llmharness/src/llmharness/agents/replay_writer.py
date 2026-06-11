@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from llmharness.replay.record import (
@@ -27,7 +27,6 @@ MANIFEST = ExtensionManifest(
     registers=("event:llmharness.extractor_fired", "event:llmharness.auditor_fired"),
     requires=("llmharness",),
 )
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     sid = audit_session_id(api)

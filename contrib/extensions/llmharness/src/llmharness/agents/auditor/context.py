@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
 
@@ -37,7 +36,6 @@ MANIFEST = ExtensionManifest(
     config_schema=AuditorContextConfig,
 )
 
-
 def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
     events = tuple(Event.from_dict(e) for e in config.events)
     edges = tuple(Edge.from_dict(e) for e in config.edges)
@@ -68,6 +66,5 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
         event.system = prompt_text
 
     api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
-
 
 __all__ = ["MANIFEST", "install"]

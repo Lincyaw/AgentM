@@ -13,14 +13,11 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import ToolCallEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI, ToolCallEvent
 from agentm.extensions import ExtensionManifest
-
 
 class ToolBashGuardConfig(BaseModel):
     model_config = {"extra": "allow"}
-
 
 MANIFEST = ExtensionManifest(
     name="tool_bash_guard",
@@ -46,7 +43,6 @@ _BLOCKED: Final[list[tuple[re.Pattern[str], str]]] = [
         "Do not use `awk -i inplace` to edit files. Use the edit tool instead.",
     ),
 ]
-
 
 def install(api: ExtensionAPI, config: ToolBashGuardConfig) -> None:
     del config

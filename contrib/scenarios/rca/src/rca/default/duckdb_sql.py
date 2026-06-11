@@ -65,10 +65,13 @@ import duckdb  # type: ignore[import-not-found,import-untyped]
 
 from pydantic import BaseModel
 
-from agentm.core.abi.messages import TextContent
-from agentm.core.abi import FunctionTool, ToolResult
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
 
 class DuckdbSqlConfig(BaseModel):
     data_dir: str | None = None
@@ -80,7 +83,6 @@ class DuckdbSqlConfig(BaseModel):
     exclude: list[str] = []
     row_limit: int | None = None
     token_limit: int | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="duckdb_sql",
@@ -97,13 +99,11 @@ _WRITE_KEYWORDS = re.compile(
 _DEFAULT_TOKEN_LIMIT = 5000  # rationale: fits RCA result rows in a compact tool turn.
 _DEFAULT_ROW_LIMIT = 200  # rationale: enough rows for patterns without flooding context.
 
-
 _ID_COLUMNS = frozenset({
     "trace_id", "span_id", "parent_span_id",
     "attr.trace_id", "attr.span_id",
 })
 _ID_KEEP = 12
-
 
 def _serialize(obj: Any) -> Any:
     if isinstance(obj, datetime):
@@ -122,7 +122,6 @@ def _serialize(obj: Any) -> Any:
         return obj.decode("utf-8", errors="replace")
     return obj
 
-
 def _compact_ids(rows: list[dict[str, Any]], cols: list[str]) -> list[dict[str, Any]]:
     """Truncate long hex ID columns to save tokens."""
     id_cols = [c for c in cols if c in _ID_COLUMNS]
@@ -138,11 +137,9 @@ def _compact_ids(rows: list[dict[str, Any]], cols: list[str]) -> list[dict[str, 
         out.append(r)
     return out
 
-
 def _estimate_tokens(text: str) -> int:
     # Cheap heuristic; close enough for budget enforcement.
     return (len(text) + 2) // 3
-
 
 def _truncate(payload: str, *, token_limit: int, rows: list[dict[str, Any]]) -> str:
     if _estimate_tokens(payload) <= token_limit:
@@ -158,14 +155,11 @@ def _truncate(payload: str, *, token_limit: int, rows: list[dict[str, Any]]) -> 
     }
     return json.dumps(out, ensure_ascii=False, default=str)
 
-
 def _ok(text: str, *, is_error: bool = False) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=is_error)
 
-
 def _err(msg: str, **extra: Any) -> ToolResult:
     return _ok(json.dumps({"error": msg, **extra}, ensure_ascii=False), is_error=True)
-
 
 def _rows_to_result(
     rows: list[dict[str, Any]], cols: list[str], *, token_limit: int
@@ -184,10 +178,8 @@ def _rows_to_result(
     )
     return _ok(_truncate(body, token_limit=token_limit, rows=rows))
 
-
 def _table_name(filename: str) -> str:
     return Path(filename).stem
-
 
 def _error_hint(msg: str) -> str | None:
     """Map a DuckDB error to a one-line, actionable recovery hint.
@@ -212,7 +204,6 @@ def _error_hint(msg: str) -> str | None:
         )
     return None
 
-
 # Percentile aliases agents habitually reach for (``p99(duration)``) that
 # DuckDB has no scalar/aggregate function for — without these every such
 # call costs a wasted "function does not exist" round-trip. Each macro
@@ -224,14 +215,12 @@ _HELPER_MACROS = (
     "CREATE OR REPLACE MACRO p99(x) AS quantile_cont(x, 0.99)",
 )
 
-
 def _install_helper_macros(conn: duckdb.DuckDBPyConnection) -> None:
     for stmt in _HELPER_MACROS:
         try:
             conn.execute(stmt)
         except duckdb.Error:  # pragma: no cover - macro already present / engine drift
             pass
-
 
 def _cap_duckdb_threads(conn: duckdb.DuckDBPyConnection) -> None:
     """Bound this connection's DuckDB worker pool.
@@ -254,7 +243,6 @@ def _cap_duckdb_threads(conn: duckdb.DuckDBPyConnection) -> None:
         conn.execute(f"SET threads={n}")
     except duckdb.Error:  # pragma: no cover - engine drift
         pass
-
 
 class _DuckDBState:
     def __init__(
@@ -315,7 +303,6 @@ class _DuckDBState:
                 result.append({"table": view, "error": str(exc)})
         return result
 
-
 def _resolve_data_dir(config: DuckdbSqlConfig) -> Path:
     raw = config.data_dir or os.environ.get("AGENTM_RCA_DATA_DIR")
     if not raw:
@@ -326,7 +313,6 @@ def _resolve_data_dir(config: DuckdbSqlConfig) -> Path:
     if not path.is_dir():
         raise ValueError(f"data_dir is not a directory: {path}")
     return path
-
 
 def _validate_sql(sql_raw: str) -> tuple[str, str] | ToolResult:
     """Apply the client-side read-only guards shared by both modes.
@@ -352,7 +338,6 @@ def _validate_sql(sql_raw: str) -> tuple[str, str] | ToolResult:
         )
     return sql, head
 
-
 def _duplicate_result(sql: str) -> ToolResult:
     return _ok(
         json.dumps(
@@ -369,12 +354,10 @@ def _duplicate_result(sql: str) -> ToolResult:
         is_error=True,
     )
 
-
 def _wrap_with_limit(sql: str, head: str, row_limit: int) -> str:
     if head in {"EXPLAIN", "DESCRIBE", "SHOW", "SUMMARIZE"}:
         return sql
     return f"SELECT * FROM ({sql}) LIMIT {row_limit}"
-
 
 # ---------------------------------------------------------------------------
 # Remote mode — HTTP client against the aegis blob query endpoint.
@@ -386,7 +369,6 @@ def _wrap_with_limit(sql: str, head: str, row_limit: int) -> str:
 # remote URL would otherwise appear.
 _REDACTED = "<remote>"
 
-
 def _scrub(text: str, secrets: tuple[str, ...]) -> str:
     """Strip known secrets from any string headed for an agent/log."""
     out = text
@@ -394,7 +376,6 @@ def _scrub(text: str, secrets: tuple[str, ...]) -> str:
         if s:
             out = out.replace(s, _REDACTED)
     return out
-
 
 class _RemoteState:
     """SDK client that targets the aegis blob query endpoint.
@@ -480,7 +461,6 @@ class _RemoteState:
     def scrub(self, text: str) -> str:
         return _scrub(text, self._secrets)
 
-
 def _resolve_remote(config: DuckdbSqlConfig) -> _RemoteState | None:
     """Build a ``_RemoteState`` iff an endpoint is configured, else ``None``.
 
@@ -515,7 +495,6 @@ def _resolve_remote(config: DuckdbSqlConfig) -> _RemoteState | None:
         row_limit=config.row_limit or _DEFAULT_ROW_LIMIT,
         token_limit=config.token_limit or _DEFAULT_TOKEN_LIMIT,
     )
-
 
 def _build_local_handlers(
     config: DuckdbSqlConfig,
@@ -573,7 +552,6 @@ def _build_local_handlers(
 
     return _list, _query
 
-
 # list_tables in remote mode is just a query: the schema IS reachable via
 # SQL, so there is no separate /schema endpoint. list_tables runs this
 # discovery query over the per-request views through /query and reshapes the
@@ -584,7 +562,6 @@ _SCHEMA_DISCOVERY_SQL = (
     "ORDER BY table_name, ordinal_position"
 )
 
-
 def _invoke_blob_query(state: _RemoteState, request_body: dict[str, Any]) -> Any:
     """The single SDK call seam (monkeypatched in tests).
 
@@ -593,7 +570,6 @@ def _invoke_blob_query(state: _RemoteState, request_body: dict[str, Any]) -> Any
     a transport error on connection failure.
     """
     return state.blob().blob_query_bucket(bucket=state._bucket, request_body=request_body)
-
 
 def _remote_error(exc: Exception) -> tuple[str, str | None]:
     """Extract an agent-facing message (+ optional hint) from a query failure.
@@ -619,7 +595,6 @@ def _remote_error(exc: Exception) -> tuple[str, str | None]:
     msg = msg[:500]
     return msg, _error_hint(msg)
 
-
 def _post_query(
     state: _RemoteState, sql: str, *, err_sql: str | None = None
 ) -> tuple[list[dict[str, Any]], list[str]] | ToolResult:
@@ -643,7 +618,6 @@ def _post_query(
     rows = data.get("rows") or []
     cols = list(rows[0].keys()) if rows else []
     return rows, cols
-
 
 # Remote mode deliberately omits the local-mode hardening: the aegis
 # ``/query`` server pre-registers the same p50/p90/p95/p99 percentile macros
@@ -706,7 +680,6 @@ def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
 
     return _list, _query
 
-
 def install(api: ExtensionAPI, config: DuckdbSqlConfig) -> None:
     remote = _resolve_remote(config)
     if remote is not None:
@@ -753,6 +726,5 @@ def install(api: ExtensionAPI, config: DuckdbSqlConfig) -> None:
             fn=_query,
         )
     )
-
 
 __all__ = ["MANIFEST", "install"]

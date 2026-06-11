@@ -15,10 +15,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 MANIFEST = ExtensionManifest(
     name="tool_normalize_json",
@@ -29,7 +32,6 @@ MANIFEST = ExtensionManifest(
     registers=("tool:normalize_json",),
 )
 
-
 _PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -38,7 +40,6 @@ _PARAMETERS: dict[str, Any] = {
     "required": ["raw"],
     "additionalProperties": False,
 }
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

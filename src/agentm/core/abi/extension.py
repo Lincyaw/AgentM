@@ -23,6 +23,7 @@ from agentm.core.abi import (
     AgentMessage,
     BusPriority,
     EventBus,
+    Handler,
     LoopConfig,
     Model,
     ObserverRegistration,
@@ -48,9 +49,6 @@ ExtensionFactory = Callable[["ExtensionAPI", dict[str, Any]], "None | Awaitable[
 Renderer = Callable[[Any], str]
 """Renders a custom message payload to a string. Placeholder for v0 — actual
 UI rendering is deferred to the mode layer."""
-
-Handler = Callable[[Any], Any] | Callable[[Any], Awaitable[Any]]
-"""Event handler signature, mirroring the kernel ``EventBus`` contract."""
 
 Unsubscribe = Callable[[], None]
 """Returned by ``ExtensionAPI.on``; calling it removes the subscription."""

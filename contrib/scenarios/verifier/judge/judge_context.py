@@ -9,8 +9,7 @@ from __future__ import annotations
 
 from typing import Required, TypedDict
 
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
@@ -50,22 +49,18 @@ MANIFEST = ExtensionManifest(
     },
 )
 
-
 # ---------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------
-
 
 class Injection(TypedDict, total=False):
     target: Required[str]
     chaos_type: Required[str]
     params: str
 
-
 class SymptomEvidence(TypedDict, total=False):
     sql: str
     claim: str
-
 
 JudgeTargetVerdict = TypedDict(
     "JudgeTargetVerdict",
@@ -79,11 +74,9 @@ JudgeTargetVerdict = TypedDict(
     total=False,
 )
 
-
 class ThroughputSummary(TypedDict, total=False):
     normal: float
     abnormal: float
-
 
 class JudgeContextConfig(TypedDict, total=False):
     injections: Required[list[Injection]]
@@ -92,7 +85,6 @@ class JudgeContextConfig(TypedDict, total=False):
     throughput: ThroughputSummary
     seeds: list[str]
     verdict_by_target: dict[str, JudgeTargetVerdict] | None
-
 
 def _build_judge_prompt(
     injections: list[Injection],
@@ -170,7 +162,6 @@ Most reviews add nothing. Call `submit_judge_review` with `add` (and
 `remove` empty) plus `rationale`.
 """
 
-
 # ---------------------------------------------------------------
 # Atom install
 # ---------------------------------------------------------------
@@ -200,6 +191,5 @@ def install(api: ExtensionAPI, config: JudgeContextConfig) -> None:
         event.system = f"{current}\n\n{context}" if current else context
 
     api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)
-
 
 __all__ = ["MANIFEST", "install"]

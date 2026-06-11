@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
-from typing import Any
 
-from agentm.core.abi.extension import AtomInfo, ExtensionAPI
-
+from agentm.core.abi import AtomInfo, ExtensionAPI
 
 class ResolvedCatalogPath:
     def __init__(
@@ -22,7 +20,6 @@ class ResolvedCatalogPath:
         self.git_path = git_path
         self.writer_path = writer_path
 
-
 def catalog_root(api: ExtensionAPI, raw_root: str | None = None) -> Path:
     if raw_root is None:
         root = Path(api.cwd)
@@ -31,7 +28,6 @@ def catalog_root(api: ExtensionAPI, raw_root: str | None = None) -> Path:
         if not root.is_absolute():
             root = Path(api.cwd) / root
     return root.resolve()
-
 
 def resolve_catalog_path(
     api: ExtensionAPI,
@@ -82,13 +78,11 @@ def resolve_catalog_path(
         writer_path=writer_path,
     )
 
-
 def _atom_by_name(atoms: list[AtomInfo], name: str) -> AtomInfo | None:
     for atom in atoms:
         if atom.name == name:
             return atom
     return None
-
 
 def _atom_by_source_path(atoms: list[AtomInfo], resolved: Path) -> AtomInfo | None:
     for atom in atoms:

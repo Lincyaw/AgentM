@@ -9,27 +9,28 @@ budgets and the model can still see why the call was rejected.
 
 from __future__ import annotations
 
-from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import ImageContent, TextContent, ToolResult, ToolResultEvent
+from agentm.core.abi import (
+    ExtensionAPI,
+    ImageContent,
+    TextContent,
+    ToolResult,
+    ToolResultEvent,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 # Minimum text payload preserved for ``is_error=True`` tool results, so that
 # the kernel-synthesized "Tool call blocked: <reason>" strings are not chopped
 # below readability by aggressive ``max_chars`` settings.
 _ERROR_FLOOR = 256
 
-
 class ToolResultBudgetConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     max_chars: int = 50_000
     error_floor: int = _ERROR_FLOOR
-
 
 MANIFEST = ExtensionManifest(
     name="tool_result_budget",
@@ -42,7 +43,6 @@ MANIFEST = ExtensionManifest(
     config_schema=ToolResultBudgetConfig,
     requires=(),  # Leaf atom: post-processes tool results only.
 )
-
 
 def install(api: ExtensionAPI, config: ToolResultBudgetConfig) -> None:
     max_chars = max(0, config.max_chars)

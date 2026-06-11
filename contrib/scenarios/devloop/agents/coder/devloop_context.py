@@ -10,8 +10,7 @@ from __future__ import annotations
 import json
 from typing import TypeAlias
 
-from agentm.core.abi.events import BeforeAgentStartEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
@@ -21,12 +20,10 @@ MANIFEST = ExtensionManifest(
     config_schema={"type": "object", "additionalProperties": True},
 )
 
-
 ContextValue: TypeAlias = (
     str | int | float | bool | None | list["ContextValue"] | dict[str, "ContextValue"]
 )
 DevloopContextConfig: TypeAlias = dict[str, ContextValue]
-
 
 def _format_value(value: ContextValue) -> str:
     if isinstance(value, str):
@@ -34,7 +31,6 @@ def _format_value(value: ContextValue) -> str:
     if isinstance(value, list) and all(isinstance(v, str) for v in value):
         return "\n".join(f"- {v}" for v in value)
     return f"```json\n{json.dumps(value, indent=2, ensure_ascii=False)}\n```"
-
 
 def install(api: ExtensionAPI, config: DevloopContextConfig) -> None:
     if not config:
@@ -51,6 +47,5 @@ def install(api: ExtensionAPI, config: DevloopContextConfig) -> None:
         event.system = f"{current}\n\n{context}" if current else context
 
     api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)
-
 
 __all__ = ["MANIFEST", "install"]

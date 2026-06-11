@@ -37,26 +37,25 @@ from pydantic import BaseModel
 
 from agentm.core.abi import (
     DecideTurnActionEvent,
+    ExtensionAPI,
     Inject,
     LoopAction,
+    TextContent,
+    UserMessage,
 )
-from agentm.core.abi.messages import TextContent, UserMessage
 from agentm.core.abi import (
     FunctionTool,
     ToolResult,
     ToolTerminate,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
 
 _DEFAULT_WARN_THRESHOLD = 0.6
 _DEFAULT_FORCE_THRESHOLD = 0.85
 
-
 class WorkerFinalizeConfig(BaseModel):
     warn_threshold: float = _DEFAULT_WARN_THRESHOLD
     force_threshold: float = _DEFAULT_FORCE_THRESHOLD
-
 
 MANIFEST = ExtensionManifest(
     name="worker_finalize",
@@ -70,13 +69,11 @@ MANIFEST = ExtensionManifest(
     config_schema=WorkerFinalizeConfig,
 )
 
-
 @dataclass
 class _State:
     submitted: bool = False
     warned: bool = False
     forced: bool = False
-
 
 def install(api: ExtensionAPI, config: WorkerFinalizeConfig) -> None:
     state = _State()
@@ -195,6 +192,5 @@ def install(api: ExtensionAPI, config: WorkerFinalizeConfig) -> None:
             fn=_submit,
         )
     )
-
 
 __all__ = ["MANIFEST", "install"]

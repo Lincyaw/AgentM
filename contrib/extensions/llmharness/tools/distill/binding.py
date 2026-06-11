@@ -25,10 +25,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
-
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+from pydantic import BaseModel
 
 from llmharness.replay.record import audit_session_id
 
@@ -38,7 +37,6 @@ class DistillBindingConfig(BaseModel):
     sample_id: str = ""
     dataset_name: str = ""
     dataset_path: str = ""
-
 
 MANIFEST = ExtensionManifest(
     name="distill_binding",
@@ -52,11 +50,9 @@ MANIFEST = ExtensionManifest(
     tier=1,
 )
 
-
 _SAMPLE_ID_ENV = "LLMHARNESS_DISTILL_SAMPLE_ID"
 _DATASET_NAME_ENV = "LLMHARNESS_DISTILL_DATASET_NAME"
 _DATASET_PATH_ENV = "LLMHARNESS_DISTILL_DATASET"
-
 
 def meta_path_for(cwd: str | os.PathLike[str], session_id: str) -> Path:
     """Canonical sidecar path. Mirrors ``replay.record.replay_log_path``.
@@ -66,7 +62,6 @@ def meta_path_for(cwd: str | os.PathLike[str], session_id: str) -> Path:
     ``aggregate`` / ``distill label`` pair the two by file stem.
     """
     return Path(cwd) / ".agentm" / "audit_replay" / f"{session_id}.meta.json"
-
 
 @dataclass(frozen=True)
 class SampleMeta:
@@ -85,7 +80,6 @@ class SampleMeta:
             "trace_id": self.trace_id,
         }
 
-
 def read_sample_meta(path: Path) -> SampleMeta | None:
     """Read a meta sidecar. Returns None on missing/malformed file."""
     try:
@@ -102,7 +96,6 @@ def read_sample_meta(path: Path) -> SampleMeta | None:
         session_id=str(raw.get("session_id") or ""),
         trace_id=str(raw.get("trace_id") or ""),
     )
-
 
 def install(api: ExtensionAPI, config: DistillBindingConfig) -> None:
     sample_id = config.sample_id or os.environ.get(_SAMPLE_ID_ENV) or ""
@@ -128,7 +121,6 @@ def install(api: ExtensionAPI, config: DistillBindingConfig) -> None:
         )
     except OSError:
         _logger.warning("distill_binding sidecar write failed: %s", path, exc_info=True)
-
 
 __all__ = [
     "MANIFEST",

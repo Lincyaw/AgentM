@@ -32,23 +32,26 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.tool import TOOL_RESULT_FORMAT_METADATA_KEY
-from agentm.core.abi.operations import BashOperations, FileOperations
-from agentm.core.lib.read_state import (
+from agentm.core.abi import (
+    BashOperations,
+    ExtensionAPI,
+    FileOperations,
+    FunctionTool,
+    TOOL_RESULT_FORMAT_METADATA_KEY,
+    TextContent,
+    ToolResult,
+)
+from agentm.core.lib import (
     content_hash_for,
     file_modified_since_read,
     get_read_state,
     record_read,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 # ---------------------------------------------------------------------------
 # MANIFEST
 # ---------------------------------------------------------------------------
-
 
 class FileToolsConfig(BaseModel):
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
@@ -60,7 +63,6 @@ class FileToolsConfig(BaseModel):
     require_read: bool = True
     default_limit: int = 250
 
-
 MANIFEST = ExtensionManifest(
     name="file_tools",
     description="Register the read, write, edit, glob, and grep tools for file I/O.",
@@ -69,7 +71,6 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -77,10 +78,8 @@ MANIFEST = ExtensionManifest(
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
 
-
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
-
 
 # ---------------------------------------------------------------------------
 # Read helpers
@@ -88,7 +87,6 @@ def _error(text: str) -> ToolResult:
 
 # 256 KB — matches Claude Code's MAX_OUTPUT_SIZE (0.25 * 1024 * 1024).
 _DEFAULT_MAX_SIZE_BYTES: Final[int] = 262_144
-
 
 _BINARY_EXTENSIONS: Final[frozenset[str]] = frozenset({
     # Video
@@ -107,7 +105,6 @@ _BINARY_EXTENSIONS: Final[frozenset[str]] = frozenset({
     ".sqlite", ".db",
 })
 
-
 def _check_binary(path: str) -> str | None:
     """Return an error string if *path* looks like a binary file, else None."""
     ext = PurePath(path).suffix.lower()
@@ -119,10 +116,8 @@ def _check_binary(path: str) -> str | None:
         )
     return None
 
-
 def _coerce_file_ops(api: ExtensionAPI, candidate: Any) -> FileOperations:
     return candidate if candidate is not None else api.get_operations().file
-
 
 def _coerce_globs(value: Any, cwd: str) -> tuple[str, ...]:
     """Anchor relative glob patterns against the session ``cwd``."""
@@ -138,7 +133,6 @@ def _coerce_globs(value: Any, cwd: str) -> tuple[str, ...]:
             out.append(os.path.normpath(os.path.join(cwd, raw)))
     return tuple(out)
 
-
 def _resolved(path: str) -> str:
     """Resolve to absolute, symlink-collapsed path for matching."""
     try:
@@ -146,10 +140,8 @@ def _resolved(path: str) -> str:
     except (OSError, RuntimeError):
         return os.path.abspath(os.path.expanduser(path))
 
-
 def _matches_any(path: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
-
 
 def _check_path_allowed(
     path: str,
@@ -169,7 +161,6 @@ def _check_path_allowed(
             f"({list(deny)})."
         )
     return None
-
 
 _READ_PARAMETERS: Final = {
     "type": "object",
@@ -196,7 +187,6 @@ _READ_PARAMETERS: Final = {
     "required": ["path"],
     "additionalProperties": False,
 }
-
 
 # ---------------------------------------------------------------------------
 # Edit helpers
@@ -232,7 +222,6 @@ _EDIT_PARAMETERS: Final = {
 _CONTEXT_LINES = 4
 _MAX_UNINTENDED_SHRINK_LINES = 5
 
-
 def _check_shrinkage(original: str, updated: str, old_len: int, new_len: int) -> str | None:
     """Reject edits that delete far more content than the replacement explains."""
     expected_delta = new_len - old_len
@@ -257,12 +246,10 @@ _QUOTE_MAP: Final[dict[str, str]] = {
     "”": '"',  # right double curly
 }
 
-
 def _normalize_quotes(s: str) -> str:
     for curly, straight in _QUOTE_MAP.items():
         s = s.replace(curly, straight)
     return s
-
 
 def _snippet_around(content: str, start_line: int, end_line: int) -> str:
     """Return a snippet of *content* showing +-CONTEXT_LINES around [start, end] with line numbers."""
@@ -275,7 +262,6 @@ def _snippet_around(content: str, start_line: int, end_line: int) -> str:
         for i, line in enumerate(lines[snippet_start:snippet_end])
     ]
     return "\n".join(numbered)
-
 
 async def _update_read_state_after_edit(
     normalized_path: str, file_ops: FileOperations
@@ -303,11 +289,9 @@ async def _update_read_state_after_edit(
         content_hash=chash,
     )
 
-
 def _strip_line_whitespace(s: str) -> str:
     """Strip leading/trailing whitespace from each line, preserving newlines."""
     return "\n".join(line.strip() for line in s.split("\n"))
-
 
 def _find_actual_string(file_content: str, search: str) -> str | None:
     """Find *search* in *file_content* with progressive fallbacks.
@@ -344,7 +328,6 @@ def _find_actual_string(file_content: str, search: str) -> str | None:
 
     return None
 
-
 # ---------------------------------------------------------------------------
 # Write helpers
 # ---------------------------------------------------------------------------
@@ -365,7 +348,6 @@ _WRITE_PARAMETERS: Final = {
     "required": ["path", "content"],
     "additionalProperties": False,
 }
-
 
 # ---------------------------------------------------------------------------
 # Glob helpers
@@ -401,12 +383,10 @@ _GLOB_SKIP_DIRS: Final[frozenset[str]] = frozenset({
     "__pycache__",
 })
 
-
 def _should_skip_glob(path: str) -> bool:
     """Return True if any path component is in the skip set."""
     parts = path.replace(os.sep, "/").split("/")
     return bool(_GLOB_SKIP_DIRS.intersection(parts))
-
 
 # ---------------------------------------------------------------------------
 # Grep helpers
@@ -469,7 +449,6 @@ _GREP_EXCLUDED_DIRS: Final[tuple[str, ...]] = (
     "__pycache__",
 )
 
-
 def build_rg_command(
     pattern: str,
     path: str,
@@ -511,7 +490,6 @@ def build_rg_command(
     cmd.append(path)
     return cmd
 
-
 def build_grep_command(
     pattern: str,
     path: str,
@@ -551,7 +529,6 @@ def build_grep_command(
     cmd.append(path)
     return cmd
 
-
 def build_grep_or_rg_command(
     pattern: str,
     path: str,
@@ -577,7 +554,6 @@ def build_grep_or_rg_command(
         context_lines=context_lines,
     )
 
-
 def relativize_paths(lines: list[str], base: str) -> list[str]:
     """Convert absolute paths at the start of each line to relative."""
     prefix = base.rstrip(os.sep) + os.sep
@@ -587,7 +563,6 @@ def relativize_paths(lines: list[str], base: str) -> list[str]:
             line = line[len(prefix):]
         out.append(line)
     return out
-
 
 def parse_grep_output(
     raw: str,
@@ -613,7 +588,6 @@ def parse_grep_output(
     if truncated:
         result += f"\n\n[Results truncated at {limit} lines]"
     return result
-
 
 # ---------------------------------------------------------------------------
 # install()

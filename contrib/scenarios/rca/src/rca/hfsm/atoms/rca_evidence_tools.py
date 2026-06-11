@@ -32,8 +32,12 @@ import time
 import uuid
 from typing import Any
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
 
 from rca.hfsm.schema import (
@@ -46,7 +50,6 @@ from rca.hfsm.schema import (
 )
 from rca.hfsm.tool_schemas import DESCRIPTIONS, PARAMS
 from rca.hfsm.updates import UpdateProposal, UpdateResult
-
 
 MANIFEST = ExtensionManifest(
     name="rca_evidence_tools",
@@ -66,12 +69,10 @@ MANIFEST = ExtensionManifest(
     requires=("rca_falsification_gate",),
 )
 
-
 # ``_tool_signature`` is the canonical hash. ``rca_observation_cache``
 # re-implements it (§11 forbids atom-to-atom imports); keep both copies in sync.
 def _canonical_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
 
 def _tool_signature(tool_name: str, args: dict[str, Any]) -> str:
     """``sha256(tool_name + canonical_json(args))``."""
@@ -80,10 +81,8 @@ def _tool_signature(tool_name: str, args: dict[str, Any]) -> str:
         (tool_name + ":" + _canonical_json(args)).encode("utf-8")
     ).hexdigest()
 
-
 def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
-
 
 def _render(result: UpdateResult) -> str:
     """Render a gate ``UpdateResult`` as ``status=... [id=...] [to=...] [reason=...]``."""
@@ -96,14 +95,11 @@ def _render(result: UpdateResult) -> str:
         return f"status=downgraded to={downgrade_op}{applied} reason={result.reason}"
     return f"status=rejected reason={result.reason}"
 
-
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
 
-
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
-
 
 def _observation_from(payload: dict[str, Any]) -> Observation:
     text = str(payload.get("text", ""))
@@ -114,7 +110,6 @@ def _observation_from(payload: dict[str, Any]) -> Observation:
         related_symptoms=list(payload.get("related_symptoms", []) or []),
         related_predictions=list(payload.get("related_predictions", []) or []),
         ts=time.time())
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config
@@ -224,10 +219,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             metadata={"idempotent": False, "rca_op": name},
         ))
 
-
 # propose_update payload builders. Each branch returns either an
 # ``UpdateProposal`` (success) or a string (validation error).
-
 
 def _h_from_payload(
     payload: Any, *, parent_id: str | None = None, parent_ids: list[str] | None = None,
@@ -243,7 +236,6 @@ def _h_from_payload(
         claim=claim, parent_ids=parents,
         rationale=str(payload.get("rationale", "")),
     )
-
 
 def _build_proposal_from_args(op: str, args: dict[str, Any]) -> UpdateProposal | str:
     target = str(args.get("target_id", "")).strip()

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentm.core.abi.messages import AgentMessage
+from agentm.core.abi import AgentMessage
 from llmharness.runtime.triggers import TriggerRegistry
 
 from .case_source import ReplayCase
@@ -41,7 +41,6 @@ __all__ = [
     "before_submission",
 ]
 
-
 # ---------------------------------------------------------------------------
 # Turn selectors: backbone -> fork index
 # ---------------------------------------------------------------------------
@@ -52,7 +51,6 @@ __all__ = [
 #: the rename still resolve. Single source of truth — ``cli.py`` reuses this
 #: same set when wiring the on-submission trigger.
 _SUBMISSION_TOOL_NAMES = frozenset({"submit_final_report", "submit_investigation"})
-
 
 def _find_submission_turn(messages: list[AgentMessage]) -> int:
     """Index of the last assistant message that calls a submission tool.
@@ -87,15 +85,12 @@ def _find_submission_turn(messages: list[AgentMessage]) -> int:
     # No submission found; fork before the very last message.
     return max(len(messages) - 1, 0)
 
-
 #: Turn selector: fork just before the agent's final submission call.
 TurnSelector = Callable[[list[AgentMessage]], int]
-
 
 def before_submission(messages: list[AgentMessage]) -> int:
     """Fork just before the agent's final submission-tool call."""
     return _find_submission_turn(messages)
-
 
 def after_submission(messages: list[AgentMessage]) -> int:
     """Fork after the full trajectory, including the submission and its result.
@@ -104,7 +99,6 @@ def after_submission(messages: list[AgentMessage]) -> int:
     so it can reflect on what it actually submitted.
     """
     return len(messages)
-
 
 # ---------------------------------------------------------------------------
 # Fork-execution result (strategy -> driver)
@@ -125,7 +119,6 @@ class ForkResult:
     intervention_path: list[str]
     response: str | None
     leaf_session_log_id: str | None
-
 
 # ---------------------------------------------------------------------------
 # Strategy protocol and implementations
@@ -158,7 +151,6 @@ class ForkStrategy:
             Scenario id passed to continuation sessions.
         """
         raise NotImplementedError
-
 
 class HarnessStrategy(ForkStrategy):
     """Run the full extractor + auditor pipeline, fork on auditor surfaces.
@@ -285,7 +277,6 @@ class HarnessStrategy(ForkStrategy):
             leaf_session_log_id=leaf.backbone_session_id,
         )
 
-
 class FixedInjectionStrategy(ForkStrategy):
     """Inject a fixed reminder at a computed fork point.
 
@@ -348,7 +339,6 @@ class FixedInjectionStrategy(ForkStrategy):
             leaf_session_log_id=getattr(run, "session_log_id", None),
         )
 
-
 # ---------------------------------------------------------------------------
 # Shared internal dataclass (used by HarnessStrategy)
 # ---------------------------------------------------------------------------
@@ -363,7 +353,6 @@ class _RecordedBackbone:
 
     session_log_id: str
     final_messages: list[AgentMessage]
-
 
 # ---------------------------------------------------------------------------
 # Pre-built prompts for common ablations

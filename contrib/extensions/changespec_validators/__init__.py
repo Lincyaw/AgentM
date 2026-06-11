@@ -19,13 +19,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 from . import atom_source, manifest_extensions, manifest_field, system_prompt
 
 SERVICE_NAME = "changespec_validators"
-
 
 MANIFEST = ExtensionManifest(
     name="changespec_validators",
@@ -35,7 +34,6 @@ MANIFEST = ExtensionManifest(
     ),
     registers=(f"service:{SERVICE_NAME}",),
 )
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

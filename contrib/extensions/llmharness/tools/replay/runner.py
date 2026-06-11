@@ -20,11 +20,10 @@ from llmharness.agents.extractor.tools import (
     FINALIZE_EXTRACTION_TOOL_NAME,
     ExtractionState,
 )
+from llmharness.replay.record import ReplayRecord
 from llmharness.schema import Edge, Event, Finding, Phase
 
 from .engine import PhaseResult, run_phase_standalone
-from llmharness.replay.record import ReplayRecord
-
 
 # ---------------------------------------------------------------------------
 # Settings dataclasses (replace old runtime.runner Settings)

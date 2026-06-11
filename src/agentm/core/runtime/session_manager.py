@@ -32,8 +32,8 @@ from agentm.core.abi.session import (
     message_entry,
 )
 from agentm.core.lib.message_codec import deserialize_payload, serialize_payload
-from agentm.core.runtime.otel_export import setup_session_telemetry
-from agentm.core.runtime.trace_reader import TraceReader
+from agentm.core.observability.otel_export import setup_session_telemetry
+from agentm.core.lib.trace_reader import TraceReader
 from opentelemetry._logs import SeverityNumber
 
 if TYPE_CHECKING:
@@ -201,7 +201,7 @@ class SessionManager:
     def default_session_dir(cwd: str) -> Path:
         """Per-cwd session log directory (``<cwd>/.agentm/observability/``)."""
 
-        from agentm.core.runtime.otel_export import resolve_observability_dir
+        from agentm.core.observability.otel_export import resolve_observability_dir
 
         return resolve_observability_dir(cwd)
 

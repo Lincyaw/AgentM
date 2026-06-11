@@ -24,16 +24,34 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 from pydantic import BaseModel
 
 from agentm.core.abi import (
+    Aborted,
+    AfterCompactEvent,
     AgentMessage,
     AssistantMessage,
+    BeforeCompactEvent,
     BeforeSendToLlmEvent,
+    CommandSpec,
+    CompactionDetails,
+    CompactionPrompts,
+    CompactionResult,
+    CompactionSettings,
+    ContextUsageEstimate,
+    DiagnosticEvent,
+    ENTRY_TYPE_COMPACTION,
+    ExtensionAPI,
+    FILE_OP_EDIT,
+    FILE_OP_METADATA_KEY,
+    FILE_OP_READ,
+    FILE_OP_WRITE,
     MessageEnd,
     Model,
+    ProviderConfig,
+    ProviderError,
+    SessionEntry,
     TextContent,
     Tool,
     ToolCallBlock,
@@ -41,27 +59,8 @@ from agentm.core.abi import (
     Usage,
     UserMessage,
 )
-from agentm.core.abi.compaction import (
-    CompactionDetails,
-    CompactionPrompts,
-    CompactionResult,
-    CompactionSettings,
-    ContextUsageEstimate,
-)
-from agentm.core.abi.events import DiagnosticEvent
-from agentm.core.abi.session import ENTRY_TYPE_COMPACTION, SessionEntry
-from agentm.core.abi.termination import Aborted, ProviderError
-from agentm.core.abi.tool import (
-    FILE_OP_EDIT,
-    FILE_OP_METADATA_KEY,
-    FILE_OP_READ,
-    FILE_OP_WRITE,
-)
 from agentm.core.lib import Turn, enumerate_turns
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import AfterCompactEvent, BeforeCompactEvent
-from agentm.core.abi.extension import CommandSpec, ExtensionAPI, ProviderConfig
-
 
 # Prompt registry keys. Kept in sync with ``compaction_prompts.py``;
 # §11 forbids atom-to-atom imports so we duplicate the canonical names
@@ -70,13 +69,11 @@ _PROMPT_SUMMARIZATION_SYSTEM = "compaction.summarization_system"
 _PROMPT_SUMMARIZATION = "compaction.summarization"
 _PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
 
-
 class LlmCompactionConfig(BaseModel):
     enabled: bool = True
     reserve_tokens: int = 16_384
     tool_result_max_chars: int = 8_000
     custom_instructions: str | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="llm_compaction",
@@ -92,7 +89,6 @@ MANIFEST = ExtensionManifest(
     tier=2,
 )
 
-
 # === Compaction engine =====================================================
 #
 # Per issue #76 the engine keeps **zero** literal English prompt text: prompts
@@ -101,12 +97,10 @@ MANIFEST = ExtensionManifest(
 # Lower than read_history's 20k: summarization prompts have a fixed token budget.
 DEFAULT_TOOL_RESULT_MAX_CHARS = 8_000
 
-
 # A flexible tool-registry shape for ``extract_file_ops_from_message``:
 # either a name->tool mapping, or any iterable of tools (we'll index by
 # ``tool.name`` ourselves).
 ToolRegistry = Mapping[str, Tool] | Sequence[Tool]
-
 
 @dataclass(slots=True)
 class _FileOpTracker:
@@ -114,10 +108,8 @@ class _FileOpTracker:
     written: set[str] = field(default_factory=set)
     edited: set[str] = field(default_factory=set)
 
-
 def create_file_ops() -> _FileOpTracker:
     return _FileOpTracker()
-
 
 def _normalize_registry(tools: ToolRegistry | None) -> Mapping[str, Tool]:
     if tools is None:
@@ -125,7 +117,6 @@ def _normalize_registry(tools: ToolRegistry | None) -> Mapping[str, Tool]:
     if isinstance(tools, Mapping):
         return tools
     return {tool.name: tool for tool in tools}
-
 
 def extract_file_ops_from_message(
     message: AgentMessage,
@@ -163,13 +154,11 @@ def extract_file_ops_from_message(
         elif file_op == FILE_OP_EDIT:
             file_ops.edited.add(path)
 
-
 def compute_file_lists(file_ops: _FileOpTracker) -> tuple[list[str], list[str]]:
     modified = set(file_ops.edited)
     modified.update(file_ops.written)
     read_only = sorted(path for path in file_ops.read if path not in modified)
     return read_only, sorted(modified)
-
 
 def format_file_operations(read_files: list[str], modified_files: list[str]) -> str:
     sections: list[str] = []
@@ -185,7 +174,6 @@ def format_file_operations(read_files: list[str], modified_files: list[str]) -> 
         return ""
     return "\n\n" + "\n\n".join(sections)
 
-
 def _truncate_for_summary(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
@@ -194,7 +182,6 @@ def _truncate_for_summary(text: str, max_chars: int) -> str:
         f"{text[:max_chars]}\n\n"
         f"[... {truncated_chars} more characters truncated]"
     )
-
 
 def serialize_messages(
     messages: list[AgentMessage],
@@ -251,7 +238,6 @@ def serialize_messages(
 
     return "\n\n".join(parts)
 
-
 def serialize_turns(
     turns: list[Turn],
     *,
@@ -265,12 +251,9 @@ def serialize_turns(
         blocks.append(f"[Turn {turn.index}]\n{body}")
     return "\n\n".join(blocks)
 
-
 Summarizer = Callable[[str, str, int], Awaitable[str]]
 
-
 DEFAULT_COMPACTION_SETTINGS = CompactionSettings()
-
 
 # A neutral fallback used by tests and by the graceful-degradation path when
 # no prompts atom is installed. Empty strings mean "no extra instructions";
@@ -279,7 +262,6 @@ EMPTY_COMPACTION_PROMPTS = CompactionPrompts(
     summarization_system="",
     update_summarization="",
 )
-
 
 @dataclass(slots=True)
 class CompactionPreparation:
@@ -290,7 +272,6 @@ class CompactionPreparation:
     file_ops: _FileOpTracker = field(default_factory=create_file_ops)
     settings: CompactionSettings = field(default_factory=CompactionSettings)
 
-
 def calculate_context_tokens(usage: Usage) -> int:
     return (
         usage.input_tokens
@@ -298,7 +279,6 @@ def calculate_context_tokens(usage: Usage) -> int:
         + usage.cache_read
         + usage.cache_write
     )
-
 
 def _get_assistant_usage(message: AgentMessage) -> Usage | None:
     if isinstance(message, AssistantMessage):
@@ -311,7 +291,6 @@ def _get_assistant_usage(message: AgentMessage) -> Usage | None:
         elif message.stop_reason not in {"aborted", "error"}:
             return message.usage
     return None
-
 
 def estimate_tokens(message: AgentMessage) -> int:
     chars = 0
@@ -344,7 +323,6 @@ def estimate_tokens(message: AgentMessage) -> int:
 
     return 0
 
-
 def estimate_context_tokens(messages: list[AgentMessage]) -> ContextUsageEstimate:
     last_usage: Usage | None = None
     last_usage_index: int | None = None
@@ -376,7 +354,6 @@ def estimate_context_tokens(messages: list[AgentMessage]) -> ContextUsageEstimat
         last_usage_index=last_usage_index,
     )
 
-
 def should_compact(
     context_tokens: int,
     context_window: int,
@@ -394,13 +371,11 @@ def should_compact(
         return False
     return context_tokens > threshold
 
-
 def _find_previous_compaction(branch: list[SessionEntry]) -> SessionEntry | None:
     for entry in reversed(branch):
         if entry.type == ENTRY_TYPE_COMPACTION:
             return entry
     return None
-
 
 def prepare_compaction(
     branch: list[SessionEntry],
@@ -454,7 +429,6 @@ def prepare_compaction(
         settings=settings,
     )
 
-
 async def generate_summary(
     turns: list[Turn],
     summarizer: Summarizer,
@@ -483,7 +457,6 @@ async def generate_summary(
     prompt_text += base_prompt
     max_tokens = max(256, int(0.8 * reserve_tokens))
     return await summarizer(prompts.summarization_system, prompt_text, max_tokens)
-
 
 async def compact(
     preparation: CompactionPreparation,
@@ -525,9 +498,7 @@ async def compact(
         ),
     )
 
-
 # === Atom install ==========================================================
-
 
 def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
     settings = CompactionSettings(
@@ -650,7 +621,6 @@ def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
         ),
     )
 
-
 async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
     """Pull prompt bodies from the registry; emit a diagnostic if missing.
 
@@ -704,7 +674,6 @@ async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
         ),
         summarization or "",
     )
-
 
 class _ProviderSummarizer:
     def __init__(self, provider: ProviderConfig, model: Model) -> None:

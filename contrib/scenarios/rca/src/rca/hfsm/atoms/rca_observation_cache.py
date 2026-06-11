@@ -50,15 +50,19 @@ import time
 import uuid
 from typing import Any
 
-from agentm.core.abi import AgentStartEvent, Tool, ToolOutcome, ToolResult
-from agentm.core.abi.events import DiagnosticEvent
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.messages import TextContent
+from agentm.core.abi import (
+    AgentStartEvent,
+    DiagnosticEvent,
+    ExtensionAPI,
+    TextContent,
+    Tool,
+    ToolOutcome,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
 
 from rca.hfsm.schema import Observation
 from rca.hfsm.updates import UpdateProposal
-
 
 MANIFEST = ExtensionManifest(
     name="rca_observation_cache",
@@ -76,17 +80,14 @@ MANIFEST = ExtensionManifest(
     requires=("rca_hgraph_store", "rca_falsification_gate"),
 )
 
-
 # ---------------------------------------------------------------------------
 # Cache wrapper. Public attribute surface mirrors the ``Tool`` Protocol
 # (name / description / parameters / execute) so the kernel sees an indistin-
 # guishable replacement.
 # ---------------------------------------------------------------------------
 
-
 def _canonical_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-
 
 def _tool_signature(tool_name: str, args: dict[str, Any]) -> str:
     """``sha256(tool_name + canonical_json(args))`` — matches the public helper
@@ -99,7 +100,6 @@ def _tool_signature(tool_name: str, args: dict[str, Any]) -> str:
 
     canonical = tool_name + ":" + _canonical_json(args)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
 
 def _extract_text(result: ToolResult | ToolOutcome) -> str:
     """Best-effort cache-key text for a tool's ``ToolResult``.
@@ -120,7 +120,6 @@ def _extract_text(result: ToolResult | ToolOutcome) -> str:
         if isinstance(chunk, TextContent):
             parts.append(chunk.text)
     return "\n".join(parts)
-
 
 class _CachedTool:
     """``Tool`` Protocol adapter wrapping an idempotent tool with L1 lookup.
@@ -183,11 +182,9 @@ class _CachedTool:
             )
         return out
 
-
 # ---------------------------------------------------------------------------
 # Install: subscribe to agent_start, swap idempotent tools by index.
 # ---------------------------------------------------------------------------
-
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

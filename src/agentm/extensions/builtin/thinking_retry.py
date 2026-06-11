@@ -18,18 +18,22 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi.events import DecideTurnActionEvent, ModelEndTurn
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.core.abi.loop import Step, Stop
-from agentm.core.abi.messages import TextContent, ThinkingBlock, ToolCallBlock
+from agentm.core.abi import (
+    DecideTurnActionEvent,
+    ExtensionAPI,
+    ModelEndTurn,
+    Step,
+    Stop,
+    TextContent,
+    ThinkingBlock,
+    ToolCallBlock,
+)
 from agentm.extensions import ExtensionManifest
 
 _logger = logging.getLogger(__name__)
 
-
 class ThinkingRetryConfig(BaseModel):
     max_retries: int = 3
-
 
 MANIFEST = ExtensionManifest(
     name="thinking_retry",
@@ -44,7 +48,6 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-
 def _is_thinking_only(content: list[Any]) -> bool:
     has_thinking = False
     for block in content:
@@ -55,7 +58,6 @@ def _is_thinking_only(content: list[Any]) -> bool:
         elif isinstance(block, ToolCallBlock):
             return False
     return has_thinking
-
 
 def install(api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
     max_retries: int = config.max_retries

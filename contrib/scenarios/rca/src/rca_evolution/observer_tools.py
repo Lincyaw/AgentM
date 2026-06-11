@@ -13,9 +13,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.core.abi.tool import ToolTerminate
-
+from agentm.core.abi import (
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
+)
 
 # ---------------------------------------------------------------------------
 # get_turn — drill into one trajectory turn
@@ -24,7 +27,6 @@ from agentm.core.abi.tool import ToolTerminate
 class GetTurnArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     idx: int = Field(description="0-based turn index in the trajectory.")
-
 
 def build_get_turn_tool(snapshot: list[dict[str, Any]]) -> FunctionTool:
     """Read one turn from the pre-serialized parent trajectory."""
@@ -57,14 +59,12 @@ def build_get_turn_tool(snapshot: list[dict[str, Any]]) -> FunctionTool:
         fn=_fn,
     )
 
-
 # ---------------------------------------------------------------------------
 # get_gt_info — ground truth for the case
 # ---------------------------------------------------------------------------
 
 class GetGtInfoArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
 
 def build_get_gt_info_tool(gt_info: dict[str, Any]) -> FunctionTool:
     """Return the ground truth root causes and fault types."""
@@ -86,14 +86,12 @@ def build_get_gt_info_tool(gt_info: dict[str, Any]) -> FunctionTool:
         fn=_fn,
     )
 
-
 # ---------------------------------------------------------------------------
 # get_trajectory_summary — high-level overview before drilling down
 # ---------------------------------------------------------------------------
 
 class GetTrajectorySummaryArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
 
 def build_get_trajectory_summary_tool(summary: str, total_turns: int) -> FunctionTool:
     """Return a condensed list of all tool calls in the trajectory."""
@@ -114,7 +112,6 @@ def build_get_trajectory_summary_tool(summary: str, total_turns: int) -> Functio
         fn=_fn,
     )
 
-
 # ---------------------------------------------------------------------------
 # submit_divergence_report — terminal tool
 # ---------------------------------------------------------------------------
@@ -132,7 +129,6 @@ class DivergencePointModel(BaseModel):
         ),
     )
 
-
 class SubmitDivergenceReportArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     divergence_points: list[DivergencePointModel] = Field(
@@ -142,7 +138,6 @@ class SubmitDivergenceReportArgs(BaseModel):
     key_lesson: str = Field(
         description="One-sentence takeaway about the failure pattern.",
     )
-
 
 def build_submit_divergence_report_tool() -> FunctionTool:
     """Terminal tool — submit structured divergence findings."""

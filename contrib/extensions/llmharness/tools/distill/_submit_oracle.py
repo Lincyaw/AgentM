@@ -12,15 +12,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
+)
+from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
-from agentm.core.abi.extension import ExtensionAPI
-from agentm.extensions import ExtensionManifest
 
 class DistillSubmitOracleConfig(BaseModel):
     model_config = {"extra": "allow"}
-
 
 MANIFEST = ExtensionManifest(
     name="distill_submit_oracle",
@@ -33,7 +37,6 @@ MANIFEST = ExtensionManifest(
     api_version=1,
     tier=1,
 )
-
 
 SUBMIT_ORACLE_TOOL_NAME = "submit_oracle_label"
 
@@ -75,7 +78,6 @@ SUBMIT_ORACLE_PARAMETERS: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-
 def install(api: ExtensionAPI, config: DistillSubmitOracleConfig) -> None:
 
     async def _submit(args: dict[str, Any]) -> ToolTerminate:
@@ -96,6 +98,5 @@ def install(api: ExtensionAPI, config: DistillSubmitOracleConfig) -> None:
             fn=_submit,
         )
     )
-
 
 __all__ = ["MANIFEST", "SUBMIT_ORACLE_TOOL_NAME", "install"]

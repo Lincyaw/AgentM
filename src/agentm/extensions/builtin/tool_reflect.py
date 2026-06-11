@@ -39,17 +39,19 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 class ToolReflectConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     default_scenario: str | None = None
     template_filename: str = "reflection_template.md"
-
 
 MANIFEST = ExtensionManifest(
     name="tool_reflect",
@@ -62,7 +64,6 @@ MANIFEST = ExtensionManifest(
     registers=("tool:reflect",),
     config_schema=ToolReflectConfig,
 )
-
 
 _PARAMETERS: Final[dict[str, Any]] = {
     "type": "object",
@@ -94,7 +95,6 @@ _PARAMETERS: Final[dict[str, Any]] = {
     "required": ["target_module"],
     "additionalProperties": False,
 }
-
 
 _CHANGE_SPEC_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
@@ -130,7 +130,6 @@ _CHANGE_SPEC_SCHEMA: Final[dict[str, Any]] = {
 
 _RECENT_FEEDBACK_CAP = 12
 _TRACE_DIGEST_CAP = 8
-
 
 def install(api: ExtensionAPI, config: ToolReflectConfig) -> None:
     default_scenario = config.default_scenario or ""
@@ -223,9 +222,7 @@ def install(api: ExtensionAPI, config: ToolReflectConfig) -> None:
         )
     )
 
-
 # ---------------------------------------------------------------------------
-
 
 def _assemble_prompt(
     *,
@@ -250,7 +247,6 @@ def _assemble_prompt(
     # whatever prose surrounds the slot in reflection_template.md is the
     # mutation instructions. We do not try to factor that out here.
     return prompt
-
 
 def _summarize_failures(failures: list[Any]) -> str:
     """Render up to ``_TRACE_DIGEST_CAP`` failure summaries as a compact
@@ -280,12 +276,10 @@ def _summarize_failures(failures: list[Any]) -> str:
         )
     return "\n".join(lines) if lines else "(no recognizable trace summaries)"
 
-
 def _format_feedback(items: list[str]) -> str:
     if not items:
         return "(no recent module_feedback for this module)"
     return "\n".join(f"- {text}" for text in items[:_RECENT_FEEDBACK_CAP])
-
 
 def _resolve_module_source(
     cwd: Path, scenario: str, target_module: str
@@ -327,7 +321,6 @@ def _resolve_module_source(
                     return text, str(py.resolve())
     return ("(source not found: no MANIFEST match)", None)
 
-
 def _gather_recent_feedback(
     cwd: Path, scenario: str, target_module: str
 ) -> list[str]:
@@ -368,7 +361,6 @@ def _gather_recent_feedback(
                     break
     return out
 
-
 def _load_run(
     path: Path,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -395,10 +387,8 @@ def _load_run(
         return None, []
     return summary, tasks
 
-
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
-
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

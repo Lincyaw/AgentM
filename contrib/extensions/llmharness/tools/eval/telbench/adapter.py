@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentm.core.abi.messages import AgentMessage, AssistantMessage, TextContent
+from agentm.core.abi import AgentMessage, AssistantMessage, TextContent
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,6 @@ class TelBenchInstance:
         id_to_idx = {s["id"]: i for i, s in enumerate(self.spans)}
         return {id_to_idx[sid] for sid in self.gold_error_span_ids if sid in id_to_idx}
 
-
 def load_telbench(path: Path) -> list[TelBenchInstance]:
     """Parse a TELBench JSONL file into typed instances."""
     instances: list[TelBenchInstance] = []
@@ -65,7 +64,6 @@ def load_telbench(path: Path) -> list[TelBenchInstance]:
             )
     return instances
 
-
 def spans_to_messages(spans: list[dict[str, str]]) -> list[AgentMessage]:
     """Convert TELBench spans to synthetic AssistantMessage list.
 
@@ -83,7 +81,6 @@ def spans_to_messages(spans: list[dict[str, str]]) -> list[AgentMessage]:
         )
         messages.append(msg)
     return messages
-
 
 __all__ = [
     "TelBenchInstance",

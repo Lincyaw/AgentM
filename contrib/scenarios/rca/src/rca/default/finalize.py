@@ -37,23 +37,23 @@ from pydantic import BaseModel
 
 from agentm.core.abi import (
     DecideTurnActionEvent,
+    ExtensionAPI,
     Inject,
     LoopAction,
     ModelEndTurn,
     Stop,
+    TextContent,
+    UserMessage,
 )
-from agentm.core.abi.messages import TextContent, UserMessage
 from agentm.core.abi import (
     FunctionTool,
     ToolResult,
     ToolTerminate,
 )
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
 
 class FinalizeConfig(BaseModel):
     continuation_instruction: str | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="finalize",
@@ -64,7 +64,6 @@ MANIFEST = ExtensionManifest(
     registers=("tool:submit_final_report",),
     config_schema=FinalizeConfig,
 )
-
 
 _DEFAULT_INSTRUCTION = (
     "Your last assistant message had no tool_call. Prose-only turns are "
@@ -81,11 +80,9 @@ _DEFAULT_INSTRUCTION = (
     "(path B)."
 )
 
-
 @dataclass
 class _State:
     submitted: bool = False
-
 
 def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
     # Imported lazily so ``import rca.finalize`` does not
@@ -187,7 +184,6 @@ def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
         )
 
     api.on("decide_turn_action", _on_decide_turn_action)
-
 
 # Inlined (no $defs / $ref) JSON schema mirroring AgentRCAOutput, so any
 # LLM tool-call backend that doesn't resolve refs still works. Kept
@@ -310,6 +306,5 @@ _AGENT_RCA_OUTPUT_SCHEMA: dict[str, Any] = {
     },
     "required": ["root_causes"],
 }
-
 
 __all__ = ["MANIFEST", "install"]

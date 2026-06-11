@@ -11,13 +11,11 @@ from __future__ import annotations
 from typing import Any
 
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import ResourcesDiscoverEvent
-from agentm.core.abi.extension import ExtensionAPI
+from agentm.core.abi import ExtensionAPI, ResourcesDiscoverEvent
 
 from rca import SCENARIO_ROOT
 
 _SKILLS_DIR = SCENARIO_ROOT / "skills"
-
 
 MANIFEST = ExtensionManifest(
     name="worker_skills",
@@ -27,7 +25,6 @@ MANIFEST = ExtensionManifest(
     ),
     registers=("event:resources_discover",),
 )
-
 
 async def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     skills_dir = str(_SKILLS_DIR)

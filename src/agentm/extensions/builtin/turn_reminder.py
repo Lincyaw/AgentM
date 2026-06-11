@@ -35,21 +35,21 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import TextContent, ToolResultMessage, UserMessage
-from agentm.core.abi.events import (
+from agentm.core.abi import (
     AgentStartEvent,
     BeforeSendToLlmEvent,
+    ExtensionAPI,
+    TextContent,
     ToolResultEvent,
+    ToolResultMessage,
     TurnStartEvent,
+    UserMessage,
 )
-from agentm.core.abi.extension import ExtensionAPI
 from agentm.extensions import ExtensionManifest
-
 
 class TurnReminderConfig(BaseModel):
     warn_within: int = 5
     finalize_tool: str = ""
-
 
 MANIFEST = ExtensionManifest(
     name="turn_reminder",
@@ -66,7 +66,6 @@ MANIFEST = ExtensionManifest(
     config_schema=TurnReminderConfig,
     requires=(),
 )
-
 
 def install(api: ExtensionAPI, config: TurnReminderConfig) -> None:
     warn_within = config.warn_within
@@ -141,7 +140,6 @@ def install(api: ExtensionAPI, config: TurnReminderConfig) -> None:
     api.on(ToolResultEvent.CHANNEL, _on_tool_result)
     api.on(BeforeSendToLlmEvent.CHANNEL, _before_send)
 
-
 def _format_warning(
     turns_left: int | None, tools_left: int | None, finalize_tool: str = "",
 ) -> str:
@@ -167,7 +165,6 @@ def _format_warning(
         f"[budget] Only {budget} remaining before a hard stop (no chance to "
         f"summarize). Start wrapping up.{tool_hint}"
     )
-
 
 def _append_to_last_message(
     messages: list[Any], text: str, state: dict[str, int]

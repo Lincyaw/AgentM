@@ -16,20 +16,19 @@ from typing import Any
 
 from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
 from llmharness.agents.extractor.tools import (
-    ExtractionState,
     FINALIZE_EXTRACTION_TOOL_NAME,
+    ExtractionState,
     GraphOp,
 )
 from llmharness.schema import Event, Verdict
 
-from .engine import PhaseResult, run_phase_standalone, terminal_tool_arguments
+from .engine import run_phase_standalone
 
 _logger = logging.getLogger(__name__)
 
-
 def _flatten_assistant_blocks(messages: list[Any]) -> list[dict[str, Any]]:
     """Extract serialized content blocks from AssistantMessages."""
-    from agentm.core.abi.messages import AssistantMessage, ToolCallBlock
+    from agentm.core.abi import AssistantMessage, ToolCallBlock
 
     out: list[dict[str, Any]] = []
     for msg in messages:
@@ -47,13 +46,10 @@ def _flatten_assistant_blocks(messages: list[Any]) -> list[dict[str, Any]]:
                 out.append({"type": btype, "text": block.text})
     return out
 
-
 # --- child runner -----------------------------------------------------------
-
 
 class ExtractorSpawnError(RuntimeError):
     """Raised by the child runner on spawn/prompt failure."""
-
 
 class StandaloneChildRunner:
     """Spawns top-level sessions per phase for offline replay."""
@@ -189,9 +185,7 @@ class StandaloneChildRunner:
             "latency_ms": latency_ms,
         }
 
-
 # --- op sink ----------------------------------------------------------------
-
 
 class InMemorySink:
     """Captures every entry in local lists — for offline drivers and tests."""
@@ -224,6 +218,5 @@ class InMemorySink:
 
     def append_partial(self, payload: dict[str, Any]) -> None:
         self.partials.append(dict(payload))
-
 
 __all__ = ["ExtractorSpawnError", "InMemorySink", "StandaloneChildRunner"]

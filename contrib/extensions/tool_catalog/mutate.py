@@ -9,21 +9,22 @@ from typing import Any, Final
 
 from pydantic import BaseModel
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult
-from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import (
+from agentm.core.abi import (
     ExtensionAPI,
+    FunctionTool,
     InstallAtomResult,
     ReloadResult,
+    TextContent,
+    ToolResult,
     UnloadAtomResult,
+    WriteResult,
 )
-from agentm.core.abi.resource import WriteResult
+from agentm.extensions import ExtensionManifest
 
 from ._paths import catalog_root, resolve_catalog_path
 
 class ToolCatalogMutateConfig(BaseModel):
     root: str | None = None
-
 
 MANIFEST = ExtensionManifest(
     name="tool_catalog_mutate",
@@ -149,7 +150,6 @@ _RELOAD_ATOM_PARAMS: Final = {
     "required": ["name", "source"],
     "additionalProperties": False,
 }
-
 
 def install(api: ExtensionAPI, config: ToolCatalogMutateConfig) -> None:
     root = catalog_root(api, config.root)
@@ -332,12 +332,10 @@ def install(api: ExtensionAPI, config: ToolCatalogMutateConfig) -> None:
         )
     )
 
-
 def _decisions_path(atom_name: str, target_sha: str, root: Any) -> Any:
-    from agentm.core.abi.catalog import atom_decisions_path
+    from agentm.core.abi import atom_decisions_path
 
     return atom_decisions_path(atom_name, target_sha, root=root)
-
 
 def _regression_decision(
     api: ExtensionAPI,
@@ -358,7 +356,6 @@ def _regression_decision(
         if payload.get("regressed") is True or payload.get("kind") == "regressed":
             return payload
     return None
-
 
 def _append_decision(
     api: ExtensionAPI,
@@ -381,10 +378,8 @@ def _append_decision(
         handle.write(json.dumps(record, sort_keys=True))
         handle.write("\n")
 
-
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
-
 
 def _serialize_result(payload: Any) -> dict[str, Any]:
     if isinstance(
@@ -394,7 +389,6 @@ def _serialize_result(payload: Any) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     raise TypeError(f"Unsupported result payload type: {type(payload).__name__}")
-
 
 def _json_result(payload: Any) -> ToolResult:
     return ToolResult(
@@ -407,7 +401,6 @@ def _json_result(payload: Any) -> ToolResult:
         extras=payload,
     )
 
-
 def _json_error(payload: Any) -> ToolResult:
     return ToolResult(
         content=[
@@ -419,7 +412,6 @@ def _json_error(payload: Any) -> ToolResult:
         extras=payload,
         is_error=True,
     )
-
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)

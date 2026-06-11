@@ -7,21 +7,23 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from agentm.core.abi.skill import SkillRecord
-from agentm.core.abi import BusPriority
+from agentm.core.abi import (
+    BusPriority,
+    CommandSpec,
+    ExtensionAPI,
+    ResourcesDiscoverEvent,
+    SessionReadyEvent,
+    SkillRecord,
+)
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.events import ResourcesDiscoverEvent, SessionReadyEvent
-from agentm.core.abi.extension import CommandSpec, ExtensionAPI
 
 from ._md_skills import parse_md_command_records, parse_md_skill_records
-
 
 class CommandsConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     command_paths: list[str] = []
     inherit_claude: bool = True
-
 
 MANIFEST = ExtensionManifest(
     name="commands",
@@ -34,13 +36,11 @@ MANIFEST = ExtensionManifest(
     tier=2,
 )
 
-
 def _default_roots(cwd: str) -> list[Path]:
     return [
         Path.home() / ".claude" / "commands",
         Path(cwd) / ".claude" / "commands",
     ]
-
 
 def _make_handler(body: str):  # type: ignore[no-untyped-def]
     def _handler(rest: str, api: ExtensionAPI) -> None:
@@ -49,7 +49,6 @@ def _make_handler(body: str):  # type: ignore[no-untyped-def]
         api.send_user_message(message)
 
     return _handler
-
 
 def _dedupe_records(records: list[SkillRecord]) -> list[SkillRecord]:
     out: list[SkillRecord] = []
@@ -60,7 +59,6 @@ def _dedupe_records(records: list[SkillRecord]) -> list[SkillRecord]:
         seen.add(record.name)
         out.append(record)
     return out
-
 
 async def install(api: ExtensionAPI, config: CommandsConfig) -> None:
     inherit_claude = config.inherit_claude
@@ -126,6 +124,5 @@ async def install(api: ExtensionAPI, config: CommandsConfig) -> None:
 
     api.on(SessionReadyEvent.CHANNEL, _populate)
     api.on(ResourcesDiscoverEvent.CHANNEL, _contribute, priority=BusPriority.POST)
-
 
 __all__ = ("MANIFEST", "install")

@@ -26,7 +26,7 @@ from agentm.core.abi import (
     EventBus,
     text_message,
 )
-from agentm.core.abi.events import (
+from agentm.core.abi import (
     MessageAppendedEvent,
     SessionHeaderEmittedEvent,
     SessionShutdownEvent,

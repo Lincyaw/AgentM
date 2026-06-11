@@ -18,7 +18,7 @@ from typing import Annotated, Any
 import typer
 
 from agentm.core.runtime.catalog import _layout
-from agentm.core.runtime.trace_reader import TraceReader
+from agentm.core.lib.trace_reader import TraceReader
 
 logger = logging.getLogger(__name__)
 _LEGACY_FINGERPRINT_WARNED = False

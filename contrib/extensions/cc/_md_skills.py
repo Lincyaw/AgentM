@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentm.core.abi.skill import SkillRecord
-from agentm.core.lib.frontmatter import parse_frontmatter
-
+from agentm.core.abi import SkillRecord
+from agentm.core.lib import parse_frontmatter
 
 @dataclass(frozen=True, slots=True)
 class AgentRecord:
@@ -18,12 +17,10 @@ class AgentRecord:
     tools: str
     model: str
 
-
 @dataclass(frozen=True, slots=True)
 class CommandRecord:
     skill: SkillRecord
     body: str
-
 
 def _read_markdown(md_path: Path) -> tuple[dict[str, Any], str] | None:
     try:
@@ -31,7 +28,6 @@ def _read_markdown(md_path: Path) -> tuple[dict[str, Any], str] | None:
     except OSError:
         return None
     return parse_frontmatter(text)
-
 
 def parse_md_skill_records(dir: Path) -> list[SkillRecord]:
     """Parse ``*.md`` files in ``dir`` into model-invocable skill records."""
@@ -68,7 +64,6 @@ def parse_md_skill_records(dir: Path) -> list[SkillRecord]:
         )
     return records
 
-
 def parse_md_command_records(dir: Path) -> list[CommandRecord]:
     """Parse command markdown files into slash-command bodies plus skills."""
 
@@ -82,7 +77,6 @@ def parse_md_command_records(dir: Path) -> list[CommandRecord]:
         if body.strip():
             records.append(CommandRecord(skill=skill, body=body))
     return records
-
 
 def parse_md_agent_records(dir: Path) -> list[AgentRecord]:
     """Parse Claude Code persona markdown files from one agent directory."""
@@ -116,7 +110,6 @@ def parse_md_agent_records(dir: Path) -> list[AgentRecord]:
             )
         )
     return records
-
 
 __all__ = (
     "AgentRecord",

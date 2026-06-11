@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 
 from agentm.core.abi import EventBus
-from agentm.core.abi.events import (
+from agentm.core.abi import (
     BeforeSendToLlmEvent,
     SessionShutdownEvent,
 )
@@ -139,8 +139,8 @@ _LEAK_SECRET = "sk-proj-FAKE_SECRET_xxx"
 
 
 def _build_before_send_event(text: str) -> Any:
-    from agentm.core.abi.events import BeforeSendToLlmEvent as _Bs
-    from agentm.core.abi.messages import TextContent, UserMessage
+    from agentm.core.abi import BeforeSendToLlmEvent as _Bs
+    from agentm.core.abi import TextContent, UserMessage
     from agentm.core.abi.stream import Model
 
     msg = UserMessage(

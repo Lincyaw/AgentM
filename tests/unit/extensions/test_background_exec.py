@@ -34,8 +34,8 @@ from agentm.core.abi import (
     ToolResult,
     ToolTerminate,
 )
-from agentm.core.abi.events import SessionShutdownEvent
-from agentm.core.abi.extension import ExtensionAPI, ExtensionStaleError
+from agentm.core.abi import SessionShutdownEvent
+from agentm.core.abi import ExtensionAPI, ExtensionStaleError
 from agentm.extensions.builtin import background_exec
 from agentm.extensions.builtin.background_exec import BackgroundExecConfig, _BgManager, _BgTool
 from tests.unit.extensions._fake_api import FakeExtensionAPI

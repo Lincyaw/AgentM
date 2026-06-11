@@ -31,15 +31,12 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import ToolCallEvent
+from agentm.core.abi import ExtensionAPI, ToolCallEvent
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 class PermissionConfig(BaseModel):
     allow: list[str] = []
     deny: list[str] = []
-
 
 MANIFEST = ExtensionManifest(
     name="permission",
@@ -49,7 +46,6 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Leaf policy atom: can guard absent, present, or future tools.
     tier=2,
 )
-
 
 def _matches_any(name: str, patterns: tuple[str, ...]) -> bool:
     """Return True if ``name`` matches any fnmatch pattern in ``patterns``.
@@ -62,7 +58,6 @@ def _matches_any(name: str, patterns: tuple[str, ...]) -> bool:
         if fnmatch.fnmatchcase(name, pattern):
             return True
     return False
-
 
 def install(api: ExtensionAPI, config: PermissionConfig) -> None:
     allow = tuple(config.allow)

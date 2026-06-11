@@ -16,7 +16,6 @@ from rca_evolution.observer import DivergenceReport
 
 _logger = logging.getLogger(__name__)
 
-
 @dataclass
 class DistilledSkill:
     name: str
@@ -26,7 +25,6 @@ class DistilledSkill:
     pattern_frequency: int
     action: str = "create"
     reason: str = ""
-
 
 def _build_report_summary(reports: list[DivergenceReport]) -> str:
     """Aggregate stats for get_report_summary tool."""
@@ -61,7 +59,6 @@ def _build_report_summary(reports: list[DivergenceReport]) -> str:
 
     return "\n".join(lines)
 
-
 def _build_skill_content(args: dict[str, Any], train_cases: int, pattern_freq: int) -> str:
     tags_s = json.dumps(args.get("tags", ["rca"]))
     triggers_s = json.dumps(args.get("trigger_patterns", []))
@@ -80,7 +77,6 @@ evidence:
 
 {args.get("body", "")}
 """
-
 
 _DISTILLER_PROMPT = """\
 You are an expert at writing operational methodology for AI agents doing RCA \
@@ -109,7 +105,6 @@ Tell the agent exactly what to check, in what order, when it sees a specific \
 pattern of symptoms.
 """
 
-
 def _collect_existing_skills(skill_dir: str) -> list[dict[str, Any]]:
     """Read all SKILL.md files under the evolved skills directory."""
     from pathlib import Path
@@ -125,7 +120,6 @@ def _collect_existing_skills(skill_dir: str) -> list[dict[str, Any]]:
         result.append({"name": name, "content": text, "body_preview": body[:500]})
     return result
 
-
 async def distill_skill(
     *,
     reports: list[DivergenceReport],
@@ -133,9 +127,12 @@ async def distill_skill(
     skill_output_dir: str = "",
 ) -> DistilledSkill | None:
     """Spawn a distiller agent to synthesize/update/retire a SKILL.md."""
-    from agentm.core.abi.session_config import AgentSessionConfig
-    from agentm.core.abi.loop import LoopConfig
-    from agentm.core.abi.messages import AssistantMessage, ToolCallBlock
+    from agentm.core.abi import (
+        AgentSessionConfig,
+        AssistantMessage,
+        LoopConfig,
+        ToolCallBlock,
+    )
     from agentm.core.runtime.session import AgentSession
     from agentm.core.runtime.session_factory import create_agent_session
 

@@ -39,10 +39,8 @@ __all__ = [
     "tool_events_from_phase_result",
 ]
 
-
 _EXTRACTOR_FINALIZE_TOOL = "finalize_extraction"
 _AUDITOR_SUBMIT_TOOL = "submit_verdict"
-
 
 class ToolEvent(TypedDict):
     """One tool_call / tool_result pair observed during a child rollout.
@@ -58,13 +56,11 @@ class ToolEvent(TypedDict):
     is_error: bool
     error_text: str | None
 
-
 def _success_rate(events: list[ToolEvent]) -> float:
     if not events:
         return 0.0
     ok = sum(1 for e in events if not e.get("is_error", False))
     return ok / len(events)
-
 
 def _terminal_success(events: list[ToolEvent], expected_tool: str) -> int:
     """1 iff the last event is ``expected_tool`` AND it succeeded."""
@@ -77,12 +73,10 @@ def _terminal_success(events: list[ToolEvent], expected_tool: str) -> int:
         return 0
     return 1
 
-
 def _efficiency_penalty(events: list[ToolEvent], budget: int) -> float:
     if budget <= 0:
         return 0.0
     return min(1.0, len(events) / budget)
-
 
 def extractor_process_reward(
     tool_events: list[ToolEvent],
@@ -121,7 +115,6 @@ def extractor_process_reward(
         "efficiency_penalty": efficiency_penalty,
     }
 
-
 def auditor_process_reward(
     tool_events: list[ToolEvent],
     *,
@@ -159,7 +152,6 @@ def auditor_process_reward(
         "efficiency_penalty": efficiency_penalty,
     }
 
-
 def tool_events_from_phase_result(result: PhaseResult) -> list[ToolEvent]:
     """Walk ``result.messages`` and pair tool_call with tool_result.
 
@@ -180,7 +172,7 @@ def tool_events_from_phase_result(result: PhaseResult) -> list[ToolEvent]:
     """
     # Local import: keeping ``agentm.core.abi`` out of module-load time
     # so train_signals stays cheap to import in the trainer's hot path.
-    from agentm.core.abi.messages import (
+    from agentm.core.abi import (
         AssistantMessage,
         TextContent,
         ToolCallBlock,

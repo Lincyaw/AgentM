@@ -6,21 +6,17 @@ registered.
 
 from __future__ import annotations
 
-from typing import Any
 
 from pydantic import BaseModel
 
-from agentm.core.abi import AgentStartEvent
+from agentm.core.abi import AgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
-from agentm.core.abi.extension import ExtensionAPI
-
 
 class ToolFilterConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     allow: list[str] = []
     deny: list[str] = []
-
 
 MANIFEST = ExtensionManifest(
     name="tool_filter",
@@ -30,7 +26,6 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Defers filtering to agent_start so tool atoms may load in any order.
     tier=2,
 )
-
 
 def install(api: ExtensionAPI, config: ToolFilterConfig) -> None:
     allow = {str(name) for name in config.allow}
