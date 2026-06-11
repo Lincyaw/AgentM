@@ -7,6 +7,8 @@ task_class: rca_baseline
 includes:
   - overlays/base-investigator.yaml
   - overlays/runtime-context.yaml
+  - overlays/skills.yaml
+  - overlays/turn-reminder.yaml
 
 extensions:
   - module: llmharness.atom
@@ -15,3 +17,5 @@ extensions:
       extractor_interval_turns: 5
       audit_interval_turns: 5
       enable_reminders: true
+      extractor_model: doubao
+      auditor_model: doubao

@@ -34,7 +34,7 @@ from .graph import (
 )
 
 # Re-export for backward compatibility
-__all__ = [
+__all__: Final = [
     "EdgeDelete",
     "EdgeUpsert",
     "Graph",

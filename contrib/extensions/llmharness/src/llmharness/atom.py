@@ -85,7 +85,7 @@ def _resolve_provider(
     """Resolve a provider config from a config.toml profile name or legacy ProviderConfig."""
     if model_name is not None:
         from agentm.ai import DEFAULT_PROVIDER_DESCRIPTORS
-        from agentm.core.lib.user_config import resolve_model_profile
+        from agentm.core.lib import resolve_model_profile
 
         profile = resolve_model_profile(model_name)
         if profile is None:

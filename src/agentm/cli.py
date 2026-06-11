@@ -595,10 +595,6 @@ async def run(
                 f'session_id={sid}  (resume with: agentm --resume {sid} -p "<prompt>")',
                 file=output,
             )
-            print(
-                f"trace:  agentm trace messages --session {sid} --format text",
-                file=output,
-            )
     return 1 if diagnostic_state["error_seen"] else 0
 
 
