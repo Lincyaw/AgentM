@@ -48,8 +48,9 @@ async def evaluate_instance(
 
     from ...agents import auditor_scenario, extractor_scenario
     from ...agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-    from ...agents.extractor.tools import GraphOp, parse_op
-    from ...atom import CumulativeAuditState, _prepare_extractor_data
+    from ...agents.extractor.graph import GraphOp, parse_op
+    from ...atom import _prepare_extractor_data
+    from ...state import CumulativeAuditState
 
     messages = spans_to_messages(instance.spans)
     n_spans = len(messages)
