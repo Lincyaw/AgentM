@@ -3,17 +3,18 @@
 Two entry points:
 
 - ``replay_one()`` — replay-fork a single baseline session
-- ``replay_batch()`` — run many cases with concurrency control
+- ``replay_batch()`` — run many sessions with concurrency control
 
-Designed for eval scripts, notebooks, and strategy sweeps::
+Session config (scenario, provider, data_dir) is auto-restored from
+the source session's stored config — callers only specify the harness
+model and strategy parameters::
 
-    results = await replay_batch(
-        cases=[("sid1", "data/case1"), ("sid2", "data/case2")],
+    summary = await replay_batch(
+        session_ids=["abc123", "def456"],
         store=store,
-        harness_provider=harness_provider,
-        agent_provider=agent_provider,
+        harness_provider=build_profile_provider("doubao"),
         auditor_prompt="trajectory_coverage",
-        concurrency=4,
+        concurrency=10,
     )
 """
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -110,28 +112,31 @@ def _extract_submission(messages: list[AgentMessage]) -> str | None:
     return None
 
 
+def _read_source_config(session_state: Any) -> dict[str, Any]:
+    """Read stored session config from a session manager."""
+    header = session_state.get_header()
+    if header is None or header.config is None:
+        return {}
+    return dict(header.config)
+
+
 async def replay_one(
     *,
     session_id: str,
-    data_dir: str,
     store: Any,
     harness_provider: tuple[str, dict[str, Any]],
-    agent_provider: tuple[str, dict[str, Any]],
-    scenario: str = "rca:baseline",
-    cwd: str | None = None,
     extractor_interval: int = 5,
     audit_interval: int = 5,
     auditor_prompt: str = "minimal",
     max_turns: int = 60,
+    data_dir_override: str | None = None,
 ) -> ReplayResult:
     """Replay-fork one baseline session.
 
-    1. Read baseline messages from ``store``
-    2. Run ``offline_audit`` to find surface points
-    3. Fork at first surface, continue with reminder, judge
+    Scenario, provider, and data_dir are auto-restored from the source
+    session's stored config. Only the harness model (for extractor/auditor)
+    and strategy parameters need to be specified.
     """
-    import os
-
     from agentm.core.abi import AgentSessionConfig
     from agentm.core.abi.loop import LoopConfig
     from agentm.core.runtime import AgentSession, create_agent_session
@@ -139,9 +144,7 @@ async def replay_one(
 
     from .judge import RcabenchJudge
 
-    resolved_cwd = cwd or os.getcwd()
-    os.environ["AGENTM_RCA_DATA_DIR"] = data_dir
-
+    # 1. Open source session and read stored config
     try:
         source = store.open(session_id)
         messages = source.get_raw_messages()
@@ -150,26 +153,59 @@ async def replay_one(
             case_id=session_id, fired=False, error=f"open failed: {exc}"
         )
 
-    # Judge control
+    stored = _read_source_config(source)
+    scenario = stored.get("scenario")
+    if not scenario:
+        return ReplayResult(
+            case_id=session_id, fired=False,
+            error="source session has no stored scenario config",
+        )
+
+    stored_provider = stored.get("provider")
+    if not stored_provider or not isinstance(stored_provider, list) or len(stored_provider) != 2:
+        return ReplayResult(
+            case_id=session_id, fired=False,
+            error="source session has no stored provider config",
+        )
+    agent_provider = (stored_provider[0], stored_provider[1])
+
+    cwd = source._cwd or os.getcwd()
+
+    # Restore AGENTM_* env vars from stored config
+    stored_env = stored.get("env")
+    if isinstance(stored_env, dict):
+        for k, v in stored_env.items():
+            if k.startswith("AGENTM_") and isinstance(v, str):
+                os.environ.setdefault(k, v)
+
+    data_dir = data_dir_override or _find_data_dir_from_config(stored)
+    if data_dir:
+        os.environ["AGENTM_RCA_DATA_DIR"] = data_dir
+
+    # 2. Judge control
     judge = RcabenchJudge()
     control_response = _extract_submission(messages)
-    ctrl = await judge.judge(
-        agent_output_json=control_response,
-        data_dir=data_dir,
-        case_id=session_id,
-    )
+    if data_dir:
+        ctrl = await judge.judge(
+            agent_output_json=control_response,
+            data_dir=data_dir,
+            case_id=session_id,
+        )
+    else:
+        ctrl = type("_", (), {"correct": None})()
 
-    # Offline audit
+    # 3. Offline audit
     try:
         surfaces = await offline_audit(
             messages,
-            cwd=resolved_cwd,
+            cwd=cwd,
             provider=harness_provider,
             extractor_interval=extractor_interval,
             audit_interval=audit_interval,
             auditor_prompt=auditor_prompt,
         )
     except Exception as exc:
+        _log.exception("offline_audit failed for %s", session_id)
         return ReplayResult(
             case_id=session_id,
             fired=False,
@@ -185,12 +221,12 @@ async def replay_one(
             intervene_correct=ctrl.correct,
         )
 
-    # Fork at first surface
+    # 4. Fork at first surface and continue
     s = surfaces[0]
     try:
         forked = store.fork(session_id, up_to=s.turn_index)
         config = AgentSessionConfig(
-            cwd=resolved_cwd,
+            cwd=cwd,
             session_manager=forked,
             scenario=scenario,
             provider=agent_provider,
@@ -202,6 +238,7 @@ async def replay_one(
         finally:
             await session.shutdown()
     except Exception as exc:
+        _log.exception("fork continuation failed for %s", session_id)
         return ReplayResult(
             case_id=session_id,
             fired=True,
@@ -211,12 +248,17 @@ async def replay_one(
             error=f"fork failed: {exc}",
         )
 
+    # 5. Judge fork
     fork_response = _extract_submission(fork_messages)
-    fork_outcome = await judge.judge(
-        agent_output_json=fork_response,
-        data_dir=data_dir,
-        case_id=f"{session_id}-fork",
-    )
+    if data_dir:
+        fork_outcome = await judge.judge(
+            agent_output_json=fork_response,
+            data_dir=data_dir,
+            case_id=f"{session_id}-fork",
+        )
+        fork_correct = fork_outcome.correct
+    else:
+        fork_correct = None
 
     return ReplayResult(
         case_id=session_id,
@@ -224,19 +266,26 @@ async def replay_one(
         surface_turn=s.turn_index,
         reminder=s.reminder_text,
         control_correct=ctrl.correct,
-        intervene_correct=fork_outcome.correct,
+        intervene_correct=fork_correct,
         forked_session_id=forked.get_session_id(),
     )
 
 
+def _find_data_dir_from_config(stored: dict[str, Any]) -> str | None:
+    """Extract data_dir from the stored session config's env snapshot."""
+    env = stored.get("env")
+    if isinstance(env, dict):
+        val = env.get("AGENTM_RCA_DATA_DIR")
+        if isinstance(val, str) and val:
+            return val
+    return os.environ.get("AGENTM_RCA_DATA_DIR")
+
+
 async def replay_batch(
-    cases: list[tuple[str, str]],
+    session_ids: list[str],
     *,
     store: Any,
     harness_provider: tuple[str, dict[str, Any]],
-    agent_provider: tuple[str, dict[str, Any]],
-    scenario: str = "rca:baseline",
-    cwd: str | None = None,
     extractor_interval: int = 5,
     audit_interval: int = 5,
     auditor_prompt: str = "minimal",
@@ -244,28 +293,27 @@ async def replay_batch(
     concurrency: int = 1,
     on_result: Any | None = None,
 ) -> ReplaySummary:
-    """Run replay-fork over many ``(session_id, data_dir)`` pairs.
+    """Run replay-fork over many sessions.
+
+    Only ``session_ids`` and ``harness_provider`` are required — scenario,
+    agent provider, and data_dir are auto-restored from each session's
+    stored config.
 
     ``on_result`` is an optional callback ``(result, index, total) -> None``
-    called after each case completes (for progress reporting / streaming
-    to a JSONL sink).
+    for progress reporting.
     """
     summary = ReplaySummary()
-    total = len(cases)
+    total = len(session_ids)
     sem = asyncio.Semaphore(max(1, concurrency))
     done_count = 0
 
-    async def _run_one(sid: str, data_dir: str) -> ReplayResult:
+    async def _run_one(sid: str) -> ReplayResult:
         nonlocal done_count
         async with sem:
             result = await replay_one(
                 session_id=sid,
-                data_dir=data_dir,
                 store=store,
                 harness_provider=harness_provider,
-                agent_provider=agent_provider,
-                scenario=scenario,
-                cwd=cwd,
                 extractor_interval=extractor_interval,
                 audit_interval=audit_interval,
                 auditor_prompt=auditor_prompt,
@@ -276,7 +324,7 @@ async def replay_batch(
                 on_result(result, done_count, total)
             return result
 
-    tasks = [asyncio.create_task(_run_one(sid, dd)) for sid, dd in cases]
+    tasks = [asyncio.create_task(_run_one(sid)) for sid in session_ids]
     for fut in asyncio.as_completed(tasks):
         result = await fut
         summary.results.append(result)
