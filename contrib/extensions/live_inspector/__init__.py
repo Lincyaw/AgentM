@@ -92,7 +92,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 # WebSocket transport. ``websockets`` ships in the top-level ``[project]
 # dependencies`` so this import is guaranteed to resolve in any AgentM
@@ -153,7 +153,7 @@ _QUEUE_HIGHWATER: int = 256
 # Process-level registry: one server per root_session_id. Child sessions in
 # the same process share the parent's server by looking up their root id
 # here in their own ``install()``.
-_SERVERS: dict[str, _Server] = {}
+_SERVERS: Final[dict[str, _Server]] = {}
 _SERVERS_LOCK = threading.Lock()
 
 def _now() -> float:

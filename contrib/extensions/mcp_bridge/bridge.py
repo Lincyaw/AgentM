@@ -15,6 +15,7 @@ session.
 
 from __future__ import annotations
 
+from typing import Final
 
 from agentm.core.abi import ExtensionAPI, SessionShutdownEvent
 
@@ -145,4 +146,4 @@ async def _snapshot_and_register(
         {"server": server_name, "tools": tuple(names)},
     )
 
-__all__ = ["install"]
+__all__: Final = ["install"]

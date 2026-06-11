@@ -10,7 +10,9 @@ See ``.claude/designs/mcp-integration.md`` for the full design rationale.
 
 from __future__ import annotations
 
+from typing import Final
+
 from .bridge import install
 from .manifest import MANIFEST
 
-__all__ = ["MANIFEST", "install"]
+__all__: Final = ["MANIFEST", "install"]
