@@ -129,12 +129,16 @@ async def offline_audit(
     provider: tuple[str, dict[str, Any]],
     extractor_interval: int = 5,
     audit_interval: int = 5,
+    auditor_prompt: str = "minimal",
 ) -> list[SurfacePoint]:
     """Run extractor + auditor offline over *messages*, return surface points.
 
     Each surface point is a position where the auditor decided to intervene
     with a reminder. The caller can ``store.fork(sid, up_to=s.turn_index)``
     at each surface to create a counterfactual branch.
+
+    ``auditor_prompt`` selects the prompt variant (e.g. ``"minimal"``,
+    ``"trajectory_coverage"``).
     """
     from .agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
     from .atom import _prepare_extractor_data
@@ -211,7 +215,7 @@ async def offline_audit(
                 "phases": [p.to_dict() for p in phases],
                 "continuation_notes": list(cumulative.last_continuation_notes),
                 "summary_threshold": 30,
-                "prompt_name": "minimal",
+                "prompt_name": auditor_prompt,
             }
             aud_extensions: list[tuple[str, dict[str, Any]]] = [
                 (_OBS, {}),
