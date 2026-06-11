@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import time
 import uuid
 from collections.abc import Callable
@@ -435,6 +436,7 @@ async def create_agent_session(
         "scenario": config.scenario,
         "provider": list(config.provider) if config.provider else None,
         "extensions": [[mod, cfg] for mod, cfg in to_load],
+        "env": {k: v for k, v in os.environ.items() if k.startswith("AGENTM_")},
     })
 
     for module_path, ext_cfg in to_load:

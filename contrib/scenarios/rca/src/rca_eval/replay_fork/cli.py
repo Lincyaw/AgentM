@@ -1,11 +1,13 @@
 """Replay-fork CLI.
 
+Session config (scenario, provider, data_dir) is auto-restored from
+the source session. Only the harness model needs to be specified.
+
 Example::
 
     uv run python -m rca_eval.replay_fork.cli \
         --session abc123 --session def456 \
-        --data-dir datasets/ops-lite-clean/cases/batch-XXX \
-        --harness-model doubao --agent-model doubao \
+        --harness-model doubao \
         --out runs/replay-fork/results.jsonl
 """
 
@@ -33,30 +35,20 @@ def run(
         list[str],
         typer.Option("--session", help="Baseline session id(s) (repeatable)"),
     ],
-    data_dir: Annotated[
-        Path,
-        typer.Option("--data-dir", help="Case data directory"),
-    ],
     harness_model: Annotated[
         str, typer.Option("--harness-model", help="config.toml profile for extractor+auditor"),
     ] = "doubao",
-    agent_model: Annotated[
-        str, typer.Option("--agent-model", help="config.toml profile for continuation agent"),
-    ] = "doubao",
-    scenario: Annotated[
-        str, typer.Option("--scenario", help="scenario for continuation sessions"),
-    ] = "rca:baseline",
+    auditor_prompt: Annotated[
+        str, typer.Option("--auditor-prompt", help="auditor prompt variant"),
+    ] = "minimal",
     extractor_interval: Annotated[
         int, typer.Option("--extractor-interval"),
     ] = 5,
     audit_interval: Annotated[
         int, typer.Option("--audit-interval"),
     ] = 5,
-    auditor_prompt: Annotated[
-        str, typer.Option("--auditor-prompt", help="auditor prompt variant"),
-    ] = "minimal",
     max_turns: Annotated[
-        int, typer.Option("--max-turns", help="max turns per fork continuation"),
+        int, typer.Option("--max-turns"),
     ] = 60,
     concurrency: Annotated[
         int, typer.Option("--concurrency", "-j"),
@@ -64,9 +56,9 @@ def run(
     out: Annotated[
         Path, typer.Option("--out", help="results JSONL path"),
     ] = Path("runs/replay-fork/results.jsonl"),
-    cwd: Annotated[
-        Path, typer.Option("--cwd"),
-    ] = Path("."),
+    obs_dir: Annotated[
+        Path, typer.Option("--obs-dir", help="observability directory"),
+    ] = Path(".agentm/observability"),
 ) -> None:
     """Run replay-fork over baseline sessions."""
     import logging
@@ -81,20 +73,13 @@ def run(
     from .api import replay_batch
     from .providers import build_profile_provider
 
-    harness_provider = build_profile_provider(harness_model)
-    agent_provider = build_profile_provider(agent_model)
-    resolved_cwd = str(cwd.resolve())
-    resolved_data = str(data_dir.resolve())
+    harness_prov = build_profile_provider(harness_model)
+    store = JsonlSessionStore(session_dir=obs_dir.resolve())
 
-    obs_dir = Path(resolved_cwd) / ".agentm" / "observability"
-    store = JsonlSessionStore(session_dir=obs_dir)
-
-    cases = [(sid, resolved_data) for sid in session]
     typer.echo(
-        f"# harness: {harness_provider[1].get('model')}\n"
-        f"# agent:   {agent_provider[1].get('model')}\n"
+        f"# harness: {harness_prov[1].get('model')}\n"
         f"# auditor_prompt: {auditor_prompt}\n"
-        f"# cases: {len(cases)}  concurrency: {concurrency}"
+        f"# sessions: {len(session)}  concurrency: {concurrency}"
     )
 
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -103,18 +88,22 @@ def run(
     def _on_result(result, done, total):  # type: ignore[no-untyped-def]
         fh.write(json.dumps(asdict(result), ensure_ascii=False, default=str) + "\n")
         fh.flush()
-        tag = "fired" if result.fired else "silent"
-        typer.echo(f"  [{done}/{total}] {result.case_id} {tag} ctrl={result.control_correct} iv={result.intervene_correct}")
+        tag = "FIRE" if result.fired else "----"
+        ctrl = "Y" if result.control_correct else "N"
+        iv = "Y" if result.intervene_correct else ("N" if result.intervene_correct is not None else "-")
+        flip = ""
+        if result.helped:
+            flip = " HELPED"
+        elif result.harmed:
+            flip = " HARMED"
+        typer.echo(f"  [{done}/{total}] {tag} ctrl={ctrl} iv={iv}{flip} {result.case_id}")
 
     try:
         summary = asyncio.run(
             replay_batch(
-                cases,
+                session,
                 store=store,
-                harness_provider=harness_provider,
-                agent_provider=agent_provider,
-                scenario=scenario,
-                cwd=resolved_cwd,
+                harness_provider=harness_prov,
                 extractor_interval=extractor_interval,
                 audit_interval=audit_interval,
                 auditor_prompt=auditor_prompt,
