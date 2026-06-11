@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -544,6 +545,70 @@ def _info(message: str) -> None:
     print(message, file=sys.stderr)
 
 
+# ---------- follow (tail -f for messages) ------------------------------------
+
+
+def _tail_messages(
+    path: Path,
+    roles: set[str],
+    types: set[str],
+    fmt: str,
+    render_fn: Callable[[dict[str, Any]], str],
+    sink: TextIO,
+) -> None:
+    """Tail the JSONL file for new messages, ``tail -f`` style."""
+
+    from agentm.core.observability.otlp import (
+        iter_log_records as _iter_lr,
+        otlp_unwrap,
+    )
+
+    with path.open("r", encoding="utf-8") as fh:
+        fh.seek(0, 2)
+        buf = ""
+        try:
+            while True:
+                chunk = fh.read()
+                if not chunk:
+                    time.sleep(0.3)
+                    continue
+                buf += chunk
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(raw, dict):
+                        continue
+                    for lr in _iter_lr(raw):
+                        if lr.get("eventName") != "agentm.message.appended":
+                            continue
+                        body = otlp_unwrap(lr.get("body"))
+                        if not isinstance(body, dict):
+                            continue
+                        payload = body.get("payload") or {}
+                        if types and body.get("type") not in types:
+                            continue
+                        if roles and payload.get("role") not in roles:
+                            continue
+                        if fmt == "ndjson":
+                            sink.write(json.dumps(body, ensure_ascii=False))
+                            sink.write("\n")
+                        elif fmt == "json":
+                            sink.write(json.dumps(body, ensure_ascii=False))
+                            sink.write("\n")
+                        else:
+                            sink.write(render_fn(body))
+                            sink.write("\n")
+                        sink.flush()
+        except KeyboardInterrupt:
+            pass
+
+
 # ---------- messages --------------------------------------------------------
 
 
@@ -568,6 +633,13 @@ def messages_cmd(
             ),
         ),
     ] = None,
+    follow: Annotated[
+        bool,
+        typer.Option(
+            "--follow", "-f",
+            help="Follow the session log in real time (like tail -f). Ctrl-C to stop.",
+        ),
+    ] = False,
     hide_thinking: Annotated[
         bool,
         typer.Option(
@@ -588,11 +660,9 @@ def messages_cmd(
 ) -> None:
     """Print the conversation trajectory (user / assistant / tool messages).
 
-    The system prompt is rebuilt by the loop on every turn and is not part
-    of the session message list, so it does NOT appear here by default.
-    Set ``AGENTM_TRACE_SYSTEM_PROMPT=1`` before running the agent to
-    persist it; the first turn's prompt will then surface as a synthetic
-    ``[system]`` message #0.
+    The system prompt is persisted by default and surfaces as a synthetic
+    ``[system]`` message #0. Set ``AGENTM_TRACE_SYSTEM_PROMPT=0`` to
+    disable persistence (reduces JSONL size for bulk eval runs).
 
     Examples:
 
@@ -668,6 +738,9 @@ def messages_cmd(
 
         n = _emit(_filtered(), chosen_fmt, _render, sink, limit)
         _info(f"{n} message(s)")
+        if follow:
+            _info("following (Ctrl-C to stop)…")
+            _tail_messages(path, roles, types, chosen_fmt, _render, sink)
     finally:
         if close:
             sink.close()

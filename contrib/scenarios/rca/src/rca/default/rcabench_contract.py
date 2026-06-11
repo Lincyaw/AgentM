@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict
+
 from agentm.core.abi import (
     BeforeAgentStartEvent,
     DiagnosticEvent,
@@ -11,6 +13,11 @@ from agentm.core.abi import (
     SessionReadyEvent,
 )
 from agentm.extensions import ExtensionManifest
+
+
+class _RcabenchContractConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
 
 MANIFEST = ExtensionManifest(
     name="rcabench_contract",
@@ -20,7 +27,7 @@ MANIFEST = ExtensionManifest(
         f"event:{BeforeAgentStartEvent.CHANNEL}",
         f"event:{DiagnosticEvent.CHANNEL}",
     ),
-    config_schema={"type": "object", "additionalProperties": False},
+    config_schema=_RcabenchContractConfig,
     tier=2,
 )
 
@@ -61,7 +68,7 @@ def _xml_attr(value: str) -> str:
         .replace('"', "&quot;")
     )
 
-async def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
+async def install(api: ExtensionAPI, _config: _RcabenchContractConfig) -> None:
     cached_contract = ""
 
     async def _load(_event: SessionReadyEvent) -> None:

@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel
 
@@ -190,7 +190,7 @@ def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
 # manually in sync with the upstream Pydantic models — Pydantic remains
 # the source of truth at validation time, this is just the wire schema
 # the model sees.
-_EVIDENCE_SCHEMA: dict[str, Any] = {
+_EVIDENCE_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "kind": {
@@ -219,7 +219,7 @@ _EVIDENCE_SCHEMA: dict[str, Any] = {
 # NOT pull rcabench_platform at import time (see the lazy import in
 # ``install``). Drift against the platform enum is locked by
 # ``tests/test_finalize_contract.py::test_fault_kind_enum_matches_platform``.
-_FAULT_KIND_ENUM: list[str] = [
+_FAULT_KIND_ENUM: Final[list[str]] = [
     "pod_failure",
     "pod_unavailable",
     "network_delay",
@@ -248,7 +248,7 @@ _FAULT_KIND_ENUM: list[str] = [
     "unknown",
 ]
 
-_AGENT_RCA_OUTPUT_SCHEMA: dict[str, Any] = {
+_AGENT_RCA_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "root_causes": {
@@ -307,4 +307,4 @@ _AGENT_RCA_OUTPUT_SCHEMA: dict[str, Any] = {
     "required": ["root_causes"],
 }
 
-__all__ = ["MANIFEST", "install"]
+__all__: Final = ["MANIFEST", "install"]

@@ -462,9 +462,9 @@ class AgentLoop:
                 # Drain the LLM stream, emitting llm_request_start/end so
                 # observers (cost trackers, observability) see request
                 # boundaries without wrapping ``stream_fn`` themselves.
-                _trace_system = os.environ.get(
+                _skip_system = os.environ.get(
                     "AGENTM_TRACE_SYSTEM_PROMPT", ""
-                ).strip().lower() in {"1", "true", "yes", "on"}
+                ).strip().lower() in {"0", "false", "no", "off"}
                 await self._bus.emit(
                     LlmRequestStartEvent.CHANNEL,
                     LlmRequestStartEvent(
@@ -474,7 +474,7 @@ class AgentLoop:
                         system_chars=len(system or ""),
                         model_id=getattr(model, "id", None),
                         turn_id=turn_id,
-                        system_text=(system or "") if _trace_system else None,
+                        system_text=None if _skip_system else (system or ""),
                     ),
                 )
                 stream_events: list[AssistantStreamEvent] = []

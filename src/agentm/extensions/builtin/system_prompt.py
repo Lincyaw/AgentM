@@ -1,5 +1,3 @@
-"""Builtin ``system_prompt`` atom per extension-as-scenario §7."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,34 +17,46 @@ MANIFEST = ExtensionManifest(
         "supplied inline via ``prompt`` or read from a file via "
         "``prompt_file`` (useful when an orchestrator stages a long prompt on "
         "disk and configures the atom with ``-e system_prompt:{\"prompt_file\""
-        ":\"/path\"}``). ``prompt_file`` wins when both are set."
+        ":\"/path\"}``). ``prompt_file`` wins when both are set. When neither "
+        "is set, context files (CLAUDE.md / AGENTS.md) are loaded from the "
+        "filesystem hierarchy."
     ),
     registers=("event:before_agent_start",),
-    # Neither key is top-level ``required``: the skip-when-unconfigured filter
-    # (session_helpers.missing_required_fields) only understands a flat
-    # ``required`` list and would otherwise reject a ``prompt_file``-only
-    # config as "missing prompt". install() instead resolves whichever source
-    # is present and contributes nothing when neither yields text.
     config_schema=SystemPromptConfig,
-    requires=(),  # Leaf atom: prepends configured prompt text only.
+    requires=(),
     provides_role=(SYSTEM_PROMPT_PROVIDER,),
 )
 
-def _resolve_prompt(config: SystemPromptConfig) -> str:
-    """Resolve the prompt text from config: ``prompt_file`` (read) or ``prompt``.
+_CONTEXT_FILENAMES = ("AGENTS.md", "CLAUDE.md")
 
-    A non-empty ``prompt_file`` takes precedence over inline ``prompt``. A
-    missing file raises (surfaced as an install diagnostic by the session
-    factory) rather than silently producing no prompt.
-    """
+
+def _discover_context_files(cwd: str) -> str:
+    """Walk from filesystem root down to *cwd*, collecting AGENTS.md / CLAUDE.md."""
+    parts: list[str] = []
+    resolved = Path(cwd).resolve()
+    chain = [resolved, *resolved.parents]
+    chain.reverse()
+    for directory in chain:
+        for filename in _CONTEXT_FILENAMES:
+            candidate = directory / filename
+            if candidate.is_file():
+                try:
+                    parts.append(candidate.read_text(encoding="utf-8").rstrip())
+                except OSError:
+                    pass
+    return "\n\n".join(parts)
+
+
+def _resolve_prompt(config: SystemPromptConfig, cwd: str) -> str:
     if config.prompt_file:
         return Path(config.prompt_file).read_text(encoding="utf-8")
-    return config.prompt or ""
+    if config.prompt is not None:
+        return config.prompt
+    return _discover_context_files(cwd)
+
 
 def install(api: ExtensionAPI, config: SystemPromptConfig) -> None:
-    prompt = _resolve_prompt(config)
-    # Empty config (e.g. the auto-discovery floor's {"prompt": ""}) contributes
-    # nothing — register no handler rather than prepend stray separators.
+    prompt = _resolve_prompt(config, api.cwd)
     if not prompt:
         return
 

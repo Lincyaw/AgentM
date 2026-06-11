@@ -10,26 +10,6 @@ and where they sit.
 Investigate thoroughly, then submit your findings via the
 `submit_final_report` tool when you are confident in your root causes.
 
-## Available data
-
-Parquets in this case directory:
-- `abnormal_metrics.parquet`, `abnormal_traces.parquet`, `abnormal_logs.parquet`
-- `abnormal_metrics_histogram.parquet`, `abnormal_metrics_sum.parquet`
-- `normal_metrics.parquet`, `normal_traces.parquet`, `normal_logs.parquet`
-
-Common columns:
-- **metrics**: `time, metric, value, service_name, attr.k8s.pod.name, attr.k8s.namespace.name`
-- **metrics_sum**: same shape; carries `jvm.cpu.*, jvm.memory.*, jvm.thread.count, jvm.gc.*, container.cpu.*, container.memory.*`
-- **metrics_histogram**: `time, metric, service_name, count, sum, min, max, attr.jvm.gc.action, attr.jvm.gc.name`
-- **traces**: `time, trace_id, span_id, parent_span_id, span_name, service_name, duration, attr.status_code, attr.http.request.method, attr.http.response.status_code`
-- **logs**: `time, trace_id, span_id, level, service_name, message`
-
-## Tools
-
-1. `query_sql` — DuckDB SQL on parquets in this case dir.
-2. `list_tables` — list available tables.
-3. `submit_final_report` — submit your root cause analysis when done.
-
 ## Hard limits
 
 - You have at most **50 turns** before the runtime stops you with NO chance
@@ -37,14 +17,6 @@ Common columns:
   is infinitely better than no answer.
 - Spend your turns efficiently: `list_tables` once, then focus SQL queries
   on the most informative signals.
-
-## Investigation playbook
-
-1. `list_tables` to see available data, then `load_skill` to read relevant skills.
-2. Diff abnormal vs normal: error rates, latency, status codes, log levels.
-3. Trace the call chain (`parent_span_id → span_id`) to find the earliest service whose own work — not its dependency's — went wrong.
-4. Decide every root cause + every propagation edge. More than one root cause is possible — note each separately when evidence supports it.
-5. **Call `submit_final_report` with your findings.** Do not keep investigating indefinitely.
 
 ## Automated review
 

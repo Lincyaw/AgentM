@@ -485,6 +485,15 @@ async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
         event.system = updated
         return {"system": updated}
 
+    def _resolve_sibling(name: str) -> Path | None:
+        """Check if *name* is a sibling file of any registered skill."""
+        filename = name if name.endswith(".md") else f"{name}.md"
+        for record in skills_by_name.values():
+            candidate = Path(record.base_dir) / filename
+            if candidate.is_file():
+                return candidate
+        return None
+
     async def _load_skill(args: dict[str, Any]) -> Any:
         name = str(args.get("name", "")).strip()
         if not name:
@@ -493,7 +502,12 @@ async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
                 is_error=True,
             )
         record = skills_by_name.get(name)
-        if record is None:
+        target: Path | None
+        if record is not None:
+            target = Path(record.file_path)
+        else:
+            target = _resolve_sibling(name)
+        if target is None:
             available = ", ".join(sorted(skills_by_name)) or "(none)"
             return ToolResult(
                 content=[TextContent(
@@ -503,7 +517,7 @@ async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
                 is_error=True,
             )
         try:
-            content = Path(record.file_path).read_text(encoding="utf-8")
+            content = target.read_text(encoding="utf-8")
         except OSError as exc:
             return ToolResult(
                 content=[TextContent(type="text", text=f"error reading skill: {exc}")],

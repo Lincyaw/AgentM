@@ -53,10 +53,14 @@ from agentm.extensions import ExtensionManifest
 # MANIFEST
 # ---------------------------------------------------------------------------
 
+_ALL_TOOLS: Final[frozenset[str]] = frozenset({"read", "write", "edit", "glob", "grep"})
+
+
 class FileToolsConfig(BaseModel):
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
     file_ops: Any = None
+    tools: list[str] | None = None
     allow_globs: list[str] | None = None
     deny_globs: list[str] | None = None
     max_size_bytes: int = 262_144
@@ -621,6 +625,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             _bash_ops_cache.append(api.get_operations().bash)
         return _bash_ops_cache[0]
 
+    enabled_tools = frozenset(config.tools) if config.tools is not None else _ALL_TOOLS
     allow_globs = _coerce_globs(config.allow_globs, api.cwd)
     deny_globs = _coerce_globs(config.deny_globs, api.cwd)
     max_size_bytes: int = config.max_size_bytes
@@ -692,20 +697,21 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         except Exception as exc:
             return _error(f"Failed to read {path!r}: {exc}")
 
-    api.register_tool(
-        FunctionTool(
-            name="read",
-            description=(
-                "Read a UTF-8 text file from disk. "
-                "By default reads the entire file. "
-                f"Files larger than {max_size_bytes} bytes require "
-                "offset and limit parameters."
-            ),
-            parameters=_READ_PARAMETERS,
-            fn=_read_execute,
-            metadata={"file_op": "read"},
+    if "read" in enabled_tools:
+        api.register_tool(
+            FunctionTool(
+                name="read",
+                description=(
+                    "Read a UTF-8 text file from disk. "
+                    "By default reads the entire file. "
+                    f"Files larger than {max_size_bytes} bytes require "
+                    "offset and limit parameters."
+                ),
+                parameters=_READ_PARAMETERS,
+                fn=_read_execute,
+                metadata={"file_op": "read"},
+            )
         )
-    )
 
     # --- write tool -------------------------------------------------------
 
@@ -786,20 +792,21 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         except Exception as exc:
             return _error(f"Failed to write {path!r}: {exc}")
 
-    api.register_tool(
-        FunctionTool(
-            name="write",
-            description=(
-                "Write a UTF-8 text file. For existing files, you MUST read "
-                "the full file first. Prefer the edit tool for modifying "
-                "existing files — use write only for new files or complete "
-                "rewrites."
-            ),
-            parameters=_WRITE_PARAMETERS,
-            fn=_write_execute,
-            metadata={"file_op": "write"},
+    if "write" in enabled_tools:
+        api.register_tool(
+            FunctionTool(
+                name="write",
+                description=(
+                    "Write a UTF-8 text file. For existing files, you MUST read "
+                    "the full file first. Prefer the edit tool for modifying "
+                    "existing files — use write only for new files or complete "
+                    "rewrites."
+                ),
+                parameters=_WRITE_PARAMETERS,
+                fn=_write_execute,
+                metadata={"file_op": "write"},
+            )
         )
-    )
 
     # --- edit tool --------------------------------------------------------
 
@@ -926,20 +933,21 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         except Exception as exc:
             return _error(f"Failed to edit {path!r}: {exc}")
 
-    api.register_tool(
-        FunctionTool(
-            name="edit",
-            description=(
-                "Edit a UTF-8 text file. Two modes:\n"
-                "1. String replacement: provide old_string + new_string.\n"
-                "2. Line-range replacement: provide start_line + end_line + new_string "
-                "(1-based, inclusive). You MUST read the file first to see line numbers."
-            ),
-            parameters=_EDIT_PARAMETERS,
-            fn=_edit_execute,
-            metadata={"file_op": "edit", TOOL_RESULT_FORMAT_METADATA_KEY: "diff"},
+    if "edit" in enabled_tools:
+        api.register_tool(
+            FunctionTool(
+                name="edit",
+                description=(
+                    "Edit a UTF-8 text file. Two modes:\n"
+                    "1. String replacement: provide old_string + new_string.\n"
+                    "2. Line-range replacement: provide start_line + end_line + new_string "
+                    "(1-based, inclusive). You MUST read the file first to see line numbers."
+                ),
+                parameters=_EDIT_PARAMETERS,
+                fn=_edit_execute,
+                metadata={"file_op": "edit", TOOL_RESULT_FORMAT_METADATA_KEY: "diff"},
+            )
         )
-    )
 
     # --- glob tool -------------------------------------------------------
 
@@ -1015,18 +1023,19 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             )
         return _ok("\n".join(lines))
 
-    api.register_tool(
-        FunctionTool(
-            name="glob",
-            description=(
-                "Find files by glob pattern. Returns matching filenames "
-                "relative to the search directory."
-            ),
-            parameters=_GLOB_PARAMETERS,
-            fn=_glob_execute,
-            metadata={"file_op": "glob"},
+    if "glob" in enabled_tools:
+        api.register_tool(
+            FunctionTool(
+                name="glob",
+                description=(
+                    "Find files by glob pattern. Returns matching filenames "
+                    "relative to the search directory."
+                ),
+                parameters=_GLOB_PARAMETERS,
+                fn=_glob_execute,
+                metadata={"file_op": "glob"},
+            )
         )
-    )
 
     # --- grep tool -------------------------------------------------------
 
@@ -1100,14 +1109,15 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         )
         return _ok(text)
 
-    api.register_tool(
-        FunctionTool(
-            name="grep",
-            description=(
-                "Search file contents with a regex pattern. Uses ripgrep "
-                "(rg) when available, falls back to grep."
-            ),
-            parameters=_GREP_PARAMETERS,
-            fn=_grep_execute,
+    if "grep" in enabled_tools:
+        api.register_tool(
+            FunctionTool(
+                name="grep",
+                description=(
+                    "Search file contents with a regex pattern. Uses ripgrep "
+                    "(rg) when available, falls back to grep."
+                ),
+                parameters=_GREP_PARAMETERS,
+                fn=_grep_execute,
+            )
         )
-    )

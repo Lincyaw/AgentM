@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import (
     ExtensionAPI,
@@ -281,4 +281,4 @@ def _maybe_str(value: Any) -> str | None:
     text = str(value).strip()
     return text or None
 
-__all__ = ["MANIFEST", "install"]
+__all__: Final = ["MANIFEST", "install"]
