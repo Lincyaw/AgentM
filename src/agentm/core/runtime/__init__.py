@@ -58,6 +58,8 @@ from agentm.core.runtime.session_bootstrap import (
     make_default_session_store,
     resolve_session_state,
 )
+from agentm.core.runtime.session_factory import create_agent_session
+from agentm.core.runtime.session_inbox import SessionInbox
 
 __all__ = [
     "AgentSession",
@@ -89,10 +91,12 @@ __all__ = [
     "SessionManager",
     "SessionTreeNode",
     "UnknownCommandError",
+    "create_agent_session",
     "events",
     "GitBackedResourceWriter",
     "load_extension",
     "make_default_session_store",
     "resolve_session_state",
+    "SessionInbox",
     "WriteResult",
 ]
