@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Tear down OTel global providers so atexit never retries against 4317."""
+    try:
+        from agentm.core.observability.otel_export import shutdown_process_telemetry
+
+        shutdown_process_telemetry()
+    except Exception:  # noqa: BLE001
+        pass
 
 # The harness configures the constitution-boundary manifest path on session
 # start; for unit tests that exercise the loader directly (or tests that

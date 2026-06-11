@@ -78,7 +78,7 @@ async def test_present_files_compose_in_order_above_base_prompt(
     # IDENTITY.md intentionally absent — must be skipped without a gap.
 
     api = _FakeAPI(tmp_path)
-    persona_atom.install(cast(Any, api), {})
+    persona_atom.install(cast(Any, api), persona_atom.PersonaConfig())
 
     out = await _fire(api, "base prompt")
     assert out is not None
@@ -103,7 +103,7 @@ async def test_present_files_compose_in_order_above_base_prompt(
 @pytest.mark.asyncio
 async def test_seeding_happens_once(tmp_path: Path) -> None:
     api = _FakeAPI(tmp_path)
-    persona_atom.install(cast(Any, api), {"defaults": {"SOUL.md": "v1\n"}})
+    persona_atom.install(cast(Any, api), persona_atom.PersonaConfig(defaults={"SOUL.md": "v1\n"}))
 
     await _fire(api, "")
     # Simulate the agent editing its own persona after the first turn.

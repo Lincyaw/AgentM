@@ -31,6 +31,24 @@ class SessionStore(Protocol):
     def open(self, id: str) -> SessionState: ...
     def most_recent(self, cwd: Path) -> SessionState | None: ...
     def create(self, cwd: Path) -> SessionState: ...
+    def fork(
+        self,
+        source_id: str,
+        *,
+        up_to: int | None = None,
+    ) -> SessionState:
+        """Create a new session seeded with messages from an existing one.
+
+        Reads the source session's message entries and replays them into a
+        fresh session. The new session's header records the source via
+        ``parent_session`` so the fork relationship is queryable.
+
+        ``up_to`` limits the number of message entries copied (``None`` =
+        all). This is the only parameter because "which messages to keep"
+        is the sole degree of freedom; everything else (cwd, session_dir)
+        is inherited from the source.
+        """
+        ...
 
 
 __all__ = ["SessionState", "SessionStore"]

@@ -40,18 +40,25 @@ def resolve_session_state(
     resume: str | None,
     continue_recent: bool,
     session_store: SessionStore,
+    fork: str | None = None,
+    fork_up_to: int | None = None,
 ) -> SessionState:
     """Pick the right :class:`SessionState` for a session bootstrap.
 
     Resolution order:
 
-    1. ``resume`` is set → :meth:`SessionStore.open` (raises
+    1. ``fork`` is set → :meth:`SessionStore.fork` — new session seeded
+       with messages from the source (raises :class:`FileNotFoundError`
+       if the source id is unknown).
+    2. ``resume`` is set → :meth:`SessionStore.open` (raises
        :class:`FileNotFoundError` if the id is unknown).
-    2. ``continue_recent`` is set → :meth:`SessionStore.most_recent`,
+    3. ``continue_recent`` is set → :meth:`SessionStore.most_recent`,
        falling through to ``create`` if no prior session exists.
-    3. Otherwise → :meth:`SessionStore.create` (fresh session).
+    4. Otherwise → :meth:`SessionStore.create` (fresh session).
     """
 
+    if fork:
+        return session_store.fork(fork, up_to=fork_up_to)
     if resume:
         return session_store.open(resume)
     if continue_recent:

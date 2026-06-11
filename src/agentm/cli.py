@@ -86,6 +86,8 @@ class CliRunConfig:
     quiet: bool = False
     resume: str | None = None
     continue_recent: bool = False
+    fork: str | None = None
+    fork_up_to: int | None = None
     max_turns: int | None = None
     max_tool_calls: int | None = None
     atom_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -333,6 +335,8 @@ def _resolve_session_state(
     cwd: str,
     resume: str | None,
     continue_recent: bool,
+    fork: str | None = None,
+    fork_up_to: int | None = None,
     session_store: SessionStore,
 ) -> SessionState:
     from agentm.core.runtime.session_bootstrap import resolve_session_state
@@ -342,13 +346,14 @@ def _resolve_session_state(
             cwd=cwd,
             resume=resume,
             continue_recent=continue_recent,
+            fork=fork,
+            fork_up_to=fork_up_to,
             session_store=session_store,
         )
     except FileNotFoundError as exc:
-        # Translate into Typer's parameter-validation error so the CLI
-        # surfaces it as "bad --resume" instead of an opaque traceback.
+        flag = f"--fork {fork!r}" if fork else f"--resume {resume!r}"
         raise typer.BadParameter(
-            f"--resume {resume!r}: no session found for cwd {cwd!r}"
+            f"{flag}: no session found for cwd {cwd!r}"
         ) from exc
 
 
@@ -474,6 +479,8 @@ def _build_session_config(
         cwd=config.cwd,
         resume=config.resume,
         continue_recent=config.continue_recent,
+        fork=config.fork,
+        fork_up_to=config.fork_up_to,
         session_store=store,
     )
     try:
@@ -730,6 +737,28 @@ def run_cmd(
             ),
         ),
     ] = False,
+    fork: Annotated[
+        str | None,
+        typer.Option(
+            "--fork",
+            help=(
+                "Fork from an existing session. Creates a new session seeded "
+                "with the source session's trajectory (or a prefix via "
+                "--from-turn). The source session is not modified."
+            ),
+        ),
+    ] = None,
+    from_turn: Annotated[
+        int | None,
+        typer.Option(
+            "--from-turn",
+            min=1,
+            help=(
+                "Used with --fork: copy only the first N messages from the "
+                "source session. Without this flag, all messages are copied."
+            ),
+        ),
+    ] = None,
     max_turns: Annotated[
         int | None,
         typer.Option(
@@ -809,7 +838,7 @@ def run_cmd(
     if scenario is None and not no_extensions:
         scenario = os.environ.get("AGENTM_SCENARIO") or DEFAULT_SCENARIO
 
-    if not prompt and not resume and not continue_recent:
+    if not prompt and not resume and not continue_recent and not fork:
         print(
             "ERROR: prompt is required for a fresh session.\n"
             "       Pass --resume <sid> (or --continue) to advance an existing\n"
@@ -840,6 +869,8 @@ def run_cmd(
             quiet=quiet,
             resume=resume,
             continue_recent=continue_recent,
+            fork=fork,
+            fork_up_to=from_turn,
             max_turns=max_turns,
             max_tool_calls=max_tool_calls,
             atom_config_overrides=_parse_set_overrides(set_config),

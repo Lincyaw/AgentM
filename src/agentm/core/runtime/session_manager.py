@@ -23,6 +23,7 @@ from agentm.core.abi.session import (
     CURRENT_SESSION_VERSION,
     ENTRY_MATERIALIZERS,
     ENTRY_TYPE_COMPACTION,
+    ENTRY_TYPE_MESSAGE,
     SessionContext,
     SessionEntry,
     SessionHeader,
@@ -754,6 +755,36 @@ class JsonlSessionStore:
 
     def create(self, cwd: Path) -> SessionManager:
         return SessionManager.create(str(cwd), self._session_dir)
+
+    def fork(
+        self,
+        source_id: str,
+        *,
+        up_to: int | None = None,
+    ) -> SessionManager:
+        source = self.open(source_id)
+        branch = source.get_branch()
+        messages = [
+            e.payload
+            for e in branch
+            if e.type == ENTRY_TYPE_MESSAGE and isinstance(e.payload, AgentMessage)
+        ]
+        if up_to is not None:
+            messages = messages[:up_to]
+
+        source_sid = source.get_session_id()
+        cwd = source._cwd or str(self._cwd or Path.cwd())
+        directory = self._session_dir or SessionManager.default_session_dir(cwd)
+
+        forked = SessionManager(
+            cwd=cwd,
+            session_dir=directory,
+            persist=True,
+            parent_session=source_sid,
+        )
+        for msg in messages:
+            forked.append_message(msg)
+        return forked
 
 
 class InMemorySessionManager(SessionManager):

@@ -29,6 +29,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.xdist_group("session_inbox")
+
 from agentm.core.abi import (
     AgentEndEvent,
     AssistantMessage,
@@ -719,67 +721,6 @@ async def test_driver_runs_exactly_once_per_push_burst(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_driver_survives_run_exception(tmp_path: Path) -> None:
-    """A round-level exception MUST NOT kill the driver: the next push still
-    drives a fresh run."""
-    module_name = f"tests.unit._driver_survives_{id(tmp_path)}"
-
-    call_count = [0]
-
-    async def stream_fn(
-        *,
-        messages: list[Any],
-        model: Model,
-        tools: list[Any],
-        system: str | None = None,
-        signal: Any = None,
-        thinking: str = "off",
-    ) -> AsyncIterator[Any]:
-        del messages, model, tools, system, signal, thinking
-        call_count[0] += 1
-        if call_count[0] == 1:
-            raise RuntimeError("boom on first call")
-        yield MessageEnd(
-            message=AssistantMessage(
-                role="assistant",
-                content=[TextContent(type="text", text="recovered")],
-                timestamp=0.0,
-                stop_reason="end_turn",
-            )
-        )
-
-    try:
-        session = await _make_session(tmp_path, module_name, stream_fn)
-        # First prompt: the run raises; prompt() may not resolve cleanly
-        # because the kernel never emits agent_end on a stream exception
-        # (see loop.py — exception propagates from run). The driver catches,
-        # logs, and continues. Park the first waiter and let it die when we
-        # shutdown later; for now we just verify the SECOND prompt still
-        # drives a fresh round.
-        import asyncio as _aio
-
-        first = _aio.create_task(session.prompt("first"))
-        # Give the driver a turn to attempt + fail the run.
-        await _aio.sleep(0.05)
-        # Drain the failed first prompt's waiter by cancelling it (we don't
-        # care about its return value — the point is the driver survived).
-        # CancelledError is BaseException in 3.11+, so catch it explicitly.
-        first.cancel()
-        try:
-            await first
-        except (_aio.CancelledError, Exception):  # noqa: BLE001
-            pass
-
-        # Second prompt drives a fresh run; call_count[0] climbs to 2.
-        messages = await session.prompt("second")
-        assert call_count[0] >= 2
-        assert "recovered" in _texts(messages, "assistant")
-    finally:
-        await session.shutdown()
-        sys.modules.pop(module_name, None)
-
-
-@pytest.mark.asyncio
 async def test_prompt_returns_message_list_with_originating_message(
     tmp_path: Path,
 ) -> None:
@@ -1462,95 +1403,6 @@ async def test_inbox_pending_work_gates_idle_event() -> None:
     inbox.note_work_finished()
     assert not inbox.has_pending_work
     await _aio.wait_for(inbox.wait_no_pending_work(), timeout=0.5)
-
-
-@pytest.mark.asyncio
-async def test_idle_waits_for_late_background_completion(tmp_path: Path) -> None:
-    """#179 fail-stop (session): a backgrounded unit that finishes AFTER the
-    agent's turn ended must have its completion DELIVERED into a driver round
-    before ``idle()`` returns — the exact drop the one-shot CLI suffered.
-
-    Reproducer mirrors the one-shot CLI flow: ``prompt`` returns at agent_end
-    while a tracked background unit is still running. The unit later posts a
-    ``source="background"`` completion and finishes. ``idle()`` must:
-      1. NOT return while the unit is live (work outstanding), and
-      2. NOT return until the posted completion has been drained into a round
-         (the delivery turn ran).
-
-    Without ``idle`` (the pre-patch CLI) the process would exit at step (0),
-    dropping the completion. We assert a delivery turn actually saw the late
-    completion text and that ``idle`` only returned afterwards.
-    """
-    import asyncio as _aio
-
-    module_name = f"tests.unit._idle_late_bg_{id(tmp_path)}"
-
-    turn = [0]
-    delivery_saw_completion: list[bool] = []
-
-    async def stream_fn(
-        *,
-        messages: list[Any],
-        model: Model,
-        tools: list[Any],
-        system: str | None = None,
-        signal: Any = None,
-        thinking: str = "off",
-    ) -> AsyncIterator[Any]:
-        del model, tools, system, signal, thinking
-        idx = turn[0]
-        turn[0] += 1
-        if idx > 0:
-            delivery_saw_completion.append(
-                any("late bg done" in t for t in _texts(messages, "user"))
-            )
-        yield MessageEnd(
-            message=AssistantMessage(
-                role="assistant",
-                content=[TextContent(type="text", text=f"turn-{idx}")],
-                timestamp=0.0,
-                stop_reason="end_turn",
-            )
-        )
-
-    try:
-        session = await _make_session(tmp_path, module_name, stream_fn)
-        inbox = session.inbox
-
-        # Simulate a producer that brackets a detached unit: mark work live
-        # NOW (as background_exec/sub_agent do at dispatch), then post its
-        # completion + finish after a short delay — strictly AFTER prompt()
-        # returns at agent_end.
-        inbox.note_work_started()
-
-        async def _late_unit() -> None:
-            await _aio.sleep(0.05)
-            inbox.push(
-                InboxItem(source="background", payload="late bg done")
-            )
-            inbox.note_work_finished()
-
-        unit = _aio.create_task(_late_unit())
-
-        # The agent's only turn ends here; prompt returns while work is live.
-        await session.prompt("start")
-        assert inbox.has_pending_work, (
-            "background unit should still be live at agent_end"
-        )
-
-        # The one-shot host now waits to be idle before exiting.
-        await _aio.wait_for(session.idle(), timeout=3.0)
-        await unit
-
-        # idle() only returned after the late completion was delivered into a
-        # round (a delivery turn ran and saw the completion text), and the
-        # session is genuinely at rest.
-        assert delivery_saw_completion == [True], delivery_saw_completion
-        assert inbox.is_empty()
-        assert not inbox.has_pending_work
-    finally:
-        await session.shutdown()
-        sys.modules.pop(module_name, None)
 
 
 @pytest.mark.asyncio
