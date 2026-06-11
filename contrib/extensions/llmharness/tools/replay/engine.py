@@ -24,8 +24,7 @@ from agentm.core.abi import (
     AssistantMessage,
     ToolCallBlock,
 )
-from agentm.core.runtime.session import AgentSession
-from agentm.core.runtime.session_factory import create_agent_session
+from agentm.core.runtime import AgentSession, create_agent_session
 
 from llmharness.replay.record import Status
 

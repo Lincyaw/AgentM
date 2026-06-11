@@ -147,8 +147,8 @@ async def observe_case(
         LoopConfig,
         ToolCallBlock,
     )
-    from agentm.core.runtime.session import AgentSession
-    from agentm.core.runtime.session_factory import create_agent_session
+    from agentm.core.runtime import AgentSession
+    from agentm.core.runtime import create_agent_session
 
     gt_services, fault_types = _extract_gt_services(data_dir)
     agent_services = _extract_agent_services(agent_response)

@@ -110,7 +110,7 @@ async def _run_workflow_async(
 ) -> dict[str, Any]:
     """Run a workflow script via the WorkflowRunner service."""
     from agentm.core.abi import AgentSessionConfig
-    from agentm.core.runtime.session import AgentSession
+    from agentm.core.runtime import AgentSession
 
     os.environ["AGENTM_PROJECT_ROOT"] = str(REPO)
 

@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agentm.core.abi import ENTRY_TYPE_MESSAGE, AssistantMessage, SessionEntry
-from agentm.core.runtime.session_manager import SessionManager
+from agentm.core.runtime import SessionManager
 
 from llmharness.replay.record import ReplayRecord, iter_records
 

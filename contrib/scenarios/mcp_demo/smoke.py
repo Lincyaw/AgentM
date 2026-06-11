@@ -33,7 +33,7 @@ from agentm.core.runtime.extension import (  # noqa: E402
     _ExtensionAPIImpl,
     build_extension_api_scope,
 )
-from agentm.core.runtime.session_inbox import SessionInbox  # noqa: E402
+from agentm.core.runtime import SessionInbox  # noqa: E402
 
 from contrib.extensions.mcp_bridge import install  # noqa: E402
 from contrib.extensions.mcp_bridge.client import MCPSessionManager  # noqa: E402

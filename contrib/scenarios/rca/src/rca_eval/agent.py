@@ -426,8 +426,8 @@ class AgentMAgent(BaseAgent):
             TextContent as _TextContent,
             ToolResultEvent,
         )
-        from agentm.core.runtime.session import AgentSession
-        from agentm.core.runtime.session_factory import create_agent_session
+        from agentm.core.runtime import AgentSession
+        from agentm.core.runtime import create_agent_session
         from rcabench_platform.v3.sdk.evaluation.v2 import AgentRCAOutput
 
         ctx: RunContext | None = kwargs.get("ctx")

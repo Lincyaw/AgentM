@@ -133,8 +133,8 @@ async def distill_skill(
         LoopConfig,
         ToolCallBlock,
     )
-    from agentm.core.runtime.session import AgentSession
-    from agentm.core.runtime.session_factory import create_agent_session
+    from agentm.core.runtime import AgentSession
+    from agentm.core.runtime import create_agent_session
 
     failed = [
         r for r in reports
