@@ -1,27 +1,22 @@
-"""``replay-fork`` CLI -- re-audit recorded baselines and fork on surface.
+"""Replay-fork CLI: offline audit a baseline session, fork at surfaces, judge.
 
 Example::
 
-    uv run python -m rca_eval.replay_fork.cli run \\
-        --source-exp agentm-ab100-baseline-0525-0847 \\
-        --harness-model ark-glm51 \\
-        --agent-model litellm \\
-        --scenario rca:baseline \\
-        --max-depth 3 \\
-        --out runs/glm51-replay/results.jsonl
-
-Both ``--harness-model`` and ``--agent-model`` are
-``~/.agentm/config.toml`` profile names. The profile carries the
-endpoint, api_key, and model id, so no ambient ``OPENAI_*`` env vars
-are needed (or consulted).
+    uv run python -m rca_eval.replay_fork.cli run \
+        --session abc123 \
+        --data-dir datasets/ops-lite-clean/cases/batch-XXX \
+        --harness-model doubao \
+        --agent-model doubao \
+        --out runs/replay-fork/results.jsonl
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -34,221 +29,216 @@ app = typer.Typer(
 )
 
 
-@app.callback()
-def _root() -> None:
-    """Replay-fork experiment commands (keeps ``run`` an explicit subcommand)."""
-
-
-@app.command()
+@app.callback(invoke_without_command=True)
 def run(
-    source_exp: Annotated[
-        str | None,
-        typer.Option("--source-exp", help="eval.db exp_id holding the recorded baselines"),
-    ] = None,
-    source_file: Annotated[
-        list[Path] | None,
-        typer.Option(
-            "--source-file",
-            help="OTLP/JSON session file(s) to replay (repeatable)",
-        ),
-    ] = None,
+    session: Annotated[
+        list[str],
+        typer.Option("--session", help="Baseline session id(s) to replay (repeatable)"),
+    ],
     data_dir: Annotated[
-        Path | None,
-        typer.Option(
-            "--data-dir",
-            help="case data directory (required with --source-file)",
-        ),
-    ] = None,
-    db: Annotated[Path, typer.Option("--db", help="Path to eval.db")] = Path("eval.db"),
+        Path,
+        typer.Option("--data-dir", help="Case data directory (parquet + injection.json)"),
+    ],
     harness_model: Annotated[
-        str, typer.Option("--harness-model", help="config.toml profile for extractor+auditor")
-    ] = "ark-glm51",
+        str, typer.Option("--harness-model", help="config.toml profile for extractor+auditor"),
+    ] = "doubao",
     agent_model: Annotated[
-        str, typer.Option("--agent-model", help="config.toml profile for the continuation agent")
-    ] = "litellm",
+        str, typer.Option("--agent-model", help="config.toml profile for continuation agent"),
+    ] = "doubao",
     scenario: Annotated[
-        str, typer.Option("--scenario", help="scenario for the continuation agent")
+        str, typer.Option("--scenario", help="scenario for continuation sessions"),
     ] = "rca:baseline",
     max_depth: Annotated[
-        int, typer.Option("--max-depth", help="max stacked interventions (greedy spine depth)")
+        int, typer.Option("--max-depth", help="max recursive fork depth"),
     ] = 3,
-    max_turns: Annotated[
-        int, typer.Option("--max-turns", help="max turns per continuation rollout")
-    ] = 60,
-    max_concurrency: Annotated[
-        int, typer.Option("--max-concurrency", help="cases to process in parallel")
-    ] = 8,
-    limit: Annotated[
-        int | None, typer.Option("--limit", help="only the first N cases")
-    ] = None,
-    case_ids: Annotated[
-        str | None, typer.Option("--case-ids", help="comma-separated case ids to restrict to")
-    ] = None,
     out: Annotated[
-        Path, typer.Option("--out", help="results JSONL path")
+        Path, typer.Option("--out", help="results JSONL path"),
     ] = Path("runs/replay-fork/results.jsonl"),
-    sidecar_dir: Annotated[
-        Path | None,
-        typer.Option("--sidecar-dir", help="dir for per-case fork-tree replay sidecars"),
-    ] = None,
-    resume: Annotated[
-        bool,
-        typer.Option(
-            "--resume",
-            help="skip cases already present in --out and append (restart-safe)",
-        ),
-    ] = False,
-    skip_extractor: Annotated[
-        bool,
-        typer.Option(
-            "--skip-extractor",
-            help="bypass the extractor and feed raw trajectory directly to the auditor",
-        ),
-    ] = False,
-    upper_bound: Annotated[
-        bool,
-        typer.Option(
-            "--upper-bound",
-            help=(
-                "ceiling test: skip the auditor pipeline entirely, fork just "
-                "before submission with a fixed reflection prompt"
-            ),
-        ),
-    ] = False,
-    auditor_prompt: Annotated[
-        str | None,
-        typer.Option(
-            "--auditor-prompt",
-            help="auditor prompt variant name (e.g. 'trajectory_coverage') or absolute path",
-        ),
-    ] = None,
+    cwd: Annotated[
+        Path, typer.Option("--cwd", help="working directory for sessions"),
+    ] = Path("."),
 ) -> None:
-    """Run the replay-fork experiment over a recorded baseline exp."""
+    """Run replay-fork over one or more baseline sessions."""
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    import json as _json
-
-    from rca_eval.agent import AgentMAgent
-
-    from .case_source import EvalDbCaseSource, SessionFileCaseSource
-    from .driver import JsonlResultSink, ReplayForkDriver
-    from .judge import RcabenchJudge
     from .providers import build_profile_provider
-    from .strategy import (
-        _SUBMISSION_TOOL_NAMES,
-        FixedInjectionStrategy,
-        ForkStrategy,
-        HarnessStrategy,
-        UPPER_BOUND_REFLECTION,
-        after_submission,
-    )
-
-    # -- Validate source flags --
-    have_exp = source_exp is not None
-    have_file = source_file is not None and len(source_file) > 0
-    if have_exp == have_file:
-        raise typer.BadParameter(
-            "exactly one of --source-exp or --source-file must be provided"
-        )
-    if have_file and data_dir is None:
-        raise typer.BadParameter("--data-dir is required when using --source-file")
-
-    ids = [c.strip() for c in case_ids.split(",") if c.strip()] if case_ids else None
-
-    # Resume: read case_ids already written to --out and skip them, appending
-    # new results rather than truncating. Lets a killed run pick up where it
-    # left off without re-running the cases it already finished.
-    skip_ids: list[str] = []
-    if resume and out.exists():
-        for line in out.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                skip_ids.append(str(_json.loads(line)["case_id"]))
-            except (ValueError, KeyError):
-                continue
-        typer.echo(f"# resume: skipping {len(skip_ids)} cases already in {out}")
 
     harness_provider = build_profile_provider(harness_model)
     agent_provider = build_profile_provider(agent_model)
-
-    # -- Build trigger registry: cadence + on-submission --
-    from llmharness.runtime.triggers import TriggerRegistry
-    from llmharness.extensions.trigger_cadence import _CadenceTrigger
-    from llmharness.extensions.trigger_on_submission import _OnSubmissionTrigger
-
-    trigger_registry = TriggerRegistry()
-    trigger_registry.register_trigger(_CadenceTrigger(interval=5))
-    trigger_registry.register_trigger(
-        _OnSubmissionTrigger(tool_names=_SUBMISSION_TOOL_NAMES)
-    )
-
-    # -- Build the fork strategy from CLI flags --
-    strategy: ForkStrategy
-    if upper_bound:
-        strategy = FixedInjectionStrategy(
-            reminder=UPPER_BOUND_REFLECTION,
-            turn_selector=after_submission,
-        )
-        typer.echo(f"# strategy: {strategy.label} (upper-bound ceiling test)")
-    else:
-        strategy = HarnessStrategy(
-            harness_provider=harness_provider,
-            max_depth=max_depth,
-            sidecar_dir=sidecar_dir,
-            skip_extractor=skip_extractor,
-            trigger_registry=trigger_registry,
-            auditor_prompt=auditor_prompt,
-        )
-        typer.echo(
-            f"# strategy: {strategy.label}\n"
-            f"# harness: {harness_provider[0]} model={harness_provider[1].get('model')} "
-            f"base_url={harness_provider[1].get('base_url')}"
-        )
+    resolved_cwd = str(cwd.resolve())
 
     typer.echo(
-        f"# agent:   {agent_provider[0]} model={agent_provider[1].get('model')} "
-        f"base_url={agent_provider[1].get('base_url')} scenario={scenario}"
+        f"# harness: {harness_provider[1].get('model')}\n"
+        f"# agent:   {agent_provider[1].get('model')}\n"
+        f"# scenario: {scenario}\n"
+        f"# sessions: {len(session)}"
     )
 
-    agent = AgentMAgent(
-        scenario=scenario,
-        provider_tuple=agent_provider,
-        max_turns=max_turns,
-    )
-    source: EvalDbCaseSource | SessionFileCaseSource
-    if have_file:
-        assert source_file is not None
-        assert data_dir is not None
-        resolved_data_dir = str(data_dir.resolve())
-        source = SessionFileCaseSource(
-            file_paths=source_file,
-            data_dir=resolved_data_dir,
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    summary = asyncio.run(
+        _run_all(
+            session_ids=session,
+            data_dir=str(data_dir.resolve()),
+            harness_provider=harness_provider,
+            agent_provider=agent_provider,
+            scenario=scenario,
+            max_depth=max_depth,
+            cwd=resolved_cwd,
+            out=out,
         )
-        typer.echo(f"# source:  {len(source_file)} session file(s), data_dir={resolved_data_dir}")
-    else:
-        assert source_exp is not None
-        source = EvalDbCaseSource(
-            db, source_exp, limit=limit, case_ids=ids, skip_case_ids=skip_ids or None
-        )
-    driver = ReplayForkDriver(
-        agent=agent,
-        strategy=strategy,
-        judge=RcabenchJudge(),
-        scenario=scenario,
     )
-    sink = JsonlResultSink(out, append=resume)
+
+    typer.echo(f"\n=== replay-fork summary ===\n{summary}\n# results: {out}")
+
+
+async def _run_all(
+    *,
+    session_ids: list[str],
+    data_dir: str,
+    harness_provider: tuple[str, dict[str, Any]],
+    agent_provider: tuple[str, dict[str, Any]],
+    scenario: str,
+    max_depth: int,
+    cwd: str,
+    out: Path,
+) -> str:
+    import os
+
+    from agentm.core.abi import AgentSessionConfig
+    from agentm.core.abi.loop import LoopConfig
+    from agentm.core.runtime import AgentSession, create_agent_session
+    from agentm.core.runtime.session_manager import JsonlSessionStore
+    from llmharness import offline_audit
+
+    from .judge import RcabenchJudge
+
+    obs_dir = Path(cwd) / ".agentm" / "observability"
+    store = JsonlSessionStore(session_dir=obs_dir)
+    judge = RcabenchJudge()
+
+    total = 0
+    fired = 0
+    control_correct = 0
+    intervene_correct = 0
+    flips_helped = 0
+    flips_harmed = 0
+
+    fh = out.open("w", encoding="utf-8")
     try:
-        summary = asyncio.run(driver.run(source, sink, max_concurrency=max_concurrency))
-    finally:
-        sink.close()
+        for sid in session_ids:
+            total += 1
+            source = store.open(sid)
+            messages = source.get_raw_messages()
 
-    typer.echo("\n=== replay-fork summary ===")
-    typer.echo(summary.format())
-    typer.echo(f"# results: {out}")
+            # Judge control (baseline)
+            control_response = _extract_submission(messages)
+            os.environ["AGENTM_RCA_DATA_DIR"] = data_dir
+            ctrl_outcome = await judge.judge(
+                agent_output_json=control_response,
+                data_dir=data_dir,
+                case_id=sid,
+            )
+            ctrl_ok = ctrl_outcome.correct
+            if ctrl_ok:
+                control_correct += 1
+
+            # Offline audit
+            surfaces = await offline_audit(
+                messages,
+                cwd=cwd,
+                provider=harness_provider,
+            )
+
+            if not surfaces:
+                result = {
+                    "case_id": sid,
+                    "fired": False,
+                    "control_correct": ctrl_ok,
+                    "intervene_correct": ctrl_ok,
+                }
+                fh.write(json.dumps(result, ensure_ascii=False) + "\n")
+                fh.flush()
+                logging.getLogger(__name__).info(
+                    "[%d/%d] %s fired=False control=%s",
+                    total, len(session_ids), sid, ctrl_ok,
+                )
+                continue
+
+            # Fork at first surface
+            s = surfaces[0]
+            fired += 1
+            forked = store.fork(sid, up_to=s.turn_index)
+            config = AgentSessionConfig(
+                cwd=cwd,
+                session_manager=forked,
+                scenario=scenario,
+                provider=agent_provider,
+                loop_config=LoopConfig(max_turns=60),
+            )
+            session = await create_agent_session(AgentSession, config)
+            try:
+                fork_messages = await session.prompt(s.reminder_text)
+            finally:
+                await session.shutdown()
+
+            fork_response = _extract_submission(fork_messages)
+            fork_outcome = await judge.judge(
+                agent_output_json=fork_response,
+                data_dir=data_dir,
+                case_id=f"{sid}-fork",
+            )
+            fork_ok = fork_outcome.correct
+            if fork_ok:
+                intervene_correct += 1
+            if not ctrl_ok and fork_ok:
+                flips_helped += 1
+            if ctrl_ok and not fork_ok:
+                flips_harmed += 1
+
+            result = {
+                "case_id": sid,
+                "fired": True,
+                "surface_turn": s.turn_index,
+                "reminder": s.reminder_text[:200],
+                "control_correct": ctrl_ok,
+                "intervene_correct": fork_ok,
+                "forked_session": forked.get_session_id(),
+            }
+            fh.write(json.dumps(result, ensure_ascii=False) + "\n")
+            fh.flush()
+            logging.getLogger(__name__).info(
+                "[%d/%d] %s fired=True control=%s intervene=%s",
+                total, len(session_ids), sid, ctrl_ok, fork_ok,
+            )
+    finally:
+        fh.close()
+
+    def pct(n: int) -> str:
+        return f"{100.0 * n / total:.1f}%" if total else "n/a"
+
+    return (
+        f"cases={total} fired={fired}\n"
+        f"control  correct: {control_correct} ({pct(control_correct)})\n"
+        f"intervene correct: {intervene_correct} ({pct(intervene_correct)})\n"
+        f"flips  W->R(helped): {flips_helped}   R->W(harmed): {flips_harmed}"
+    )
+
+
+def _extract_submission(messages: list[Any]) -> str | None:
+    """Find submit_final_report tool call and return its text arg."""
+    from agentm.core.abi import AssistantMessage, ToolCallBlock
+
+    for msg in messages:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in msg.content:
+            if isinstance(block, ToolCallBlock) and block.name == "submit_final_report":
+                return block.arguments.get("text")
+    return None
 
 
 def main() -> None:
@@ -257,6 +247,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-__all__ = ["app", "main"]

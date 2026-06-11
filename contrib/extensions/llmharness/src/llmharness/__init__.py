@@ -1,5 +1,6 @@
 """LLM-as-harness: cognitive-audit AgentM extension."""
 
+from .offline import SurfacePoint, offline_audit
 from .schema import (
     Edge,
     EdgeKind,
@@ -19,5 +20,7 @@ __all__ = [
     "Finding",
     "Phase",
     "Reminder",
+    "SurfacePoint",
     "Verdict",
+    "offline_audit",
 ]

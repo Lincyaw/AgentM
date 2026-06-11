@@ -721,6 +721,20 @@ class SessionManager:
     def get_messages(self) -> list[AgentMessage]:
         return self.build_session_context().messages
 
+    def get_raw_messages(self) -> list[AgentMessage]:
+        """Return message payloads directly from entries, no materializers.
+
+        Unlike :meth:`get_messages` (which routes through
+        ``ENTRY_MATERIALIZERS``), this reads the already-deserialized
+        ``AgentMessage`` payloads straight from the entry tree. Use when
+        atoms are not loaded (offline tools, replay drivers).
+        """
+        return [
+            e.payload
+            for e in self.get_branch()
+            if e.type == ENTRY_TYPE_MESSAGE and isinstance(e.payload, AgentMessage)
+        ]
+
 
 class JsonlSessionStore:
     """Default presenter session store backed by JSONL SessionManager files."""
