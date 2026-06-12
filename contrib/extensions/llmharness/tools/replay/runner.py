@@ -14,7 +14,7 @@ import contextlib
 import json
 from typing import Any
 
-from llmharness.agents.auditor.prompt import build_auditor_system_prompt
+from llmharness.agents.auditor.context import build_auditor_system_prompt
 from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
 from llmharness.agents.extractor.tools import (
     FINALIZE_EXTRACTION_TOOL_NAME,
@@ -51,7 +51,7 @@ class ExtractorSettings:
         *,
         prompt_override: str | None = None,
     ) -> ExtractorSettings:
-        from llmharness.agents.extractor.prompt import load_extractor_prompt
+        from llmharness.agents.extractor.context import load_extractor_prompt
 
         base_prompt = prompt_override
         if base_prompt is None:
@@ -65,7 +65,7 @@ class ExtractorSettings:
 
     @classmethod
     def default(cls) -> ExtractorSettings:
-        from llmharness.agents.extractor.prompt import load_extractor_prompt
+        from llmharness.agents.extractor.context import load_extractor_prompt
 
         return cls(base_prompt=load_extractor_prompt("default"))
 
@@ -93,7 +93,7 @@ class AuditorSettings:
         *,
         prompt_override: str | None = None,
     ) -> AuditorSettings:
-        from llmharness.agents.auditor.prompt import load_auditor_prompt
+        from llmharness.agents.auditor.context import load_auditor_prompt
 
         base_prompt = prompt_override
         if base_prompt is None:
@@ -110,7 +110,7 @@ class AuditorSettings:
 
     @classmethod
     def default(cls) -> AuditorSettings:
-        from llmharness.agents.auditor.prompt import load_auditor_prompt
+        from llmharness.agents.auditor.context import load_auditor_prompt
 
         return cls(base_prompt=load_auditor_prompt("minimal"))
 

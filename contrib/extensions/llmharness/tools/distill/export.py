@@ -38,9 +38,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from llmharness.agents.auditor.prompt import load_auditor_prompt
+from llmharness.agents.auditor.context import load_auditor_prompt
 from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-from llmharness.agents.extractor.prompt import load_extractor_prompt
+from llmharness.agents.extractor.context import load_extractor_prompt
 from llmharness.agents.extractor.tools import (
     DELETE_EDGE_TOOL_NAME,
     DELETE_NODE_TOOL_NAME,

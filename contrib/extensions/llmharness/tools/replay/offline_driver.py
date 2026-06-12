@@ -107,9 +107,9 @@ async def replay_pipeline_over_trajectory(
     surfaces: list[SurfaceFiring] = []
     reminder: Reminder | None = None
 
-    from llmharness.agents.auditor.prompt import build_auditor_system_prompt
+    from llmharness.agents.auditor.context import build_auditor_system_prompt
     from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-    from llmharness.agents.extractor.prompt import load_extractor_prompt
+    from llmharness.agents.extractor.context import load_extractor_prompt
     from llmharness.agents.extractor.tools import ExtractionState
 
     for turn_number, prefix_len in enumerate(_turn_end_prefix_lengths(messages), start=1):

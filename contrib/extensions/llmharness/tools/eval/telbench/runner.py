@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from llmharness.agents.auditor.prompt import load_auditor_prompt
+from llmharness.agents.auditor.context import load_auditor_prompt
 
 from ...replay.offline_driver import replay_pipeline_over_trajectory
 from ...replay.runner import AuditorSettings, ExtractorSettings

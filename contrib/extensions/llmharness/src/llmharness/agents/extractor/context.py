@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Final
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
@@ -10,8 +11,24 @@ from pydantic import BaseModel
 
 from llmharness.schema import Edge, Event
 
-from .prompt import load_extractor_prompt
 from .tools import ExtractionState
+
+_PROMPTS_DIR: Final = Path(__file__).parent / "prompts"
+_BUILTIN_NAMES: Final = frozenset(p.stem for p in _PROMPTS_DIR.glob("*.md"))
+
+
+def load_extractor_prompt(name: str = "default") -> str:
+    """Load extractor prompt by name or absolute path."""
+    md = _PROMPTS_DIR / f"{name}.md"
+    if md.is_file():
+        return md.read_text(encoding="utf-8")
+    path = Path(name).expanduser()
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    raise ValueError(
+        f"unknown extractor prompt {name!r}; "
+        f"available: {sorted(_BUILTIN_NAMES)}"
+    )
 
 
 class ExtractorContextConfig(BaseModel):
