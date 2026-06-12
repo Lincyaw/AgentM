@@ -1149,7 +1149,7 @@ def cli(
         return
     log_level = str(log_level).upper()
     logger.remove()
-    logger.add(sys.stderr, level=log_level, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> <level>{level: <8}</level> <cyan>{file}:{line}</cyan> <level>{message}</level>")
+    logger.add(sys.stderr, level=log_level, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> <level>{level: <7}</level> <cyan>{file}:{line}</cyan> <level>{message}</level>")
     _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     resolved_cwd = cwd or str(Path.cwd())
     try:
