@@ -92,19 +92,18 @@ async def _run_phase(
     try:
         session = await create_agent_session(AgentSession, config)
     except Exception as exc:
-        return _PhaseResult(output=None, error=str(exc), messages=[])
+        _log.error("[%s] session creation FAILED: %s", purpose, exc)
+        raise RuntimeError(f"session creation failed ({purpose}): {exc}") from exc
 
     sid = session.session_id
-    _log.info(
-        "  [%s] session %s started → agentm trace messages --session %s --format text",
-        purpose.replace("cognitive_audit_", ""), sid, sid,
-    )
+    _log.info("agentm trace messages --session %s --format text", sid)
 
     try:
         messages = await session.prompt(payload)
     except Exception as exc:
         with contextlib.suppress(Exception):
             await session.shutdown()
+        _log.error("[%s] session %s prompt FAILED: %s", purpose, sid, exc)
         return _PhaseResult(output=None, error=str(exc), messages=[], session_id=sid)
 
     with contextlib.suppress(Exception):
@@ -116,9 +115,13 @@ async def _run_phase(
         for block in reversed(msg.content):
             if isinstance(block, ToolCallBlock) and block.name == terminal_tool:
                 return _PhaseResult(
-                    output=dict(block.arguments), error=None,
-                    messages=messages, session_id=sid,
+                    output=dict(block.arguments),
+                    error=None,
+                    messages=messages,
+                    session_id=sid,
                 )
+
+    _log.warning("[%s] session %s: terminal tool %r was NOT called", purpose, sid, terminal_tool)
     return _PhaseResult(
         output=None,
         error=f"{terminal_tool!r} was not called",
@@ -169,6 +172,8 @@ async def offline_audit(
     from .agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
     from .atom import _prepare_extractor_data
 
+    assert len(messages) > 0, "offline_audit: empty message list"
+
     cumulative = CumulativeAuditState.fresh()
     surfaces: list[SurfacePoint] = []
     firings: list[AuditFiring] = []
@@ -179,66 +184,93 @@ async def offline_audit(
     _OBS = "agentm.extensions.builtin.observability"
     _OPS = "agentm.extensions.builtin.operations"
 
-    for turn_number, prefix_len in enumerate(
-        _turn_end_prefix_lengths(messages), start=1
-    ):
+    turn_bounds = _turn_end_prefix_lengths(messages)
+    _log.info(
+        "offline_audit: %d messages, %d turns, firing at extractor=%d auditor=%d",
+        len(messages), len(turn_bounds), extractor_interval, audit_interval,
+    )
+
+    total_ext_ops = 0
+
+    for turn_number, prefix_len in enumerate(turn_bounds, start=1):
         prefix = messages[:prefix_len]
         auditor_due = (turn_number % audit_interval) == 0
         extractor_due = (turn_number % extractor_interval) == 0 or auditor_due
 
         # --- Extractor ---
+        ext_sid: str | None = None
         if extractor_due:
             data = _prepare_extractor_data(prefix, cumulative, None)
-            if data is not None:
-                from pathlib import Path as _Path
+            assert data is not None, (
+                f"extractor turn {turn_number}: _prepare_extractor_data returned None "
+                f"(prefix_len={prefix_len}, cursor={cumulative.cursor_last_turn_index})"
+            )
 
-                firing_id = cumulative.firing_id_counter
-                ops_path = _Path(cwd) / ".agentm" / "audit_ops" / f"offline_{firing_id}.jsonl"
+            from pathlib import Path as _Path
 
-                ctx_config = dict(data)
-                ctx_config["prompt_name"] = "default"
-                ctx_config["ops_file"] = str(ops_path)
+            firing_id = cumulative.firing_id_counter
+            ops_path = _Path(cwd) / ".agentm" / "audit_ops" / f"offline_{firing_id}.jsonl"
 
-                extensions: list[tuple[str, dict[str, Any]]] = [
-                    (_OBS, {}),
-                    (_OPS, {}),
-                    (_EXT_CTX, ctx_config),
-                    (_EXT_TOOLS, {}),
-                ]
-                payload_json = json.dumps(
-                    data, ensure_ascii=False, default=str
+            ctx_config = dict(data)
+            ctx_config["prompt_name"] = "default"
+            ctx_config["ops_file"] = str(ops_path)
+
+            extensions: list[tuple[str, dict[str, Any]]] = [
+                (_OBS, {}),
+                (_OPS, {}),
+                (_EXT_CTX, ctx_config),
+                (_EXT_TOOLS, {}),
+            ]
+            payload_json = json.dumps(data, ensure_ascii=False, default=str)
+            try:
+                ext_result = await _run_phase(
+                    cwd=cwd,
+                    extensions=extensions,
+                    provider=provider,
+                    payload=payload_json,
+                    terminal_tool="finalize_extraction",
+                    purpose="cognitive_audit_extractor_offline",
                 )
-                ext_sid: str | None = None
-                try:
-                    ext_result = await _run_phase(
-                        cwd=cwd,
-                        extensions=extensions,
-                        provider=provider,
-                        payload=payload_json,
-                        terminal_tool="finalize_extraction",
-                        purpose="cognitive_audit_extractor_offline",
+                ext_sid = ext_result.session_id
+
+                if ext_result.error:
+                    _log.warning(
+                        "  extractor turn=%d FAILED: %s (sid=%s)",
+                        turn_number, ext_result.error, ext_sid,
                     )
-                    ext_sid = ext_result.session_id
+                else:
                     from .atom import _read_ops_file
 
                     ops = _read_ops_file(ops_path)
-                    if ops:
+                    n_ops = len(ops) if ops else 0
+                    total_ext_ops += n_ops
+
+                    if n_ops == 0:
+                        _log.warning(
+                            "  extractor turn=%d: 0 ops (LLM did not produce graph edits) sid=%s",
+                            turn_number, ext_sid,
+                        )
+                    else:
                         cumulative.absorb_extractor_firing(
                             firing_ops=ops,
                             firing_cursor=data["window_hi"],
                             firing_id=firing_id,
                         )
-                    _log.info(
-                        "  extractor turn=%d ops=%d sid=%s  "
-                        "→ agentm trace messages --session %s --format text",
-                        turn_number, len(ops) if ops else 0, ext_sid, ext_sid,
-                    )
-                except Exception:
-                    _log.exception("extractor firing failed at turn %d", turn_number)
+                        _log.info("  extractor turn=%d ops=%d sid=%s", turn_number, n_ops, ext_sid)
+            except Exception:
+                _log.exception("extractor firing CRASHED at turn %d", turn_number)
 
         # --- Auditor ---
         if auditor_due:
             events, edges, phases = cumulative.graph_view()
+
+            if not events:
+                _log.warning(
+                    "  auditor turn=%d: graph is EMPTY (all extractors failed or produced 0 ops), "
+                    "auditor will have nothing to judge. total_ext_ops so far=%d",
+                    turn_number, total_ext_ops,
+                )
+
             _AUD_CTX = "llmharness.agents.auditor.context"
             aud_ctx_config: dict[str, Any] = {
                 "events": [e.to_dict() for e in events],
@@ -273,12 +305,33 @@ async def offline_audit(
                 terminal_tool=SUBMIT_VERDICT_TOOL_NAME,
                 purpose="cognitive_audit_auditor_offline",
             )
+
             surfaced = False
-            if aud_result.output is not None:
+            if aud_result.error:
+                _log.warning(
+                    "  auditor turn=%d FAILED: %s (sid=%s)",
+                    turn_number, aud_result.error, aud_result.session_id,
+                )
+            elif aud_result.output is None:
+                _log.warning(
+                    "  auditor turn=%d: no output (sid=%s)", turn_number, aud_result.session_id,
+                )
+            else:
                 verdict_raw = aud_result.output.get("verdict") or aud_result.output
-                if isinstance(verdict_raw, dict):
-                    with contextlib.suppress(KeyError, TypeError, ValueError):
+                if not isinstance(verdict_raw, dict):
+                    _log.warning(
+                        "  auditor turn=%d: verdict is not a dict: %s (sid=%s)",
+                        turn_number, type(verdict_raw).__name__, aud_result.session_id,
+                    )
+                else:
+                    try:
                         verdict = Verdict.from_dict(verdict_raw)
+                    except (KeyError, TypeError, ValueError) as exc:
+                        _log.warning(
+                            "  auditor turn=%d: malformed verdict: %s (sid=%s)",
+                            turn_number, exc, aud_result.session_id,
+                        )
+                    else:
                         cumulative.absorb_auditor_verdict(verdict.to_dict())
                         if verdict.surface_reminder and verdict.reminder_text:
                             surfaced = True
@@ -288,18 +341,23 @@ async def offline_audit(
                                     reminder_text=verdict.reminder_text,
                                 )
                             )
+
             fire_mark = " ★ SURFACE" if surfaced else ""
             _log.info(
-                "  auditor  turn=%d graph=%d sid=%s%s  "
-                "→ agentm trace messages --session %s --format text",
-                turn_number, len(events), aud_result.session_id,
-                fire_mark, aud_result.session_id,
+                "  auditor  turn=%d graph=%d sid=%s%s",
+                turn_number, len(events), aud_result.session_id, fire_mark,
             )
-            firings.append(AuditFiring(
-                turn_number=turn_number,
-                extractor_session_id=ext_sid if extractor_due else None,
-                auditor_session_id=aud_result.session_id,
-                surfaced=surfaced,
-            ))
+            firings.append(
+                AuditFiring(
+                    turn_number=turn_number,
+                    extractor_session_id=ext_sid if extractor_due else None,
+                    auditor_session_id=aud_result.session_id,
+                    surfaced=surfaced,
+                )
+            )
 
+    _log.info(
+        "offline_audit done: %d firings, %d surfaces, %d total graph ops",
+        len(firings), len(surfaces), total_ext_ops,
+    )
     return OfflineAuditResult(surfaces=surfaces, firings=firings)
