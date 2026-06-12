@@ -248,11 +248,7 @@ class WireClient:
 
             delay = min(backoff, self._backoff_cap)
             delay += random.uniform(0.0, delay)  # full jitter
-            logger.warning(
-                "wire client peer=%s disconnected; reconnecting in %.2fs",
-                self._peer_name,
-                delay,
-            )
+            logger.warning(f"wire client peer={self._peer_name} disconnected; reconnecting in {delay:.2f}s")
             await asyncio.sleep(delay)
             if self._closed:
                 return
@@ -264,18 +260,10 @@ class WireClient:
                     backoff = min(backoff * 2, self._backoff_cap)
                     self._disconnected.set()
                     continue
-                logger.error(
-                    "wire client peer=%s reconnect rejected (code=%s); giving up",
-                    self._peer_name,
-                    exc.code,
-                )
+                logger.error(f"wire client peer={self._peer_name} reconnect rejected (code={exc.code}); giving up")
                 raise
             except (ConnectionRefusedError, FileNotFoundError, OSError) as exc:
-                logger.warning(
-                    "wire client peer=%s reconnect failed (%s); retrying",
-                    self._peer_name,
-                    exc.__class__.__name__,
-                )
+                logger.warning(f"wire client peer={self._peer_name} reconnect failed ({exc.__class__.__name__}); retrying")
                 backoff = min(backoff * 2, self._backoff_cap)
                 self._disconnected.set()
                 continue

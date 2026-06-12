@@ -554,12 +554,7 @@ class AgentLoop:
                 if cap is not None and len(tool_calls) > cap:
                     dropped_tool_calls = tool_calls[cap:]
                     tool_calls = tool_calls[:cap]
-                    logger.warning(
-                        "turn %d: %d tool calls truncated to %d "
-                        "(max_tool_calls_per_turn=%d)",
-                        turn_index, len(tool_calls) + len(dropped_tool_calls),
-                        cap, cap,
-                    )
+                    logger.warning(f"turn {turn_index}: {len(tool_calls) + len(dropped_tool_calls)} tool calls truncated to {cap} (max_tool_calls_per_turn={cap})")
                 paired_outcomes: list[tuple[str, ToolOutcome]] = []
                 if tool_calls:
                     raw_outcomes = await self._execute_tool_calls(

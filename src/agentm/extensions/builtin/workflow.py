@@ -502,10 +502,7 @@ class _WorkflowRun:
             except TimeoutError as exc:
                 last_error = exc
                 if attempt < retry:
-                    logger.warning(
-                        "workflow agent timed out (prompt=%.60s…), "
-                        "retrying (%d left)", prompt, retry - attempt,
-                    )
+                    logger.warning(f"workflow agent timed out (prompt={prompt}…), retrying ({retry - attempt} left)")
                     self.agents_retried += 1
                     current_prompt = _structured_retry_prompt(
                         prompt, exc, attempt + 1,
@@ -517,10 +514,7 @@ class _WorkflowRun:
             parsed = _auto_parse(result)
 
             if _is_agent_error(parsed) and attempt < retry:
-                logger.warning(
-                    "workflow agent failed (prompt=%.60s…), retrying (%d left)",
-                    prompt, retry - attempt,
-                )
+                logger.warning(f"workflow agent failed (prompt={prompt}…), retrying ({retry - attempt} left)")
                 self.agents_retried += 1
                 continue
 
@@ -531,11 +525,7 @@ class _WorkflowRun:
                 except (ValidationError, TypeError) as exc:
                     last_error = exc
                     if attempt < retry:
-                        logger.warning(
-                            "workflow structured output invalid for %s "
-                            "(prompt=%.60s…), retrying (%d left)",
-                            model_cls.__name__, prompt, retry - attempt,
-                        )
+                        logger.warning(f"workflow structured output invalid for {model_cls.__name__} (prompt={prompt}…), retrying ({retry - attempt} left)")
                         self.agents_retried += 1
                         current_prompt = _structured_retry_prompt(
                             prompt, exc, attempt + 1,
@@ -686,10 +676,7 @@ class _WorkflowRun:
                 with contextlib.suppress(Exception):
                     await child.shutdown()
         except Exception as exc:
-            logger.warning(
-                "workflow agent spawn/prompt failed: %s: %s",
-                type(exc).__name__, exc,
-            )
+            logger.warning(f"workflow agent spawn/prompt failed: {type(exc).__name__}: {exc}")
             return json.dumps({
                 "_error": type(exc).__name__,
                 "detail": str(exc)[:500],

@@ -446,11 +446,7 @@ class _GatewayRuntime:
         if not durable and kind not in EPHEMERAL_OUTBOUND_KINDS:
             # An unknown kind falls through as ephemeral — surface it, since a
             # typo'd DURABLE kind would otherwise silently downgrade.
-            logger.warning(
-                "outbound kind %r is not in the known wire vocabulary; "
-                "delivering as ephemeral (best-effort, droppable)",
-                kind,
-            )
+            logger.warning(f"outbound kind {kind!r} is not in the known wire vocabulary; delivering as ephemeral (best-effort, droppable)")
         for peer in targets:
             outbox_id: int | None = None
             if durable:

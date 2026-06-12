@@ -398,14 +398,7 @@ class FeishuAdapter:
         content = _strip_leading_bot_mention(
             content, getattr(msg, "mentions", None), self._bot_open_id()
         )
-        logger.info(
-            "[feishu] rx chat=%s sender=%s msg_id=%s thread=%s text=%r",
-            chat_id,
-            sender,
-            message_id,
-            thread_id,
-            content[:120],
-        )
+        logger.info(f"[feishu] rx chat={chat_id} sender={sender} msg_id={message_id} thread={thread_id} text={content[:120]!r}")
         if self._is_self(sender):
             return
         if not self._is_allowed(sender):
@@ -812,10 +805,7 @@ class FeishuAdapter:
                     if isinstance(rid, str):
                         reaction_id = rid
         if not reaction_id:
-            logger.warning(
-                "[feishu] add_reaction succeeded but reaction_id missing in %r",
-                raw,
-            )
+            logger.warning(f"[feishu] add_reaction succeeded but reaction_id missing in {raw!r}")
             return None
         return message_id, reaction_id
 
@@ -840,11 +830,7 @@ class FeishuAdapter:
             try:
                 await self._channel.remove_reaction(message_id, reaction_id)
             except Exception:
-                logger.exception(
-                    "[feishu] remove_reaction failed (msg=%s reaction=%s)",
-                    message_id,
-                    reaction_id,
-                )
+                logger.exception(f"[feishu] remove_reaction failed (msg={message_id} reaction={reaction_id})")
 
     # -- helpers -------------------------------------------------------
 
@@ -859,11 +845,7 @@ class FeishuAdapter:
     def _is_allowed(self, sender_id: str) -> bool:
         allow = self._config.allow_from
         if not allow:
-            logger.warning(
-                "[feishu] allow_from is empty — denying %s; "
-                "pass --allow-from '*' to permit everyone",
-                sender_id,
-            )
+            logger.warning(f"[feishu] allow_from is empty — denying {sender_id}; pass --allow-from '*' to permit everyone")
             return False
         if "*" in allow:
             return True

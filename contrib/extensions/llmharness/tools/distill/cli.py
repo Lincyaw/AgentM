@@ -134,9 +134,7 @@ async def _label_session(
 
     gt = gt_index.get(meta.sample_id)
     if gt is None:
-        logger.warning(
-            "sample_id %r not in dataset; skipping %s", meta.sample_id, replay_file.name
-        )
+        logger.warning(f"sample_id {meta.sample_id!r} not in dataset; skipping {replay_file.name}")
         return 0, 0
 
     records = _replay_record_dicts(replay_file)

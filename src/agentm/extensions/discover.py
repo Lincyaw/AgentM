@@ -134,12 +134,7 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
             module = importlib.import_module(module_path)
         except (ImportError, RuntimeError, SyntaxError) as exc:
             _LAST_DISCOVERY_FAILURES.append((module_path, exc))
-            logger.warning(
-                "discover_builtin: failed to import %s (%s: %s)",
-                module_path,
-                type(exc).__name__,
-                exc,
-            )
+            logger.warning(f"discover_builtin: failed to import {module_path} ({type(exc).__name__}: {exc})")
             continue
         manifest_obj: Any = getattr(module, "MANIFEST", None)
         if not isinstance(manifest_obj, ExtensionManifest):
@@ -148,12 +143,7 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
                 f"MANIFEST: ExtensionManifest constant"
             )
             _LAST_DISCOVERY_FAILURES.append((module_path, failure))
-            logger.warning(
-                "discover_builtin: skipping %s (%s: %s)",
-                module_path,
-                type(failure).__name__,
-                failure,
-            )
+            logger.warning(f"discover_builtin: skipping {module_path} ({type(failure).__name__}: {failure})")
             continue
         if manifest_obj.name != info.name:
             failure = RuntimeError(
@@ -162,12 +152,7 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
                 f"{info.name!r}"
             )
             _LAST_DISCOVERY_FAILURES.append((module_path, failure))
-            logger.warning(
-                "discover_builtin: skipping %s (%s: %s)",
-                module_path,
-                type(failure).__name__,
-                failure,
-            )
+            logger.warning(f"discover_builtin: skipping {module_path} ({type(failure).__name__}: {failure})")
             continue
         entries[info.name] = BuiltinEntry(
             name=info.name,
@@ -230,14 +215,7 @@ def _discover_flat_atoms(
                     raise
             except (ImportError, RuntimeError, SyntaxError) as exc:
                 _LAST_DISCOVERY_FAILURES.append((module_path, exc))
-                logger.warning(
-                    "%s: failed to import %s from %s (%s: %s)",
-                    label,
-                    module_path,
-                    path,
-                    type(exc).__name__,
-                    exc,
-                )
+                logger.warning(f"{label}: failed to import {module_path} from {path} ({type(exc).__name__}: {exc})")
                 continue
 
         manifest_obj: Any = getattr(module, "MANIFEST", None)
@@ -413,12 +391,7 @@ def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
             module = importlib.import_module(module_path)
         except (ImportError, RuntimeError, SyntaxError) as exc:
             _LAST_DISCOVERY_FAILURES.append((module_path, exc))
-            logger.warning(
-                "entrypoint atom: failed to import %s (%s: %s)",
-                module_path,
-                type(exc).__name__,
-                exc,
-            )
+            logger.warning(f"entrypoint atom: failed to import {module_path} ({type(exc).__name__}: {exc})")
             continue
         manifest_obj: Any = getattr(module, "MANIFEST", None)
         if not isinstance(manifest_obj, ExtensionManifest):

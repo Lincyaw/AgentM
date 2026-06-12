@@ -95,11 +95,7 @@ def _resolve_provider(
                 ext_module = desc.extension_module
                 break
         if ext_module is None:
-            logger.warning(
-                "provider %r (from model %r) has no extension module",
-                profile.provider,
-                model_name,
-            )
+            logger.warning(f"provider {profile.provider!r} (from model {model_name!r}) has no extension module")
             return None
         return (ext_module, dict(profile.to_build_config()))
     if legacy is not None:

@@ -578,9 +578,7 @@ def _configure_manifest(cwd: str) -> None:
         if manifest_path.exists():
             _manifest_mod.configure_manifest_path(manifest_path)
     except Exception as exc:
-        logger.warning(
-            "agentm core-manifest configuration failed during startup: %r", exc
-        )
+        logger.warning(f"agentm core-manifest configuration failed during startup: {exc!r}")
 
 
 def _migrate_catalog(cwd: str) -> None:

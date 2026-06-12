@@ -79,17 +79,11 @@ def install(api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
 
         consecutive_count += 1
         if consecutive_count > max_retries:
-            logger.warning(
-                "thinking_retry: exhausted %d retries; stopping", max_retries
-            )
+            logger.warning(f"thinking_retry: exhausted {max_retries} retries; stopping")
             consecutive_count = 0
             return None
 
-        logger.info(
-            "thinking_retry: thinking-only response (%d/%d); stepping",
-            consecutive_count,
-            max_retries,
-        )
+        logger.info(f"thinking_retry: thinking-only response ({consecutive_count}/{max_retries}); stepping")
         return Step()
 
     api.on(DecideTurnActionEvent.CHANNEL, on_decide)

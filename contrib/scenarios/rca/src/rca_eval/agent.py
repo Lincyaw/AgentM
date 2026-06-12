@@ -243,13 +243,7 @@ class AgentMAgent(BaseAgent):
         # fork_policy / control_scenario / branch_scenario) doesn't
         # silently degrade to a vanilla control session.
         if _extra:
-            logger.warning(
-                "AgentMAgent: ignoring unknown kwargs %s. "
-                "Pre-refactor names like intervention_mode / fork_policy / "
-                "fork_audit / control_scenario / branch_scenario are removed; "
-                "use chained_fork=true and max_interventions=N instead.",
-                sorted(_extra.keys()),
-            )
+            logger.warning(f"AgentMAgent: ignoring unknown kwargs {sorted(_extra.keys())}. Pre-refactor names like intervention_mode / fork_policy / fork_audit / control_scenario / branch_scenario are removed; use chained_fork=true and max_interventions=N instead.")
 
     @staticmethod
     def name() -> str:
@@ -622,13 +616,7 @@ def _scenario_mounts_harness(scenario: str) -> bool:
         extensions = load_scenario(scenario)
     except ScenarioLoadError as exc:
         if isinstance(exc.cause, FileNotFoundError):
-            logger.warning(
-                "rca eval: scenario %r not found; treating as non-harness "
-                "(distill binding will not be mounted). Check "
-                "AGENTM_PROJECT_ROOT and contrib/scenarios/ layout. (%s)",
-                scenario,
-                exc,
-            )
+            logger.warning(f"rca eval: scenario {scenario!r} not found; treating as non-harness (distill binding will not be mounted). Check AGENTM_PROJECT_ROOT and contrib/scenarios/ layout. ({exc})")
             return False
         raise
     return any(module == _HARNESS_ADAPTER_MODULE for module, _ in extensions)

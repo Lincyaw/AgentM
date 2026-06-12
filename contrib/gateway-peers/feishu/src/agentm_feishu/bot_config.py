@@ -35,12 +35,7 @@ def _read_secret(raw: dict[str, Any], bot_name: str) -> str | None:
         try:
             return Path(secret_file).read_text(encoding="utf-8").strip()
         except OSError as exc:
-            logger.warning(
-                "[feishu.bots.%s] cannot read app_secret_file %r: %s",
-                bot_name,
-                secret_file,
-                exc,
-            )
+            logger.warning(f"[feishu.bots.{bot_name}] cannot read app_secret_file {secret_file!r}: {exc}")
             return None
 
     direct = raw.get("app_secret")
@@ -80,26 +75,17 @@ def load_bot_configs() -> list[tuple[str, FeishuConfig]]:
     result: list[tuple[str, FeishuConfig]] = []
     for name, raw in bots.items():
         if not isinstance(raw, dict):
-            logger.warning(
-                "config.toml: [feishu.bots.%s] is not a table; skipped", name
-            )
+            logger.warning(f"config.toml: [feishu.bots.{name}] is not a table; skipped")
             continue
 
         app_id = raw.get("app_id")
         if not isinstance(app_id, str) or not app_id:
-            logger.warning(
-                "config.toml: [feishu.bots.%s] missing app_id; skipped", name
-            )
+            logger.warning(f"config.toml: [feishu.bots.{name}] missing app_id; skipped")
             continue
 
         app_secret = _read_secret(raw, name)
         if not app_secret:
-            logger.warning(
-                "config.toml: [feishu.bots.%s] no app_secret resolved "
-                "(set app_secret, app_secret_file, or LARK_APP_SECRET_%s); skipped",
-                name,
-                name.upper(),
-            )
+            logger.warning(f"config.toml: [feishu.bots.{name}] no app_secret resolved (set app_secret, app_secret_file, or LARK_APP_SECRET_{name.upper()}); skipped")
             continue
 
         channel_name = raw.get("channel_name")
@@ -112,11 +98,7 @@ def load_bot_configs() -> list[tuple[str, FeishuConfig]]:
 
         session_scope = raw.get("session_scope", "chat")
         if session_scope not in ("chat", "user"):
-            logger.warning(
-                "config.toml: [feishu.bots.%s] session_scope %r invalid; using 'chat'",
-                name,
-                session_scope,
-            )
+            logger.warning(f"config.toml: [feishu.bots.{name}] session_scope {session_scope!r} invalid; using 'chat'")
             session_scope = "chat"
 
         raw_allow = raw.get("allow_from")

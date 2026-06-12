@@ -110,11 +110,7 @@ class UnixPeerCredAuthenticator:
             return False
         uid = _peer_uid(sock)
         if uid is None:
-            logger.warning(
-                "peer-cred reject: peer=%s — could not read peer uid "
-                "(unsupported platform?)",
-                peer_id,
-            )
+            logger.warning(f"peer-cred reject: peer={peer_id} — could not read peer uid (unsupported platform?)")
             return False
         if self._allowed_uids is None:
             logger.info(f"peer-cred accept: peer={peer_id} uid={uid} (any-uid policy)")
@@ -122,12 +118,7 @@ class UnixPeerCredAuthenticator:
         if uid in self._allowed_uids:
             logger.info(f"peer-cred accept: peer={peer_id} uid={uid}")
             return True
-        logger.warning(
-            "peer-cred reject: peer=%s uid=%d not in allow-list %s",
-            peer_id,
-            uid,
-            sorted(self._allowed_uids),
-        )
+        logger.warning(f"peer-cred reject: peer={peer_id} uid={uid} not in allow-list {sorted(self._allowed_uids)}")
         return False
 
 

@@ -137,12 +137,7 @@ class ApprovalManager:
             return False  # stale, already resolved or timed out
         future, requester_sender_id = entry
         if clicker_sender_id != requester_sender_id:
-            logger.info(
-                "approval %s click by %s ignored (expected %s)",
-                approval_id,
-                clicker_sender_id,
-                requester_sender_id,
-            )
+            logger.info(f"approval {approval_id} click by {clicker_sender_id} ignored (expected {requester_sender_id})")
             return False  # identity mismatch, silently drop
         self._pending.pop(approval_id, None)
         if not future.done():

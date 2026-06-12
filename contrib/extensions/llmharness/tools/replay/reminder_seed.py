@@ -86,12 +86,7 @@ def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
             return None
         default = event.observation.default_action
         if isinstance(default, Stop) and default.cause.final:
-            logger.warning(
-                "replay_reminder_seed: first DecideTurnActionEvent has "
-                "final-cause Stop (%s); reminder will not be delivered, "
-                "leaving seed armed",
-                type(default.cause).__name__,
-            )
+            logger.warning(f"replay_reminder_seed: first DecideTurnActionEvent has final-cause Stop ({type(default.cause).__name__}); reminder will not be delivered, leaving seed armed")
             return None
         message = _build_reminder_message(text)
         try:

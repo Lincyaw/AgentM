@@ -179,11 +179,7 @@ def _warn_legacy_fingerprint(atom_name: str, expected_hash: str) -> None:
     global _LEGACY_FINGERPRINT_WARNED
     if _LEGACY_FINGERPRINT_WARNED:
         return
-    logger.warning(
-        "agentm catalog indexer skipping pre-migration fingerprint %s@%s",
-        atom_name,
-        expected_hash,
-    )
+    logger.warning(f"agentm catalog indexer skipping pre-migration fingerprint {atom_name}@{expected_hash}")
     _LEGACY_FINGERPRINT_WARNED = True
 
 

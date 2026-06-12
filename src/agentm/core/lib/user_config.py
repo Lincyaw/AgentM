@@ -86,10 +86,7 @@ def _parse_profile(key: str, raw: dict[str, Any]) -> ModelProfile | None:
     provider = raw.get("provider")
     model = raw.get("model")
     if not isinstance(provider, str) or not isinstance(model, str):
-        logger.warning(
-            "config.toml: [models.%s] missing required 'provider' or 'model'; skipped",
-            key,
-        )
+        logger.warning(f"config.toml: [models.{key}] missing required 'provider' or 'model'; skipped")
         return None
     name = raw.get("name")
     if not isinstance(name, str):
@@ -151,9 +148,7 @@ def load_user_config() -> UserConfig:
     if isinstance(raw_models, dict):
         for key, value in raw_models.items():
             if not isinstance(value, dict):
-                logger.warning(
-                    "config.toml: [models.%s] is not a table; skipped", key
-                )
+                logger.warning(f"config.toml: [models.{key}] is not a table; skipped")
                 continue
             profile = _parse_profile(key, value)
             if profile is not None:

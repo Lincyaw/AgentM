@@ -660,11 +660,7 @@ class AtomReloader:
             except Exception as rollback_exc:  # noqa: BLE001
                 # Rollback also failed; restore from immutable snapshot.
                 # rather than something half-new / half-old.
-                logger.exception(
-                    "atom %r rollback failed after apply failure; "
-                    "restoring from pre-reload snapshot",
-                    name,
-                )
+                logger.exception(f"atom {name!r} rollback failed after apply failure; restoring from pre-reload snapshot")
                 self._restore_from_snapshot(snapshot)
                 self._bus.emit_sync(
                     ExtensionReloadEvent.CHANNEL,
@@ -984,10 +980,7 @@ class AtomReloader:
         )
 
         if effective_manifest.tier == 2:
-            logger.warning(
-                "tier-2 install proceeds in MVP for %s (no approval gate)",
-                name,
-            )
+            logger.warning(f"tier-2 install proceeds in MVP for {name} (no approval gate)")
 
         return InstallAtomResult(
             ok=True,
@@ -1033,10 +1026,7 @@ class AtomReloader:
         manifest = atom.manifest or _default_manifest(name)
         trigger: Any = "agent" if agent_initiated else "human"
         if manifest.tier == 2:
-            logger.warning(
-                "tier-2 unload proceeds in MVP for %s (no approval gate)",
-                name,
-            )
+            logger.warning(f"tier-2 unload proceeds in MVP for {name} (no approval gate)")
 
         veto_reason = self._collect_block_veto(
             BeforeUnloadAtomEvent.CHANNEL,

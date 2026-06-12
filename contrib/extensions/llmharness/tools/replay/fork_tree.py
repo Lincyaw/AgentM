@@ -347,15 +347,7 @@ async def run_fork_tree_experiment(
             initial_messages=list(task.prefix) if task.prefix else None,
             seed_reminder_text=task.seed_reminder,
         )
-        logger.info(
-            "fork_tree: node=%s parent=%s depth=%d session=%s msgs=%d seed=%s",
-            task.node_id,
-            task.parent_id,
-            task.depth,
-            backbone.session_log_id,
-            len(backbone.final_messages),
-            "None" if task.seed_reminder is None else "set",
-        )
+        logger.info(f'fork_tree: node={task.node_id} parent={task.parent_id} depth={task.depth} session={backbone.session_log_id} msgs={len(backbone.final_messages)} seed={"None" if task.seed_reminder is None else "set"}')
         run = await replay_pipeline_over_trajectory(
             messages=backbone.final_messages,
             cwd=cwd,
@@ -391,12 +383,7 @@ async def run_fork_tree_experiment(
         floor = task.fork_turn - 1
         forward_surfaces = [s for s in surfaces if s.fork_message_index > floor]
         if len(forward_surfaces) != len(surfaces):
-            logger.warning(
-                "fork_tree: node=%s dropped %d non-progressing surface(s) at/below fork floor=%d",
-                task.node_id,
-                len(surfaces) - len(forward_surfaces),
-                floor,
-            )
+            logger.warning(f"fork_tree: node={task.node_id} dropped {len(surfaces) - len(forward_surfaces)} non-progressing surface(s) at/below fork floor={floor}")
 
         node = ForkNode(
             node_id=task.node_id,
@@ -421,10 +408,7 @@ async def run_fork_tree_experiment(
         )
         for surface in selected:
             if state["emitted"] >= max_total_nodes:
-                logger.warning(
-                    "fork_tree: max_total_nodes=%d reached; not enqueuing further children",
-                    max_total_nodes,
-                )
+                logger.warning(f"fork_tree: max_total_nodes={max_total_nodes} reached; not enqueuing further children")
                 break
             state["emitted"] += 1
             child_prefix = _fork_prefix(backbone.final_messages, surface.fork_message_index)

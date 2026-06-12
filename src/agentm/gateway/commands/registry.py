@@ -135,10 +135,7 @@ def _load_builtins(registry: CommandRegistry) -> None:
             for h in bundle:
                 registry.register(h)
         else:
-            logger.warning(
-                "builtin command module %s exports no HANDLER / BUILTINS",
-                modname,
-            )
+            logger.warning(f"builtin command module {modname} exports no HANDLER / BUILTINS")
 
 
 def _load_markdown(registry: CommandRegistry, cwd: Path) -> None:
@@ -196,8 +193,6 @@ def _load_entry_points(registry: CommandRegistry) -> None:
             continue
         candidate = obj() if callable(obj) and not hasattr(obj, "handle") else obj
         if not hasattr(candidate, "handle"):
-            logger.warning(
-                "command plugin %r did not yield a CommandHandler", ep.name
-            )
+            logger.warning(f"command plugin {ep.name!r} did not yield a CommandHandler")
             continue
         registry.register(candidate)
