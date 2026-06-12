@@ -67,6 +67,7 @@ def build_auditor_system_prompt(
     continuation_notes: list[str],
     summary_threshold: int = 30,
     base_prompt: str | None = None,
+    methodology: list[str] | None = None,
 ) -> str:
     """Assemble the auditor system prompt for one firing."""
     framing = base_prompt if base_prompt is not None else load_auditor_prompt("minimal")
@@ -82,6 +83,18 @@ def build_auditor_system_prompt(
     findings_payload = [f.to_dict() for f in findings]
 
     sections: list[str] = [framing.rstrip(), ""]
+
+    if methodology:
+        sections.append("## METHODOLOGY (loaded by main agent)")
+        sections.append(
+            "The main agent loaded these domain-specific skills during its session. "
+            "Use them to evaluate whether the agent's reasoning follows the methodology — "
+            "not just whether it investigated every entity mentioned."
+        )
+        for i, skill_text in enumerate(methodology):
+            sections.append(f"### Skill {i + 1}")
+            sections.append(skill_text.strip())
+        sections.append("")
 
     if phases:
         sections.append("## PHASES (primary view — merged basic blocks)")
@@ -134,6 +147,7 @@ def build_auditor_trajectory_prompt(
     trajectory: list[dict[str, Any]],
     continuation_notes: list[str],
     base_prompt: str | None = None,
+    methodology: list[str] | None = None,
 ) -> str:
     """Assemble the auditor system prompt for a trajectory-mode firing."""
     framing = (
@@ -143,6 +157,18 @@ def build_auditor_trajectory_prompt(
     )
 
     sections: list[str] = [framing.rstrip(), ""]
+
+    if methodology:
+        sections.append("## METHODOLOGY (loaded by main agent)")
+        sections.append(
+            "The main agent loaded these domain-specific skills during its session. "
+            "Use them to evaluate whether the agent's reasoning follows the methodology — "
+            "not just whether it investigated every entity mentioned."
+        )
+        for i, skill_text in enumerate(methodology):
+            sections.append(f"### Skill {i + 1}")
+            sections.append(skill_text.strip())
+        sections.append("")
 
     sections.append("## TRAJECTORY")
     sections.append(
@@ -174,6 +200,7 @@ class AuditorContextConfig(BaseModel):
     prompt_name: str = "minimal"
     trajectory_snapshot: list[dict[str, Any]] | None = None
     mode: Literal["graph", "trajectory"] = "graph"
+    methodology: list[str] = []
 
 MANIFEST = ExtensionManifest(
     name="auditor_context",
@@ -189,12 +216,14 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
     findings = [Finding.from_dict(f) for f in config.findings]
 
     base_prompt = load_auditor_prompt(config.prompt_name)
+    meth = config.methodology or None
 
     if config.mode == "trajectory" and config.trajectory_snapshot is not None:
         prompt_text = build_auditor_trajectory_prompt(
             trajectory=config.trajectory_snapshot,
             continuation_notes=config.continuation_notes,
             base_prompt=base_prompt,
+            methodology=meth,
         )
     else:
         prompt_text = build_auditor_system_prompt(
@@ -206,6 +235,7 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
             continuation_notes=config.continuation_notes,
             summary_threshold=config.summary_threshold,
             base_prompt=base_prompt,
+            methodology=meth,
         )
 
     def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
