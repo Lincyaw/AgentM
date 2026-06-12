@@ -79,7 +79,7 @@ def run(
             _logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
     _logger.remove()
-    _logger.add(sys.stderr, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss} {level} {name}: {message}")
+    _logger.add(sys.stderr, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> <level>{level: <8}</level> <cyan>{name}</cyan>: <level>{message}</level>")
     _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     _stdlib_logging.getLogger("httpx").setLevel(_stdlib_logging.WARNING)
     _stdlib_logging.getLogger("opentelemetry").setLevel(_stdlib_logging.WARNING)

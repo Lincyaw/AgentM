@@ -568,7 +568,7 @@ class _InterceptHandler(_stdlib_logging.Handler):
 
 def main(argv: list[str] | None = None) -> int:
     logger.remove()
-    logger.add(sys.stderr, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss} {level} {name}: {message}")
+    logger.add(sys.stderr, level="INFO", format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> <level>{level: <8}</level> <cyan>{name}</cyan>: <level>{message}</level>")
     _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     parser = _build_parser()
     args = parser.parse_args(argv)

@@ -401,7 +401,7 @@ def cli(
     logger.add(
         sys.stderr,
         level="INFO" if verbose else "WARNING",
-        format="{time:YYYY-MM-DD HH:mm:ss} {level} {name}: {message}",
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> <level>{level: <8}</level> <cyan>{name}</cyan>: <level>{message}</level>",
     )
     _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     _install_lark_log_filters()
