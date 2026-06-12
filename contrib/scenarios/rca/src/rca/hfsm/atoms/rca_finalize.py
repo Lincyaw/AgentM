@@ -29,7 +29,7 @@ short-circuit the FSM by submitting reports without ever calling
 returns ``speculation``; no hardcoded ``len(symptoms) > 0`` rule lives
 in this atom.
 
-§11 contract: stdlib + ``agentm.core.abi.*`` + ``agentm.extensions``. No
+contract: stdlib + ``agentm.core.abi.*`` + ``agentm.extensions``. No
 atom-to-atom imports; L1 is reached via ``api.get_service('rca.hgraph.read')``
 and the judge via ``api.get_service('rca.judge.investigation_genuine')``.
 """
@@ -100,11 +100,14 @@ _PARAMS: Final[dict[str, Any]] = {
 
 _GENUINE = "genuine_investigation"
 
+
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
 
+
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+
 
 def _hypothesis_summary(read_handle: Any) -> list[dict[str, Any]]:
     """Compose a structured summary of every hypothesis the store knows.
@@ -138,9 +141,7 @@ def _hypothesis_summary(read_handle: Any) -> list[dict[str, Any]]:
                 polarity = getattr(p, "polarity", "")
                 checks = list(getattr(p, "checks", []) or [])
                 checks_count += len(checks)
-                preds_summary.append(
-                    f"[{polarity}] {pclaim} (checks={len(checks)})"
-                )
+                preds_summary.append(f"[{polarity}] {pclaim} (checks={len(checks)})")
             seen[hid] = {
                 "id": hid,
                 "claim": getattr(h, "claim", ""),
@@ -149,6 +150,7 @@ def _hypothesis_summary(read_handle: Any) -> list[dict[str, Any]]:
                 "checks_count": checks_count,
             }
     return list(seen.values())
+
 
 def _build_judge_context(
     read_handle: Any,
@@ -172,12 +174,12 @@ def _build_judge_context(
         obs_count = len(getattr(obs_attr, "observations", []) or [])
 
     supporting = [
-        str(x) for x in (args.get("supporting_observations") or [])
+        str(x)
+        for x in (args.get("supporting_observations") or [])
         if isinstance(x, str)
     ]
     refuted = [
-        str(x) for x in (args.get("refuted_alternatives") or [])
-        if isinstance(x, str)
+        str(x) for x in (args.get("refuted_alternatives") or []) if isinstance(x, str)
     ]
     graph_slice: dict[str, Any] = {
         "symptom_count": len(symptoms),
@@ -195,6 +197,7 @@ def _build_judge_context(
         },
     }
     return JudgeContext(graph_slice=graph_slice, operands={})
+
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config
@@ -253,17 +256,22 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                 f"reason={verdict.reason}"
             )
         supporting = [
-            str(x) for x in (args.get("supporting_observations") or [])
+            str(x)
+            for x in (args.get("supporting_observations") or [])
             if isinstance(x, str)
         ]
         refuted = [
-            str(x) for x in (args.get("refuted_alternatives") or [])
+            str(x)
+            for x in (args.get("refuted_alternatives") or [])
             if isinstance(x, str)
         ]
         body = (
-            "status=finalized root_cause=" + root_cause
-            + " supporting=" + ",".join(supporting)
-            + " refuted=" + ",".join(refuted)
+            "status=finalized root_cause="
+            + root_cause
+            + " supporting="
+            + ",".join(supporting)
+            + " refuted="
+            + ",".join(refuted)
         )
         # Emit a bus event so observability sinks (and the smoke test) can
         # pick up the final report content without parsing the tool result.

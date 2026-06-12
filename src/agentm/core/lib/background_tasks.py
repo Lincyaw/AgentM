@@ -5,7 +5,7 @@ This is the substrate shared by every atom that runs work in a detached
 ``extensions/builtin/sub_agent.py`` (the original prototype, where the unit is
 a child :class:`AgentSession`) so a future ``background_exec`` atom — whose
 unit is a single tool coroutine — can sit on the same machinery without either
-atom importing the other (§11 forbids atom→atom imports; ``core.lib`` is the
+atom importing the other (forbids atom→atom imports; ``core.lib`` is the
 non-atom seam they share).
 
 Generalization boundary: this module owns only what is generic to *any*

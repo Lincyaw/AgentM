@@ -45,7 +45,7 @@ Downgrade-application semantics flip (design §5.2):
   more evidence, propose the refine explicitly, split, merge, or
   request help.
 
-§11 contract notes:
+contract notes:
 
 * Imports are stdlib + ``agentm.core.abi.*`` + ``agentm.extensions`` plus
   the scenario's pure modules (``schema``, ``updates``, ``judges``) only.
@@ -118,6 +118,7 @@ _GENUINE_ATTEMPT = "genuine_attempt"
 # install builds, never as module-level mutable globals (§11.4.D3).
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _JudgeBundle:
     """The four judges the gate consults, looked up once at install."""
@@ -126,6 +127,7 @@ class _JudgeBundle:
     coverage: Judge
     independence: Judge
     falsified_genuinely: Judge
+
 
 @dataclass
 class _Gate:
@@ -382,9 +384,7 @@ class _Gate:
             return UpdateResult.rejected(reason)
         merged = update.hypothesis
         if merged is None:
-            return UpdateResult.rejected(
-                "merge requires the merged hypothesis payload"
-            )
+            return UpdateResult.rejected("merge requires the merged hypothesis payload")
         if not merged.parent_ids:
             merged.parent_ids = list(update.sources)
         self.write_handle.add_hypothesis(merged)
@@ -452,17 +452,13 @@ class _Gate:
     def _apply_record_symptom(self, update: UpdateProposal) -> UpdateResult:
         sym = update.symptom
         if sym is None:
-            return UpdateResult.rejected(
-                "record_symptom requires a symptom payload"
-            )
+            return UpdateResult.rejected("record_symptom requires a symptom payload")
         self.write_handle.add_symptom(sym)
         return UpdateResult.applied(sym.id)
 
     # -- Helpers -------------------------------------------------------------
 
-    def _resolve_target(
-        self, update: UpdateProposal
-    ) -> Hypothesis | UpdateResult:
+    def _resolve_target(self, update: UpdateProposal) -> Hypothesis | UpdateResult:
         target_id = update.target_id or (
             update.hypothesis.id if update.hypothesis is not None else None
         )
@@ -505,11 +501,13 @@ class _Gate:
             applied_id=None,
         )
 
+
 # ---------------------------------------------------------------------------
 # Pure helpers — graph-slice constructors and structural traversal.
 # Free of regex / lemma matching by construction; they pass structured
 # data to the judges and return judges' free-text verdicts unchanged.
 # ---------------------------------------------------------------------------
+
 
 def _hypothesis_slice(h: Hypothesis) -> dict[str, Any]:
     return {
@@ -521,6 +519,7 @@ def _hypothesis_slice(h: Hypothesis) -> dict[str, Any]:
         "rationale": h.rationale,
     }
 
+
 def _prediction_slice(p: Prediction) -> dict[str, Any]:
     return {
         "id": p.id,
@@ -530,6 +529,7 @@ def _prediction_slice(p: Prediction) -> dict[str, Any]:
         "test_plan": p.test_plan,
         "checks": [_check_slice(c) for c in p.checks],
     }
+
 
 def _check_slice(c: CheckResult) -> dict[str, Any]:
     interpretation = c.interpretation
@@ -559,6 +559,7 @@ def _check_slice(c: CheckResult) -> dict[str, Any]:
         ],
     }
 
+
 def _all_checks(h: Hypothesis) -> list[CheckResult]:
     """Flatten every check on every prediction of ``h``."""
 
@@ -566,6 +567,7 @@ def _all_checks(h: Hypothesis) -> list[CheckResult]:
     for p in h.predictions:
         out.extend(p.checks)
     return out
+
 
 def _collect_supporting_checks(h: Hypothesis) -> list[CheckResult]:
     """Return all checks attached to positive predictions, in order.
@@ -589,6 +591,7 @@ def _collect_supporting_checks(h: Hypothesis) -> list[CheckResult]:
         out.extend(p.checks)
     return out
 
+
 def _observation_log_slice(h: Hypothesis) -> list[dict[str, Any]]:
     """The observation set attached to any of ``h``'s checks.
 
@@ -610,6 +613,7 @@ def _observation_log_slice(h: Hypothesis) -> list[dict[str, Any]]:
                 )
     return obs
 
+
 def _judge_reason(kind: str, verdict: Verdict) -> str:
     """Compose a downgrade reason from a judge's verdict.
 
@@ -622,6 +626,7 @@ def _judge_reason(kind: str, verdict: Verdict) -> str:
 
     return f"judge={kind} verdict={verdict.verdict} reason={verdict.reason}"
 
+
 def _find_hypothesis_owning_prediction(
     graph: GraphView, prediction_id: str
 ) -> Hypothesis | None:
@@ -633,11 +638,14 @@ def _find_hypothesis_owning_prediction(
     confirmed: list[Hypothesis] = (
         confirmed_getter() if callable(confirmed_getter) else []
     )
-    for h in list(graph.get_open_leaves()) + list(graph.get_refuted_branches()) + confirmed:
+    for h in (
+        list(graph.get_open_leaves()) + list(graph.get_refuted_branches()) + confirmed
+    ):
         for p in h.predictions:
             if p.id == prediction_id:
                 return h
     return None
+
 
 def _unique_child_id(graph: GraphView, base: str) -> str:
     if graph.get_hypothesis(base) is None:
@@ -647,9 +655,11 @@ def _unique_child_id(graph: GraphView, base: str) -> str:
         counter += 1
     return f"{base}.{counter}"
 
+
 # ---------------------------------------------------------------------------
 # install — wire the gate into the scenario.
 # ---------------------------------------------------------------------------
+
 
 def _required_judge(api: ExtensionAPI, service_name: str) -> Judge:
     impl = api.get_service(service_name)
@@ -660,6 +670,7 @@ def _required_judge(api: ExtensionAPI, service_name: str) -> Judge:
             "the gate"
         )
     return impl  # type: ignore[no-any-return]
+
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

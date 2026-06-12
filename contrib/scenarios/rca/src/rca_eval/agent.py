@@ -21,7 +21,7 @@ Two pieces of glue do the work:
   ``before_send_to_llm`` event because :meth:`AgentSession.prompt` does not
   return it.
 
-Boundary: this module is a host-side driver (not a §11 atom — no
+Boundary: this module is a host-side driver (not a atom — no
 ``MANIFEST`` / ``install`` pair, never named in a scenario manifest), so
 the ``agentm.core.runtime.*`` imports inside :func:`run_one` are
 intentional. If this file is ever promoted to an atom, route session
@@ -72,6 +72,7 @@ _EMPTY_AGENT_RCA_OUTPUT: dict[str, list[Any]] = {
 # when new variants are added.
 _HARNESS_ADAPTER_MODULE = "llmharness.atom"
 
+
 def _provider_name_from_base_url(base_url: str) -> str:
     """Derive a stable provider registry slug from a base URL.
 
@@ -86,11 +87,13 @@ def _provider_name_from_base_url(base_url: str) -> str:
     host = urlparse(base_url).hostname or "openai-compat"
     return host.replace(".", "-")
 
+
 def _env_bool(name: str, *, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
         return default
     return raw.strip().lower() not in {"false", "0", "no", "off", ""}
+
 
 def _try_resolve_profile(model: str) -> tuple[str, dict[str, Any]] | None:
     """Attempt to resolve ``model`` as a ``~/.agentm/config.toml`` profile."""
@@ -107,9 +110,8 @@ def _try_resolve_profile(model: str) -> tuple[str, dict[str, Any]] | None:
     except Exception:  # noqa: BLE001
         return None
 
-def _build_provider(
-    provider: str, model: str
-) -> tuple[str, dict[str, Any]]:
+
+def _build_provider(provider: str, model: str) -> tuple[str, dict[str, Any]]:
     """Same env-var convention as ``agentm.cli._build_provider``.
 
     Duplicated here (rather than imported) because the eval adapter is
@@ -143,9 +145,8 @@ def _build_provider(
             cfg["verify_ssl"] = False
         return ("agentm.extensions.builtin.llm_openai", cfg)
 
-    raise ValueError(
-        f"unknown provider {provider!r}; expected 'anthropic' or 'openai'"
-    )
+    raise ValueError(f"unknown provider {provider!r}; expected 'anthropic' or 'openai'")
+
 
 def _coerce_max_turns(value: Any, fallback: int) -> int:
     if value is None:
@@ -155,6 +156,7 @@ def _coerce_max_turns(value: Any, fallback: int) -> int:
     except (TypeError, ValueError):
         return fallback
     return result if result > 0 else fallback
+
 
 def _coerce_max_interventions(value: Any, fallback: int) -> int:
     """Coerce ``--ak max_interventions=...`` to a non-negative int.
@@ -173,6 +175,7 @@ def _coerce_max_interventions(value: Any, fallback: int) -> int:
         return fallback
     return result if result >= 0 else fallback
 
+
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
@@ -184,6 +187,7 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     if text in {"0", "false", "no", "off", ""}:
         return False
     return default
+
 
 @dataclass(frozen=True)
 class _SessionRun:
@@ -197,6 +201,7 @@ class _SessionRun:
     root_session_id: str
     session_log_id: str
     audit_replay_path: str
+
 
 class AgentMAgent(BaseAgent):
     """Run an RCA investigation through an in-process AgentM session."""
@@ -220,11 +225,7 @@ class AgentMAgent(BaseAgent):
         # ``--ak`` values arrive as strings, so coerce explicitly.
         self._scenario = scenario
         self._model = model or os.environ.get("AGENTM_MODEL", _DEFAULT_MODEL)
-        self._provider = (
-            provider
-            or os.environ.get("AGENTM_PROVIDER")
-            or "anthropic"
-        )
+        self._provider = provider or os.environ.get("AGENTM_PROVIDER") or "anthropic"
         self._provider_tuple = provider_tuple
         if provider_tuple is not None:
             self._model = provider_tuple[1].get("model", self._model)
@@ -243,7 +244,9 @@ class AgentMAgent(BaseAgent):
         # fork_policy / control_scenario / branch_scenario) doesn't
         # silently degrade to a vanilla control session.
         if _extra:
-            logger.warning(f"AgentMAgent: ignoring unknown kwargs {sorted(_extra.keys())}. Pre-refactor names like intervention_mode / fork_policy / fork_audit / control_scenario / branch_scenario are removed; use chained_fork=true and max_interventions=N instead.")
+            logger.warning(
+                f"AgentMAgent: ignoring unknown kwargs {sorted(_extra.keys())}. Pre-refactor names like intervention_mode / fork_policy / fork_audit / control_scenario / branch_scenario are removed; use chained_fork=true and max_interventions=N instead."
+            )
 
     @staticmethod
     def name() -> str:
@@ -380,9 +383,7 @@ class AgentMAgent(BaseAgent):
         tree_meta["nodes"] = [
             {
                 **node_header,
-                "run": _run_metadata(
-                    session_runs[node_header["backbone_session_id"]]
-                ),
+                "run": _run_metadata(session_runs[node_header["backbone_session_id"]]),
             }
             for node_header in experiment.header["nodes"]
         ]
@@ -540,9 +541,7 @@ class AgentMAgent(BaseAgent):
             submission_dump: Any = None
         else:
             response = submission.model_dump_json(by_alias=True)
-            submission_dump = submission.model_dump(
-                mode="json", by_alias=True
-            )
+            submission_dump = submission.model_dump(mode="json", by_alias=True)
 
         trajectory = _build_trajectory(
             agent_name=f"agentm:{scenario}",
@@ -591,6 +590,7 @@ class AgentMAgent(BaseAgent):
             audit_replay_path=audit_replay_path,
         )
 
+
 def _scenario_mounts_harness(scenario: str) -> bool:
     """True iff ``scenario`` mounts the llmharness cognitive-audit adapter.
 
@@ -616,10 +616,13 @@ def _scenario_mounts_harness(scenario: str) -> bool:
         extensions = load_scenario(scenario)
     except ScenarioLoadError as exc:
         if isinstance(exc.cause, FileNotFoundError):
-            logger.warning(f"rca eval: scenario {scenario!r} not found; treating as non-harness (distill binding will not be mounted). Check AGENTM_PROJECT_ROOT and contrib/scenarios/ layout. ({exc})")
+            logger.warning(
+                f"rca eval: scenario {scenario!r} not found; treating as non-harness (distill binding will not be mounted). Check AGENTM_PROJECT_ROOT and contrib/scenarios/ layout. ({exc})"
+            )
             return False
         raise
     return any(module == _HARNESS_ADAPTER_MODULE for module, _ in extensions)
+
 
 def _run_metadata(run: _SessionRun) -> dict[str, Any]:
     return {
@@ -631,6 +634,7 @@ def _run_metadata(run: _SessionRun) -> dict[str, Any]:
         "session_log_id": run.session_log_id,
         "audit_replay_path": run.audit_replay_path,
     }
+
 
 def _build_trajectory(
     *,
@@ -650,9 +654,7 @@ def _build_trajectory(
     messages: list[Message] = []
     for msg in final_messages:
         if isinstance(msg, UserMessage):
-            text = "".join(
-                c.text for c in msg.content if isinstance(c, TextContent)
-            )
+            text = "".join(c.text for c in msg.content if isinstance(c, TextContent))
             messages.append(Message(role="user", content=text))
         elif isinstance(msg, AssistantMessage):
             text_parts: list[str] = []
@@ -665,9 +667,7 @@ def _build_trajectory(
                         ToolCall(
                             id=block.id,
                             name=block.name,
-                            arguments=json.dumps(
-                                block.arguments, ensure_ascii=False
-                            ),
+                            arguments=json.dumps(block.arguments, ensure_ascii=False),
                         )
                     )
             messages.append(
@@ -680,9 +680,7 @@ def _build_trajectory(
         elif isinstance(msg, ToolResultMessage):
             for result_block in msg.content:
                 text = "".join(
-                    c.text
-                    for c in result_block.content
-                    if isinstance(c, TextContent)
+                    c.text for c in result_block.content if isinstance(c, TextContent)
                 )
                 messages.append(
                     Message(
@@ -701,5 +699,6 @@ def _build_trajectory(
             )
         ]
     )
+
 
 __all__ = ["AgentMAgent"]

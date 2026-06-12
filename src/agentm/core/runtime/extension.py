@@ -6,7 +6,7 @@ Protocols, dataclasses, exceptions, and ContextVar live in
 :mod:`agentm.core.abi.extension` — this module imports them.
 
 Pluggability hard rule (see ``.claude/designs/pluggable-architecture.md`` §1):
-atoms never import from this module. The §11 validator forbids
+atoms never import from this module. The validator forbids
 ``agentm.core.runtime`` outright.
 """
 
@@ -314,7 +314,9 @@ def build_extension_api_scope(
 class _ExtensionAPIImpl:
     """Concrete ``ExtensionAPI``; delegates to the session's bus and registries."""
 
-    def __init__(self, scope: ExtensionAPIScope, *, owner_name: str = "<unknown>") -> None:
+    def __init__(
+        self, scope: ExtensionAPIScope, *, owner_name: str = "<unknown>"
+    ) -> None:
         self._bus = scope.bus
         self._cwd = scope.cwd
         self._session_id = scope.session_id
@@ -663,7 +665,7 @@ def load_extension(
             AttributeError(f"module {module_path!r} has no callable 'install' symbol"),
         )
 
-    # §11 contract validation on initial load. The atom_reloader's
+    # contract validation on initial load. The atom_reloader's
     # _finish_install path validates separately, so it passes validate=False
     # to avoid double-checking.
     if validate:
@@ -676,6 +678,7 @@ def load_extension(
         schema_cls = getattr(manifest, "config_schema", None)
         if schema_cls is not None:
             from pydantic import BaseModel as _PydanticBase
+
             if isinstance(schema_cls, type) and issubclass(schema_cls, _PydanticBase):
                 resolved_config = schema_cls.model_validate(config)
 
@@ -704,7 +707,7 @@ def load_extension(
 
 
 def _validate_on_load(module: Any, module_path: str) -> None:
-    """Run §11 AST validation on *module*'s source before ``install`` runs.
+    """Run AST validation on *module*'s source before ``install`` runs.
 
     Raises ``ExtensionLoadError`` if any error-severity issue is found.
     """
@@ -725,23 +728,23 @@ def _validate_on_load(module: Any, module_path: str) -> None:
         # Package atom — validate the whole package.
         package_dir = src_file.parent
         issues = validate_atom_package(
-            package_dir, module_path=module_path,
+            package_dir,
+            module_path=module_path,
             known_extension_names=set(),
         )
     else:
         issues = validate_atom_file(
-            src_file, module_path=module_path,
+            src_file,
+            module_path=module_path,
             known_extension_names=set(),
         )
 
     blocking = [i for i in issues if i.severity == "error"]
     if blocking:
-        msg = "; ".join(
-            f"[{i.rule}] {i.message}" for i in blocking[:5]
-        )
+        msg = "; ".join(f"[{i.rule}] {i.message}" for i in blocking[:5])
         raise ExtensionLoadError(
             module_path,
-            RuntimeError(f"§11 contract violation: {msg}"),
+            RuntimeError(f"contract violation: {msg}"),
         )
 
 

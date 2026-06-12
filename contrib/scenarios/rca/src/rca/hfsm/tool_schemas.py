@@ -2,8 +2,8 @@
 
 Pure data module (no ``MANIFEST``, no ``install``). Lives alongside
 ``schema.py`` / ``updates.py`` so the evidence-tools atom stays under the
-§11 single-file size envelope. Importing pure scenario-local modules from
-an atom is permitted by the §11 atom-to-atom rule (rule names only other
+single-file size envelope. Importing pure scenario-local modules from
+an atom is permitted by the atom-to-atom rule (rule names only other
 atom files; pure modules are pure data).
 
 Two contracts the LLM sees are load-bearing here:
@@ -43,7 +43,11 @@ PARAMS: Final[dict[str, dict[str, Any]]] = {
         "type": "object",
         "properties": {
             "text": {**_STR, "description": "Free-form observed problem."},
-            "source": {**_STR, "description": "Origin tag (free-text).", "default": "user_intake"},
+            "source": {
+                **_STR,
+                "description": "Origin tag (free-text).",
+                "default": "user_intake",
+            },
         },
         "required": ["text"],
         "additionalProperties": False,
@@ -52,7 +56,10 @@ PARAMS: Final[dict[str, dict[str, Any]]] = {
         "type": "object",
         "properties": {
             "text": {**_STR, "description": "Rendered evidence (cited verbatim)."},
-            "source_tool_call": {**_STR, "description": "tool_call_id that produced this fact."},
+            "source_tool_call": {
+                **_STR,
+                "description": "tool_call_id that produced this fact.",
+            },
             "related_symptoms": {**_STR_ARR, "default": []},
             "related_predictions": {**_STR_ARR, "default": []},
         },
@@ -70,7 +77,10 @@ PARAMS: Final[dict[str, dict[str, Any]]] = {
                     "type": "object",
                     "properties": {
                         "claim": _STR,
-                        "polarity": {"type": "string", "enum": ["positive", "negative"]},
+                        "polarity": {
+                            "type": "string",
+                            "enum": ["positive", "negative"],
+                        },
                         "test_plan": _STR,
                     },
                     "required": ["claim", "polarity"],
@@ -138,7 +148,11 @@ PARAMS: Final[dict[str, dict[str, Any]]] = {
                     "enter the graph; orchestrator re-derives from observations alone."
                 ),
             },
-            "verdict_proposal": {**_STR, "description": VERDICT_GUIDANCE, "default": ""},
+            "verdict_proposal": {
+                **_STR,
+                "description": VERDICT_GUIDANCE,
+                "default": "",
+            },
         },
         "required": [
             "hypothesis_id",
@@ -160,7 +174,10 @@ PARAMS: Final[dict[str, dict[str, Any]]] = {
             },
             "target_id": _STR,
             "reason": {**_STR, "default": ""},
-            "child": {"type": "object", "description": "Payload for refine / supersede."},
+            "child": {
+                "type": "object",
+                "description": "Payload for refine / supersede.",
+            },
             "children": {"type": "array", "items": {"type": "object"}, "default": []},
             "sources": {**_STR_ARR, "default": []},
         },

@@ -28,7 +28,7 @@ command is the kind of failure mode that exposes private prompts.
 The :class:`CommandContext` facade is intentionally narrow. Handlers
 should never receive a gateway object directly; they get the few
 capabilities they need (end the session, read stats, list commands,
-reach the live ExtensionAPI). Mirrors the §11 ``ExtensionAPI`` pattern:
+reach the live ExtensionAPI). Mirrors the ``ExtensionAPI`` pattern:
 atoms reach gateway internals only through documented services.
 """
 
@@ -144,8 +144,8 @@ class CommandContext:
     """Returns ``(active_model_name, available_profile_names)`` for ``/model``.
     Names are the ``[models.<name>]`` keys from ``config.toml``."""
 
-    switch_model: Callable[[str], Awaitable[tuple[bool, str]]] = (
-        lambda _name: _default_switch_model(_name)
+    switch_model: Callable[[str], Awaitable[tuple[bool, str]]] = lambda _name: (
+        _default_switch_model(_name)
     )
     """Switch the active model profile and start a fresh session.
     Returns ``(ok, message)``."""
@@ -153,8 +153,8 @@ class CommandContext:
     cwd: str = "."
     """Working directory for the gateway process."""
 
-    resume_session: Callable[[str], Awaitable[None]] = (
-        lambda _sid: _default_resume(_sid)
+    resume_session: Callable[[str], Awaitable[None]] = lambda _sid: _default_resume(
+        _sid
     )
     """Shut down the current session and set the ChatSessionMap entry to
     ``session_id`` so the next inbound message resumes from that

@@ -12,7 +12,7 @@ daemon-restart recovery) or creates fresh. Either way it stamps the
 envelopes scoped to this ``session_key``.
 
 The wire_driver atom (§4) reaches these services by name (it cannot
-import gateway modules — §11 import allow-list), so the contract is:
+import gateway modules — import allow-list), so the contract is:
 
 * ``wire_outbound``  -> ``Callable[[dict], Awaitable[None]]`` (outbound sink)
 * ``session_key``    -> ``str``

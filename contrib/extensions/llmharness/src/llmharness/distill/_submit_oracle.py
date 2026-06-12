@@ -1,4 +1,4 @@
-"""§11 single-file atom: ``submit_oracle_label`` terminal tool.
+"""single-file atom: ``submit_oracle_label`` terminal tool.
 
 Used by the Stage A oracle child of the distill labeler. The child sees
 the GT-laden prompt (prompts/oracle.md), reasons over the snapshot, and
@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 class DistillSubmitOracleConfig(BaseModel):
     model_config = {"extra": "allow"}
+
 
 MANIFEST = ExtensionManifest(
     name="distill_submit_oracle",
@@ -78,6 +79,7 @@ SUBMIT_ORACLE_PARAMETERS: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+
 def install(api: ExtensionAPI, config: DistillSubmitOracleConfig) -> None:
 
     async def _submit(args: dict[str, Any]) -> ToolTerminate:
@@ -98,5 +100,6 @@ def install(api: ExtensionAPI, config: DistillSubmitOracleConfig) -> None:
             fn=_submit,
         )
     )
+
 
 __all__ = ["MANIFEST", "SUBMIT_ORACLE_TOOL_NAME", "install"]

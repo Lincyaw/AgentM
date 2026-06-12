@@ -17,7 +17,7 @@ fabricated input.
 Lives in ``core.lib`` because the ``observability`` atom and the
 ``Event.to_otel`` translators in ``core.abi.events`` both need identical
 semantics, and atom-to-atom / atom-to-runtime imports are forbidden by
-the §11 single-file contract. ``core.lib`` is the sanctioned shared
+the single-file contract. ``core.lib`` is the sanctioned shared
 "stdlib for atoms".
 """
 

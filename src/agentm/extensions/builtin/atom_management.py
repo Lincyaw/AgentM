@@ -36,8 +36,10 @@ from agentm.extensions import ExtensionManifest
 # MANIFEST
 # ---------------------------------------------------------------------------
 
+
 class AtomManagementConfig(BaseModel):
     pass
+
 
 MANIFEST = ExtensionManifest(
     name="atom_management",
@@ -54,11 +56,14 @@ MANIFEST = ExtensionManifest(
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
 
+
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+
 
 # ---------------------------------------------------------------------------
 # Tool parameter schemas
@@ -79,7 +84,7 @@ _INSTALL_PARAMETERS: Final = {
             "description": (
                 "Full Python module text. Must contain a top-level "
                 "``MANIFEST = ExtensionManifest(...)`` and an "
-                "``install(api, config)`` function. §11 single-file "
+                "``install(api, config)`` function. single-file "
                 "contract applies — no imports of other atom modules, "
                 "no agentm.core._internal, no agentm.core.runtime.session."
             ),
@@ -130,6 +135,7 @@ _LIST_PARAMETERS: Final = {
 # ---------------------------------------------------------------------------
 # install()
 # ---------------------------------------------------------------------------
+
 
 def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
     del config

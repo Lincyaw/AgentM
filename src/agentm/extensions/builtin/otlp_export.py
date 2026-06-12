@@ -43,12 +43,14 @@ from agentm.core.abi import ExtensionAPI, ExtensionLoadError
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+
 class OtlpExportConfig(BaseModel):
     endpoint: str | None = None
     protocol: str | None = None
     headers: str | None = None
     insecure: bool | None = None
     timeout: float | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="otlp_export",
@@ -57,7 +59,7 @@ MANIFEST = ExtensionManifest(
         "spans and logs are forwarded to a remote collector in addition to "
         "the on-disk ndjson file. Idempotent across sessions in one process."
     ),
-    registers=(),  # Attaches to process-global OTel providers; no §11 surface.
+    registers=(),  # Attaches to process-global OTel providers; no surface.
     config_schema=OtlpExportConfig,
     requires=("observability",),
     api_version=1,
@@ -69,6 +71,7 @@ MANIFEST = ExtensionManifest(
 # once or every export would be duplicated.
 _lock = threading.Lock()
 _attached = False
+
 
 def _parse_headers(raw: str | None) -> dict[str, str] | None:
     if not raw:
@@ -84,6 +87,7 @@ def _parse_headers(raw: str | None) -> dict[str, str] | None:
         if key:
             out[key] = value
     return out or None
+
 
 def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
     # Reach the process-level SDK TracerProvider + LoggerProvider through
@@ -103,9 +107,7 @@ def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
             or "http://localhost:4317"
         )
         protocol = (
-            config.protocol
-            or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
-            or "grpc"
+            config.protocol or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL") or "grpc"
         )
         if protocol not in ("grpc", "http/protobuf"):
             raise ExtensionLoadError(
@@ -125,9 +127,7 @@ def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
         else:
             insecure = bool(insecure_raw)
         timeout_raw: float | str = (
-            config.timeout
-            or os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT")
-            or 10
+            config.timeout or os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT") or 10
         )
         timeout = int(float(timeout_raw))
 
@@ -187,5 +187,6 @@ def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
 
         atexit.register(_shutdown)
         _attached = True
+
 
 __all__: Final = ["MANIFEST", "install"]

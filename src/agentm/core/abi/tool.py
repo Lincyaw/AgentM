@@ -89,7 +89,7 @@ class ToolTerminate(ToolOutcome):
     ``"rca:final-report-submitted"`` or ``"sandbox:shutdown"``.
     The kernel cannot enumerate scenario-defined reasons, so a
     namespaced string keeps observers safe from collisions when two
-    scenarios pick the same bare label. The §11 validator emits a
+    scenarios pick the same bare label. The validator emits a
     soft warning for unprefixed reasons; existing single-scenario
     reasons keep working.
     """

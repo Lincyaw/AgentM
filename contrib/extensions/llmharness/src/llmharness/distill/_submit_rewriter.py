@@ -1,4 +1,4 @@
-"""§11 single-file atom: ``submit_rewrite`` terminal tool.
+"""single-file atom: ``submit_rewrite`` terminal tool.
 
 Used by the Stage B GT-blind rewriter child of the distill labeler.
 """
@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 class DistillSubmitRewriterConfig(BaseModel):
     model_config = {"extra": "allow"}
+
 
 MANIFEST = ExtensionManifest(
     name="distill_submit_rewriter",
@@ -76,6 +77,7 @@ SUBMIT_REWRITE_PARAMETERS: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+
 def install(api: ExtensionAPI, config: DistillSubmitRewriterConfig) -> None:
 
     async def _submit(args: dict[str, Any]) -> ToolTerminate:
@@ -96,5 +98,6 @@ def install(api: ExtensionAPI, config: DistillSubmitRewriterConfig) -> None:
             fn=_submit,
         )
     )
+
 
 __all__ = ["MANIFEST", "SUBMIT_REWRITE_TOOL_NAME", "install"]

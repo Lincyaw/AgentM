@@ -355,6 +355,7 @@ class ExtensionAPI(Protocol):
         accept only paths inside their managed work-dir.
         """
         ...
+
     def register_message_renderer(
         self, custom_type: str, renderer: Renderer
     ) -> None: ...
@@ -422,7 +423,7 @@ class ExtensionAPI(Protocol):
         """Create a nested ``AgentSession`` rooted at this one.
 
         ``config`` is an ``AgentSessionConfig`` (typed ``Any`` here to avoid
-        pulling ``agentm.core.runtime.session`` into the §11 import allow-list).
+        pulling ``agentm.core.runtime.session`` into the import allow-list).
         The runtime fills in ``parent_bus`` and ``parent_session_id`` from
         the current session — caller-supplied values for those fields are
         ignored. Returns the constructed child session.
@@ -462,7 +463,7 @@ class ExtensionAPI(Protocol):
 
         - ``target_path`` is in the constitution
         - an atom with ``name`` is already loaded
-        - the source fails the §11 single-file extension validator
+        - the source fails the single-file extension validator
         - ``MANIFEST.tier == 2``: agent-installed atoms cannot ship at
           tier 2; promotion requires human review (separate flow)
 
@@ -517,6 +518,7 @@ class ExtensionAPI(Protocol):
         Cross-process embedders that already maintain an OTel span id
         can supply it on :class:`AgentSessionConfig.session_id`."""
         ...
+
     @property
     def root_session_id(self) -> str:
         """The OTel ``trace_id`` — 16 bytes / 32 hex chars — shared
@@ -528,6 +530,7 @@ class ExtensionAPI(Protocol):
         generates a fresh trace_id; for spawned children it inherits
         from the parent verbatim."""
         ...
+
     @property
     def parent_session_id(self) -> str | None:
         """``None`` for root sessions; the parent's ``session_id`` for
@@ -536,6 +539,7 @@ class ExtensionAPI(Protocol):
         atoms (notably the observability sink) can chain spans across
         sessions without an external mapping table."""
         ...
+
     @property
     def purpose(self) -> str:
         """Caller-defined label from :class:`AgentSessionConfig.purpose`,
@@ -544,6 +548,7 @@ class ExtensionAPI(Protocol):
         (e.g. ``cognitive_audit_extractor`` / ``cognitive_audit_auditor``)
         without inferring it from the loaded module list."""
         ...
+
     @property
     def scenario(self) -> str | None:
         """Scenario name from :class:`AgentSessionConfig.scenario` (e.g.
@@ -553,6 +558,7 @@ class ExtensionAPI(Protocol):
         fingerprint span — otherwise the trace file gives no in-band
         signal of which scenario produced it."""
         ...
+
     @property
     def tools(self) -> list[Tool]:
         """The live tool-catalog list for the session.

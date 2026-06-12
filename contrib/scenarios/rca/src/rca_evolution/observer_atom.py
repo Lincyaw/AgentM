@@ -1,4 +1,4 @@
-"""§11 atom: observer tools for the evolution divergence-analysis agent.
+"""atom: observer tools for the evolution divergence-analysis agent.
 
 Registers get_turn, get_gt_info, get_trajectory_summary, and
 submit_divergence_report. All data is passed via config at install time.
@@ -20,12 +20,14 @@ from rca_evolution.observer_tools import (
     build_submit_divergence_report_tool,
 )
 
+
 class EvolutionObserverConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     trajectory_snapshot: list[Any] = []
     gt_info: dict[str, Any] = {}
     trajectory_summary: str = "(no summary)"
+
 
 MANIFEST = ExtensionManifest(
     name="evolution_observer",
@@ -38,6 +40,7 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=EvolutionObserverConfig,
 )
+
 
 async def install(api: ExtensionAPI, config: EvolutionObserverConfig) -> None:
     snapshot = config.trajectory_snapshot

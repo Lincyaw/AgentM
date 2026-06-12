@@ -1,4 +1,4 @@
-"""§11 atom: distiller tools for the evolution skill-synthesis agent.
+"""atom: distiller tools for the evolution skill-synthesis agent.
 
 Registers browse_reports, get_report_summary, and submit_skill.
 All data is passed via config at install time.
@@ -20,12 +20,14 @@ from rca_evolution.distiller_tools import (
     build_submit_skill_tool,
 )
 
+
 class EvolutionDistillerConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     reports: list[Any] = []
     report_summary: str = "(no summary)"
     existing_skills: list[Any] = []
+
 
 MANIFEST = ExtensionManifest(
     name="evolution_distiller",
@@ -38,6 +40,7 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=EvolutionDistillerConfig,
 )
+
 
 async def install(api: ExtensionAPI, config: EvolutionDistillerConfig) -> None:
     reports = config.reports
