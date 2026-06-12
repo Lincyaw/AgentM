@@ -103,7 +103,7 @@ def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:
     directive = _build_directive(config.next_event_id, len(recent_events), config.tool_call_budget)
     system = f"{prompt_text}\n\n{directive}" if prompt_text else directive
 
-    def _before_start(event: BeforeAgentStartEvent) -> None:
-        event.system = system
+    def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
+        return {"system": system}
 
     api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
