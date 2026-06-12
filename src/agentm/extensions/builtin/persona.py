@@ -89,7 +89,13 @@ async def _build_block(
         sections.append(f"{_heading(name)}\n\n{body}")
     if not sections:
         return ""
-    return "# Persona\n\n" + "\n\n".join(sections)
+    return (
+        "# Persona\n\n"
+        "The following defines your identity for this conversation. Stay "
+        "consistent with this persona in tone, knowledge, and behavior "
+        "throughout the session. Do not contradict or step outside it.\n\n"
+        + "\n\n".join(sections)
+    )
 
 def _cwd_relative(path: Path, cwd: str) -> str:
     try:

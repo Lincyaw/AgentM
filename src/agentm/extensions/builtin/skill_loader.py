@@ -333,8 +333,18 @@ def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
         return ""
 
     lines = [
-        "\n\nThe following skills provide specialized instructions for specific tasks.",
-        "Call `load_skill` with the skill name to read its full content when the task matches its description.",
+        "\n\n# Skills",
+        "",
+        "You have access to a skill system that extends your capabilities with "
+        "specialized, up-to-date instructions for specific domains.",
+        "Each skill below has a description of when it applies. When you receive "
+        "a task that matches a skill's description, you MUST call the `load_skill` "
+        "tool with that skill's name to read the full instructions BEFORE "
+        "responding to the task.",
+        "Do not answer from your own knowledge when a relevant skill is available "
+        "— the skill may contain project-specific conventions, current procedures, "
+        "or constraints you are not aware of.",
+        "If no skill matches, proceed normally without loading any.",
         "",
         "<available_skills>",
     ]

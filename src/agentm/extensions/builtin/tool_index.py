@@ -34,7 +34,17 @@ def install(api: ExtensionAPI, _config: ToolIndexConfig) -> None:
         tools = api.tools
         if not tools:
             return
-        lines = ["<available_tools>"]
+        lines = [
+            "# Tools",
+            "",
+            "You have the following tools available. Use the appropriate tool "
+            "when the task calls for it — prefer tools over generating answers "
+            "from memory when a tool can provide authoritative, up-to-date "
+            "information. You may call multiple tools in a single turn if "
+            "needed.",
+            "",
+            "<available_tools>",
+        ]
         for tool in tools:
             lines.append("  <tool>")
             lines.append(f"    <name>{escape(tool.name)}</name>")

@@ -37,15 +37,16 @@ def _build_block(cwd: str) -> str:
         f"{platform.machine()}, Python {platform.python_version()}"
     )
     return (
+        "# Runtime Context\n\n"
         "<runtime_context>\n"
         f"workspace: {workspace}\n"
         f"runtime: {runtime}\n"
-        "</runtime_context>\n"
-        "\n"
-        "When the user asks where you are, what you can see, or what your "
-        "working directory is, answer from the workspace path above. Do not "
-        "guess and do not fall back to a home directory. All shell commands "
-        "run with this as cwd."
+        "</runtime_context>\n\n"
+        "This is your execution environment. When the user asks where you "
+        "are, what you can see, or what your working directory is, answer "
+        "from the workspace path above — do not guess or fall back to a "
+        "home directory. All file paths you reference and shell commands "
+        "you run use this workspace as the working directory."
     )
 
 def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:
