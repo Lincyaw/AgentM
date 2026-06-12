@@ -77,7 +77,7 @@ def run(
 
     log_level = "DEBUG" if verbose else "INFO"
     logger.remove()
-    logger.add(sys.stdout, level=log_level, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> <level>{level: <8}</level> <cyan>{file}:{line}</cyan> <level>{message}</level>")
+    logger.add(sys.stdout, level=log_level, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> <level>{level: <7}</level> <cyan>{file}:{line}</cyan> <level>{message}</level>")
     _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     _stdlib_logging.getLogger("httpx").setLevel(_stdlib_logging.WARNING)
     _stdlib_logging.getLogger("httpcore").setLevel(_stdlib_logging.WARNING)
