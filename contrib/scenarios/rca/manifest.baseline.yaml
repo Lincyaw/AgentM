@@ -4,5 +4,6 @@ task_class: rca_baseline
 
 includes:
   - overlays/base-investigator.yaml
+  - overlays/runtime-context.yaml
   - overlays/skills.yaml
   - overlays/turn-reminder.yaml
