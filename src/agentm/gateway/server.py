@@ -325,9 +325,7 @@ class WireServer:
             return
         if env.kind == KIND_PONG:
             return
-        logger.debug(
-            "server: ignoring unexpected kind %s from %s", env.kind, session.peer_id
-        )
+        logger.debug(f"server: ignoring unexpected kind {env.kind} from {session.peer_id}")
 
     # -- unified sender (§2.6 ordered delivery channel) --------------
 
@@ -354,11 +352,7 @@ class WireServer:
                     await asyncio.to_thread(
                         self._outbox.dead_letter, r.id, "max delivery attempts"
                     )
-                    logger.warning(
-                        "dead_letter peer=%s env_id=%s reason=max_attempts",
-                        peer_id,
-                        r.envelope.id,
-                    )
+                    logger.warning(f"dead_letter peer={peer_id} env_id={r.envelope.id} reason=max_attempts")
                     continue
                 session.send_q.put(r.envelope, r.id)
 
@@ -384,14 +378,7 @@ class WireServer:
                 depth = len(session.send_q)
                 session.pending_count_hint = depth
                 if depth > self._high_water and not session.backpressure:
-                    logger.warning(
-                        "slow_consumer peer=%s queued=%d high_water=%d "
-                        "dropped_ephemeral=%d",
-                        peer_id,
-                        depth,
-                        self._high_water,
-                        session.send_q.dropped_ephemeral,
-                    )
+                    logger.warning(f"slow_consumer peer={peer_id} queued={depth} high_water={self._high_water} dropped_ephemeral={session.send_q.dropped_ephemeral}")
                     session.backpressure = True
                 elif session.backpressure and depth <= self._low_water:
                     session.backpressure = False

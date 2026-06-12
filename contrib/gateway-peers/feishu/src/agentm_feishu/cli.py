@@ -699,9 +699,7 @@ async def _arun_multi(
                     try:
                         await a.handle_outbound(env)
                     except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "[%s] handle_outbound failed id=%s", bot_name, env.id
-                        )
+                        logger.exception(f"[{bot_name}] handle_outbound failed id={env.id}")
                 return
             if env.kind in (KIND_PING, KIND_PONG):
                 return
@@ -779,11 +777,7 @@ async def _arun_multi(
             )
         )
 
-    logger.info(
-        "agentm-feishu: started %d bot(s): %s",
-        len(bot_configs),
-        ", ".join(n for n, _ in bot_configs),
-    )
+    logger.info(f'agentm-feishu: started {len(bot_configs)} bot(s): {", ".join(n for n, _ in bot_configs)}')
 
     stop_task = asyncio.create_task(stop_event.wait(), name="feishu-multi-stop")
     all_tasks = [*tasks, stop_task]

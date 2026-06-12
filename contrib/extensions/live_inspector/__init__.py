@@ -333,11 +333,7 @@ class _Server:
         except asyncio.QueueFull:
             client.dropped += 1
             if client.dropped == 1 or client.dropped % 100 == 0:
-                logger.warning(
-                    "live_inspector: slow client dropped %d messages (root=%s)",
-                    client.dropped,
-                    self.root_session_id,
-                )
+                logger.warning(f"live_inspector: slow client dropped {client.dropped} messages (root={self.root_session_id})")
 
     async def _enqueue_one(self, client: _Client, record: dict[str, Any]) -> None:
         self._enqueue_sync(client, record)
@@ -458,9 +454,7 @@ def _get_or_create_server(
                 with open(url_file, "w", encoding="utf-8") as fh:
                     fh.write(url + "\n")
             except OSError:
-                logger.warning(
-                    "live_inspector: failed to write url_file=%s", url_file
-                )
+                logger.warning(f"live_inspector: failed to write url_file={url_file}")
     return srv
 
 class _BusObserver(EventBusObserver):

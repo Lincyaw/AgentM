@@ -243,14 +243,7 @@ class AgentSession:
         drained = self._inbox.drain()
         if not drained:
             return
-        logger.warning(
-            "agentm session driver: discarded %d undrained inbox "
-            "item(s) after a pre-context-event early return (%s; "
-            "sources=%r) to avoid driver spin",
-            len(drained),
-            reason,
-            [item.source for item in drained],
-        )
+        logger.warning(f"agentm session driver: discarded {len(drained)} undrained inbox item(s) after a pre-context-event early return ({reason}; sources={[item.source for item in drained]!r}) to avoid driver spin")
         # ``payload`` may be a JSON-native shape (str / dict / list of
         # TextContent/ImageContent dataclasses). The session manager runs the
         # whole payload through to_jsonable before persisting, so attaching
@@ -763,10 +756,7 @@ class AgentSession:
         except asyncio.CancelledError:
             pass
         except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "agentm session driver: shutdown await raised (%s); continuing",
-                type(exc).__name__,
-            )
+            logger.exception(f"agentm session driver: shutdown await raised ({type(exc).__name__}); continuing")
             driver_exc = exc
 
         for fut in self._end_waiters:
@@ -813,11 +803,7 @@ class AgentSession:
             try:
                 shutil.rmtree(self._eval_sandbox, ignore_errors=True)
             except Exception as exc:  # noqa: BLE001 - shutdown best-effort
-                logger.warning(
-                    "failed to clean eval sandbox %s: %r",
-                    self._eval_sandbox,
-                    exc,
-                )
+                logger.warning(f"failed to clean eval sandbox {self._eval_sandbox}: {exc!r}")
 
         # B6 boundary-review fix: in strict mode, propagate the captured
         # driver exception AFTER cleanup finished. The bus is drained, the

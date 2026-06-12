@@ -185,8 +185,8 @@ async def offline_audit(
 
     turn_bounds = _turn_end_prefix_lengths(messages)
     logger.info(
-        "offline_audit: %d messages, %d turns, firing at extractor=%d auditor=%d",
-        len(messages), len(turn_bounds), extractor_interval, audit_interval,
+        f"offline_audit: {len(messages)} messages, {len(turn_bounds)} turns, "
+        f"firing at extractor={extractor_interval} auditor={audit_interval}"
     )
 
     total_ext_ops = 0
@@ -233,10 +233,7 @@ async def offline_audit(
                 ext_sid = ext_result.session_id
 
                 if ext_result.error:
-                    logger.warning(
-                        "  extractor turn=%d FAILED: %s (sid=%s)",
-                        turn_number, ext_result.error, ext_sid,
-                    )
+                    logger.warning(f"  extractor turn={turn_number} FAILED: {ext_result.error} (sid={ext_sid})")
                 else:
                     from .atom import _read_ops_file
 
@@ -245,10 +242,7 @@ async def offline_audit(
                     total_ext_ops += n_ops
 
                     if n_ops == 0:
-                        logger.warning(
-                            "  extractor turn=%d: 0 ops (LLM did not produce graph edits) sid=%s",
-                            turn_number, ext_sid,
-                        )
+                        logger.warning(f"  extractor turn={turn_number}: 0 ops (LLM did not produce graph edits) sid={ext_sid}")
                     else:
                         cumulative.absorb_extractor_firing(
                             firing_ops=ops,
@@ -265,9 +259,8 @@ async def offline_audit(
 
             if not events:
                 logger.warning(
-                    "  auditor turn=%d: graph is EMPTY (all extractors failed or produced 0 ops), "
-                    "auditor will have nothing to judge. total_ext_ops so far=%d",
-                    turn_number, total_ext_ops,
+                    f"  auditor turn={turn_number}: graph is EMPTY (all extractors failed or produced 0 ops), "
+                    f"auditor will have nothing to judge. total_ext_ops so far={total_ext_ops}"
                 )
 
             _AUD_CTX = "llmharness.agents.auditor.context"
@@ -307,29 +300,21 @@ async def offline_audit(
 
             surfaced = False
             if aud_result.error:
-                logger.warning(
-                    "  auditor turn=%d FAILED: %s (sid=%s)",
-                    turn_number, aud_result.error, aud_result.session_id,
-                )
+                logger.warning(f"  auditor turn={turn_number} FAILED: {aud_result.error} (sid={aud_result.session_id})")
             elif aud_result.output is None:
-                logger.warning(
-                    "  auditor turn=%d: no output (sid=%s)", turn_number, aud_result.session_id,
-                )
+                logger.warning(f"  auditor turn={turn_number}: no output (sid={aud_result.session_id})")
             else:
                 verdict_raw = aud_result.output.get("verdict") or aud_result.output
                 if not isinstance(verdict_raw, dict):
                     logger.warning(
-                        "  auditor turn=%d: verdict is not a dict: %s (sid=%s)",
-                        turn_number, type(verdict_raw).__name__, aud_result.session_id,
+                        f"  auditor turn={turn_number}: verdict is not a dict: "
+                        f"{type(verdict_raw).__name__} (sid={aud_result.session_id})"
                     )
                 else:
                     try:
                         verdict = Verdict.from_dict(verdict_raw)
                     except (KeyError, TypeError, ValueError) as exc:
-                        logger.warning(
-                            "  auditor turn=%d: malformed verdict: %s (sid=%s)",
-                            turn_number, exc, aud_result.session_id,
-                        )
+                        logger.warning(f"  auditor turn={turn_number}: malformed verdict: {exc} (sid={aud_result.session_id})")
                     else:
                         cumulative.absorb_auditor_verdict(verdict.to_dict())
                         if verdict.surface_reminder and verdict.reminder_text:
@@ -342,10 +327,7 @@ async def offline_audit(
                             )
 
             fire_mark = " ★ SURFACE" if surfaced else ""
-            logger.info(
-                "  auditor  turn=%d graph=%d sid=%s%s",
-                turn_number, len(events), aud_result.session_id, fire_mark,
-            )
+            logger.info(f"  auditor  turn={turn_number} graph={len(events)} sid={aud_result.session_id}{fire_mark}")
             firings.append(
                 AuditFiring(
                     turn_number=turn_number,
@@ -355,8 +337,5 @@ async def offline_audit(
                 )
             )
 
-    logger.info(
-        "offline_audit done: %d firings, %d surfaces, %d total graph ops",
-        len(firings), len(surfaces), total_ext_ops,
-    )
+    logger.info(f"offline_audit done: {len(firings)} firings, {len(surfaces)} surfaces, {total_ext_ops} total graph ops")
     return OfflineAuditResult(surfaces=surfaces, firings=firings)

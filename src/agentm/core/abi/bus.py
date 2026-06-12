@@ -382,9 +382,7 @@ class EventBus:
                 if inspect.isawaitable(value):
                     value = await value
             except Exception as exc:
-                logger.exception(
-                    "Event handler raised on channel %r; suppressing.", channel
-                )
+                logger.exception(f"Event handler raised on channel {channel!r}; suppressing.")
                 err = exc
                 value = None
             if observe_handlers:
@@ -471,16 +469,10 @@ class EventBus:
                     if self._strict_sync_handlers and async_violation is None:
                         async_violation = (channel, h)
                     else:
-                        logger.warning(
-                            "Async handler on channel %r skipped during emit_sync; "
-                            "use a sync handler or subscribe via an async-only channel.",
-                            channel,
-                        )
+                        logger.warning(f"Async handler on channel {channel!r} skipped during emit_sync; use a sync handler or subscribe via an async-only channel.")
                     value = None
             except Exception as exc:
-                logger.exception(
-                    "Event handler raised on channel %r; suppressing.", channel
-                )
+                logger.exception(f"Event handler raised on channel {channel!r}; suppressing.")
                 err = exc
                 value = None
             if observe_handlers:
