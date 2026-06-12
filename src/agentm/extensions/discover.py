@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import logging
+from loguru import logger
 import pkgutil
 import sys
 from dataclasses import dataclass
@@ -27,7 +27,6 @@ from typing import Any
 
 from agentm.extensions import ExtensionManifest
 
-logger = logging.getLogger(__name__)
 
 CONTRIB_ATOM_MODULE_PREFIX = "_agentm_contrib__"
 """Synthetic module-name prefix for atoms discovered under

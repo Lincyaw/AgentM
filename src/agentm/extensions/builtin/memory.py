@@ -38,7 +38,7 @@ restarts and can be mined by future evolution/query atoms.
 from __future__ import annotations
 
 import json
-import logging
+from loguru import logger
 import re
 import time
 from pathlib import Path
@@ -56,7 +56,6 @@ from agentm.core.abi import (
 from agentm.core.lib import parse_frontmatter
 from agentm.extensions import ExtensionManifest
 
-logger = logging.getLogger(__name__)
 
 _VALID_TYPES: Final[tuple[str, ...]] = ("feedback", "project", "user", "reference")
 _NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")

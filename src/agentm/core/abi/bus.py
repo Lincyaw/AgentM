@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import bisect
 import inspect
-import logging
+from loguru import logger
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
         TurnStartEvent,
     )
 
-logger = logging.getLogger(__name__)
 
 
 # A handler may be sync or async; it returns anything (the bus collects).

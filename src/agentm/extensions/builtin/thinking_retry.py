@@ -13,7 +13,7 @@ counter caps consecutive thinking-only retries to prevent infinite loops.
 
 from __future__ import annotations
 
-import logging
+from loguru import logger
 from typing import Any
 
 from pydantic import BaseModel
@@ -30,7 +30,6 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 
-_logger = logging.getLogger(__name__)
 
 class ThinkingRetryConfig(BaseModel):
     max_retries: int = 3
@@ -80,13 +79,13 @@ def install(api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
 
         consecutive_count += 1
         if consecutive_count > max_retries:
-            _logger.warning(
+            logger.warning(
                 "thinking_retry: exhausted %d retries; stopping", max_retries
             )
             consecutive_count = 0
             return None
 
-        _logger.info(
+        logger.info(
             "thinking_retry: thinking-only response (%d/%d); stepping",
             consecutive_count,
             max_retries,

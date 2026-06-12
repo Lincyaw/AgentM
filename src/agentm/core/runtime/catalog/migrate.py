@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import logging
+from loguru import logger
 import shutil
 from pathlib import Path
 
 from agentm.core.runtime.catalog import _layout
-
-logger = logging.getLogger(__name__)
 
 _MIGRATION_MARKER = ".migration-v2"
 _LEGACY_FILES = {"source.py", "manifest.yaml"}

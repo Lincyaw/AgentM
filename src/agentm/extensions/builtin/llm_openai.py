@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
-import logging
+from loguru import logger
 import os
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -83,7 +83,6 @@ from agentm.core.lib.tool_schema import _force_strict
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from openai import AsyncOpenAI
 
-logger = logging.getLogger(__name__)
 
 class LlmOpenaiConfig(BaseModel):
     model_config = ConfigDict(extra="allow")

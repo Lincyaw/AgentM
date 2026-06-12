@@ -37,7 +37,7 @@ harness event from ``agentm.core.abi.events``.
 from __future__ import annotations
 
 import json
-import logging
+from loguru import logger
 import time
 from pathlib import Path
 from typing import Any
@@ -47,7 +47,6 @@ from pydantic import BaseModel
 from agentm.core.abi import ExtensionAPI, SessionReadyEvent, TraceReader
 from agentm.extensions import ExtensionManifest
 
-logger = logging.getLogger(__name__)
 
 _DEFAULT_RECENT_N = 20
 _DEFAULT_MIN_SAMPLES = 5

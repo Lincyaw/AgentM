@@ -8,7 +8,7 @@ layers and is not derivable from raw observability.
 from __future__ import annotations
 
 import json
-import logging
+from loguru import logger
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -20,7 +20,6 @@ import typer
 from agentm.core.runtime.catalog import _layout
 from agentm.core.lib.trace_reader import TraceReader
 
-logger = logging.getLogger(__name__)
 _LEGACY_FINGERPRINT_WARNED = False
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+from loguru import logger
 import shutil
 from pathlib import Path
 from typing import Any
@@ -46,7 +46,6 @@ from agentm.core.runtime.session_inbox import (
 from agentm.core.runtime.session_factory import SessionRuntime
 from agentm.core.runtime.session_manager import SessionManager
 
-logger = logging.getLogger(__name__)
 
 # Grace window for ``AgentSession.shutdown`` to await the persistent driver
 # task before forcing cancellation. Pulled from the shared substrate default

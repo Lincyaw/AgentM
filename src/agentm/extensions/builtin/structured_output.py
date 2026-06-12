@@ -17,15 +17,13 @@ schema-constrained terminal tool.
 from __future__ import annotations
 
 import json
-import logging
+from loguru import logger
 from typing import Any
 
 from pydantic import BaseModel
 
 from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
 from agentm.extensions import ExtensionManifest
-
-_log = logging.getLogger(__name__)
 
 
 class StructuredOutputConfig(BaseModel):
@@ -62,7 +60,7 @@ def install(api: Any, config: StructuredOutputConfig) -> None:
         _validate_fn = _jschema_validate
         _validation_error_cls = ValidationError
     except ImportError:
-        _log.debug(
+        logger.debug(
             "jsonschema not installed; submit_result will skip validation "
             "(LLM schema enforcement at the provider level is the primary gate)"
         )

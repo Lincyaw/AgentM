@@ -6,14 +6,13 @@ to empty defaults — the config file is always optional.
 
 from __future__ import annotations
 
-import logging
+from loguru import logger
 import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypedDict
 
-logger = logging.getLogger(__name__)
 
 
 class ModelBuildConfig(TypedDict, total=False):

@@ -57,7 +57,7 @@ import hashlib
 import importlib.util
 import inspect
 import json
-import logging
+from loguru import logger
 import os
 import sys
 import textwrap
@@ -85,7 +85,6 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 
-_log = logging.getLogger(__name__)
 _T = TypeVar("_T")
 _M = TypeVar("_M", bound=BaseModel)
 
@@ -503,7 +502,7 @@ class _WorkflowRun:
             except TimeoutError as exc:
                 last_error = exc
                 if attempt < retry:
-                    _log.warning(
+                    logger.warning(
                         "workflow agent timed out (prompt=%.60s…), "
                         "retrying (%d left)", prompt, retry - attempt,
                     )
@@ -518,7 +517,7 @@ class _WorkflowRun:
             parsed = _auto_parse(result)
 
             if _is_agent_error(parsed) and attempt < retry:
-                _log.warning(
+                logger.warning(
                     "workflow agent failed (prompt=%.60s…), retrying (%d left)",
                     prompt, retry - attempt,
                 )
@@ -532,7 +531,7 @@ class _WorkflowRun:
                 except (ValidationError, TypeError) as exc:
                     last_error = exc
                     if attempt < retry:
-                        _log.warning(
+                        logger.warning(
                             "workflow structured output invalid for %s "
                             "(prompt=%.60s…), retrying (%d left)",
                             model_cls.__name__, prompt, retry - attempt,
@@ -687,7 +686,7 @@ class _WorkflowRun:
                 with contextlib.suppress(Exception):
                     await child.shutdown()
         except Exception as exc:
-            _log.warning(
+            logger.warning(
                 "workflow agent spawn/prompt failed: %s: %s",
                 type(exc).__name__, exc,
             )
@@ -875,7 +874,7 @@ def _final_session_output(messages: list[AgentMessage]) -> str:
                 if isinstance(text, str) and text:
                     return text
 
-    _log.warning(
+    logger.warning(
         "workflow agent produced no output — "
         "it may have exhausted its tool budget without calling a finalize tool"
     )
@@ -1311,7 +1310,7 @@ class WorkflowRunner:
                 tags=tags,
             )
         except Exception:
-            _log.debug("workflow_delivery artifact write failed", exc_info=True)
+            logger.debug("workflow_delivery artifact write failed", exc_info=True)
 
     async def run_file(
         self,
@@ -1367,7 +1366,7 @@ class WorkflowRunner:
             raise WorkflowValidationError(errors)
         for w in issues:
             if w.severity == "warning":
-                _log.warning("workflow line %d: %s", w.line, w.message)
+                logger.warning("workflow line %d: %s", w.line, w.message)
 
         self._last_run = run = _WorkflowRun(
             api=self._api,
