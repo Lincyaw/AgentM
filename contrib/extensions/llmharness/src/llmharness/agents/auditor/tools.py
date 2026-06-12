@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Self
+from typing import Any
 
 from agentm.core.abi import (
     ExtensionAPI,
@@ -13,6 +13,7 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from typing_extensions import Self
 
 SUBMIT_VERDICT_TOOL_NAME = "submit_verdict"
 

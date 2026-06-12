@@ -192,6 +192,11 @@ or genuinely ambiguous requirements that research cannot resolve.)
 - **No preset enums for subjective fields** — free-text + LLM-decided.
 - **Auto-commit awareness**: `agentm` auto-commits during sessions; run
   E2E in a sandbox, never on `main`.
+- **No destructive git**: `git reset --hard`, `git checkout -- .`,
+  `git clean -f` and any other command that discards uncommitted work are
+  **forbidden**. Always use recoverable alternatives (`git stash`,
+  `git revert`, `git reset --soft`, worktree isolation). Uncommitted
+  changes in the working tree may contain the user's in-progress work.
 
 ## Requirements index
 

@@ -229,7 +229,8 @@ async def _run_child(
     try:
         child = await api.spawn_child_session(config)
         try:
-            return await child.prompt(prompt)
+            result: list[AgentMessage] = await child.prompt(prompt)
+            return result
         finally:
             with contextlib.suppress(Exception):
                 await child.shutdown()

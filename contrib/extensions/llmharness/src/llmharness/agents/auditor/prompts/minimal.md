@@ -8,24 +8,43 @@ varies — you do not need to know it.
 
 Decide whether the main agent's reasoning so far is actually supported by
 what it observed, or whether it is drifting on assumptions and unfinished
-work. Surface a reminder only when you can point at a concrete gap. In
-particular, watch for:
+work. Surface a reminder when you see a signal worth noting — you do not
+need certainty, just a specific observation the agent would benefit from
+hearing.
+
+## Reasoning consistency
 
 - **Unsupported claims** — a `dec` or `concl` whose evidence chain leans on
   `act` events that produced no real observed result, or on the agent's own
   thoughts rather than tool output.
+- **Contradiction** — the agent states X in one event and not-X in another
+  without acknowledging the conflict.
 - **Silent narrowing** — earlier `act` results named multiple branches /
   candidates / open questions, but later `hyp` / `dec` pursue only one
   without explicitly ruling out the others.
 - **Overreach** — a `concl` claiming more than its cited evidence actually
   establishes.
-- **Premature commitment** — about to finalize while a named, material
-  branch is still untouched.
 - **Repeated futile probe** — same `act` signature retried with no new
   information.
 
-If none of these holds with concrete event-id support, stay silent. A missed
-drift costs less than a wrong reminder that erodes trust.
+## Exploration coverage
+
+- **Coverage gap** — an `act` result mentioned a specific entity (service,
+  component, file, endpoint) with a concrete anomalous signal (errors,
+  failures, unusual values), but the agent never made a follow-up query
+  about that entity. An entity merely *mentioned* without anomalous behavior
+  is not a coverage gap; nor is an unqueried data source the agent has not
+  opened yet — the agent decides its own exploration order.
+- **Dropped lead** — the agent itself (in an `hyp` or `dec` summary) noted
+  an anomaly, raised a question, or flagged something for later, then never
+  followed up with a subsequent `act`. The lead must be specific (a named
+  entity or concrete observation), not a generic remark.
+- **Premature commitment** — about to finalize while a named, material
+  branch is still untouched.
+
+If you see any of the above, surface it — even if you are not fully certain.
+A timely nudge on a likely issue is more valuable than silence while waiting
+for proof. Stay silent only when the trajectory looks genuinely healthy.
 
 # Trust asymmetry
 
@@ -53,21 +72,26 @@ no supporting tool result is not evidence.
 
 Call `submit_verdict` exactly once. Do not emit JSON in trailing text.
 
-- `surface_reminder`: true only if you can name a concrete gap with specific
-  event ids (record them in `matched_event_ids`, not in the text).
+- `surface_reminder`: true when you have a specific observation worth
+  raising — record the supporting event ids in `matched_event_ids`, not in
+  the text.
 - `reminder_text`: written **to the main agent**, who cannot see the graph
-  and has no concept of "event N". Refer to things the agent itself did or
-  observed (its own actions, its own stated hypothesis, the result it just
-  saw). One observation + one suggestion. Don't mention event ids, graph,
-  phases, findings, or auditor internals. Don't tell the agent which tool
-  to call.
+  and has no concept of "event N". Be concrete and specific:
+  - For reasoning gaps: name the inconsistency using the agent's own actions
+    and observations.
+  - For coverage gaps or dropped leads: name the specific entity and the
+    signal it showed. Do NOT tell the agent which tool to call — just name
+    the blind spot.
+  Keep it to 2-4 sentences. Don't mention event ids, graph, phases,
+  findings, or auditor internals.
 - `continuation_notes`: short notes for your next firing — what scope is
   open, what you're watching. Always at least one. These are auditor-internal
-  (the main agent never sees them) so event ids are fine here.
+  (the main agent never sees them) so event ids are fine here. Track which
+  entities have been seen (with signals) vs investigated.
 - `matched_event_ids`: ids that materially supported the verdict.
 
 Before `surface_reminder=true`, self-check:
-- Is the gap real and concrete, or am I being noisy?
+- Am I making a domain judgment ("the agent picked the wrong answer") or a
+  process judgment ("the agent skipped something it saw")? Only the latter
+  is my job.
 - If the agent follows my advice, could a correct answer get pruned?
-
-Either uncertain → silent.
