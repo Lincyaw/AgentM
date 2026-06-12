@@ -57,16 +57,16 @@ class TokenAuthenticator:
         transport: asyncio.StreamWriter,  # noqa: ARG002 — token auth ignores transport
     ) -> bool:
         if token is None or token == "":
-            logger.warning("token reject: peer=%s — no token presented", peer_id)
+            logger.warning(f"token reject: peer={peer_id} — no token presented")
             return False
         # Constant-time membership check (issue #3): naive ``in`` against
         # a set leaks a timing oracle on the comparing bytes. Walk the
         # whole allow-list with ``hmac.compare_digest`` and only branch
         # on the OR-accumulated result.
         if _constant_time_membership(str(token), self._allowed_tokens):
-            logger.info("token accept: peer=%s", peer_id)
+            logger.info(f"token accept: peer={peer_id}")
             return True
-        logger.warning("token reject: peer=%s — token not in allow-list", peer_id)
+        logger.warning(f"token reject: peer={peer_id} — token not in allow-list")
         return False
 
 

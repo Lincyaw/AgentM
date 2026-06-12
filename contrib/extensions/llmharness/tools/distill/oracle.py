@@ -225,7 +225,7 @@ async def run_oracle(
         purpose="distill_oracle",
     )
     if result.status != "ok" or not isinstance(result.output, dict):
-        logger.warning("oracle phase non-ok: status=%s error=%s", result.status, result.error)
+        logger.warning(f"oracle phase non-ok: status={result.status} error={result.error}")
         return None
     args = result.output
     return OracleLabel(
@@ -261,7 +261,7 @@ async def run_rewriter(
         purpose="distill_rewriter",
     )
     if result.status != "ok" or not isinstance(result.output, dict):
-        logger.warning("rewriter phase non-ok: status=%s error=%s", result.status, result.error)
+        logger.warning(f"rewriter phase non-ok: status={result.status} error={result.error}")
         return None
     args = result.output
     return RewriterOutput(

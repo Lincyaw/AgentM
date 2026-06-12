@@ -66,7 +66,7 @@ def load_bot_configs() -> list[tuple[str, FeishuConfig]]:
         with open(path, "rb") as fh:
             data = tomllib.load(fh)
     except Exception:
-        logger.warning("config.toml: failed to parse %s", path, exc_info=True)
+        logger.opt(exception=True).warning(f"config.toml: failed to parse {path}")
         return []
 
     feishu = data.get("feishu")

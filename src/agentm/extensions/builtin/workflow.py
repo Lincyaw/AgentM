@@ -1310,7 +1310,7 @@ class WorkflowRunner:
                 tags=tags,
             )
         except Exception:
-            logger.debug("workflow_delivery artifact write failed", exc_info=True)
+            logger.opt(exception=True).debug("workflow_delivery artifact write failed")
 
     async def run_file(
         self,
@@ -1366,7 +1366,7 @@ class WorkflowRunner:
             raise WorkflowValidationError(errors)
         for w in issues:
             if w.severity == "warning":
-                logger.warning("workflow line %d: %s", w.line, w.message)
+                logger.warning(f"workflow line {w.line}: {w.message}")
 
         self._last_run = run = _WorkflowRun(
             api=self._api,

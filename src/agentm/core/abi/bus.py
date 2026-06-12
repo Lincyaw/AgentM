@@ -417,7 +417,7 @@ class EventBus:
                 if callable(callback):
                     logger.exception("EventBus observer callback raised; suppressing.")
                 else:
-                    logger.exception("EventBus observer.%s raised; suppressing.", method)
+                    logger.exception(f"EventBus observer.{method} raised; suppressing.")
         observer = self._observer
         if observer is None:
             return
@@ -427,7 +427,7 @@ class EventBus:
                 return
             observer_method(*args)
         except Exception:
-            logger.exception("EventBus observer.%s raised; suppressing.", method)
+            logger.exception(f"EventBus observer.{method} raised; suppressing.")
 
     def emit_sync(self, channel: str, event: Any) -> list[Any]:
         """Synchronous emit — runs only sync handlers; coroutine-returning

@@ -281,7 +281,7 @@ class WireClient:
                 continue
             # Success — reset backoff and notify.
             backoff = self._backoff_base
-            logger.info("wire client peer=%s reconnected", self._peer_name)
+            logger.info(f"wire client peer={self._peer_name} reconnected")
             if on_connect is not None:
                 await on_connect(False)
 
@@ -369,7 +369,7 @@ class WireClient:
             # an unexpected disconnect — the supervisor must not re-dial.
             raise
         except Exception:
-            logger.exception("client read loop crashed for peer=%s", self._peer_name)
+            logger.exception(f"client read loop crashed for peer={self._peer_name}")
         finally:
             # Any non-cancel exit is an unexpected drop. Mark disconnected so
             # the reconnect supervisor (if any) wakes and re-dials; harmless

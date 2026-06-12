@@ -137,7 +137,7 @@ def load_user_config() -> UserConfig:
         with open(path, "rb") as fh:
             data = tomllib.load(fh)
     except Exception:
-        logger.warning("config.toml: failed to parse %s; using defaults", path, exc_info=True)
+        logger.opt(exception=True).warning(f"config.toml: failed to parse {path}; using defaults")
         _cached = _EMPTY
         return _cached
 

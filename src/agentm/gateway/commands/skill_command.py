@@ -78,7 +78,7 @@ class SkillCommand:
         try:
             raw = skill_md.read_text(encoding="utf-8")
         except OSError as exc:
-            logger.warning("skill %s: cannot read %s: %s", self.name, skill_md, exc)
+            logger.warning(f"skill {self.name}: cannot read {skill_md}: {exc}")
             return CommandResult(
                 expanded_prompt=(
                     f"The user invoked /skill:{self.name} but the skill body "

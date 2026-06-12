@@ -70,7 +70,7 @@ class CommandRouter:
         try:
             return await handler.handle(inv, ctx)
         except Exception:
-            logger.exception("command %r raised", inv.raw)
+            logger.exception(f"command {inv.raw!r} raised")
             return CommandResult(
                 outbound=[
                     ctx.reply(

@@ -114,7 +114,7 @@ def install(api: ExtensionAPI, config: ToolGuardWatchConfig) -> None:
             )
         except Exception as exc:  # noqa: BLE001
             # Watcher must never break a session start.
-            logger.warning("guard_watch: _on_ready failed: %s", exc)
+            logger.warning(f"guard_watch: _on_ready failed: {exc}")
             return
 
     api.on(SessionReadyEvent.CHANNEL, _on_ready)

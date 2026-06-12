@@ -206,7 +206,7 @@ async def replay_one(
         surfaces = audit_result.surfaces
         audit_firings = audit_result.firings
     except Exception as exc:
-        logger.exception("offline_audit failed for %s", session_id)
+        logger.exception(f"offline_audit failed for {session_id}")
         return ReplayResult(
             case_id=session_id,
             fired=False,
@@ -240,7 +240,7 @@ async def replay_one(
         finally:
             await session.shutdown()
     except Exception as exc:
-        logger.exception("fork continuation failed for %s", session_id)
+        logger.exception(f"fork continuation failed for {session_id}")
         return ReplayResult(
             case_id=session_id,
             fired=True,

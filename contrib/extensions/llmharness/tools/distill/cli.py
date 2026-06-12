@@ -129,7 +129,7 @@ async def _label_session(
     # meta sidecar lives next to it as <sid>.meta.json.
     meta = read_sample_meta(replay_file.with_suffix(".meta.json"))
     if meta is None:
-        logger.warning("no meta sidecar for %s; skipping", replay_file.name)
+        logger.warning(f"no meta sidecar for {replay_file.name}; skipping")
         return 0, 0
 
     gt = gt_index.get(meta.sample_id)

@@ -87,7 +87,7 @@ def _resolve_provider(
 
         profile = resolve_model_profile(model_name)
         if profile is None:
-            logger.warning("model profile %r not found in config.toml", model_name)
+            logger.warning(f"model profile {model_name!r} not found in config.toml")
             return None
         ext_module: str | None = None
         for desc in DEFAULT_PROVIDER_DESCRIPTORS:
@@ -198,7 +198,7 @@ def _read_ops_file(path: Path) -> list[GraphOp]:
         try:
             ops.append(parse_op(json.loads(line)))
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-            logger.warning("skipping malformed op line in %s", path)
+            logger.warning(f"skipping malformed op line in {path}")
     return ops
 
 
@@ -234,7 +234,7 @@ async def _run_child(
             with contextlib.suppress(Exception):
                 await child.shutdown()
     except Exception:
-        logger.exception("child session failed (purpose=%s)", purpose)
+        logger.exception(f"child session failed (purpose={purpose})")
         return None
 
 
@@ -463,7 +463,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         try:
             await asyncio.wait_for(worker_task, timeout=shutdown_timeout)
         except asyncio.TimeoutError:
-            logger.warning("audit drain exceeded %.1fs; cancelling", shutdown_timeout)
+            logger.warning(f"audit drain exceeded {shutdown_timeout:.1f}s; cancelling")
             worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await worker_task

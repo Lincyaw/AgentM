@@ -552,7 +552,7 @@ class FeishuAdapter:
             return
         chat_id = str(body.get("chat_id") or "")
         if not chat_id:
-            logger.warning("outbound dropped: empty chat_id (env id=%s)", env.id)
+            logger.warning(f"outbound dropped: empty chat_id (env id={env.id})")
             return
         raw_meta = body.get("metadata")
         meta = raw_meta if isinstance(raw_meta, dict) else {}
@@ -742,7 +742,7 @@ class FeishuAdapter:
                 else:
                     await self._channel.update_card(turn.message_id, card)
             except Exception:
-                logger.exception("[feishu] live card render failed (chat=%s)", turn.chat_id)
+                logger.exception(f"[feishu] live card render failed (chat={turn.chat_id})")
                 return
             turn.last_render = time.monotonic()
 
@@ -796,7 +796,7 @@ class FeishuAdapter:
         try:
             result = await self._channel.add_reaction(message_id, emoji)
         except Exception:
-            logger.exception("[feishu] add_reaction failed for %s", message_id)
+            logger.exception(f"[feishu] add_reaction failed for {message_id}")
             return None
         raw = getattr(result, "raw", None) or {}
         data = raw.get("data") if isinstance(raw, dict) else None

@@ -29,7 +29,7 @@ def migrate_catalog_v2(*, root: Path | None = None) -> bool:
                     continue
                 legacy = _migrate_legacy_version_dir(version_dir)
                 if legacy:
-                    logger.info("catalog migration marked legacy version dir %s", legacy)
+                    logger.info(f"catalog migration marked legacy version dir {legacy}")
 
     catalog_root.mkdir(parents=True, exist_ok=True)
     marker.write_text("ok\n", encoding="utf-8")

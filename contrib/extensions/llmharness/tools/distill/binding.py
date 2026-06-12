@@ -119,7 +119,7 @@ def install(api: ExtensionAPI, config: DistillBindingConfig) -> None:
             encoding="utf-8",
         )
     except OSError:
-        logger.warning("distill_binding sidecar write failed: %s", path, exc_info=True)
+        logger.opt(exception=True).warning(f"distill_binding sidecar write failed: {path}")
 
 __all__ = [
     "MANIFEST",

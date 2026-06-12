@@ -804,7 +804,7 @@ class AgentSession:
             if trace_path.is_file():
                 index_trace(trace_path)
         except Exception as exc:
-            logger.warning("agentm catalog indexer post-shutdown failed: %r", exc)
+            logger.warning(f"agentm catalog indexer post-shutdown failed: {exc!r}")
 
         # Tear down the eval sandbox dir if this session created one for
         # ``atom_source_overrides``. Best-effort: any failure is logged but
