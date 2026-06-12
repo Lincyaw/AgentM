@@ -130,6 +130,7 @@ source = { editable = "contrib/gateway-peers/feishu" }
 dependencies = [
     { name = "agentm" },
     { name = "lark-oapi" },
+    { name = "loguru" },
     { name = "python-dotenv" },
     { name = "typer" },
 ]
@@ -146,6 +147,7 @@ dev = [
 requires-dist = [
     { name = "agentm", editable = "." },
     { name = "lark-oapi", specifier = ">=1.6" },
+    { name = "loguru", specifier = ">=0.7" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
@@ -194,6 +196,7 @@ version = "0.2.0"
 source = { editable = "contrib/gateway-peers/terminal" }
 dependencies = [
     { name = "agentm" },
+    { name = "loguru" },
     { name = "textual" },
     { name = "typer" },
 ]
@@ -209,6 +212,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agentm", editable = "." },
+    { name = "loguru", specifier = ">=0.7" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
@@ -1652,6 +1656,7 @@ name = "llmharness"
 version = "0.6.0"
 source = { editable = "contrib/extensions/llmharness" }
 dependencies = [
+    { name = "loguru" },
     { name = "pydantic" },
     { name = "typer" },
 ]
@@ -1665,6 +1670,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "loguru", specifier = ">=0.7" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
@@ -2887,6 +2893,7 @@ source = { editable = "contrib/scenarios/rca" }
 dependencies = [
     { name = "agentm" },
     { name = "duckdb" },
+    { name = "loguru" },
     { name = "pydantic" },
     { name = "pytz" },
     { name = "rcabench-platform", extra = ["llm-eval", "sdk"] },
@@ -2897,6 +2904,7 @@ dependencies = [
 requires-dist = [
     { name = "agentm", editable = "." },
     { name = "duckdb", specifier = ">=1.4.4" },
+    { name = "loguru", specifier = ">=0.7" },
     { name = "pydantic", specifier = ">=2.11.0" },
     { name = "pytz", specifier = ">=2025.1" },
     { name = "rcabench-platform", extras = ["sdk", "llm-eval"], specifier = ">=0.4.44" },

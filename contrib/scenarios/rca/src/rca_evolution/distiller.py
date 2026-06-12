@@ -7,14 +7,13 @@ get_report_summary) and submits a structured skill via submit_skill.
 from __future__ import annotations
 
 import json
-import logging
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from rca_evolution.observer import DivergenceReport
+from loguru import logger
 
-_logger = logging.getLogger(__name__)
+from rca_evolution.observer import DivergenceReport
 
 @dataclass
 class DistilledSkill:
@@ -142,7 +141,7 @@ async def distill_skill(
         and not all(dp.category == "analysis_failed" for dp in r.divergence_points)
     ]
     if not failed:
-        _logger.info("No usable failure reports (all correct or analysis_failed).")
+        logger.info("No usable failure reports (all correct or analysis_failed).")
         return None
 
     cats: Counter[str] = Counter()
@@ -158,7 +157,7 @@ async def distill_skill(
 
     top_cat, cat_count = cats.most_common(1)[0]
     if cat_count < 2:
-        _logger.info("Top category %r only %d case(s), need ≥2.", top_cat, cat_count)
+        logger.info("Top category %r only %d case(s), need ≥2.", top_cat, cat_count)
         return None
 
     report_dicts = [r.to_dict() for r in failed]
@@ -196,14 +195,14 @@ async def distill_skill(
                 break
 
     if skill_args is None:
-        _logger.warning("Distiller did not submit a skill.")
+        logger.warning("Distiller did not submit a skill.")
         return None
 
     action = skill_args.get("action", "create")
     name = skill_args.get("name", f"evolved-{top_cat}")
 
     if action == "retire":
-        _logger.info("Distiller retiring skill %r: %s", name, skill_args.get("reason", ""))
+        logger.info("Distiller retiring skill %r: %s", name, skill_args.get("reason", ""))
         return DistilledSkill(
             name=name, content="", pattern_category=top_cat,
             train_cases=len(reports), pattern_frequency=cat_count,

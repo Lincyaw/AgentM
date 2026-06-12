@@ -14,11 +14,13 @@ Model is a ``~/.agentm/config.toml`` profile name.
 from __future__ import annotations
 
 import asyncio
-import logging
+import logging as _stdlib_logging
 import os
 import sys
 from pathlib import Path
 from typing import Annotated
+
+from loguru import logger
 
 import typer
 
@@ -61,15 +63,25 @@ def run(
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Run the self-evolution loop."""
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s %(message)s",
-        stream=sys.stdout,
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
+    class _InterceptHandler(_stdlib_logging.Handler):
+        def emit(self, record: _stdlib_logging.LogRecord) -> None:
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            frame, depth = _stdlib_logging.currentframe(), 2
+            while frame and frame.f_code.co_filename == _stdlib_logging.__file__:
+                frame = frame.f_back
+                depth += 1
+            logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+    log_level = "DEBUG" if verbose else "INFO"
+    logger.remove()
+    logger.add(sys.stdout, level=log_level, format="{time:YYYY-MM-DD HH:mm:ss} {level} {name}: {message}")
+    _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+    _stdlib_logging.getLogger("httpx").setLevel(_stdlib_logging.WARNING)
+    _stdlib_logging.getLogger("httpcore").setLevel(_stdlib_logging.WARNING)
+    _stdlib_logging.getLogger("openai").setLevel(_stdlib_logging.WARNING)
 
     from rca_evolution.loop import run_evolution_loop
 

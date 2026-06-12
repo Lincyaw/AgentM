@@ -17,6 +17,7 @@ dependencies = [
   # FunctionTool.parameters, and validate_python() supplies pre-validation
   # for free.
   "pydantic>=2.0",
+  "loguru>=0.7",
 ]
 
 [project.optional-dependencies]

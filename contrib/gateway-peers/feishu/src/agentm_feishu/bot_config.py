@@ -10,15 +10,14 @@ This module reads the TOML file independently — it does NOT import or modify
 
 from __future__ import annotations
 
-import logging
 import os
 import tomllib
 from pathlib import Path
 from typing import Any
 
-from .adapter import FeishuConfig
+from loguru import logger
 
-log = logging.getLogger("agentm_feishu.bot_config")
+from .adapter import FeishuConfig
 
 
 def _agentm_home() -> Path:
@@ -36,7 +35,7 @@ def _read_secret(raw: dict[str, Any], bot_name: str) -> str | None:
         try:
             return Path(secret_file).read_text(encoding="utf-8").strip()
         except OSError as exc:
-            log.warning(
+            logger.warning(
                 "[feishu.bots.%s] cannot read app_secret_file %r: %s",
                 bot_name,
                 secret_file,
@@ -67,7 +66,7 @@ def load_bot_configs() -> list[tuple[str, FeishuConfig]]:
         with open(path, "rb") as fh:
             data = tomllib.load(fh)
     except Exception:
-        log.warning("config.toml: failed to parse %s", path, exc_info=True)
+        logger.warning("config.toml: failed to parse %s", path, exc_info=True)
         return []
 
     feishu = data.get("feishu")
@@ -81,21 +80,21 @@ def load_bot_configs() -> list[tuple[str, FeishuConfig]]:
     result: list[tuple[str, FeishuConfig]] = []
     for name, raw in bots.items():
         if not isinstance(raw, dict):
-            log.warning(
+            logger.warning(
                 "config.toml: [feishu.bots.%s] is not a table; skipped", name
             )
             continue
 
         app_id = raw.get("app_id")
         if not isinstance(app_id, str) or not app_id:
-            log.warning(
+            logger.warning(
                 "config.toml: [feishu.bots.%s] missing app_id; skipped", name
             )
             continue
 
         app_secret = _read_secret(raw, name)
         if not app_secret:
-            log.warning(
+            logger.warning(
                 "config.toml: [feishu.bots.%s] no app_secret resolved "
                 "(set app_secret, app_secret_file, or LARK_APP_SECRET_%s); skipped",
                 name,
@@ -113,7 +112,7 @@ def load_bot_configs() -> list[tuple[str, FeishuConfig]]:
 
         session_scope = raw.get("session_scope", "chat")
         if session_scope not in ("chat", "user"):
-            log.warning(
+            logger.warning(
                 "config.toml: [feishu.bots.%s] session_scope %r invalid; using 'chat'",
                 name,
                 session_scope,

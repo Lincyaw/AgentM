@@ -21,14 +21,12 @@ model and strategy parameters::
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any
 
 from agentm.core.abi import AgentMessage, AssistantMessage, ToolCallBlock
-
-_log = logging.getLogger(__name__)
+from loguru import logger
 
 __all__ = [
     "ReplayResult",
@@ -208,7 +206,7 @@ async def replay_one(
         surfaces = audit_result.surfaces
         audit_firings = audit_result.firings
     except Exception as exc:
-        _log.exception("offline_audit failed for %s", session_id)
+        logger.exception("offline_audit failed for %s", session_id)
         return ReplayResult(
             case_id=session_id,
             fired=False,
@@ -242,7 +240,7 @@ async def replay_one(
         finally:
             await session.shutdown()
     except Exception as exc:
-        _log.exception("fork continuation failed for %s", session_id)
+        logger.exception("fork continuation failed for %s", session_id)
         return ReplayResult(
             case_id=session_id,
             fired=True,

@@ -17,12 +17,11 @@ runs with ``llm_client=None`` -- fully offline and deterministic.
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-_logger = logging.getLogger(__name__)
+from loguru import logger
 
 __all__ = ["JudgeOutcome", "LeafJudge", "RcabenchJudge"]
 
@@ -88,7 +87,7 @@ class RcabenchJudge:
                 case_name=case_id,
             )
         except Exception as exc:  # noqa: BLE001 -- one bad case must not sink the batch
-            _logger.exception("RcabenchJudge: evaluate_v2() raised for case %s", case_id)
+            logger.exception("RcabenchJudge: evaluate_v2() raised for case %s", case_id)
             return JudgeOutcome(correct=False, error=f"evaluate_v2 raised: {exc!s:.200}")
 
         detail = {

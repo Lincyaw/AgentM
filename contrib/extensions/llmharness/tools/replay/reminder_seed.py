@@ -18,7 +18,6 @@ re-inject).
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any
 
@@ -32,11 +31,10 @@ from agentm.core.abi import (
     text_message,
 )
 from agentm.extensions import ExtensionManifest
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from llmharness.schema import REMINDER_DELIVERED
-
-_logger = logging.getLogger(__name__)
 
 # Matches the preamble in llmharness.atom so the injected message is
 # byte-identical to what the live adapter would have produced.
@@ -88,7 +86,7 @@ def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
             return None
         default = event.observation.default_action
         if isinstance(default, Stop) and default.cause.final:
-            _logger.warning(
+            logger.warning(
                 "replay_reminder_seed: first DecideTurnActionEvent has "
                 "final-cause Stop (%s); reminder will not be delivered, "
                 "leaving seed armed",
@@ -99,13 +97,13 @@ def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
         try:
             api.session.append_entry(REMINDER_DELIVERED, {"text": text})
         except Exception:
-            _logger.exception("replay_reminder_seed: failed to persist reminder_delivered entry")
+            logger.exception("replay_reminder_seed: failed to persist reminder_delivered entry")
         fired[0] = True
         if unsubscribe:
             try:
                 unsubscribe[0]()
             except Exception:
-                _logger.exception("replay_reminder_seed: unsubscribe callback raised; ignoring")
+                logger.exception("replay_reminder_seed: unsubscribe callback raised; ignoring")
         return Inject(messages=[message])
 
     unsubscribe.append(api.on(DecideTurnActionEvent.CHANNEL, _on_decide))

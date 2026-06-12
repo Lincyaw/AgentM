@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
 from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
@@ -24,7 +23,6 @@ from llmharness.schema import Event, Verdict
 
 from .engine import run_phase_standalone
 
-_logger = logging.getLogger(__name__)
 
 def _flatten_assistant_blocks(messages: list[Any]) -> list[dict[str, Any]]:
     """Extract serialized content blocks from AssistantMessages."""

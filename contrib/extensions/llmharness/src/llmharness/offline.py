@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,11 +23,10 @@ from agentm.core.abi import (
     AssistantMessage,
     ToolCallBlock,
 )
+from loguru import logger
 
 from .schema import Verdict
 from .state import CumulativeAuditState
-
-_log = logging.getLogger(__name__)
 
 __all__ = ["SurfacePoint", "offline_audit"]
 
@@ -92,19 +90,19 @@ async def _run_phase(
     try:
         session = await create_agent_session(AgentSession, config)
     except Exception as exc:
-        _log.error("[%s] session creation FAILED: %s", purpose, exc)
+        logger.error("[%s] session creation FAILED: %s", purpose, exc)
         raise RuntimeError(f"session creation failed ({purpose}): {exc}") from exc
 
     sid = session.session_id
     label = purpose.replace("cognitive_audit_", "").replace("_offline", "")
-    _log.info("[%s] agentm trace messages --session %s --format text", label, sid)
+    logger.info("[%s] agentm trace messages --session %s --format text", label, sid)
 
     try:
         messages = await session.prompt(payload)
     except Exception as exc:
         with contextlib.suppress(Exception):
             await session.shutdown()
-        _log.error("[%s] session %s prompt FAILED: %s", purpose, sid, exc)
+        logger.error("[%s] session %s prompt FAILED: %s", purpose, sid, exc)
         return _PhaseResult(output=None, error=str(exc), messages=[], session_id=sid)
 
     with contextlib.suppress(Exception):
@@ -122,7 +120,7 @@ async def _run_phase(
                     session_id=sid,
                 )
 
-    _log.warning("[%s] session %s: terminal tool %r was NOT called", purpose, sid, terminal_tool)
+    logger.warning("[%s] session %s: terminal tool %r was NOT called", purpose, sid, terminal_tool)
     return _PhaseResult(
         output=None,
         error=f"{terminal_tool!r} was not called",
@@ -186,7 +184,7 @@ async def offline_audit(
     _OPS = "agentm.extensions.builtin.operations"
 
     turn_bounds = _turn_end_prefix_lengths(messages)
-    _log.info(
+    logger.info(
         "offline_audit: %d messages, %d turns, firing at extractor=%d auditor=%d",
         len(messages), len(turn_bounds), extractor_interval, audit_interval,
     )
@@ -235,7 +233,7 @@ async def offline_audit(
                 ext_sid = ext_result.session_id
 
                 if ext_result.error:
-                    _log.warning(
+                    logger.warning(
                         "  extractor turn=%d FAILED: %s (sid=%s)",
                         turn_number, ext_result.error, ext_sid,
                     )
@@ -247,7 +245,7 @@ async def offline_audit(
                     total_ext_ops += n_ops
 
                     if n_ops == 0:
-                        _log.warning(
+                        logger.warning(
                             "  extractor turn=%d: 0 ops (LLM did not produce graph edits) sid=%s",
                             turn_number, ext_sid,
                         )
@@ -257,16 +255,16 @@ async def offline_audit(
                             firing_cursor=data["window_hi"],
                             firing_id=firing_id,
                         )
-                        _log.info("  extractor turn=%d ops=%d sid=%s", turn_number, n_ops, ext_sid)
+                        logger.info("  extractor turn=%d ops=%d sid=%s", turn_number, n_ops, ext_sid)
             except Exception:
-                _log.exception("extractor firing CRASHED at turn %d", turn_number)
+                logger.exception("extractor firing CRASHED at turn %d", turn_number)
 
         # --- Auditor ---
         if auditor_due:
             events, edges, phases = cumulative.graph_view()
 
             if not events:
-                _log.warning(
+                logger.warning(
                     "  auditor turn=%d: graph is EMPTY (all extractors failed or produced 0 ops), "
                     "auditor will have nothing to judge. total_ext_ops so far=%d",
                     turn_number, total_ext_ops,
@@ -309,18 +307,18 @@ async def offline_audit(
 
             surfaced = False
             if aud_result.error:
-                _log.warning(
+                logger.warning(
                     "  auditor turn=%d FAILED: %s (sid=%s)",
                     turn_number, aud_result.error, aud_result.session_id,
                 )
             elif aud_result.output is None:
-                _log.warning(
+                logger.warning(
                     "  auditor turn=%d: no output (sid=%s)", turn_number, aud_result.session_id,
                 )
             else:
                 verdict_raw = aud_result.output.get("verdict") or aud_result.output
                 if not isinstance(verdict_raw, dict):
-                    _log.warning(
+                    logger.warning(
                         "  auditor turn=%d: verdict is not a dict: %s (sid=%s)",
                         turn_number, type(verdict_raw).__name__, aud_result.session_id,
                     )
@@ -328,7 +326,7 @@ async def offline_audit(
                     try:
                         verdict = Verdict.from_dict(verdict_raw)
                     except (KeyError, TypeError, ValueError) as exc:
-                        _log.warning(
+                        logger.warning(
                             "  auditor turn=%d: malformed verdict: %s (sid=%s)",
                             turn_number, exc, aud_result.session_id,
                         )
@@ -344,7 +342,7 @@ async def offline_audit(
                             )
 
             fire_mark = " ★ SURFACE" if surfaced else ""
-            _log.info(
+            logger.info(
                 "  auditor  turn=%d graph=%d sid=%s%s",
                 turn_number, len(events), aud_result.session_id, fire_mark,
             )
@@ -357,7 +355,7 @@ async def offline_audit(
                 )
             )
 
-    _log.info(
+    logger.info(
         "offline_audit done: %d firings, %d surfaces, %d total graph ops",
         len(firings), len(surfaces), total_ext_ops,
     )

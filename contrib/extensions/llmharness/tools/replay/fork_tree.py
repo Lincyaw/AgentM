@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -51,6 +50,7 @@ from agentm.core.abi import (
     ToolCallBlock,
     ToolResultMessage,
 )
+from loguru import logger
 
 from llmharness.atom import CumulativeAuditState
 from llmharness.replay.record import ReplayRecord, write_record
@@ -58,8 +58,6 @@ from llmharness.replay.record import ReplayRecord, write_record
 from .offline import InMemorySink, StandaloneChildRunner
 from .offline_driver import SurfaceFiring, replay_pipeline_over_trajectory
 from .runner import AuditorSettings, ExtractorSettings
-
-_logger = logging.getLogger(__name__)
 
 __all__ = [
     "FORK_TREE_HEADER_KEY",
@@ -349,7 +347,7 @@ async def run_fork_tree_experiment(
             initial_messages=list(task.prefix) if task.prefix else None,
             seed_reminder_text=task.seed_reminder,
         )
-        _logger.info(
+        logger.info(
             "fork_tree: node=%s parent=%s depth=%d session=%s msgs=%d seed=%s",
             task.node_id,
             task.parent_id,
@@ -393,7 +391,7 @@ async def run_fork_tree_experiment(
         floor = task.fork_turn - 1
         forward_surfaces = [s for s in surfaces if s.fork_message_index > floor]
         if len(forward_surfaces) != len(surfaces):
-            _logger.warning(
+            logger.warning(
                 "fork_tree: node=%s dropped %d non-progressing surface(s) at/below fork floor=%d",
                 task.node_id,
                 len(surfaces) - len(forward_surfaces),
@@ -423,7 +421,7 @@ async def run_fork_tree_experiment(
         )
         for surface in selected:
             if state["emitted"] >= max_total_nodes:
-                _logger.warning(
+                logger.warning(
                     "fork_tree: max_total_nodes=%d reached; not enqueuing further children",
                     max_total_nodes,
                 )

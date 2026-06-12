@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +16,7 @@ from agentm.core.abi import (
     ToolTerminate,
 )
 from agentm.extensions import ExtensionManifest
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from llmharness.schema import Edge, EdgeKind, Event, EventKind
@@ -277,8 +277,6 @@ class ExtractionState:
         if self.recent_graph_dict or self.recent_edges_dict or self.pending_ops:
             self._refold()
 
-    _log = logging.getLogger(__name__)
-
     def _persist_op(self, op: GraphOp) -> None:
         if self.ops_file is None:
             return
@@ -288,7 +286,7 @@ class ExtractionState:
             with p.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(op.to_dict(), ensure_ascii=False) + "\n")
         except OSError:
-            self._log.warning("ops file write failed: %s", self.ops_file, exc_info=True)
+            logger.warning("ops file write failed: %s", self.ops_file, exc_info=True)
 
     # -- Public mutators ----------------------------------------------------
 
