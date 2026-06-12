@@ -29,10 +29,11 @@ exists yet, so users can preview what is available.
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from .protocol import (
     CommandContext,
@@ -41,9 +42,6 @@ from .protocol import (
     CommandKind,
     CommandResult,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 # --- discovery -------------------------------------------------------

@@ -20,12 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-log = logging.getLogger("agentm.gateway.approval")
+from loguru import logger
 
 _APPROVE = "approve"
 _DENY = "deny"
@@ -138,7 +137,7 @@ class ApprovalManager:
             return False  # stale, already resolved or timed out
         future, requester_sender_id = entry
         if clicker_sender_id != requester_sender_id:
-            log.info(
+            logger.info(
                 "approval %s click by %s ignored (expected %s)",
                 approval_id,
                 clicker_sender_id,

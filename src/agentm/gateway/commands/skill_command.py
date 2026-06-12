@@ -16,10 +16,11 @@ parent directory.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+from loguru import logger
 
 from .protocol import (
     CommandContext,
@@ -28,9 +29,6 @@ from .protocol import (
     CommandKind,
     CommandResult,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 _TURN_INJECTION = (

@@ -17,13 +17,12 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import ctypes.util
-import logging
 import socket
 import struct
 import sys
 from typing import Any
 
-log = logging.getLogger("agentm.gateway.auth")
+from loguru import logger
 
 
 # Linux SO_PEERCRED struct ucred = (pid, uid, gid), three native ints.
@@ -107,23 +106,23 @@ class UnixPeerCredAuthenticator:
         # which proxies ``getsockopt`` and ``fileno`` — both of which is
         # all peer-cred lookup needs.
         if sock is None or not hasattr(sock, "fileno"):
-            log.warning("peer-cred reject: peer=%s — no socket on transport", peer_id)
+            logger.warning("peer-cred reject: peer=%s — no socket on transport", peer_id)
             return False
         uid = _peer_uid(sock)
         if uid is None:
-            log.warning(
+            logger.warning(
                 "peer-cred reject: peer=%s — could not read peer uid "
                 "(unsupported platform?)",
                 peer_id,
             )
             return False
         if self._allowed_uids is None:
-            log.info("peer-cred accept: peer=%s uid=%d (any-uid policy)", peer_id, uid)
+            logger.info("peer-cred accept: peer=%s uid=%d (any-uid policy)", peer_id, uid)
             return True
         if uid in self._allowed_uids:
-            log.info("peer-cred accept: peer=%s uid=%d", peer_id, uid)
+            logger.info("peer-cred accept: peer=%s uid=%d", peer_id, uid)
             return True
-        log.warning(
+        logger.warning(
             "peer-cred reject: peer=%s uid=%d not in allow-list %s",
             peer_id,
             uid,

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
+import logging as _stdlib_logging
 import os
 import signal
 import sys
@@ -37,6 +37,7 @@ from typing import Annotated, Any
 from urllib.parse import urlparse
 
 import typer
+from loguru import logger
 
 from agentm.gateway import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm.gateway.approval import ApprovalManager
@@ -82,7 +83,21 @@ EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
 EXIT_SIGINT = 130
 
-logger = logging.getLogger("agentm.gateway.cli")
+
+
+class _InterceptHandler(_stdlib_logging.Handler):
+    def emit(self, record: _stdlib_logging.LogRecord) -> None:
+        level: str | int
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        frame = _stdlib_logging.currentframe()
+        depth = 2
+        while frame and frame.f_code.co_filename == _stdlib_logging.__file__:
+            frame = frame.f_back  # type: ignore[assignment]
+            depth += 1
+        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
 # -------- bind resolution ---------------------------------------------
@@ -1136,10 +1151,10 @@ def cli(
     if install_systemd or uninstall_systemd:
         _systemd_action(install=install_systemd)
         return
-    logging.basicConfig(
-        level=getattr(logging, str(log_level).upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    log_level = str(log_level).upper()
+    logger.remove()
+    logger.add(sys.stderr, level=log_level, format="{time:YYYY-MM-DD HH:mm:ss} {level} {name}: {message}")
+    _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     resolved_cwd = cwd or str(Path.cwd())
     try:
         rc = asyncio.run(
