@@ -47,6 +47,7 @@ class ReplayResult:
     surface_turn: int | None = None
     reminder: str | None = None
     forked_session_id: str | None = None
+    audit_firings: list[Any] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -196,7 +197,7 @@ async def replay_one(
 
     # 3. Offline audit
     try:
-        surfaces = await offline_audit(
+        audit_result = await offline_audit(
             messages,
             cwd=cwd,
             provider=harness_provider,
@@ -204,6 +205,8 @@ async def replay_one(
             audit_interval=audit_interval,
             auditor_prompt=auditor_prompt,
         )
+        surfaces = audit_result.surfaces
+        audit_firings = audit_result.firings
     except Exception as exc:
         _log.exception("offline_audit failed for %s", session_id)
         return ReplayResult(
@@ -219,6 +222,7 @@ async def replay_one(
             fired=False,
             control_correct=ctrl.correct,
             intervene_correct=ctrl.correct,
+            audit_firings=audit_firings,
         )
 
     # 4. Fork at first surface and continue
@@ -268,6 +272,7 @@ async def replay_one(
         control_correct=ctrl.correct,
         intervene_correct=fork_correct,
         forked_session_id=forked.get_session_id(),
+        audit_firings=audit_firings,
     )
 
 

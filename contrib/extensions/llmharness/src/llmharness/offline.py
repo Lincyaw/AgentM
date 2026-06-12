@@ -34,11 +34,29 @@ __all__ = ["SurfacePoint", "offline_audit"]
 
 
 @dataclass(frozen=True)
+class AuditFiring:
+    """One extractor+auditor firing pair."""
+
+    turn_number: int
+    extractor_session_id: str | None
+    auditor_session_id: str | None
+    surfaced: bool
+
+
+@dataclass(frozen=True)
 class SurfacePoint:
     """A position in the trajectory where the auditor would intervene."""
 
     turn_index: int
     reminder_text: str
+
+
+@dataclass
+class OfflineAuditResult:
+    """Full result of an offline audit run."""
+
+    surfaces: list[SurfacePoint]
+    firings: list[AuditFiring]
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +69,7 @@ class _PhaseResult:
     output: dict[str, Any] | None
     error: str | None
     messages: list[AgentMessage]
+    session_id: str | None = None
 
 
 async def _run_phase(
@@ -75,12 +94,14 @@ async def _run_phase(
     except Exception as exc:
         return _PhaseResult(output=None, error=str(exc), messages=[])
 
+    sid = session.session_id
+
     try:
         messages = await session.prompt(payload)
     except Exception as exc:
         with contextlib.suppress(Exception):
             await session.shutdown()
-        return _PhaseResult(output=None, error=str(exc), messages=[])
+        return _PhaseResult(output=None, error=str(exc), messages=[], session_id=sid)
 
     with contextlib.suppress(Exception):
         await session.shutdown()
@@ -91,12 +112,14 @@ async def _run_phase(
         for block in reversed(msg.content):
             if isinstance(block, ToolCallBlock) and block.name == terminal_tool:
                 return _PhaseResult(
-                    output=dict(block.arguments), error=None, messages=messages
+                    output=dict(block.arguments), error=None,
+                    messages=messages, session_id=sid,
                 )
     return _PhaseResult(
         output=None,
         error=f"{terminal_tool!r} was not called",
         messages=messages,
+        session_id=sid,
     )
 
 
@@ -130,12 +153,11 @@ async def offline_audit(
     extractor_interval: int = 5,
     audit_interval: int = 5,
     auditor_prompt: str = "minimal",
-) -> list[SurfacePoint]:
-    """Run extractor + auditor offline over *messages*, return surface points.
+) -> OfflineAuditResult:
+    """Run extractor + auditor offline over *messages*, return audit result.
 
-    Each surface point is a position where the auditor decided to intervene
-    with a reminder. The caller can ``store.fork(sid, up_to=s.turn_index)``
-    at each surface to create a counterfactual branch.
+    The result contains surface points (where the auditor would intervene)
+    and per-firing session ids for trace inspection.
 
     ``auditor_prompt`` selects the prompt variant (e.g. ``"minimal"``,
     ``"trajectory_coverage"``).
@@ -145,6 +167,7 @@ async def offline_audit(
 
     cumulative = CumulativeAuditState.fresh()
     surfaces: list[SurfacePoint] = []
+    firings: list[AuditFiring] = []
 
     _EXT_CTX = "llmharness.agents.extractor.context"
     _EXT_TOOLS = "llmharness.agents.extractor.tools"
@@ -181,8 +204,9 @@ async def offline_audit(
                 payload_json = json.dumps(
                     data, ensure_ascii=False, default=str
                 )
+                ext_sid: str | None = None
                 try:
-                    await _run_phase(
+                    ext_result = await _run_phase(
                         cwd=cwd,
                         extensions=extensions,
                         provider=provider,
@@ -190,6 +214,7 @@ async def offline_audit(
                         terminal_tool="finalize_extraction",
                         purpose="cognitive_audit_extractor_offline",
                     )
+                    ext_sid = ext_result.session_id
                     from .atom import _read_ops_file
 
                     ops = _read_ops_file(ops_path)
@@ -199,6 +224,11 @@ async def offline_audit(
                             firing_cursor=data["window_hi"],
                             firing_id=firing_id,
                         )
+                    _log.info(
+                        "  extractor turn=%d ops=%d sid=%s  "
+                        "→ agentm trace messages --session %s --format text",
+                        turn_number, len(ops) if ops else 0, ext_sid, ext_sid,
+                    )
                 except Exception:
                     _log.exception("extractor firing failed at turn %d", turn_number)
 
@@ -239,6 +269,7 @@ async def offline_audit(
                 terminal_tool=SUBMIT_VERDICT_TOOL_NAME,
                 purpose="cognitive_audit_auditor_offline",
             )
+            surfaced = False
             if aud_result.output is not None:
                 verdict_raw = aud_result.output.get("verdict") or aud_result.output
                 if isinstance(verdict_raw, dict):
@@ -246,11 +277,25 @@ async def offline_audit(
                         verdict = Verdict.from_dict(verdict_raw)
                         cumulative.absorb_auditor_verdict(verdict.to_dict())
                         if verdict.surface_reminder and verdict.reminder_text:
+                            surfaced = True
                             surfaces.append(
                                 SurfacePoint(
                                     turn_index=prefix_len,
                                     reminder_text=verdict.reminder_text,
                                 )
                             )
+            fire_mark = " ★ SURFACE" if surfaced else ""
+            _log.info(
+                "  auditor  turn=%d graph=%d sid=%s%s  "
+                "→ agentm trace messages --session %s --format text",
+                turn_number, len(events), aud_result.session_id,
+                fire_mark, aud_result.session_id,
+            )
+            firings.append(AuditFiring(
+                turn_number=turn_number,
+                extractor_session_id=ext_sid if extractor_due else None,
+                auditor_session_id=aud_result.session_id,
+                surfaced=surfaced,
+            ))
 
-    return surfaces
+    return OfflineAuditResult(surfaces=surfaces, firings=firings)
