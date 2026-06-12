@@ -388,7 +388,22 @@ async def _build_index_block(file_ops: Any, base: Path, max_lines: int) -> str:
         lines = lines[:max_lines]
         truncated = f"\n... ({len(text.splitlines()) - max_lines} more lines, use memory_search)"
     body = "\n".join(lines) + truncated
-    return f"<memory_index>\n{body}\n</memory_index>"
+    return (
+        "# Memory\n\n"
+        "You have a persistent memory system. The index below contains one-line "
+        "summaries of stored memories — it is loaded every turn so you can see "
+        "what is available.\n"
+        "- To read a memory's full content, call `memory_read` with its name.\n"
+        "- To save new information the user shares (preferences, project context, "
+        "corrections), call `memory_save`.\n"
+        "- To find memories by keyword, call `memory_search`.\n"
+        "- To remove outdated information, call `memory_delete`.\n\n"
+        "When a task relates to a memory entry listed below, read it first — "
+        "the one-line summary is a relevance hint, not the full content. "
+        "When the user explicitly asks you to remember or recall something, "
+        "always use the memory tools.\n\n"
+        f"<memory_index>\n{body}\n</memory_index>"
+    )
 
 async def _rewrite_index(
     file_ops: Any,
