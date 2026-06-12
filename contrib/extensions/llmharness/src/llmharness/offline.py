@@ -95,6 +95,10 @@ async def _run_phase(
         return _PhaseResult(output=None, error=str(exc), messages=[])
 
     sid = session.session_id
+    _log.info(
+        "  [%s] session %s started → agentm trace messages --session %s --format text",
+        purpose.replace("cognitive_audit_", ""), sid, sid,
+    )
 
     try:
         messages = await session.prompt(payload)
