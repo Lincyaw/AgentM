@@ -191,10 +191,10 @@ def write_record(path: Path, record: ReplayRecord) -> None:
             fh.write(record.to_jsonl())
             fh.write("\n")
     except OSError:
-        import logging
+        from loguru import logger
 
-        logging.getLogger(__name__).warning(
-            "llmharness replay-log write failed: %s", path, exc_info=True
+        logger.warning(
+            "llmharness replay-log write failed: {}", path
         )
 
 def iter_records(path: Path) -> Iterator[ReplayRecord]:

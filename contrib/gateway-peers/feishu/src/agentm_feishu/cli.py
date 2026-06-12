@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
+import logging as _stdlib_logging
 import os
 import signal
 import sys
@@ -53,6 +53,8 @@ from agentm.gateway.wire import (
 )
 
 from . import __version__
+from loguru import logger
+
 from .adapter import FeishuAdapter, FeishuConfig
 from .ws_patch import apply_ws_patch
 
@@ -70,7 +72,6 @@ EXIT_CONNECT = 7
 
 PROG = "agentm-feishu"
 
-log = logging.getLogger("agentm_feishu")
 
 
 def _err(kind: str, root: str, fix: str) -> None:
@@ -169,25 +170,27 @@ def _install_lark_log_filters() -> None:
 
     Idempotent: the filter classes are unique-per-call but installing
     them twice on the same logger is harmless — they're cheap predicates.
+    These filters operate on the stdlib logging side, BEFORE the
+    InterceptHandler routes them to loguru.
     """
 
-    class _LarkCleanCloseFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            if record.levelno == logging.ERROR and "1000 (OK)" in record.getMessage():
-                record.levelno = logging.INFO
+    class _LarkCleanCloseFilter(_stdlib_logging.Filter):
+        def filter(self, record: _stdlib_logging.LogRecord) -> bool:
+            if record.levelno == _stdlib_logging.ERROR and "1000 (OK)" in record.getMessage():
+                record.levelno = _stdlib_logging.INFO
                 record.levelname = "INFO"
             return True
 
-    logging.getLogger("Lark").addFilter(_LarkCleanCloseFilter())
+    _stdlib_logging.getLogger("Lark").addFilter(_LarkCleanCloseFilter())
 
-    class _LarkOrphanTaskFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
+    class _LarkOrphanTaskFilter(_stdlib_logging.Filter):
+        def filter(self, record: _stdlib_logging.LogRecord) -> bool:
             message = record.getMessage()
             if "lark_oapi" in message and "Task was destroyed" in message:
                 return False
             return True
 
-    logging.getLogger("asyncio").addFilter(_LarkOrphanTaskFilter())
+    _stdlib_logging.getLogger("asyncio").addFilter(_LarkOrphanTaskFilter())
 
     warnings.filterwarnings(
         "ignore",
@@ -382,11 +385,25 @@ def cli(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    logging.basicConfig(
-        level=logging.INFO if verbose else logging.WARNING,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    class _InterceptHandler(_stdlib_logging.Handler):
+        def emit(self, record: _stdlib_logging.LogRecord) -> None:
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            frame, depth = _stdlib_logging.currentframe(), 2
+            while frame and frame.f_code.co_filename == _stdlib_logging.__file__:
+                frame = frame.f_back
+                depth += 1
+            logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level="INFO" if verbose else "WARNING",
+        format="{time:YYYY-MM-DD HH:mm:ss} {level} {name}: {message}",
     )
+    _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     _install_lark_log_filters()
 
     # Detect single-bot (CLI flags / env) vs multi-bot (config.toml).
@@ -508,7 +525,7 @@ async def _arun(
             try:
                 await adapter.handle_outbound(env)
             except Exception:  # noqa: BLE001
-                log.exception("adapter.handle_outbound failed id=%s", env.id)
+                logger.exception("adapter.handle_outbound failed id=%s", env.id)
             return
         if env.kind in (KIND_PING, KIND_PONG):
             return
@@ -624,7 +641,7 @@ async def _arun(
         try:
             await adapter.stop()
         except Exception:  # noqa: BLE001
-            log.exception("adapter.stop raised")
+            logger.exception("adapter.stop raised")
         await client.close()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await reconnect_task
@@ -682,7 +699,7 @@ async def _arun_multi(
                     try:
                         await a.handle_outbound(env)
                     except Exception:  # noqa: BLE001
-                        log.exception(
+                        logger.exception(
                             "[%s] handle_outbound failed id=%s", bot_name, env.id
                         )
                 return
@@ -762,7 +779,7 @@ async def _arun_multi(
             )
         )
 
-    log.info(
+    logger.info(
         "agentm-feishu: started %d bot(s): %s",
         len(bot_configs),
         ", ".join(n for n, _ in bot_configs),
@@ -804,7 +821,7 @@ async def _arun_multi(
             try:
                 await adapter.stop()
             except Exception:  # noqa: BLE001
-                log.exception("adapter.stop raised")
+                logger.exception("adapter.stop raised")
         for client in clients:
             await client.close()
         for t in tasks:

@@ -14,10 +14,11 @@ submit_tool + system_prompt). No cards, no skills.
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from loguru import logger
 
 from llmharness.schema import Edge, Event, Finding
 
@@ -31,8 +32,6 @@ from ._submit_oracle import SUBMIT_ORACLE_TOOL_NAME
 from ._submit_rewriter import SUBMIT_REWRITE_TOOL_NAME
 from .causal import CausalSnapshot, causal_mask
 from .gt import GroundTruth
-
-_logger = logging.getLogger(__name__)
 
 _ORACLE_SUBMIT_MODULE = "llmharness.distill._submit_oracle"
 _REWRITER_SUBMIT_MODULE = "llmharness.distill._submit_rewriter"
@@ -226,7 +225,7 @@ async def run_oracle(
         purpose="distill_oracle",
     )
     if result.status != "ok" or not isinstance(result.output, dict):
-        _logger.warning("oracle phase non-ok: status=%s error=%s", result.status, result.error)
+        logger.warning("oracle phase non-ok: status=%s error=%s", result.status, result.error)
         return None
     args = result.output
     return OracleLabel(
@@ -262,7 +261,7 @@ async def run_rewriter(
         purpose="distill_rewriter",
     )
     if result.status != "ok" or not isinstance(result.output, dict):
-        _logger.warning("rewriter phase non-ok: status=%s error=%s", result.status, result.error)
+        logger.warning("rewriter phase non-ok: status=%s error=%s", result.status, result.error)
         return None
     args = result.output
     return RewriterOutput(

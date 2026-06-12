@@ -9,7 +9,6 @@ Thin orchestration over existing infrastructure:
 from __future__ import annotations
 
 import json
-import logging
 import os
 import sqlite3
 import subprocess
@@ -18,10 +17,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from rca_evolution.distiller import DistilledSkill, distill_skill
 from rca_evolution.observer import DivergenceReport, observe_case
-
-_logger = logging.getLogger(__name__)
 
 @dataclass
 class IterationResult:
@@ -90,18 +89,18 @@ def _run_eval(
         if limit is not None:
             cmd.extend(["-l", str(limit)])
 
-        _logger.info("Running eval: exp=%s concurrency=%d limit=%s cmd=%s", exp_id, concurrency, limit, " ".join(cmd))
+        logger.info("Running eval: exp=%s concurrency=%d limit=%s cmd=%s", exp_id, concurrency, limit, " ".join(cmd))
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=env)
         except subprocess.TimeoutExpired:
-            _logger.warning("Eval timed out for %s; using partial results", exp_id)
+            logger.warning("Eval timed out for %s; using partial results", exp_id)
             return
         if result.stderr:
-            _logger.debug("Eval stderr: %s", result.stderr[-1000:])
+            logger.debug("Eval stderr: %s", result.stderr[-1000:])
         if result.returncode != 0:
-            _logger.error("Eval failed (exit %d): %s", result.returncode, result.stderr[-500:])
+            logger.error("Eval failed (exit %d): %s", result.returncode, result.stderr[-500:])
             raise RuntimeError(f"rca llm-eval run failed: {result.stderr[-200:]}")
-        _logger.info("Eval complete: %s", exp_id)
+        logger.info("Eval complete: %s", exp_id)
     finally:
         os.unlink(rendered_path)
 
@@ -193,7 +192,7 @@ async def run_evolution_loop(
 
     # Step 1: Baseline on test set
     baseline_exp = f"{exp_id_prefix}-baseline"
-    _logger.info("=== Step 1: baseline eval on test set (exp=%s) ===", baseline_exp)
+    logger.info("=== Step 1: baseline eval on test set (exp=%s) ===", baseline_exp)
     _run_eval(
         config_path=eval_config, exp_id=baseline_exp,
         scenario=scenario, concurrency=concurrency,
@@ -202,17 +201,17 @@ async def run_evolution_loop(
     baseline_results = _query_results(db_path, baseline_exp)
     baseline_acc = _accuracy(baseline_results)
     result.initial_accuracy = baseline_acc
-    _logger.info("Baseline accuracy: %.1f%% (%d/%d)",
+    logger.info("Baseline accuracy: %.1f%% (%d/%d)",
                  baseline_acc * 100,
                  sum(1 for r in baseline_results if r.get("correct")),
                  len(baseline_results))
 
     for iteration in range(max_iterations):
-        _logger.info("=== Iteration %d/%d ===", iteration + 1, max_iterations)
+        logger.info("=== Iteration %d/%d ===", iteration + 1, max_iterations)
 
         # Step 2: Run train cases
         train_exp = f"{exp_id_prefix}-train-{iteration}"
-        _logger.info("Running train cases (exp=%s)...", train_exp)
+        logger.info("Running train cases (exp=%s)...", train_exp)
         _run_eval(
             config_path=eval_config, exp_id=train_exp,
             scenario=scenario, concurrency=concurrency,
@@ -220,7 +219,7 @@ async def run_evolution_loop(
         )
         train_results = _query_results(db_path, train_exp)
         train_acc = _accuracy(train_results)
-        _logger.info("Train accuracy: %.1f%% (%d/%d)",
+        logger.info("Train accuracy: %.1f%% (%d/%d)",
                      train_acc * 100,
                      sum(1 for r in train_results if r.get("correct")),
                      len(train_results))
@@ -228,7 +227,7 @@ async def run_evolution_loop(
         # Step 3: Find failures
         failed = [r for r in train_results if not r.get("correct")]
         if not failed:
-            _logger.info("No failures in training set. Stopping.")
+            logger.info("No failures in training set. Stopping.")
             result.iterations.append(IterationResult(
                 iteration=iteration + 1, skill=None,
                 baseline_accuracy=baseline_acc, skill_accuracy=baseline_acc,
@@ -237,7 +236,7 @@ async def run_evolution_loop(
             break
 
         # Step 4: Observe failures
-        _logger.info("Observing %d failures...", len(failed))
+        logger.info("Observing %d failures...", len(failed))
         reports: list[DivergenceReport] = []
         for row in failed:
             source = row["source"]
@@ -257,18 +256,18 @@ async def run_evolution_loop(
                 provider_tuple=provider_tuple,
             )
             reports.append(report)
-            _logger.info("  %s: %d divergence points, lesson=%s",
+            logger.info("  %s: %d divergence points, lesson=%s",
                          source, len(report.divergence_points), report.key_lesson[:80])
 
         # Step 5: Distill
-        _logger.info("Distilling failure patterns...")
+        logger.info("Distilling failure patterns...")
         skill = await distill_skill(
             reports=reports, provider_tuple=provider_tuple,
             skill_output_dir=skill_output_dir,
         )
 
         if skill is None:
-            _logger.info("Could not distill a skill. Stopping.")
+            logger.info("Could not distill a skill. Stopping.")
             result.iterations.append(IterationResult(
                 iteration=iteration + 1, skill=None,
                 baseline_accuracy=baseline_acc, skill_accuracy=baseline_acc,
@@ -276,7 +275,7 @@ async def run_evolution_loop(
             ))
             break
 
-        _logger.info("Distilled: %s action=%s (pattern=%s, freq=%d)",
+        logger.info("Distilled: %s action=%s (pattern=%s, freq=%d)",
                      skill.name, skill.action, skill.pattern_category, skill.pattern_frequency)
 
         # Handle retire
@@ -286,7 +285,7 @@ async def run_evolution_loop(
                 (retire_dir / "SKILL.md").unlink()
                 if retire_dir.exists():
                     retire_dir.rmdir()
-                _logger.info("Retired skill: %s (%s)", skill.name, skill.reason)
+                logger.info("Retired skill: %s (%s)", skill.name, skill.reason)
             result.iterations.append(IterationResult(
                 iteration=iteration + 1, skill=skill,
                 baseline_accuracy=result.initial_accuracy,
@@ -299,11 +298,11 @@ async def run_evolution_loop(
         skill_dir = Path(skill_output_dir) / skill.name
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(skill.content)
-        _logger.info("Wrote skill (%s): %s", skill.action, skill_dir / "SKILL.md")
+        logger.info("Wrote skill (%s): %s", skill.action, skill_dir / "SKILL.md")
 
         # Step 6: Backtest with skill on test set
         skill_exp = f"{exp_id_prefix}-skill-{iteration}"
-        _logger.info("Backtesting with skill (exp=%s)...", skill_exp)
+        logger.info("Backtesting with skill (exp=%s)...", skill_exp)
         _run_eval(
             config_path=eval_config, exp_id=skill_exp,
             scenario=scenario, concurrency=concurrency,
@@ -311,18 +310,18 @@ async def run_evolution_loop(
         )
         skill_results = _query_results(db_path, skill_exp)
         skill_acc = _accuracy(skill_results)
-        _logger.info("Skill accuracy: %.1f%% (baseline: %.1f%%)",
+        logger.info("Skill accuracy: %.1f%% (baseline: %.1f%%)",
                      skill_acc * 100, baseline_acc * 100)
 
         # Step 7: Accept or reject
         accepted = skill_acc > baseline_acc
         if accepted:
-            _logger.info("ACCEPTED %s (%.1f%% → %.1f%%)",
+            logger.info("ACCEPTED %s (%.1f%% → %.1f%%)",
                          skill.name, baseline_acc * 100, skill_acc * 100)
             result.accepted_skills.append(skill)
             baseline_acc = skill_acc
         else:
-            _logger.info("REJECTED %s (%.1f%% vs %.1f%%)",
+            logger.info("REJECTED %s (%.1f%% vs %.1f%%)",
                          skill.name, skill_acc * 100, baseline_acc * 100)
             (skill_dir / "SKILL.md").unlink(missing_ok=True)
             if skill_dir.exists():
@@ -336,7 +335,7 @@ async def run_evolution_loop(
         ))
 
     result.final_accuracy = baseline_acc
-    _logger.info("=== Evolution complete: %.1f%% → %.1f%%, %d skills accepted ===",
+    logger.info("=== Evolution complete: %.1f%% → %.1f%%, %d skills accepted ===",
                  result.initial_accuracy * 100, result.final_accuracy * 100,
                  len(result.accepted_skills))
     return result

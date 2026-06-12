@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 import time
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -24,6 +23,7 @@ from agentm.core.abi import (
     text_message,
 )
 from agentm.extensions import ExtensionManifest
+from loguru import logger
 from pydantic import BaseModel
 
 from . import schema as _et
@@ -58,8 +58,6 @@ class LLMHarnessConfig(BaseModel):
     enable_reminders: bool = True
 
 
-_log = logging.getLogger(__name__)
-
 REMINDER_PREAMBLE: Final = "[system reminder — automated review of your investigation so far]\n"
 
 MANIFEST = ExtensionManifest(
@@ -89,7 +87,7 @@ def _resolve_provider(
 
         profile = resolve_model_profile(model_name)
         if profile is None:
-            _log.warning("model profile %r not found in config.toml", model_name)
+            logger.warning("model profile %r not found in config.toml", model_name)
             return None
         ext_module: str | None = None
         for desc in DEFAULT_PROVIDER_DESCRIPTORS:
@@ -97,7 +95,7 @@ def _resolve_provider(
                 ext_module = desc.extension_module
                 break
         if ext_module is None:
-            _log.warning(
+            logger.warning(
                 "provider %r (from model %r) has no extension module",
                 profile.provider,
                 model_name,
@@ -200,7 +198,7 @@ def _read_ops_file(path: Path) -> list[GraphOp]:
         try:
             ops.append(parse_op(json.loads(line)))
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-            _log.warning("skipping malformed op line in %s", path)
+            logger.warning("skipping malformed op line in %s", path)
     return ops
 
 
@@ -236,7 +234,7 @@ async def _run_child(
             with contextlib.suppress(Exception):
                 await child.shutdown()
     except Exception:
-        _log.exception("child session failed (purpose=%s)", purpose)
+        logger.exception("child session failed (purpose=%s)", purpose)
         return None
 
 
@@ -409,7 +407,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             try:
                 api.session.append_entry(_et.REMINDER_DELIVERED, {"text": r.text})
             except Exception:
-                _log.exception("failed to persist reminder_delivered")
+                logger.exception("failed to persist reminder_delivered")
         return Inject(messages=injected)
 
     if cfg.mode == "sync":
@@ -439,7 +437,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                _log.exception("audit worker job failed")
+                logger.exception("audit worker job failed")
             finally:
                 queue.task_done()
 
@@ -465,12 +463,12 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         try:
             await asyncio.wait_for(worker_task, timeout=shutdown_timeout)
         except asyncio.TimeoutError:
-            _log.warning("audit drain exceeded %.1fs; cancelling", shutdown_timeout)
+            logger.warning("audit drain exceeded %.1fs; cancelling", shutdown_timeout)
             worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await worker_task
         except Exception:
-            _log.exception("audit worker raised on shutdown")
+            logger.exception("audit worker raised on shutdown")
 
     api.on(TurnEndEvent.CHANNEL, _on_turn_end)
     if enable_reminders:

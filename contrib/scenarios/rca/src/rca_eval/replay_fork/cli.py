@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
@@ -61,15 +62,28 @@ def run(
     ] = Path(".agentm/observability"),
 ) -> None:
     """Run replay-fork over baseline sessions."""
-    import logging
+    import logging as _stdlib_logging
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("opentelemetry").setLevel(logging.WARNING)
-    logging.getLogger("agentm.core.runtime.catalog").setLevel(logging.WARNING)
+    from loguru import logger as _logger
+
+    class _InterceptHandler(_stdlib_logging.Handler):
+        def emit(self, record: _stdlib_logging.LogRecord) -> None:
+            try:
+                level = _logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            frame, depth = _stdlib_logging.currentframe(), 2
+            while frame and frame.f_code.co_filename == _stdlib_logging.__file__:
+                frame = frame.f_back
+                depth += 1
+            _logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+    _logger.remove()
+    _logger.add(sys.stderr, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss} {level} {name}: {message}")
+    _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+    _stdlib_logging.getLogger("httpx").setLevel(_stdlib_logging.WARNING)
+    _stdlib_logging.getLogger("opentelemetry").setLevel(_stdlib_logging.WARNING)
+    _stdlib_logging.getLogger("agentm.core.runtime.catalog").setLevel(_stdlib_logging.WARNING)
 
     from agentm.core.runtime.session_manager import JsonlSessionStore
 

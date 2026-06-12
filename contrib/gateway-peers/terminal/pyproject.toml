@@ -11,6 +11,7 @@ authors = [{ name = "AgentM contributors" }]
 # `[tool.uv.sources]` entry; nothing extra is needed beyond `uv sync`.
 dependencies = [
     "agentm",
+    "loguru>=0.7",
     # Drives the `--format textual` rich frontend. Pulls Rich transitively.
     "textual>=0.85",
     "typer>=0.25.1",

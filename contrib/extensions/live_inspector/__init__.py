@@ -86,7 +86,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
+from loguru import logger
 import os
 import sys
 import threading
@@ -114,8 +114,6 @@ from pydantic import BaseModel
 
 from agentm.core.lib import to_jsonable
 from agentm.extensions import ExtensionManifest
-
-logger = logging.getLogger(__name__)
 
 class LiveInspectorConfig(BaseModel):
     bind: str = "127.0.0.1"

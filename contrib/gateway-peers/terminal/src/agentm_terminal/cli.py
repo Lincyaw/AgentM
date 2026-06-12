@@ -12,7 +12,7 @@ business data only, stable exit codes, structured error lines.
 from __future__ import annotations
 
 import asyncio
-import logging
+import logging as _stdlib_logging
 import os
 import signal
 import sys
@@ -24,6 +24,8 @@ import typer
 from agentm.gateway import DEFAULT_SOCKET_URL, autoload_dotenv
 from agentm.gateway.client import AuthError
 from agentm.gateway.client_cli import ConnectError, ConnectOptions, resolve_connect
+
+from loguru import logger
 
 from . import __version__
 from .client import TerminalClient
@@ -41,7 +43,6 @@ EXIT_CONNECT = 7
 PROG = "agentm-terminal"
 _FORMATS = ("text", "json", "tui")
 
-log = logging.getLogger("agentm_terminal")
 
 
 def _err(kind: str, root: str, fix: str) -> None:
@@ -188,11 +189,25 @@ def cli(
         )
         raise typer.Exit(code=EXIT_USAGE)
 
-    logging.basicConfig(
-        level=logging.INFO if verbose else logging.WARNING,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    class _InterceptHandler(_stdlib_logging.Handler):
+        def emit(self, record: _stdlib_logging.LogRecord) -> None:
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            frame, depth = _stdlib_logging.currentframe(), 2
+            while frame and frame.f_code.co_filename == _stdlib_logging.__file__:
+                frame = frame.f_back
+                depth += 1
+            logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level="INFO" if verbose else "WARNING",
+        format="{time:YYYY-MM-DD HH:mm:ss} {level} {name}: {message}",
     )
+    _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
 
     try:
         rc = asyncio.run(
@@ -321,7 +336,7 @@ async def _run_plain(
             try:
                 renderer.render_outbound(body)
             except Exception:  # noqa: BLE001
-                log.exception("renderer failed")
+                logger.exception("renderer failed")
         stop.set()
 
     reader = asyncio.create_task(
@@ -367,7 +382,7 @@ async def _stdin_reader(
         try:
             await client.send_inbound(body)
         except Exception:  # noqa: BLE001
-            log.exception("failed to send inbound; closing")
+            logger.exception("failed to send inbound; closing")
             stop.set()
             return
 

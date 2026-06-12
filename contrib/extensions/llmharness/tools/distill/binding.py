@@ -19,7 +19,6 @@ trivial install side effect.
 from __future__ import annotations
 
 import json
-import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,11 +26,11 @@ from typing import Any
 
 from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
+from loguru import logger
 from pydantic import BaseModel
 
 from llmharness.replay.record import audit_session_id
 
-_logger = logging.getLogger(__name__)
 
 class DistillBindingConfig(BaseModel):
     sample_id: str = ""
@@ -100,7 +99,7 @@ def read_sample_meta(path: Path) -> SampleMeta | None:
 def install(api: ExtensionAPI, config: DistillBindingConfig) -> None:
     sample_id = config.sample_id or os.environ.get(_SAMPLE_ID_ENV) or ""
     if not sample_id:
-        _logger.debug("distill_binding mounted without sample_id; meta sidecar will not be written")
+        logger.debug("distill_binding mounted without sample_id; meta sidecar will not be written")
         return
     dataset_name = config.dataset_name or os.environ.get(_DATASET_NAME_ENV) or ""
     dataset_path = config.dataset_path or os.environ.get(_DATASET_PATH_ENV) or ""
@@ -120,7 +119,7 @@ def install(api: ExtensionAPI, config: DistillBindingConfig) -> None:
             encoding="utf-8",
         )
     except OSError:
-        _logger.warning("distill_binding sidecar write failed: %s", path, exc_info=True)
+        logger.warning("distill_binding sidecar write failed: %s", path, exc_info=True)
 
 __all__ = [
     "MANIFEST",

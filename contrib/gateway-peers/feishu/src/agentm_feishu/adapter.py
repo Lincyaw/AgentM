@@ -28,7 +28,6 @@ persist, so they are never folded into the (overwritten) live card.
 from __future__ import annotations
 
 import asyncio
-import logging
 import re
 import time
 from concurrent.futures import Future
@@ -37,8 +36,7 @@ from typing import Any
 
 from agentm.gateway.client import WireClient
 from agentm.gateway.wire import KIND_INBOUND, WIRE_VERSION, Envelope
-
-log = logging.getLogger("agentm_feishu.adapter")
+from loguru import logger
 
 
 # Maps the typed v2 button style to Lark's button type.
@@ -355,7 +353,7 @@ class FeishuAdapter:
         try:
             await channel.connect_until_ready(timeout=20.0)
         except Exception:
-            log.exception("feishu connect_until_ready failed")
+            logger.exception("feishu connect_until_ready failed")
             raise
         self._running = True
         await self._stop_event.wait()
@@ -375,11 +373,11 @@ class FeishuAdapter:
             try:
                 await self._channel.disconnect()
             except Exception:
-                log.exception("FeishuAdapter.disconnect raised")
+                logger.exception("FeishuAdapter.disconnect raised")
             try:
                 await self._channel.stop_background()
             except Exception:
-                log.exception("FeishuAdapter.stop_background raised")
+                logger.exception("FeishuAdapter.stop_background raised")
         await _cancel_lark_tasks()
 
     # -- inbound (Feishu -> gateway) ----------------------------------
@@ -400,7 +398,7 @@ class FeishuAdapter:
         content = _strip_leading_bot_mention(
             content, getattr(msg, "mentions", None), self._bot_open_id()
         )
-        log.info(
+        logger.info(
             "[feishu] rx chat=%s sender=%s msg_id=%s thread=%s text=%r",
             chat_id,
             sender,
@@ -531,7 +529,7 @@ class FeishuAdapter:
         try:
             await self._client.send(env)
         except Exception:  # noqa: BLE001
-            log.exception("forward_inbound failed; dropping envelope")
+            logger.exception("forward_inbound failed; dropping envelope")
 
     # -- outbound (gateway -> Feishu) ---------------------------------
 
@@ -554,7 +552,7 @@ class FeishuAdapter:
             return
         chat_id = str(body.get("chat_id") or "")
         if not chat_id:
-            log.warning("outbound dropped: empty chat_id (env id=%s)", env.id)
+            logger.warning("outbound dropped: empty chat_id (env id=%s)", env.id)
             return
         raw_meta = body.get("metadata")
         meta = raw_meta if isinstance(raw_meta, dict) else {}
@@ -740,11 +738,11 @@ class FeishuAdapter:
                     )
                     turn.message_id = _result_message_id(result)
                     if turn.message_id is None:
-                        log.warning("[feishu] live card send returned no message_id")
+                        logger.warning("[feishu] live card send returned no message_id")
                 else:
                     await self._channel.update_card(turn.message_id, card)
             except Exception:
-                log.exception("[feishu] live card render failed (chat=%s)", turn.chat_id)
+                logger.exception("[feishu] live card render failed (chat=%s)", turn.chat_id)
                 return
             turn.last_render = time.monotonic()
 
@@ -798,7 +796,7 @@ class FeishuAdapter:
         try:
             result = await self._channel.add_reaction(message_id, emoji)
         except Exception:
-            log.exception("[feishu] add_reaction failed for %s", message_id)
+            logger.exception("[feishu] add_reaction failed for %s", message_id)
             return None
         raw = getattr(result, "raw", None) or {}
         data = raw.get("data") if isinstance(raw, dict) else None
@@ -814,7 +812,7 @@ class FeishuAdapter:
                     if isinstance(rid, str):
                         reaction_id = rid
         if not reaction_id:
-            log.warning(
+            logger.warning(
                 "[feishu] add_reaction succeeded but reaction_id missing in %r",
                 raw,
             )
@@ -834,7 +832,7 @@ class FeishuAdapter:
                 # concurrent.futures.Future from this same loop.
                 pair = await asyncio.wrap_future(cf)
             except Exception:
-                log.exception("[feishu] ack-add task raised")
+                logger.exception("[feishu] ack-add task raised")
                 continue
             if not pair:
                 continue
@@ -842,7 +840,7 @@ class FeishuAdapter:
             try:
                 await self._channel.remove_reaction(message_id, reaction_id)
             except Exception:
-                log.exception(
+                logger.exception(
                     "[feishu] remove_reaction failed (msg=%s reaction=%s)",
                     message_id,
                     reaction_id,
@@ -861,7 +859,7 @@ class FeishuAdapter:
     def _is_allowed(self, sender_id: str) -> bool:
         allow = self._config.allow_from
         if not allow:
-            log.warning(
+            logger.warning(
                 "[feishu] allow_from is empty — denying %s; "
                 "pass --allow-from '*' to permit everyone",
                 sender_id,

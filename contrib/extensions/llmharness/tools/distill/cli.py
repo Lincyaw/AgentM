@@ -33,13 +33,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import logging
+import logging as _stdlib_logging
 import sys
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import TraceReader
+from loguru import logger
 
 from llmharness.replay.record import iter_records
 
@@ -54,8 +55,6 @@ from .gt import GroundTruth, load_dataset
 from .oracle import label_auditor_record
 from .rl_prompts import Phase as RlPhase
 from .rl_prompts import rl_rows_from_replay, serialize_row
-
-_logger = logging.getLogger(__name__)
 
 
 def _parse_provider(spec: str | None) -> tuple[str, dict[str, Any]] | None:
@@ -130,12 +129,12 @@ async def _label_session(
     # meta sidecar lives next to it as <sid>.meta.json.
     meta = read_sample_meta(replay_file.with_suffix(".meta.json"))
     if meta is None:
-        _logger.warning("no meta sidecar for %s; skipping", replay_file.name)
+        logger.warning("no meta sidecar for %s; skipping", replay_file.name)
         return 0, 0
 
     gt = gt_index.get(meta.sample_id)
     if gt is None:
-        _logger.warning(
+        logger.warning(
             "sample_id %r not in dataset; skipping %s", meta.sample_id, replay_file.name
         )
         return 0, 0
@@ -556,8 +555,23 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _InterceptHandler(_stdlib_logging.Handler):
+    def emit(self, record: _stdlib_logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        frame, depth = _stdlib_logging.currentframe(), 2
+        while frame and frame.f_code.co_filename == _stdlib_logging.__file__:
+            frame = frame.f_back
+            depth += 1
+        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logger.remove()
+    logger.add(sys.stderr, level="INFO", format="{time:YYYY-MM-DD HH:mm:ss} {level} {name}: {message}")
+    _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     parser = _build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args))

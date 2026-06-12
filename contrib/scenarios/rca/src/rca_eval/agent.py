@@ -32,7 +32,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import logging
 import os
 from typing import Any
 
@@ -48,8 +47,7 @@ from rcabench_platform.v3.sdk.llm_eval.trajectory.schema import (
     Trajectory,
     Turn,
 )
-
-_logger = logging.getLogger(__name__)
+from loguru import logger
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 # RCA investigations dispatch workers, poll, and run many SQL queries; the
@@ -245,7 +243,7 @@ class AgentMAgent(BaseAgent):
         # fork_policy / control_scenario / branch_scenario) doesn't
         # silently degrade to a vanilla control session.
         if _extra:
-            _logger.warning(
+            logger.warning(
                 "AgentMAgent: ignoring unknown kwargs %s. "
                 "Pre-refactor names like intervention_mode / fork_policy / "
                 "fork_audit / control_scenario / branch_scenario are removed; "
@@ -624,7 +622,7 @@ def _scenario_mounts_harness(scenario: str) -> bool:
         extensions = load_scenario(scenario)
     except ScenarioLoadError as exc:
         if isinstance(exc.cause, FileNotFoundError):
-            _logger.warning(
+            logger.warning(
                 "rca eval: scenario %r not found; treating as non-harness "
                 "(distill binding will not be mounted). Check "
                 "AGENTM_PROJECT_ROOT and contrib/scenarios/ layout. (%s)",
