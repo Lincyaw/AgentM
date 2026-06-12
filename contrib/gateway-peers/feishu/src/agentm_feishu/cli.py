@@ -525,7 +525,7 @@ async def _arun(
             try:
                 await adapter.handle_outbound(env)
             except Exception:  # noqa: BLE001
-                logger.exception("adapter.handle_outbound failed id=%s", env.id)
+                logger.exception(f"adapter.handle_outbound failed id={env.id}")
             return
         if env.kind in (KIND_PING, KIND_PONG):
             return

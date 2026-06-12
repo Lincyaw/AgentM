@@ -56,7 +56,7 @@ class MarkdownPromptCommand:
         meta, body = _split_frontmatter(raw)
         name = (meta.get("name") or path.stem).lower().strip()
         if not name:
-            logger.warning("markdown command at %s has empty name; skipping", path)
+            logger.warning(f"markdown command at {path} has empty name; skipping")
             return None
         summary = (
             meta.get("summary")

@@ -87,7 +87,7 @@ class RcabenchJudge:
                 case_name=case_id,
             )
         except Exception as exc:  # noqa: BLE001 -- one bad case must not sink the batch
-            logger.exception("RcabenchJudge: evaluate_v2() raised for case %s", case_id)
+            logger.exception(f"RcabenchJudge: evaluate_v2() raised for case {case_id}")
             return JudgeOutcome(correct=False, error=f"evaluate_v2 raised: {exc!s:.200}")
 
         detail = {

@@ -106,7 +106,7 @@ class UnixPeerCredAuthenticator:
         # which proxies ``getsockopt`` and ``fileno`` — both of which is
         # all peer-cred lookup needs.
         if sock is None or not hasattr(sock, "fileno"):
-            logger.warning("peer-cred reject: peer=%s — no socket on transport", peer_id)
+            logger.warning(f"peer-cred reject: peer={peer_id} — no socket on transport")
             return False
         uid = _peer_uid(sock)
         if uid is None:
@@ -117,10 +117,10 @@ class UnixPeerCredAuthenticator:
             )
             return False
         if self._allowed_uids is None:
-            logger.info("peer-cred accept: peer=%s uid=%d (any-uid policy)", peer_id, uid)
+            logger.info(f"peer-cred accept: peer={peer_id} uid={uid} (any-uid policy)")
             return True
         if uid in self._allowed_uids:
-            logger.info("peer-cred accept: peer=%s uid=%d", peer_id, uid)
+            logger.info(f"peer-cred accept: peer={peer_id} uid={uid}")
             return True
         logger.warning(
             "peer-cred reject: peer=%s uid=%d not in allow-list %s",

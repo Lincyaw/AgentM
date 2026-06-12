@@ -204,7 +204,7 @@ async def observe_case(
                 break
 
     if report_args is None:
-        logger.warning("Observer did not submit report for %s", case_id)
+        logger.warning(f"Observer did not submit report for {case_id}")
         return DivergenceReport(
             case_id=case_id, correct=False,
             root_causes_gt=gt_services, root_causes_agent=agent_services,

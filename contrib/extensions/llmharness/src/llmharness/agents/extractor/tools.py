@@ -286,7 +286,7 @@ class ExtractionState:
             with p.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(op.to_dict(), ensure_ascii=False) + "\n")
         except OSError:
-            logger.warning("ops file write failed: %s", self.ops_file, exc_info=True)
+            logger.opt(exception=True).warning(f"ops file write failed: {self.ops_file}")
 
     # -- Public mutators ----------------------------------------------------
 

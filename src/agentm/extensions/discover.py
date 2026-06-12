@@ -248,7 +248,7 @@ def _discover_flat_atoms(
                 f"MANIFEST: ExtensionManifest constant"
             )
             _LAST_DISCOVERY_FAILURES.append((module_path, failure))
-            logger.warning("%s: skipping %s (%s)", label, module_path, failure)
+            logger.warning(f"{label}: skipping {module_path} ({failure})")
             continue
         if manifest_obj.name != stem:
             sys.modules.pop(module_path, None)
@@ -258,7 +258,7 @@ def _discover_flat_atoms(
                 f"{stem!r}"
             )
             _LAST_DISCOVERY_FAILURES.append((module_path, failure))
-            logger.warning("%s: skipping %s (%s)", label, module_path, failure)
+            logger.warning(f"{label}: skipping {module_path} ({failure})")
             continue
         if manifest_obj.tier >= 2:
             sys.modules.pop(module_path, None)
@@ -268,7 +268,7 @@ def _discover_flat_atoms(
                 "them explicitly through a scenario manifest if intended"
             )
             _LAST_DISCOVERY_FAILURES.append((module_path, failure))
-            logger.warning("%s: skipping %s (%s)", label, module_path, failure)
+            logger.warning(f"{label}: skipping {module_path} ({failure})")
             continue
         entries[stem] = BuiltinEntry(
             name=stem,
@@ -427,7 +427,7 @@ def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
                 f"MANIFEST: ExtensionManifest constant"
             )
             _LAST_DISCOVERY_FAILURES.append((module_path, failure))
-            logger.warning("entrypoint atom: skipping %s (%s)", module_path, failure)
+            logger.warning(f"entrypoint atom: skipping {module_path} ({failure})")
             continue
         if manifest_obj.name != ep.name:
             failure = RuntimeError(
@@ -436,7 +436,7 @@ def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
                 f"{ep.name!r}"
             )
             _LAST_DISCOVERY_FAILURES.append((module_path, failure))
-            logger.warning("entrypoint atom: skipping %s (%s)", module_path, failure)
+            logger.warning(f"entrypoint atom: skipping {module_path} ({failure})")
             continue
         entries[ep.name] = BuiltinEntry(
             name=ep.name,

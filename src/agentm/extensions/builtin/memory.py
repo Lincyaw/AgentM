@@ -349,7 +349,7 @@ async def _list_memory_files(file_ops: Any, base: Path) -> list[Path]:
     try:
         names = await file_ops.list_dir(str(base))
     except Exception as exc:
-        logger.warning("memory: failed to list %s: %s", base, exc)
+        logger.warning(f"memory: failed to list {base}: {exc}")
         return []
     out: list[Path] = []
     for entry in names:
@@ -377,7 +377,7 @@ async def _build_index_block(file_ops: Any, base: Path, max_lines: int) -> str:
             return ""
         raw = await file_ops.read_file(str(index_path))
     except Exception as exc:
-        logger.warning("memory: failed to read index %s: %s", index_path, exc)
+        logger.warning(f"memory: failed to read index {index_path}: {exc}")
         return ""
     text = raw.decode("utf-8", errors="replace").strip()
     if not text:

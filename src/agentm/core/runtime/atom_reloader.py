@@ -583,7 +583,7 @@ class AtomReloader:
 
         effective_manifest = manifest or atom.manifest or _default_manifest(name)
         if effective_manifest.tier == 2:
-            logger.warning("tier-2 reload proceeds in MVP for %s", name)
+            logger.warning(f"tier-2 reload proceeds in MVP for {name}")
 
         try:
             current_source = atom.file_path.read_text(encoding="utf-8")

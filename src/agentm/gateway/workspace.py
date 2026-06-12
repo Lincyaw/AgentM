@@ -67,7 +67,7 @@ class WorkspaceResolver:
             self._created.add(cwd)
             if not ws_path.exists():
                 ws_path.mkdir(parents=True, exist_ok=True)
-                logger.info("created workspace for channel %r: %s", channel, ws_path)
+                logger.info(f"created workspace for channel {channel!r}: {ws_path}")
 
         return cwd
 
@@ -82,7 +82,7 @@ def load_gateway_config(default_cwd: str) -> WorkspaceResolver:
         with open(path, "rb") as fh:
             data = tomllib.load(fh)
     except Exception:
-        logger.warning("config.toml: failed to parse %s", path, exc_info=True)
+        logger.opt(exception=True).warning(f"config.toml: failed to parse {path}")
         return WorkspaceResolver(default_cwd)
 
     gateway = data.get("gateway")

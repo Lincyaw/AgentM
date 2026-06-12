@@ -441,7 +441,7 @@ async def create_agent_session(
         try:
             await install(module_path, ext_cfg)
         except Exception as exc:  # noqa: BLE001
-            logger.error("extension install failed: %s: %s", module_path, exc)
+            logger.error(f"extension install failed: {module_path}: {exc}")
             await bus.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(
@@ -589,7 +589,7 @@ def _migrate_catalog(cwd: str) -> None:
 
         migrate_catalog_v2(root=Path(cwd))
     except Exception as exc:
-        logger.warning("agentm catalog migration failed during startup: %r", exc)
+        logger.warning(f"agentm catalog migration failed during startup: {exc!r}")
 
 
 async def _prime_contrib_discovery(config: AgentSessionConfig, bus: EventBus) -> None:

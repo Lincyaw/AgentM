@@ -316,7 +316,7 @@ class WireServer:
             try:
                 await self._on_inbound(session, env)
             except Exception:
-                logger.exception("on_inbound handler raised for env id=%s", env.id)
+                logger.exception(f"on_inbound handler raised for env id={env.id}")
             return
         if env.kind == KIND_ACK:
             return  # server-side acks are implicit; tolerate client-sent ones.
@@ -416,7 +416,7 @@ class WireServer:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("sender loop for peer=%s crashed", peer_id)
+            logger.exception(f"sender loop for peer={peer_id} crashed")
 
     async def _account_failure(
         self, session: PeerSession, item: SendItem, reason: str

@@ -168,7 +168,7 @@ class SessionManager:
             try:
                 await sess.shutdown()
             except Exception:
-                logger.exception("session shutdown failed for %s", session_key)
+                logger.exception(f"session shutdown failed for {session_key}")
 
     def forget(self, session_key: str) -> None:
         """Clear the persistent ChatSessionMap entry."""

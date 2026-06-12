@@ -615,9 +615,8 @@ class OpenAIStreamFn:
                         await stream.close()
                     except Exception:
                         # Best-effort close; do not let cleanup mask the abort.
-                        logger.debug(
-                            "openai: error while closing aborted stream",
-                            exc_info=True,
+                        logger.opt(exception=True).debug(
+                            "openai: error while closing aborted stream"
                         )
                     break
                 async for kernel_event in _translate_chunk(chunk, state):
@@ -630,8 +629,8 @@ class OpenAIStreamFn:
                     if asyncio.iscoroutine(result):
                         await result
                 except Exception:
-                    logger.debug(
-                        "openai: error while closing stream", exc_info=True
+                    logger.opt(exception=True).debug(
+                        "openai: error while closing stream"
                     )
 
         # Flush any tool calls that didn't get an explicit end signal —

@@ -90,19 +90,19 @@ async def _run_phase(
     try:
         session = await create_agent_session(AgentSession, config)
     except Exception as exc:
-        logger.error("[%s] session creation FAILED: %s", purpose, exc)
+        logger.error(f"[{purpose}] session creation FAILED: {exc}")
         raise RuntimeError(f"session creation failed ({purpose}): {exc}") from exc
 
     sid = session.session_id
     label = purpose.replace("cognitive_audit_", "").replace("_offline", "")
-    logger.info("[%s] agentm trace messages --session %s --format text", label, sid)
+    logger.info(f"[{label}] agentm trace messages --session {sid} --format text")
 
     try:
         messages = await session.prompt(payload)
     except Exception as exc:
         with contextlib.suppress(Exception):
             await session.shutdown()
-        logger.error("[%s] session %s prompt FAILED: %s", purpose, sid, exc)
+        logger.error(f"[{purpose}] session {sid} prompt FAILED: {exc}")
         return _PhaseResult(output=None, error=str(exc), messages=[], session_id=sid)
 
     with contextlib.suppress(Exception):
@@ -120,7 +120,7 @@ async def _run_phase(
                     session_id=sid,
                 )
 
-    logger.warning("[%s] session %s: terminal tool %r was NOT called", purpose, sid, terminal_tool)
+    logger.warning(f"[{purpose}] session {sid}: terminal tool {terminal_tool!r} was NOT called")
     return _PhaseResult(
         output=None,
         error=f"{terminal_tool!r} was not called",
@@ -255,9 +255,9 @@ async def offline_audit(
                             firing_cursor=data["window_hi"],
                             firing_id=firing_id,
                         )
-                        logger.info("  extractor turn=%d ops=%d sid=%s", turn_number, n_ops, ext_sid)
+                        logger.info(f"  extractor turn={turn_number} ops={n_ops} sid={ext_sid}")
             except Exception:
-                logger.exception("extractor firing CRASHED at turn %d", turn_number)
+                logger.exception(f"extractor firing CRASHED at turn {turn_number}")
 
         # --- Auditor ---
         if auditor_due:

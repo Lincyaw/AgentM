@@ -353,7 +353,7 @@ def rebuild_catalog(*, root: Path, observability: Path) -> tuple[int, int, int, 
             result = index_trace(trace_path, root=root)
         except Exception as exc:
             failures += 1
-            logger.warning("agentm catalog rebuild failed for %s: %r", trace_path, exc)
+            logger.warning(f"agentm catalog rebuild failed for {trace_path}: {exc!r}")
             continue
         n_atoms += result.n_atoms_attributed
         n_warnings += len(result.warnings)

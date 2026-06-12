@@ -157,7 +157,7 @@ async def distill_skill(
 
     top_cat, cat_count = cats.most_common(1)[0]
     if cat_count < 2:
-        logger.info("Top category %r only %d case(s), need ≥2.", top_cat, cat_count)
+        logger.info(f"Top category {top_cat!r} only {cat_count} case(s), need ≥2.")
         return None
 
     report_dicts = [r.to_dict() for r in failed]
@@ -202,7 +202,7 @@ async def distill_skill(
     name = skill_args.get("name", f"evolved-{top_cat}")
 
     if action == "retire":
-        logger.info("Distiller retiring skill %r: %s", name, skill_args.get("reason", ""))
+        logger.info(f'Distiller retiring skill {name!r}: {skill_args.get("reason", "")}')
         return DistilledSkill(
             name=name, content="", pattern_category=top_cat,
             train_cases=len(reports), pattern_frequency=cat_count,

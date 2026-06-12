@@ -499,12 +499,12 @@ class _GatewayRuntime:
     async def handle_inbound(self, peer: PeerSession, env: Envelope) -> None:
         session_key = env.session_key
         if not session_key:
-            logger.warning("dropping inbound id=%s with no session_key", env.id)
+            logger.warning(f"dropping inbound id={env.id} with no session_key")
             return
         try:
             decision = dispatch(env)
         except Exception:
-            logger.exception("router failed for inbound id=%s", env.id)
+            logger.exception(f"router failed for inbound id={env.id}")
             return
         body = decision.body
         # Learn which channel this peer serves (§3.4) so its replies route
@@ -549,7 +549,7 @@ class _GatewayRuntime:
             else:
                 await self._prompt_session(session_key, scenario, body)
         except Exception as exc:
-            logger.exception("error handling inbound from %s", session_key)
+            logger.exception(f"error handling inbound from {session_key}")
             await self._send_error(session_key, body, exc)
 
     def _interrupt_session(self, session_key: str) -> None:
@@ -1317,9 +1317,9 @@ async def _arun(
 
     await server.start()
     if bind_spec.scheme == "unix":
-        logger.info("gateway bound at unix://%s", bind_spec.socket_path)
+        logger.info(f"gateway bound at unix://{bind_spec.socket_path}")
     else:
-        logger.info("gateway bound at %s", bind_spec.url)
+        logger.info(f"gateway bound at {bind_spec.url}")
 
     try:
         await stop_event.wait()

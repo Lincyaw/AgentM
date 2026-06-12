@@ -125,7 +125,7 @@ def _load_builtins(registry: CommandRegistry) -> None:
                 f"{builtins_pkg.__name__}.{modname}"
             )
         except Exception:
-            logger.exception("failed to import builtin command %r", modname)
+            logger.exception(f"failed to import builtin command {modname!r}")
             continue
         handler = getattr(mod, "HANDLER", None)
         bundle = getattr(mod, "BUILTINS", None)
@@ -149,7 +149,7 @@ def _load_markdown(registry: CommandRegistry, cwd: Path) -> None:
         try:
             handler = MarkdownPromptCommand.from_path(path)
         except Exception:
-            logger.exception("failed to load markdown command %s", path)
+            logger.exception(f"failed to load markdown command {path}")
             continue
         if handler is not None:
             registry.register(handler)
@@ -192,7 +192,7 @@ def _load_entry_points(registry: CommandRegistry) -> None:
         try:
             obj = ep.load()
         except Exception:
-            logger.exception("failed to load command plugin %r", ep.name)
+            logger.exception(f"failed to load command plugin {ep.name!r}")
             continue
         candidate = obj() if callable(obj) and not hasattr(obj, "handle") else obj
         if not hasattr(candidate, "handle"):

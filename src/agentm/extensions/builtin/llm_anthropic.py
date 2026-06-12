@@ -465,9 +465,8 @@ class AnthropicStreamFn:
                         await stream.close()
                     except Exception:
                         # Best-effort close; do not let cleanup mask the abort.
-                        logger.debug(
-                            "anthropic: error while closing aborted stream",
-                            exc_info=True,
+                        logger.opt(exception=True).debug(
+                            "anthropic: error while closing aborted stream"
                         )
                     break
                 async for kernel_event in _translate_event(event, state):
