@@ -11,6 +11,7 @@ from agentm.core.abi import (
     AgentMessage,
     AgentSessionConfig,
     AssistantMessage,
+    BeforeAgentStartEvent,
     DecideTurnActionEvent,
     ExtensionAPI,
     Inject,
@@ -58,12 +59,27 @@ class LLMHarnessConfig(BaseModel):
     enable_reminders: bool = True
 
 
-REMINDER_PREAMBLE: Final = "[system reminder — automated review of your investigation so far]\n"
+REMINDER_OPEN: Final = "<system-reminder>\n"
+REMINDER_CLOSE: Final = "\n</system-reminder>"
+
+_SYSTEM_PROMPT_BLOCK: Final = (
+    "## Automated review\n\n"
+    "During your investigation you may receive `<system-reminder>` messages.\n"
+    "These are from an independent reviewer monitoring your reasoning trajectory.\n\n"
+    "When you receive one:\n"
+    "- Treat it as a serious signal, not noise.\n"
+    "- If it identifies a lead you haven't investigated, prioritize it.\n"
+    "- If it flags a contradiction, re-examine the raw data rather than "
+    "reasoning from memory.\n"
+    "- Change your investigation direction based on the feedback — do not "
+    "simply acknowledge and continue."
+)
 
 MANIFEST = ExtensionManifest(
     name="llmharness",
     description="Two-phase cognitive-audit: per-turn extractor + every-k-turns auditor.",
-    registers=("event:turn_end", "event:decide_turn_action", "event:session_shutdown"),
+    registers=("event:turn_end", "event:decide_turn_action", "event:session_shutdown",
+               "event:before_agent_start"),
     config_schema=LLMHarnessConfig,
     requires=("observability", "operations"),
     api_version=1,
@@ -389,7 +405,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     # ------------------------------------------------------------------
 
     def _build_reminder_msg(text: str) -> UserMessage:
-        return text_message(REMINDER_PREAMBLE + text, timestamp=time.time())
+        return text_message(f"{REMINDER_OPEN}{text}{REMINDER_CLOSE}", timestamp=time.time())
 
     def _on_decide(event: DecideTurnActionEvent) -> LoopAction | None:
         if not pending_reminders:
@@ -406,6 +422,14 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             except Exception:
                 logger.exception("failed to persist reminder_delivered")
         return Inject(messages=injected)
+
+    if enable_reminders:
+
+        def _on_before_start(event: BeforeAgentStartEvent) -> None:
+            current = str(event.system or "")
+            event.system = f"{current}\n\n{_SYSTEM_PROMPT_BLOCK}" if current else _SYSTEM_PROMPT_BLOCK
+
+        api.on(BeforeAgentStartEvent.CHANNEL, _on_before_start)
 
     if cfg.mode == "sync":
 

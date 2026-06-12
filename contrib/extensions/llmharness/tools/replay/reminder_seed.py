@@ -36,12 +36,11 @@ from pydantic import BaseModel, Field
 
 from llmharness.schema import REMINDER_DELIVERED
 
-# Matches the preamble in llmharness.atom so the injected message is
-# byte-identical to what the live adapter would have produced.
-REMINDER_PREAMBLE = "[system reminder — automated review of your investigation so far]\n"
+REMINDER_OPEN = "<system-reminder>\n"
+REMINDER_CLOSE = "\n</system-reminder>"
 
 def _build_reminder_message(text: str) -> UserMessage:
-    return text_message(REMINDER_PREAMBLE + text, timestamp=time.time())
+    return text_message(f"{REMINDER_OPEN}{text}{REMINDER_CLOSE}", timestamp=time.time())
 
 class ReplayReminderSeedConfig(BaseModel):
     text: str = Field(

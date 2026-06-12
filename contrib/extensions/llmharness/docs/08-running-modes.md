@@ -19,9 +19,9 @@ If you only want a quick mental model: read §1 and skim §5.
 | Reminder injection | `atom.py:_make_reminder_injector` (live) and `replay/reminder_seed.py` (offline / prefix-replay) | on the **main** agent's bus via `DecideTurnActionEvent` → `Inject([reminder_msg])` | the `surface_reminder` text from a Verdict | one synthetic user message + `REMINDER_DELIVERED` entry |
 
 The single source of truth for the reminder message shape is
-`atom.py: REMINDER_PREAMBLE constant`; both call sites
-import from there so train-time and inference-time messages stay
-byte-identical.
+`atom.py: REMINDER_OPEN / REMINDER_CLOSE constants` (XML `<system-reminder>`
+tags); both call sites import from there so train-time and inference-time
+messages stay byte-identical.
 
 ### Live adapter knobs (`atom.py`)
 

@@ -95,7 +95,9 @@ instead.
 
 ## Constraint: train/inference parity
 
-The reminder message format is single-sourced as the `REMINDER_PREAMBLE`
-constant in `atom.py` and used by both the live adapter and the seed atom. The test suite pins the format (see
-``tests/test_reminder_seed_atom.py`` + ``tests/test_reminder_injector.py``);
-do not duplicate the preamble string anywhere else.
+The reminder message format is single-sourced as the `REMINDER_OPEN` /
+`REMINDER_CLOSE` constants in `atom.py` (XML `<system-reminder>` tags) and
+used by both the live adapter and the seed atom. The test suite pins the
+format (see ``tests/test_reminder_seed_atom.py`` +
+``tests/test_reminder_injector.py``); do not duplicate the tag strings
+anywhere else.
