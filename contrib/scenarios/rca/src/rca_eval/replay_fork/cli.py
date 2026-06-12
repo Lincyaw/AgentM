@@ -67,6 +67,9 @@ def run(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("opentelemetry").setLevel(logging.WARNING)
+    logging.getLogger("agentm.core.runtime.catalog").setLevel(logging.WARNING)
 
     from agentm.core.runtime.session_manager import JsonlSessionStore
 
