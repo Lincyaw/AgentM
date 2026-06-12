@@ -41,7 +41,7 @@ a process boundary — the same answer as for ``bash``. Determinism for the
 resume journal is achieved by *not injecting* ``time`` / ``random`` rather than
 by interception.
 
-§11 single-file contract: stdlib + ``agentm.core.abi.*`` +
+single-file contract: stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions.*``. No atom-to-atom imports — ``artifact_store`` is
 reached via ``api.get_service`` and worker child sessions via
 ``api.spawn_child_session``.
@@ -113,10 +113,11 @@ WorkflowResult = str | dict[str, Any] | list[Any]
 # types). Every host-side object reached through ``ExtensionAPI`` is given a
 # real type or a minimal structural ``Protocol`` below.
 
+
 class _ChildSession(Protocol):
     """The slice of a spawned child session this atom drives.
 
-    ``spawn_child_session`` is typed ``-> Any`` in the ABI (so the §11 import
+    ``spawn_child_session`` is typed ``-> Any`` in the ABI (so the import
     allow-list need not pull in ``core.runtime``); this Protocol re-types the
     handful of members we actually use, structurally."""
 
@@ -124,6 +125,7 @@ class _ChildSession(Protocol):
 
     async def prompt(self, message: str) -> list[AgentMessage]: ...
     async def shutdown(self) -> None: ...
+
 
 class _ArtifactStore(Protocol):
     """The ``artifact_store`` service surface used for the resume journal."""
@@ -139,6 +141,7 @@ class _ArtifactStore(Protocol):
         tags: list[str] | None = None,
     ) -> dict[str, str]: ...
 
+
 class BudgetSnapshot(TypedDict):
     """Aggregated child token spend (also returned in the tool ``extras``)."""
 
@@ -147,6 +150,7 @@ class BudgetSnapshot(TypedDict):
     output_tokens: int
     total: int | None
     remaining: int | None
+
 
 class RunSummary(TypedDict):
     """Post-execution summary of a workflow run."""
@@ -158,12 +162,14 @@ class RunSummary(TypedDict):
     budget: BudgetSnapshot
     wall_clock_s: float
 
+
 class WorkflowConfig(BaseModel):
     max_concurrency: int | None = None
     max_agents: int | None = None
     wall_clock_timeout_s: float | None = None
     default_scenario: str | None = None
     budget_tokens: int | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="workflow",
@@ -200,14 +206,12 @@ _AGENT_COUNT_BACKSTOP: Final[int] = 1000
 # Worker-isolation atom (``isolation="agent_env"``). Soft/optional dependency:
 # NOT in MANIFEST.requires (that would force every workflow user to load
 # agent-env + the arl extra). Enforcement is the runtime availability guard in
-# ``_WorkflowRun._spawn_and_drive``, not the §11 validator. The module path is
+# ``_WorkflowRun._spawn_and_drive``, not the validator. The module path is
 # what goes into the child's extension list; the bare atom name (for the
 # loaded-set check) is DERIVED from it rather than written as a literal — a
 # bare-name literal would read as an undeclared hard dependency to the D4
 # contract check.
-_AGENT_ENV_ATOM_MODULE: Final[str] = (
-    "agentm.extensions.builtin.operations"
-)
+_AGENT_ENV_ATOM_MODULE: Final[str] = "agentm.extensions.builtin.operations"
 _AGENT_ENV_ATOM: Final[str] = _AGENT_ENV_ATOM_MODULE.rsplit(".", 1)[-1]
 
 # structured_output atom: wired automatically when agent(schema=...) is used.
@@ -223,16 +227,48 @@ _STRUCTURED_OUTPUT_ATOM: Final[str] = _STRUCTURED_OUTPUT_ATOM_MODULE.rsplit(".",
 # ``time`` / ``random`` are likewise not provided, keeping the journal key
 # replay-deterministic.
 _SAFE_BUILTIN_NAMES: Final[tuple[str, ...]] = (
-    "abs", "all", "any", "bool", "dict", "divmod", "enumerate", "filter",
-    "float", "frozenset", "int", "isinstance", "issubclass", "len", "list",
-    "map", "max", "min", "next", "range", "repr", "reversed", "round", "set",
-    "slice", "sorted", "str", "sum", "tuple", "zip",
-    "Exception", "ValueError", "KeyError", "IndexError", "TypeError",
-    "RuntimeError", "StopIteration",
+    "abs",
+    "all",
+    "any",
+    "bool",
+    "dict",
+    "divmod",
+    "enumerate",
+    "filter",
+    "float",
+    "frozenset",
+    "int",
+    "isinstance",
+    "issubclass",
+    "len",
+    "list",
+    "map",
+    "max",
+    "min",
+    "next",
+    "range",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "slice",
+    "sorted",
+    "str",
+    "sum",
+    "tuple",
+    "zip",
+    "Exception",
+    "ValueError",
+    "KeyError",
+    "IndexError",
+    "TypeError",
+    "RuntimeError",
+    "StopIteration",
 )
 _SAFE_BUILTINS: Final[dict[str, Any]] = {
     name: getattr(_builtins, name) for name in _SAFE_BUILTIN_NAMES
 }
+
 
 @dataclass(slots=True)
 class WorkflowPhaseEvent(Event):
@@ -247,6 +283,7 @@ class WorkflowPhaseEvent(Event):
     CHANNEL: ClassVar[Literal["workflow_phase"]] = "workflow_phase"
     kind: Literal["phase", "log"] = "log"
     text: str = ""
+
 
 @dataclass(slots=True)
 class _BudgetService:
@@ -297,6 +334,7 @@ class _BudgetService:
             "remaining": remaining,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class _Budget:
     """Read-only ``budget`` view injected into the script."""
@@ -315,6 +353,7 @@ class _Budget:
         if total is None:
             return None
         return max(0, total - self.spent())
+
 
 @dataclass(slots=True)
 class _Journal:
@@ -378,9 +417,11 @@ class _Journal:
             tags=[key],
         )
 
+
 def _default_concurrency() -> int:
     cpu = os.cpu_count() or 2
     return max(1, min(16, cpu - 2))
+
 
 @dataclass(slots=True)
 class _WorkflowRun:
@@ -489,7 +530,10 @@ class _WorkflowRun:
             try:
                 async with self.semaphore:
                     coro = self._spawn_and_drive(
-                        current_prompt, scenario, isolation, tool_allowlist,
+                        current_prompt,
+                        scenario,
+                        isolation,
+                        tool_allowlist,
                         extra_extensions=extra_extensions,
                         atom_config=atom_config,
                         schema=json_schema,
@@ -502,10 +546,14 @@ class _WorkflowRun:
             except TimeoutError as exc:
                 last_error = exc
                 if attempt < retry:
-                    logger.warning(f"workflow agent timed out (prompt={prompt}…), retrying ({retry - attempt} left)")
+                    logger.warning(
+                        f"workflow agent timed out (prompt={prompt}…), retrying ({retry - attempt} left)"
+                    )
                     self.agents_retried += 1
                     current_prompt = _structured_retry_prompt(
-                        prompt, exc, attempt + 1,
+                        prompt,
+                        exc,
+                        attempt + 1,
                     )
                     continue
                 self.agents_failed += 1
@@ -514,7 +562,9 @@ class _WorkflowRun:
             parsed = _auto_parse(result)
 
             if _is_agent_error(parsed) and attempt < retry:
-                logger.warning(f"workflow agent failed (prompt={prompt}…), retrying ({retry - attempt} left)")
+                logger.warning(
+                    f"workflow agent failed (prompt={prompt}…), retrying ({retry - attempt} left)"
+                )
                 self.agents_retried += 1
                 continue
 
@@ -525,10 +575,14 @@ class _WorkflowRun:
                 except (ValidationError, TypeError) as exc:
                     last_error = exc
                     if attempt < retry:
-                        logger.warning(f"workflow structured output invalid for {model_cls.__name__} (prompt={prompt}…), retrying ({retry - attempt} left)")
+                        logger.warning(
+                            f"workflow structured output invalid for {model_cls.__name__} (prompt={prompt}…), retrying ({retry - attempt} left)"
+                        )
                         self.agents_retried += 1
                         current_prompt = _structured_retry_prompt(
-                            prompt, exc, attempt + 1,
+                            prompt,
+                            exc,
+                            attempt + 1,
                         )
                         continue
                     self.agents_failed += 1
@@ -643,6 +697,7 @@ class _WorkflowRun:
         session_manager: Any = None
         if session_id is not None:
             from agentm.core.abi import SESSION_STORE_SERVICE
+
             store = self.api.get_service(SESSION_STORE_SERVICE)
             if store is None:
                 raise RuntimeError(
@@ -676,11 +731,16 @@ class _WorkflowRun:
                 with contextlib.suppress(Exception):
                     await child.shutdown()
         except Exception as exc:
-            logger.warning(f"workflow agent spawn/prompt failed: {type(exc).__name__}: {exc}")
-            return json.dumps({
-                "_error": type(exc).__name__,
-                "detail": str(exc)[:500],
-            })
+            logger.warning(
+                f"workflow agent spawn/prompt failed: {type(exc).__name__}: {exc}"
+            )
+            return json.dumps(
+                {
+                    "_error": type(exc).__name__,
+                    "detail": str(exc)[:500],
+                }
+            )
+
 
 class WorkflowContext:
     """Typed interface for module-mode workflow scripts.
@@ -795,9 +855,11 @@ class WorkflowContext:
         """Start a named phase (groups subsequent agents in the progress view)."""
         self._run.phase(name)
 
+
 # ---------------------------------------------------------------------------
 # Output extraction / error helpers
 # ---------------------------------------------------------------------------
+
 
 def _build_agent_error_info(messages: list[AgentMessage]) -> dict[str, Any]:
     """Build a structured error dict when a child agent produces no output."""
@@ -813,6 +875,7 @@ def _build_agent_error_info(messages: list[AgentMessage]) -> dict[str, Any]:
                             return info
     return info
 
+
 def _structured_retry_prompt(original: str, exc: Exception, attempt: int) -> str:
     return (
         f"{original}\n\n"
@@ -823,6 +886,7 @@ def _structured_retry_prompt(original: str, exc: Exception, attempt: int) -> str
         f"`result` object conforming to the required JSON schema."
     )
 
+
 def _is_agent_error(result: AgentResult) -> bool:
     """True if the result represents an agent failure."""
     if isinstance(result, dict) and "_error" in result:
@@ -830,6 +894,7 @@ def _is_agent_error(result: AgentResult) -> bool:
     if isinstance(result, str) and not result:
         return True
     return False
+
 
 def _final_session_output(messages: list[AgentMessage]) -> str:
     """Extract the agent's final output from a completed session.
@@ -867,6 +932,7 @@ def _final_session_output(messages: list[AgentMessage]) -> str:
     )
     return ""
 
+
 def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
     """Parse JSON if possible, otherwise return raw string.
 
@@ -885,15 +951,26 @@ def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
         pass
     return text
 
+
 # ---------------------------------------------------------------------------
 # Pre-execution validation
 # ---------------------------------------------------------------------------
 
 # Names available in the exec-mode curated namespace.
-_SDK_NAMES: Final[frozenset[str]] = frozenset({
-    "agent", "parallel", "pipeline", "budget", "args", "json", "log", "phase",
-})
+_SDK_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "agent",
+        "parallel",
+        "pipeline",
+        "budget",
+        "args",
+        "json",
+        "log",
+        "phase",
+    }
+)
 _EXEC_KNOWN_NAMES: Final[frozenset[str]] = frozenset(_SAFE_BUILTIN_NAMES) | _SDK_NAMES
+
 
 @dataclass(frozen=True, slots=True)
 class ScriptIssue:
@@ -903,6 +980,7 @@ class ScriptIssue:
     message: str
     severity: Literal["error", "warning"]
 
+
 class WorkflowValidationError(Exception):
     """Raised when pre-execution validation finds blocking issues."""
 
@@ -910,6 +988,7 @@ class WorkflowValidationError(Exception):
         self.issues = issues
         detail = "\n".join(f"  line {i.line}: {i.message}" for i in issues)
         super().__init__(f"workflow script validation failed:\n{detail}")
+
 
 def _detect_script_mode(source: str) -> Literal["exec", "module"]:
     """``module`` if the source defines a top-level ``async def run(...)``."""
@@ -921,6 +1000,7 @@ def _detect_script_mode(source: str) -> Literal["exec", "module"]:
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "run":
             return "module"
     return "exec"
+
 
 def _validate_script(
     source: str,
@@ -941,37 +1021,54 @@ def _validate_script(
         return _validate_exec(tree)
     return _validate_module(tree)
 
-_FORBIDDEN_CALLS: Final[frozenset[str]] = frozenset({
-    "open", "__import__", "eval", "exec", "compile", "input", "getattr",
-})
+
+_FORBIDDEN_CALLS: Final[frozenset[str]] = frozenset(
+    {
+        "open",
+        "__import__",
+        "eval",
+        "exec",
+        "compile",
+        "input",
+        "getattr",
+    }
+)
+
 
 def _validate_exec(tree: ast.Module) -> list[ScriptIssue]:
     issues: list[ScriptIssue] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
-            issues.append(ScriptIssue(
-                node.lineno,
-                "import not available in exec mode — use module mode "
-                "(define `async def run(ctx: WorkflowContext)`) for imports",
-                "error",
-            ))
+            issues.append(
+                ScriptIssue(
+                    node.lineno,
+                    "import not available in exec mode — use module mode "
+                    "(define `async def run(ctx: WorkflowContext)`) for imports",
+                    "error",
+                )
+            )
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in _FORBIDDEN_CALLS:
-                issues.append(ScriptIssue(
-                    node.lineno,
-                    f"'{node.func.id}()' is not available in the "
-                    f"workflow namespace",
-                    "error",
-                ))
+                issues.append(
+                    ScriptIssue(
+                        node.lineno,
+                        f"'{node.func.id}()' is not available in the "
+                        f"workflow namespace",
+                        "error",
+                    )
+                )
         elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             if node.value.id in ("time", "random"):
-                issues.append(ScriptIssue(
-                    node.lineno,
-                    f"'{node.value.id}' is not available — workflow "
-                    f"scripts must be deterministic for resume/journal",
-                    "error",
-                ))
+                issues.append(
+                    ScriptIssue(
+                        node.lineno,
+                        f"'{node.value.id}' is not available — workflow "
+                        f"scripts must be deterministic for resume/journal",
+                        "error",
+                    )
+                )
     return issues
+
 
 def _validate_module(tree: ast.Module) -> list[ScriptIssue]:
     issues: list[ScriptIssue] = []
@@ -981,30 +1078,38 @@ def _validate_module(tree: ast.Module) -> list[ScriptIssue]:
             run_func = node
             break
     if run_func is None:
-        issues.append(ScriptIssue(
-            0, "module mode requires `async def run(ctx: WorkflowContext)`",
-            "error",
-        ))
+        issues.append(
+            ScriptIssue(
+                0,
+                "module mode requires `async def run(ctx: WorkflowContext)`",
+                "error",
+            )
+        )
         return issues
     params = run_func.args
     if not params.args and not params.posonlyargs:
-        issues.append(ScriptIssue(
-            run_func.lineno,
-            "`run()` must accept a WorkflowContext parameter "
-            "(e.g. `async def run(ctx: WorkflowContext)`)",
-            "error",
-        ))
+        issues.append(
+            ScriptIssue(
+                run_func.lineno,
+                "`run()` must accept a WorkflowContext parameter "
+                "(e.g. `async def run(ctx: WorkflowContext)`)",
+                "error",
+            )
+        )
     return issues
+
 
 # ---------------------------------------------------------------------------
 # Script execution — exec mode (inline / LLM-generated)
 # ---------------------------------------------------------------------------
+
 
 def _error(message: str) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=message)],
         is_error=True,
     )
+
 
 def _coerce_result(raw: object) -> str:
     if isinstance(raw, str):
@@ -1015,6 +1120,7 @@ def _coerce_result(raw: object) -> str:
         return json.dumps(raw, ensure_ascii=False, default=str)
     except TypeError:
         return str(raw)
+
 
 def _build_namespace(run: _WorkflowRun) -> dict[str, Any]:
     """The curated globals the script runs against — only the SDK + safe
@@ -1032,6 +1138,7 @@ def _build_namespace(run: _WorkflowRun) -> dict[str, Any]:
         "phase": run.phase,
     }
 
+
 async def _run_user_script(script: str, ns: dict[str, Any]) -> object:
     """Compile the script as the body of an ``async def`` and await it, so the
     script can ``await agent(...)`` / ``parallel(...)`` directly. ``return`` in
@@ -1042,9 +1149,11 @@ async def _run_user_script(script: str, ns: dict[str, Any]) -> object:
     exec(code, ns)  # noqa: S102 - curated namespace; same authority as the agent
     return await ns["__workflow__"]()
 
+
 # ---------------------------------------------------------------------------
 # Script execution — module mode (developer-written file scripts)
 # ---------------------------------------------------------------------------
+
 
 async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
     """Import a file script as a Python module and call ``run(ctx)``.
@@ -1092,8 +1201,7 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
                 with contextlib.suppress(ValueError):
                     sys.path.remove(path_entry)
             stale = [
-                k for k in sys.modules
-                if k == pkg_root or k.startswith(pkg_root + ".")
+                k for k in sys.modules if k == pkg_root or k.startswith(pkg_root + ".")
             ]
             for k in stale:
                 sys.modules.pop(k, None)
@@ -1119,6 +1227,7 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
             return await run_fn(ctx)
         finally:
             sys.modules.pop(module_name, None)
+
 
 _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
     "type": "object",
@@ -1173,6 +1282,7 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
 
 _WORKFLOW_RUNNER_SERVICE: Final[str] = "workflow_runner"
 
+
 class WorkflowRunner:
     """Programmatic entry point for running workflow scripts.
 
@@ -1213,8 +1323,11 @@ class WorkflowRunner:
     def last_budget_snapshot(self) -> BudgetSnapshot:
         if self._last_run is None:
             return BudgetSnapshot(
-                spent=0, input_tokens=0, output_tokens=0,
-                total=None, remaining=None,
+                spent=0,
+                input_tokens=0,
+                output_tokens=0,
+                total=None,
+                remaining=None,
             )
         return self._last_run.budget_svc.snapshot()
 
@@ -1226,11 +1339,16 @@ class WorkflowRunner:
     def last_run_summary(self) -> RunSummary:
         if self._last_run is None:
             return RunSummary(
-                agents_spawned=0, agents_succeeded=0,
-                agents_failed=0, agents_retried=0,
+                agents_spawned=0,
+                agents_succeeded=0,
+                agents_failed=0,
+                agents_retried=0,
                 budget=BudgetSnapshot(
-                    spent=0, input_tokens=0, output_tokens=0,
-                    total=None, remaining=None,
+                    spent=0,
+                    input_tokens=0,
+                    output_tokens=0,
+                    total=None,
+                    remaining=None,
                 ),
                 wall_clock_s=0.0,
             )
@@ -1316,8 +1434,11 @@ class WorkflowRunner:
             raise FileNotFoundError(f"workflow script not found: {sp}")
         script = sp.read_text(encoding="utf-8")
         return await self._execute(
-            script, args or {}, source_path=sp,
-            cwd=cwd, provider=provider,
+            script,
+            args or {},
+            source_path=sp,
+            cwd=cwd,
+            provider=provider,
         )
 
     async def run_script(
@@ -1332,8 +1453,10 @@ class WorkflowRunner:
         if not script.strip():
             raise ValueError("workflow: empty script")
         return await self._execute(
-            script, args or {},
-            cwd=cwd, provider=provider,
+            script,
+            args or {},
+            cwd=cwd,
+            provider=provider,
         )
 
     async def _execute(
@@ -1392,12 +1515,14 @@ class WorkflowRunner:
         result = _auto_parse(_coerce_result(raw))
 
         await self._emit_delivery(
-            run, result,
+            run,
+            result,
             source_path=source_path,
             args_payload=args_payload,
         )
 
         return result
+
 
 def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
     if api.purpose == _WORKER_PURPOSE:
@@ -1444,12 +1569,12 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
         script_path_raw = args.get("script_path")
 
         if script_path_raw and script:
-            return _error(
-                "workflow: 'script' and 'script_path' are mutually exclusive"
-            )
+            return _error("workflow: 'script' and 'script_path' are mutually exclusive")
 
         cwd_arg = args.get("cwd")
-        cwd: str | None = str(cwd_arg) if isinstance(cwd_arg, str) and cwd_arg.strip() else None
+        cwd: str | None = (
+            str(cwd_arg) if isinstance(cwd_arg, str) and cwd_arg.strip() else None
+        )
 
         model_arg = args.get("model")
         provider: tuple[str, dict[str, Any]] | None = None
@@ -1466,36 +1591,38 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
         try:
             if isinstance(script_path_raw, str) and script_path_raw.strip():
                 result = await runner.run_file(
-                    script_path_raw, args.get("args"),
-                    cwd=cwd, provider=provider,
+                    script_path_raw,
+                    args.get("args"),
+                    cwd=cwd,
+                    provider=provider,
                 )
             elif isinstance(script, str) and script.strip():
                 result = await runner.run_script(
-                    script, args.get("args"),
-                    cwd=cwd, provider=provider,
+                    script,
+                    args.get("args"),
+                    cwd=cwd,
+                    provider=provider,
                 )
             else:
-                return _error(
-                    "workflow: either 'script' or 'script_path' is required"
-                )
+                return _error("workflow: either 'script' or 'script_path' is required")
         except WorkflowValidationError as exc:
             return _error(str(exc))
         except (FileNotFoundError, ValueError) as exc:
             return _error(f"workflow: {exc}")
         except asyncio.TimeoutError:
             return _error(
-                f"workflow: script exceeded wall-clock budget "
-                f"({wall_clock_timeout}s)"
+                f"workflow: script exceeded wall-clock budget ({wall_clock_timeout}s)"
             )
         except Exception as exc:
-            return _error(
-                f"workflow script error: {type(exc).__name__}: {exc}"
-            )
+            return _error(f"workflow script error: {type(exc).__name__}: {exc}")
 
         return ToolResult(
-            content=[TextContent(
-                type="text", text=_coerce_result(result),
-            )],
+            content=[
+                TextContent(
+                    type="text",
+                    text=_coerce_result(result),
+                )
+            ],
             extras={
                 "progress": runner.last_progress,
                 "summary": runner.last_run_summary,

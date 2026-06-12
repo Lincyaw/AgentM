@@ -21,7 +21,7 @@ The prompt registry is published by the ``prompt_templates`` atom under the
 ``"prompt_templates"`` service key; this atom resolves it via
 ``api.get_service("prompt_templates")``.
 
-The §11 single-file contract holds: this atom does not import any other
+The single-file contract holds: this atom does not import any other
 atom and reaches services exclusively via :class:`ExtensionAPI`.
 """
 
@@ -238,12 +238,16 @@ _BRANCH_SUMMARY_PREAMBLE = (
 
 # --- EntryMaterializer implementations --------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class _MessageEntryMaterializer:
     def to_message(self, entry: SessionEntry) -> AgentMessage | None:
-        if isinstance(entry.payload, (UserMessage, AssistantMessage, ToolResultMessage)):
+        if isinstance(
+            entry.payload, (UserMessage, AssistantMessage, ToolResultMessage)
+        ):
             return entry.payload
         return None
+
 
 @dataclass(frozen=True, slots=True)
 class _BranchSummaryEntryMaterializer:
@@ -262,6 +266,7 @@ class _BranchSummaryEntryMaterializer:
             stop_reason="end_turn",
         )
 
+
 @dataclass(frozen=True, slots=True)
 class _CompactionEntryMaterializer:
     def to_message(self, entry: SessionEntry) -> AgentMessage | None:
@@ -278,7 +283,9 @@ class _CompactionEntryMaterializer:
             timestamp=entry.timestamp,
         )
 
+
 # --- Manifest + install -----------------------------------------------------
+
 
 class CompactionPromptsConfig(BaseModel):
     model_config = {"extra": "allow"}
@@ -288,6 +295,7 @@ class CompactionPromptsConfig(BaseModel):
     update_summarization: str | None = None
     branch_summary: str | None = None
     branch_summary_preamble: str | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="compaction_prompts",
@@ -304,13 +312,17 @@ MANIFEST = ExtensionManifest(
     provides_role=(COMPACTION_PROMPTS,),
 )
 
+
 def install(api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
     bodies: dict[str, str] = {
-        PROMPT_SUMMARIZATION_SYSTEM: config.summarization_system or _SUMMARIZATION_SYSTEM,
+        PROMPT_SUMMARIZATION_SYSTEM: config.summarization_system
+        or _SUMMARIZATION_SYSTEM,
         PROMPT_SUMMARIZATION: config.summarization or _SUMMARIZATION,
-        PROMPT_UPDATE_SUMMARIZATION: config.update_summarization or _UPDATE_SUMMARIZATION,
+        PROMPT_UPDATE_SUMMARIZATION: config.update_summarization
+        or _UPDATE_SUMMARIZATION,
         PROMPT_BRANCH_SUMMARY: config.branch_summary or _BRANCH_SUMMARY,
-        PROMPT_BRANCH_SUMMARY_PREAMBLE: config.branch_summary_preamble or _BRANCH_SUMMARY_PREAMBLE,
+        PROMPT_BRANCH_SUMMARY_PREAMBLE: config.branch_summary_preamble
+        or _BRANCH_SUMMARY_PREAMBLE,
     }
     registry = api.get_service("prompt_templates")
     if registry is None:
@@ -327,6 +339,7 @@ def install(api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
     ENTRY_MATERIALIZERS[ENTRY_TYPE_MESSAGE] = _MessageEntryMaterializer()
     ENTRY_MATERIALIZERS[ENTRY_TYPE_BRANCH_SUMMARY] = _BranchSummaryEntryMaterializer()
     ENTRY_MATERIALIZERS[ENTRY_TYPE_COMPACTION] = _CompactionEntryMaterializer()
+
 
 def _override(config: dict[str, Any], key: str, default: str) -> str:
     candidate = config.get(key)

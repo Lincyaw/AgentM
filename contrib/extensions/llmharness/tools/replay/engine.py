@@ -4,7 +4,7 @@ Live path: parent session spawns a child via ``api.spawn_child_session``.
 Replay path: this module creates a brand-new top-level session with the
 same extensions and pumps the recorded payload through it.
 
-Boundary: this module is a host-side driver (not a §11 atom — no
+Boundary: this module is a host-side driver (not a atom — no
 ``MANIFEST`` / ``install`` pair, never named in a scenario manifest), so
 the ``agentm.core.runtime.*`` imports below are intentional and must not
 be removed.
@@ -43,8 +43,10 @@ class PhaseResult:
     latency_ms: int
     messages: list[AgentMessage]
 
+
 def terminal_tool_arguments(
-    messages: list[AgentMessage], tool_name: str,
+    messages: list[AgentMessage],
+    tool_name: str,
 ) -> dict[str, Any] | None:
     """Extract the arguments of the last call to ``tool_name``."""
     for msg in reversed(messages):
@@ -54,6 +56,7 @@ def terminal_tool_arguments(
             if isinstance(block, ToolCallBlock) and block.name == tool_name:
                 return dict(block.arguments)
     return None
+
 
 async def run_phase_standalone(
     *,

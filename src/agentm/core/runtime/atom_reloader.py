@@ -345,7 +345,7 @@ class AtomReloader:
     ) -> None:
         # validate=False: the reloader validates atom source separately via
         # _validate_reload_source / _validate_install_source before reaching
-        # here, so skip the load-time §11 check to avoid double work.
+        # here, so skip the load-time check to avoid double work.
         result = load_extension(module_path, api, ext_cfg, validate=False)
         if inspect.isawaitable(result):
             await result
@@ -396,7 +396,9 @@ class AtomReloader:
         self._clear_module_bytecode(atom.file_path)
         importlib.invalidate_caches()
         # Synthetic atoms have no package finder; re-seed sys.modules from disk.
-        if atom.import_kind == "synthetic" or atom.module_path.startswith(_SCENARIO_MODULE_PREFIX):
+        if atom.import_kind == "synthetic" or atom.module_path.startswith(
+            _SCENARIO_MODULE_PREFIX
+        ):
             # Scenario-local atoms are synthetic too.
             self._import_synthetic_module(atom.module_path, atom.file_path)
         await self._finish_install(
@@ -455,8 +457,7 @@ class AtomReloader:
             loaded_by_module=dict(self._loaded_by_module),
             loaded_by_name=dict(self._loaded_by_name),
             handlers_by_atom={
-                owner: list(unsubs)
-                for owner, unsubs in self._handlers_by_atom.items()
+                owner: list(unsubs) for owner, unsubs in self._handlers_by_atom.items()
             },
             registrations_by_atom={
                 owner: list(regs) for owner, regs in self._registrations_by_atom.items()
@@ -488,7 +489,10 @@ class AtomReloader:
         )
         self._registrations_by_atom.clear()
         self._registrations_by_atom.update(
-            {owner: list(regs) for owner, regs in snapshot.registrations_by_atom.items()}
+            {
+                owner: list(regs)
+                for owner, regs in snapshot.registrations_by_atom.items()
+            }
         )
         self.owners_by_kind.clear()
         self.owners_by_kind.update(
@@ -660,7 +664,9 @@ class AtomReloader:
             except Exception as rollback_exc:  # noqa: BLE001
                 # Rollback also failed; restore from immutable snapshot.
                 # rather than something half-new / half-old.
-                logger.exception(f"atom {name!r} rollback failed after apply failure; restoring from pre-reload snapshot")
+                logger.exception(
+                    f"atom {name!r} rollback failed after apply failure; restoring from pre-reload snapshot"
+                )
                 self._restore_from_snapshot(snapshot)
                 self._bus.emit_sync(
                     ExtensionReloadEvent.CHANNEL,
@@ -749,7 +755,7 @@ class AtomReloader:
     # ``reload_atom`` swaps an atom's source in place. ``install_atom`` adds
     # a brand-new one at runtime, ``unload_atom`` removes it. The mechanism
     # reuses the same building blocks: ResourceWriter for the on-disk write,
-    # ``_validate_reload_source``-equivalent for the §11 contract, the
+    # ``_validate_reload_source``-equivalent for the contract, the
     # ``_remove_handlers``/``_remove_registrations``/``sys.modules.pop``
     # cleanup that ``_activate_atom_install`` already does mid-reload.
     #
@@ -980,7 +986,9 @@ class AtomReloader:
         )
 
         if effective_manifest.tier == 2:
-            logger.warning(f"tier-2 install proceeds in MVP for {name} (no approval gate)")
+            logger.warning(
+                f"tier-2 install proceeds in MVP for {name} (no approval gate)"
+            )
 
         return InstallAtomResult(
             ok=True,
@@ -1026,7 +1034,9 @@ class AtomReloader:
         manifest = atom.manifest or _default_manifest(name)
         trigger: Any = "agent" if agent_initiated else "human"
         if manifest.tier == 2:
-            logger.warning(f"tier-2 unload proceeds in MVP for {name} (no approval gate)")
+            logger.warning(
+                f"tier-2 unload proceeds in MVP for {name} (no approval gate)"
+            )
 
         veto_reason = self._collect_block_veto(
             BeforeUnloadAtomEvent.CHANNEL,

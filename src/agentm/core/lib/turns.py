@@ -7,7 +7,7 @@ entries (compaction, branch_summary) are skipped.
 This is the single source of turn numbering shared by two atoms that must
 agree: the ``llm_compaction`` engine tags its summary with ``[Turn N]``
 markers, and the ``read_history`` tool resolves a turn index back to its
-original messages. §11 forbids atom-to-atom imports, so the shared numbering
+original messages. forbids atom-to-atom imports, so the shared numbering
 lives here in ``core.lib`` where both atoms reach it as a pure utility.
 
 Indices are 1-based and **stable across compactions**: the session tree only

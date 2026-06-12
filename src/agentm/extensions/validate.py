@@ -1,4 +1,4 @@
-"""Validator for the §11 single-file extension contract.
+"""Validator for the single-file extension contract.
 
 Checks every module under ``agentm/extensions/builtin/`` against the
 contract. Returns a list of :class:`ValidationIssue`; an empty list means
@@ -86,8 +86,7 @@ _FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
     ),
     (
         "agentm._scenarios.",
-        "scenario-local atom-to-atom coupling forbidden — depend via "
-        "events / api only",
+        "scenario-local atom-to-atom coupling forbidden — depend via events / api only",
     ),
     ("langchain", "langchain is forbidden in the v2 tree"),
 )
@@ -154,8 +153,7 @@ def validate_builtin() -> list[ValidationIssue]:
                     module_path=f"agentm.extensions.builtin.{info.name}",
                     rule="11.4.1-subpackage",
                     message=(
-                        f"{info.name!r} is a subpackage; "
-                        "single-file extensions only"
+                        f"{info.name!r} is a subpackage; single-file extensions only"
                     ),
                 )
             )
@@ -191,10 +189,7 @@ def validate_builtin() -> list[ValidationIssue]:
                         ValidationIssue(
                             module_path=module_path,
                             rule="11.4.2-install",
-                            message=(
-                                "'install' must accept (api, config); "
-                                f"got {sig}"
-                            ),
+                            message=(f"'install' must accept (api, config); got {sig}"),
                         )
                     )
             except (TypeError, ValueError):  # pragma: no cover — defensive
@@ -312,7 +307,7 @@ def _check_ast_rules(
                         rule="11.4.D7-inherit-provider-bare-literal",
                         message=(
                             "use PARENT_PROVIDER_CONFIG_KEY rather than the "
-                            "bare \"provider\" string when reading the "
+                            'bare "provider" string when reading the '
                             "inherit_provider config payload"
                         ),
                     )
@@ -348,7 +343,9 @@ def _check_ast_rules(
             )
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if target.lineno not in ignored_lines and _is_api_attribute_target(target):
+                if target.lineno not in ignored_lines and _is_api_attribute_target(
+                    target
+                ):
                     issues.append(
                         ValidationIssue(
                             module_path=module_path,
@@ -459,7 +456,10 @@ def _check_undeclared_api_mutation(
             self.generic_visit(node)
 
         def visit_Call(self, node: ast.Call) -> None:
-            if _is_api_registry_mutating_call(node) and not self._inside_routed_handler():
+            if (
+                _is_api_registry_mutating_call(node)
+                and not self._inside_routed_handler()
+            ):
                 self.found = True
             self.generic_visit(node)
 
@@ -469,19 +469,25 @@ def _check_undeclared_api_mutation(
                     self.found = True
 
         def _inside_routed_handler(self) -> bool:
-            return bool(self.function_stack and self.function_stack[-1] in routed_handlers)
+            return bool(
+                self.function_stack and self.function_stack[-1] in routed_handlers
+            )
 
     visitor = _Visitor()
     visitor.visit(install)
     return [_undeclared_mutation_issue(module_path)] if visitor.found else []
 
 
-def _agent_start_handler_names(install: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+def _agent_start_handler_names(
+    install: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> set[str]:
     names: set[str] = set()
     for node in ast.walk(install):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
-        if node.func.attr != "on" or not _is_api_registry_mutation_owner(node.func.value):
+        if node.func.attr != "on" or not _is_api_registry_mutation_owner(
+            node.func.value
+        ):
             continue
         if len(node.args) < 2 or not _is_agent_start_channel(node.args[0]):
             continue
@@ -505,7 +511,11 @@ def _undeclared_mutation_issue(module_path: str) -> ValidationIssue:
 
 
 def _is_private_api_getattr(node: ast.Call) -> bool:
-    if not isinstance(node.func, ast.Name) or node.func.id != "getattr" or len(node.args) < 2:
+    if (
+        not isinstance(node.func, ast.Name)
+        or node.func.id != "getattr"
+        or len(node.args) < 2
+    ):
         return False
     target, attr = node.args[0], node.args[1]
     if not (
@@ -623,7 +633,9 @@ def _type_expr_contains_forbidden_service(node: ast.expr) -> bool:
 
 def _is_unfinalized_mutable_global(node: ast.stmt) -> bool:
     if isinstance(node, ast.AnnAssign):
-        return _is_mutable_literal(node.value) and not _annotation_is_final(node.annotation)
+        return _is_mutable_literal(node.value) and not _annotation_is_final(
+            node.annotation
+        )
     if isinstance(node, ast.Assign):
         return _is_mutable_literal(node.value)
     return False
@@ -751,13 +763,20 @@ def _check_peer_literal_requires(
         ]
 
     own = own_name or module_path.rpartition(".")[2]
-    requires = manifest_requires if manifest_requires is not None else _manifest_requires_from_tree(tree)
+    requires = (
+        manifest_requires
+        if manifest_requires is not None
+        else _manifest_requires_from_tree(tree)
+    )
     peers = known_extension_names - {own}
     referenced: set[str] = set()
 
     class _Visitor(ast.NodeVisitor):
         def visit_Assign(self, node: ast.Assign) -> None:
-            if any(isinstance(target, ast.Name) and target.id == "MANIFEST" for target in node.targets):
+            if any(
+                isinstance(target, ast.Name) and target.id == "MANIFEST"
+                for target in node.targets
+            ):
                 return
             self.generic_visit(node)
 
@@ -784,9 +803,7 @@ def _check_peer_literal_requires(
     ]
 
 
-def _build_reachability_graph(
-    entry_file: Path, package_root: Path
-) -> set[Path]:
+def _build_reachability_graph(entry_file: Path, package_root: Path) -> set[Path]:
     """Static AST-only import graph traversal starting from *entry_file*.
 
     Returns all ``.py`` files reachable through intra-package imports
@@ -831,7 +848,7 @@ def _build_reachability_graph(
                         resolved = candidate.with_suffix(".py").resolve()
                 else:
                     # `from . import a, b, c` — each name may be a module.
-                    for alias in (node.names or []):
+                    for alias in node.names or []:
                         sub = base / alias.name
                         sub_resolved: Path | None = None
                         if (sub / "__init__.py").is_file():
@@ -907,9 +924,7 @@ def validate_atom_package(
             parts = parts[:-1]
         file_module = f"{module_path}.{'.'.join(parts)}" if parts else module_path
 
-        issues.extend(
-            _check_imports(file_module, src_file, package_root=resolved_root)
-        )
+        issues.extend(_check_imports(file_module, src_file, package_root=resolved_root))
         issues.extend(_check_ast_rules(file_module, src_file))
 
     return issues
@@ -922,7 +937,11 @@ def validate_atom_file(
     known_extension_names: set[str] | None = None,
 ) -> list[ValidationIssue]:
     src_file = Path(path)
-    known = known_extension_names if known_extension_names is not None else set(discover_builtin())
+    known = (
+        known_extension_names
+        if known_extension_names is not None
+        else set(discover_builtin())
+    )
     return [
         *_check_imports(module_path, src_file),
         *_check_ast_rules(module_path, src_file),
@@ -955,21 +974,19 @@ def _classify_import(
             # atoms. An atom importing from its own private subpackage is not
             # atom-to-atom coupling — skip the check.
             if bare == "agentm.extensions.builtin":
-                suffix = imported[len(bare) + 1:]
+                suffix = imported[len(bare) + 1 :]
                 if suffix.startswith("_"):
                     continue
             return [
                 ValidationIssue(
                     module_path=module_path,
                     rule="11.4.5-import",
-                    message=(
-                        f"forbidden import {imported!r}: {reason}"
-                    ),
+                    message=(f"forbidden import {imported!r}: {reason}"),
                 )
             ]
     for pkg_prefix in _PACKAGE_ONLY_PREFIXES:
         if imported.startswith(pkg_prefix + ".") and imported != pkg_prefix:
-            sub = imported[len(pkg_prefix) + 1:]
+            sub = imported[len(pkg_prefix) + 1 :]
             if "." not in sub:
                 if all_names and all(n.startswith("_") for n in all_names):
                     continue
@@ -1065,8 +1082,7 @@ def validate_extension_contract(
                     module_path=module_path,
                     rule="11.4.7-requires",
                     message=(
-                        f"requires {ref!r} which is not a discovered "
-                        "built-in extension"
+                        f"requires {ref!r} which is not a discovered built-in extension"
                     ),
                 )
             )
@@ -1101,8 +1117,7 @@ def validate_extension_contract(
                     module_path=module_path,
                     rule="11.4.8-config-schema",
                     message=(
-                        "MANIFEST.config_schema must be a BaseModel "
-                        "subclass or None"
+                        "MANIFEST.config_schema must be a BaseModel subclass or None"
                     ),
                 )
             )
@@ -1114,8 +1129,7 @@ def validate_extension_contract(
                 module_path=module_path,
                 rule="11.4.9-api-version-too-new",
                 message=(
-                    f"atom requires api_version {api_version}, "
-                    f"current is {api_current}"
+                    f"atom requires api_version {api_version}, current is {api_current}"
                 ),
             )
         )

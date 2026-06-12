@@ -1,6 +1,6 @@
 """Public surface of the AgentM extension catalog.
 
-Implements §11 (Single-File, Self-Contained Extension Contract) of
+Implements (Single-File, Self-Contained Extension Contract) of
 ``.claude/designs/extension-as-scenario.md``. The intent is to make
 extensions a *mechanically checkable* unit so that future agents can edit
 their own behavior without breaking the harness.
@@ -47,9 +47,7 @@ def parse_register_tag(tag: str) -> tuple[str, str]:
 
     kind, sep, ident = tag.partition(":")
     if not sep or not kind or not ident:
-        raise ValueError(
-            f"register tag {tag!r} must be of the form '<kind>:<id>'"
-        )
+        raise ValueError(f"register tag {tag!r} must be of the form '<kind>:<id>'")
     if kind not in VALID_REGISTER_KINDS:
         raise ValueError(
             f"register tag kind {kind!r} not in {sorted(VALID_REGISTER_KINDS)}"

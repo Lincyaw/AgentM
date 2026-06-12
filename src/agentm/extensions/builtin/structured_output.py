@@ -10,7 +10,7 @@ convenience — the workflow wires the atom config and extracts the result
 automatically. Can also be loaded standalone in any scenario that needs a
 schema-constrained terminal tool.
 
-§11 single-file contract: stdlib + ``agentm.core.abi.*`` +
+single-file contract: stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions.*``. No atom-to-atom imports.
 """
 
@@ -83,13 +83,18 @@ def install(api: Any, config: StructuredOutputConfig) -> None:
             except _validation_error_cls as exc:
                 return ToolTerminate(
                     result=ToolResult(
-                        content=[TextContent(
-                            type="text",
-                            text=json.dumps({
-                                "error": "schema_validation_failed",
-                                "detail": str(exc.message),
-                            }, ensure_ascii=False),
-                        )],
+                        content=[
+                            TextContent(
+                                type="text",
+                                text=json.dumps(
+                                    {
+                                        "error": "schema_validation_failed",
+                                        "detail": str(exc.message),
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                        ],
                         is_error=True,
                     ),
                     reason="workflow:structured_output",
@@ -97,10 +102,12 @@ def install(api: Any, config: StructuredOutputConfig) -> None:
 
         return ToolTerminate(
             result=ToolResult(
-                content=[TextContent(
-                    type="text",
-                    text=json.dumps(result, ensure_ascii=False),
-                )],
+                content=[
+                    TextContent(
+                        type="text",
+                        text=json.dumps(result, ensure_ascii=False),
+                    )
+                ],
             ),
             reason="workflow:structured_output",
         )

@@ -1,4 +1,4 @@
-"""§11 contract gate.
+"""contract gate.
 
 This single test runs ``validate_builtin`` over every module under
 ``agentm/extensions/builtin/``. **Every PR that adds or modifies a built-in
@@ -34,7 +34,7 @@ def setup_function() -> None:
 
 
 def test_builtin_catalog_passes_section_11_contract() -> None:
-    """Every built-in extension must satisfy the §11 contract.
+    """Every built-in extension must satisfy the contract.
 
     If this fails, read the issue list — each entry includes the offending
     module path and the contract rule that was violated.
@@ -51,8 +51,7 @@ def test_builtin_catalog_passes_section_11_contract() -> None:
 
     issues = validate_builtin()
     real_issues = [
-        i for i in issues
-        if (i.module_path, i.rule) not in _D4_FALSE_POSITIVES
+        i for i in issues if (i.module_path, i.rule) not in _D4_FALSE_POSITIVES
     ]
     assert real_issues == [], "\n".join(
         f"  - {i.module_path} [{i.rule}]: {i.message}" for i in real_issues
@@ -98,9 +97,7 @@ def _patch_catalog(
 ) -> None:
     """Replace ``validate.discover_builtin`` with a stub returning ``entries``."""
 
-    monkeypatch.setattr(
-        "agentm.extensions.validate.discover_builtin", lambda: entries
-    )
+    monkeypatch.setattr("agentm.extensions.validate.discover_builtin", lambda: entries)
 
 
 def _patch_core_manifest(
@@ -153,14 +150,10 @@ def test_S7_api_version_too_new_rejected(
 
     issues = validate_builtin()
 
-    assert _has_rule(
-        issues, "11.4.9-api-version-too-new", "too_new_atom"
-    ), (
+    assert _has_rule(issues, "11.4.9-api-version-too-new", "too_new_atom"), (
         "expected rule '11.4.9-api-version-too-new' to fire on api_version=99 "
         f"with current=1; got: {[(i.rule, i.message) for i in issues]}"
     )
-
-
 
 
 def test_tier_2_atom_not_in_manifest_list_warns(
@@ -190,9 +183,7 @@ def test_tier_2_atom_not_in_manifest_list_warns(
 
     issues = validate_builtin()
 
-    assert _has_rule(
-        issues, "11.4.10-tier-list-mismatch", "orphan_tier2"
-    ), (
+    assert _has_rule(issues, "11.4.10-tier-list-mismatch", "orphan_tier2"), (
         "expected rule '11.4.10-tier-list-mismatch' to fire when an atom's "
         f"tier=2 is not mirrored in core_manifest.tier_2_atoms; "
         f"got: {[(i.rule, i.message) for i in issues]}"
@@ -204,8 +195,6 @@ def test_tier_2_atom_not_in_manifest_list_warns(
     )
 
 
-
-
 def _validate_source(tmp_path: Path, source: str) -> list[ValidationIssue]:
     path = tmp_path / "atom.py"
     path.write_text(source, encoding="utf-8")
@@ -215,29 +204,25 @@ def _validate_source(tmp_path: Path, source: str) -> list[ValidationIssue]:
 
 
 def test_D1_private_api_getattr_rejected(tmp_path: Path) -> None:
-    issues = _validate_source(tmp_path, 'def install(api, config):\n    getattr(api, "_observer")\n')
+    issues = _validate_source(
+        tmp_path, 'def install(api, config):\n    getattr(api, "_observer")\n'
+    )
 
     assert any(issue.rule == "11.4.D1-private-api-reflection" for issue in issues)
 
 
-
-
-
-
 def test_D2_api_attribute_assignment_rejected(tmp_path: Path) -> None:
-    issues = _validate_source(tmp_path, 'def install(api, config):\n    api.on = something\n')
+    issues = _validate_source(
+        tmp_path, "def install(api, config):\n    api.on = something\n"
+    )
 
     assert any(issue.rule == "11.4.D2-api-attribute-overwrite" for issue in issues)
 
 
-
-
 def test_D3_mutable_global_without_final_rejected(tmp_path: Path) -> None:
-    issues = _validate_source(tmp_path, '_GLOBAL: dict[str, Any] = {}\n')
+    issues = _validate_source(tmp_path, "_GLOBAL: dict[str, Any] = {}\n")
 
     assert any(issue.rule == "11.4.D3-mutable-global" for issue in issues)
-
-
 
 
 def test_D5_agentm_fstring_dynamic_import_rejected(tmp_path: Path) -> None:
@@ -249,39 +234,31 @@ def test_D5_agentm_fstring_dynamic_import_rejected(tmp_path: Path) -> None:
     assert any(issue.rule == "11.4.D5-dynamic-agentm-import" for issue in issues)
 
 
-
-
 def test_D6_concrete_harness_service_isinstance_rejected(tmp_path: Path) -> None:
     issues = _validate_source(
         tmp_path,
-        "def install(api, config):\n"
-        "    isinstance(writer, GitBackedResourceWriter)\n",
+        "def install(api, config):\n    isinstance(writer, GitBackedResourceWriter)\n",
     )
 
     assert any(issue.rule == "11.4.D6-service-downcast" for issue in issues)
 
 
-
-
 def test_D4_peer_literal_requires_manifest_entry(tmp_path: Path) -> None:
     issues = _validate_source(
         tmp_path,
-        'from agentm.extensions import ExtensionManifest\n'
+        "from agentm.extensions import ExtensionManifest\n"
         'MANIFEST = ExtensionManifest(name="synthetic", description="", registers=())\n'
-        'def install(api, config):\n'
+        "def install(api, config):\n"
         '    return "system_prompt"\n',
     )
 
     assert any(issue.rule == "11.4.D4-peer-requires" for issue in issues)
 
 
-
-
 def test_D7_warns_on_undeclared_api_registry_mutation(tmp_path: Path) -> None:
     issues = _validate_source(
         tmp_path,
-        'def install(api, config):\n'
-        '    api.tools.append(object())\n',
+        "def install(api, config):\n    api.tools.append(object())\n",
     )
 
     assert any(
@@ -315,12 +292,15 @@ def test_build_reachability_graph_includes_reachable(tmp_path: Path) -> None:
     """_build_reachability_graph includes files imported from __init__.py
     (both directly and transitively) but excludes unreachable files."""
 
-    pkg_dir = _make_package(tmp_path, {
-        "__init__.py": "from .helper import greet\ndef install(api, config): pass\n",
-        "helper.py": "from .util import x\ndef greet(): pass\n",
-        "util.py": "x = 1\n",
-        "unreachable.py": "import os\n",
-    })
+    pkg_dir = _make_package(
+        tmp_path,
+        {
+            "__init__.py": "from .helper import greet\ndef install(api, config): pass\n",
+            "helper.py": "from .util import x\ndef greet(): pass\n",
+            "util.py": "x = 1\n",
+            "unreachable.py": "import os\n",
+        },
+    )
     init_file = pkg_dir / "__init__.py"
     reachable = _build_reachability_graph(init_file, pkg_dir)
 
@@ -334,11 +314,14 @@ def test_build_reachability_graph_includes_reachable(tmp_path: Path) -> None:
 def test_build_reachability_graph_handles_cycle(tmp_path: Path) -> None:
     """Cyclic imports between modules do not cause infinite loops."""
 
-    pkg_dir = _make_package(tmp_path, {
-        "__init__.py": "from .a import x\ndef install(api, config): pass\n",
-        "a.py": "from .b import y\nx = 1\n",
-        "b.py": "from .a import x\ny = 2\n",
-    })
+    pkg_dir = _make_package(
+        tmp_path,
+        {
+            "__init__.py": "from .a import x\ndef install(api, config): pass\n",
+            "a.py": "from .b import y\nx = 1\n",
+            "b.py": "from .a import x\ny = 2\n",
+        },
+    )
     init_file = pkg_dir / "__init__.py"
     reachable = _build_reachability_graph(init_file, pkg_dir)
 
@@ -349,12 +332,15 @@ def test_build_reachability_graph_handles_cycle(tmp_path: Path) -> None:
 def test_build_reachability_graph_from_dot_import(tmp_path: Path) -> None:
     """``from . import agents, commands`` resolves each name to its module."""
 
-    pkg_dir = _make_package(tmp_path, {
-        "__init__.py": "from . import agents, commands\ndef install(api, config): pass\n",
-        "agents.py": "x = 1\n",
-        "commands.py": "y = 2\n",
-        "unreachable.py": "z = 3\n",
-    })
+    pkg_dir = _make_package(
+        tmp_path,
+        {
+            "__init__.py": "from . import agents, commands\ndef install(api, config): pass\n",
+            "agents.py": "x = 1\n",
+            "commands.py": "y = 2\n",
+            "unreachable.py": "z = 3\n",
+        },
+    )
     init_file = pkg_dir / "__init__.py"
     reachable = _build_reachability_graph(init_file, pkg_dir)
 
@@ -365,13 +351,18 @@ def test_build_reachability_graph_from_dot_import(tmp_path: Path) -> None:
     assert "unreachable.py" not in reachable_names
 
 
-def test_validate_atom_package_catches_forbidden_import_in_reachable(tmp_path: Path) -> None:
+def test_validate_atom_package_catches_forbidden_import_in_reachable(
+    tmp_path: Path,
+) -> None:
     """A forbidden import in a reachable file is flagged."""
 
-    pkg_dir = _make_package(tmp_path, {
-        "__init__.py": "from .worker import do_thing\ndef install(api, config): pass\n",
-        "worker.py": "from agentm.core.runtime.session import AgentSession\ndef do_thing(): pass\n",
-    })
+    pkg_dir = _make_package(
+        tmp_path,
+        {
+            "__init__.py": "from .worker import do_thing\ndef install(api, config): pass\n",
+            "worker.py": "from agentm.core.runtime.session import AgentSession\ndef do_thing(): pass\n",
+        },
+    )
     issues = validate_atom_package(
         pkg_dir,
         module_path="test.fake_atom",
@@ -386,11 +377,14 @@ def test_validate_atom_package_catches_forbidden_import_in_reachable(tmp_path: P
 def test_validate_atom_package_skips_unreachable_file(tmp_path: Path) -> None:
     """A forbidden import in an unreachable file (host-driver) is not flagged."""
 
-    pkg_dir = _make_package(tmp_path, {
-        "__init__.py": "from .clean import ok\ndef install(api, config): pass\n",
-        "clean.py": "ok = True\n",
-        "host_driver.py": "from agentm.core.runtime.session import AgentSession\n",
-    })
+    pkg_dir = _make_package(
+        tmp_path,
+        {
+            "__init__.py": "from .clean import ok\ndef install(api, config): pass\n",
+            "clean.py": "ok = True\n",
+            "host_driver.py": "from agentm.core.runtime.session import AgentSession\n",
+        },
+    )
     issues = validate_atom_package(
         pkg_dir,
         module_path="test.fake_atom",
@@ -416,27 +410,28 @@ def test_validate_atom_package_missing_init(tmp_path: Path) -> None:
 def test_validate_atom_package_clean_package_passes(tmp_path: Path) -> None:
     """A clean package with only allowed imports passes validation."""
 
-    pkg_dir = _make_package(tmp_path, {
-        "__init__.py": (
-            "from agentm.core.abi import ExtensionAPI\n"
-            "from .worker import helper\n"
-            "def install(api, config): pass\n"
-        ),
-        "worker.py": (
-            "import json\n"
-            "from agentm.core.lib import to_jsonable\n"
-            "def helper(): pass\n"
-        ),
-    })
+    pkg_dir = _make_package(
+        tmp_path,
+        {
+            "__init__.py": (
+                "from agentm.core.abi import ExtensionAPI\n"
+                "from .worker import helper\n"
+                "def install(api, config): pass\n"
+            ),
+            "worker.py": (
+                "import json\n"
+                "from agentm.core.lib import to_jsonable\n"
+                "def helper(): pass\n"
+            ),
+        },
+    )
     issues = validate_atom_package(
         pkg_dir,
         module_path="test.clean_atom",
         known_extension_names=set(),
     )
     error_issues = [i for i in issues if i.severity == "error"]
-    assert not error_issues, (
-        f"clean package should have no errors; got: {error_issues}"
-    )
+    assert not error_issues, f"clean package should have no errors; got: {error_issues}"
 
 
 def test_runtime_load_extension_blocks_bad_atom(tmp_path: Path) -> None:
@@ -475,13 +470,15 @@ def test_runtime_load_extension_blocks_bad_atom(tmp_path: Path) -> None:
     try:
         with pytest.raises(ExtensionLoadError) as exc_info:
             load_extension(module_name, api, {}, validate=True)
-        assert "contract violation" in str(exc_info.value).lower() or "11.4.5" in str(exc_info.value)
+        assert "contract violation" in str(exc_info.value).lower() or "11.4.5" in str(
+            exc_info.value
+        )
     finally:
         sys.modules.pop(module_name, None)
 
 
 def test_runtime_load_extension_skips_validation_when_disabled(tmp_path: Path) -> None:
-    """load_extension with validate=False does not run §11 checks."""
+    """load_extension with validate=False does not run checks."""
 
     import sys
     from unittest.mock import MagicMock
@@ -513,7 +510,7 @@ def test_runtime_load_extension_skips_validation_when_disabled(tmp_path: Path) -
 
 
 def test_existing_contrib_packages_pass_import_validation() -> None:
-    """All existing contrib extension packages pass §11 import validation.
+    """All existing contrib extension packages pass import validation.
 
     This is a regression gate for the package-aware reachability graph:
     contrib packages must not have forbidden imports in reachable files.
@@ -552,8 +549,7 @@ def test_existing_contrib_packages_pass_import_validation() -> None:
     # contribution). AST hygiene rules (D3, D7, etc.) have pre-existing
     # violations in contrib code that are tracked separately.
     import_issues = [
-        i for i in all_issues
-        if i.severity == "error" and i.rule.startswith("11.4.5")
+        i for i in all_issues if i.severity == "error" and i.rule.startswith("11.4.5")
     ]
     assert not import_issues, (
         "contrib packages have forbidden import violations:\n"
@@ -562,5 +558,3 @@ def test_existing_contrib_packages_pass_import_validation() -> None:
         )
     )
     assert validated > 0, "expected at least one contrib package to validate"
-
-

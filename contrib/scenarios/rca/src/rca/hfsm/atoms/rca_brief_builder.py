@@ -17,7 +17,7 @@ Two structural properties this atom enforces (acceptance #9 / §6.1, §6.2):
   Callers may opt out with ``blind=False`` for explicit non-blinded
   flows (e.g. devil's advocate brief in Phase 2).
 
-§11 contract: stdlib + ``agentm.core.abi.*`` + ``agentm.extensions`` +
+contract: stdlib + ``agentm.core.abi.*`` + ``agentm.extensions`` +
 the scenario's pure ``schema`` module. No atom-to-atom imports — the
 brief builder reads L1 through the ``rca.hgraph.read`` service captured
 at install time.
@@ -60,6 +60,7 @@ _ADVERSARIAL_PREFIX = (
     "leading hypothesis. Return observations only — no proposed update."
 )
 
+
 @dataclass
 class _BriefBuilder:
     read: Any  # rca.hgraph.read service
@@ -73,7 +74,10 @@ class _BriefBuilder:
         blind: bool = True,
     ) -> str:
         return self.build(
-            hypothesis_id, prediction_id, mode=mode, blind=blind,
+            hypothesis_id,
+            prediction_id,
+            mode=mode,
+            blind=blind,
         )
 
     def build(
@@ -88,7 +92,8 @@ class _BriefBuilder:
         if h is None:
             raise ValueError(f"unknown hypothesis: {hypothesis_id}")
         pred = next(
-            (p for p in h.predictions if p.id == prediction_id), None,
+            (p for p in h.predictions if p.id == prediction_id),
+            None,
         )
         if pred is None:
             raise ValueError(
@@ -119,18 +124,22 @@ class _BriefBuilder:
             # Non-blinded callers get the parent claim. Phase 1 callers
             # leave ``blind=True`` so this branch is dead-code on the
             # default path; kept for the Phase 2 devil's-advocate brief.
-            lines.extend([
+            lines.extend(
+                [
+                    "",
+                    "## Parent hypothesis (visible — non-blinded mode)",
+                    "",
+                    f"- claim: {h.claim}",
+                    f"- rationale: {h.rationale}" if h.rationale else "",
+                ]
+            )
+        lines.extend(
+            [
                 "",
-                "## Parent hypothesis (visible — non-blinded mode)",
+                "## Relevant observations (L1 slice)",
                 "",
-                f"- claim: {h.claim}",
-                f"- rationale: {h.rationale}" if h.rationale else "",
-            ])
-        lines.extend([
-            "",
-            "## Relevant observations (L1 slice)",
-            "",
-        ])
+            ]
+        )
         relevant = self._slice_observations(prediction_id)
         if relevant:
             for obs in relevant:
@@ -142,16 +151,18 @@ class _BriefBuilder:
             lines.extend(["", "## No-go zones (already-refuted branches)", ""])
             for branch_text in no_go:
                 lines.append(f"- {branch_text}")
-        lines.extend([
-            "",
-            "## Expected output",
-            "",
-            "Return a two-column structured result:",
-            "- `observations`: facts you found (text + source_tool_call + ",
-            "  related_symptoms/related_predictions). These are ingested into L1.",
-            "- `interpretation`: free-form `proposed_update` / `reasoning` / ",
-            "  `confidence`. Advisory only — the orchestrator re-derives.",
-        ])
+        lines.extend(
+            [
+                "",
+                "## Expected output",
+                "",
+                "Return a two-column structured result:",
+                "- `observations`: facts you found (text + source_tool_call + ",
+                "  related_symptoms/related_predictions). These are ingested into L1.",
+                "- `interpretation`: free-form `proposed_update` / `reasoning` / ",
+                "  `confidence`. Advisory only — the orchestrator re-derives.",
+            ]
+        )
         return "\n".join(line for line in lines if line is not None)
 
     def _slice_observations(self, prediction_id: str) -> list[Any]:
@@ -178,10 +189,8 @@ class _BriefBuilder:
 
     def _no_go_zones(self) -> list[str]:
         refuted = self.read.get_refuted_branches()
-        return [
-            f"{h.claim} (refuted)"
-            for h in refuted
-        ]
+        return [f"{h.claim} (refuted)" for h in refuted]
+
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

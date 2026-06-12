@@ -12,7 +12,7 @@ reminders, if any, come from the still-live auditor running in the
 branched session (configured at the CLI layer to keep observing but not
 re-inject).
 
-§11 contract: single file, no atom-to-atom imports, no
+contract: single file, no atom-to-atom imports, no
 ``agentm.core.runtime.*`` import, no ``agentm.core._internal`` import.
 """
 
@@ -39,8 +39,10 @@ from llmharness.schema import REMINDER_DELIVERED
 REMINDER_OPEN = "<system-reminder>\n"
 REMINDER_CLOSE = "\n</system-reminder>"
 
+
 def _build_reminder_message(text: str) -> UserMessage:
     return text_message(f"{REMINDER_OPEN}{text}{REMINDER_CLOSE}", timestamp=time.time())
+
 
 class ReplayReminderSeedConfig(BaseModel):
     text: str = Field(
@@ -51,6 +53,7 @@ class ReplayReminderSeedConfig(BaseModel):
             "prepended automatically; pass only the body."
         ),
     )
+
 
 MANIFEST = ExtensionManifest(
     name="replay_reminder_seed",
@@ -73,6 +76,7 @@ MANIFEST = ExtensionManifest(
     tier=1,
 )
 
+
 def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
     """Wire the one-shot reminder seeder."""
     text: str = config.text
@@ -85,7 +89,9 @@ def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
             return None
         default = event.observation.default_action
         if isinstance(default, Stop) and default.cause.final:
-            logger.warning(f"replay_reminder_seed: first DecideTurnActionEvent has final-cause Stop ({type(default.cause).__name__}); reminder will not be delivered, leaving seed armed")
+            logger.warning(
+                f"replay_reminder_seed: first DecideTurnActionEvent has final-cause Stop ({type(default.cause).__name__}); reminder will not be delivered, leaving seed armed"
+            )
             return None
         message = _build_reminder_message(text)
         try:
@@ -101,5 +107,6 @@ def install(api: ExtensionAPI, config: ReplayReminderSeedConfig) -> None:
         return Inject(messages=[message])
 
     unsubscribe.append(api.on(DecideTurnActionEvent.CHANNEL, _on_decide))
+
 
 __all__ = ["MANIFEST", "install"]

@@ -170,7 +170,7 @@ class Judge(Protocol):
     """A single judgment surface.
 
     Implementations register themselves via
-    ``api.set_service("rca.judge.<kind>", impl)`` from inside a §11 atom.
+    ``api.set_service("rca.judge.<kind>", impl)`` from inside a atom.
     The service name's ``<kind>`` suffix matches the implementation's
     ``kind`` attribute.
     """

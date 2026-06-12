@@ -1,12 +1,12 @@
 """Auto-discovery of built-in extensions.
 
 Walks ``agentm/extensions/builtin/`` and imports every ``<name>.py`` module
-that is not a package (subpackages are forbidden by the §11 single-file
+that is not a package (subpackages are forbidden by the single-file
 rule and are rejected by :func:`discover_builtin`). Used by:
 
 - ``load_scenario`` — to validate that scenario YAML references resolve
   to real atoms with a clear error.
-- ``validate.validate_builtin`` — to drive the §11 contract checks.
+- ``validate.validate_builtin`` — to drive the contract checks.
 - Future agent tooling that needs "what atoms exist".
 
 Discovery is **memoized at process scope** so repeated calls are cheap.
@@ -48,6 +48,7 @@ auto-discovered from ``<cwd>/.agentm/atoms/`` are imported under
 ``reload_atom``, or ``unload_atom`` call sees the same module identity it
 would have synthesised itself."""
 
+
 @dataclass(frozen=True, slots=True)
 class BuiltinEntry:
     """One discovered built-in extension."""
@@ -64,8 +65,10 @@ class BuiltinEntry:
 
     manifest: ExtensionManifest
 
+
 _CACHE: dict[str, BuiltinEntry] | None = None
 _LAST_DISCOVERY_FAILURES: list[tuple[str, BaseException]] = []
+
 
 def reset_cache() -> None:
     """Drop the memoized discovery result. Tests that mutate the catalog
@@ -74,6 +77,7 @@ def reset_cache() -> None:
     global _CACHE
     _CACHE = None
     _LAST_DISCOVERY_FAILURES.clear()
+
 
 def last_discovery_failures() -> list[tuple[str, BaseException]]:
     """Return ``(module_path, exception)`` for every atom that failed to
@@ -86,6 +90,7 @@ def last_discovery_failures() -> list[tuple[str, BaseException]]:
     """
 
     return list(_LAST_DISCOVERY_FAILURES)
+
 
 def discover_builtin() -> dict[str, BuiltinEntry]:
     """Return ``name → BuiltinEntry`` for every module under
@@ -134,7 +139,9 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
             module = importlib.import_module(module_path)
         except (ImportError, RuntimeError, SyntaxError) as exc:
             _LAST_DISCOVERY_FAILURES.append((module_path, exc))
-            logger.warning(f"discover_builtin: failed to import {module_path} ({type(exc).__name__}: {exc})")
+            logger.warning(
+                f"discover_builtin: failed to import {module_path} ({type(exc).__name__}: {exc})"
+            )
             continue
         manifest_obj: Any = getattr(module, "MANIFEST", None)
         if not isinstance(manifest_obj, ExtensionManifest):
@@ -143,7 +150,9 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
                 f"MANIFEST: ExtensionManifest constant"
             )
             _LAST_DISCOVERY_FAILURES.append((module_path, failure))
-            logger.warning(f"discover_builtin: skipping {module_path} ({type(failure).__name__}: {failure})")
+            logger.warning(
+                f"discover_builtin: skipping {module_path} ({type(failure).__name__}: {failure})"
+            )
             continue
         if manifest_obj.name != info.name:
             failure = RuntimeError(
@@ -152,7 +161,9 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
                 f"{info.name!r}"
             )
             _LAST_DISCOVERY_FAILURES.append((module_path, failure))
-            logger.warning(f"discover_builtin: skipping {module_path} ({type(failure).__name__}: {failure})")
+            logger.warning(
+                f"discover_builtin: skipping {module_path} ({type(failure).__name__}: {failure})"
+            )
             continue
         entries[info.name] = BuiltinEntry(
             name=info.name,
@@ -163,6 +174,7 @@ def discover_builtin() -> dict[str, BuiltinEntry]:
 
     _CACHE = entries
     return entries
+
 
 def _discover_flat_atoms(
     atoms_dir: Path, *, module_prefix: str, label: str
@@ -215,7 +227,9 @@ def _discover_flat_atoms(
                     raise
             except (ImportError, RuntimeError, SyntaxError) as exc:
                 _LAST_DISCOVERY_FAILURES.append((module_path, exc))
-                logger.warning(f"{label}: failed to import {module_path} from {path} ({type(exc).__name__}: {exc})")
+                logger.warning(
+                    f"{label}: failed to import {module_path} from {path} ({type(exc).__name__}: {exc})"
+                )
                 continue
 
         manifest_obj: Any = getattr(module, "MANIFEST", None)
@@ -255,6 +269,7 @@ def _discover_flat_atoms(
             manifest=manifest_obj,
         )
     return entries
+
 
 def discover_by_role() -> dict[str, BuiltinEntry]:
     """Return ``role → BuiltinEntry`` over every builtin + contrib + home +
@@ -296,6 +311,7 @@ def discover_by_role() -> dict[str, BuiltinEntry]:
                 entries[role] = entry
     return entries
 
+
 def discover_user_atoms(cwd: Path) -> dict[str, BuiltinEntry]:
     """Atoms previously committed by ``api.install_atom`` to
     ``<cwd>/.agentm/atoms/<name>.py``. Auto-loaded so the catalog and the
@@ -307,6 +323,7 @@ def discover_user_atoms(cwd: Path) -> dict[str, BuiltinEntry]:
         module_prefix=USER_ATOM_MODULE_PREFIX,
         label="user atom",
     )
+
 
 def _agentm_repo_root() -> Path | None:
     """Return the AgentM source-checkout root, or ``None`` when running
@@ -324,6 +341,7 @@ def _agentm_repo_root() -> Path | None:
         return None
     candidate = Path(pkg_init).resolve().parent.parent.parent
     return candidate if (candidate / "contrib" / "extensions").is_dir() else None
+
 
 def discover_contrib_atoms() -> dict[str, BuiltinEntry]:
     """Research-line / scenario-bound atoms shipped under
@@ -343,6 +361,7 @@ def discover_contrib_atoms() -> dict[str, BuiltinEntry]:
         label="contrib atom",
     )
 
+
 def discover_home_atoms() -> dict[str, BuiltinEntry]:
     """Extensions installed by the user into ``~/.agentm/contrib/extensions/``.
 
@@ -359,6 +378,7 @@ def discover_home_atoms() -> dict[str, BuiltinEntry]:
         module_prefix=HOME_ATOM_MODULE_PREFIX,
         label="home atom",
     )
+
 
 def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
     """Atoms published by any installed distribution via the ``agentm.atoms``
@@ -391,7 +411,9 @@ def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
             module = importlib.import_module(module_path)
         except (ImportError, RuntimeError, SyntaxError) as exc:
             _LAST_DISCOVERY_FAILURES.append((module_path, exc))
-            logger.warning(f"entrypoint atom: failed to import {module_path} ({type(exc).__name__}: {exc})")
+            logger.warning(
+                f"entrypoint atom: failed to import {module_path} ({type(exc).__name__}: {exc})"
+            )
             continue
         manifest_obj: Any = getattr(module, "MANIFEST", None)
         if not isinstance(manifest_obj, ExtensionManifest):
@@ -418,6 +440,7 @@ def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
             manifest=manifest_obj,
         )
     return entries
+
 
 __all__ = [
     "BuiltinEntry",

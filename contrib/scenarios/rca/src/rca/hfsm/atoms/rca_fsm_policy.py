@@ -27,7 +27,7 @@ States::
 The FSM state container is published as the ``rca.fsm`` service so the
 finalize atom (and smoke tests) can read it. The state mutates only here.
 
-§11 contract: stdlib + ``agentm.core.abi.*`` + ``agentm.extensions`` +
+contract: stdlib + ``agentm.core.abi.*`` + ``agentm.extensions`` +
 scenario-local pure modules (``schema``, ``scheduler``). No atom-to-atom
 imports; the gate is reached only through the bus event it emits.
 """
@@ -44,7 +44,13 @@ from agentm.extensions import ExtensionManifest
 from rca.hfsm.scheduler import pick_next
 
 FSMState = Literal[
-    "INTAKE", "OBSERVE", "HYPOTHESIZE", "VERIFY", "JUDGE", "FINALIZE", "BLOCKED",
+    "INTAKE",
+    "OBSERVE",
+    "HYPOTHESIZE",
+    "VERIFY",
+    "JUDGE",
+    "FINALIZE",
+    "BLOCKED",
 ]
 
 MANIFEST = ExtensionManifest(
@@ -80,31 +86,53 @@ _PROMPTS_DIR: Final[Path] = (
 # any point in the trace and re-routing them through later states would
 # force the LLM to wait artificially.
 _PER_STATE_TOOLS: Final[dict[str, frozenset[str]]] = {
-    "INTAKE": frozenset({
-        "record_symptom", "record_observation",
-    }),
-    "OBSERVE": frozenset({
-        "record_symptom", "record_observation", "propose_hypothesis",
-    }),
-    "HYPOTHESIZE": frozenset({
-        "propose_hypothesis", "record_observation",
-    }),
-    "VERIFY": frozenset({
-        "attach_check", "record_observation", "dispatch_agent",
-    }),
-    "JUDGE": frozenset({
-        "propose_update", "record_observation",
-    }),
-    "FINALIZE": frozenset({
-        "submit_final_report",
-    }),
-    "BLOCKED": frozenset({
-        # Phase 1 ships no request_help tool; BLOCKED is unreachable.
-        # Empty visibility is a deliberate fail-safe — if the FSM ever
-        # ends up here, the LLM has no tool calls available and the
-        # loop ends naturally on ModelEndTurn.
-    }),
+    "INTAKE": frozenset(
+        {
+            "record_symptom",
+            "record_observation",
+        }
+    ),
+    "OBSERVE": frozenset(
+        {
+            "record_symptom",
+            "record_observation",
+            "propose_hypothesis",
+        }
+    ),
+    "HYPOTHESIZE": frozenset(
+        {
+            "propose_hypothesis",
+            "record_observation",
+        }
+    ),
+    "VERIFY": frozenset(
+        {
+            "attach_check",
+            "record_observation",
+            "dispatch_agent",
+        }
+    ),
+    "JUDGE": frozenset(
+        {
+            "propose_update",
+            "record_observation",
+        }
+    ),
+    "FINALIZE": frozenset(
+        {
+            "submit_final_report",
+        }
+    ),
+    "BLOCKED": frozenset(
+        {
+            # Phase 1 ships no request_help tool; BLOCKED is unreachable.
+            # Empty visibility is a deliberate fail-safe — if the FSM ever
+            # ends up here, the LLM has no tool calls available and the
+            # loop ends naturally on ModelEndTurn.
+        }
+    ),
 }
+
 
 @dataclass
 class FSMStateContainer:
@@ -127,6 +155,7 @@ class FSMStateContainer:
             return
         self.state = new_state
         self.history.append(new_state)
+
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

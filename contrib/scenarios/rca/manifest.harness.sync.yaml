@@ -17,5 +17,5 @@ extensions:
       extractor_interval_turns: 5
       audit_interval_turns: 5
       enable_reminders: true
-      extractor_model: doubao
-      auditor_model: doubao
+      extractor_model: litellm
+      auditor_model: litellm

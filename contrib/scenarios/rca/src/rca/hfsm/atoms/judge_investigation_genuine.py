@@ -45,7 +45,7 @@ noticing structural emptiness (e.g. ``symptom_count == 0``) and
 returning ``"speculation"`` rather than relying on caller-side ``len()``
 checks.
 
-§11 single-file contract: stdlib + ``agentm.core.abi.*`` +
+single-file contract: stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions`` + scenario-local ``judges`` module only. No
 atom-to-atom imports. No module-level mutable state. Failure mode: one
 retry on provider error or malformed ``submit_verdict`` payload, then
@@ -94,15 +94,18 @@ _SERVICE_NAME = f"rca.judge.{_KIND}"
 _PROMPT_RELPATH = f"contrib/scenarios/rca/prompts/hfsm/judges/{_KIND}.md"
 _LRU_MAX = 256
 
+
 class _ScriptedVerdict(BaseModel):
     verdict: str
     reason: str
     confidence: str
 
+
 class JudgeInvestigationGenuineConfig(BaseModel):
     mode: str = "llm"
     model: str | None = None
     scripted: list[_ScriptedVerdict] = []
+
 
 MANIFEST = ExtensionManifest(
     name="judge_investigation_genuine",
@@ -117,6 +120,7 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
+
 async def _inert_execute(args: dict[str, Any]) -> ToolResult:
     """``submit_verdict`` is never invoked by the agent loop — the judge
     reads the ``ToolCallBlock`` straight off the assistant message — but
@@ -124,6 +128,7 @@ async def _inert_execute(args: dict[str, Any]) -> ToolResult:
 
     del args
     return ToolResult(content=[TextContent(type="text", text="ok")])
+
 
 def _build_tool() -> Tool:
     schema = build_submit_verdict_tool_schema(_KIND)
@@ -134,6 +139,7 @@ def _build_tool() -> Tool:
         fn=_inert_execute,
     )
 
+
 def _format_user_message(ctx: JudgeContext) -> str:
     return (
         "graph_slice:\n"
@@ -142,14 +148,20 @@ def _format_user_message(ctx: JudgeContext) -> str:
         + json.dumps(ctx.operands, indent=2, sort_keys=True, default=str)
     )
 
+
 def _load_prompt(cwd: str) -> str:
     for candidate in (
         Path(cwd) / _PROMPT_RELPATH,
-        Path(__file__).resolve().parents[4] / "prompts" / "hfsm" / "judges" / f"{_KIND}.md",
+        Path(__file__).resolve().parents[4]
+        / "prompts"
+        / "hfsm"
+        / "judges"
+        / f"{_KIND}.md",
     ):
         if candidate.exists():
             return candidate.read_text(encoding="utf-8")
     raise FileNotFoundError(f"judge_{_KIND}: prompt file not found")
+
 
 def _parse_submit_verdict(message: AssistantMessage) -> Verdict:
     """Extract the ``submit_verdict`` payload or raise ``ValueError``.
@@ -159,7 +171,10 @@ def _parse_submit_verdict(message: AssistantMessage) -> Verdict:
     """
 
     for block in message.content:
-        if not isinstance(block, ToolCallBlock) or block.name != SUBMIT_VERDICT_TOOL_NAME:
+        if (
+            not isinstance(block, ToolCallBlock)
+            or block.name != SUBMIT_VERDICT_TOOL_NAME
+        ):
             continue
         args = block.arguments
         if not isinstance(args, dict):
@@ -176,6 +191,7 @@ def _parse_submit_verdict(message: AssistantMessage) -> Verdict:
         return Verdict(verdict=verdict, reason=reason, confidence=confidence)
     raise ValueError("assistant message contained no submit_verdict tool call")
 
+
 def _run_coro(coro: Any) -> Any:
     """Sync entry point for the async provider call.
 
@@ -191,6 +207,7 @@ def _run_coro(coro: Any) -> Any:
         return asyncio.run(coro)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
         return ex.submit(asyncio.run, coro).result()
+
 
 class _StubJudge:
     """Returns scripted verdicts in order; caches per context."""
@@ -223,6 +240,7 @@ class _StubJudge:
         if len(self._cache) > _LRU_MAX:
             self._cache.popitem(last=False)
         return verdict
+
 
 class _LlmJudge:
     """Drives the active provider via ``stream_fn``; one retry then unclear."""
@@ -297,6 +315,7 @@ class _LlmJudge:
             max_output_tokens=default.max_output_tokens,
             metadata=dict(getattr(default, "metadata", {})),
         )
+
 
 def install(api: ExtensionAPI, config: JudgeInvestigationGenuineConfig) -> None:
     mode = config.mode.lower()

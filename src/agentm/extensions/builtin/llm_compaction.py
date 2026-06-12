@@ -63,17 +63,19 @@ from agentm.core.lib import Turn, enumerate_turns
 from agentm.extensions import ExtensionManifest
 
 # Prompt registry keys. Kept in sync with ``compaction_prompts.py``;
-# §11 forbids atom-to-atom imports so we duplicate the canonical names
+# forbids atom-to-atom imports so we duplicate the canonical names
 # here instead of importing them.
 _PROMPT_SUMMARIZATION_SYSTEM = "compaction.summarization_system"
 _PROMPT_SUMMARIZATION = "compaction.summarization"
 _PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
+
 
 class LlmCompactionConfig(BaseModel):
     enabled: bool = True
     reserve_tokens: int = 16_384
     tool_result_max_chars: int = 8_000
     custom_instructions: str | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="llm_compaction",
@@ -102,14 +104,17 @@ DEFAULT_TOOL_RESULT_MAX_CHARS = 8_000
 # ``tool.name`` ourselves).
 ToolRegistry = Mapping[str, Tool] | Sequence[Tool]
 
+
 @dataclass(slots=True)
 class _FileOpTracker:
     read: set[str] = field(default_factory=set)
     written: set[str] = field(default_factory=set)
     edited: set[str] = field(default_factory=set)
 
+
 def create_file_ops() -> _FileOpTracker:
     return _FileOpTracker()
+
 
 def _normalize_registry(tools: ToolRegistry | None) -> Mapping[str, Tool]:
     if tools is None:
@@ -117,6 +122,7 @@ def _normalize_registry(tools: ToolRegistry | None) -> Mapping[str, Tool]:
     if isinstance(tools, Mapping):
         return tools
     return {tool.name: tool for tool in tools}
+
 
 def extract_file_ops_from_message(
     message: AgentMessage,
@@ -154,11 +160,13 @@ def extract_file_ops_from_message(
         elif file_op == FILE_OP_EDIT:
             file_ops.edited.add(path)
 
+
 def compute_file_lists(file_ops: _FileOpTracker) -> tuple[list[str], list[str]]:
     modified = set(file_ops.edited)
     modified.update(file_ops.written)
     read_only = sorted(path for path in file_ops.read if path not in modified)
     return read_only, sorted(modified)
+
 
 def format_file_operations(read_files: list[str], modified_files: list[str]) -> str:
     sections: list[str] = []
@@ -166,22 +174,19 @@ def format_file_operations(read_files: list[str], modified_files: list[str]) -> 
         sections.append("<read-files>\n" + "\n".join(read_files) + "\n</read-files>")
     if modified_files:
         sections.append(
-            "<modified-files>\n"
-            + "\n".join(modified_files)
-            + "\n</modified-files>"
+            "<modified-files>\n" + "\n".join(modified_files) + "\n</modified-files>"
         )
     if not sections:
         return ""
     return "\n\n" + "\n\n".join(sections)
 
+
 def _truncate_for_summary(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     truncated_chars = len(text) - max_chars
-    return (
-        f"{text[:max_chars]}\n\n"
-        f"[... {truncated_chars} more characters truncated]"
-    )
+    return f"{text[:max_chars]}\n\n[... {truncated_chars} more characters truncated]"
+
 
 def serialize_messages(
     messages: list[AgentMessage],
@@ -238,6 +243,7 @@ def serialize_messages(
 
     return "\n\n".join(parts)
 
+
 def serialize_turns(
     turns: list[Turn],
     *,
@@ -247,9 +253,12 @@ def serialize_turns(
 
     blocks: list[str] = []
     for turn in turns:
-        body = serialize_messages(turn.messages, tool_result_max_chars=tool_result_max_chars)
+        body = serialize_messages(
+            turn.messages, tool_result_max_chars=tool_result_max_chars
+        )
         blocks.append(f"[Turn {turn.index}]\n{body}")
     return "\n\n".join(blocks)
+
 
 Summarizer = Callable[[str, str, int], Awaitable[str]]
 
@@ -263,6 +272,7 @@ EMPTY_COMPACTION_PROMPTS = CompactionPrompts(
     update_summarization="",
 )
 
+
 @dataclass(slots=True)
 class CompactionPreparation:
     turns_to_summarize: list[Turn]
@@ -272,13 +282,12 @@ class CompactionPreparation:
     file_ops: _FileOpTracker = field(default_factory=create_file_ops)
     settings: CompactionSettings = field(default_factory=CompactionSettings)
 
+
 def calculate_context_tokens(usage: Usage) -> int:
     return (
-        usage.input_tokens
-        + usage.output_tokens
-        + usage.cache_read
-        + usage.cache_write
+        usage.input_tokens + usage.output_tokens + usage.cache_read + usage.cache_write
     )
+
 
 def _get_assistant_usage(message: AgentMessage) -> Usage | None:
     if isinstance(message, AssistantMessage):
@@ -291,6 +300,7 @@ def _get_assistant_usage(message: AgentMessage) -> Usage | None:
         elif message.stop_reason not in {"aborted", "error"}:
             return message.usage
     return None
+
 
 def estimate_tokens(message: AgentMessage) -> int:
     chars = 0
@@ -307,7 +317,9 @@ def estimate_tokens(message: AgentMessage) -> int:
             if isinstance(assistant_block, TextContent):
                 chars += len(assistant_block.text)
             elif isinstance(assistant_block, ToolCallBlock):
-                chars += len(assistant_block.name) + len(repr(assistant_block.arguments))
+                chars += len(assistant_block.name) + len(
+                    repr(assistant_block.arguments)
+                )
             else:
                 chars += len(getattr(assistant_block, "text", ""))
         return max(1, (chars + 3) // 4)
@@ -322,6 +334,7 @@ def estimate_tokens(message: AgentMessage) -> int:
         return max(1, (chars + 3) // 4)
 
     return 0
+
 
 def estimate_context_tokens(messages: list[AgentMessage]) -> ContextUsageEstimate:
     last_usage: Usage | None = None
@@ -354,6 +367,7 @@ def estimate_context_tokens(messages: list[AgentMessage]) -> ContextUsageEstimat
         last_usage_index=last_usage_index,
     )
 
+
 def should_compact(
     context_tokens: int,
     context_window: int,
@@ -371,11 +385,13 @@ def should_compact(
         return False
     return context_tokens > threshold
 
+
 def _find_previous_compaction(branch: list[SessionEntry]) -> SessionEntry | None:
     for entry in reversed(branch):
         if entry.type == ENTRY_TYPE_COMPACTION:
             return entry
     return None
+
 
 def prepare_compaction(
     branch: list[SessionEntry],
@@ -429,6 +445,7 @@ def prepare_compaction(
         settings=settings,
     )
 
+
 async def generate_summary(
     turns: list[Turn],
     summarizer: Summarizer,
@@ -441,14 +458,14 @@ async def generate_summary(
     tool_result_max_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
 ) -> str:
     base_prompt = (
-        prompts.update_summarization
-        if previous_summary
-        else summarization_prompt
+        prompts.update_summarization if previous_summary else summarization_prompt
     )
     if custom_instructions:
         base_prompt = f"{base_prompt}\n\nAdditional focus: {custom_instructions}"
 
-    conversation_text = serialize_turns(turns, tool_result_max_chars=tool_result_max_chars)
+    conversation_text = serialize_turns(
+        turns, tool_result_max_chars=tool_result_max_chars
+    )
     prompt_text = f"<conversation>\n{conversation_text}\n</conversation>\n\n"
     if previous_summary:
         prompt_text += (
@@ -457,6 +474,7 @@ async def generate_summary(
     prompt_text += base_prompt
     max_tokens = max(256, int(0.8 * reserve_tokens))
     return await summarizer(prompts.summarization_system, prompt_text, max_tokens)
+
 
 async def compact(
     preparation: CompactionPreparation,
@@ -498,7 +516,9 @@ async def compact(
         ),
     )
 
+
 # === Atom install ==========================================================
+
 
 def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
     settings = CompactionSettings(
@@ -575,7 +595,9 @@ def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
             AfterCompactEvent(
                 summary=final_summary,
                 kept_message_count=len(rebuilt_messages),
-                discarded_message_count=max(0, len(session_messages) - len(rebuilt_messages)),
+                discarded_message_count=max(
+                    0, len(session_messages) - len(rebuilt_messages)
+                ),
                 details=details,
             ),
         )
@@ -601,7 +623,9 @@ def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
         # the user via the AfterCompactEvent the shared path emits.
         session_messages = api.session.get_messages()
         usage_estimate = estimate_context_tokens(session_messages)
-        rebuilt = await _run_compaction("manual", session_messages, usage_estimate.tokens)
+        rebuilt = await _run_compaction(
+            "manual", session_messages, usage_estimate.tokens
+        )
         if rebuilt is None:
             await api.events.emit(
                 DiagnosticEvent.CHANNEL,
@@ -620,6 +644,7 @@ def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
             handler=compact_command,
         ),
     )
+
 
 async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
     """Pull prompt bodies from the registry; emit a diagnostic if missing.
@@ -675,12 +700,15 @@ async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
         summarization or "",
     )
 
+
 class _ProviderSummarizer:
     def __init__(self, provider: ProviderConfig, model: Model) -> None:
         self._provider = provider
         self._model = model
 
-    async def __call__(self, system_prompt: str, prompt_text: str, max_tokens: int) -> str:
+    async def __call__(
+        self, system_prompt: str, prompt_text: str, max_tokens: int
+    ) -> str:
         summary_model = type(self._model)(
             id=self._model.id,
             provider=self._model.provider,
@@ -707,12 +735,16 @@ class _ProviderSummarizer:
             if isinstance(stream_event, MessageEnd):
                 final_message = stream_event.message
         if final_message is None:
-            raise RuntimeError("Summarization stream ended without a final assistant message")
+            raise RuntimeError(
+                "Summarization stream ended without a final assistant message"
+            )
         if final_message.stop_reason == "error":
             raise RuntimeError("Summarization provider returned an error stop_reason")
 
         text = "\n".join(
-            block.text for block in final_message.content if isinstance(block, TextContent)
+            block.text
+            for block in final_message.content
+            if isinstance(block, TextContent)
         ).strip()
         if not text:
             raise RuntimeError("Summarization provider returned empty text")

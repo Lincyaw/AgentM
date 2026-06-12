@@ -18,7 +18,7 @@ LLM-vocabulary guidance lives in ``tool_schemas.PARAMS``; the
 gate matches by word-boundary regex. Per CLAUDE.md "no preset enums",
 this is schema guidance not enforcement.
 
-§11 contract: single MANIFEST + single ``install``; imports stdlib +
+contract: single MANIFEST + single ``install``; imports stdlib +
 ``agentm.core.abi.*`` + ``agentm.extensions`` + the scenario's pure
 ``schema`` / ``updates`` / ``tool_schemas`` modules; the gate is reached
 strictly via ``api.get_service('rca.gate')``.
@@ -69,10 +69,12 @@ MANIFEST = ExtensionManifest(
     requires=("rca_falsification_gate",),
 )
 
+
 # ``_tool_signature`` is the canonical hash. ``rca_observation_cache``
-# re-implements it (§11 forbids atom-to-atom imports); keep both copies in sync.
+# re-implements it (forbids atom-to-atom imports); keep both copies in sync.
 def _canonical_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
 
 def _tool_signature(tool_name: str, args: dict[str, Any]) -> str:
     """``sha256(tool_name + canonical_json(args))``."""
@@ -81,8 +83,10 @@ def _tool_signature(tool_name: str, args: dict[str, Any]) -> str:
         (tool_name + ":" + _canonical_json(args)).encode("utf-8")
     ).hexdigest()
 
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
 
 def _render(result: UpdateResult) -> str:
     """Render a gate ``UpdateResult`` as ``status=... [id=...] [to=...] [reason=...]``."""
@@ -95,21 +99,29 @@ def _render(result: UpdateResult) -> str:
         return f"status=downgraded to={downgrade_op}{applied} reason={result.reason}"
     return f"status=rejected reason={result.reason}"
 
+
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
 
+
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+
 
 def _observation_from(payload: dict[str, Any]) -> Observation:
     text = str(payload.get("text", ""))
     source_call = str(payload.get("source_tool_call", ""))
     signature = _tool_signature(source_call, {"text": text}) if source_call else ""
     return Observation(
-        id=_new_id("O"), text=text, source_tool_call=source_call, tool_signature=signature,
+        id=_new_id("O"),
+        text=text,
+        source_tool_call=source_call,
+        tool_signature=signature,
         related_symptoms=list(payload.get("related_symptoms", []) or []),
         related_predictions=list(payload.get("related_predictions", []) or []),
-        ts=time.time())
+        ts=time.time(),
+    )
+
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config
@@ -124,15 +136,24 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if not text:
             return _error("status=rejected reason=text must be non-empty")
         sym = Symptom(
-            id=_new_id("S"), text=text,
-            source=str(args.get("source", "user_intake")), ts=time.time())
-        return _ok(_render(gate.apply(UpdateProposal(op="record_symptom", symptom=sym))))
+            id=_new_id("S"),
+            text=text,
+            source=str(args.get("source", "user_intake")),
+            ts=time.time(),
+        )
+        return _ok(
+            _render(gate.apply(UpdateProposal(op="record_symptom", symptom=sym)))
+        )
 
     async def _record_observation(args: dict[str, Any]) -> ToolResult:
         if not str(args.get("text", "")).strip():
             return _error("status=rejected reason=text must be non-empty")
         obs = _observation_from(args)
-        return _ok(_render(gate.apply(UpdateProposal(op="record_observation", observation=obs))))
+        return _ok(
+            _render(
+                gate.apply(UpdateProposal(op="record_observation", observation=obs))
+            )
+        )
 
     async def _propose_hypothesis(args: dict[str, Any]) -> ToolResult:
         claim = str(args.get("claim", "")).strip()
@@ -141,18 +162,27 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         h_id = _new_id("H")
         predictions: list[Prediction] = []
         for idx, p in enumerate(list(args.get("predictions", []) or [])):
-            if not isinstance(p, dict) or p.get("polarity") not in ("positive", "negative"):
+            if not isinstance(p, dict) or p.get("polarity") not in (
+                "positive",
+                "negative",
+            ):
                 return _error(
                     f"status=rejected reason=predictions[{idx}] must be object with "
                     "polarity='positive'|'negative'"
                 )
-            predictions.append(Prediction(
-                id=_new_id("P"), hypothesis_id=h_id,
-                claim=str(p.get("claim", "")), polarity=p["polarity"],
-                test_plan=p.get("test_plan"),
-            ))
+            predictions.append(
+                Prediction(
+                    id=_new_id("P"),
+                    hypothesis_id=h_id,
+                    claim=str(p.get("claim", "")),
+                    polarity=p["polarity"],
+                    test_plan=p.get("test_plan"),
+                )
+            )
         h = Hypothesis(
-            id=h_id, claim=claim, predictions=predictions,
+            id=h_id,
+            claim=claim,
+            predictions=predictions,
             rationale=str(args.get("rationale", "")),
         )
         return _ok(_render(gate.apply(UpdateProposal(op="propose", hypothesis=h))))
@@ -167,7 +197,9 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         obs_rows: list[Observation] = []
         for idx, o in enumerate(args.get("observations", []) or []):
             if not isinstance(o, dict):
-                return _error(f"status=rejected reason=observations[{idx}] must be object")
+                return _error(
+                    f"status=rejected reason=observations[{idx}] must be object"
+                )
             obs_rows.append(_observation_from(o))
         interp_in = args.get("interpretation") or {}
         if not isinstance(interp_in, dict):
@@ -179,21 +211,28 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             # the gate matches on word-boundary so appending is safe.
             verdict = (verdict + " [steelman]").strip()
         check = CheckResult(
-            id=_new_id("C"), prediction_id=pid, worker_session_id=wsid,
+            id=_new_id("C"),
+            prediction_id=pid,
+            worker_session_id=wsid,
             observations=obs_rows,
             interpretation=Interpretation(
                 proposed_update=str(interp_in.get("proposed_update", "")),
                 reasoning=str(interp_in.get("reasoning", "")),
                 confidence=str(interp_in.get("confidence", "")),
             ),
-            verdict_proposal=verdict, ts=time.time(),
+            verdict_proposal=verdict,
+            ts=time.time(),
         )
         # Persist observations first so they can be cited / cached, then attach.
         for obs in obs_rows:
             gate.apply(UpdateProposal(op="record_observation", observation=obs))
-        return _ok(_render(
-            gate.apply(UpdateProposal(op="attach_check", prediction_id=pid, check=check))
-        ))
+        return _ok(
+            _render(
+                gate.apply(
+                    UpdateProposal(op="attach_check", prediction_id=pid, check=check)
+                )
+            )
+        )
 
     async def _propose_update(args: dict[str, Any]) -> ToolResult:
         op = str(args.get("op", "")).strip()
@@ -214,16 +253,26 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         "propose_update": _propose_update,
     }
     for name, fn in fns.items():
-        api.register_tool(FunctionTool(
-            name=name, description=DESCRIPTIONS[name], parameters=PARAMS[name], fn=fn,
-            metadata={"idempotent": False, "rca_op": name},
-        ))
+        api.register_tool(
+            FunctionTool(
+                name=name,
+                description=DESCRIPTIONS[name],
+                parameters=PARAMS[name],
+                fn=fn,
+                metadata={"idempotent": False, "rca_op": name},
+            )
+        )
+
 
 # propose_update payload builders. Each branch returns either an
 # ``UpdateProposal`` (success) or a string (validation error).
 
+
 def _h_from_payload(
-    payload: Any, *, parent_id: str | None = None, parent_ids: list[str] | None = None,
+    payload: Any,
+    *,
+    parent_id: str | None = None,
+    parent_ids: list[str] | None = None,
 ) -> Hypothesis | str:
     if not isinstance(payload, dict):
         return "child must be an object"
@@ -233,9 +282,11 @@ def _h_from_payload(
     parents = list(parent_ids) if parent_ids else ([parent_id] if parent_id else [])
     return Hypothesis(
         id=str(payload.get("id") or _new_id("H")),
-        claim=claim, parent_ids=parents,
+        claim=claim,
+        parent_ids=parents,
         rationale=str(payload.get("rationale", "")),
     )
+
 
 def _build_proposal_from_args(op: str, args: dict[str, Any]) -> UpdateProposal | str:
     target = str(args.get("target_id", "")).strip()
@@ -246,7 +297,9 @@ def _build_proposal_from_args(op: str, args: dict[str, Any]) -> UpdateProposal |
     if op == "suspend":
         if not target:
             return "op=suspend requires target_id"
-        return UpdateProposal(op="suspend", target_id=target, reason=str(args.get("reason", "")))
+        return UpdateProposal(
+            op="suspend", target_id=target, reason=str(args.get("reason", ""))
+        )
     if op == "refine":
         if not target:
             return "op=refine requires target_id + child={claim,...}"
@@ -254,7 +307,9 @@ def _build_proposal_from_args(op: str, args: dict[str, Any]) -> UpdateProposal |
         if isinstance(child, str):
             return child
         return UpdateProposal(
-            op="refine", hypothesis=child, target_id=target,
+            op="refine",
+            hypothesis=child,
+            target_id=target,
             reason=str(args.get("reason", "")),
         )
     if op == "supersede":
@@ -263,7 +318,8 @@ def _build_proposal_from_args(op: str, args: dict[str, Any]) -> UpdateProposal |
         if not target or not isinstance(rid, str) or not rid:
             return "op=supersede requires target_id + child={id:'<existing>'}"
         return UpdateProposal(
-            op="supersede", target_id=target,
+            op="supersede",
+            target_id=target,
             hypothesis=Hypothesis(id=rid, claim=""),
         )
     if op == "split":

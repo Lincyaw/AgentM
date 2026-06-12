@@ -1,4 +1,4 @@
-"""§11 atom + helper: sample-id binding for distill data collection.
+"""atom + helper: sample-id binding for distill data collection.
 
 The atom is mounted on the **main agent** session (the one running the
 target scenario, e.g. rca). At install time it reads the sample id from
@@ -12,7 +12,7 @@ Mount::
     agentm --extension llmharness.atom \\
            --extension llmharness.distill.binding ...
 
-§11 single-file: no atom-to-atom imports, no core.runtime imports,
+single-file: no atom-to-atom imports, no core.runtime imports,
 trivial install side effect.
 """
 
@@ -22,7 +22,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
@@ -37,6 +37,7 @@ class DistillBindingConfig(BaseModel):
     dataset_name: str = ""
     dataset_path: str = ""
 
+
 MANIFEST = ExtensionManifest(
     name="distill_binding",
     description=(
@@ -49,9 +50,10 @@ MANIFEST = ExtensionManifest(
     tier=1,
 )
 
-_SAMPLE_ID_ENV = "LLMHARNESS_DISTILL_SAMPLE_ID"
-_DATASET_NAME_ENV = "LLMHARNESS_DISTILL_DATASET_NAME"
-_DATASET_PATH_ENV = "LLMHARNESS_DISTILL_DATASET"
+_SAMPLE_ID_ENV: Final = "LLMHARNESS_DISTILL_SAMPLE_ID"
+_DATASET_NAME_ENV: Final = "LLMHARNESS_DISTILL_DATASET_NAME"
+_DATASET_PATH_ENV: Final = "LLMHARNESS_DISTILL_DATASET"
+
 
 def meta_path_for(cwd: str | os.PathLike[str], session_id: str) -> Path:
     """Canonical sidecar path. Mirrors ``replay.record.replay_log_path``.
@@ -61,6 +63,7 @@ def meta_path_for(cwd: str | os.PathLike[str], session_id: str) -> Path:
     ``aggregate`` / ``distill label`` pair the two by file stem.
     """
     return Path(cwd) / ".agentm" / "audit_replay" / f"{session_id}.meta.json"
+
 
 @dataclass(frozen=True)
 class SampleMeta:
@@ -79,6 +82,7 @@ class SampleMeta:
             "trace_id": self.trace_id,
         }
 
+
 def read_sample_meta(path: Path) -> SampleMeta | None:
     """Read a meta sidecar. Returns None on missing/malformed file."""
     try:
@@ -95,6 +99,7 @@ def read_sample_meta(path: Path) -> SampleMeta | None:
         session_id=str(raw.get("session_id") or ""),
         trace_id=str(raw.get("trace_id") or ""),
     )
+
 
 def install(api: ExtensionAPI, config: DistillBindingConfig) -> None:
     sample_id = config.sample_id or os.environ.get(_SAMPLE_ID_ENV) or ""
@@ -121,7 +126,8 @@ def install(api: ExtensionAPI, config: DistillBindingConfig) -> None:
     except OSError:
         logger.opt(exception=True).warning(f"distill_binding sidecar write failed: {path}")
 
-__all__ = [
+
+__all__: Final = [
     "MANIFEST",
     "SampleMeta",
     "install",

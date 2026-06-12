@@ -31,7 +31,7 @@ after execution, defeating the cost-saving purpose. Wrapping the
 registered tool at install time is the documented seam — see the plan's
 "FALLBACK" instructions and the precedent in ``file_mutation_queue``.
 
-§11 contract:
+contract:
 
 * One MANIFEST + one ``install``. No atom-to-atom imports — the cache
   reaches the store via ``api.get_service('rca.hgraph.read')`` and the
@@ -86,20 +86,23 @@ MANIFEST = ExtensionManifest(
 # guishable replacement.
 # ---------------------------------------------------------------------------
 
+
 def _canonical_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
 
 def _tool_signature(tool_name: str, args: dict[str, Any]) -> str:
     """``sha256(tool_name + canonical_json(args))`` — matches the public helper
     in ``rca_evidence_tools._tool_signature``.
 
-    Re-implemented here (not imported) because §11 forbids atom-to-atom
+    Re-implemented here (not imported) because forbids atom-to-atom
     imports. The canonicalisation rule is the public contract; both
     implementations must stay in sync.
     """
 
     canonical = tool_name + ":" + _canonical_json(args)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 def _extract_text(result: ToolResult | ToolOutcome) -> str:
     """Best-effort cache-key text for a tool's ``ToolResult``.
@@ -120,6 +123,7 @@ def _extract_text(result: ToolResult | ToolOutcome) -> str:
         if isinstance(chunk, TextContent):
             parts.append(chunk.text)
     return "\n".join(parts)
+
 
 class _CachedTool:
     """``Tool`` Protocol adapter wrapping an idempotent tool with L1 lookup.
@@ -159,9 +163,7 @@ class _CachedTool:
         cached = self._read.get_observation_by_signature(signature)
         if cached is not None:
             await self._emit(signature, hit=True)
-            return ToolResult(
-                content=[TextContent(type="text", text=cached.text)]
-            )
+            return ToolResult(content=[TextContent(type="text", text=cached.text)])
         # Cache miss — delegate. Exceptions propagate per FunctionTool's
         # own contract; the loop converts them into ToolErrorEvent.
         out = await self._wrapped.execute(args, signal=signal)
@@ -177,14 +179,14 @@ class _CachedTool:
             # Route the write through the gate so the single-writer
             # property (design §7.4) is preserved. record_observation has
             # no precondition and never downgrades.
-            self._gate.apply(
-                UpdateProposal(op="record_observation", observation=obs)
-            )
+            self._gate.apply(UpdateProposal(op="record_observation", observation=obs))
         return out
+
 
 # ---------------------------------------------------------------------------
 # Install: subscribe to agent_start, swap idempotent tools by index.
 # ---------------------------------------------------------------------------
+
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config
@@ -209,9 +211,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             DiagnosticEvent(
                 level="info",
                 source="rca_observation_cache",
-                message=(
-                    f"tool_call_cached signature={signature} hit={hit}"
-                ),
+                message=(f"tool_call_cached signature={signature} hit={hit}"),
             ),
         )
 
@@ -226,7 +226,10 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             if not bool(metadata.get("idempotent", False)):
                 continue
             tools[index] = _CachedTool(
-                tool, read_handle=read_handle, gate=gate, emit=_emit,
+                tool,
+                read_handle=read_handle,
+                gate=gate,
+                emit=_emit,
             )
             wrapped_names.add(tool.name)
 

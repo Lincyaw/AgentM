@@ -8,7 +8,7 @@ inbox and renders each item into an :class:`AgentMessage` according to its
 ``source``.
 
 The inbox lives in ``core.runtime`` (substrate), not in an atom: it is
-mechanism, not policy, so the §11 single-file-extension contract does not
+mechanism, not policy, so the single-file-extension contract does not
 apply. Producers (atoms in later steps) push items; the runtime-owned
 handlers registered by the session drain them.
 
@@ -248,7 +248,9 @@ def render_item(item: InboxItem) -> AgentMessage:
 
     if item.source in ("background", "monitor", "subagent"):
         text = item.payload if isinstance(item.payload, str) else str(item.payload)
-        wrapped = f'<system-reminder source="{item.source}">\n{text}\n</system-reminder>'
+        wrapped = (
+            f'<system-reminder source="{item.source}">\n{text}\n</system-reminder>'
+        )
         return UserMessage(
             role="user",
             content=[TextContent(type="text", text=wrapped)],

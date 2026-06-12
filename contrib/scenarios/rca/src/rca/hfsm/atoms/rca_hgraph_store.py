@@ -19,7 +19,7 @@ unknown token) raises ``RuntimeError``. Publishing the claim function as a
 service changes nothing security-wise: the token is already a public service
 and the one-shot claim still enforces single-writer.
 
-§11 single-file contract: stdlib + ``agentm.core.abi.*`` +
+single-file contract: stdlib + ``agentm.core.abi.*`` +
 ``agentm.extensions.*`` only. The sibling ``schema`` import is a pure-data
 module, not an atom, and is permitted by §11.4 (atoms may import their
 scenario's pure modules; the validator's atom-to-atom rule names only other
@@ -65,12 +65,14 @@ MANIFEST = ExtensionManifest(
 # importing this module's atom-internal types.
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _StoreState:
     symptoms: dict[str, Symptom] = field(default_factory=dict)
     hypotheses: dict[str, Hypothesis] = field(default_factory=dict)
     observations: list[Observation] = field(default_factory=list)
     obs_by_signature: dict[str, Observation] = field(default_factory=dict)
+
 
 class _ReadHandle:
     """Read API published as ``rca.hgraph.read``.
@@ -99,8 +101,7 @@ class _ReadHandle:
             for parent_id in h.parent_ids:
                 has_child.add(parent_id)
         return [
-            h for h in all_h.values()
-            if h.status == "open" and h.id not in has_child
+            h for h in all_h.values() if h.status == "open" and h.id not in has_child
         ]
 
     def get_unexplained_symptoms(self) -> list[Symptom]:
@@ -127,29 +128,21 @@ class _ReadHandle:
                 for c in p.checks:
                     for obs in c.observations:
                         explained.update(obs.related_symptoms)
-        return [
-            s for s in self._state.symptoms.values()
-            if s.id not in explained
-        ]
+        return [s for s in self._state.symptoms.values() if s.id not in explained]
 
     def get_refuted_branches(self) -> list[Hypothesis]:
-        return [
-            h for h in self._state.hypotheses.values()
-            if h.status == "refuted"
-        ]
+        return [h for h in self._state.hypotheses.values() if h.status == "refuted"]
 
     def get_confirmed(self) -> list[Hypothesis]:
         # Narrow read-only helper consumed by ``rca.judge.coverage`` (and
         # by historical Phase-1 callers that have since moved into judge
         # services). Kept narrow and read-only — not on the public
         # read-API surface listed in the design doc.
-        return [
-            h for h in self._state.hypotheses.values()
-            if h.status == "confirmed"
-        ]
+        return [h for h in self._state.hypotheses.values() if h.status == "confirmed"]
 
     def get_observation_by_signature(self, signature: str) -> Observation | None:
         return self._state.obs_by_signature.get(signature)
+
 
 class _WriteHandle:
     """Write API surfaced only via :func:`claim_write_handle`.
@@ -181,7 +174,8 @@ class _WriteHandle:
         # participate in memoization.
         if observation.tool_signature:
             self._state.obs_by_signature.setdefault(
-                observation.tool_signature, observation,
+                observation.tool_signature,
+                observation,
             )
 
     def attach_check(self, prediction_id: str, check: CheckResult) -> None:
@@ -199,9 +193,10 @@ class _WriteHandle:
                     return
         raise KeyError(f"unknown prediction: {prediction_id}")
 
+
 # ---------------------------------------------------------------------------
 # Single-writer token registry. Module-level because the gate atom does not
-# import this module (§11 atom-to-atom rule); it reaches the write handle
+# import this module (atom-to-atom rule); it reaches the write handle
 # through ``api.get_service('rca.hgraph.write_token')`` for the token and
 # ``api.get_service('rca.hgraph.claim_write')`` for the claim function below,
 # which :func:`install` publishes — no sibling-atom import involved.
@@ -209,6 +204,7 @@ class _WriteHandle:
 
 _pending: Final[dict[str, _WriteHandle]] = {}
 _claimed: Final[set[str]] = set()
+
 
 def claim_write_handle(token: str) -> _WriteHandle:
     """Return the write handle for the install whose token matches ``token``.
@@ -238,21 +234,22 @@ def claim_write_handle(token: str) -> _WriteHandle:
         # token) must not be able to silently win the race on retry.
         _claimed.add(token)
         raise RuntimeError(
-            f"no pending rca.hgraph install matches token={token!r}; "
-            "token rejected"
+            f"no pending rca.hgraph install matches token={token!r}; token rejected"
         )
     _claimed.add(token)
     return handle
+
 
 def _reset_for_tests() -> None:
     """Wipe the token registry between tests.
 
     Test-only — production scenarios never tear an install down within the
-    same process. Marked private and undocumented in the §11 surface.
+    same process. Marked private and undocumented in the surface.
     """
 
     _pending.clear()
     _claimed.clear()
+
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config

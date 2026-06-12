@@ -29,7 +29,7 @@ hits, user-reported failures) are post-MVP — the design doc flags this
 explicitly. The atom keeps the extractor pluggable via
 ``metric_extractor`` config in case a scenario wants to override.
 
-§11 contract: single file; no atom-to-atom imports; no harness.session
+contract: single file; no atom-to-atom imports; no harness.session
 import; no core._internal import. The session_ready hook is a public
 harness event from ``agentm.core.abi.events``.
 """
@@ -53,6 +53,7 @@ _DEFAULT_MIN_SAMPLES = 5
 _DEFAULT_REGRESSION_THRESHOLD = 0.20  # tool_error_rate (errors / turns)
 _DEFAULT_COOLDOWN_SECONDS = 24 * 3600.0
 
+
 class ToolGuardWatchConfig(BaseModel):
     model_config = {"extra": "allow"}
 
@@ -63,6 +64,7 @@ class ToolGuardWatchConfig(BaseModel):
     auto_rollback: bool = True
     cooldown_seconds: float = _DEFAULT_COOLDOWN_SECONDS
     disabled: bool = False
+
 
 MANIFEST = ExtensionManifest(
     name="tool_guard_watch",
@@ -75,6 +77,7 @@ MANIFEST = ExtensionManifest(
     registers=("event:session_ready",),
     config_schema=ToolGuardWatchConfig,
 )
+
 
 def install(api: ExtensionAPI, config: ToolGuardWatchConfig) -> None:
     if config.disabled:
@@ -119,8 +122,10 @@ def install(api: ExtensionAPI, config: ToolGuardWatchConfig) -> None:
 
     api.on(SessionReadyEvent.CHANNEL, _on_ready)
 
+
 # ---------------------------------------------------------------------------
 # core algorithm — pure, easy to unit-test
+
 
 def _evaluate_and_maybe_rollback(
     *,
@@ -177,9 +182,7 @@ def _evaluate_and_maybe_rollback(
         if len(samples) >= recent_n:
             break
 
-    regressing = [
-        s for s in samples if s["tool_error_rate"] > regression_threshold
-    ]
+    regressing = [s for s in samples if s["tool_error_rate"] > regression_threshold]
     if len(regressing) < min_samples:
         return  # evidence floor not met — exactly the fail-stop property
 
@@ -221,9 +224,7 @@ def _evaluate_and_maybe_rollback(
             prior_activate.get("candidate_id") if prior_activate else None
         ),
         "from_sha": last_activate.get("to_sha"),
-        "to_sha": (
-            prior_activate.get("to_sha") if prior_activate else None
-        ),
+        "to_sha": (prior_activate.get("to_sha") if prior_activate else None),
         "evidence": {
             "samples_count": len(samples),
             "regressing_count": len(regressing),
@@ -235,8 +236,10 @@ def _evaluate_and_maybe_rollback(
     }
     _append_decision_record(decisions_path, rollback_record)
 
+
 # ---------------------------------------------------------------------------
 # helpers
+
 
 def _summarize_trace(path: Path) -> dict[str, Any] | None:
     """Heuristic tool_error_rate extractor for one OTLP/JSON trace file.
@@ -265,6 +268,7 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
         "tool_error_rate": rate,
     }
 
+
 def _load_activations(path: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     try:
@@ -283,6 +287,7 @@ def _load_activations(path: Path) -> list[dict[str, Any]]:
         return []
     return out
 
+
 def _last_kind_in(
     records: list[dict[str, Any]], *, kinds: set[str]
 ) -> dict[str, Any] | None:
@@ -290,6 +295,7 @@ def _last_kind_in(
         if rec.get("kind") in kinds:
             return rec
     return None
+
 
 def _prior_activate(
     records: list[dict[str, Any]], *, current: dict[str, Any]
@@ -307,16 +313,19 @@ def _prior_activate(
             return rec
     return None
 
+
 def _append_decision_record(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
+
 
 def _coerce_int(value: Any, default: int) -> int:
     try:
         return int(value) if value is not None else default
     except (TypeError, ValueError):
         return default
+
 
 def _coerce_float(value: Any, default: float) -> float:
     try:
