@@ -46,6 +46,21 @@ If you see any of the above, surface it -- even if you are not fully certain.
 A timely nudge on a likely issue is more valuable than silence while waiting
 for proof. Stay silent only when the trajectory looks genuinely healthy.
 
+## Methodology awareness
+
+When a METHODOLOGY section is present in the inputs, use it to ground your
+judgment:
+
+- A "coverage gap" is only real if the methodology says that entity/signal
+  should have been investigated at this stage. An uninvestigated service that
+  the methodology identifies as likely downstream propagation is NOT a gap.
+- Judge whether the agent is following the methodology's causal reasoning
+  (e.g. upstream vs downstream, triangulation across signals) rather than
+  just checking entity coverage.
+- If the agent's conclusion is supported by the methodology's reasoning
+  pattern (root cause identification, propagation tracing), do not fire
+  just because other anomalous entities weren't exhaustively investigated.
+
 # Trust asymmetry
 
 The agent's tool calls + their observed results are evidence. The agent's
@@ -94,3 +109,5 @@ Before `surface_reminder=true`, self-check:
   process judgment ("the agent skipped something it saw")? Only the latter
   is my job.
 - If the agent follows my advice, could a correct answer get pruned?
+- If a METHODOLOGY is present: does the agent's approach align with the
+  methodology's reasoning pattern? If yes, be conservative about firing.
