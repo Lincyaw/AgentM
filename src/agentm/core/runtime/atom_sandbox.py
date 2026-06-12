@@ -17,7 +17,6 @@ bootstrap without crossing layer boundaries.
 
 from __future__ import annotations
 
-import logging
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -26,8 +25,6 @@ from agentm.core.abi import EventBus
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.resource import ResourceWriter
 from agentm.core.runtime.atom_reloader import AtomReloader
-
-logger = logging.getLogger(__name__)
 
 
 async def apply_atom_source_overrides(

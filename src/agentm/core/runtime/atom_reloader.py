@@ -6,7 +6,7 @@ import asyncio
 import importlib
 import importlib.util
 import inspect
-import logging
+from loguru import logger
 import os
 import sys
 import tempfile
@@ -42,8 +42,6 @@ from agentm.core.runtime.extension import (
     load_extension,
 )
 from agentm.core.runtime.resource_writer import ResourceWriter
-
-logger = logging.getLogger(__name__)
 
 _SCENARIO_MODULE_PREFIX = "agentm._scenarios."
 

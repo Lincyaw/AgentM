@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-import logging
+from loguru import logger
 import os
 import time
 import uuid
@@ -59,8 +59,6 @@ from agentm.core.runtime.session_helpers import (
 )
 from agentm.core.runtime.session_inbox import SessionInbox
 from agentm.core.runtime.session_manager import InMemorySessionManager, SessionManager
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)

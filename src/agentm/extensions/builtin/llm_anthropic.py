@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import logging
+from loguru import logger
 import os
 import time
 from collections.abc import AsyncIterator, Mapping
@@ -72,7 +72,6 @@ from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
     from anthropic import AsyncAnthropic
 
-logger = logging.getLogger(__name__)
 
 class LlmAnthropicConfig(BaseModel):
     model_config = ConfigDict(extra="allow")

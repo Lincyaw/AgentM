@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import logging
+from loguru import logger
 import os
 import time
 from dataclasses import dataclass
@@ -106,7 +106,7 @@ from .tool import (
     ToolTerminate,
 )
 
-_logger = logging.getLogger(__name__)
+
 
 
 # --- Config -----------------------------------------------------------------
@@ -554,7 +554,7 @@ class AgentLoop:
                 if cap is not None and len(tool_calls) > cap:
                     dropped_tool_calls = tool_calls[cap:]
                     tool_calls = tool_calls[:cap]
-                    _logger.warning(
+                    logger.warning(
                         "turn %d: %d tool calls truncated to %d "
                         "(max_tool_calls_per_turn=%d)",
                         turn_index, len(tool_calls) + len(dropped_tool_calls),

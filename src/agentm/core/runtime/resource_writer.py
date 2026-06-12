@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+from loguru import logger
 import os
 import shutil
 import subprocess
@@ -29,8 +29,6 @@ from agentm.core._internal.catalog.manifest import (
     matches_manifest_glob,
 )
 from agentm.core.abi.events import ResourceWriteEvent
-
-logger = logging.getLogger(__name__)
 
 
 # Author / committer identity overrides leak from the user's shell into git

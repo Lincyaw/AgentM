@@ -30,7 +30,7 @@ in ``tests/unit/extensions/test_observability_semconv.py`` lock it down.
 from __future__ import annotations
 
 import inspect
-import logging
+from loguru import logger
 import time
 import traceback
 from typing import Any
@@ -73,7 +73,6 @@ from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 from opentelemetry._logs import SeverityNumber
 
-logger = logging.getLogger(__name__)
 
 # Channels whose per-emission dispatch records add no diagnostic value over
 # the higher-level spans/records this atom writes — ``stream_delta`` fires
