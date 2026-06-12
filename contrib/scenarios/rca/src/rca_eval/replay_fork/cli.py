@@ -97,6 +97,14 @@ def run(
         elif result.harmed:
             flip = " HARMED"
         typer.echo(f"  [{done}/{total}] {tag} ctrl={ctrl} iv={iv}{flip} {result.case_id}")
+        typer.echo(f"    baseline: agentm trace messages --session {result.case_id} --format text")
+        if result.forked_session_id:
+            typer.echo(f"    fork:     agentm trace messages --session {result.forked_session_id} --format text")
+        for f in getattr(result, "audit_firings", []):
+            ext = f.extractor_session_id or "-"
+            aud = f.auditor_session_id or "-"
+            sfx = " ★" if f.surfaced else ""
+            typer.echo(f"    turn {f.turn_number:>3}: ext={ext} aud={aud}{sfx}")
 
     try:
         summary = asyncio.run(

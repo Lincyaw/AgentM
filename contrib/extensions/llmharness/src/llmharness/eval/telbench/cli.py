@@ -124,6 +124,10 @@ def telbench(
     concurrency: Annotated[
         int, typer.Option("--concurrency", "-j", help="Max parallel instances")
     ] = 1,
+    instance_ids: Annotated[
+        Path | None,
+        typer.Option("--instance-ids", help="JSON file with list of instance IDs to run"),
+    ] = None,
 ) -> None:
     """Run TELBench evaluation with the cognitive-audit pipeline."""
     if mode not in ("posthoc", "online"):
@@ -140,6 +144,12 @@ def telbench(
     if answer_status != "all":
         instances = [i for i in instances if i.meta.get("answer_status") == answer_status]
         typer.echo(f"Filtered to {len(instances)} instances (answer_status={answer_status})")
+
+    if instance_ids is not None:
+        with open(instance_ids, encoding="utf-8") as f:
+            ids_to_run = set(json.load(f))
+        instances = [i for i in instances if i.id in ids_to_run]
+        typer.echo(f"Filtered to {len(instances)} instances by --instance-ids")
 
     if offset > 0:
         instances = instances[offset:]

@@ -1,6 +1,6 @@
 """LLM-as-harness: cognitive-audit AgentM extension."""
 
-from .offline import SurfacePoint, offline_audit
+from .offline import AuditFiring, OfflineAuditResult, SurfacePoint, offline_audit
 from .schema import (
     Edge,
     EdgeKind,
@@ -13,11 +13,13 @@ from .schema import (
 )
 
 __all__ = [
+    "AuditFiring",
     "Edge",
     "EdgeKind",
     "Event",
     "EventKind",
     "Finding",
+    "OfflineAuditResult",
     "Phase",
     "Reminder",
     "SurfacePoint",
