@@ -96,7 +96,8 @@ async def _run_phase(
         raise RuntimeError(f"session creation failed ({purpose}): {exc}") from exc
 
     sid = session.session_id
-    _log.info("agentm trace messages --session %s --format text", sid)
+    label = purpose.replace("cognitive_audit_", "").replace("_offline", "")
+    _log.info("[%s] agentm trace messages --session %s --format text", label, sid)
 
     try:
         messages = await session.prompt(payload)
