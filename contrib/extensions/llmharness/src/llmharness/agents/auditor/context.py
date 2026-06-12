@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Final, Literal
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
@@ -10,11 +12,155 @@ from pydantic import BaseModel
 
 from llmharness.schema import Edge, Event, Finding, Phase
 
-from .prompt import (
-    build_auditor_system_prompt,
-    build_auditor_trajectory_prompt,
-    load_auditor_prompt,
-)
+# ---------------------------------------------------------------------------
+# Prompt loading
+# ---------------------------------------------------------------------------
+
+_PROMPTS_DIR: Final = Path(__file__).parent / "prompts"
+_BUILTIN_NAMES: Final = frozenset(p.stem for p in _PROMPTS_DIR.glob("*.md"))
+
+
+def load_auditor_prompt(name: str = "minimal") -> str:
+    """Load auditor prompt by name or absolute path."""
+    md = _PROMPTS_DIR / f"{name}.md"
+    if md.is_file():
+        return md.read_text(encoding="utf-8")
+    path = Path(name).expanduser()
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    raise ValueError(
+        f"unknown auditor prompt {name!r}; "
+        f"available: {sorted(_BUILTIN_NAMES)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# System-prompt assembly
+# ---------------------------------------------------------------------------
+
+
+def _degrade_event(ev_dict: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": ev_dict.get("id"),
+        "kind": ev_dict.get("kind"),
+        "summary": ev_dict.get("summary"),
+        "source_turns": ev_dict.get("source_turns", []),
+    }
+
+
+def _degrade_edge(ed_dict: dict[str, object]) -> dict[str, object]:
+    return {
+        "src": ed_dict.get("src"),
+        "dst": ed_dict.get("dst"),
+        "kind": ed_dict.get("kind"),
+        "reason": ed_dict.get("reason"),
+    }
+
+
+def build_auditor_system_prompt(
+    *,
+    events: tuple[Event, ...],
+    edges: tuple[Edge, ...],
+    phases: tuple[Phase, ...] = (),
+    findings: list[Finding],
+    check_errors: dict[str, str],
+    continuation_notes: list[str],
+    summary_threshold: int = 30,
+    base_prompt: str | None = None,
+) -> str:
+    """Assemble the auditor system prompt for one firing."""
+    framing = base_prompt if base_prompt is not None else load_auditor_prompt("minimal")
+    degraded = len(events) > summary_threshold
+
+    if degraded:
+        events_payload = [_degrade_event(ev.to_dict()) for ev in events]
+        edges_payload = [_degrade_edge(ed.to_dict()) for ed in edges]
+    else:
+        events_payload = [ev.to_dict() for ev in events]
+        edges_payload = [ed.to_dict() for ed in edges]
+
+    findings_payload = [f.to_dict() for f in findings]
+
+    sections: list[str] = [framing.rstrip(), ""]
+
+    if phases:
+        sections.append("## PHASES (primary view — merged basic blocks)")
+        sections.append(
+            f"phases ({len(phases)} total). Each phase wraps one or more raw "
+            "events; ``member_event_ids`` lists them in order. Consecutive "
+            "``act`` events are coalesced into ``act_run`` blocks; "
+            "``task`` / ``hyp`` / ``dec`` / ``concl`` always stay singleton. "
+            "Reason at this level by default; consult the raw events block "
+            "below when a specific witness needs verification."
+        )
+        sections.append(json.dumps([p.to_dict() for p in phases], ensure_ascii=False))
+        sections.append("")
+
+    sections.append("## GRAPH")
+    sections.append(
+        f"events ({len(events_payload)} total"
+        + (
+            f", degraded — threshold={summary_threshold}, witness fields stripped)"
+            if degraded
+            else ")"
+        )
+        + ":"
+    )
+    sections.append(json.dumps(events_payload, ensure_ascii=False))
+    sections.append("")
+    sections.append(f"edges ({len(edges_payload)} total):")
+    sections.append(json.dumps(edges_payload, ensure_ascii=False))
+    sections.append("")
+
+    sections.append("## FINDINGS (advisory)")
+    sections.append(json.dumps(findings_payload, ensure_ascii=False))
+    if check_errors:
+        sections.append(
+            "checks_failed: "
+            + json.dumps(check_errors, ensure_ascii=False)
+            + " (non-blocking; other checks ran)"
+        )
+    sections.append("")
+
+    sections.append("## CONTINUATION_NOTES (from your prior firing)")
+    sections.append(json.dumps(list(continuation_notes), ensure_ascii=False))
+    sections.append("")
+
+    return "\n".join(sections)
+
+
+def build_auditor_trajectory_prompt(
+    *,
+    trajectory: list[dict[str, Any]],
+    continuation_notes: list[str],
+    base_prompt: str | None = None,
+) -> str:
+    """Assemble the auditor system prompt for a trajectory-mode firing."""
+    framing = (
+        base_prompt
+        if base_prompt is not None
+        else load_auditor_prompt("trajectory")
+    )
+
+    sections: list[str] = [framing.rstrip(), ""]
+
+    sections.append("## TRAJECTORY")
+    sections.append(
+        f"conversation turns ({len(trajectory)} total):"
+    )
+    sections.append(json.dumps(trajectory, ensure_ascii=False))
+    sections.append("")
+
+    sections.append("## CONTINUATION_NOTES (from your prior firing)")
+    sections.append(json.dumps(list(continuation_notes), ensure_ascii=False))
+    sections.append("")
+
+    return "\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# Atom
+# ---------------------------------------------------------------------------
 
 
 class AuditorContextConfig(BaseModel):
@@ -67,4 +213,10 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
 
     api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
 
-__all__: Final = ["MANIFEST", "install"]
+__all__: Final = [
+    "MANIFEST",
+    "build_auditor_system_prompt",
+    "build_auditor_trajectory_prompt",
+    "install",
+    "load_auditor_prompt",
+]
