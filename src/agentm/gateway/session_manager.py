@@ -25,15 +25,14 @@ import gateway modules — §11 import allow-list), so the contract is:
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+from loguru import logger
 
 from .approval import ApprovalManager
 from .chat_session_map import ChatSessionMap
 from .wire import InboundBody
-
-logger = logging.getLogger("agentm.gateway.session_manager")
 
 # (cwd, session_key, scenario, resume_session_id, wire_services) -> AgentSession
 #

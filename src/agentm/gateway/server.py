@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+from loguru import logger
 
 from agentm.gateway.auth import (
     AllowAllAuthenticator,
@@ -61,8 +62,6 @@ from agentm.gateway.wire import (
     decode_stream,
     encode,
 )
-
-log = logging.getLogger("agentm.gateway.server")
 
 SERVER_VERSION: str = "0.2.0"
 # Dead-letter cap for durable replay. ``attempts`` advances once per
@@ -276,7 +275,7 @@ class WireServer:
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("connection handler crashed")
+            logger.exception("connection handler crashed")
         finally:
             if peer_id is not None:
                 self._registry.deregister(peer_id)
@@ -317,7 +316,7 @@ class WireServer:
             try:
                 await self._on_inbound(session, env)
             except Exception:
-                log.exception("on_inbound handler raised for env id=%s", env.id)
+                logger.exception("on_inbound handler raised for env id=%s", env.id)
             return
         if env.kind == KIND_ACK:
             return  # server-side acks are implicit; tolerate client-sent ones.
@@ -326,7 +325,7 @@ class WireServer:
             return
         if env.kind == KIND_PONG:
             return
-        log.debug(
+        logger.debug(
             "server: ignoring unexpected kind %s from %s", env.kind, session.peer_id
         )
 
@@ -355,7 +354,7 @@ class WireServer:
                     await asyncio.to_thread(
                         self._outbox.dead_letter, r.id, "max delivery attempts"
                     )
-                    log.warning(
+                    logger.warning(
                         "dead_letter peer=%s env_id=%s reason=max_attempts",
                         peer_id,
                         r.envelope.id,
@@ -385,7 +384,7 @@ class WireServer:
                 depth = len(session.send_q)
                 session.pending_count_hint = depth
                 if depth > self._high_water and not session.backpressure:
-                    log.warning(
+                    logger.warning(
                         "slow_consumer peer=%s queued=%d high_water=%d "
                         "dropped_ephemeral=%d",
                         peer_id,
@@ -417,7 +416,7 @@ class WireServer:
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("sender loop for peer=%s crashed", peer_id)
+            logger.exception("sender loop for peer=%s crashed", peer_id)
 
     async def _account_failure(
         self, session: PeerSession, item: SendItem, reason: str

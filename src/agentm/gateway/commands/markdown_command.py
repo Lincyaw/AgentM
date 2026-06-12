@@ -16,10 +16,11 @@ to the first non-empty line of the body.
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from loguru import logger
 
 from .protocol import (
     CommandContext,
@@ -28,9 +29,6 @@ from .protocol import (
     CommandKind,
     CommandResult,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)

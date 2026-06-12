@@ -31,11 +31,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 import random
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+from loguru import logger
 
 from agentm.gateway.transport import ClientTransport, UnixClientTransport
 from agentm.gateway.wire import (
@@ -53,8 +54,6 @@ from agentm.gateway.wire import (
     decode_stream,
     encode,
 )
-
-log = logging.getLogger("agentm.gateway.client")
 
 OutboundHandler = Callable[[Envelope], Awaitable[None]]
 
@@ -249,7 +248,7 @@ class WireClient:
 
             delay = min(backoff, self._backoff_cap)
             delay += random.uniform(0.0, delay)  # full jitter
-            log.warning(
+            logger.warning(
                 "wire client peer=%s disconnected; reconnecting in %.2fs",
                 self._peer_name,
                 delay,
@@ -265,14 +264,14 @@ class WireClient:
                     backoff = min(backoff * 2, self._backoff_cap)
                     self._disconnected.set()
                     continue
-                log.error(
+                logger.error(
                     "wire client peer=%s reconnect rejected (code=%s); giving up",
                     self._peer_name,
                     exc.code,
                 )
                 raise
             except (ConnectionRefusedError, FileNotFoundError, OSError) as exc:
-                log.warning(
+                logger.warning(
                     "wire client peer=%s reconnect failed (%s); retrying",
                     self._peer_name,
                     exc.__class__.__name__,
@@ -282,7 +281,7 @@ class WireClient:
                 continue
             # Success — reset backoff and notify.
             backoff = self._backoff_base
-            log.info("wire client peer=%s reconnected", self._peer_name)
+            logger.info("wire client peer=%s reconnected", self._peer_name)
             if on_connect is not None:
                 await on_connect(False)
 
@@ -361,7 +360,7 @@ class WireClient:
                 try:
                     envelopes, buf = decode_stream(buf)
                 except (InvalidEnvelope, WireError):
-                    log.exception("client received malformed frame")
+                    logger.exception("client received malformed frame")
                     return
                 for env in envelopes:
                     await self._dispatch(env)
@@ -370,7 +369,7 @@ class WireClient:
             # an unexpected disconnect — the supervisor must not re-dial.
             raise
         except Exception:
-            log.exception("client read loop crashed for peer=%s", self._peer_name)
+            logger.exception("client read loop crashed for peer=%s", self._peer_name)
         finally:
             # Any non-cancel exit is an unexpected drop. Mark disconnected so
             # the reconnect supervisor (if any) wakes and re-dials; harmless

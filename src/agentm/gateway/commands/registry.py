@@ -9,19 +9,17 @@ restart is cheap.
 from __future__ import annotations
 
 import importlib
-import logging
 import pkgutil
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from loguru import logger
+
 from .atom_command import build_atom_commands
 from .markdown_command import MarkdownPromptCommand
 from .protocol import CommandHandler
 from .skill_command import SkillCommand, walk_skill_dirs
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)

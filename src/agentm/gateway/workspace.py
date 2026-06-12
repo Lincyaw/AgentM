@@ -9,12 +9,11 @@ channels use the gateway's ``--cwd`` (full backward compat).
 
 from __future__ import annotations
 
-import logging
 import os
 import tomllib
 from pathlib import Path
 
-log = logging.getLogger("agentm.gateway.workspace")
+from loguru import logger
 
 
 def _agentm_home() -> Path:
@@ -68,7 +67,7 @@ class WorkspaceResolver:
             self._created.add(cwd)
             if not ws_path.exists():
                 ws_path.mkdir(parents=True, exist_ok=True)
-                log.info("created workspace for channel %r: %s", channel, ws_path)
+                logger.info("created workspace for channel %r: %s", channel, ws_path)
 
         return cwd
 
@@ -83,7 +82,7 @@ def load_gateway_config(default_cwd: str) -> WorkspaceResolver:
         with open(path, "rb") as fh:
             data = tomllib.load(fh)
     except Exception:
-        log.warning("config.toml: failed to parse %s", path, exc_info=True)
+        logger.warning("config.toml: failed to parse %s", path, exc_info=True)
         return WorkspaceResolver(default_cwd)
 
     gateway = data.get("gateway")

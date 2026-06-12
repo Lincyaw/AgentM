@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
+
+from loguru import logger
 
 from .protocol import (
     CommandContext,
@@ -12,9 +13,6 @@ from .protocol import (
     parse_invocation,
 )
 from .registry import CommandRegistry
-
-
-logger = logging.getLogger(__name__)
 
 
 UNKNOWN_REPLY = (
