@@ -163,8 +163,14 @@ async def offline_audit(
         if extractor_due:
             data = _prepare_extractor_data(prefix, cumulative, None)
             if data is not None:
+                from pathlib import Path as _Path
+
+                firing_id = cumulative.firing_id_counter
+                ops_path = _Path(cwd) / ".agentm" / "audit_ops" / f"offline_{firing_id}.jsonl"
+
                 ctx_config = dict(data)
                 ctx_config["prompt_name"] = "default"
+                ctx_config["ops_file"] = str(ops_path)
 
                 extensions: list[tuple[str, dict[str, Any]]] = [
                     (_OBS, {}),
@@ -176,7 +182,7 @@ async def offline_audit(
                     data, ensure_ascii=False, default=str
                 )
                 try:
-                    result = await _run_phase(
+                    await _run_phase(
                         cwd=cwd,
                         extensions=extensions,
                         provider=provider,
@@ -184,24 +190,15 @@ async def offline_audit(
                         terminal_tool="finalize_extraction",
                         purpose="cognitive_audit_extractor_offline",
                     )
-                    if result.output is not None:
-                        from .agents.extractor.graph import parse_op
+                    from .atom import _read_ops_file
 
-                        ops_raw = result.output.get("ops", [])
-                        ops = []
-                        for op_dict in ops_raw:
-                            if isinstance(op_dict, dict):
-                                with contextlib.suppress(
-                                    KeyError, ValueError, TypeError
-                                ):
-                                    ops.append(parse_op(op_dict))
-                        if ops:
-                            firing_id = cumulative.firing_id_counter
-                            cumulative.absorb_extractor_firing(
-                                firing_ops=ops,
-                                firing_cursor=data["window_hi"],
-                                firing_id=firing_id,
-                            )
+                    ops = _read_ops_file(ops_path)
+                    if ops:
+                        cumulative.absorb_extractor_firing(
+                            firing_ops=ops,
+                            firing_cursor=data["window_hi"],
+                            firing_id=firing_id,
+                        )
                 except Exception:
                     _log.exception("extractor firing failed at turn %d", turn_number)
 
