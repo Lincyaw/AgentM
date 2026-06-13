@@ -194,18 +194,14 @@ class _FileOtlpExporter:
             )
         except Exception:  # pragma: no cover — encoder bugs are unexpected
             return failure
-        lines = [
-            json.dumps(item, separators=(",", ":"), ensure_ascii=False)
-            for item in payload.get(self._payload_key, [])
-        ]
-        if not lines:
+        if not payload.get(self._payload_key):
             return success
+        line = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         with self._lock:
             if self._closed:
                 return failure
-            for line in lines:
-                self._fh.write(line)
-                self._fh.write("\n")
+            self._fh.write(line)
+            self._fh.write("\n")
             self._fh.flush()
             try:
                 os.fsync(self._fh.fileno())
@@ -271,6 +267,80 @@ _global_logger_provider: LoggerProvider | None = None
 _global_atexit_registered = False
 
 
+def _maybe_attach_otlp_exporters(
+    tp: TracerProvider, lp: LoggerProvider
+) -> None:
+    """Attach OTLP network exporters when ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set.
+
+    Called once during process-level provider construction — before any
+    session emits its first event — so that every record (including
+    ``session.start``) reaches the remote collector. The
+    ``otlp_export`` builtin extension becomes a no-op when the exporters
+    are already attached here.
+    """
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not endpoint:
+        return
+
+    protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+    headers_raw = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
+    headers: dict[str, str] | None = None
+    if headers_raw:
+        headers = {}
+        for chunk in headers_raw.split(","):
+            chunk = chunk.strip()
+            if "=" in chunk:
+                k, _, v = chunk.partition("=")
+                if k.strip():
+                    headers[k.strip()] = v.strip()
+        headers = headers or None
+
+    insecure_env = os.environ.get("OTEL_EXPORTER_OTLP_INSECURE")
+    insecure = insecure_env is None or insecure_env.lower() == "true"
+    timeout = int(float(os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT", "10")))
+
+    try:
+        span_exp: Any
+        log_exp: Any
+        if protocol == "http/protobuf":
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter as HttpSpanExp,
+            )
+            from opentelemetry.exporter.otlp.proto.http._log_exporter import (
+                OTLPLogExporter as HttpLogExp,
+            )
+
+            span_exp = HttpSpanExp(
+                endpoint=endpoint, headers=headers, timeout=timeout,
+            )
+            log_exp = HttpLogExp(
+                endpoint=endpoint, headers=headers, timeout=timeout,
+            )
+        else:
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter as GrpcSpanExp,
+            )
+            from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
+                OTLPLogExporter as GrpcLogExp,
+            )
+
+            span_exp = GrpcSpanExp(
+                endpoint=endpoint, insecure=insecure,
+                headers=headers, timeout=timeout,
+            )
+            log_exp = GrpcLogExp(
+                endpoint=endpoint, insecure=insecure,
+                headers=headers, timeout=timeout,
+            )
+    except Exception:
+        return
+
+    span_proc = BatchSpanProcessor(span_exp)
+    log_proc = BatchLogRecordProcessor(log_exp)
+    tp.add_span_processor(span_proc)
+    lp.add_log_record_processor(log_proc)
+
+
 def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
     """Lazily construct the process-level OTel providers.
 
@@ -279,6 +349,10 @@ def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
     ``service.version``; per-session metadata (``agentm.session.id``,
     ``agentm.scenario.name``) is emitted as **per-span / per-log
     attributes** by the observability atom, not as resource attributes.
+
+    When ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set, process-level OTLP
+    network exporters are attached immediately — before any session emits
+    its first event — so that every record reaches the remote collector.
 
     Returns ``(tracer_provider, logger_provider)``.
     """
@@ -298,6 +372,9 @@ def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
         )
         _global_tracer_provider = TracerProvider(resource=resource)
         _global_logger_provider = LoggerProvider(resource=resource)
+        _maybe_attach_otlp_exporters(
+            _global_tracer_provider, _global_logger_provider,
+        )
         if not _global_atexit_registered:
             atexit.register(shutdown_process_telemetry)
             _global_atexit_registered = True

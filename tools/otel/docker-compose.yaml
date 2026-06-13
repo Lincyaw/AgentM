@@ -1,9 +1,8 @@
-# Local OTel collector + Jaeger UI for AgentM development.
+# Local OTel collector + ClickHouse for AgentM development.
 #
 # Usage:
 #   docker compose -f tools/otel/docker-compose.yaml up -d
-#   uv run agentm --extension agentm.extensions.builtin.otlp_export "hello"
-#   open http://localhost:16686     # Jaeger UI
+#   open http://localhost:8123/play # ClickHouse HTTP playground
 #
 # Stop:
 #   docker compose -f tools/otel/docker-compose.yaml down
@@ -19,12 +18,30 @@ services:
       - "4317:4317"   # OTLP gRPC (default for AgentM)
       - "4318:4318"   # OTLP HTTP
     depends_on:
-      - jaeger
+      clickhouse:
+        condition: service_healthy
 
-  jaeger:
-    image: jaegertracing/all-in-one:1.76.0
-    container_name: agentm-jaeger
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.6
+    container_name: agentm-clickhouse
     environment:
-      COLLECTOR_OTLP_ENABLED: "true"
+      CLICKHOUSE_DB: otel
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     ports:
-      - "16686:16686"   # Jaeger UI
+      - "8123:8123"   # HTTP interface / playground
+      # Native TCP 9000 only needs internal access (collector → clickhouse)
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+volumes:
+  clickhouse-data:

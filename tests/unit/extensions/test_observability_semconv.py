@@ -97,18 +97,20 @@ def _read_otlp_lines(path: Path) -> list[dict[str, Any]]:
 
 
 def _spans_in(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from agentm.core.observability.otlp import iter_spans
+
     out: list[dict[str, Any]] = []
     for line in lines:
-        for scope in line.get("scopeSpans", []) or []:
-            out.extend(scope.get("spans", []) or [])
+        out.extend(iter_spans(line))
     return out
 
 
 def _log_records_in(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from agentm.core.observability.otlp import iter_log_records
+
     out: list[dict[str, Any]] = []
     for line in lines:
-        for scope in line.get("scopeLogs", []) or []:
-            out.extend(scope.get("logRecords", []) or [])
+        out.extend(iter_log_records(line))
     return out
 
 

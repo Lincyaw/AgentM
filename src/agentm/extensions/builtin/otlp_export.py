@@ -95,6 +95,12 @@ def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
     # these as OTel globals (so ``opentelemetry.trace.get_tracer_provider``
     # returns ``ProxyTracerProvider``); the handle holds direct references
     # we can attach our network processors to.
+    #
+    # Since core.observability.otel_export.setup_process_telemetry() now
+    # attaches OTLP exporters early when OTEL_EXPORTER_OTLP_ENDPOINT is
+    # set, this extension is only needed when the env var was NOT set at
+    # provider-construction time but the user explicitly mounts the
+    # extension with a config override.
     telemetry = api.get_session_telemetry()
     global _attached
     with _lock:
