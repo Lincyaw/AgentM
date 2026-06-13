@@ -42,6 +42,11 @@ agent-env = [
 ]
 eval = [
     "duckdb>=1.5.2",
+    # Fault-propagation-graph schema: the verifier natively emits
+    # ground-truth Scenario files in this format (fpg_scenario.json).
+    "fpg>=0.1.0",
+    # The verifier's hop/judge scenarios mount rca.default.duckdb_sql.
+    "rca-scenario",
 ]
 harbor = [
     "agentm-harbor>=0.1.0",
@@ -92,6 +97,7 @@ members = [
 # Resolve the agent-env plugin to the in-workspace member (editable) for dev;
 # a published wheel takes over transparently outside the workspace.
 [tool.uv.sources]
+fpg = { git = "https://github.com/Lincyaw/fpg-convention" }
 agentm-terminal = { workspace = true }
 llmharness = { workspace = true }
 agentm-mcp-bridge = { workspace = true }

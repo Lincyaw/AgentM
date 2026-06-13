@@ -269,3 +269,98 @@ def check_node_degraded(data_dir: Path, node_name: str) -> bool:
     if normal_mem and abnormal_mem and abnormal_mem > normal_mem * threshold:
         return True
     return False
+
+
+def profile_dataset(
+    data_dir: Path, max_distinct: int = 25,
+) -> dict[str, dict[str, object]]:
+    """Mechanical dataset profile: per table pair, the column list plus
+    normal-vs-abnormal value distributions of every low-cardinality column.
+
+    Hop agents receive this in their prompt so that discovering WHERE a
+    signal lives (which column carries error status, what level values
+    logs use, which metrics exist) is deterministic harness work, not
+    something an LLM must remember to do. High-cardinality content
+    (message text, ids, timestamps, durations) is excluded by the
+    cardinality threshold itself.
+    """
+    conn = _duckdb_conn(data_dir)
+    tables = {
+        f.stem for f in data_dir.iterdir()
+        if f.suffix == ".parquet" and f.name != "conclusion.parquet"
+    }
+    pairs = sorted(
+        base for base in {t.removeprefix("normal_") for t in tables if t.startswith("normal_")}
+        if f"abnormal_{base}" in tables
+    )
+    profile: dict[str, dict[str, object]] = {}
+    for base in pairs:
+        cols = [
+            r[1] for r in conn.execute(
+                f"PRAGMA table_info('normal_{base}')"
+            ).fetchall()
+        ]
+        col_profile: dict[str, dict[str, dict[str, int]]] = {}
+        for col in cols:
+            qcol = '"' + col.replace('"', '""') + '"'
+            try:
+                n_card, a_card = (
+                    conn.execute(
+                        f"SELECT COUNT(DISTINCT {qcol}) FROM {win}_{base}"
+                    ).fetchone()[0]
+                    for win in ("normal", "abnormal")
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if max(n_card, a_card) > max_distinct:
+                continue
+            dist: dict[str, dict[str, int]] = {}
+            for win in ("normal", "abnormal"):
+                rows = conn.execute(
+                    f"SELECT COALESCE(CAST({qcol} AS VARCHAR), 'NULL'), COUNT(*) "
+                    f"FROM {win}_{base} GROUP BY 1 ORDER BY 2 DESC"
+                ).fetchall()
+                dist[win] = {str(v): int(c) for v, c in rows}
+            col_profile[col] = dist
+        profile[base] = {"columns": cols, "value_distributions": col_profile}
+    conn.close()
+    return profile
+
+
+def vanished_endpoints(
+    data_dir: Path, services: list[str], min_normal: int = 5,
+) -> dict[str, list[dict[str, object]]]:
+    """Per service: endpoints (span_name) present in the normal window
+    (>= min_normal spans) but entirely absent from the abnormal window.
+
+    Mechanical pre-computation for the judge's fault-path
+    flow-disappearance review: which user-flow endpoints vanished is a
+    fact the harness extracts deterministically; whether a vanished
+    endpoint's chain leads to the fault stays the judge's call.
+    """
+    if not services:
+        return {}
+    conn = _duckdb_conn(data_dir)
+    out: dict[str, list[dict[str, object]]] = {}
+    for svc in services:
+        try:
+            rows = conn.execute(
+                "SELECT n.span_name, n.cnt, COALESCE(a.cnt, 0) "
+                "FROM (SELECT span_name, COUNT(*) cnt FROM normal_traces "
+                "      WHERE service_name = ? GROUP BY 1) n "
+                "LEFT JOIN (SELECT span_name, COUNT(*) cnt FROM abnormal_traces "
+                "      WHERE service_name = ? GROUP BY 1) a "
+                "USING (span_name) "
+                "WHERE n.cnt >= ? AND COALESCE(a.cnt, 0) = 0 "
+                "ORDER BY n.cnt DESC",
+                [svc, svc, min_normal],
+            ).fetchall()
+        except Exception:  # noqa: BLE001
+            continue
+        if rows:
+            out[svc] = [
+                {"span_name": r[0], "normal": int(r[1]), "abnormal": int(r[2])}
+                for r in rows
+            ]
+    conn.close()
+    return out

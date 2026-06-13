@@ -1,135 +1,194 @@
 """Inject whole-graph review context into the judge agent session.
 
 Reads structured config describing the propagation results (injections,
-confirmed services, rejected verdicts, throughput) and builds the full
-domain context, appending it to the system prompt so the agent starts
-with complete case-specific knowledge.
+confirmed services, rejected verdicts with their fpg evidence) and
+builds the full domain context, appending it to the system prompt so
+the agent starts with complete case-specific knowledge.
 """
 from __future__ import annotations
 
-from typing import Required, TypedDict
+from typing import Final
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
+from fpg import Evidence
+
+
+class InjectionInfo(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    target: str
+    chaos_type: str
+    params: str = ""
+
+
+class TableProfile(BaseModel):
+    """Mechanical profile of one normal/abnormal table pair."""
+
+    model_config = ConfigDict(extra="ignore")
+    columns: list[str] = Field(default_factory=list)
+    # column -> window ("normal"/"abnormal") -> value -> count
+    value_distributions: dict[str, dict[str, dict[str, int]]] = Field(
+        default_factory=dict
+    )
+
+
+class TargetVerdict(BaseModel):
+    """One hop verdict as seen by the judge (fpg evidence attached)."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+    from_service: str = Field(default="", alias="from")
+    to: str = ""
+    verdict: str = ""
+    rationale: str = ""
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
+class VanishedEndpoint(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    span_name: str
+    normal: int
+    abnormal: int
+
+
+class ThroughputSummary(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    normal: float = 0.0
+    abnormal: float = 0.0
+
+
+class JudgeContextConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    injections: list[InjectionInfo]
+    confirmed: list[str]
+    rejected_verdicts: list[TargetVerdict] = Field(default_factory=list)
+    throughput: ThroughputSummary = Field(default_factory=ThroughputSummary)
+    seeds: list[str] = Field(default_factory=list)
+    verdict_by_target: dict[str, TargetVerdict] = Field(default_factory=dict)
+    # Mechanically profiled dataset shape, same as the hop agents get
+    dataset_profile: dict[str, TableProfile] = Field(default_factory=dict)
+    # Mechanically detected: per rejected service, endpoints with spans
+    # in the normal window but ZERO in the abnormal window
+    vanished_endpoints: dict[str, list[VanishedEndpoint]] = Field(
+        default_factory=dict
+    )
+    # Mechanically derived: services no other (non-synthetic) service
+    # calls — their callers are end users / the load generator
+    entry_services: list[str] = Field(default_factory=list)
+
 
 MANIFEST = ExtensionManifest(
     name="judge_context",
     description="Inject whole-graph review context into the judge agent.",
     registers=("event:before_agent_start",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "injections": {
-                "type": "array",
-                "items": {"type": "object"},
-            },
-            "confirmed": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "rejected_verdicts": {
-                "type": "array",
-                "items": {"type": "object"},
-            },
-            "throughput": {
-                "type": "object",
-                "additionalProperties": True,
-            },
-            "seeds": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "verdict_by_target": {
-                "type": ["object", "null"],
-                "additionalProperties": True,
-            },
-        },
-        "required": ["injections", "confirmed"],
-        "additionalProperties": False,
-    },
+    config_schema=JudgeContextConfig,
 )
 
 # ---------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------
 
-class Injection(TypedDict, total=False):
-    target: Required[str]
-    chaos_type: Required[str]
-    params: str
+def _format_dist(dist: dict[str, int], limit: int = 6) -> str:
+    items = sorted(dist.items(), key=lambda kv: -kv[1])
+    text = ", ".join(f"{v}={c}" for v, c in items[:limit])
+    if len(items) > limit:
+        text += f", … (+{len(items) - limit} more)"
+    return text
 
-class SymptomEvidence(TypedDict, total=False):
-    sql: str
-    claim: str
 
-JudgeTargetVerdict = TypedDict(
-    "JudgeTargetVerdict",
-    {
-        "from": str,
-        "to": str,
-        "verdict": str,
-        "rationale": str,
-        "symptom_evidence": list[SymptomEvidence],
-    },
-    total=False,
-)
+def _format_dataset_profile(profile: dict[str, TableProfile]) -> str:
+    lines: list[str] = []
+    for base, tp in profile.items():
+        lines.append(f"### {base} (tables normal_{base} / abnormal_{base})")
+        lines.append("columns: " + ", ".join(tp.columns))
+        for col, windows in tp.value_distributions.items():
+            normal = _format_dist(windows.get("normal", {}))
+            abnormal = _format_dist(windows.get("abnormal", {}))
+            marker = (
+                "  <-- CHANGED"
+                if windows.get("normal", {}).keys()
+                != windows.get("abnormal", {}).keys()
+                else ""
+            )
+            lines.append(
+                f"- {col}: normal [{normal}] | abnormal [{abnormal}]{marker}"
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
-class ThroughputSummary(TypedDict, total=False):
-    normal: float
-    abnormal: float
-
-class JudgeContextConfig(TypedDict, total=False):
-    injections: Required[list[Injection]]
-    confirmed: Required[list[str]]
-    rejected_verdicts: list[JudgeTargetVerdict]
-    throughput: ThroughputSummary
-    seeds: list[str]
-    verdict_by_target: dict[str, JudgeTargetVerdict] | None
 
 def _build_judge_prompt(
-    injections: list[Injection],
+    injections: list[InjectionInfo],
     confirmed: list[str],
-    rejected_verdicts: list[JudgeTargetVerdict],
+    rejected_verdicts: list[TargetVerdict],
     throughput: ThroughputSummary,
     seeds: set[str],
-    verdict_by_target: dict[str, JudgeTargetVerdict] | None = None,
+    verdict_by_target: dict[str, TargetVerdict],
+    dataset_profile: dict[str, TableProfile],
+    vanished_endpoints: dict[str, list[VanishedEndpoint]],
+    entry_services: list[str],
 ) -> str:
-    verdict_by_target = verdict_by_target or {}
+    inj_lines = [f"- {i.target} ({i.chaos_type})" for i in injections]
 
-    inj_lines = [
-        f"- {i['target']} ({i['chaos_type']})" for i in injections
-    ]
-
-    tp_normal = throughput.get("normal", 0)
-    tp_abnormal = throughput.get("abnormal", 0)
-    tp_drop = ((tp_normal - tp_abnormal) / tp_normal * 100
-               if tp_normal > 0 else 0)
+    tp_drop = (
+        (throughput.normal - throughput.abnormal) / throughput.normal * 100
+        if throughput.normal > 0 else 0
+    )
 
     def _ev_claims(svc: str) -> str:
-        v = verdict_by_target.get(svc, {})
-        claims = [
-            e.get("claim", "") for e in v.get("symptom_evidence", [])
-            if e.get("claim")
-        ]
+        v = verdict_by_target.get(svc)
+        if v is None:
+            return ""
+        claims = [e.explanation for e in v.evidence if e.explanation]
         return "; ".join(claims[:4])
 
     confirmed_nonseed = [s for s in confirmed if s not in seeds]
-    confirmed_lines: list[str] = []
+    confirmed_lines: list[str] = [
+        f"- **{s}** (injection seed)" for s in sorted(seeds) if s in confirmed
+    ]
     for s in confirmed_nonseed:
-        v = verdict_by_target.get(s, {})
-        frm = v.get("from", "?")
+        v = verdict_by_target.get(s)
+        frm = v.from_service if v else "?"
+        rationale = v.rationale if v else "(no rationale)"
         confirmed_lines.append(
-            f"- {frm} → **{s}**: {v.get('rationale', '(no rationale)')}\n"
+            f"- {frm} → **{s}**: {rationale}\n"
             f"    evidence: {_ev_claims(s) or '(none)'}"
         )
     confirmed_block = "\n".join(confirmed_lines) or "(none)"
 
-    rejected_lines: list[str] = []
-    for v in rejected_verdicts:
-        rejected_lines.append(
-            f"- {v['from']} → {v['to']}: {v['rationale']}"
-        )
+    rejected_lines = [
+        f"- {v.from_service} → {v.to}: {v.rationale}"
+        for v in rejected_verdicts
+    ]
     rejected_block = "\n".join(rejected_lines) or "(none)"
+
+    entries = set(entry_services)
+    vanished_block = ""
+    if vanished_endpoints:
+        lines = []
+        for svc, eps in vanished_endpoints.items():
+            tag = " (ENTRY service — its callers are end users)" if svc in entries else ""
+            lines.append(f"- **{svc}**{tag}:")
+            for ep in eps:
+                lines.append(
+                    f"    - {ep.span_name}: normal={ep.normal} -> abnormal=0"
+                )
+        vanished_block = (
+            "\n## Vanished endpoints (mechanically detected on REJECTED "
+            "services)\nEndpoints with spans in the normal window and ZERO "
+            "in the abnormal window:\n" + "\n".join(lines) + "\n"
+        )
+
+    profile_block = ""
+    if dataset_profile:
+        profile_block = (
+            "\n## Dataset shape (mechanically profiled — authoritative for "
+            "THIS dataset)\n"
+            + _format_dataset_profile(dataset_profile)
+            + "\n"
+        )
 
     return f"""\
 Review the fault-propagation graph built by independent hop agents.
@@ -138,28 +197,60 @@ Review the fault-propagation graph built by independent hop agents.
 {chr(10).join(inj_lines)}
 
 ## System-wide load (the cascade signal)
-- load-generator root spans: normal {tp_normal} → abnormal {tp_abnormal} (drop {tp_drop:.1f}%)
+- load-generator root spans: normal {throughput.normal} → abnormal {throughput.abnormal} (drop {tp_drop:.1f}%)
 - Examine the data yourself to decide whether a system-wide cascade is
   occurring. A large throughput drop MAY indicate cascading collapse, but
   use your own judgement — query the rejected services' own metrics to
   confirm genuine unavailability before promoting.
-
-## Confirmed services (context — do NOT change these) ({len(confirmed_nonseed)})
+{profile_block}{vanished_block}
+## Confirmed graph — do NOT change these; ALL of them (seeds included) \
+are valid `via_service` anchors ({len(confirmed_nonseed) + len(seeds & set(confirmed))})
 {confirmed_block}
 
-## Rejected services — ADD only under a real cascade ({len(rejected_lines)})
+## Rejected services — your review targets ({len(rejected_lines)})
 {rejected_block}
 
-## Decide
-- Leave `remove` EMPTY. The per-edge analysis is authoritative for
-  what is degraded; second-guessing it from rationale text alone
-  removes genuinely-degraded services and corrupts the graph.
-- ADD a rejected service only if genuine system-wide cascade makes it
-  unavailable, not merely less-called. Use `list_tables` / `query_sql`
-  to confirm; state latencies in ms/s (duration is nanoseconds).
+## The two global patterns you promote for
+Hop agents judge one edge at a time from the target's OWN aggregate
+signals; two genuine degradation patterns are invisible at that zoom:
 
-Most reviews add nothing. Call `submit_judge_review` with `add` (and
-`remove` empty) plus `rationale`.
+1. **System-wide cascade**: services rejected for "fewer calls /
+   throughput drop" that are in fact unavailable because the whole
+   system is collapsing. Confirm via load-generator root spans and the
+   rejected services' own metrics.
+2. **Fault-path flow disappearance at ENTRY services**: the harness
+   already detected the vanished endpoints (section above) and marked
+   which services are entries. For mid-chain services, "fewer calls"
+   is indeed the caller's problem — do not promote those. But for an
+   ENTRY service that rule CANNOT apply: its callers are end users,
+   there is no upstream service to attribute the drop to. A vanished
+   user-facing endpoint at an entry means the user flow itself broke
+   — that is exactly how the injected fault surfaces as user impact.
+   Your judgment call is only: does the vanished endpoint's chain
+   lead to an injected fault (the path often names the dependency,
+   e.g. /api/v1/foodservice/... -> ts-food-service; multi-step user
+   flows also break when an EARLIER step in the same flow hits the
+   fault)? If yes, promote the entry with predicate flow_interrupted,
+   via_service = the confirmed service its broken flow depends on.
+   Sibling endpoints speeding up strengthens the signal (fail-fast /
+   load shift), it does not weaken it.
+
+## Decide
+- Promotions are NOT removals: the per-edge analysis is authoritative
+  for what is degraded; you only ADD what no single edge could see.
+  (`suggested_remove` is audit-only and never applied.)
+- Verify with `list_tables` / `query_sql` before promoting; state
+  latencies in ms/s (duration is nanoseconds).
+- Every promotion must name `via_service`: the CONFIRMED upstream
+  whose path reaches it — usually the `from` side of its rejected
+  verdict above; **injection seeds are valid anchors**. Promotions may
+  chain: list them upstream-first, and a service earlier in your
+  `add` list can anchor a later one. Use a `predicate` of typically
+  service_unavailable or throughput_collapse for cascades,
+  flow_interrupted for fault-path flow disappearance.
+
+Many reviews add nothing — promote only what you verified. Call
+`submit_judge_review` with `add` (possibly empty) plus `rationale`.
 """
 
 # ---------------------------------------------------------------
@@ -167,23 +258,23 @@ Most reviews add nothing. Call `submit_judge_review` with `add` (and
 # ---------------------------------------------------------------
 
 def install(api: ExtensionAPI, config: JudgeContextConfig) -> None:
-    injections = config.get("injections", [])
-    confirmed = config.get("confirmed", [])
-    if not injections:
+    if not config.injections:
         return
 
-    seeds_list: list[str] = config.get("seeds") or [
-        i["target"] for i in injections if i.get("target")
-    ]
-    seeds = set(seeds_list)
+    seeds = set(config.seeds) or {
+        i.target for i in config.injections if i.target
+    }
 
     context = _build_judge_prompt(
-        injections=injections,
-        confirmed=confirmed,
-        rejected_verdicts=config.get("rejected_verdicts", []),
-        throughput=config.get("throughput", {}),
+        injections=config.injections,
+        confirmed=config.confirmed,
+        rejected_verdicts=config.rejected_verdicts,
+        throughput=config.throughput,
         seeds=seeds,
-        verdict_by_target=config.get("verdict_by_target"),
+        verdict_by_target=config.verdict_by_target,
+        dataset_profile=config.dataset_profile,
+        vanished_endpoints=config.vanished_endpoints,
+        entry_services=config.entry_services,
     )
 
     def before_agent_start(event: BeforeAgentStartEvent) -> None:
@@ -192,4 +283,4 @@ def install(api: ExtensionAPI, config: JudgeContextConfig) -> None:
 
     api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)
 
-__all__ = ["MANIFEST", "install"]
+__all__: Final = ["MANIFEST", "install"]

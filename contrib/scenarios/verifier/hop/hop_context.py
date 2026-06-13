@@ -8,52 +8,59 @@ knowledge.
 The workflow orchestrator passes this data via ``atom_config`` — the
 workflow script itself stays pure orchestration (BFS + parallel +
 structured data), while all prompt/domain logic lives here in the
-agent unit.
+agent unit. The upstream's confirmed state arrives as an fpg EventNode
+(strongly typed), so the evidence shown to the agent is exactly what
+the scenario file will carry.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Required, TypedDict
+from typing import Final
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
+from fpg.scenario import EventNode
+
+
+class TableProfile(BaseModel):
+    """Mechanical profile of one normal/abnormal table pair."""
+
+    model_config = ConfigDict(extra="ignore")
+    columns: list[str] = Field(default_factory=list)
+    # column -> window ("normal"/"abnormal") -> value -> count
+    value_distributions: dict[str, dict[str, dict[str, int]]] = Field(
+        default_factory=dict
+    )
+
+
+class HopContextConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    from_service: str
+    to_service: str
+    rel_type: str
+    fault_kind: str
+    injection_target: str
+    # [fault_kind, target, params] triples for every injected fault
+    all_faults: list[list[str]]
+    fault_docs: dict[str, str] = Field(default_factory=dict)
+    is_infra: bool = False
+    # fpg EventNode of the confirmed upstream (structural layer; the
+    # predicate is validated against the profile by the submit tool)
+    upstream_evidence: EventNode | None = None
+    # Mechanically profiled dataset shape (harness work, not LLM work):
+    # table -> columns + low-cardinality value distributions per window
+    dataset_profile: dict[str, TableProfile] = Field(default_factory=dict)
+
 
 MANIFEST = ExtensionManifest(
     name="hop_context",
     description="Inject per-edge fault-propagation context into the hop agent.",
     registers=("event:before_agent_start",),
-    config_schema={
-        "type": "object",
-        "properties": {
-            "from_service": {"type": "string"},
-            "to_service": {"type": "string"},
-            "rel_type": {"type": "string"},
-            "fault_kind": {"type": "string"},
-            "injection_target": {"type": "string"},
-            "all_faults": {
-                "type": "array",
-                "items": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-            },
-            "fault_docs": {
-                "type": "object",
-                "additionalProperties": {"type": "string"},
-            },
-            "is_infra": {"type": "boolean"},
-            "upstream_evidence": {
-                "type": ["object", "null"],
-                "additionalProperties": True,
-            },
-        },
-        "required": [
-            "from_service", "to_service", "rel_type",
-            "fault_kind", "injection_target", "all_faults",
-        ],
-        "additionalProperties": False,
-    },
+    config_schema=HopContextConfig,
 )
 
 # ---------------------------------------------------------------
@@ -62,9 +69,10 @@ MANIFEST = ExtensionManifest(
 
 _FAULT_KINDS_DIR = Path(__file__).resolve().parent.parent / "fault_kinds"
 
-_FAULT_DOC_ALIAS = {
+_FAULT_DOC_ALIAS: Final = {
     "memorystress": "memstress",
     "jvmlatency": "jvmmethodlatency",
+    "jvmexception": "jvmmethodexception",
     "podkill": "podfailure",
     "containerkill": "podfailure",
 }
@@ -89,7 +97,7 @@ def _load_fault_doc(fault_kind: str) -> str:
 # Prompt construction
 # ---------------------------------------------------------------
 
-_REL_DESCRIPTIONS = {
+_REL_DESCRIPTIONS: Final = {
     "callee_to_caller": "{to} calls {frm}, so {frm} is {to}'s downstream "
                         "dependency. A degraded callee propagates UP to its "
                         "caller {to}, which blocks on or fails with the bad "
@@ -109,25 +117,6 @@ _REL_DESCRIPTIONS = {
                         "(database/cache/broker). {to} is uninstrumented: it "
                         "has NO spans of its own — its calls live inside {frm}.",
 }
-
-class UpstreamEvidence(TypedDict, total=False):
-    source: str
-    normal_avg_ms: float
-    abnormal_avg_ms: float
-    ratio: float
-    rationale: str
-    symptom_evidence: list[dict[str, str]]
-
-class HopContextConfig(TypedDict, total=False):
-    from_service: Required[str]
-    to_service: Required[str]
-    rel_type: Required[str]
-    fault_kind: Required[str]
-    injection_target: Required[str]
-    all_faults: Required[list[list[str]]]
-    fault_docs: dict[str, str]
-    is_infra: bool
-    upstream_evidence: UpstreamEvidence | None
 
 def _fault_context(
     all_faults: list[tuple[str, str, str]],
@@ -149,29 +138,43 @@ def _fault_context(
     )
     return "\n".join(lines)
 
-def _format_upstream_evidence(evidence: UpstreamEvidence) -> str:
+def _format_dist(dist: dict[str, int], limit: int = 6) -> str:
+    items = sorted(dist.items(), key=lambda kv: -kv[1])
+    text = ", ".join(f"{v}={c}" for v, c in items[:limit])
+    if len(items) > limit:
+        text += f", … (+{len(items) - limit} more)"
+    return text
+
+
+def _format_dataset_profile(profile: dict[str, TableProfile]) -> str:
+    """Render the mechanical dataset profile for the prompt."""
     lines: list[str] = []
-    src = evidence.get("source", "")
-    if src == "injection_target":
-        n_ms = evidence.get("normal_avg_ms")
-        a_ms = evidence.get("abnormal_avg_ms")
-        ratio = evidence.get("ratio")
-        if n_ms is not None and a_ms is not None:
-            lines.append(
-                f"Avg latency: normal {n_ms:.1f}ms → abnormal {a_ms:.1f}ms "
-                f"({ratio}x)"
+    for base, tp in profile.items():
+        lines.append(f"### {base} (tables normal_{base} / abnormal_{base})")
+        lines.append("columns: " + ", ".join(tp.columns))
+        for col, windows in tp.value_distributions.items():
+            normal = _format_dist(windows.get("normal", {}))
+            abnormal = _format_dist(windows.get("abnormal", {}))
+            marker = (
+                "  <-- CHANGED"
+                if windows.get("normal", {}).keys()
+                != windows.get("abnormal", {}).keys()
+                else ""
             )
-    elif src == "hop_agent":
-        rationale = evidence.get("rationale")
-        if rationale:
-            lines.append(f"Rationale: {rationale}")
-        for ev in evidence.get("symptom_evidence", []):
-            claim = ev.get("claim", "")
-            sql = ev.get("sql", "")
-            if claim:
-                lines.append(f"- {claim}")
-            if sql:
-                lines.append(f"  ```sql\n  {sql}\n  ```")
+            lines.append(
+                f"- {col}: normal [{normal}] | abnormal [{abnormal}]{marker}"
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _format_upstream_node(node: EventNode) -> str:
+    lines = [f"Classified failure mode: {node.predicate}"]
+    for ev in node.evidence:
+        if ev.explanation:
+            lines.append(f"- {ev.explanation}")
+        if ev.query.statement:
+            lines.append(f"  ```sql\n  {ev.query.statement}\n  ```")
     return "\n".join(lines)
 
 def _build_hop_prompt(
@@ -183,7 +186,8 @@ def _build_hop_prompt(
     all_faults: list[tuple[str, str, str]],
     fault_docs: dict[str, str],
     is_infra: bool,
-    upstream_evidence: UpstreamEvidence | None,
+    upstream_evidence: EventNode | None,
+    dataset_profile: dict[str, TableProfile],
 ) -> str:
     rel_desc = _REL_DESCRIPTIONS.get(rel_type, "{frm} and {to} are related.")
     rel_text = rel_desc.format(frm=from_service, to=to_service)
@@ -194,8 +198,21 @@ def _build_hop_prompt(
         f"Relationship: {rel_text}",
         _fault_context(all_faults, to_service),
     ]
-    if upstream_evidence:
-        ev_text = _format_upstream_evidence(upstream_evidence)
+    if dataset_profile:
+        parts.append(
+            "\n## Dataset shape (mechanically profiled — authoritative for "
+            "THIS dataset)\n"
+            "Columns per table, and value distributions of every "
+            "low-cardinality column in the normal vs abnormal window. Use "
+            "this to decide WHERE signals live (which column carries error "
+            "status, what level values logs use, which metrics exist) "
+            "instead of assuming. A `<-- CHANGED` marker means new values "
+            "appeared or vanished in the abnormal window — investigate "
+            "whether they belong to the target.\n\n"
+            + _format_dataset_profile(dataset_profile)
+        )
+    if upstream_evidence is not None:
+        ev_text = _format_upstream_node(upstream_evidence)
         if ev_text:
             parts.append(
                 f"\n## Observed symptoms on {from_service}\n{ev_text}\n\n"
@@ -247,36 +264,33 @@ def _build_hop_prompt(
 # ---------------------------------------------------------------
 
 def install(api: ExtensionAPI, config: HopContextConfig) -> None:
-    from_service = config.get("from_service", "")
-    to_service = config.get("to_service", "")
-    if not from_service or not to_service:
+    if not config.from_service or not config.to_service:
         return
 
-    all_faults_raw = config.get("all_faults", [])
     all_faults = [
         (f[0], f[1], f[2] if len(f) > 2 else "")
-        for f in all_faults_raw
+        for f in config.all_faults
         if len(f) >= 2
     ]
 
-    fault_docs_cfg = config.get("fault_docs") or {}
     fault_docs: dict[str, str] = {}
     for fk, _, _ in all_faults:
-        if fk in fault_docs_cfg:
-            fault_docs[fk] = fault_docs_cfg[fk]
+        if fk in config.fault_docs:
+            fault_docs[fk] = config.fault_docs[fk]
         elif fk not in fault_docs:
             fault_docs[fk] = _load_fault_doc(fk)
 
     context = _build_hop_prompt(
-        from_service=from_service,
-        to_service=to_service,
-        rel_type=config.get("rel_type", ""),
-        fault_kind=config.get("fault_kind", ""),
-        injection_target=config.get("injection_target", ""),
+        from_service=config.from_service,
+        to_service=config.to_service,
+        rel_type=config.rel_type,
+        fault_kind=config.fault_kind,
+        injection_target=config.injection_target,
         all_faults=all_faults,
         fault_docs=fault_docs,
-        is_infra=bool(config.get("is_infra", False)),
-        upstream_evidence=config.get("upstream_evidence"),
+        is_infra=config.is_infra,
+        upstream_evidence=config.upstream_evidence,
+        dataset_profile=config.dataset_profile,
     )
 
     def before_agent_start(event: BeforeAgentStartEvent) -> None:
@@ -285,4 +299,4 @@ def install(api: ExtensionAPI, config: HopContextConfig) -> None:
 
     api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)
 
-__all__ = ["MANIFEST", "install"]
+__all__: Final = ["MANIFEST", "install"]

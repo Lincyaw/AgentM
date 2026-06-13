@@ -63,31 +63,37 @@ def diff_cases(
     """
     cases = sorted(
         p.name for p in run_dir.iterdir()
-        if p.is_dir() and (p / "final_propagation.json").exists()
+        if p.is_dir() and (p / "fpg_scenario.json").exists()
     )
 
     agg: dict[str, int] = defaultdict(int)
     svc_agg: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     rows: list[dict] = []
 
+    _NOT_EVALUATED = {
+        None, "no-result", "skipped_seed_target", "skipped_cycle",
+        "dropped_cycle",
+    }
+
     for name in cases:
         cdir = dataset_dir / name
         if not cdir.exists():
             continue
-        fp = json.loads((run_dir / name / "final_propagation.json").read_text())
-        seeds = set(fp.get("seeds", []))
-        v_prop = set(fp.get("propagated", []))
+        scenario = json.loads((run_dir / name / "fpg_scenario.json").read_text())
+        seeds = {i["node_id"] for i in scenario.get("injections", [])}
+        confirmed = {n["id"] for n in scenario.get("graph", {}).get("nodes", [])}
+        v_prop = confirmed - seeds
 
         gt_seeds, gt_prop = _gt_services(cdir)
         seeds |= gt_seeds
 
         evaluated: set[str] = set()
-        pg = run_dir / name / "propagation_graph.json"
-        if pg.exists():
-            hop_log = json.loads(pg.read_text()).get("hop_log", [])
+        meta_path = run_dir / name / "run_meta.json"
+        if meta_path.exists():
+            hop_log = json.loads(meta_path.read_text()).get("hop_log", [])
             evaluated = {
                 h["to"] for h in hop_log
-                if h.get("verdict") not in (None, "edge_sql")
+                if h.get("verdict") not in _NOT_EVALUATED
             }
 
         agree = v_prop & gt_prop

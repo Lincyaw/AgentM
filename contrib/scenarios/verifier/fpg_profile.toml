@@ -1,0 +1,99 @@
+# Vocabulary profile for the verifier testbed family (chaos-injected
+# microservice benchmarks: hs / otel-demo / clickhouse pedestals).
+#
+# The verifier natively produces fpg scenarios: hop agents classify the
+# observed symptom with one of these predicates (enforced as the enum of
+# submit_hop_verdict), edges carry these mechanisms, and the final
+# fpg_scenario.json is validated against the schema this profile binds:
+#
+#     schema = build_schema(load_profile("contrib/scenarios/verifier/fpg_profile.toml"))
+#
+# Conventions: values are lowercase snake_case; "other" is reserved and
+# auto-injected by the fpg factory as the escape hatch.
+
+name = "microservices"
+version = "0.3.0"
+extends = "core"
+
+# --- node predicates ----------------------------------------------------------
+# Failure modes a service can exhibit. Injection seeds get one mapped
+# deterministically from the chaos type (CHAOS_PREDICATE in
+# eval/fpg_mapping.py); propagated services get the one the hop agent
+# classified from its own evidence.
+
+[node_predicates.cpu_saturation]
+brief = "CPU saturated (stress injection or runaway consumption)"
+
+[node_predicates.memory_exhaustion]
+brief = "Memory exhausted (OOM pressure, heap stress)"
+
+[node_predicates.gc_pressure]
+brief = "JVM garbage-collection pressure: pause storms stalling request handling"
+
+[node_predicates.network_degraded]
+brief = "Network quality degraded (delay/loss/corrupt/duplicate/bandwidth limit)"
+
+[node_predicates.network_partitioned]
+brief = "Network partition isolates the service from peers"
+
+[node_predicates.service_unavailable]
+brief = "Service unavailable (pod killed/unschedulable): span volume drops — partially or to zero — with tail latency exploding to seconds and connection errors"
+
+[node_predicates.latency_degradation]
+brief = "Request latency degraded, including tail (p9x) blowup"
+
+[node_predicates.error_rate_increase]
+brief = "Error rate elevated: failed calls, timeouts, 5xx, exceptions"
+
+[node_predicates.response_corruption]
+brief = "Responses carry wrong/mutated data (body bytes or method output) without necessarily erroring"
+
+[node_predicates.semantic_corruption]
+brief = "Silently produces wrong values in responses or outbound requests (mutated constants/URLs, null/empty returns); no errors, no crash, latency may even drop"
+
+[node_predicates.dns_resolution_failure]
+brief = "DNS resolution fails or returns wrong addresses (observable as resolve errors, or outbound connection errors/timeouts when addresses are wrong)"
+
+[node_predicates.clock_skew]
+brief = "System clock skewed relative to the rest of the cluster"
+
+[node_predicates.connection_pool_exhausted]
+brief = "DB/HTTP connection pool fully occupied; requests queue or fail (e.g. hikaricp pending)"
+
+[node_predicates.thread_pool_exhausted]
+brief = "Worker thread pool saturated (e.g. tomcat busy == max); requests queue"
+
+[node_predicates.traffic_amplification]
+brief = "Abnormal request volume surge on this service (retry storms, failover stampede)"
+
+[node_predicates.flow_interrupted]
+brief = "A user-facing request flow stops completing: fault-path endpoints lose their spans entirely while sibling endpoints stay healthy (surfaces at entry/aggregator services)"
+
+[node_predicates.throughput_collapse]
+brief = "Throughput collapses as part of a system-wide cascade (judge-confirmed unavailability)"
+
+[node_predicates.service_degraded]
+brief = "Genuine degradation confirmed but not classifiable into a finer predicate; see evidence"
+
+# --- edge mechanisms ----------------------------------------------------------
+# Mapped deterministically from the relationship type of the verified
+# edge (REL_MECHANISM in eval/fpg_mapping.py).
+
+[edge_mechanisms.sync_call_blocking]
+brief = "Degraded callee blocks its callers through synchronous calls (callee -> caller)"
+
+[edge_mechanisms.request_flow_disruption]
+brief = "Faulty caller distorts the request flow its callees receive (caller -> callee)"
+
+[edge_mechanisms.co_deployment_contention]
+brief = "Services on the same k8s node contend for node resources affected by the fault"
+
+[edge_mechanisms.shared_infra_dependency]
+brief = "Degradation transfers through a shared backing component (DB/cache/broker)"
+
+# --- entity types ---------------------------------------------------------------
+# The verifier works at service granularity; backing components
+# (mysql, mongodb-profile, ...) are also addressed as services.
+
+[entity_types.svc]
+brief = "A service in the benchmark system, instrumented or backing (e.g. svc:frontend, svc:mongodb-profile)"

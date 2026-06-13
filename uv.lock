@@ -58,6 +58,8 @@ all-contrib = [
 ]
 eval = [
     { name = "duckdb" },
+    { name = "fpg" },
+    { name = "rca-scenario" },
 ]
 harbor = [
     { name = "agentm-harbor" },
@@ -94,9 +96,10 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.86.0" },
     { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.2.0" },
     { name = "duckdb", marker = "extra == 'eval'", specifier = ">=1.5.2" },
+    { name = "fpg", marker = "extra == 'eval'", git = "https://github.com/Lincyaw/fpg-convention" },
     { name = "llmharness", marker = "extra == 'all-contrib'", editable = "contrib/extensions/llmharness" },
     { name = "llmharness", marker = "extra == 'llmharness'", editable = "contrib/extensions/llmharness" },
-    { name = "loguru", specifier = ">=0.7.0" },
+    { name = "loguru", specifier = ">=0.7" },
     { name = "openai", specifier = ">=1.50.0" },
     { name = "opentelemetry-api", specifier = ">=1.30.0" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.30.0" },
@@ -105,6 +108,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rca-scenario", marker = "extra == 'eval'", editable = "contrib/scenarios/rca" },
     { name = "tomli-w", specifier = ">=1.0" },
     { name = "typer", specifier = ">=0.25.1" },
     { name = "websockets", specifier = ">=12.0" },
@@ -1012,6 +1016,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/1f/f9/f38573ed5844586db374d085911740a501ccfa373b455fc9413f09f85237/filelock-3.29.1.tar.gz", hash = "sha256:d97e6b1b9757569626c58caa07dc4beb1613f4a2938b1e8cc81afca398906c9e", size = 59335, upload-time = "2026-06-03T15:19:04.053Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4c/a0/614c5fe402fd88951df45f4dda2fa3b4e17a99ecd92340771929169b3b95/filelock-3.29.1-py3-none-any.whl", hash = "sha256:85199dfd706869641b72b2e8955d5416a4b2b7dc4b0e8e6d97b4cc1299a6983b", size = 40750, upload-time = "2026-06-03T15:19:02.959Z" },
+]
+
+[[package]]
+name = "fpg"
+version = "0.1.0"
+source = { git = "https://github.com/Lincyaw/fpg-convention#0a52870dc7e18df60035ff2f52758443b7b78fca" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pyyaml" },
 ]
 
 [[package]]
