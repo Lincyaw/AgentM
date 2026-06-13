@@ -54,8 +54,9 @@ Choose edges by causal role first, then attach a witness.
 
 ## Commitment tracking
 
-`hyp`, `dec`, and `concl` nodes carry an optional `status` field that tracks
-how committed the agent is to the claim:
+`hyp`, `dec`, and `concl` nodes MUST have a `status` field that tracks
+how committed the agent is to the claim. Always set this on every
+`upsert_node` call for these kinds:
 
 | Status | Meaning |
 |--------|---------|
@@ -73,20 +74,21 @@ nodes do not use status; omit it for those kinds.
 
 ## Edge roles
 
-Each edge carries an optional `role` that describes the causal relationship
-between `src` and `dst`:
+Every edge MUST have a `role` that describes the causal relationship between
+`src` and `dst`. Always set this field on every `upsert_edge` call:
 
 | Role | Meaning |
 |------|---------|
 | `supports` | Evidence at `src` positively confirms the claim at `dst` |
 | `weakens` | Evidence at `src` partially contradicts or undermines `dst` |
-| `depends` | Pure logical dependency — `src` requires `dst` to make sense (default) |
+| `depends` | Pure logical dependency — `src` requires `dst` to make sense |
 | `narrows` | `src` eliminates alternatives, making `dst` more specific |
 
 Choose role by asking: does `src`'s evidence make `dst` MORE or LESS
 credible? If more, `supports`; if less, `weakens`; if it just needs `dst`
-to exist, `depends`; if it rules out competing hypotheses, `narrows`. When
-omitted, the auditor treats it as `depends`.
+to exist, `depends`; if it rules out competing hypotheses, `narrows`.
+The auditor reads role to identify evidence gaps — a `committed` hypothesis
+with only `depends` edges but no `supports` edge is a red flag.
 
 ## Granularity
 

@@ -597,13 +597,12 @@ class UpsertNodeArgs(BaseModel):
     status: Literal["exploratory", "tentative", "committed", "finalized"] | None = Field(
         default=None,
         description=(
-            "Commitment status for hyp/dec/concl nodes. "
+            "Commitment status — REQUIRED for hyp/dec/concl nodes. "
             "exploratory=mentioned but not pursued, "
             "tentative=under active investigation, "
             "committed=later reasoning depends on this, "
             "finalized=part of the final answer. "
-            "Ignored for task/act nodes. "
-            "Omit to leave unchanged on existing nodes."
+            "Must be set for hyp/dec/concl; omit only for task/act."
         ),
     )
 
@@ -709,15 +708,13 @@ class UpsertEdgeArgs(BaseModel):
             "time. Pass \"\" when kind='data'."
         ),
     )
-    role: Literal["supports", "weakens", "depends", "narrows"] | None = Field(
-        default=None,
+    role: Literal["supports", "weakens", "depends", "narrows"] = Field(
         description=(
-            "Causal role of this edge. "
+            "Causal role of this edge — REQUIRED. "
             "supports=evidence positively confirms the claim, "
             "weakens=evidence partially contradicts, "
-            "depends=logical dependency (default), "
-            "narrows=eliminates alternatives. "
-            "Omit to default to depends."
+            "depends=logical dependency, "
+            "narrows=eliminates alternatives."
         ),
     )
 
