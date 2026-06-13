@@ -54,22 +54,38 @@ def otlp_unwrap(value: Any) -> Any:
 
 
 def iter_spans(line: dict[str, Any]) -> list[dict[str, Any]]:
-    """Iterate spans on one OTLP ``ResourceSpans``-line dict.
+    """Iterate spans on one OTLP/JSON ndjson line.
 
-    Returns a flat list of span dicts (one per ``scopeSpans[*].spans[*]``).
-    The list is empty for lines that aren't ``ResourceSpans`` elements.
+    Handles both the collector-compatible format
+    (``{"resourceSpans": [{...}]}``) and the legacy unwrapped format
+    (``{"scopeSpans": [...]}``) transparently.
     """
     out: list[dict[str, Any]] = []
-    for scope in line.get("scopeSpans", []) or []:
-        out.extend(scope.get("spans", []) or [])
+    resources = line.get("resourceSpans")
+    if resources:
+        for rs in resources:
+            for scope in rs.get("scopeSpans", []) or []:
+                out.extend(scope.get("spans", []) or [])
+    else:
+        for scope in line.get("scopeSpans", []) or []:
+            out.extend(scope.get("spans", []) or [])
     return out
 
 
 def iter_log_records(line: dict[str, Any]) -> list[dict[str, Any]]:
-    """Iterate log records on one OTLP ``ResourceLogs``-line dict."""
+    """Iterate log records on one OTLP/JSON ndjson line.
+
+    Handles both ``{"resourceLogs": [{...}]}`` and legacy ``{"scopeLogs": [...]}``.
+    """
     out: list[dict[str, Any]] = []
-    for scope in line.get("scopeLogs", []) or []:
-        out.extend(scope.get("logRecords", []) or [])
+    resources = line.get("resourceLogs")
+    if resources:
+        for rl in resources:
+            for scope in rl.get("scopeLogs", []) or []:
+                out.extend(scope.get("logRecords", []) or [])
+    else:
+        for scope in line.get("scopeLogs", []) or []:
+            out.extend(scope.get("logRecords", []) or [])
     return out
 
 

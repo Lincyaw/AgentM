@@ -394,6 +394,95 @@ class TraceReader:
             )
         return None
 
+    def scan_identity_and_line_count(
+        self,
+    ) -> tuple[SessionIdentity | None, int]:
+        """Single-pass extraction of session identity and total line count.
+
+        Optimised for directory-wide scans (``agentm trace index``): opens the
+        file **once**, parses only the line(s) that might contain the
+        ``agentm.session.start`` record, then counts the remaining newlines
+        via fast binary chunk reads — no per-line Python iteration, no JSON
+        parsing, and no OTLP unwrapping of records that aren't needed.
+        """
+        _SESSION_START = "agentm.session.start"
+
+        def _norm(value: Any) -> str | None:
+            if value is None or value == "":
+                return None
+            return str(value)
+
+        try:
+            fh = self._path.open("rb")
+        except OSError:
+            return None, 0
+
+        identity: SessionIdentity | None = None
+        line_count = 0
+
+        with fh:
+            for raw_line in fh:
+                line_count += 1
+                if identity is not None:
+                    # Already found — just count remaining lines in bulk.
+                    rest = fh.read()
+                    line_count += rest.count(b"\n")
+                    break
+
+                # Fast substring gate — skip JSON parse if impossible.
+                if _SESSION_START.encode() not in raw_line:
+                    continue
+
+                try:
+                    parsed = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+
+                # Walk OTLP structure — handle both collector-compatible
+                # (resourceLogs wrapper) and legacy (direct scopeLogs).
+                from agentm.core.observability.otlp import (
+                    iter_log_records as _iter_lr,
+                )
+
+                for rec in _iter_lr(parsed):
+                    if rec.get("eventName") != _SESSION_START:
+                        continue
+                    body_raw = rec.get("body")
+                    body = (
+                        otlp_unwrap(body_raw)
+                        if isinstance(body_raw, dict)
+                        else {}
+                    )
+                    attrs = _unwrap_attributes(rec.get("attributes"))
+                    identity = SessionIdentity(
+                        trace_id=_norm(
+                            body.get("root_session_id")
+                            or attrs.get("agentm.session.root_id")
+                        ),
+                        session_id=_norm(
+                            body.get("session_id")
+                            or attrs.get("agentm.session.id")
+                            or rec.get("spanId")
+                        ),
+                        parent_session_id=_norm(
+                            body.get("parent_session_id")
+                            or attrs.get("agentm.session.parent_id")
+                        ),
+                        purpose=_norm(
+                            body.get("purpose")
+                            or attrs.get("agentm.session.purpose")
+                        ),
+                        scenario=_norm(
+                            body.get("scenario")
+                            or attrs.get("agentm.session.scenario")
+                        ),
+                    )
+                    break
+
+        return identity, line_count
+
     def load_session_header(self) -> dict[str, Any] | None:
         """Return the body of the latest ``agentm.session.header`` log record.
 

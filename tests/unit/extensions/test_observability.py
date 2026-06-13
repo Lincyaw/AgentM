@@ -90,10 +90,11 @@ def _read_otlp(path: Path) -> list[dict[str, Any]]:
 
 
 def _log_records(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from agentm.core.observability.otlp import iter_log_records
+
     out: list[dict[str, Any]] = []
     for line in lines:
-        for scope in line.get("scopeLogs", []) or []:
-            out.extend(scope.get("logRecords", []) or [])
+        out.extend(iter_log_records(line))
     return out
 
 

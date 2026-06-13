@@ -1,7 +1,7 @@
-# Minimal OpenTelemetry Collector config for local AgentM tracing.
+# OpenTelemetry Collector config for local AgentM tracing.
 #
-# Receives OTLP from `agentm.extensions.builtin.otlp_export`, fans out to:
-#   * Jaeger (UI at http://localhost:16686)
+# Receives OTLP from AgentM, exports to:
+#   * ClickHouse (HTTP playground at http://localhost:8123/play)
 #   * debug exporter (writes a span-summary line per batch to collector stdout
 #     — set `verbosity: detailed` if you want full attributes printed).
 #
@@ -21,11 +21,24 @@ processors:
     timeout: 2s
 
 exporters:
-  # Jaeger all-in-one exposes OTLP/gRPC on 4317 inside its own container.
-  otlp/jaeger:
-    endpoint: jaeger:4317
-    tls:
-      insecure: true
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s
+    database: otel
+    create_schema: true
+    ttl: 720h
+    logs_table_name: otel_logs
+    traces_table_name: otel_traces
+    timeout: 10s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 1000
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
   debug:
     verbosity: normal
 
@@ -34,8 +47,8 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp/jaeger, debug]
+      exporters: [clickhouse, debug]
     logs:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [clickhouse, debug]

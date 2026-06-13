@@ -29,7 +29,40 @@ from typing import Annotated, Any, Callable, TextIO
 
 import typer
 
-from agentm.core.abi import LogRecord, SessionIdentity, Span, TraceReader
+from agentm.core.abi import LogRecord, Span, TraceReader
+
+# ClickHouse backend — lazy import to avoid urllib cost on the prompt path.
+_ch_mod: Any = None
+
+
+def _ch() -> Any:
+    """Lazily import the ClickHouse backend module."""
+    global _ch_mod
+    if _ch_mod is None:
+        from agentm import cli_trace_ch
+        _ch_mod = cli_trace_ch
+    return _ch_mod
+
+
+def _ch_session(
+    file: Path | None, session: str | None, latest: bool,
+) -> tuple[str, str] | None:
+    """Try to resolve a ClickHouse-backed session.
+
+    Returns ``(ch_url, session_id)`` when ClickHouse is available and
+    ``--file`` is not forcing JSONL mode. Returns ``None`` to fall back
+    to the JSONL path.
+    """
+    if file is not None:
+        return None
+    ch = _ch()
+    url = ch.get_url()
+    if url is None:
+        return None
+    sid = ch.resolve_session(url, session, latest)
+    if sid is None:
+        return None
+    return url, sid
 
 app = typer.Typer(
     name="trace",
@@ -671,7 +704,6 @@ def messages_cmd(
       agentm trace messages --session 7b0f... --format ndjson > traj.ndjson
     """
 
-    path = _resolve_source(file, session, latest, cwd)
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
@@ -684,14 +716,36 @@ def messages_cmd(
             types = set(entry_type)
         color = _color_enabled(sink, no_color)
 
+        def _render(entry: dict[str, Any]) -> str:
+            payload = entry.get("payload") or {}
+            role_str = str(payload.get("role") or entry.get("type") or "?")
+            color_key = role_str if role_str in _ANSI else "kind"
+            header = _paint(f"[{role_str}]", color_key, color)
+            lines = _render_content_blocks(
+                payload.get("content"),
+                color=color,
+                hide_thinking=hide_thinking,
+            )
+            body = "\n".join([header, *lines]) if lines else header
+            return body + "\n"
+
+        # ClickHouse fast path
+        if not follow:
+            ch = _ch_session(file, session, latest)
+            if ch:
+                url, sid = ch
+                records = _ch().messages(
+                    url, sid, roles=roles or None, types=types or None,
+                )
+                n = _emit(records, chosen_fmt, _render, sink, limit)
+                _info(f"{n} message(s)")
+                return
+
+        # JSONL path
+        path = _resolve_source(file, session, latest, cwd)
+
         def _filtered() -> Iterator[dict[str, Any]]:
             reader = TraceReader(path)
-            # If the loop recorded the system prompt (opt-in via
-            # AGENTM_TRACE_SYSTEM_PROMPT=1), surface the very first
-            # occurrence as a synthetic message #0 with role=system.
-            # Subsequent turns may mutate it (a real concern for KV
-            # prefix-cache invalidation) — use ``trace logs --name
-            # agentm.llm.system_prompt`` to inspect per-turn drift.
             sys_iter = reader.iter_log_records(name="agentm.llm.system_prompt")
             first_sys = next(sys_iter, None)
             if first_sys is not None:
@@ -720,21 +774,6 @@ def messages_cmd(
                 if roles and payload.get("role") not in roles:
                     continue
                 yield entry
-
-        def _render(entry: dict[str, Any]) -> str:
-            payload = entry.get("payload") or {}
-            role_str = str(payload.get("role") or entry.get("type") or "?")
-            color_key = role_str if role_str in _ANSI else "kind"
-            header = _paint(f"[{role_str}]", color_key, color)
-            lines = _render_content_blocks(
-                payload.get("content"),
-                color=color,
-                hide_thinking=hide_thinking,
-            )
-            body = "\n".join([header, *lines]) if lines else header
-            # Trailing blank line so consecutive entries are visually
-            # separated; ``_emit`` adds one more ``\n`` per record.
-            return body + "\n"
 
         n = _emit(_filtered(), chosen_fmt, _render, sink, limit)
         _info(f"{n} message(s)")
@@ -767,7 +806,6 @@ def turns_cmd(
       agentm trace turns --latest --format ndjson | jq '.input_tokens'
     """
 
-    path = _resolve_source(file, session, latest, cwd)
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
@@ -782,7 +820,13 @@ def turns_cmd(
                 f"out={turn.get('output_tokens',0)}"
             )
 
-        records = TraceReader(path).load_turn_summaries()
+        ch = _ch_session(file, session, latest)
+        if ch:
+            url, sid = ch
+            records: Any = _ch().turns(url, sid)
+        else:
+            path = _resolve_source(file, session, latest, cwd)
+            records = TraceReader(path).load_turn_summaries()
         n = _emit(records, chosen_fmt, _render, sink, limit)
         _info(f"{n} turn(s)")
     finally:
@@ -810,44 +854,52 @@ def usage_cmd(
       agentm trace usage --file path/to/session.jsonl --format ndjson
     """
 
-    path = _resolve_source(file, session, latest, cwd)
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
-        records = TraceReader(path).load_turn_summaries()
-        if not records:
+
+        ch = _ch_session(file, session, latest)
+        if ch:
+            url, sid = ch
+            summary = _ch().usage(url, sid)
+        else:
+            path = _resolve_source(file, session, latest, cwd)
+            records = TraceReader(path).load_turn_summaries()
+            if not records:
+                summary = None
+            else:
+                total_input = sum(r.get("input_tokens", 0) for r in records)
+                total_output = sum(r.get("output_tokens", 0) for r in records)
+                cache_read = sum(r.get("cache_read", 0) for r in records)
+                cache_write = sum(r.get("cache_write", 0) for r in records)
+                non_cached = total_input - cache_read
+                hit_pct = (cache_read / total_input * 100) if total_input else 0.0
+                summary = {
+                    "turns": len(records),
+                    "input_tokens": total_input,
+                    "cache_read": cache_read,
+                    "cache_write": cache_write,
+                    "non_cached_input": non_cached,
+                    "cache_hit_rate": round(hit_pct, 1),
+                    "output_tokens": total_output,
+                    "total_tokens": total_input + total_output,
+                }
+
+        if summary is None:
             _info("no turns found")
             return
-
-        total_input = sum(r.get("input_tokens", 0) for r in records)
-        total_output = sum(r.get("output_tokens", 0) for r in records)
-        cache_read = sum(r.get("cache_read", 0) for r in records)
-        cache_write = sum(r.get("cache_write", 0) for r in records)
-        non_cached = total_input - cache_read
-        hit_pct = (cache_read / total_input * 100) if total_input else 0.0
-
-        summary: dict[str, Any] = {
-            "turns": len(records),
-            "input_tokens": total_input,
-            "cache_read": cache_read,
-            "cache_write": cache_write,
-            "non_cached_input": non_cached,
-            "cache_hit_rate": round(hit_pct, 1),
-            "output_tokens": total_output,
-            "total_tokens": total_input + total_output,
-        }
 
         if chosen_fmt == "ndjson":
             sink.write(json.dumps(summary) + "\n")
         else:
             sink.write(
                 f"turns:            {summary['turns']}\n"
-                f"input tokens:     {total_input:>12,}\n"
-                f"  cache read:     {cache_read:>12,}  ({hit_pct:.1f}%)\n"
-                f"  cache write:    {cache_write:>12,}\n"
-                f"  non-cached:     {non_cached:>12,}\n"
-                f"output tokens:    {total_output:>12,}\n"
-                f"total tokens:     {total_input + total_output:>12,}\n"
+                f"input tokens:     {summary['input_tokens']:>12,}\n"
+                f"  cache read:     {summary['cache_read']:>12,}  ({summary['cache_hit_rate']:.1f}%)\n"
+                f"  cache write:    {summary['cache_write']:>12,}\n"
+                f"  non-cached:     {summary['non_cached_input']:>12,}\n"
+                f"output tokens:    {summary['output_tokens']:>12,}\n"
+                f"total tokens:     {summary['total_tokens']:>12,}\n"
             )
     finally:
         if close:
@@ -883,30 +935,20 @@ def chats_cmd(
       agentm trace chats --latest --model Doubao-Seed-2.0-pro
     """
 
-    path = _resolve_source(file, session, latest, cwd)
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
         where_filters = _parse_where(where)
         wanted_models = set(model or [])
 
-        def _filtered() -> Iterator[dict[str, Any]]:
-            for span in TraceReader(path).chat_calls():
-                if not _within_window(span.start_time_unix_nano, since, until):
-                    continue
-                if any(
-                    span.attributes.get(k) != v for k, v in where_filters.items()
-                ):
-                    continue
-                if wanted_models:
-                    m = span.attributes.get("gen_ai.request.model")
-                    if m not in wanted_models:
-                        continue
-                yield _span_to_dict(span, unwrap_attrs)
-
         def _render(d: dict[str, Any]) -> str:
             attrs = d if "gen_ai.request.model" in d else d.get("attributes", {})
             duration_ns = attrs.get("agentm.llm.duration_ns")
+            if isinstance(duration_ns, str):
+                try:
+                    duration_ns = int(duration_ns)
+                except ValueError:
+                    duration_ns = None
             duration = (
                 f"{duration_ns / 1e9:.2f}s" if isinstance(duration_ns, int) else "?"
             )
@@ -917,7 +959,31 @@ def chats_cmd(
                 f"duration={duration}"
             )
 
-        n = _emit(_filtered(), chosen_fmt, _render, sink, limit)
+        def _apply_filters(records: Iterator[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+            for d in records:
+                attrs = d.get("attributes", {})
+                if not _within_window(d.get("start_time_unix_nano"), since, until):
+                    continue
+                if any(attrs.get(k) != v for k, v in where_filters.items()):
+                    continue
+                if wanted_models:
+                    m = attrs.get("gen_ai.request.model")
+                    if m not in wanted_models:
+                        continue
+                yield d
+
+        ch = _ch_session(file, session, latest)
+        if ch:
+            url, sid = ch
+            raw = _ch().chats(url, sid)
+        else:
+            path = _resolve_source(file, session, latest, cwd)
+            raw = (
+                _span_to_dict(span, unwrap_attrs)
+                for span in TraceReader(path).chat_calls()
+            )
+
+        n = _emit(_apply_filters(raw), chosen_fmt, _render, sink, limit)
         _info(f"{n} chat call(s)")
     finally:
         if close:
@@ -925,6 +991,39 @@ def chats_cmd(
 
 
 # ---------- tools -----------------------------------------------------------
+
+
+def _jsonl_tool_records(path: Path) -> Iterator[dict[str, Any]]:
+    """Yield tool-call dicts from a JSONL file (shared by tools_cmd)."""
+    for span, args_log, result_log in TraceReader(path).tool_calls():
+        tool_name = span.attributes.get(
+            "gen_ai.tool.name"
+        ) or span.name.removeprefix("execute_tool ").strip()
+        args_payload: Any = args_log.body if args_log is not None else None
+        if args_payload is None:
+            raw = span.attributes.get("gen_ai.tool.call.arguments")
+            if isinstance(raw, str):
+                try:
+                    args_payload = json.loads(raw)
+                except (TypeError, ValueError):
+                    args_payload = raw
+        result_payload: Any = result_log.body if result_log is not None else None
+        if result_payload is None:
+            raw = span.attributes.get("gen_ai.tool.call.result")
+            if isinstance(raw, str):
+                try:
+                    result_payload = json.loads(raw)
+                except (TypeError, ValueError):
+                    result_payload = raw
+        yield {
+            "tool": tool_name,
+            "span_id": span.span_id,
+            "start_time_unix_nano": span.start_time_unix_nano,
+            "end_time_unix_nano": span.end_time_unix_nano,
+            "args": args_payload,
+            "result": result_payload,
+            "attributes": span.attributes,
+        }
 
 
 @app.command("tools")
@@ -957,55 +1056,11 @@ def tools_cmd(
       agentm trace tools --latest --format ndjson | jq '.tool'
     """
 
-    path = _resolve_source(file, session, latest, cwd)
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
         where_filters = _parse_where(where)
         wanted = set(tool or [])
-
-        def _filtered() -> Iterator[dict[str, Any]]:
-            for span, args_log, result_log in TraceReader(path).tool_calls():
-                tool_name = span.attributes.get(
-                    "gen_ai.tool.name"
-                ) or span.name.removeprefix("execute_tool ").strip()
-                if wanted and tool_name not in wanted:
-                    continue
-                if not _within_window(span.start_time_unix_nano, since, until):
-                    continue
-                if any(
-                    span.attributes.get(k) != v for k, v in where_filters.items()
-                ):
-                    continue
-                args_payload: Any = (
-                    args_log.body if args_log is not None else None
-                )
-                if args_payload is None:
-                    raw = span.attributes.get("gen_ai.tool.call.arguments")
-                    if isinstance(raw, str):
-                        try:
-                            args_payload = json.loads(raw)
-                        except (TypeError, ValueError):
-                            args_payload = raw
-                result_payload: Any = (
-                    result_log.body if result_log is not None else None
-                )
-                if result_payload is None:
-                    raw = span.attributes.get("gen_ai.tool.call.result")
-                    if isinstance(raw, str):
-                        try:
-                            result_payload = json.loads(raw)
-                        except (TypeError, ValueError):
-                            result_payload = raw
-                yield {
-                    "tool": tool_name,
-                    "span_id": span.span_id,
-                    "start_time_unix_nano": span.start_time_unix_nano,
-                    "end_time_unix_nano": span.end_time_unix_nano,
-                    "args": args_payload,
-                    "result": result_payload,
-                    "attributes": span.attributes,
-                }
 
         def _render(d: dict[str, Any]) -> str:
             args_repr = json.dumps(d["args"], ensure_ascii=False)
@@ -1015,7 +1070,28 @@ def tools_cmd(
                 f"  → result={result_repr}"
             )
 
-        n = _emit(_filtered(), chosen_fmt, _render, sink, limit)
+        def _apply_filters(records: Iterator[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+            for d in records:
+                if wanted and d["tool"] not in wanted:
+                    continue
+                if not _within_window(d.get("start_time_unix_nano"), since, until):
+                    continue
+                if any(
+                    d.get("attributes", {}).get(k) != v
+                    for k, v in where_filters.items()
+                ):
+                    continue
+                yield d
+
+        ch = _ch_session(file, session, latest)
+        if ch:
+            url, sid = ch
+            raw = _ch().tools(url, sid)
+        else:
+            path = _resolve_source(file, session, latest, cwd)
+            raw = _jsonl_tool_records(path)
+
+        n = _emit(_apply_filters(raw), chosen_fmt, _render, sink, limit)
         _info(f"{n} tool call(s)")
     finally:
         if close:
@@ -1055,26 +1131,36 @@ def info_cmd(
 
     if what not in {"header", "fingerprint", "both"}:
         _fail(2, "argument", f"--what {what!r} not in {{header,fingerprint,both}}")
-    path = _resolve_source(file, session, latest, cwd)
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
-        reader = TraceReader(path)
-        payload: dict[str, Any] = {}
-        if what in {"header", "both"}:
-            header = reader.load_session_header()
-            if header is None and what == "header":
-                _fail(3, "not_found", "no agentm.session.header record in trace")
-            if header is not None:
-                payload["header"] = header
-        if what in {"fingerprint", "both"}:
-            fp = reader.load_session_fingerprint()
-            if fp is None and what == "fingerprint":
-                _fail(
-                    3, "not_found", "no agentm.session.fingerprint record in trace"
-                )
-            if fp is not None:
-                payload["fingerprint"] = fp
+
+        payload: dict[str, Any]
+        ch = _ch_session(file, session, latest)
+        if ch:
+            url, sid = ch
+            payload = _ch().info(url, sid)
+        else:
+            path = _resolve_source(file, session, latest, cwd)
+            reader = TraceReader(path)
+            payload = {}
+            if what in {"header", "both"}:
+                header = reader.load_session_header()
+                if header is None and what == "header":
+                    _fail(3, "not_found", "no agentm.session.header record in trace")
+                if header is not None:
+                    payload["header"] = header
+            if what in {"fingerprint", "both"}:
+                fp = reader.load_session_fingerprint()
+                if fp is None and what == "fingerprint":
+                    _fail(
+                        3, "not_found", "no agentm.session.fingerprint record in trace"
+                    )
+                if fp is not None:
+                    payload["fingerprint"] = fp
+
+        if what != "both" and what not in payload:
+            _fail(3, "not_found", f"no agentm.session.{what} record in trace")
         if not payload:
             _fail(3, "not_found", "no session metadata found in trace")
 
@@ -1131,26 +1217,41 @@ def spans_cmd(
       agentm trace spans --latest --name 'chat Doubao-Seed-2.0-pro' --unwrap-attrs
     """
 
-    path = _resolve_source(file, session, latest, cwd)
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
         where_filters = _parse_where(where)
 
-        def _filtered() -> Iterator[dict[str, Any]]:
-            for span in TraceReader(path).iter_spans(
-                name=name, attribute_filters=where_filters or None
-            ):
-                if name_prefix is not None and not span.name.startswith(name_prefix):
-                    continue
-                if not _within_window(span.start_time_unix_nano, since, until):
-                    continue
-                yield _span_to_dict(span, unwrap_attrs)
-
         def _render(d: dict[str, Any]) -> str:
             return f"[span] {d['name']}"
 
-        n = _emit(_filtered(), chosen_fmt, _render, sink, limit)
+        def _apply_filters(records: Iterator[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+            for d in records:
+                if not _within_window(d.get("start_time_unix_nano"), since, until):
+                    continue
+                attrs = d.get("attributes", {})
+                if any(attrs.get(k) != v for k, v in where_filters.items()):
+                    continue
+                yield d
+
+        ch = _ch_session(file, session, latest)
+        if ch:
+            url, sid = ch
+            raw = _ch().spans(url, sid, name=name, name_prefix=name_prefix)
+        else:
+            path = _resolve_source(file, session, latest, cwd)
+
+            def _jsonl_spans() -> Iterator[dict[str, Any]]:
+                for span in TraceReader(path).iter_spans(
+                    name=name, attribute_filters=where_filters or None
+                ):
+                    if name_prefix is not None and not span.name.startswith(name_prefix):
+                        continue
+                    yield _span_to_dict(span, unwrap_attrs)
+
+            raw = _jsonl_spans()
+
+        n = _emit(_apply_filters(raw), chosen_fmt, _render, sink, limit)
         _info(f"{n} span(s)")
     finally:
         if close:
@@ -1190,28 +1291,43 @@ def logs_cmd(
       agentm trace logs --latest --name-prefix agentm.handler --limit 10
     """
 
-    path = _resolve_source(file, session, latest, cwd)
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
         where_filters = _parse_where(where)
 
-        def _filtered() -> Iterator[dict[str, Any]]:
-            for rec in TraceReader(path).iter_log_records(
-                name=name, attribute_filters=where_filters or None
-            ):
-                if name_prefix is not None and not rec.event_name.startswith(
-                    name_prefix
-                ):
-                    continue
-                if not _within_window(rec.time_unix_nano, since, until):
-                    continue
-                yield _log_to_dict(rec, unwrap_attrs)
-
         def _render(d: dict[str, Any]) -> str:
             return f"[log] {d['event_name']}"
 
-        n = _emit(_filtered(), chosen_fmt, _render, sink, limit)
+        def _apply_filters(records: Iterator[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+            for d in records:
+                if not _within_window(d.get("time_unix_nano"), since, until):
+                    continue
+                attrs = d.get("attributes", {})
+                if any(attrs.get(k) != v for k, v in where_filters.items()):
+                    continue
+                yield d
+
+        ch = _ch_session(file, session, latest)
+        if ch:
+            url, sid = ch
+            raw = _ch().logs(url, sid, name=name, name_prefix=name_prefix)
+        else:
+            path = _resolve_source(file, session, latest, cwd)
+
+            def _jsonl_logs() -> Iterator[dict[str, Any]]:
+                for rec in TraceReader(path).iter_log_records(
+                    name=name, attribute_filters=where_filters or None
+                ):
+                    if name_prefix is not None and not rec.event_name.startswith(
+                        name_prefix
+                    ):
+                        continue
+                    yield _log_to_dict(rec, unwrap_attrs)
+
+            raw = _jsonl_logs()
+
+        n = _emit(_apply_filters(raw), chosen_fmt, _render, sink, limit)
         _info(f"{n} log record(s)")
     finally:
         if close:
@@ -1241,37 +1357,43 @@ def stats_cmd(
       agentm trace stats --latest --format json | jq '.spans'
     """
 
-    path = _resolve_source(file, session, latest, cwd)
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
-        logs: Counter[str] = Counter()
-        spans: Counter[str] = Counter()
-        for item in TraceReader(path).iter_all():
-            if isinstance(item, Span):
-                spans[item.name] += 1
-            else:
-                logs[item.event_name] += 1
-        logs_sorted: dict[str, int] = dict(
-            sorted(logs.items(), key=lambda kv: -kv[1])
-        )
-        spans_sorted: dict[str, int] = dict(
-            sorted(spans.items(), key=lambda kv: -kv[1])
-        )
-        summary: dict[str, Any] = {
-            "file": str(path),
-            "logs": logs_sorted,
-            "spans": spans_sorted,
-            "log_total": sum(logs.values()),
-            "span_total": sum(spans.values()),
-        }
+
+        ch = _ch_session(file, session, latest)
+        if ch:
+            url, sid = ch
+            summary = _ch().stats(url, sid)
+        else:
+            path = _resolve_source(file, session, latest, cwd)
+            log_counts: Counter[str] = Counter()
+            span_counts: Counter[str] = Counter()
+            for item in TraceReader(path).iter_all():
+                if isinstance(item, Span):
+                    span_counts[item.name] += 1
+                else:
+                    log_counts[item.event_name] += 1
+            logs_sorted: dict[str, int] = dict(
+                sorted(log_counts.items(), key=lambda kv: -kv[1])
+            )
+            spans_sorted: dict[str, int] = dict(
+                sorted(span_counts.items(), key=lambda kv: -kv[1])
+            )
+            summary = {
+                "file": str(path),
+                "logs": logs_sorted,
+                "spans": spans_sorted,
+                "log_total": sum(log_counts.values()),
+                "span_total": sum(span_counts.values()),
+            }
         if chosen_fmt == "text":
             sink.write(f"file: {summary['file']}\n")
             sink.write(f"logs ({summary['log_total']}):\n")
-            for k, v in logs_sorted.items():
+            for k, v in summary["logs"].items():
                 sink.write(f"  {v:>5}  {k}\n")
             sink.write(f"spans ({summary['span_total']}):\n")
-            for k, v in spans_sorted.items():
+            for k, v in summary["spans"].items():
                 sink.write(f"  {v:>5}  {k}\n")
         elif chosen_fmt == "json":
             json.dump(summary, sink, ensure_ascii=False, indent=2)
@@ -1286,19 +1408,46 @@ def stats_cmd(
 
 # ---------- index (directory-granular session topology) ---------------------
 
+_CACHE_FILE = ".trace_index_cache.json"
 
-def _count_lines(path: Path) -> int | None:
-    """Cheap line count for a session file (proxy for record volume).
 
-    Returns ``None`` if the file can't be read — the identity fields are
-    the priority, so a missing count never blocks a row.
-    """
-
-    try:
-        with path.open("rb") as handle:
-            return sum(1 for _ in handle)
-    except OSError:
+def _scan_file(path: Path) -> dict[str, Any] | None:
+    """Single-pass scan: identity + line count. Returns ``None`` to skip."""
+    identity, line_count = TraceReader(path).scan_identity_and_line_count()
+    if identity is None:
         return None
+    return {
+        "path": str(path),
+        "trace_id": identity.trace_id,
+        "session_id": identity.session_id,
+        "parent_session_id": identity.parent_session_id,
+        "purpose": identity.purpose,
+        "scenario": identity.scenario,
+        "records": line_count or None,
+    }
+
+
+def _load_index_cache(obs_dir: Path) -> dict[str, Any]:
+    cache_path = obs_dir / _CACHE_FILE
+    try:
+        with cache_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return {}
+
+
+def _save_index_cache(obs_dir: Path, cache: dict[str, Any]) -> None:
+    cache_path = obs_dir / _CACHE_FILE
+    tmp = cache_path.with_suffix(".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(cache, fh, separators=(",", ":"))
+        tmp.replace(cache_path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
 
 
 @app.command("index")
@@ -1314,6 +1463,20 @@ def index_cmd(
     limit: LimitOpt = None,
     fmt: FormatOpt = None,
     out: OutputOpt = None,
+    jobs: Annotated[
+        int,
+        typer.Option(
+            "--jobs", "-j",
+            help="Parallel workers (default: min(cpu_count, 8)).",
+        ),
+    ] = 0,
+    no_cache: Annotated[
+        bool,
+        typer.Option(
+            "--no-cache",
+            help="Bypass the on-disk index cache and re-scan every file.",
+        ),
+    ] = False,
 ) -> None:
     """Map every session file to its trace-tree identity (one row per file).
 
@@ -1324,6 +1487,10 @@ def index_cmd(
     from a ``trace_id`` to its session files. Files with no session.start
     record are skipped. Filtering is the consumer's job — pipe through jq.
 
+    Results are cached in ``.trace_index_cache.json`` inside the
+    observability directory. Only new or modified files are re-scanned on
+    subsequent runs. Pass ``--no-cache`` to force a full rescan.
+
     Each row: {path, trace_id, session_id, parent_session_id, purpose,
     scenario, records}.
 
@@ -1333,41 +1500,9 @@ def index_cmd(
       agentm trace index --dir /path/to/.agentm/observability --format text
     """
 
-    if directory is not None:
-        obs_dir = directory
-    else:
-        from agentm.core.observability.otel_export import resolve_observability_dir
-
-        obs_dir = resolve_observability_dir(cwd)
-    if not obs_dir.is_dir():
-        _fail(
-            3,
-            "not_found",
-            f"observability directory not found: {obs_dir}",
-            "pass --dir, or cd into a run directory / pass --cwd",
-        )
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
-
-        def _rows() -> Iterator[dict[str, Any]]:
-            for path in sorted(obs_dir.glob("*.jsonl")):
-                if not path.is_file():
-                    continue
-                identity: SessionIdentity | None = TraceReader(
-                    path
-                ).first_session_identity()
-                if identity is None:
-                    continue
-                yield {
-                    "path": str(path),
-                    "trace_id": identity.trace_id,
-                    "session_id": identity.session_id,
-                    "parent_session_id": identity.parent_session_id,
-                    "purpose": identity.purpose,
-                    "scenario": identity.scenario,
-                    "records": _count_lines(path),
-                }
 
         def _render(d: dict[str, Any]) -> str:
             return (
@@ -1376,10 +1511,87 @@ def index_cmd(
                 f"parent={d.get('parent_session_id') or '-'} "
                 f"purpose={d.get('purpose') or '-'} "
                 f"records={d.get('records') if d.get('records') is not None else '?'} "
-                f"{d['path']}"
+                f"{d.get('path', '-')}"
             )
 
-        n = _emit(_rows(), chosen_fmt, _render, sink, limit)
+        # ClickHouse fast path (skip when --dir forces JSONL scan)
+        if directory is None:
+            ch_url = _ch().get_url()
+            if ch_url is not None:
+                rows = list(_ch().index(ch_url))
+                n = _emit(iter(rows), chosen_fmt, _render, sink, limit)
+                _info(f"{n} session(s) (clickhouse)")
+                return
+
+        # JSONL scan path
+        if directory is not None:
+            obs_dir = directory
+        else:
+            from agentm.core.observability.otel_export import resolve_observability_dir
+
+            obs_dir = resolve_observability_dir(cwd)
+        if not obs_dir.is_dir():
+            _fail(
+                3,
+                "not_found",
+                f"observability directory not found: {obs_dir}",
+                "pass --dir, or cd into a run directory / pass --cwd",
+            )
+        files = sorted(p for p in obs_dir.glob("*.jsonl") if p.is_file())
+
+        cache = {} if no_cache else _load_index_cache(obs_dir)
+        cached_rows: list[dict[str, Any]] = []
+        stale_files: list[Path] = []
+
+        for path in files:
+            fname = path.name
+            entry = cache.get(fname)
+            if entry is not None:
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                if entry.get("_mtime") == st.st_mtime and entry.get("_size") == st.st_size:
+                    row = entry.get("row")
+                    if row is not None:
+                        row["path"] = str(path)
+                        cached_rows.append(row)
+                    continue
+            stale_files.append(path)
+
+        scanned_rows: list[dict[str, Any]] = []
+        if stale_files:
+            max_workers = jobs if jobs > 0 else min(os.cpu_count() or 4, 8)
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                for path, row in zip(stale_files, pool.map(_scan_file, stale_files)):
+                    try:
+                        st = path.stat()
+                    except OSError:
+                        continue
+                    cache[path.name] = {
+                        "_mtime": st.st_mtime,
+                        "_size": st.st_size,
+                        "row": row,
+                    }
+                    if row is not None:
+                        scanned_rows.append(row)
+
+        live_names = {p.name for p in files}
+        for dead in [k for k in cache if k not in live_names]:
+            del cache[dead]
+
+        if stale_files or len(cache) != len(files):
+            _save_index_cache(obs_dir, cache)
+
+        _info(
+            f"{len(cached_rows)} cached, {len(scanned_rows)} scanned"
+            f" ({len(stale_files)} file(s) re-scanned)"
+        )
+
+        all_rows = sorted(cached_rows + scanned_rows, key=lambda d: d["path"])
+        n = _emit(iter(all_rows), chosen_fmt, _render, sink, limit)
         _info(f"{n} session file(s)")
     finally:
         if close:
