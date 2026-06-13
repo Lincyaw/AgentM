@@ -18,7 +18,7 @@ Config keys (all optional; env vars take precedence per OTel convention):
 
 | key          | env var                          | default                    |
 |--------------|----------------------------------|----------------------------|
-| ``endpoint`` | ``OTEL_EXPORTER_OTLP_ENDPOINT``  | ``http://localhost:4317``  |
+| ``endpoint`` | ``OTEL_EXPORTER_OTLP_ENDPOINT``  | **required**               |
 | ``protocol`` | ``OTEL_EXPORTER_OTLP_PROTOCOL``  | ``grpc``                   |
 | ``headers``  | ``OTEL_EXPORTER_OTLP_HEADERS``   | none                       |
 | ``insecure`` | ``OTEL_EXPORTER_OTLP_INSECURE``  | ``true`` (grpc only)       |
@@ -110,8 +110,18 @@ def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
         endpoint = (
             config.endpoint
             or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-            or "http://localhost:4317"
         )
+        if not endpoint:
+            raise ExtensionLoadError(
+                __name__,
+                RuntimeError(
+                    "No OTLP endpoint configured. Set OTEL_EXPORTER_OTLP_ENDPOINT "
+                    "or pass endpoint in the extension config.\n\n"
+                    "  Quick start:\n"
+                    "    docker compose -f tools/otel/docker-compose.yaml up -d\n"
+                    "    export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317"
+                ),
+            )
         protocol = (
             config.protocol or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL") or "grpc"
         )

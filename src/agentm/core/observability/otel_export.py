@@ -270,17 +270,27 @@ _global_atexit_registered = False
 def _maybe_attach_otlp_exporters(
     tp: TracerProvider, lp: LoggerProvider
 ) -> None:
-    """Attach OTLP network exporters when ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set.
+    """Attach OTLP network exporters using ``OTEL_EXPORTER_OTLP_ENDPOINT``.
 
     Called once during process-level provider construction — before any
     session emits its first event — so that every record (including
     ``session.start``) reaches the remote collector. The
     ``otlp_export`` builtin extension becomes a no-op when the exporters
     are already attached here.
+
+    Raises :class:`RuntimeError` when the env var is unset — the collector
+    is required for trace storage and query (``agentm trace``).
     """
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     if not endpoint:
-        return
+        raise RuntimeError(
+            "OTEL_EXPORTER_OTLP_ENDPOINT is not set. "
+            "AgentM requires an OTLP collector for trace storage.\n\n"
+            "  Quick start — launch the bundled collector + ClickHouse:\n"
+            "    docker compose -f tools/otel/docker-compose.yaml up -d\n\n"
+            "  Then export the endpoint:\n"
+            "    export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317\n"
+        )
 
     protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
     headers_raw = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
