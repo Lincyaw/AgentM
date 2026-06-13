@@ -278,18 +278,17 @@ def _maybe_attach_otlp_exporters(
     ``otlp_export`` builtin extension becomes a no-op when the exporters
     are already attached here.
 
-    Raises :class:`RuntimeError` when the env var is unset — the collector
+    Raises :class:`SystemExit` when the env var is unset — the collector
     is required for trace storage and query (``agentm trace``).
     """
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     if not endpoint:
-        raise RuntimeError(
-            "OTEL_EXPORTER_OTLP_ENDPOINT is not set. "
+        raise SystemExit(
+            "\n\033[1;31mError:\033[0m OTEL_EXPORTER_OTLP_ENDPOINT is not set.\n"
             "AgentM requires an OTLP collector for trace storage.\n\n"
-            "  Quick start — launch the bundled collector + ClickHouse:\n"
-            "    docker compose -f tools/otel/docker-compose.yaml up -d\n\n"
-            "  Then export the endpoint:\n"
-            "    export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317\n"
+            "Quick start — launch the bundled collector + ClickHouse:\n\n"
+            "  docker compose -f tools/otel/docker-compose.yaml up -d\n"
+            "  export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317\n"
         )
 
     protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
