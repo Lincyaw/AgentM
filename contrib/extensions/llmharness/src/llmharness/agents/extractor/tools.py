@@ -19,7 +19,7 @@ from agentm.extensions import ExtensionManifest
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from llmharness.schema import Edge, EdgeKind, Event, EventKind
+from llmharness.schema import CommitmentStatus, Edge, EdgeKind, EdgeRole, Event, EventKind
 
 from .graph import (
     EdgeDelete,
@@ -161,6 +161,8 @@ def _state_echo(state: ExtractionState) -> str:
 
 EVENT_KIND_VALUES: Final[list[str]] = [k.value for k in EventKind]
 EDGE_KIND_VALUES: Final[list[str]] = [k.value for k in EdgeKind]
+COMMITMENT_STATUS_VALUES: Final[list[str]] = [s.value for s in CommitmentStatus]
+EDGE_ROLE_VALUES: Final[list[str]] = [r.value for r in EdgeRole]
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -337,6 +339,7 @@ class ExtractionState:
                     summary=ev.summary,
                     source_turns=tuple(ev.source_turns),
                     external_refs=ev.external_refs,
+                    status=ev.status.value if ev.status else None,
                 )
             )
         for (src, dst, kind), ed in self.recent_edges_dict.items():
@@ -350,6 +353,7 @@ class ExtractionState:
                     cited_quote=ed.cited_quote,
                     src_turns=ed.src_turns,
                     dst_turns=ed.dst_turns,
+                    role=ed.role.value if ed.role else None,
                 )
             )
         self.pending_graph = fold_graph(prefix + self.pending_ops)
@@ -395,11 +399,19 @@ class ExtractionState:
                 "append at the next free slot."
             )
 
+        status_raw = raw.get("status")
+        if status_raw is not None and status_raw not in COMMITMENT_STATUS_VALUES:
+            return (
+                f"apply_node_upsert: status {status_raw!r} not in "
+                f"{COMMITMENT_STATUS_VALUES}"
+            )
+
         op = NodeUpsert(
             id=ev.id,
             kind=ev.kind.value,
             summary=ev.summary,
             source_turns=tuple(ev.source_turns),
+            status=status_raw,
         )
         self.pending_ops.append(op)
         self._persist_op(op)
@@ -468,6 +480,13 @@ class ExtractionState:
         if not isinstance(reason, str):
             return "apply_edge_upsert: reason must be a string"
 
+        role_raw = raw.get("role")
+        if role_raw is not None and role_raw not in EDGE_ROLE_VALUES:
+            return (
+                f"apply_edge_upsert: role {role_raw!r} not in "
+                f"{EDGE_ROLE_VALUES}"
+            )
+
         op = EdgeUpsert(
             src=src,
             dst=dst,
@@ -477,6 +496,7 @@ class ExtractionState:
             cited_quote=cited_quote,
             src_turns=tuple(src_event.source_turns),
             dst_turns=tuple(dst_event.source_turns),
+            role=role_raw,
         )
         self.pending_ops.append(op)
         self._persist_op(op)
@@ -572,6 +592,18 @@ class UpsertNodeArgs(BaseModel):
             "Trajectory indices this event was extracted from. "
             "Non-empty and contiguous ([first, first+1, ..., last] "
             "with no gaps)."
+        ),
+    )
+    status: Literal["exploratory", "tentative", "committed", "finalized"] | None = Field(
+        default=None,
+        description=(
+            "Commitment status for hyp/dec/concl nodes. "
+            "exploratory=mentioned but not pursued, "
+            "tentative=under active investigation, "
+            "committed=later reasoning depends on this, "
+            "finalized=part of the final answer. "
+            "Ignored for task/act nodes. "
+            "Omit to leave unchanged on existing nodes."
         ),
     )
 
@@ -675,6 +707,17 @@ class UpsertEdgeArgs(BaseModel):
             "Required when kind='ref'. "
             "Paraphrasing or reformatting is rejected at op-build "
             "time. Pass \"\" when kind='data'."
+        ),
+    )
+    role: Literal["supports", "weakens", "depends", "narrows"] | None = Field(
+        default=None,
+        description=(
+            "Causal role of this edge. "
+            "supports=evidence positively confirms the claim, "
+            "weakens=evidence partially contradicts, "
+            "depends=logical dependency (default), "
+            "narrows=eliminates alternatives. "
+            "Omit to default to depends."
         ),
     )
 
