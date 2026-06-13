@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""Producer-consumer fault propagation verifier.
+"""Producer-consumer fault propagation verifier (fpg-native).
 
 Phase 0: build a relationship graph from traces (call graph,
 bidirectional) and optionally deployment co-location.
 Propagation: every confirmed node is a *producer* — it enqueues ALL
 its neighbours. Each neighbour is a *consumer*: a hop-agent checks
 whether it is genuinely degraded. If confirmed, it becomes a
-producer itself. Edges between already-confirmed nodes are verified
-by SQL alone (no agent). Same-round hops run in parallel.
+producer itself. EVERY edge goes through a hop agent — including
+edges between already-confirmed services. Same-round hops run in
+parallel.
+
+The primary output per case is ``fpg_scenario.json`` — a ground-truth
+scenario in the fault-propagation-graph schema
+(https://github.com/Lincyaw/fpg-convention), validated against the
+profile-bound schema (fpg_profile.toml) before writing. Pipeline
+telemetry (hop log, all verdicts, judge review) goes to
+``run_meta.json``.
 
 Orchestration is a pre-written workflow script
 (``propagation_workflow.py``) executed by the ``workflow`` atom engine.
-The harness prepares the args (DuckDB graph, injections) and invokes
-the workflow tool directly on an AgentSession.
+The harness prepares the args (DuckDB graph, injections, prebuilt fpg
+seed nodes) and invokes the workflow tool directly on an AgentSession.
 
 Usage (single case):
     uv run python cli.py run <case_dir> [--model X]
@@ -37,6 +45,12 @@ import typer
 sys.path.insert(0, str(Path(__file__).resolve().parent / "eval"))
 
 from diff import diff_cases  # noqa: E402
+from fpg_mapping import (  # noqa: E402
+    REL_MECHANISM,
+    assemble_scenario,
+    build_seed_node,
+    load_injection_meta,
+)
 from graph import (  # noqa: E402
     SYNTHETIC,
     _build_neighbor_graph,
@@ -44,6 +58,8 @@ from graph import (  # noqa: E402
     get_infra_nodes,
     get_node_map,
     get_relationships,
+    profile_dataset,
+    vanished_endpoints,
 )
 from injection import (  # noqa: E402
     TargetEvidence,
@@ -68,13 +84,18 @@ class WorkflowArgs(TypedDict, total=False):
     injections: list[dict[str, str]]
     infra_nodes: list[str]
     node_map: dict[str, str]
-    target_evidence: dict[str, TargetEvidence]
     fault_docs: dict[str, str]
     budget: int
     out_dir: str
     skip_propagate: bool
     skip_judge: bool
-    existing_propagation: dict[str, Any]
+    window: dict[str, str]
+    dataset_profile: dict[str, Any]
+    vanished: dict[str, Any]
+    entry_services: list[str]
+    seed_nodes: dict[str, dict[str, Any]]
+    rel_mechanism: dict[str, str]
+    existing_state: dict[str, Any]
 
 def _resolve_provider() -> ProviderSpec:
     """Build a provider spec from the environment (config.toml profile)."""
@@ -141,14 +162,21 @@ def run_judge(
     *,
     budget: int = 20,
 ) -> dict:
-    """Run judge via the workflow (skip_propagate=True, skip_judge=False)."""
+    """Run judge via the workflow (skip_propagate=True, skip_judge=False).
+
+    Reads the case's fpg_scenario.json + run_meta.json, applies the
+    judge's cascade promotions (each attached through a confirmed
+    upstream), and rewrites both files.
+    """
     data_dir = case_dir.resolve()
     out = run_dir.resolve()
-    trace_path = out / "propagation_graph.json"
-    if not trace_path.exists():
+    scenario_path = out / "fpg_scenario.json"
+    meta_path = out / "run_meta.json"
+    if not scenario_path.exists():
         return {}
 
-    trace = json.loads(trace_path.read_text())
+    scenario = json.loads(scenario_path.read_text())
+    run_meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     injections = get_injections(data_dir)
     if not injections:
         return {}
@@ -161,64 +189,73 @@ def run_judge(
             if doc:
                 fault_docs[fk] = doc
 
+    meta = load_injection_meta(data_dir)
+    rels = get_relationships(data_dir)
+    infra_nodes = get_infra_nodes(data_dir)
+    rels.extend(get_infra_edges(data_dir, infra_nodes))
+    neighbor_graph = _build_neighbor_graph(rels)
+    graph_serializable: dict[str, list[list[str]]] = {
+        svc: [[n, r] for n, r in neighbors]
+        for svc, neighbors in neighbor_graph.items()
+        if svc not in SYNTHETIC
+    }
+
     workflow_args: WorkflowArgs = {
         "data_dir": str(data_dir),
-        "graph": {},
+        "graph": graph_serializable,
         "injections": [
             i for i in injections
             if i.get("target") and i["target"] not in SYNTHETIC
         ],
-        "infra_nodes": [],
+        "infra_nodes": sorted(infra_nodes),
         "node_map": {},
-        "target_evidence": {},
         "fault_docs": fault_docs,
         "budget": budget,
         "out_dir": str(out),
         "skip_propagate": True,
         "skip_judge": False,
-        "existing_propagation": trace,
+        "window": meta["window"],
+        "rel_mechanism": dict(REL_MECHANISM),
+        "dataset_profile": dict(profile_dataset(data_dir)),
+        "entry_services": sorted(
+            {a for a, b, r in rels if r == "caller_to_callee"}
+            - {b for a, b, r in rels if r == "caller_to_callee"}
+        ),
+        "vanished": vanished_endpoints(
+            data_dir,
+            sorted({
+                k.split("__", 1)[1]
+                for k, v in run_meta.get("verdicts", {}).items()
+                if v.get("verdict") == "rejected"
+            }),
+        ),
+        "existing_state": {
+            "nodes": scenario.get("graph", {}).get("nodes", []),
+            "edges": scenario.get("graph", {}).get("edges", []),
+            "verdicts": run_meta.get("verdicts", {}),
+            "hop_log": run_meta.get("hop_log", []),
+            "rounds": run_meta.get("rounds", 0),
+        },
     }
 
     result = asyncio.run(_run_workflow_async(workflow_args, out))
+    if not result:
+        return {}
+
+    scenario = assemble_scenario(meta, result["nodes"], result["edges"])
+    scenario_path.write_text(
+        json.dumps(scenario, indent=2, ensure_ascii=False) + "\n"
+    )
+    run_meta.update({
+        "hop_log": result.get("hop_log", []),
+        "rounds": result.get("rounds", 0),
+        "verdicts": result.get("verdicts", {}),
+        "judge": result.get("judge") or {},
+    })
+    meta_path.write_text(
+        json.dumps(run_meta, indent=2, ensure_ascii=False) + "\n"
+    )
     return result.get("judge") or {}
-
-# ------------------------------------------------------------------
-# Output
-# ------------------------------------------------------------------
-
-def build_report(
-    result: dict, injections: list[dict[str, str]],
-) -> dict:
-    report: dict = {
-        "injections": [
-            {
-                "target_service": inj["target"],
-                "fault_kind": inj["chaos_type"],
-                "verdict": "true",
-                "rationale": "injection target (seed)",
-            }
-            for inj in injections
-        ],
-        "propagation_nodes": [],
-        "propagation_edges": [],
-    }
-    for node in result["confirmed_nodes"]:
-        ev = result["node_evidence"].get(node, {})
-        report["propagation_nodes"].append({
-            "service": node,
-            "symptom_evidence": ev.get("symptom_evidence", []),
-        })
-    for edge in result["edges"]:
-        from_svc = edge[0] if isinstance(edge, list) else edge
-        to_svc = edge[1] if isinstance(edge, list) else ""
-        ev = result["node_evidence"].get(to_svc, {})
-        report["propagation_edges"].append({
-            "from_service": from_svc,
-            "to_service": to_svc,
-            "relationship_sql": ev.get("relationship_sql", ""),
-            "claim": ev.get("claim", ""),
-        })
-    return report
 
 def run_one_case(
     case_dir: Path,
@@ -228,8 +265,10 @@ def run_one_case(
 ) -> dict:
     """Run propagation verification on a single case.
 
-    Returns a summary dict with keys: case, seeds, confirmed, edges,
-    rounds, error.  The full report and trace are written to *out_dir*.
+    Writes the fpg ground-truth scenario (fpg_scenario.json, validated
+    against the profile-bound schema) plus pipeline telemetry
+    (run_meta.json) to *out_dir*. Returns a summary dict with keys:
+    case, seeds, confirmed, edges, rounds, error.
     """
     data_dir = case_dir.resolve()
     out = out_dir.resolve()
@@ -239,6 +278,7 @@ def run_one_case(
     injections = get_injections(data_dir)
     if not injections:
         return {"case": case_name, "error": "no injections"}
+    meta = load_injection_meta(data_dir)
 
     rels = get_relationships(data_dir)
     infra_nodes = get_infra_nodes(data_dir)
@@ -267,12 +307,16 @@ def run_one_case(
         if svc not in SYNTHETIC
     }
 
-    # Pre-compute target evidence for injection seeds
-    target_evidence: dict[str, TargetEvidence] = {}
+    # Prebuild fpg seed nodes: predicate mapped from the chaos type,
+    # evidence = the normal/abnormal latency comparison
+    seed_nodes: dict[str, dict[str, Any]] = {}
     for inj in injections:
         target = inj["target"]
-        if target and target not in SYNTHETIC:
-            target_evidence[target] = dict(get_target_evidence(data_dir, target))
+        if target and target not in SYNTHETIC and target not in seed_nodes:
+            evidence: TargetEvidence = get_target_evidence(data_dir, target)
+            seed_nodes[target] = build_seed_node(
+                target, inj["chaos_type"], meta["window"], dict(evidence),
+            )
 
     # Pre-compute fault docs so the workflow can pass them to context atoms
     fault_docs: dict[str, str] = {}
@@ -292,32 +336,36 @@ def run_one_case(
         ],
         "infra_nodes": sorted(infra_nodes),
         "node_map": node_map,
-        "target_evidence": target_evidence,
         "fault_docs": fault_docs,
         "budget": budget,
         "out_dir": str(out),
         "skip_judge": True,
+        "window": meta["window"],
+        "seed_nodes": seed_nodes,
+        "rel_mechanism": dict(REL_MECHANISM),
+        "dataset_profile": dict(profile_dataset(data_dir)),
     }
 
     result = asyncio.run(_run_workflow_async(workflow_args, out))
 
-    (out / "propagation_graph.json").write_text(
-        json.dumps(result, indent=2, ensure_ascii=False, default=str)
+    scenario = assemble_scenario(meta, result["nodes"], result["edges"])
+    (out / "fpg_scenario.json").write_text(
+        json.dumps(scenario, indent=2, ensure_ascii=False) + "\n"
     )
-
-    report = build_report(result, injections)
-    (out / "report.json").write_text(
-        json.dumps(report, indent=2, ensure_ascii=False)
-    )
+    (out / "run_meta.json").write_text(json.dumps({
+        "hop_log": result.get("hop_log", []),
+        "rounds": result.get("rounds", 0),
+        "verdicts": result.get("verdicts", {}),
+    }, indent=2, ensure_ascii=False, default=str) + "\n")
 
     seeds = [i["target"] for i in injections]
-    confirmed = result["confirmed_nodes"]
+    confirmed = [n["id"] for n in result["nodes"]]
     propagated = [s for s in confirmed if s not in seeds]
-    edge_count = len(result["edges"])
+    edge_pairs = [[e["src"], e["dst"]] for e in result["edges"]]
 
     print(f"\nRounds: {result['rounds']}")
     print(f"Confirmed: {confirmed}")
-    print(f"Edges ({edge_count}): {result['edges']}")
+    print(f"Edges ({len(edge_pairs)}): {edge_pairs}")
 
     return {
         "case": case_name,
@@ -327,7 +375,7 @@ def run_one_case(
         "seeds": seeds,
         "confirmed": confirmed,
         "propagated": propagated,
-        "edges": edge_count,
+        "edges": len(edge_pairs),
         "rounds": result["rounds"],
     }
 
@@ -336,27 +384,27 @@ def run_one_case(
 # ------------------------------------------------------------------
 
 def _read_cached_summary(out_dir: Path, case_name: str) -> dict | None:
-    report_path = out_dir / "report.json"
-    trace_path = out_dir / "propagation_graph.json"
-    if not report_path.exists() or not trace_path.exists():
+    scenario_path = out_dir / "fpg_scenario.json"
+    meta_path = out_dir / "run_meta.json"
+    if not scenario_path.exists() or not meta_path.exists():
         return None
     try:
-        report = json.loads(report_path.read_text())
-        trace = json.loads(trace_path.read_text())
+        scenario = json.loads(scenario_path.read_text())
+        run_meta = json.loads(meta_path.read_text())
     except Exception:  # noqa: BLE001
         return None
-    seeds = [i["target_service"] for i in report.get("injections", [])]
-    confirmed = trace.get("confirmed_nodes", [])
+    seeds = [i["node_id"] for i in scenario.get("injections", [])]
+    confirmed = [n["id"] for n in scenario.get("graph", {}).get("nodes", [])]
     return {
         "case": case_name,
         "fault_kind": "+".join(
-            dict.fromkeys(i["fault_kind"] for i in report.get("injections", []))
+            dict.fromkeys(i["fault_type"] for i in scenario.get("injections", []))
         ) or "unknown",
         "seeds": seeds,
         "confirmed": confirmed,
         "propagated": [s for s in confirmed if s not in seeds],
-        "edges": len(report.get("propagation_edges", [])),
-        "rounds": trace.get("rounds", 0),
+        "edges": len(scenario.get("graph", {}).get("edges", [])),
+        "rounds": run_meta.get("rounds", 0),
         "cached": True,
     }
 
@@ -523,17 +571,21 @@ def judge(
     result = run_judge(case_dir, run_dir, budget=budget)
     if result:
         print(f"\nJudge rationale: {result.get('rationale', '?')}")
+        added = result.get("add", [])
+        if added:
+            for promo in added:
+                print(f"  promoted: {promo.get('via_service')} -> "
+                      f"{promo.get('service')} ({promo.get('predicate')})")
     else:
         print("Judge produced no review.")
 
-    final_path = run_dir / "final_propagation.json"
-    if final_path.exists():
-        final = json.loads(final_path.read_text())
-        removed = final.get("removed", [])
-        added = final.get("added", [])
-        print(f"\nFinal propagation: {len(final['confirmed_nodes'])} services "
-              f"(-{len(removed)} pruned, +{len(added)} promoted)")
-        print(f"Output: {final_path}")
+    scenario_path = run_dir / "fpg_scenario.json"
+    if scenario_path.exists():
+        scenario = json.loads(scenario_path.read_text())
+        n_nodes = len(scenario.get("graph", {}).get("nodes", []))
+        n_edges = len(scenario.get("graph", {}).get("edges", []))
+        print(f"\nScenario after judge: {n_nodes} nodes, {n_edges} edges")
+        print(f"Output: {scenario_path}")
 
 def _run_judge_or_skip(
     dataset_dir: Path,
@@ -544,15 +596,15 @@ def _run_judge_or_skip(
     budget: int,
 ) -> dict:
     case_out = run_dir / name
-    final_path = case_out / "final_propagation.json"
-    if final_path.exists():
+    meta_path = case_out / "run_meta.json"
+    if meta_path.exists():
         try:
-            json.loads(final_path.read_text())  # validate parseable
-            print(f"[{idx}/{total}] {name} CACHED", flush=True)
-            return {"case": name, "cached": True}
+            if "judge" in json.loads(meta_path.read_text()):
+                print(f"[{idx}/{total}] {name} CACHED", flush=True)
+                return {"case": name, "cached": True}
         except Exception:  # noqa: BLE001
             pass
-    if not (case_out / "propagation_graph.json").exists():
+    if not (case_out / "fpg_scenario.json").exists():
         print(f"[{idx}/{total}] {name} SKIP: no hop results", flush=True)
         return {"case": name, "error": "no hop results"}
     print(f"[{idx}/{total}] {name} judging...", flush=True)
@@ -577,7 +629,7 @@ def judge_batch(
     _set_model(model)
     cases = sorted(
         p.name for p in run_dir.iterdir()
-        if p.is_dir() and (p / "propagation_graph.json").exists()
+        if p.is_dir() and (p / "fpg_scenario.json").exists()
     )
     if limit:
         cases = cases[:limit]
@@ -601,12 +653,9 @@ def judge_batch(
     summaries = [results[name] for name in cases if name in results]
     ok = sum(1 for s in summaries if "error" not in s)
     cached = sum(1 for s in summaries if s.get("cached"))
-    pruned = sum(s.get("removed", 0) for s in summaries)
-    promoted = sum(s.get("added", 0) for s in summaries)
 
     print(f"\n{'='*50}")
-    print(f"Total: {total}  OK: {ok}  Cached: {cached}  "
-          f"Pruned: {pruned}  Promoted: {promoted}")
+    print(f"Total: {total}  OK: {ok}  Cached: {cached}")
 
 @app.command()
 def diff(

@@ -80,8 +80,9 @@ the killed service may show its spans disappearing or fast-failing
 while unrelated paths stay normal.
 
 ### Uninstrumented backing components (DB / cache)
-These have no spans. Judge them via the CLIENT spans inside the caller
-(e.g. `WHERE service_name = '<caller>' AND attr.span_kind = 'Client'`).
+These have no spans. Judge them via the CLIENT-side spans inside the
+caller (filter the caller's spans to its client/outbound kind — check
+how this dataset marks span direction first).
 If the client-span latency or error rate for DB operations worsened,
 the backing component is affected. If the caller simply stopped
 sending DB calls (because the caller itself died), the backing
