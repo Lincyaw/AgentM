@@ -14,8 +14,8 @@ extensions:
   - module: llmharness.atom
     config:
       mode: sync
-      extractor_interval_turns: 5
-      audit_interval_turns: 5
+      extractor_interval_turns: 10
+      audit_interval_turns: 10
       enable_reminders: true
-      extractor_model: litellm
-      auditor_model: litellm
+      extractor_model: litellm-dsv4flash
+      auditor_model: litellm-dsv4flash
