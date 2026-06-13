@@ -73,6 +73,27 @@ def _header_to_record(header: SessionHeader) -> dict[str, Any]:
     return asdict(header)
 
 
+def _json_safe(value: Any, _depth: int = 0) -> Any:
+    """Reduce *value* to JSON-serializable primitives, replacing live
+    objects with their repr.
+
+    The session header is persisted (and deep-copied by ``asdict``), so
+    everything stored in it must be a plain value. Resolved configs can
+    carry live objects — e.g. a child session inherits the parent's
+    instantiated provider, whose stream fn holds an httpx client with
+    asyncio futures that neither deepcopy nor JSON can handle.
+    """
+    if _depth > 8:
+        return repr(value)[:200]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v, _depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v, _depth + 1) for v in value]
+    return repr(value)[:200]
+
+
 def _infer_cwd_from_log(file_path: Path) -> str | None:
     """Best-effort scan for ``cwd`` on the first ``agentm.session.header``
     record in an OTLP/JSON log. Used by :meth:`JsonlSessionManager.open`
@@ -355,12 +376,17 @@ class SessionManager:
         Replaces the header with an updated copy and re-emits it so the
         JSONL on disk carries the config. Called by the session factory
         after extension resolution — framework-level, no atom involvement.
+
+        The config is scrubbed to JSON-safe primitives first: resolved
+        configs may carry live objects (a child session inherits the
+        parent's instantiated provider), which must never reach the
+        persisted, ``asdict``-copied header.
         """
         from dataclasses import replace as _replace
 
         if self._header is None:
             return
-        self._header = _replace(self._header, config=config)
+        self._header = _replace(self._header, config=_json_safe(config))
         self._emit(
             SessionHeaderEmittedEvent.CHANNEL,
             SessionHeaderEmittedEvent(record=_header_to_record(self._header)),
