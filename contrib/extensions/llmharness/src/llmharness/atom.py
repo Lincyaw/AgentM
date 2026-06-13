@@ -340,12 +340,20 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     # Core pipeline step
     # ------------------------------------------------------------------
 
-    async def _step(messages: list[AgentMessage], tc: int) -> None:
+    async def _step(
+        messages: list[AgentMessage],
+        tc: int,
+        *,
+        force: bool = False,
+    ) -> None:
         nonlocal turn_count
         turn_count = tc
 
         auditor_due = enable_auditor and (tc % auditor_k) == 0
         extractor_due = (tc % extractor_k) == 0 or auditor_due
+        if force:
+            extractor_due = True
+            auditor_due = enable_auditor
 
         # --- Extractor ---
         if extractor_due:
@@ -485,7 +493,13 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             turn_count += 1
             await _step(list(event.messages), turn_count)
 
+        async def _on_shutdown_sync(_event: SessionShutdownEvent) -> None:
+            msgs = list(api.session.get_messages())
+            if msgs:
+                await _step(msgs, turn_count, force=True)
+
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
+        api.on(SessionShutdownEvent.CHANNEL, _on_shutdown_sync)
         if enable_reminders:
             api.on(DecideTurnActionEvent.CHANNEL, _on_decide)
         return
@@ -525,18 +539,20 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         queue.put_nowait((list(event.messages), turn_count))
 
     async def _on_shutdown(_event: SessionShutdownEvent) -> None:
-        if worker_task is None or worker_task.done():
-            return
-        queue.put_nowait(None)
-        try:
-            await asyncio.wait_for(worker_task, timeout=shutdown_timeout)
-        except asyncio.TimeoutError:
-            logger.warning(f"audit drain exceeded {shutdown_timeout:.1f}s; cancelling")
-            worker_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await worker_task
-        except Exception:
-            logger.exception("audit worker raised on shutdown")
+        if worker_task is not None and not worker_task.done():
+            queue.put_nowait(None)
+            try:
+                await asyncio.wait_for(worker_task, timeout=shutdown_timeout)
+            except asyncio.TimeoutError:
+                logger.warning(f"audit drain exceeded {shutdown_timeout:.1f}s; cancelling")
+                worker_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await worker_task
+            except Exception:
+                logger.exception("audit worker raised on shutdown")
+        msgs = list(api.session.get_messages())
+        if msgs:
+            await _step(msgs, turn_count, force=True)
 
     api.on(TurnEndEvent.CHANNEL, _on_turn_end)
     if enable_reminders:
