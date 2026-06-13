@@ -43,15 +43,20 @@ injection seed(s)
     ▼  BFS expansion
 ┌─────────────────────────────────────────────┐
 │ For each edge (confirmed → neighbor):       │
-│   • already confirmed? → SQL verify edge    │
-│   • not confirmed? → spawn hop agent        │
+│   • target is a seed, or edge would close   │
+│     a cycle? → skipped (fpg root/DAG rules) │
+│   • otherwise → spawn hop agent (EVERY      │
+│     edge, incl. between confirmed services) │
 │     hop agent gets:                         │
 │       - fault type + injection config       │
-│       - upstream's observed symptoms (SQL)  │
+│       - upstream's fpg node (predicate +    │
+│         SQL evidence)                       │
 │       - relationship type                   │
 │       - instruction to find DIFFERENT       │
 │         signals on the downstream           │
-│   • confirmed → add to queue, fan out       │
+│   • confirmed → fpg node (predicate         │
+│     classified, evidence re-executed) +     │
+│     mechanism-labeled edge; fan out         │
 │   • rejected → this edge is done            │
 │     (target may still be reached via        │
 │      another edge in a later round)         │
@@ -69,7 +74,8 @@ injection seed(s)
 └─────────────────────────────────────────────┘
     │
     ▼
-final_propagation.json (nodes + edges + evidence)
+fpg_scenario.json (fault-propagation-graph scenario:
+fpg EventNodes + mechanism-labeled edges + injections)
 ```
 
 Why promotion-only: the hop agents already reason per-edge about error
@@ -83,23 +89,27 @@ judge pruning was strongly net-negative, so only cascade promotion remains.
 
 ```bash
 # Single case
-uv run python contrib/scenarios/verifier/eval/audit_case_propagate.py \
+uv run python contrib/scenarios/verifier/cli.py \
     run <case_dir> --model litellm
 
 # Batch
-uv run python contrib/scenarios/verifier/eval/audit_case_propagate.py \
+uv run python contrib/scenarios/verifier/cli.py \
     batch <dataset_dir> --run-dir /tmp/verifier-run \
     --model litellm --parallel 8 --case-parallel 30
 
 # Judge (post-processing, after hop agents complete)
-uv run python contrib/scenarios/verifier/eval/audit_case_propagate.py \
+uv run python contrib/scenarios/verifier/cli.py \
     judge-batch <dataset_dir> --run-dir /tmp/verifier-run \
     --model litellm --parallel 30
 
 # Resume (cached results are skipped automatically)
-uv run python contrib/scenarios/verifier/eval/audit_case_propagate.py \
+uv run python contrib/scenarios/verifier/cli.py \
     batch <dataset_dir> --run-dir /tmp/verifier-run --model litellm
+
 ```
+
+All commands need the `eval` extra (`uv sync --extra eval`): duckdb,
+the fpg schema package, and the rca duckdb_sql atom.
 
 ## Output
 
@@ -107,11 +117,17 @@ Each case produces under `<run-dir>/<case>/`:
 
 | File | Content |
 |------|---------|
-| `report.json` | injections, propagated nodes, edges, rounds |
-| `all_verdicts.json` | all hop verdicts (confirmed + rejected) with SQL evidence |
-| `final_propagation.json` | final graph after judge: nodes, edges, evidence, `added` (cascade promotions), `suggested_remove` (judge prune suggestions, audit-only — not applied) |
-| `hops/<from>__<to>/` | per-hop agent session (stdout, stderr, verdict.json) |
-| `judge/` | judge agent session |
+| `fpg_scenario.json` | THE result: a ground-truth scenario in the [fpg schema](https://github.com/Lincyaw/fpg-convention). Time-anchored EventNodes (predicate classified by the hop agent from the profile vocabulary, re-executable SQL evidence), mechanism-labeled edges, explicit injection records. Validated against the profile-bound schema (`fpg_profile.toml`) before writing — a written file is a valid scenario by construction. The judge phase rewrites it in place with cascade promotions applied. |
+| `run_meta.json` | Pipeline telemetry: hop log (incl. `skipped_seed_target` / `skipped_cycle` guards), all hop verdicts (confirmed + rejected) with their fpg evidence, rounds, judge review (`add` promotions with `via_service`, audit-only `suggested_remove`). |
+| `relationships.json` | Phase-0 relationship graph (service pairs + rel type). |
+
+The fpg structural rules are enforced at construction time, not
+filtered afterwards: injection seeds never gain incoming edges, an
+edge that would close a cycle is never evaluated, every edge —
+including between two already-confirmed services — goes through a hop
+agent, and a judge promotion must name the confirmed upstream it
+cascades through (so promoted nodes are connected, never spurious
+roots).
 
 ## Comparing against GT
 
@@ -119,8 +135,8 @@ GT (`causal_graph.json`) uses `component_to_service` to map span-level
 nodes to services. When comparing:
 
 1. Extract GT service set via `component_to_service`, minus root causes
-2. Extract verifier service set from `final_propagation.json` nodes,
-   minus injection seeds
+2. Extract verifier service set from `fpg_scenario.json` graph nodes,
+   minus injection seeds (`injections[].node_id`)
 3. Classify discrepancies:
    - **Verifier has, GT doesn't** — either verifier found real
      propagation GT missed, or verifier false positive

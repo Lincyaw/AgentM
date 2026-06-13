@@ -30,7 +30,12 @@ class _VerdictModel(BaseModel):
         description="Notes for your next firing. Auditor-internal.",
     )
     matched_event_ids: list[int] = Field(
-        description="Event IDs that supported this verdict.",
+        description=(
+            "Event IDs where an error originates or is committed to. "
+            "Only include events that introduced, propagated, or finalized "
+            "an unsupported or incorrect claim. Do NOT include events you "
+            "merely reviewed but found no fault in."
+        ),
     )
 
     @model_validator(mode="after")

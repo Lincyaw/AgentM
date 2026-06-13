@@ -250,6 +250,11 @@ def _read_ops_file(path: Path) -> list[GraphOp]:
 # ---------------------------------------------------------------------------
 
 
+_CHILD_MAX_RETRIES: Final = 6
+_CHILD_RETRY_BASE_DELAY: Final = 15.0
+_CHILD_RETRY_MAX_DELAY: Final = 120.0
+
+
 async def _run_child(
     api: ExtensionAPI,
     *,
@@ -269,17 +274,26 @@ async def _run_child(
         atom_config_overrides=atom_config_overrides or {},
         purpose=purpose,
     )
-    try:
-        child = await api.spawn_child_session(config)
+    for attempt in range(_CHILD_MAX_RETRIES):
         try:
-            result: list[AgentMessage] = await child.prompt(prompt)
-            return result
-        finally:
-            with contextlib.suppress(Exception):
-                await child.shutdown()
-    except Exception:
-        logger.exception(f"child session failed (purpose={purpose})")
-        return None
+            child = await api.spawn_child_session(config)
+            try:
+                result: list[AgentMessage] = await child.prompt(prompt)
+                return result
+            finally:
+                with contextlib.suppress(Exception):
+                    await child.shutdown()
+        except Exception:
+            if attempt < _CHILD_MAX_RETRIES - 1:
+                delay = min(_CHILD_RETRY_BASE_DELAY * (2 ** attempt), _CHILD_RETRY_MAX_DELAY)
+                logger.warning(
+                    f"child session failed (purpose={purpose}), "
+                    f"retry {attempt + 1}/{_CHILD_MAX_RETRIES - 1} in {delay:.0f}s"
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.exception(f"child session failed after {_CHILD_MAX_RETRIES} attempts (purpose={purpose})")
+    return None
 
 
 def _terminal_tool_args(
