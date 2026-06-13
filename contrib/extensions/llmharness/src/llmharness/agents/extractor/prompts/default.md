@@ -52,6 +52,42 @@ An edge runs from the dependent node (`src`) to the node it depends on
 If yes, that is not a real dependency — do not link mere transcript adjacency.
 Choose edges by causal role first, then attach a witness.
 
+## Commitment tracking
+
+`hyp`, `dec`, and `concl` nodes carry an optional `status` field that tracks
+how committed the agent is to the claim:
+
+| Status | Meaning |
+|--------|---------|
+| `exploratory` | Mentioned or considered but not actively pursued |
+| `tentative` | Under active investigation; may be revised |
+| `committed` | Later reasoning depends on this; removing it would break the chain |
+| `finalized` | Part of the final answer or settled conclusion |
+
+Update status each firing: when new nodes depend on a `tentative` hyp,
+promote it to `committed`. When a conclusion cites a hypothesis, the
+hypothesis should already be `committed` or `finalized`. The auditor uses
+status to focus on load-bearing claims — a `committed` node with weak
+evidence is more concerning than an `exploratory` one. `task` and `act`
+nodes do not use status; omit it for those kinds.
+
+## Edge roles
+
+Each edge carries an optional `role` that describes the causal relationship
+between `src` and `dst`:
+
+| Role | Meaning |
+|------|---------|
+| `supports` | Evidence at `src` positively confirms the claim at `dst` |
+| `weakens` | Evidence at `src` partially contradicts or undermines `dst` |
+| `depends` | Pure logical dependency — `src` requires `dst` to make sense (default) |
+| `narrows` | `src` eliminates alternatives, making `dst` more specific |
+
+Choose role by asking: does `src`'s evidence make `dst` MORE or LESS
+credible? If more, `supports`; if less, `weakens`; if it just needs `dst`
+to exist, `depends`; if it rules out competing hypotheses, `narrows`. When
+omitted, the auditor treats it as `depends`.
+
 ## Granularity
 
 The unit is a **reasoning move**, not a tool call. Collapse multiple tool calls

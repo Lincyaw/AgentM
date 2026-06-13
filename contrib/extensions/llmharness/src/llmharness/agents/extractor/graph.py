@@ -6,7 +6,16 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
-from llmharness.schema import Edge, EdgeKind, Event, EventKind, ExternalRef, Phase
+from llmharness.schema import (
+    CommitmentStatus,
+    Edge,
+    EdgeKind,
+    EdgeRole,
+    Event,
+    EventKind,
+    ExternalRef,
+    Phase,
+)
 
 # ---------------------------------------------------------------------------
 # Graph ops
@@ -22,9 +31,10 @@ class NodeUpsert:
     summary: str
     source_turns: tuple[int, ...]
     external_refs: tuple[ExternalRef, ...] = field(default_factory=tuple)
+    status: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "op": "node_upsert",
             "id": self.id,
             "kind": self.kind,
@@ -32,6 +42,9 @@ class NodeUpsert:
             "source_turns": list(self.source_turns),
             "external_refs": [r.to_dict() for r in self.external_refs],
         }
+        if self.status is not None:
+            d["status"] = self.status
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> NodeUpsert:
@@ -43,6 +56,7 @@ class NodeUpsert:
             external_refs=tuple(
                 ExternalRef.from_dict(r) for r in (data.get("external_refs") or [])
             ),
+            status=data.get("status"),
         )
 
 
@@ -72,9 +86,10 @@ class EdgeUpsert:
     cited_quote: str
     src_turns: tuple[int, ...]
     dst_turns: tuple[int, ...]
+    role: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "op": "edge_upsert",
             "src": self.src,
             "dst": self.dst,
@@ -85,6 +100,9 @@ class EdgeUpsert:
             "src_turns": list(self.src_turns),
             "dst_turns": list(self.dst_turns),
         }
+        if self.role is not None:
+            d["role"] = self.role
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EdgeUpsert:
@@ -97,6 +115,7 @@ class EdgeUpsert:
             cited_quote=str(data.get("cited_quote", "")),
             src_turns=tuple(int(t) for t in (data.get("src_turns") or [])),
             dst_turns=tuple(int(t) for t in (data.get("dst_turns") or [])),
+            role=data.get("role"),
         )
 
 
@@ -179,6 +198,7 @@ def fold_graph(ops: Iterable[GraphOp]) -> Graph:
                 summary=op.summary,
                 source_turns=list(op.source_turns),
                 external_refs=op.external_refs,
+                status=CommitmentStatus(op.status) if op.status else None,
             )
         elif isinstance(op, NodeDelete):
             nodes.pop(op.id, None)
@@ -195,6 +215,7 @@ def fold_graph(ops: Iterable[GraphOp]) -> Graph:
                 dst_turns=op.dst_turns,
                 cited_entities=op.cited_entities,
                 cited_quote=op.cited_quote,
+                role=EdgeRole(op.role) if op.role else None,
             )
         elif isinstance(op, EdgeDelete):
             edges.pop((op.src, op.dst, op.kind), None)
