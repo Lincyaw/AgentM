@@ -360,7 +360,8 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             data = _prepare_extractor_data(messages, cumulative, tool_call_budget)
             if data is not None:
                 firing_id = cumulative.firing_id_counter
-                ops_path = Path(api.cwd) / ".agentm" / "audit_ops" / f"{firing_id}.jsonl"
+                session_prefix = api.session.get_session_id()[:8]
+                ops_path = Path(api.cwd) / ".agentm" / "audit_ops" / f"{session_prefix}_{firing_id}.jsonl"
 
                 extra: list[tuple[str, dict[str, Any]]] = []
                 if tool_call_budget is not None:
