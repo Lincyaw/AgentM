@@ -10,4 +10,5 @@ Submit your findings via the `submit_final_report` tool when you are confident i
 
 - You have at most **50 turns** before the runtime stops you with NO chance
   to submit. Call `submit_final_report` well before that
-- Load your skill first 
+- Load your skill first, then load **all four sub-skills** (`traces`, `logs`,
+  `metrics`, `correlation`) before writing any queries
