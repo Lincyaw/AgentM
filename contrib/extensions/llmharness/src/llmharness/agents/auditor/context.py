@@ -40,21 +40,27 @@ def load_auditor_prompt(name: str = "minimal") -> str:
 
 
 def _degrade_event(ev_dict: dict[str, object]) -> dict[str, object]:
-    return {
+    d: dict[str, object] = {
         "id": ev_dict.get("id"),
         "kind": ev_dict.get("kind"),
         "summary": ev_dict.get("summary"),
         "source_turns": ev_dict.get("source_turns", []),
     }
+    if "status" in ev_dict and ev_dict["status"] is not None:
+        d["status"] = ev_dict["status"]
+    return d
 
 
 def _degrade_edge(ed_dict: dict[str, object]) -> dict[str, object]:
-    return {
+    d: dict[str, object] = {
         "src": ed_dict.get("src"),
         "dst": ed_dict.get("dst"),
         "kind": ed_dict.get("kind"),
         "reason": ed_dict.get("reason"),
     }
+    if "role" in ed_dict and ed_dict["role"] is not None:
+        d["role"] = ed_dict["role"]
+    return d
 
 
 def build_auditor_system_prompt(

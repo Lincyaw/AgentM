@@ -17,11 +17,29 @@ class EventKind(str, Enum):
     CONCL = "concl"
 
 
+class CommitmentStatus(str, Enum):
+    """How committed the agent is to a hyp/dec/concl claim."""
+
+    EXPLORATORY = "exploratory"
+    TENTATIVE = "tentative"
+    COMMITTED = "committed"
+    FINALIZED = "finalized"
+
+
 class EdgeKind(str, Enum):
     """Kind of edge between two events."""
 
     DATA = "data"
     REF = "ref"
+
+
+class EdgeRole(str, Enum):
+    """Causal role of an edge between two events."""
+
+    SUPPORTS = "supports"
+    WEAKENS = "weakens"
+    DEPENDS = "depends"
+    NARROWS = "narrows"
 
 
 @dataclass(frozen=True)
@@ -63,18 +81,23 @@ class Event:
     summary: str
     source_turns: list[int] = field(default_factory=list)
     external_refs: tuple[ExternalRef, ...] = ()
+    status: CommitmentStatus | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "id": self.id,
             "kind": self.kind.value,
             "summary": self.summary,
             "source_turns": list(self.source_turns),
             "external_refs": [r.to_dict() for r in self.external_refs],
         }
+        if self.status is not None:
+            d["status"] = self.status.value
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Event:
+        raw_status = data.get("status")
         return cls(
             id=int(data["id"]),
             kind=EventKind(data["kind"]),
@@ -83,6 +106,7 @@ class Event:
             external_refs=tuple(
                 ExternalRef.from_dict(r) for r in (data.get("external_refs") or [])
             ),
+            status=CommitmentStatus(raw_status) if raw_status is not None else None,
         )
 
 
@@ -98,9 +122,10 @@ class Edge:
     dst_turns: tuple[int, ...]
     cited_entities: tuple[str, ...] = ()
     cited_quote: str = ""
+    role: EdgeRole | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "src": self.src,
             "dst": self.dst,
             "kind": self.kind.value,
@@ -110,9 +135,13 @@ class Edge:
             "cited_entities": list(self.cited_entities),
             "cited_quote": self.cited_quote,
         }
+        if self.role is not None:
+            d["role"] = self.role.value
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Edge:
+        raw_role = data.get("role")
         return cls(
             src=int(data["src"]),
             dst=int(data["dst"]),
@@ -122,6 +151,7 @@ class Edge:
             dst_turns=tuple(int(t) for t in (data.get("dst_turns") or [])),
             cited_entities=tuple(str(e) for e in (data.get("cited_entities") or [])),
             cited_quote=str(data.get("cited_quote", "")),
+            role=EdgeRole(raw_role) if raw_role is not None else None,
         )
 
 
@@ -245,8 +275,10 @@ __all__ = [
     "MESSAGE",
     "RECENT_VERDICTS_FOR_AUDITOR",
     "VERDICT",
+    "CommitmentStatus",
     "Edge",
     "EdgeKind",
+    "EdgeRole",
     "Event",
     "EventKind",
     "ExternalRef",
