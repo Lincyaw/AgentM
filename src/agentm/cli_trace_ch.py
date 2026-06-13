@@ -122,6 +122,56 @@ def index(url: str) -> Iterator[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# session state (for resume)
+# ---------------------------------------------------------------------------
+
+
+def session_header(url: str, sid: str) -> dict[str, Any] | None:
+    """Fetch the latest ``agentm.session.header`` body for *sid*."""
+    rows = _query(
+        url,
+        "SELECT Body FROM otel_logs "
+        "WHERE EventName = 'agentm.session.header' "
+        "  AND LogAttributes['agentm.session.id'] = {sid:String} "
+        "ORDER BY Timestamp DESC LIMIT 1",
+        params={"sid": sid},
+    )
+    if not rows:
+        return None
+    body = _parse_body(rows[0].get("Body"))
+    return body if isinstance(body, dict) else None
+
+
+def session_entries(url: str, sid: str) -> list[dict[str, Any]]:
+    """Fetch all ``agentm.message.appended`` bodies for *sid*, ordered."""
+    result: list[dict[str, Any]] = []
+    for r in _query(
+        url,
+        "SELECT Body FROM otel_logs "
+        "WHERE EventName = 'agentm.message.appended' "
+        "  AND LogAttributes['agentm.session.id'] = {sid:String} "
+        "ORDER BY Timestamp",
+        params={"sid": sid},
+    ):
+        body = _parse_body(r.get("Body"))
+        if isinstance(body, dict):
+            result.append(body)
+    return result
+
+
+def most_recent_session_id(url: str, cwd: str | None = None) -> str | None:
+    """Return the session_id of the most recently started session."""
+    rows = _query(
+        url,
+        "SELECT LogAttributes['agentm.session.id'] AS sid "
+        "FROM otel_logs "
+        "WHERE EventName = 'agentm.session.start' "
+        "ORDER BY Timestamp DESC LIMIT 1",
+    )
+    return rows[0]["sid"] if rows else None
+
+
+# ---------------------------------------------------------------------------
 # messages
 # ---------------------------------------------------------------------------
 

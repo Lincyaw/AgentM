@@ -19,7 +19,7 @@ from agentm.core.lib.background_tasks import (
     SlotLimitReached,
 )
 from agentm.core.lib.frontmatter import parse_frontmatter
-from agentm.core.lib.observability_dir import resolve_observability_dir
+from agentm.core.lib.observability_dir import file_export_requested, resolve_observability_dir
 from agentm.core.lib.read_state import (
     FileReadState,
     clear as clear_read_state,
@@ -54,6 +54,7 @@ __all__ = [
     "content_hash_for",
     "encode_tool_args",
     "enumerate_turns",
+    "file_export_requested",
     "file_modified_since_read",
     "final_summary",
     "find_metadata_files",

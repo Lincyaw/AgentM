@@ -581,6 +581,41 @@ def _info(message: str) -> None:
 # ---------- follow (tail -f for messages) ------------------------------------
 
 
+def _follow_ch_messages(
+    url: str,
+    sid: str,
+    roles: set[str],
+    types: set[str],
+    seen: int,
+    fmt: str,
+    render_fn: Callable[[dict[str, Any]], str],
+    sink: TextIO,
+) -> None:
+    """Poll ClickHouse for new messages, ``tail -f`` style."""
+    offset = seen
+    try:
+        while True:
+            time.sleep(1.0)
+            records = list(
+                _ch().messages(
+                    url, sid, roles=roles or None, types=types or None,
+                )
+            )
+            if len(records) <= offset:
+                continue
+            for entry in records[offset:]:
+                if fmt == "ndjson" or fmt == "json":
+                    sink.write(json.dumps(entry, ensure_ascii=False))
+                    sink.write("\n")
+                else:
+                    sink.write(render_fn(entry))
+                    sink.write("\n")
+                sink.flush()
+            offset = len(records)
+    except KeyboardInterrupt:
+        pass
+
+
 def _tail_messages(
     path: Path,
     roles: set[str],
@@ -729,19 +764,24 @@ def messages_cmd(
             body = "\n".join([header, *lines]) if lines else header
             return body + "\n"
 
-        # ClickHouse fast path
-        if not follow:
-            ch = _ch_session(file, session, latest)
-            if ch:
-                url, sid = ch
-                records = _ch().messages(
-                    url, sid, roles=roles or None, types=types or None,
+        # ClickHouse path (primary)
+        ch = _ch_session(file, session, latest)
+        if ch:
+            url, sid = ch
+            records = _ch().messages(
+                url, sid, roles=roles or None, types=types or None,
+            )
+            n = _emit(records, chosen_fmt, _render, sink, limit)
+            _info(f"{n} message(s)")
+            if follow:
+                _info("following (Ctrl-C to stop)…")
+                _follow_ch_messages(
+                    url, sid, roles or set(), types, n,
+                    chosen_fmt, _render, sink,
                 )
-                n = _emit(records, chosen_fmt, _render, sink, limit)
-                _info(f"{n} message(s)")
-                return
+            return
 
-        # JSONL path
+        # JSONL fallback
         path = _resolve_source(file, session, latest, cwd)
 
         def _filtered() -> Iterator[dict[str, Any]]:

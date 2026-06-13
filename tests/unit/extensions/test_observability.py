@@ -155,13 +155,14 @@ def _build_before_send_event(text: str) -> Any:
 
 @pytest.mark.asyncio
 async def test_observability_strips_messages_from_before_send_to_llm(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Single-event-log merge: ``before_send_to_llm`` no longer carries the
     full ``messages`` snapshot on disk — the canonical trajectory lives in
     ``agentm.message.appended`` records. Any secret in the prompt body
     therefore cannot reach the trace via this channel by construction.
     """
+    monkeypatch.setenv("AGENTM_OBSERVABILITY_DIR", str(tmp_path / ".agentm" / "observability"))
     api = _api(tmp_path)
     observability.install(api, observability.ObservabilityConfig())
     event = _build_before_send_event(f"leak: {_LEAK_SECRET}")

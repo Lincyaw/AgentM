@@ -223,12 +223,13 @@ def _trace_path(api: _ExtensionAPIImpl) -> Path:
 
 @pytest.mark.asyncio
 async def test_writer_emits_session_header_and_message_appended_logs(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """SessionHeader + MessageAppended events become agentm.session.header /
     agentm.message.appended log records with the SessionEntry dict verbatim
     in the body. This is the contract SessionManager._load reads from.
     """
+    monkeypatch.setenv("AGENTM_OBSERVABILITY_DIR", str(tmp_path / ".agentm" / "observability"))
     api = _build_api(tmp_path)
     observability.install(api, observability.ObservabilityConfig(include_handler_records=False))
 

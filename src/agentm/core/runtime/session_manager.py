@@ -187,6 +187,26 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     @classmethod
+    def from_records(
+        cls,
+        header: SessionHeader,
+        entries: list[dict[str, Any]],
+        cwd: str = "",
+    ) -> Self:
+        """Reconstruct session state from pre-loaded records (e.g. ClickHouse)."""
+        mgr = cls(cwd=cwd or header.cwd, persist=False)
+        mgr._header = header
+        mgr._entries = {}
+        mgr._order = []
+        mgr._leaf_id = None
+        for record in entries:
+            entry = _entry_from_record(record)
+            mgr._entries[entry.id] = entry
+            mgr._order.append(entry.id)
+            mgr._leaf_id = entry.id
+        return mgr
+
+    @classmethod
     def create(cls, cwd: str, session_dir: Path | None = None) -> Self:
         directory = session_dir or cls.default_session_dir(cwd)
         return cls(cwd=cwd, session_dir=directory, persist=True)
