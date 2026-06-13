@@ -8,6 +8,11 @@ from pathlib import Path
 _ENV_OBSERVABILITY_DIR = "AGENTM_OBSERVABILITY_DIR"
 
 
+def file_export_requested() -> bool:
+    """Return True when the user explicitly opted into local file export."""
+    return bool(os.environ.get(_ENV_OBSERVABILITY_DIR))
+
+
 def resolve_observability_dir(cwd: str | Path | None = None) -> Path:
     """Return the observability directory, honoring AGENTM_OBSERVABILITY_DIR.
 

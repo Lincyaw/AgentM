@@ -8,10 +8,10 @@ flavored error wrapping on top.
 
 Two functions:
 
-* :func:`make_default_session_store` — returns the canonical
-  ``JsonlSessionStore`` rooted at ``<cwd>/.agentm``. Most embedders want
-  this; pass a custom :class:`SessionStore` only if you need a different
-  on-disk shape.
+* :func:`make_default_session_store` — returns the canonical session
+  store.  When ClickHouse is reachable the store reads session state
+  from the collector (no local JSONL); otherwise falls back to
+  ``JsonlSessionStore``.
 * :func:`resolve_session_state` — picks the right :class:`SessionState`
   given a resume id / continue-recent flag, falling back to a fresh
   state when neither is requested. Raises :class:`FileNotFoundError`
@@ -22,15 +22,101 @@ Two functions:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from agentm.core.abi.session_store import SessionState, SessionStore
 
 
+class ClickHouseSessionStore:
+    """Session store backed by ClickHouse (OTLP collector).
+
+    ``create`` returns an in-memory (non-persisting) session manager —
+    messages reach ClickHouse via the OTLP exporter, not via local
+    files.  ``open`` / ``most_recent`` / ``fork`` reconstruct state by
+    querying ClickHouse for the recorded header + message entries.
+    """
+
+    def __init__(self, url: str) -> None:
+        self._url = url
+
+    @staticmethod
+    def _ch() -> Any:
+        from agentm import cli_trace_ch
+        return cli_trace_ch
+
+    def create(self, cwd: Path) -> SessionState:
+        from agentm.core.runtime.session_manager import SessionManager
+        return SessionManager(cwd=str(cwd), persist=False)
+
+    def open(self, id: str) -> SessionState:
+        from agentm.core.runtime.session_manager import (
+            SessionManager,
+            _header_from_record,
+        )
+
+        ch = self._ch()
+        header_raw = ch.session_header(self._url, id)
+        if header_raw is None:
+            raise FileNotFoundError(id)
+        entries = ch.session_entries(self._url, id)
+        return SessionManager.from_records(
+            _header_from_record(header_raw), entries,
+        )
+
+    def most_recent(self, cwd: Path) -> SessionState | None:
+        ch = self._ch()
+        sid = ch.most_recent_session_id(self._url)
+        if sid is None:
+            return None
+        return self.open(sid)
+
+    def fork(
+        self,
+        source_id: str,
+        *,
+        up_to: int | None = None,
+    ) -> SessionState:
+        from agentm.core.abi.session import AgentMessage
+        from agentm.core.runtime.session_manager import (
+            ENTRY_TYPE_MESSAGE,
+            SessionManager,
+        )
+
+        source: SessionManager = self.open(source_id)  # type: ignore[assignment]
+        branch = source.get_branch()
+        messages = [
+            e.payload
+            for e in branch
+            if e.type == ENTRY_TYPE_MESSAGE and isinstance(e.payload, AgentMessage)
+        ]
+        if up_to is not None:
+            messages = messages[:up_to]
+
+        forked = SessionManager(
+            cwd=source._cwd,
+            persist=False,
+            parent_session=source.get_session_id(),
+        )
+        for msg in messages:
+            forked.append_message(msg)
+        return forked
+
+
 def make_default_session_store(cwd: str) -> SessionStore:
-    """Return the canonical JSONL-backed :class:`SessionStore` for ``cwd``."""
+    """Return the best available session store.
 
+    Prefers ClickHouse when reachable (no local file I/O); falls back
+    to the JSONL-backed store otherwise.
+    """
+
+    try:
+        from agentm import cli_trace_ch
+        url = cli_trace_ch.get_url()
+        if url is not None:
+            return ClickHouseSessionStore(url)  # type: ignore[return-value]
+    except Exception:
+        pass
     from agentm.core.runtime.session_manager import JsonlSessionStore
-
     return JsonlSessionStore(cwd=Path(cwd))
 
 

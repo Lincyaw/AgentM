@@ -81,7 +81,10 @@ __all__ = [
     "shutdown_process_telemetry",
 ]
 
-from agentm.core.lib.observability_dir import resolve_observability_dir  # noqa: E402
+from agentm.core.lib.observability_dir import (  # noqa: E402
+    file_export_requested,
+    resolve_observability_dir,
+)
 from agentm.core.observability.otlp import (  # noqa: E402
     iter_log_records,
     iter_spans,
@@ -278,18 +281,12 @@ def _maybe_attach_otlp_exporters(
     ``otlp_export`` builtin extension becomes a no-op when the exporters
     are already attached here.
 
-    Raises :class:`SystemExit` when the env var is unset — the collector
-    is required for trace storage and query (``agentm trace``).
+    Skips silently when the env var is unset — local file export is
+    controlled separately via ``AGENTM_OBSERVABILITY_DIR``.
     """
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     if not endpoint:
-        raise SystemExit(
-            "\n\033[1;31mError:\033[0m OTEL_EXPORTER_OTLP_ENDPOINT is not set.\n"
-            "AgentM requires an OTLP collector for trace storage.\n\n"
-            "Quick start — launch the bundled collector + ClickHouse:\n\n"
-            "  docker compose -f tools/otel/docker-compose.yaml up -d\n"
-            "  export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317\n"
-        )
+        return
 
     protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
     headers_raw = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
@@ -501,15 +498,15 @@ class SessionTelemetry:
     """
 
     session_id: str
-    file_path: Path
+    file_path: Path | None
     tracer: Tracer
     logger: Logger
     tracer_provider: TracerProvider
     logger_provider: LoggerProvider
-    span_processor: BlockingBatchSpanProcessor
-    log_processor: BlockingBatchLogRecordProcessor
-    span_exporter: FileSpanExporter
-    log_exporter: FileLogExporter
+    span_processor: BlockingBatchSpanProcessor | None
+    log_processor: BlockingBatchLogRecordProcessor | None
+    span_exporter: FileSpanExporter | None
+    log_exporter: FileLogExporter | None
     # --- Observability-atom-populated context ------------------------------
     # The observability atom stamps these in its install() so each
     # per-event translator has session-scoped metadata without re-reaching
@@ -653,6 +650,8 @@ class SessionTelemetry:
         if self._shutdown:
             return
         self._shutdown = True
+        if self.span_processor is None:
+            return
         # Drain + remove the per-session processors so other sessions still
         # running in the same process keep emitting. Provider lives on.
         try:
@@ -660,16 +659,17 @@ class SessionTelemetry:
         except Exception:  # pragma: no cover
             pass
         try:
-            self.log_processor.shutdown()
+            if self.log_processor is not None:
+                self.log_processor.shutdown()
         except Exception:  # pragma: no cover
             pass
         _remove_span_processor(self.tracer_provider, self.span_processor)
-        _remove_log_processor(self.logger_provider, self.log_processor)
-        # ``BatchSpanProcessor.shutdown`` already calls exporter.shutdown;
-        # the exporters guard with ``self._closed`` so a second call is a
-        # no-op.
-        self.span_exporter.shutdown()
-        self.log_exporter.shutdown()
+        if self.log_processor is not None:
+            _remove_log_processor(self.logger_provider, self.log_processor)
+        if self.span_exporter is not None:
+            self.span_exporter.shutdown()
+        if self.log_exporter is not None:
+            self.log_exporter.shutdown()
 
 
 def setup_session_telemetry(
@@ -713,39 +713,50 @@ def setup_session_telemetry(
 
     tracer_provider, logger_provider = setup_process_telemetry()
 
-    if file_path is None:
-        file_path = resolve_observability_dir(cwd) / f"{session_id}.jsonl"
-    else:
-        file_path = Path(file_path)
+    # File export: only when caller passes an explicit path (SessionManager
+    # persistence) or the user opted in via AGENTM_OBSERVABILITY_DIR. The
+    # default path — OTLP remote only — avoids writing local files.
+    write_files = file_path is not None or file_export_requested()
+    resolved_path: Path | None = None
+    span_exporter: FileSpanExporter | None = None
+    log_exporter: FileLogExporter | None = None
+    span_processor: BlockingBatchSpanProcessor | None = None
+    log_processor: BlockingBatchLogRecordProcessor | None = None
 
-    span_exporter = FileSpanExporter(file_path)
-    log_exporter = FileLogExporter(file_path)
+    if write_files:
+        if file_path is not None:
+            resolved_path = Path(file_path)
+        else:
+            resolved_path = resolve_observability_dir(cwd) / f"{session_id}.jsonl"
 
-    effective_batch_size = (
-        max_export_batch_size
-        if max_export_batch_size is not None
-        else min(512, max_queue_size)
-    )
+        span_exporter = FileSpanExporter(resolved_path)
+        log_exporter = FileLogExporter(resolved_path)
 
-    span_processor = BlockingBatchSpanProcessor(
-        span_exporter,
-        max_queue_size=max_queue_size,
-        schedule_delay_millis=schedule_delay_millis,
-        export_timeout_millis=export_timeout_millis,
-        max_export_batch_size=effective_batch_size,
-        session_id_filter=session_id,
-    )
-    tracer_provider.add_span_processor(span_processor)
+        effective_batch_size = (
+            max_export_batch_size
+            if max_export_batch_size is not None
+            else min(512, max_queue_size)
+        )
 
-    log_processor = BlockingBatchLogRecordProcessor(
-        log_exporter,
-        max_queue_size=max_queue_size,
-        schedule_delay_millis=schedule_delay_millis,
-        export_timeout_millis=export_timeout_millis,
-        max_export_batch_size=effective_batch_size,
-        session_id_filter=session_id,
-    )
-    logger_provider.add_log_record_processor(log_processor)
+        span_processor = BlockingBatchSpanProcessor(
+            span_exporter,
+            max_queue_size=max_queue_size,
+            schedule_delay_millis=schedule_delay_millis,
+            export_timeout_millis=export_timeout_millis,
+            max_export_batch_size=effective_batch_size,
+            session_id_filter=session_id,
+        )
+        tracer_provider.add_span_processor(span_processor)
+
+        log_processor = BlockingBatchLogRecordProcessor(
+            log_exporter,
+            max_queue_size=max_queue_size,
+            schedule_delay_millis=schedule_delay_millis,
+            export_timeout_millis=export_timeout_millis,
+            max_export_batch_size=effective_batch_size,
+            session_id_filter=session_id,
+        )
+        logger_provider.add_log_record_processor(log_processor)
 
     # Per-session instrument scope: gives consumers a join point in addition
     # to the ``agentm.session.id`` attribute stamped by atoms.
@@ -755,7 +766,7 @@ def setup_session_telemetry(
 
     return SessionTelemetry(
         session_id=session_id,
-        file_path=file_path,
+        file_path=resolved_path,
         tracer=tracer,
         logger=logger,
         tracer_provider=tracer_provider,
