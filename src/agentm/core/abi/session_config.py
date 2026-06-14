@@ -48,6 +48,7 @@ class AgentSessionConfig:
     provider: tuple[str, dict[str, Any]] | None = None
     extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     scenario: str | None = None
+    scenario_dir: str | None = None
     extra_extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     """Atoms appended after the primary load step (auto-discover or scenario).
 

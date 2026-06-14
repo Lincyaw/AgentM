@@ -494,7 +494,7 @@ async def test_end_to_end_loop_activates_known_good_replacement(
     # synthetic ``agentm._scenarios.format_fix.tool_normalize_json`` name.
     from agentm.extensions.loader import load_scenario
 
-    scenario_extensions = load_scenario(str(scenario_dir))
+    scenario_extensions, _ = load_scenario(str(scenario_dir))
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),

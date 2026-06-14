@@ -183,29 +183,30 @@ def _resolve_scenario_entrypoint(name: str) -> Path | None:
             return concrete
     return None
 
-def load_scenario(name_or_path: str) -> list[tuple[str, dict[str, Any]]]:
-    """Resolve and parse a scenario manifest.
-
-    Returns a list of ``(module_path, config)`` pairs in declaration order.
-    For ``local:`` entries the module is registered into ``sys.modules``
-    under its synthetic name before this function returns.
-    """
-
-    extensions, _meta = load_scenario_with_meta(name_or_path)
-    return extensions
-
-def load_scenario_with_meta(
+def load_scenario(
     name_or_path: str,
 ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
-    """Like :func:`load_scenario`, but also returns top-level scenario
-    metadata (``task_class`` and friends). Per-task-evolution scenarios
-    declare ``task_class`` at manifest top level; the harness threads it
-    onto :class:`AgentSessionConfig.task_class` so observability can
-    populate ``session.fingerprint.task_meta``.
+    """Resolve and parse a scenario manifest.
+
+    Returns ``(extensions, meta)`` where *extensions* is a list of
+    ``(module_path, config)`` pairs in declaration order and *meta*
+    carries top-level scenario metadata: ``scenario_dir``, ``task_class``,
+    ``promotion``, etc.
     """
 
     candidate = Path(name_or_path)
     if candidate.is_absolute():
+        manifest_path = (
+            candidate / "manifest.yaml" if candidate.is_dir() else candidate
+        )
+        if not manifest_path.is_file():
+            raise ScenarioLoadError(
+                str(manifest_path),
+                FileNotFoundError(
+                    f"scenario manifest not found at {manifest_path}"
+                ),
+            )
+    elif candidate.exists() or (candidate / "manifest.yaml").exists():
         manifest_path = (
             candidate / "manifest.yaml" if candidate.is_dir() else candidate
         )
@@ -251,7 +252,7 @@ def load_scenario_with_meta(
         payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         payload = None
-    meta: dict[str, Any] = {}
+    meta: dict[str, Any] = {"scenario_dir": str(manifest_path.resolve().parent)}
     if isinstance(payload, dict):
         for key in ("task_class", "promotion"):
             if key in payload:
@@ -693,4 +694,4 @@ def _register_local(
 def _entry_error(index: int, detail: str) -> str:
     return f"extensions[{index}] {detail}"
 
-__all__ = ["ScenarioLoadError", "load_scenario", "load_scenario_with_meta", "sort_extensions_by_requires"]
+__all__ = ["ScenarioLoadError", "load_scenario", "sort_extensions_by_requires"]

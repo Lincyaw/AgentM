@@ -362,6 +362,11 @@ async def create_agent_session(
     _configure_manifest(config.cwd)
     _migrate_catalog(config.cwd)
 
+    # Resolve extensions (and scenario_dir) before building the scope so
+    # the frozen scope carries the final scenario_dir value.
+    await _prime_contrib_discovery(config, bus)
+    to_load = await _resolve_extensions(config, bus)
+
     reloader = AtomReloader(
         cwd=config.cwd,
         resource_writer=resource_writer,
@@ -390,6 +395,7 @@ async def create_agent_session(
     scope = build_extension_api_scope(
         bus=bus,
         cwd=config.cwd,
+        scenario_dir=config.scenario_dir,
         session_id=session_id,
         root_session_id=root_session_id,
         parent_session_id=config.parent_session_id,
@@ -426,9 +432,6 @@ async def create_agent_session(
     install = partial(
         _install_with_events, bus=bus, api_factory=api_factory, reloader=reloader,
     )
-
-    await _prime_contrib_discovery(config, bus)
-    to_load = await _resolve_extensions(config, bus)
 
     session_manager.set_session_config({
         "scenario": config.scenario,
@@ -644,7 +647,8 @@ async def _resolve_extensions(
         from agentm.extensions.loader import ScenarioLoadError, load_scenario
 
         try:
-            to_load = load_scenario(config.scenario)
+            to_load, _scenario_meta = load_scenario(config.scenario)
+            config.scenario_dir = _scenario_meta.get("scenario_dir")
         except (ScenarioLoadError, Exception) as exc:  # noqa: BLE001
             await bus.emit(
                 DiagnosticEvent.CHANNEL,
