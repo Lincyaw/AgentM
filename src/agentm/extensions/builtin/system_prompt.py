@@ -47,16 +47,21 @@ def _discover_context_files(cwd: str) -> str:
     return "\n\n".join(parts)
 
 
-def _resolve_prompt(config: SystemPromptConfig, cwd: str) -> str:
+def _resolve_prompt(
+    config: SystemPromptConfig, *, cwd: str, scenario_dir: str | None
+) -> str:
     if config.prompt_file:
-        return Path(config.prompt_file).read_text(encoding="utf-8")
+        p = Path(config.prompt_file)
+        if not p.is_absolute() and scenario_dir:
+            p = Path(scenario_dir) / p
+        return p.read_text(encoding="utf-8")
     if config.prompt is not None:
         return config.prompt
     return _discover_context_files(cwd)
 
 
 def install(api: ExtensionAPI, config: SystemPromptConfig) -> None:
-    prompt = _resolve_prompt(config, api.cwd)
+    prompt = _resolve_prompt(config, cwd=api.cwd, scenario_dir=api.scenario_dir)
     if not prompt:
         return
 

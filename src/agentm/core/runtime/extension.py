@@ -221,6 +221,7 @@ class ExtensionAPIScope:
 
     bus: EventBus
     cwd: str
+    scenario_dir: str | None
     session_id: str
     root_session_id: str
     parent_session_id: str | None
@@ -248,6 +249,7 @@ def build_extension_api_scope(
     *,
     bus: EventBus,
     cwd: str,
+    scenario_dir: str | None = None,
     session_id: str,
     root_session_id: str | None = None,
     parent_session_id: str | None = None,
@@ -274,6 +276,7 @@ def build_extension_api_scope(
     return ExtensionAPIScope(
         bus=bus,
         cwd=cwd,
+        scenario_dir=scenario_dir,
         session_id=session_id,
         # If no trace_id is supplied, the session is its own trace —
         # collapse to session_id. Callers that want strict OTel shape
@@ -319,6 +322,7 @@ class _ExtensionAPIImpl:
     ) -> None:
         self._bus = scope.bus
         self._cwd = scope.cwd
+        self._scenario_dir = scope.scenario_dir
         self._session_id = scope.session_id
         self._root_session_id = scope.root_session_id
         self._parent_session_id = scope.parent_session_id
@@ -561,6 +565,11 @@ class _ExtensionAPIImpl:
     def cwd(self) -> str:
         self._assert_active()
         return self._cwd
+
+    @property
+    def scenario_dir(self) -> str | None:
+        self._assert_active()
+        return self._scenario_dir
 
     @property
     def session_id(self) -> str:

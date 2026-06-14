@@ -39,6 +39,7 @@ class FakeExtensionAPI:
     def __init__(self) -> None:
         self.tools: list[Any] = []
         self.inbox = SessionInbox()
+        self.scenario_dir: str | None = None
         self._handlers: dict[str, list[Any]] = {}
 
     def post_inbox(

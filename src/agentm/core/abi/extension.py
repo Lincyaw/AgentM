@@ -510,6 +510,10 @@ class ExtensionAPI(Protocol):
     @property
     def cwd(self) -> str: ...
     @property
+    def scenario_dir(self) -> str | None:
+        """Directory containing the loaded scenario manifest, or None."""
+        ...
+    @property
     def session_id(self) -> str:
         """This session's OTel ``span_id`` — 8 bytes / 16 hex chars.
         Always set; identifies the *session-root span* inside the trace.

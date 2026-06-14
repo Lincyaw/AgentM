@@ -245,7 +245,7 @@ async def test_mad_does_not_flip_gate_decision(tmp_path: Path) -> None:
     provider_module = _install_static_provider()
     from agentm.extensions.loader import load_scenario
 
-    scenario_extensions = load_scenario(str(scenario_dir))
+    scenario_extensions, _ = load_scenario(str(scenario_dir))
     session = await AgentSession.create(
         AgentSessionConfig(
             cwd=str(tmp_path),

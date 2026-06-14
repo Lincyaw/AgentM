@@ -613,7 +613,7 @@ def _scenario_mounts_harness(scenario: str) -> bool:
     from agentm.extensions.loader import ScenarioLoadError, load_scenario
 
     try:
-        extensions = load_scenario(scenario)
+        extensions, _meta = load_scenario(scenario)
     except ScenarioLoadError as exc:
         if isinstance(exc.cause, FileNotFoundError):
             logger.warning(
