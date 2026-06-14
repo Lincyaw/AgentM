@@ -122,6 +122,7 @@ class _ChildSession(Protocol):
     handful of members we actually use, structurally."""
 
     bus: EventBus
+    session_id: str
 
     async def prompt(self, message: str) -> list[AgentMessage]: ...
     async def shutdown(self) -> None: ...
@@ -444,6 +445,7 @@ class _WorkflowRun:
     cwd_override: str | None = None
     provider_override: tuple[str, dict[str, Any]] | None = None
     progress: list[dict[str, str]] = field(default_factory=list)
+    child_sessions: list[dict[str, Any]] = field(default_factory=list)
     _agent_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _bg_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
 
@@ -720,6 +722,11 @@ class _WorkflowRun:
         )
         try:
             child: _ChildSession = await self.api.spawn_child_session(config)
+            self.child_sessions.append({
+                "session_id": child.session_id,
+                "scenario": scenario or self.default_scenario,
+                "prompt": prompt[:200],
+            })
             self.budget_svc.attach(child)
             try:
                 messages = await child.prompt(prompt)
@@ -1396,6 +1403,7 @@ class WorkflowRunner:
                 "tokens": summary["budget"],
             },
             "progress": run.progress,
+            "child_sessions": run.child_sessions,
             "args": args_payload,
             "result": result,
         }

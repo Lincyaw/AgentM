@@ -14,11 +14,10 @@ extensions:
     config:
       exclude:
         - conclusion.parquet
-      token_limit: 3000
+      token_limit: 10000
   - local: judge_context
   - local: judge_finalize
   - module: agentm.extensions.builtin.observability
-
   - module: agentm.extensions.builtin.turn_reminder
     config:
       warn_within: 5
@@ -30,22 +29,30 @@ extensions:
         independent hop agents built one edge at a time. Each hop
         agent ran careful per-edge analysis — checking error rate,
         latency magnitude, fault mechanism, and relationship
-        direction — and already rejected throughput-only drops and
-        noise. **Their confirmations are authoritative; you do NOT
-        remove them.**
+        direction. **Their confirmations are authoritative; you do
+        NOT remove them.**
 
-        Your job is to catch what no single edge could see — two
-        global patterns:
-        1. A system-wide CASCADE in which services the hop agents
-           rejected for "fewer calls / throughput drop" are in fact
-           genuinely unavailable because the whole system is
-           collapsing.
-        2. FAULT-PATH FLOW DISAPPEARANCE at user-facing entry or
-           aggregator services: aggregate latency/errors look healthy
-           (other endpoints dilute them), but the endpoint(s) whose
-           downstream chain leads to the fault lost their spans
-           entirely in the abnormal window — a user flow is broken.
-           Check per-span_name counts across windows before deciding.
+        Your job is to catch what no single edge could see — you
+        have the GLOBAL view of which services are confirmed dead,
+        which are inconclusive, and which were rejected. Use this to:
+
+        1. **Resolve inconclusive verdicts**: hop agents marked edges
+           as inconclusive when they found ambiguous signals (e.g.
+           zero traffic but service running). With your global view
+           of which upstream services are confirmed dead, you can
+           determine whether zero traffic is genuine cascade
+           (service_unavailable) or just reduced load (reject).
+
+        2. **Challenge suspicious rejections**: if a hop agent
+           rejected a service for "fewer calls / no degradation" but
+           ALL confirmed upstream services on the path to it are
+           dead, the rejection is likely wrong — the service has no
+           traffic BECAUSE its dependencies failed.
+
+        3. **Detect fault-path flow disappearance**: aggregate
+           latency/errors look healthy (other endpoints dilute them),
+           but the endpoint(s) whose downstream chain leads to the
+           fault lost their spans entirely — a user flow is broken.
 
         Tools: `list_tables`, `query_sql`, `submit_judge_review`.
 
@@ -56,24 +63,28 @@ extensions:
           count.
 
         ## Decision framework
-        - You only ADD; you never remove. The per-edge analysis is
-          authoritative for what is degraded (`suggested_remove` is
-          audit-only and never applied to the graph).
-        - ADD a rejected service only when a genuine system-wide
-          cascade makes it unavailable, not merely less-called.
-          Use `list_tables` / `query_sql` to confirm; state latencies
-          in ms/s (duration is nanoseconds).
-        - Every promotion must name `via_service` — the CONFIRMED
-          upstream service whose path the cascade reaches it through
-          (it becomes an edge via_service -> service in the graph) —
-          and a `predicate` for the failure mode it exhibits
-          (typically service_unavailable or throughput_collapse for
-          cascades, flow_interrupted for fault-path flow
-          disappearance).
-        - Use your own judgement on the data — there is no hardcoded
-          threshold. Look at the load-generator root span counts, the
-          rejected services' own metrics, and decide whether the
-          evidence warrants promotion.
+        - **Confirmations are final.** You never remove confirmed
+          services (`suggested_remove` is audit-only).
+        - **Direct promotion (`add`)**: use when you have enough
+          global evidence to confirm directly (e.g. system-wide
+          cascade with load-gen throughput collapse > 80%).
+        - **Re-evaluation (`re_evaluate`)**: PREFERRED for most
+          cases. Send the edge back to a hop agent with your global
+          context explaining WHY its prior verdict may be wrong. The
+          hop agent will re-query the data and make the final call.
+          Use this when: the prior verdict was inconclusive or when
+          a rejection looks suspicious given the global graph state.
+        - Every `add` must name `via_service` (the confirmed upstream)
+          and a `predicate` (typically service_unavailable,
+          throughput_collapse, or flow_interrupted).
+        - Every `re_evaluate` must name `via_service` and provide
+          `context` — a clear explanation of what the hop agent
+          should reconsider (e.g. "ts-food-service is confirmed dead
+          with URL mutation. ts-preserve-service has zero spans.
+          This is likely cascade unavailability — the mutated URL
+          means requests never reach ts-preserve-service. Check if
+          the specific endpoint that routes through ts-food-service
+          lost all its spans.").
 
-        Most reviews add nothing. Call `submit_judge_review` with
-        `add` (possibly empty) plus `rationale`.
+        Use your own judgement — there is no hardcoded threshold.
+        Submit `submit_judge_review` with your decisions.
