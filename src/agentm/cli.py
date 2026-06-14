@@ -19,6 +19,7 @@ from typing import Annotated, Any, TextIO, cast
 
 import typer
 from dotenv import load_dotenv
+from loguru import logger
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
 from agentm.cli_trace import app as _trace_app
@@ -396,9 +397,10 @@ def _make_install_warner() -> Any:
     def _on_install(event: ExtensionInstallEvent) -> None:
         if event.phase != "error":
             return
-        print(
-            f"WARNING: [extension_install] {event.module_path}: {event.error}",
-            file=sys.stderr,
+        logger.warning(
+            "[extension_install] {path}: {error}",
+            path=event.module_path,
+            error=event.error,
         )
 
     return _on_install
@@ -485,12 +487,12 @@ def _attach_default_diagnostics(bus: EventBus) -> dict[str, bool]:
     state = {"error_seen": False}
 
     def _on_diagnostic(event: DiagnosticEvent) -> None:
-        prefix = {
-            "info": "INFO",
-            "warning": "WARNING",
-            "error": "ERROR",
-        }.get(event.level, event.level.upper())
-        print(f"{prefix}: [{event.source}] {event.message}", file=sys.stderr)
+        log_fn = {
+            "info": logger.info,
+            "warning": logger.warning,
+            "error": logger.error,
+        }.get(event.level, logger.info)
+        log_fn("[{source}] {message}", source=event.source, message=event.message)
         if event.level == "error":
             state["error_seen"] = True
 
@@ -605,9 +607,9 @@ async def run(
         sid = session_manager.get_session_id()
         if sid:
             if session_manager.session_file is not None:
-                print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
-            print(f"INFO: session id: {sid}", file=sys.stderr)
-            print(f"INFO: trace:  agentm trace messages --session {sid} --format text", file=sys.stderr)
+                logger.info("session log: {path}", path=session_manager.session_file)
+            logger.info("session id: {sid}", sid=sid)
+            logger.info("trace:  agentm trace messages --session {sid} --format text", sid=sid)
 
     session = await AgentSession.create(session_config)
     try:
@@ -631,11 +633,11 @@ async def run(
         # warn and exit anyway (still exit 0 for an otherwise-completed prompt);
         # any work that finishes after this point will not be delivered.
         if not await session.idle(timeout=ONESHOT_IDLE_TIMEOUT_SECONDS):
-            print(
-                "WARNING: timed out waiting for background work to finish after "
-                f"{ONESHOT_IDLE_TIMEOUT_SECONDS:.0f}s; exiting anyway. Any "
-                "late background completion will not be delivered.",
-                file=sys.stderr,
+            logger.warning(
+                "timed out waiting for background work to finish after "
+                "{timeout:.0f}s; exiting anyway. Any late background "
+                "completion will not be delivered.",
+                timeout=ONESHOT_IDLE_TIMEOUT_SECONDS,
             )
         final = session.session_manager.get_messages()
         cost_service = session.get_service("cost_query")
@@ -996,7 +998,7 @@ def list_extensions_cmd(
         if source in {"all", "user"}:
             buckets.append(("user", discover_user_atoms(Path(cwd))))
     except Exception as exc:
-        print(f"ERROR: discovery failed: {exc}", file=sys.stderr)
+        logger.error("discovery failed: {exc}", exc=exc)
         raise typer.Exit(code=1) from exc
 
     needle = filter_substr.lower() if filter_substr else None
@@ -1046,7 +1048,7 @@ def list_extensions_cmd(
                 f"    {entry.manifest.description}\n"
                 f"    -e {entry.module_path}"
             )
-    print(f"\n{total} extension(s) shown.", file=sys.stderr)
+    logger.info("{total} extension(s) shown.", total=total)
 
 
 @app.command(name="onboard")

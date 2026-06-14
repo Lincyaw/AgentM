@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Annotated
 
 import typer
+from loguru import logger
 
 app = typer.Typer(
     name="workflow",
@@ -116,7 +116,7 @@ async def _run_async(
 
     if not quiet:
         def _on_phase(event: WorkflowPhaseEvent) -> None:
-            print(f"[{event.kind}] {event.text}", file=sys.stderr)
+            logger.info("[{kind}] {text}", kind=event.kind, text=event.text)
 
         bus.on(WorkflowPhaseEvent.CHANNEL, _on_phase)
 
@@ -131,10 +131,7 @@ async def _run_async(
     try:
         runner = session.get_service("workflow_runner")
         if runner is None:
-            print(
-                "error: workflow_runner service not found in session",
-                file=sys.stderr,
-            )
+            logger.error("workflow_runner service not found in session")
             return 1
 
         result = await runner.run_file(script_path, workflow_args)
@@ -143,32 +140,26 @@ async def _run_async(
 
         if not quiet:
             summary = runner.last_run_summary
-            print(
-                "\n--- workflow summary ---",
-                file=sys.stderr,
+            logger.info("--- workflow summary ---")
+            logger.info(
+                "agents: {spawned} spawned, {ok} ok, {failed} failed, {retried} retried",
+                spawned=summary["agents_spawned"],
+                ok=summary["agents_succeeded"],
+                failed=summary["agents_failed"],
+                retried=summary["agents_retried"],
             )
-            print(
-                f"agents: {summary['agents_spawned']} spawned, "
-                f"{summary['agents_succeeded']} ok, "
-                f"{summary['agents_failed']} failed, "
-                f"{summary['agents_retried']} retried",
-                file=sys.stderr,
+            logger.info(
+                "tokens: {spent} (in={inp}, out={out})",
+                spent=summary["budget"]["spent"],
+                inp=summary["budget"]["input_tokens"],
+                out=summary["budget"]["output_tokens"],
             )
-            print(
-                f"tokens: {summary['budget']['spent']} "
-                f"(in={summary['budget']['input_tokens']}, "
-                f"out={summary['budget']['output_tokens']})",
-                file=sys.stderr,
-            )
-            print(
-                f"wall clock: {summary['wall_clock_s']:.1f}s",
-                file=sys.stderr,
-            )
+            logger.info("wall clock: {t:.1f}s", t=summary["wall_clock_s"])
 
         return 0
 
     except Exception as exc:
-        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        logger.error("{exc_type}: {exc}", exc_type=type(exc).__name__, exc=exc)
         return 1
     finally:
         await session.shutdown()

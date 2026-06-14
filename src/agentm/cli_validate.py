@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from loguru import logger
 
 from agentm.extensions.validate import (
     ValidationIssue,
@@ -35,7 +36,7 @@ app = typer.Typer(
 def _print_issues(issues: list[ValidationIssue]) -> int:
     """Print issues and return exit code (0 = clean, 1 = violations)."""
     if not issues:
-        print("No violations found.", file=sys.stderr)
+        logger.info("No violations found.")
         return 0
     for issue in issues:
         severity = "error" if issue.severity == "error" else "warning"
@@ -45,10 +46,7 @@ def _print_issues(issues: list[ValidationIssue]) -> int:
         )
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity != "error"]
-    print(
-        f"\n{len(errors)} error(s), {len(warnings)} warning(s).",
-        file=sys.stderr,
-    )
+    logger.info("{n_err} error(s), {n_warn} warning(s).", n_err=len(errors), n_warn=len(warnings))
     return 1 if errors else 0
 
 
@@ -98,7 +96,7 @@ def validate_file_cmd(
     for p in paths:
         resolved = p.resolve()
         if not resolved.is_file():
-            print(f"ERROR: {p} is not a file", file=sys.stderr)
+            logger.error("{path} is not a file", path=p)
             raise typer.Exit(code=2)
         module_path = resolved.stem
         all_issues.extend(
@@ -121,7 +119,7 @@ def validate_package_cmd(
     for p in paths:
         resolved = p.resolve()
         if not resolved.is_dir():
-            print(f"ERROR: {p} is not a directory", file=sys.stderr)
+            logger.error("{path} is not a directory", path=p)
             raise typer.Exit(code=2)
         module_path = resolved.name
         all_issues.extend(
