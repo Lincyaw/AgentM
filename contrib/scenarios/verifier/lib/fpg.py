@@ -137,12 +137,17 @@ def assemble_scenario(
     from fpg import SCHEMA_VERSION, build_schema, load_profile
 
     schema = build_schema(load_profile(PROFILE_PATH))
+    node_ids = {n["id"] for n in nodes}
+    injections = [
+        r for r in build_injection_records(meta)
+        if r["node_id"] in node_ids
+    ]
     scenario = {
         "schema_version": SCHEMA_VERSION,
         "scenario_id": meta["scenario_id"],
         "testbed": meta["testbed"],
         "vocab_version": schema.profile.vocab_version,
-        "injections": build_injection_records(meta),
+        "injections": injections,
         "graph": {"nodes": nodes, "edges": edges},
     }
     validated = schema.Scenario.model_validate(scenario)

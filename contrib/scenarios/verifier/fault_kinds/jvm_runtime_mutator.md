@@ -72,28 +72,29 @@ changes (HTTP 4xx/5xx from the corrupted request).
 
 ## How it propagates
 The cascade is driven by **data / functionality loss**, not
-latency. The propagated signal on a neighbour must be an
-**observable change in that neighbour's own behaviour**:
+latency. Distinguish upstream (callers of the target) from
+downstream (services the target calls):
 
-- **error rate up** on a caller that validates the response (e.g.
-  HTTP 500 from a null-pointer caused by empty data, or a 4xx/5xx
-  on the receiver of a mutated URL); or
-- **errors / functional breakage** where the mutated value is
-  consumed (a downstream that receives a corrupted request and
-  rejects it, retries, or logs failures).
+### Upstream (callers)
+A caller's endpoint that routes through the mutated method may
+vanish entirely: the mutated URL returns 404 or the corrupted
+data causes fast failure, so the caller's flow stops completing.
+The caller's aggregate may look healthy (other endpoints dilute
+it), but the specific endpoint that depends on the target lost
+its spans. This IS the caller's degradation — its user-facing
+flow is broken. Confirm with `flow_interrupted`.
 
-### Key judgment rule
-A **throughput drop is not, by itself, propagation** — even for
-this fault, and even when concentrated on specific endpoints.
-Fewer correct requests reaching a neighbour means the *target*
-stopped sending them; the neighbour itself is healthy and
-idle-but-fine. That is the target's degradation, already counted,
-not the neighbour's. Confirm a neighbour only when its OWN error
-rate rises or its OWN behaviour breaks. If the only change you can
-find on the neighbour is "fewer calls, same latency, same error
-rate", reject it.
+A caller may also show explicit errors (4xx/5xx, exceptions)
+if it validates the corrupted response. Confirm with
+`error_rate_elevated`.
 
-The target itself is the seed and is not re-judged here; its
-aggregate latency may even drop (404/null returns fast) — that is
-the fault's signature on the *target*, not evidence about a
-neighbour.
+### Downstream (callees)
+Services the target calls may receive fewer or zero requests
+because the mutated path stopped sending them. If the
+downstream's own latency and error rate are unchanged and its
+only signal is "fewer calls", that is **not** the downstream's
+degradation — the target simply stopped calling it. Reject.
+
+Confirm a downstream only when its OWN error rate rises or its
+OWN behaviour breaks (e.g. it receives a corrupted request and
+rejects it).
