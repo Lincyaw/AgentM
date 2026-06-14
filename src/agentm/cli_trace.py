@@ -39,8 +39,8 @@ def _ch() -> Any:
     """Lazily import the ClickHouse backend module."""
     global _ch_mod
     if _ch_mod is None:
-        from agentm import cli_trace_ch
-        _ch_mod = cli_trace_ch
+        from agentm.core.observability import clickhouse
+        _ch_mod = clickhouse
     return _ch_mod
 
 

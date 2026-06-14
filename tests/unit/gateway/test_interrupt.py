@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import pytest
 
-from agentm.gateway.cli import _GatewayRuntime
+from agentm.gateway.runtime import GatewayRuntime
 from agentm.gateway.peer import PeerSession
 from agentm.gateway.wire import WIRE_VERSION, Envelope
 
@@ -53,7 +53,7 @@ def _interrupt_inbound() -> Envelope:
 @pytest.mark.asyncio
 async def test_interrupt_inbound_calls_session_interrupt_and_spawns_no_task() -> None:
     sess = _FakeSession()
-    rt = object.__new__(_GatewayRuntime)
+    rt = object.__new__(GatewayRuntime)
     rt._sessions = cast(Any, _FakeSessions(sess))
     rt._peer_channels = {}
     rt._inflight = set()

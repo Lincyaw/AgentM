@@ -4,7 +4,7 @@ The bug this guards against: with a Feishu peer and a terminal peer
 connected to one gateway, a reply for the Feishu chat must NOT be
 enqueued to the terminal peer (and vice versa). The earlier code
 broadcast every outbound to every peer, so a second connected client of
-a different platform received traffic it did not own. ``_route_targets``
+a different platform received traffic it did not own. ``route_targets``
 is the pure selection that fixes it.
 """
 
@@ -14,7 +14,7 @@ from typing import Any, cast, get_args
 
 import pytest
 
-from agentm.gateway.cli import _GatewayRuntime, _route_targets
+from agentm.gateway.runtime import GatewayRuntime, route_targets
 from agentm.gateway.peer import PeerSession
 from agentm.gateway.wire import (
     DURABLE_OUTBOUND_KINDS,
@@ -34,7 +34,7 @@ def test_delivery_class_partition_matches_the_kind_literal() -> None:
 
 
 def _peer(peer_id: str) -> PeerSession:
-    # _route_targets only reads .peer_id; the writer is never touched here.
+    # route_targets only reads .peer_id; the writer is never touched here.
     return PeerSession(peer_id=peer_id, transport_writer=cast(Any, None))
 
 
@@ -44,8 +44,8 @@ def test_routes_only_to_peer_serving_the_channel() -> None:
     peers = [feishu, terminal]
     channels = {"feishu-1": "feishu", "terminal-1": "terminal"}
 
-    assert _route_targets(peers, channels, "feishu") == [feishu]
-    assert _route_targets(peers, channels, "terminal") == [terminal]
+    assert route_targets(peers, channels, "feishu") == [feishu]
+    assert route_targets(peers, channels, "terminal") == [terminal]
 
 
 def test_excludes_peers_with_unknown_channel_when_a_match_exists() -> None:
@@ -56,7 +56,7 @@ def test_excludes_peers_with_unknown_channel_when_a_match_exists() -> None:
 
     # The fresh peer must not receive Feishu traffic just because it is
     # connected — only the known Feishu peer does.
-    assert _route_targets(peers, channels, "feishu") == [feishu]
+    assert route_targets(peers, channels, "feishu") == [feishu]
 
 
 def test_falls_back_to_all_when_no_peer_serves_the_channel() -> None:
@@ -66,9 +66,9 @@ def test_falls_back_to_all_when_no_peer_serves_the_channel() -> None:
 
     # Nothing learned yet (single-client-before-first-inbound) -> deliver
     # to everyone so the degenerate case still works.
-    assert _route_targets(peers, {}, "feishu") == peers
+    assert route_targets(peers, {}, "feishu") == peers
     # Empty target channel (proactive / degenerate) -> same fallback.
-    assert _route_targets(peers, {"a": "feishu"}, "") == peers
+    assert route_targets(peers, {"a": "feishu"}, "") == peers
 
 
 def test_routes_to_all_same_channel_peers_mirror_case() -> None:
@@ -78,7 +78,7 @@ def test_routes_to_all_same_channel_peers_mirror_case() -> None:
     channels = {"terminal-1": "terminal", "terminal-2": "terminal"}
 
     # Two terminals on the same channel both mirror the conversation.
-    assert _route_targets(peers, channels, "terminal") == [t1, t2]
+    assert route_targets(peers, channels, "terminal") == [t1, t2]
 
 
 # --- delivery-class split (durable persisted + queued, ephemeral queued) ----
@@ -125,10 +125,10 @@ class _FakeServer:
         return self._peers
 
 
-def _runtime_with(peer: PeerSession, outbox: _RecordingOutbox) -> _GatewayRuntime:
+def _runtime_with(peer: PeerSession, outbox: _RecordingOutbox) -> GatewayRuntime:
     # Bypass the heavy __init__ (builds SqliteOutbox/SessionManager/...); we
     # only exercise _emit_outbound, which reads _server/_outbox/_peer_channels.
-    rt = object.__new__(_GatewayRuntime)
+    rt = object.__new__(GatewayRuntime)
     rt._server = cast(Any, _FakeServer([peer]))
     rt._outbox = cast(Any, outbox)
     rt._peer_channels = {peer.peer_id: "terminal"}

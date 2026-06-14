@@ -1,7 +1,7 @@
 """Fail-stop: the systemd unit renderer must produce mode-correct, socket-paired
 units without ever invoking real ``systemctl`` or writing system dirs.
 
-The render step is a pure function of a resolved :class:`_SystemdPlan`, so these
+The render step is a pure function of a resolved :class:`SystemdPlan`, so these
 tests assert directly on the rendered text. A regression here means the operator
 gets a gateway and a feishu client that disagree on the socket (broken deploy)
 or a system unit that runs as the wrong user / target.
@@ -13,19 +13,19 @@ from pathlib import Path
 
 import pytest
 
-from agentm.gateway import cli as gw_cli
-from agentm.gateway.cli import (
-    _SystemdPlan,
-    _build_systemd_plan,
-    _render_feishu_unit,
-    _render_gateway_unit,
-    _systemd_action,
+from agentm.gateway import systemd as gw_systemd
+from agentm.gateway.systemd import (
+    SystemdPlan,
+    build_systemd_plan,
+    render_feishu_unit,
+    render_gateway_unit,
+    systemd_action,
 )
 
 
-def _system_plan(*, feishu: bool = True) -> _SystemdPlan:
+def _system_plan(*, feishu: bool = True) -> SystemdPlan:
     sock = "unix:///run/agentm/gw.sock"
-    return _SystemdPlan(
+    return SystemdPlan(
         system=True,
         unit_dir=Path("/etc/systemd/system"),
         socket_url=sock,
@@ -38,9 +38,9 @@ def _system_plan(*, feishu: bool = True) -> _SystemdPlan:
     )
 
 
-def _user_plan() -> _SystemdPlan:
+def _user_plan() -> SystemdPlan:
     sock = "unix://%t/agentm/gw.sock"
-    return _SystemdPlan(
+    return SystemdPlan(
         system=False,
         unit_dir=Path.home() / ".config" / "systemd" / "user",
         socket_url=sock,
@@ -55,7 +55,7 @@ def _user_plan() -> _SystemdPlan:
 
 def test_system_mode_unit_pins_run_socket_and_user() -> None:
     plan = _system_plan()
-    gw = _render_gateway_unit(plan)
+    gw = render_gateway_unit(plan)
     assert "unix:///run/agentm/gw.sock" in gw
     assert "RuntimeDirectory=agentm" in gw
     assert "RuntimeDirectoryMode=0750" in gw
@@ -66,7 +66,7 @@ def test_system_mode_unit_pins_run_socket_and_user() -> None:
 
 def test_user_mode_unit_uses_runtime_specifier_and_no_user() -> None:
     plan = _user_plan()
-    gw = _render_gateway_unit(plan)
+    gw = render_gateway_unit(plan)
     assert "unix://%t/agentm/gw.sock" in gw
     assert "WantedBy=default.target" in gw
     assert "User=" not in gw
@@ -77,14 +77,14 @@ def test_user_mode_unit_uses_runtime_specifier_and_no_user() -> None:
 
 def test_gateway_and_feishu_share_the_same_socket() -> None:
     for plan in (_system_plan(), _user_plan()):
-        gw = _render_gateway_unit(plan)
-        feishu = _render_feishu_unit(plan)
+        gw = render_gateway_unit(plan)
+        feishu = render_feishu_unit(plan)
         assert plan.socket_url in gw
         assert f"--connect {plan.socket_url}" in feishu
 
 
 def test_feishu_unit_is_loosely_coupled_to_gateway() -> None:
-    feishu = _render_feishu_unit(_system_plan())
+    feishu = render_feishu_unit(_system_plan())
     assert "After=agentm-gateway.service" in feishu
     assert "Wants=agentm-gateway.service" in feishu
     assert "Requires=" not in feishu  # loose coupling: no restart cascade
@@ -93,8 +93,8 @@ def test_feishu_unit_is_loosely_coupled_to_gateway() -> None:
 
 def test_units_carry_environmentfile_and_path() -> None:
     plan = _system_plan()
-    gw = _render_gateway_unit(plan)
-    feishu = _render_feishu_unit(plan)
+    gw = render_gateway_unit(plan)
+    feishu = render_feishu_unit(plan)
     assert "EnvironmentFile=-/srv/ws/.env" in gw
     assert "EnvironmentFile=-/srv/ws/.env" in feishu
     assert f"Environment=PATH={plan.path_env}" in gw
@@ -107,7 +107,7 @@ def test_install_skips_feishu_unit_when_bin_unresolved(
     written but the feishu unit is skipped (no broken half-deploy). systemctl
     is stubbed — this never touches real systemd."""
     unit_dir = tmp_path / "units"
-    plan = _SystemdPlan(
+    plan = SystemdPlan(
         system=False,
         unit_dir=unit_dir,
         socket_url="unix://%t/agentm/gw.sock",
@@ -118,14 +118,14 @@ def test_install_skips_feishu_unit_when_bin_unresolved(
         run_as=None,
         feishu_bin=None,
     )
-    monkeypatch.setattr(gw_cli, "_build_systemd_plan", lambda: plan)
+    monkeypatch.setattr(gw_systemd, "build_systemd_plan", lambda: plan)
     calls: list[list[str]] = []
 
     import subprocess as _sp
 
     monkeypatch.setattr(_sp, "run", lambda *a, **k: calls.append(list(a[0])))
 
-    _systemd_action(install=True)
+    systemd_action(install=True)
 
     assert (unit_dir / "agentm-gateway.service").exists()
     assert not (unit_dir / "agentm-feishu.service").exists()
@@ -141,7 +141,7 @@ def test_build_plan_bakes_cwd_into_exec_and_workspace(
 ) -> None:
     """--cwd must survive into the gateway ExecStart, WorkingDirectory, and the
     EnvironmentFile, all on the same workspace. _baked_gateway_argv() strips
-    --cwd to derive the workspace, so _build_systemd_plan must re-add it — the
+    --cwd to derive the workspace, so build_systemd_plan must re-add it — the
     gateway resolves its session cwd + state-dir from --cwd, not from the unit's
     WorkingDirectory."""
     import os
@@ -155,7 +155,7 @@ def test_build_plan_bakes_cwd_into_exec_and_workspace(
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     monkeypatch.setattr(shutil, "which", lambda name: f"/venv/bin/{name}")
 
-    plan = _build_systemd_plan()
+    plan = build_systemd_plan()
 
     # --cwd round-trips into ExecStart (quoted because of the space).
     assert "--cwd" in plan.gateway_exec_start
@@ -164,7 +164,7 @@ def test_build_plan_bakes_cwd_into_exec_and_workspace(
     assert plan.working_dir == Path(ws)
     assert plan.env_file == Path(ws) / ".env"
     # The rendered gateway unit references <ws>/.env.
-    gw = _render_gateway_unit(plan)
+    gw = render_gateway_unit(plan)
     assert f"EnvironmentFile=-{Path(ws) / '.env'}" in gw
     # The forced --bind socket survives and pairs with feishu.
     assert plan.socket_url in plan.gateway_exec_start
@@ -184,7 +184,7 @@ def test_build_plan_defaults_workspace_to_cwd_when_no_cwd_flag(
     monkeypatch.setattr(shutil, "which", lambda name: f"/venv/bin/{name}")
     monkeypatch.chdir(tmp_path)
 
-    plan = _build_systemd_plan()
+    plan = build_systemd_plan()
 
     assert plan.working_dir == tmp_path
     assert plan.env_file == tmp_path / ".env"
@@ -207,13 +207,13 @@ def test_build_plan_absolutizes_relative_cwd_and_stays_user(
     monkeypatch.setattr(os, "geteuid", lambda: 0)  # even root → user units
     monkeypatch.setattr(shutil, "which", lambda name: f"/venv/bin/{name}")
 
-    plan = _build_systemd_plan()
+    plan = build_systemd_plan()
 
     assert not plan.system  # user units only, even as root
     assert plan.working_dir.is_absolute()
     assert plan.working_dir == (tmp_path / "work").resolve()
     assert plan.run_as is None
-    gw = _render_gateway_unit(plan)
+    gw = render_gateway_unit(plan)
     # The WorkingDirectory line is absolute (no relative path → no bad setting).
     assert f"WorkingDirectory={(tmp_path / 'work').resolve()}" in gw
     assert "WantedBy=default.target" in gw  # user target, not multi-user

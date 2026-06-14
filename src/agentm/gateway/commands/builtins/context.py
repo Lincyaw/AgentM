@@ -34,7 +34,7 @@ class ContextCommand:
         if not trace_path.exists():
             return CommandResult(outbound=[ctx.reply("No trace data yet.")])
 
-        from agentm.cli_trace import TraceReader
+        from agentm.core.abi import TraceReader
 
         records = TraceReader(trace_path).load_turn_summaries()
         if not records:

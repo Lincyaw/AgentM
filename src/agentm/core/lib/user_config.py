@@ -174,6 +174,44 @@ def resolve_model_profile(model_name: str | None) -> ModelProfile | None:
     return config.models.get(model_name.lower())
 
 
+def resolve_provider_model(
+    *,
+    provider_flag: str | None = None,
+    model_flag: str | None = None,
+    registry: Any = None,
+) -> tuple[str, str, ModelProfile | None]:
+    """Apply ``CLI flag > env var > config.toml profile > registry default``.
+
+    Returns ``(provider, model, profile_or_None)``.  The *registry*
+    parameter defaults to :data:`agentm.ai.DEFAULT_PROVIDER_REGISTRY`
+    (lazy import to avoid circular dependency at module load).
+    """
+    if registry is None:
+        from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+
+        registry = DEFAULT_PROVIDER_REGISTRY
+
+    raw_model = model_flag or os.environ.get("AGENTM_MODEL")
+    profile = resolve_model_profile(raw_model)
+
+    if profile is not None:
+        provider = (
+            provider_flag
+            or os.environ.get("AGENTM_PROVIDER")
+            or profile.provider
+        )
+        model = profile.model
+    else:
+        provider = (
+            provider_flag
+            or os.environ.get("AGENTM_PROVIDER")
+            or registry.default_provider().id
+        )
+        model = raw_model or registry.default_model(provider)
+
+    return provider, model, profile
+
+
 def apply_reasoning_effort(
     build_config: ModelBuildConfig, cli_flag: str | None
 ) -> ModelBuildConfig:
