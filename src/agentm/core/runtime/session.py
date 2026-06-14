@@ -783,16 +783,11 @@ class AgentSession:
         self._bus.clear()
 
         try:
-            from agentm.core.runtime.catalog.indexer import index_trace
+            trace_file = self._session_manager.session_file
+            if trace_file is not None and trace_file.is_file():
+                from agentm.core.runtime.catalog.indexer import index_trace
 
-            trace_path = (
-                Path(self._cwd)
-                / ".agentm"
-                / "observability"
-                / f"{self._session_id}.jsonl"
-            )
-            if trace_path.is_file():
-                index_trace(trace_path)
+                index_trace(trace_file)
         except Exception as exc:
             logger.warning(f"agentm catalog indexer post-shutdown failed: {exc!r}")
 

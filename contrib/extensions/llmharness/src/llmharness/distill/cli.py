@@ -172,20 +172,20 @@ def _cmd_label(args: argparse.Namespace) -> int:
     rewriter_provider = _parse_provider(args.rewriter_provider or args.oracle_provider)
 
     if not replay_dir.is_dir():
-        print(f"replay-dir not found: {replay_dir}", file=sys.stderr)
+        logger.error("replay-dir not found: {path}", path=replay_dir)
         return 2
     if not dataset_path.is_file():
-        print(f"dataset not found: {dataset_path}", file=sys.stderr)
+        logger.error("dataset not found: {path}", path=dataset_path)
         return 2
 
     gt_index = load_dataset(dataset_path)
     if not gt_index:
-        print(f"dataset {dataset_path} loaded zero rows", file=sys.stderr)
+        logger.error("dataset {path} loaded zero rows", path=dataset_path)
         return 2
 
     sessions = sorted(replay_dir.glob("*.jsonl"))
     if not sessions:
-        print(f"no replay logs in {replay_dir}", file=sys.stderr)
+        logger.error("no replay logs in {path}", path=replay_dir)
         return 2
 
     total_kept = 0
@@ -201,11 +201,11 @@ def _cmd_label(args: argparse.Namespace) -> int:
                 rewriter_provider=rewriter_provider,
             )
         )
-        print(f"{replay_file.name}: kept={kept} dropped={dropped}")
+        logger.info("{name}: kept={kept} dropped={dropped}", name=replay_file.name, kept=kept, dropped=dropped)
         total_kept += kept
         total_dropped += dropped
 
-    print(f"total: kept={total_kept} dropped={total_dropped} out={out_dir}")
+    logger.info("total: kept={kept} dropped={dropped} out={out}", kept=total_kept, dropped=total_dropped, out=out_dir)
     return 0
 
 
@@ -238,10 +238,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
 
     if want_extractor:
         if replay_dir is None or not replay_dir.is_dir():
-            print(
-                "--replay-dir is required when phase includes extractor",
-                file=sys.stderr,
-            )
+            logger.error("--replay-dir is required when phase includes extractor")
             return 2
 
         def _iter() -> Iterable[Any]:
@@ -260,7 +257,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
         n_aud = write_jsonl(out_dir / "auditor.jsonl", auditor_records_from_labels(label_rows))
         n_drop = write_jsonl(out_dir / "dropped.jsonl", dropped_records_from_labels(label_rows))
 
-    print(f"extractor={n_ext} auditor={n_aud} dropped={n_drop} out={out_dir}")
+    logger.info("extractor={n_ext} auditor={n_aud} dropped={n_drop} out={out}", n_ext=n_ext, n_aud=n_aud, n_drop=n_drop, out=out_dir)
     return 0
 
 
@@ -291,12 +288,12 @@ def _cmd_rl_prompts(args: argparse.Namespace) -> int:
         phases = ("extractor", "auditor")
 
     if not replay_dir.is_dir():
-        print(f"replay-dir not found: {replay_dir}", file=sys.stderr)
+        logger.error("replay-dir not found: {path}", path=replay_dir)
         return 2
 
     sessions = sorted(replay_dir.glob("*.jsonl"))
     if not sessions:
-        print(f"no replay logs in {replay_dir}", file=sys.stderr)
+        logger.error("no replay logs in {path}", path=replay_dir)
         return 2
 
     def _iter() -> Iterable[dict[str, Any]]:
@@ -307,7 +304,7 @@ def _cmd_rl_prompts(args: argparse.Namespace) -> int:
             )
 
     n = _write_rl_rows(out_path, _iter())
-    print(f"rl-prompts={n} out={out_path}")
+    logger.info("rl-prompts={n} out={out}", n=n, out=out_path)
     return 0
 
 
@@ -424,15 +421,15 @@ def _annotate_one_bundle(
 ) -> dict[str, Any] | None:
     meta_path = case_metadata_override or (bundle_dir / "case_metadata.json")
     if not meta_path.is_file():
-        print(f"missing case_metadata.json for {bundle_dir}", file=sys.stderr)
+        logger.warning("missing case_metadata.json for {path}", path=bundle_dir)
         return None
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"failed to read {meta_path}: {exc}", file=sys.stderr)
+        logger.warning("failed to read {path}: {exc}", path=meta_path, exc=exc)
         return None
     if not isinstance(meta, dict):
-        print(f"case_metadata.json must be an object: {meta_path}", file=sys.stderr)
+        logger.warning("case_metadata.json must be an object: {path}", path=meta_path)
         return None
 
     case_id = str(meta.get("case_id") or "")
@@ -472,16 +469,13 @@ def _cmd_annotate_case_outcome(args: argparse.Namespace) -> int:
     bundles = [Path(b) for b in args.bundle]
     override = Path(args.case_metadata) if args.case_metadata else None
     if override is not None and len(bundles) != 1:
-        print(
-            "--case-metadata may only be combined with a single --bundle",
-            file=sys.stderr,
-        )
+        logger.error("--case-metadata may only be combined with a single --bundle")
         return 2
     n_ok = 0
     n_skip = 0
     for bundle in bundles:
         if not bundle.is_dir():
-            print(f"bundle not a directory: {bundle}", file=sys.stderr)
+            logger.warning("bundle not a directory: {path}", path=bundle)
             n_skip += 1
             continue
         outcome = _annotate_one_bundle(bundle, case_metadata_override=override)
@@ -489,12 +483,14 @@ def _cmd_annotate_case_outcome(args: argparse.Namespace) -> int:
             n_skip += 1
             continue
         n_ok += 1
-        print(
-            f"{bundle}: case_id={outcome['case_id']} "
-            f"composite={outcome['composite_score']:.3f} "
-            f"submission_seen={outcome['submission_seen']}"
+        logger.info(
+            "{bundle}: case_id={case_id} composite={composite:.3f} submission_seen={seen}",
+            bundle=bundle,
+            case_id=outcome["case_id"],
+            composite=outcome["composite_score"],
+            seen=outcome["submission_seen"],
         )
-    print(f"annotated={n_ok} skipped={n_skip}")
+    logger.info("annotated={ok} skipped={skip}", ok=n_ok, skip=n_skip)
     return 0 if n_skip == 0 else 1
 
 

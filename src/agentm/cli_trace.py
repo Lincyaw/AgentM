@@ -148,7 +148,8 @@ def _resolve_source(
                 3,
                 "not_found",
                 f"no *.jsonl files under {obs_dir}",
-                "run `agentm` once to produce a session log first",
+                "run `agentm` once to produce a session log, "
+                "or set AGENTM_CLICKHOUSE_URL for remote trace storage",
             )
         path = candidates[0]
     if not path.is_file():

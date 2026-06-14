@@ -46,13 +46,13 @@ import base64
 import json
 import os
 import shlex
-import sys
 import urllib.request
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -598,7 +598,7 @@ def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     issue_num = os.environ.get("WORKBUDDY_ISSUE_NUM")
     if not repo or not token:
-        print("WARNING: [agent_env_sync] WORKBUDDY_REPO or GH_TOKEN not set, skipping clone", file=sys.stderr)
+        logger.warning("[agent_env_sync] WORKBUDDY_REPO or GH_TOKEN not set, skipping clone")
         return
     clone_url = f"https://x-access-token:{token}@github.com/{repo}.git"
     branch = f"workbuddy/issue-{issue_num}" if issue_num else ""
@@ -625,7 +625,7 @@ def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
         f"echo '.agentm/' >> {work_dir}/.gitignore",
         work_dir,
     )
-    print(f"INFO: [agent_env_sync] cloned {repo} into {work_dir}", file=sys.stderr)
+    logger.info("[agent_env_sync] cloned {repo} into {work_dir}", repo=repo, work_dir=work_dir)
 
 def _inject_gh_token(session: Any, work_dir: str) -> None:
     """Make GH_TOKEN available in the sandbox so agents can use `gh` CLI."""
@@ -638,7 +638,7 @@ def _inject_gh_token(session: Any, work_dir: str) -> None:
         "chmod 644 /etc/profile.d/gh_token.sh"
     )
     _pod_exec(session, setup_cmd, work_dir)
-    print("INFO: [agent_env_sync] injected GH_TOKEN into sandbox", file=sys.stderr)
+    logger.info("[agent_env_sync] injected GH_TOKEN into sandbox")
 
 def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> None:
     """Upload SKILL.md files from ``AGENTM_SKILLS_DIR`` into the sandbox."""
@@ -663,16 +663,16 @@ def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> 
                         _upload_to_pod(gateway_url, session_id, target, fh.read())
                     count += 1
                 except Exception as exc:
-                    print(f"WARNING: [agent_env_sync] skill upload failed for {entry}: {exc}", file=sys.stderr)
+                    logger.warning("[agent_env_sync] skill upload failed for {entry}: {exc}", entry=entry, exc=exc)
         elif entry.endswith(".md") and os.path.isfile(entry_path):
             try:
                 with open(entry_path, "rb") as fh:
                     _upload_to_pod(gateway_url, session_id, f"{target_base}/{entry}", fh.read())
                 count += 1
             except Exception as exc:
-                print(f"WARNING: [agent_env_sync] skill upload failed for {entry}: {exc}", file=sys.stderr)
+                logger.warning("[agent_env_sync] skill upload failed for {entry}: {exc}", entry=entry, exc=exc)
     if count:
-        print(f"INFO: [agent_env_sync] uploaded {count} skill(s) to {target_base}/", file=sys.stderr)
+        logger.info("[agent_env_sync] uploaded {count} skill(s) to {target_base}/", count=count, target_base=target_base)
 
 def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     # Deferred import keeps the SDK truly optional — atoms that never run
