@@ -13,9 +13,11 @@ mechanism; every policy is a replaceable atom. Boundary contract in
 
 - `agentm -p "<prompt>"` — one-shot prompt (default scenario `local`).
 - `agentm` (no args) — show help and subcommand list.
-- `agentm trace …` — query the OTLP/JSON session log
-  (`messages` · `turns` · `tools` · `chats` · `info` · `index`); preferred
-  over hand-parsing `.agentm/observability/*.jsonl`.
+- `agentm trace …` — query session traces from ClickHouse (default
+  backend) or local JSONL. Subcommands: `messages` · `turns` · `tools` ·
+  `chats` · `info` · `index` · `spans` · `logs` · `stats` · `usage`.
+  Always use `agentm trace` to inspect trajectories — never hand-parse
+  JSONL or artifacts.
 - `agentm gateway --bind …` — single-process gateway subcommand: holds
   all chat sessions in memory and serves chat-client peers over the v2
   wire protocol (`.claude/designs/single-process-gateway.md`).
@@ -52,29 +54,17 @@ mechanism; every policy is a replaceable atom. Boundary contract in
 
 ### Trace debugging combos
 
-A logical trace spans many JSONL files — one root session + N spawned
-children (`purpose` distinguishes `root` / `cognitive_audit_extractor` /
-`cognitive_audit_auditor`). Composition pattern:
+Default backend is ClickHouse; traces are queryable by `--session <id>`
+across the full history. A logical trace spans multiple sessions — one
+root + N spawned children. Composition pattern:
 
-- `agentm trace index` is the **selection layer**: it scans the
-  observability dir and emits one identity row per session file
-  (`{path, trace_id, session_id, parent_session_id, purpose, scenario,
-  records}`). It maps a `trace_id` — the id `eval.db.evaluation_data.trace_id`
-  stores — to its session files. It's the **only** directory-granular verb;
-  every other verb stays single-file by design (`--file`/`--session`/`--latest`).
-- Idiom: `index --format ndjson | jq 'select(.trace_id==…)' | <loop per .path>
-  agentm trace {tools,messages,…} --file "$f" --format ndjson | jq …`.
-- Canonical example — extract auditor verdicts across one trace:
-
-  ```bash
-  TID=dfc09e403bd64ca59c01bfa805962526
-  agentm trace index --format ndjson \
-   | jq -r --arg t "$TID" 'select(.trace_id==$t and .purpose=="cognitive_audit_auditor")|.path' \
-   | while read f; do agentm trace tools --file "$f" --tool submit_verdict --format ndjson; done \
-   | jq -c '.args.verdict|{fired:.surface_reminder, reminder:.reminder_text}'
-  ```
-
-  Filtering is the consumer's job (jq) — `index` has no `--trace` flag.
+- `agentm trace index` — selection layer: emits one identity row per
+  session (`{session_id, trace_id, parent_session_id, purpose, scenario}`).
+- `agentm trace messages --session <id>` — full conversation trajectory.
+- `agentm trace tools --session <id> [--tool <name>]` — tool calls with
+  args + results joined.
+- Idiom: find a child session from the workflow delivery artifact, then
+  `agentm trace tools --session <child_id> --format ndjson | jq …`.
 
 ## Repo exploration
 

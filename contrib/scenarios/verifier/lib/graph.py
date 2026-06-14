@@ -1,10 +1,11 @@
-"""Phase 0: relationship graph building from traces and metrics."""
+"""Relationship graph building from traces and metrics."""
 from __future__ import annotations
 
-import os
 import re
 from collections import defaultdict
 from pathlib import Path
+
+from . import duckdb_conn
 
 SYNTHETIC = {
     "loadgenerator", "locust", "wrk2", "dsb-wrk2", "k6",
@@ -13,22 +14,13 @@ SYNTHETIC = {
 
 Rel = tuple[str, str, str]  # (service_a, service_b, rel_type)
 
-# Uninstrumented backing components (DB / cache / broker) emit no spans
-# of their own, so they never appear as a trace ``service_name`` — only
-# in metrics. A node present in metrics but absent from traces in BOTH
-# windows is infra; a node absent from *abnormal* traces only is a
-# crashed-but-instrumented service (e.g. a PodFailure'd app), not infra.
 _DB_INFRA = re.compile(r"mysql|mariadb|postgres|sqlserver|oracle|cockroach", re.I)
-# Known uninstrumented backing components. A metrics-only node is treated as
-# infra only if its name matches one of these — otherwise a real but idle
-# (un-exercised in this case) service would be mislabelled as infra.
 _INFRA_NAME = re.compile(
     r"mysql|mariadb|postgres|sqlserver|oracle|cockroach|mongo|redis|"
     r"memcached|rabbitmq|kafka|consul|etcd|zookeeper|nacos|elasticsearch|"
     r"cassandra|clickhouse|minio",
     re.I,
 )
-# SQL/ORM client span-name shapes that mark a span as a database call.
 _DBOP_SPAN_SQL = (
     "(span_name LIKE 'SELECT%' OR span_name LIKE 'INSERT%' "
     "OR span_name LIKE 'UPDATE%' OR span_name LIKE 'DELETE%' "
@@ -37,32 +29,9 @@ _DBOP_SPAN_SQL = (
 )
 
 
-def _duckdb_conn(data_dir: Path):  # noqa: ANN202
-    import duckdb
-
-    conn = duckdb.connect(":memory:")
-    _cap = os.environ.get("AGENTM_DUCKDB_THREADS")
-    if _cap:
-        try:
-            conn.execute(f"SET threads={max(1, int(_cap))}")
-        except (ValueError, duckdb.Error):
-            pass
-    for f in sorted(data_dir.iterdir()):
-        if f.is_file() and f.suffix == ".parquet" and f.name != "conclusion.parquet":
-            conn.execute(
-                f"CREATE VIEW {f.stem} AS "
-                f"SELECT * FROM read_parquet('{f.as_posix()}')"
-            )
-    return conn
-
-
 def get_relationships(data_dir: Path) -> list[Rel]:
-    """Build bidirectional relationship list from call graph + deployment.
-
-    Uses the UNION of normal and abnormal windows so that edges only
-    visible in one window (e.g. a short normal capture) are not lost.
-    """
-    conn = _duckdb_conn(data_dir)
+    """Build bidirectional relationship list from call graph + deployment."""
+    conn = duckdb_conn(data_dir)
     rels: list[Rel] = []
 
     rows = conn.execute(
@@ -118,7 +87,7 @@ def get_relationships(data_dir: Path) -> list[Rel]:
     return rels
 
 
-def _build_neighbor_graph(
+def build_neighbor_graph(
     rels: list[Rel],
 ) -> dict[str, list[tuple[str, str]]]:
     """Return ``{service: [(neighbour, rel_type)]}``."""
@@ -137,19 +106,15 @@ def _trace_services(conn) -> set[str]:  # noqa: ANN001
     for tbl in ("normal_traces", "abnormal_traces"):
         try:
             rows = conn.execute(f"SELECT DISTINCT service_name FROM {tbl}").fetchall()
-        except Exception:  # noqa: BLE001 - table may be absent
+        except Exception:  # noqa: BLE001
             continue
         out.update(r[0] for r in rows if r[0])
     return out
 
 
 def get_infra_nodes(data_dir: Path) -> set[str]:
-    """Backing components present in metrics but never in traces.
-
-    These are the nodes the trace-only relationship graph is structurally
-    blind to (``mysql``, ``rabbitmq``, ``mongodb-*``, ``memcached-*`` …).
-    """
-    conn = _duckdb_conn(data_dir)
+    """Backing components present in metrics but never in traces."""
+    conn = duckdb_conn(data_dir)
     try:
         metric_svcs = {
             r[0]
@@ -171,16 +136,10 @@ def get_infra_nodes(data_dir: Path) -> set[str]:
 
 
 def get_infra_edges(data_dir: Path, infra_nodes: set[str]) -> list[Rel]:
-    """Link each infra node to the services that depend on it.
-
-    SQL databases are linked from every service emitting Client DB-op
-    spans (the DB call lives inside the *caller*). Named per-service
-    backends (``mongodb-profile``, ``memcached-rate-1``) are linked to the
-    service whose name is a token of the backend name.
-    """
+    """Link each infra node to the services that depend on it."""
     if not infra_nodes:
         return []
-    conn = _duckdb_conn(data_dir)
+    conn = duckdb_conn(data_dir)
     rels: list[Rel] = []
 
     db_callers: list[str] = []
@@ -204,7 +163,6 @@ def get_infra_edges(data_dir: Path, infra_nodes: set[str]) -> list[Rel]:
         if _DB_INFRA.search(node):
             callers = db_callers
         else:
-            # mongodb-profile / memcached-rate-1 -> match the owning service
             tokens = set(node.replace("_", "-").split("-"))
             callers = [s for s in trace_svcs if s in tokens or s in node]
         for svc in callers:
@@ -213,78 +171,11 @@ def get_infra_edges(data_dir: Path, infra_nodes: set[str]) -> list[Rel]:
     return rels
 
 
-def get_node_map(data_dir: Path) -> dict[str, str]:
-    """Return ``{service_name: k8s_node_name}`` from metrics."""
-    conn = _duckdb_conn(data_dir)
-    try:
-        rows = conn.execute(
-            "SELECT DISTINCT service_name, \"attr.k8s.node.name\" "
-            "FROM normal_metrics "
-            "WHERE service_name IS NOT NULL AND service_name <> '' "
-            "  AND \"attr.k8s.node.name\" IS NOT NULL"
-        ).fetchall()
-    except Exception:  # noqa: BLE001
-        conn.close()
-        return {}
-    conn.close()
-    return {svc: node for svc, node in rows}
-
-
-def check_node_degraded(data_dir: Path, node_name: str) -> bool:
-    """Quick check: does this k8s node show CPU or memory degradation?
-
-    Compares average CPU/memory usage between normal and abnormal windows.
-    Returns True if degradation exceeds 20%, meaning co_deployed services
-    on this node may be genuinely affected.
-    """
-    conn = _duckdb_conn(data_dir)
-    try:
-        rows = conn.execute(
-            "SELECT 'normal' AS win, "
-            "  AVG(CASE WHEN metric_name LIKE '%cpu%' THEN value END), "
-            "  AVG(CASE WHEN metric_name LIKE '%memory%' THEN value END) "
-            "FROM normal_metrics "
-            "WHERE \"attr.k8s.node.name\" = ? "
-            "UNION ALL "
-            "SELECT 'abnormal', "
-            "  AVG(CASE WHEN metric_name LIKE '%cpu%' THEN value END), "
-            "  AVG(CASE WHEN metric_name LIKE '%memory%' THEN value END) "
-            "FROM abnormal_metrics "
-            "WHERE \"attr.k8s.node.name\" = ?",
-            [node_name, node_name],
-        ).fetchall()
-    except Exception:  # noqa: BLE001
-        conn.close()
-        return True  # err on the side of checking
-    conn.close()
-
-    if len(rows) != 2:
-        return True
-    normal_cpu, normal_mem = rows[0][1], rows[0][2]
-    abnormal_cpu, abnormal_mem = rows[1][1], rows[1][2]
-
-    threshold = 1.2  # 20% increase
-    if normal_cpu and abnormal_cpu and abnormal_cpu > normal_cpu * threshold:
-        return True
-    if normal_mem and abnormal_mem and abnormal_mem > normal_mem * threshold:
-        return True
-    return False
-
-
 def profile_dataset(
     data_dir: Path, max_distinct: int = 25,
 ) -> dict[str, dict[str, object]]:
-    """Mechanical dataset profile: per table pair, the column list plus
-    normal-vs-abnormal value distributions of every low-cardinality column.
-
-    Hop agents receive this in their prompt so that discovering WHERE a
-    signal lives (which column carries error status, what level values
-    logs use, which metrics exist) is deterministic harness work, not
-    something an LLM must remember to do. High-cardinality content
-    (message text, ids, timestamps, durations) is excluded by the
-    cardinality threshold itself.
-    """
-    conn = _duckdb_conn(data_dir)
+    """Column profiles + low-cardinality value distributions per table pair."""
+    conn = duckdb_conn(data_dir)
     tables = {
         f.stem for f in data_dir.iterdir()
         if f.suffix == ".parquet" and f.name != "conclusion.parquet"
@@ -330,17 +221,10 @@ def profile_dataset(
 def vanished_endpoints(
     data_dir: Path, services: list[str], min_normal: int = 5,
 ) -> dict[str, list[dict[str, object]]]:
-    """Per service: endpoints (span_name) present in the normal window
-    (>= min_normal spans) but entirely absent from the abnormal window.
-
-    Mechanical pre-computation for the judge's fault-path
-    flow-disappearance review: which user-flow endpoints vanished is a
-    fact the harness extracts deterministically; whether a vanished
-    endpoint's chain leads to the fault stays the judge's call.
-    """
+    """Endpoints present in normal window but absent from abnormal."""
     if not services:
         return {}
-    conn = _duckdb_conn(data_dir)
+    conn = duckdb_conn(data_dir)
     out: dict[str, list[dict[str, object]]] = {}
     for svc in services:
         try:

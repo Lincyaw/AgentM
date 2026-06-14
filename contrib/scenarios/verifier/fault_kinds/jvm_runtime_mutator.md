@@ -37,8 +37,29 @@ signature.
 
 ## When it did NOT materialise
 If the mutated method is never exercised during the abnormal
-window, or the mutated value is never consumed by a code path that
-matters, the injection has no visible effect.
+window AND the service's traffic is otherwise normal (similar span
+count, no flow disappearance), the injection has no visible effect.
+
+### Traffic vanishing IS the mutation's effect
+A common pattern: the target's span count drops from hundreds to
+zero in the abnormal window, yet the service is still running
+(resource metrics present, CPU near-idle). The seed agent must NOT
+conclude "method never invoked, mutation had no effect." Instead:
+
+1. Check whether the target service is alive (resource metrics
+   present in abnormal window).
+2. If alive but zero spans: the mutation likely took effect on
+   earlier calls, broke the outbound path (mutated URL → 404),
+   and upstream callers stopped sending requests after discovering
+   the flow is broken.
+3. Corroborate: does the entire call chain downstream of the
+   mutated method also show zero spans? (e.g. if the mutation is
+   on a food-service endpoint, do food-related services system-wide
+   go to zero?) If yes, the mutation caused a flow-level collapse
+   — confirm with predicate `data_corrupted` or `flow_interrupted`.
+
+The zero-traffic pattern is the mutation's SIGNATURE, not evidence
+of a non-effective injection.
 
 ## How to observe on a neighbour
 The mutation affects a specific call path, so the signal on a

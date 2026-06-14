@@ -12,72 +12,67 @@
 # auto-injected by the fpg factory as the escape hatch.
 
 name = "microservices"
-version = "0.3.0"
+version = "0.4.0"
 extends = "core"
 
 # --- node predicates ----------------------------------------------------------
-# Failure modes a service can exhibit. Injection seeds get one mapped
-# deterministically from the chaos type (CHAOS_PREDICATE in
-# eval/fpg_mapping.py); propagated services get the one the hop agent
-# classified from its own evidence.
+# Failure modes a service can exhibit. Organised in three layers:
+#
+#   Resource / environment — what physically happened (typical on seeds)
+#   Application behaviour  — what the service's responses look like
+#   Propagation effect     — patterns that emerge across the dependency chain
 
-[node_predicates.cpu_saturation]
-brief = "CPU saturated (stress injection or runaway consumption)"
+# -- Resource / environment layer --
 
-[node_predicates.memory_exhaustion]
-brief = "Memory exhausted (OOM pressure, heap stress)"
-
-[node_predicates.gc_pressure]
-brief = "JVM garbage-collection pressure: pause storms stalling request handling"
-
-[node_predicates.network_degraded]
-brief = "Network quality degraded (delay/loss/corrupt/duplicate/bandwidth limit)"
+[node_predicates.process_killed]
+brief = "Service process terminated, not running"
 
 [node_predicates.network_partitioned]
-brief = "Network partition isolates the service from peers"
+brief = "Process running but network completely severed"
 
-[node_predicates.service_unavailable]
-brief = "Service unavailable (pod killed/unschedulable): span volume drops — partially or to zero — with tail latency exploding to seconds and connection errors"
+[node_predicates.network_degraded]
+brief = "Network path quality reduced (added delay, packet loss, corruption, bandwidth limit)"
 
-[node_predicates.latency_degradation]
-brief = "Request latency degraded, including tail (p9x) blowup"
+[node_predicates.cpu_saturated]
+brief = "CPU fully consumed, all request handling starved"
 
-[node_predicates.error_rate_increase]
-brief = "Error rate elevated: failed calls, timeouts, 5xx, exceptions"
+[node_predicates.memory_exhausted]
+brief = "Memory under sustained pressure or OOM"
 
-[node_predicates.response_corruption]
-brief = "Responses carry wrong/mutated data (body bytes or method output) without necessarily erroring"
+[node_predicates.gc_pressure]
+brief = "GC storms causing repeated stop-the-world pauses"
 
-[node_predicates.semantic_corruption]
-brief = "Silently produces wrong values in responses or outbound requests (mutated constants/URLs, null/empty returns); no errors, no crash, latency may even drop"
+[node_predicates.dns_broken]
+brief = "DNS resolution fails or returns wrong addresses"
 
-[node_predicates.dns_resolution_failure]
-brief = "DNS resolution fails or returns wrong addresses (observable as resolve errors, or outbound connection errors/timeouts when addresses are wrong)"
+[node_predicates.clock_skewed]
+brief = "System clock offset relative to the cluster"
 
-[node_predicates.clock_skew]
-brief = "System clock skewed relative to the rest of the cluster"
+# -- Application behaviour layer --
 
-[node_predicates.connection_pool_exhausted]
-brief = "DB/HTTP connection pool fully occupied; requests queue or fail (e.g. hikaricp pending)"
+[node_predicates.latency_degraded]
+brief = "Specific request paths slow, local resources normal"
 
-[node_predicates.thread_pool_exhausted]
-brief = "Worker thread pool saturated (e.g. tomcat busy == max); requests queue"
+[node_predicates.error_rate_elevated]
+brief = "Error rate higher than normal (timeouts, connection refused, exceptions)"
 
-[node_predicates.traffic_amplification]
-brief = "Abnormal request volume surge on this service (retry storms, failover stampede)"
+[node_predicates.data_corrupted]
+brief = "Output data incorrect without explicit errors"
+
+# -- Propagation effect layer --
 
 [node_predicates.flow_interrupted]
-brief = "A user-facing request flow stops completing: fault-path endpoints lose their spans entirely while sibling endpoints stay healthy (surfaces at entry/aggregator services)"
+brief = "A specific request path through this service stopped; other endpoints healthy"
 
-[node_predicates.throughput_collapse]
-brief = "Throughput collapses as part of a system-wide cascade (judge-confirmed unavailability)"
+[node_predicates.resource_pool_exhausted]
+brief = "Thread or connection pool fully occupied; all endpoints slow despite normal CPU/memory"
 
-[node_predicates.service_degraded]
-brief = "Genuine degradation confirmed but not classifiable into a finer predicate; see evidence"
+[node_predicates.traffic_amplification]
+brief = "Abnormal request volume surge (retry storms, failover stampede)"
 
 # --- edge mechanisms ----------------------------------------------------------
 # Mapped deterministically from the relationship type of the verified
-# edge (REL_MECHANISM in eval/fpg_mapping.py).
+# edge (REL_MECHANISM in lib/fpg.py).
 
 [edge_mechanisms.sync_call_blocking]
 brief = "Degraded callee blocks its callers through synchronous calls (callee -> caller)"
