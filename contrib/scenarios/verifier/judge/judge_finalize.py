@@ -67,14 +67,42 @@ class JudgePromotion(BaseModel):
     )
 
 
+class JudgeReEval(BaseModel):
+    """Request re-evaluation of an edge with global context."""
+
+    model_config = _STRICT
+    service: str = Field(
+        description="The inconclusive/rejected service to re-evaluate."
+    )
+    via_service: str = Field(
+        description="The confirmed upstream service this edge comes from."
+    )
+    context: str = Field(
+        description="Global context to provide the hop agent on re-evaluation. "
+        "Explain WHY its prior verdict may be wrong given the full graph "
+        "(e.g. 'all upstream services on the path to this service are "
+        "confirmed dead — zero traffic is expected cascade, not just fewer "
+        "calls')."
+    )
+
+
 class JudgeReview(BaseModel):
-    """Whole-graph review verdict (promotion-only)."""
+    """Whole-graph review verdict."""
 
     model_config = _STRICT
     add: list[JudgePromotion] = Field(
-        description="Currently-rejected services to PROMOTE — genuinely "
-        "degraded on full-picture review (e.g. system-wide cascade "
-        "unavailability). Empty if none."
+        description="Services to PROMOTE directly — you have enough "
+        "evidence from the global view to confirm them without "
+        "re-investigation (e.g. system-wide cascade unavailability). "
+        "Empty if none."
+    )
+    re_evaluate: list[JudgeReEval] = Field(
+        default_factory=list,
+        description="Inconclusive or rejected edges to send BACK to a hop "
+        "agent for re-investigation with your global context. Use when "
+        "you believe the prior verdict is wrong but want the hop agent "
+        "to verify with data queries. Prefer this over direct promotion "
+        "when the evidence needs re-examination.",
     )
     suggested_remove: list[str] = Field(
         default_factory=list,
@@ -83,8 +111,8 @@ class JudgeReview(BaseModel):
         "authoritative. Empty if none.",
     )
     rationale: str = Field(
-        description="Per-service justification for each add/suggestion, "
-        "citing data."
+        description="Per-service justification for each add/re_evaluate/"
+        "suggestion, citing data."
     )
 
 
@@ -117,11 +145,11 @@ def install(api: ExtensionAPI, config: JudgeFinalizeConfig) -> None:
         FunctionTool(
             name="submit_judge_review",
             description=(
-                "Submit your whole-graph review. Promotion-only: each "
-                "entry in `add` names a rejected service, the confirmed "
-                "upstream it cascades through (via_service), and the "
-                "failure mode it exhibits. `suggested_remove` is "
-                "audit-only and not applied."
+                "Submit your whole-graph review. `add` promotes services "
+                "directly. `re_evaluate` sends edges back to hop agents "
+                "with your global context for re-investigation (preferred "
+                "when evidence needs re-examination). `suggested_remove` "
+                "is audit-only and not applied."
             ),
             parameters=JudgeReview,
             fn=_submit_judge,

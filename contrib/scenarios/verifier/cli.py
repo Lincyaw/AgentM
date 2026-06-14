@@ -251,6 +251,7 @@ def run_judge(
         "rounds": result.get("rounds", 0),
         "verdicts": result.get("verdicts", {}),
         "judge": result.get("judge") or {},
+        "judge_rounds": result.get("judge_rounds", []),
     })
     meta_path.write_text(
         json.dumps(run_meta, indent=2, ensure_ascii=False) + "\n"
@@ -339,7 +340,7 @@ def run_one_case(
         "fault_docs": fault_docs,
         "budget": budget,
         "out_dir": str(out),
-        "skip_judge": True,
+        "skip_judge": False,
         "window": meta["window"],
         "seed_nodes": seed_nodes,
         "rel_mechanism": dict(REL_MECHANISM),
@@ -352,11 +353,16 @@ def run_one_case(
     (out / "fpg_scenario.json").write_text(
         json.dumps(scenario, indent=2, ensure_ascii=False) + "\n"
     )
-    (out / "run_meta.json").write_text(json.dumps({
+    run_meta: dict[str, Any] = {
         "hop_log": result.get("hop_log", []),
         "rounds": result.get("rounds", 0),
         "verdicts": result.get("verdicts", {}),
-    }, indent=2, ensure_ascii=False, default=str) + "\n")
+    }
+    if result.get("judge_rounds"):
+        run_meta["judge_rounds"] = result["judge_rounds"]
+    (out / "run_meta.json").write_text(
+        json.dumps(run_meta, indent=2, ensure_ascii=False, default=str) + "\n"
+    )
 
     seeds = [i["target"] for i in injections]
     confirmed = [n["id"] for n in result["nodes"]]

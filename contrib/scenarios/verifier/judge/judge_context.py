@@ -63,6 +63,7 @@ class JudgeContextConfig(BaseModel):
 
     injections: list[InjectionInfo]
     confirmed: list[str]
+    inconclusive_verdicts: list[TargetVerdict] = Field(default_factory=list)
     rejected_verdicts: list[TargetVerdict] = Field(default_factory=list)
     throughput: ThroughputSummary = Field(default_factory=ThroughputSummary)
     seeds: list[str] = Field(default_factory=list)
@@ -122,6 +123,7 @@ def _format_dataset_profile(profile: dict[str, TableProfile]) -> str:
 def _build_judge_prompt(
     injections: list[InjectionInfo],
     confirmed: list[str],
+    inconclusive_verdicts: list[TargetVerdict],
     rejected_verdicts: list[TargetVerdict],
     throughput: ThroughputSummary,
     seeds: set[str],
@@ -157,6 +159,12 @@ def _build_judge_prompt(
             f"    evidence: {_ev_claims(s) or '(none)'}"
         )
     confirmed_block = "\n".join(confirmed_lines) or "(none)"
+
+    inconclusive_lines = [
+        f"- {v.from_service} → {v.to}: {v.rationale}"
+        for v in inconclusive_verdicts
+    ]
+    inconclusive_block = "\n".join(inconclusive_lines) or "(none)"
 
     rejected_lines = [
         f"- {v.from_service} → {v.to}: {v.rationale}"
@@ -207,10 +215,13 @@ Review the fault-propagation graph built by independent hop agents.
 are valid `via_service` anchors ({len(confirmed_nonseed) + len(seeds & set(confirmed))})
 {confirmed_block}
 
-## Rejected services — your review targets ({len(rejected_lines)})
+## Inconclusive edges — hop agents could not decide ({len(inconclusive_lines)})
+{inconclusive_block}
+
+## Rejected services — review for suspicious rejections ({len(rejected_lines)})
 {rejected_block}
 
-## The two global patterns you promote for
+## Global patterns to look for
 Hop agents judge one edge at a time from the target's OWN aggregate
 signals; two genuine degradation patterns are invisible at that zoom:
 
@@ -236,21 +247,23 @@ signals; two genuine degradation patterns are invisible at that zoom:
    load shift), it does not weaken it.
 
 ## Decide
-- Promotions are NOT removals: the per-edge analysis is authoritative
-  for what is degraded; you only ADD what no single edge could see.
+- **Confirmations are final** — you only ADD or RE-EVALUATE.
   (`suggested_remove` is audit-only and never applied.)
-- Verify with `list_tables` / `query_sql` before promoting; state
-  latencies in ms/s (duration is nanoseconds).
-- Every promotion must name `via_service`: the CONFIRMED upstream
-  whose path reaches it — usually the `from` side of its rejected
-  verdict above; **injection seeds are valid anchors**. Promotions may
-  chain: list them upstream-first, and a service earlier in your
-  `add` list can anchor a later one. Use a `predicate` of typically
-  service_unavailable or throughput_collapse for cascades,
-  flow_interrupted for fault-path flow disappearance.
+- **`re_evaluate`** (PREFERRED): send inconclusive or suspiciously-
+  rejected edges back to a hop agent with your global context. The
+  hop agent will re-query data and make the final call. Provide a
+  clear `context` explaining what to reconsider (e.g. "upstream
+  ts-food-service is confirmed dead with URL mutation — zero spans on
+  ts-preserve-service is expected cascade, not just fewer calls.
+  Check the specific endpoint that routes through ts-food-service.").
+- **`add`** (direct promotion): use only when you have enough
+  global evidence without needing re-investigation (e.g. system-wide
+  cascade with load-gen throughput collapse > 80%).
+- Every `add` must name `via_service` and `predicate`. Every
+  `re_evaluate` must name `via_service` and `context`.
+- Verify with `list_tables` / `query_sql` before deciding.
 
-Many reviews add nothing — promote only what you verified. Call
-`submit_judge_review` with `add` (possibly empty) plus `rationale`.
+Call `submit_judge_review` with your decisions.
 """
 
 # ---------------------------------------------------------------
@@ -268,6 +281,7 @@ def install(api: ExtensionAPI, config: JudgeContextConfig) -> None:
     context = _build_judge_prompt(
         injections=config.injections,
         confirmed=config.confirmed,
+        inconclusive_verdicts=config.inconclusive_verdicts,
         rejected_verdicts=config.rejected_verdicts,
         throughput=config.throughput,
         seeds=seeds,

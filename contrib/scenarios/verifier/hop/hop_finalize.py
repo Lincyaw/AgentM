@@ -49,9 +49,12 @@ _STRICT: Final = ConfigDict(extra="forbid")
 
 class HopVerdict(BaseModel):
     model_config = _STRICT
-    verdict: Literal["confirmed", "rejected"] = Field(
+    verdict: Literal["confirmed", "rejected", "inconclusive"] = Field(
         description="confirmed = service is genuinely degraded by the upstream fault; "
-        "rejected = no genuine degradation found."
+        "rejected = no genuine degradation found after thorough investigation; "
+        "inconclusive = ambiguous signal that requires global context to resolve "
+        "(e.g. zero traffic where you cannot tell if the service is down vs simply "
+        "not receiving requests due to upstream failure)."
     )
     predicate: NodePredicate | None = Field(  # type: ignore[valid-type]
         default=None,
@@ -65,7 +68,7 @@ class HopVerdict(BaseModel):
         description="Re-executable evidence: each item is a DuckDB SQL "
         "statement (query.language='sql') comparing normal vs abnormal "
         "windows, plus an explanation of what the result shows. Include "
-        "the queries you ran even for rejected verdicts."
+        "the queries you ran even for rejected/inconclusive verdicts."
     )
     relationship: Evidence | None = Field(
         default=None,
