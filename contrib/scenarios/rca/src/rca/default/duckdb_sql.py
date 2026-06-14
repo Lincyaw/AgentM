@@ -141,19 +141,13 @@ def _estimate_tokens(text: str) -> int:
     # Cheap heuristic; close enough for budget enforcement.
     return (len(text) + 2) // 3
 
-def _truncate(payload: str, *, token_limit: int, rows: list[dict[str, Any]]) -> str:
-    if _estimate_tokens(payload) <= token_limit:
-        return payload
-    ratio = token_limit / max(1, _estimate_tokens(payload))
-    keep = max(1, int(len(rows) * ratio * 0.8))
-    out: dict[str, Any] = {
-        "_truncated": True,
-        "_total_rows": len(rows),
-        "_rows_returned": keep,
-        "_suggestion": "Add WHERE filters, narrower time range, or a smaller LIMIT.",
-        "rows": rows[:keep],
-    }
-    return json.dumps(out, ensure_ascii=False, default=str)
+def _format_value(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, dict | list):
+        return json.dumps(v, ensure_ascii=False, default=str).replace("\t", " ")
+    s = str(v)
+    return s.replace("\t", " ").replace("\n", " ").replace("\r", "")
 
 def _ok(text: str, *, is_error: bool = False) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=is_error)
@@ -164,19 +158,22 @@ def _err(msg: str, **extra: Any) -> ToolResult:
 def _rows_to_result(
     rows: list[dict[str, Any]], cols: list[str], *, token_limit: int
 ) -> ToolResult:
-    """Shape result rows into the agent-facing ``ToolResult``.
-
-    The single pipeline shared by local and remote ``query_sql`` so both
-    modes emit byte-identical output: id-compaction → JSON body →
-    token-budget truncation.
-    """
+    """Shape result rows into the agent-facing ``ToolResult`` as TSV."""
     rows = _compact_ids(rows, cols)
-    body = json.dumps(
-        {"row_count": len(rows), "rows": rows},
-        ensure_ascii=False,
-        default=str,
-    )
-    return _ok(_truncate(body, token_limit=token_limit, rows=rows))
+    if not rows:
+        return _ok("(0 rows)")
+    header = "\t".join(cols)
+    data_lines = [
+        "\t".join(_format_value(row.get(c)) for c in cols) for row in rows
+    ]
+    tsv = header + "\n" + "\n".join(data_lines)
+    if _estimate_tokens(tsv) <= token_limit:
+        return _ok(tsv)
+    ratio = token_limit / max(1, _estimate_tokens(tsv))
+    keep = max(1, int(len(rows) * ratio * 0.8))
+    result = header + "\n" + "\n".join(data_lines[:keep])
+    result += f"\n({len(rows)} total, {keep} shown. Add WHERE filters or smaller LIMIT.)"
+    return _ok(result)
 
 def _table_name(filename: str) -> str:
     return Path(filename).stem
@@ -511,13 +508,16 @@ def _build_local_handlers(
             tables = state.describe()
         except (duckdb.Error, OSError) as exc:
             return _err(f"list_tables failed: {exc}")
-        payload = json.dumps(
-            {"data_dir": str(state.data_dir), "tables": tables},
-            ensure_ascii=False,
-            default=str,
-            indent=2,
-        )
-        return _ok(payload)
+        lines: list[str] = []
+        for t in tables:
+            if "error" in t:
+                lines.append(f"{t['table']}: error: {t['error']}")
+                continue
+            cols_str = ", ".join(
+                f"{c['name']} {c['type']}" for c in t["columns"]
+            )
+            lines.append(f"{t['table']} ({t['row_count']} rows)\n  {cols_str}")
+        return _ok("\n\n".join(lines))
 
     async def _query(args: dict[str, Any]) -> ToolResult:
         validated = _validate_sql(str(args.get("sql", "")))
@@ -631,9 +631,7 @@ def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
         if isinstance(fetched, ToolResult):
             return fetched
         rows, _cols = fetched
-        # Flat (table_name, column_name, data_type) → grouped tables; order
-        # preserved (server already ORDER BY table_name, ordinal_position).
-        tables: dict[str, list[dict[str, Any]]] = {}
+        tables: dict[str, list[str]] = {}
         order: list[str] = []
         for r in rows:
             name = r.get("table_name")
@@ -642,19 +640,11 @@ def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
             if name not in tables:
                 tables[name] = []
                 order.append(name)
-            tables[name].append(
-                {"name": r.get("column_name"), "type": r.get("data_type")}
-            )
-        payload = json.dumps(
-            {
-                "data_dir": state.handle,
-                "tables": [{"table": t, "columns": tables[t]} for t in order],
-            },
-            ensure_ascii=False,
-            default=str,
-            indent=2,
-        )
-        return _ok(payload)
+            tables[name].append(f"{r.get('column_name')} {r.get('data_type')}")
+        lines: list[str] = []
+        for t in order:
+            lines.append(f"{t}\n  {', '.join(tables[t])}")
+        return _ok("\n\n".join(lines))
 
     async def _query(args: dict[str, Any]) -> ToolResult:
         validated = _validate_sql(str(args.get("sql", "")))
