@@ -8,3 +8,11 @@ extensions:
     config:
       include_defaults: false
       inherit_claude: false
+  - module: rca.default.preload_skills
+    config:
+      skills:
+        - SKILL
+        - traces
+        - logs
+        - metrics
+        - correlation

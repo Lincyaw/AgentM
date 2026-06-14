@@ -97,26 +97,49 @@ def resolve_session(
 # ---------------------------------------------------------------------------
 
 
-def index(url: str) -> Iterator[dict[str, Any]]:
+def index(
+    url: str,
+    *,
+    trace_id: str | None = None,
+    purposes: set[str] | None = None,
+    scenarios: set[str] | None = None,
+    roots_only: bool = False,
+    children_of: str | None = None,
+) -> Iterator[dict[str, Any]]:
     """Session topology — one row per ``session.start``."""
-    for r in _query(
-        url,
+    where = ["EventName = 'agentm.session.start'"]
+    params: dict[str, str] = {}
+    if trace_id is not None:
+        where.append("LogAttributes['agentm.session.root_id'] = {tid:String}")
+        params["tid"] = trace_id
+    if roots_only:
+        where.append("LogAttributes['agentm.session.parent_id'] = ''")
+    if children_of is not None:
+        where.append("LogAttributes['agentm.session.parent_id'] = {parent:String}")
+        params["parent"] = children_of
+    sql = (
         "SELECT "
         "  LogAttributes['agentm.session.id']        AS session_id, "
         "  LogAttributes['agentm.session.root_id']    AS trace_id, "
         "  LogAttributes['agentm.session.parent_id']  AS parent_session_id, "
         "  LogAttributes['agentm.session.purpose']    AS purpose, "
         "  LogAttributes['agentm.session.scenario']   AS scenario "
-        "FROM otel_logs "
-        "WHERE EventName = 'agentm.session.start' "
-        "ORDER BY Timestamp",
-    ):
+        f"FROM otel_logs WHERE {' AND '.join(where)} "
+        "ORDER BY Timestamp"
+    )
+    for r in _query(url, sql, params):
+        purpose = r["purpose"] or None
+        scenario = r["scenario"] or None
+        if purposes and purpose not in purposes:
+            continue
+        if scenarios and scenario not in scenarios:
+            continue
         yield {
             "session_id": r["session_id"] or None,
             "trace_id": r["trace_id"] or None,
             "parent_session_id": r["parent_session_id"] or None,
-            "purpose": r["purpose"] or None,
-            "scenario": r["scenario"] or None,
+            "purpose": purpose,
+            "scenario": scenario,
             "records": None,
         }
 

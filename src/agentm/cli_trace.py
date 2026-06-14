@@ -1490,6 +1490,35 @@ def _save_index_cache(obs_dir: Path, cache: dict[str, Any]) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _index_filter(
+    rows: Iterable[dict[str, Any]],
+    *,
+    trace_id: str | None,
+    purposes: set[str],
+    scenarios: set[str],
+    roots_only: bool,
+    children_of: str | None,
+    min_records: int | None,
+) -> Iterator[dict[str, Any]]:
+    """Apply index filters to a stream of identity rows."""
+    for row in rows:
+        if trace_id is not None and row.get("trace_id") != trace_id:
+            continue
+        if purposes and row.get("purpose") not in purposes:
+            continue
+        if scenarios and row.get("scenario") not in scenarios:
+            continue
+        if roots_only and row.get("parent_session_id") is not None:
+            continue
+        if children_of is not None and row.get("parent_session_id") != children_of:
+            continue
+        if min_records is not None:
+            rc = row.get("records")
+            if rc is not None and rc < min_records:
+                continue
+        yield row
+
+
 @app.command("index")
 def index_cmd(
     cwd: CwdOpt = Path("."),
@@ -1498,6 +1527,48 @@ def index_cmd(
         typer.Option(
             "--dir",
             help="Observability directory to scan (default <cwd>/.agentm/observability/).",
+        ),
+    ] = None,
+    trace_id: Annotated[
+        str | None,
+        typer.Option(
+            "--trace",
+            help="Filter by trace_id (exact match).",
+        ),
+    ] = None,
+    purpose: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--purpose",
+            help="Filter by purpose (repeatable, e.g. root / cognitive_audit_extractor).",
+        ),
+    ] = None,
+    scenario: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--scenario",
+            help="Filter by scenario name (repeatable).",
+        ),
+    ] = None,
+    roots_only: Annotated[
+        bool,
+        typer.Option(
+            "--roots-only",
+            help="Only show root sessions (no parent).",
+        ),
+    ] = False,
+    children_of: Annotated[
+        str | None,
+        typer.Option(
+            "--children-of",
+            help="Only show sessions whose parent_session_id matches this value.",
+        ),
+    ] = None,
+    min_records: Annotated[
+        int | None,
+        typer.Option(
+            "--min-records",
+            help="Only show sessions with at least N records.",
         ),
     ] = None,
     limit: LimitOpt = None,
@@ -1525,7 +1596,7 @@ def index_cmd(
     directory-granular verb: it scans the observability dir and emits one
     identity row per ``agentm.session.start`` file, so jq + shell can go
     from a ``trace_id`` to its session files. Files with no session.start
-    record are skipped. Filtering is the consumer's job — pipe through jq.
+    record are skipped.
 
     Results are cached in ``.trace_index_cache.json`` inside the
     observability directory. Only new or modified files are re-scanned on
@@ -1536,9 +1607,18 @@ def index_cmd(
 
     Examples:
 
-      agentm trace index --format ndjson | jq 'select(.trace_id=="…")'
+      agentm trace index --trace abc123
+      agentm trace index --roots-only --scenario rca
+      agentm trace index --children-of abc123 --purpose cognitive_audit_auditor
+      agentm trace index --min-records 10 --format ndjson
       agentm trace index --dir /path/to/.agentm/observability --format text
     """
+
+    if roots_only and children_of is not None:
+        _fail(2, "argument", "--roots-only and --children-of are mutually exclusive")
+
+    purposes = set(purpose or [])
+    scenarios = set(scenario or [])
 
     sink, close = _open_output(out)
     try:
@@ -1558,8 +1638,24 @@ def index_cmd(
         if directory is None:
             ch_url = _ch().get_url()
             if ch_url is not None:
-                rows = list(_ch().index(ch_url))
-                n = _emit(iter(rows), chosen_fmt, _render, sink, limit)
+                raw = _ch().index(
+                    ch_url,
+                    trace_id=trace_id,
+                    purposes=purposes or None,
+                    scenarios=scenarios or None,
+                    roots_only=roots_only,
+                    children_of=children_of,
+                )
+                filtered = _index_filter(
+                    raw,
+                    trace_id=None,
+                    purposes=set(),
+                    scenarios=set(),
+                    roots_only=False,
+                    children_of=None,
+                    min_records=min_records,
+                )
+                n = _emit(filtered, chosen_fmt, _render, sink, limit)
                 _info(f"{n} session(s) (clickhouse)")
                 return
 
@@ -1631,7 +1727,16 @@ def index_cmd(
         )
 
         all_rows = sorted(cached_rows + scanned_rows, key=lambda d: d["path"])
-        n = _emit(iter(all_rows), chosen_fmt, _render, sink, limit)
+        filtered = _index_filter(
+            all_rows,
+            trace_id=trace_id,
+            purposes=purposes,
+            scenarios=scenarios,
+            roots_only=roots_only,
+            children_of=children_of,
+            min_records=min_records,
+        )
+        n = _emit(filtered, chosen_fmt, _render, sink, limit)
         _info(f"{n} session file(s)")
     finally:
         if close:
