@@ -7,8 +7,6 @@ message to ``ctx.agent(prompt=...)``.
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict
@@ -20,40 +18,6 @@ class PriorVerdict(BaseModel):
     model_config = ConfigDict(extra="ignore")
     verdict: str = ""
     rationale: str = ""
-
-
-# ---------------------------------------------------------------
-# Fault doc loading
-# ---------------------------------------------------------------
-
-_FAULT_KINDS_DIR = Path(__file__).resolve().parent.parent / "fault_kinds"
-
-_FAULT_DOC_ALIAS: Final = {
-    "memorystress": "memstress",
-    "jvmlatency": "jvmmethodlatency",
-    "jvmexception": "jvmmethodexception",
-    "podkill": "podfailure",
-    "containerkill": "podfailure",
-}
-
-
-def _norm_fault(name: str) -> str:
-    key = re.sub(r"[^a-z0-9]", "", name.lower())
-    return _FAULT_DOC_ALIAS.get(key, key)
-
-
-def load_fault_doc(fault_kind: str) -> str:
-    """Load the markdown doc for a fault kind. Returns '' if not found."""
-    if not fault_kind:
-        return ""
-    p = _FAULT_KINDS_DIR / f"{fault_kind}.md"
-    if p.is_file():
-        return p.read_text().strip()
-    target = _norm_fault(fault_kind)
-    for doc in _FAULT_KINDS_DIR.glob("*.md"):
-        if _norm_fault(doc.stem) == target:
-            return doc.read_text().strip()
-    return ""
 
 
 # ---------------------------------------------------------------
@@ -101,7 +65,9 @@ def _fault_context(
     return line
 
 
-def _format_upstream_node(node: EventNode) -> str:
+def _format_upstream_node(node: EventNode | dict) -> str:  # type: ignore[type-arg]
+    if isinstance(node, dict):
+        node = EventNode.model_validate(node)
     lines = [f"Classified failure mode: {node.predicate}"]
     for ev in node.evidence:
         if ev.explanation:
@@ -120,7 +86,7 @@ def build_hop_prompt(
     all_faults: list[tuple[str, str, str]],
     fault_docs: dict[str, str],
     is_infra: bool = False,
-    upstream_evidence: EventNode | None = None,
+    upstream_evidence: EventNode | dict | None = None,  # type: ignore[type-arg]
     judge_context: str = "",
     prior_verdict: PriorVerdict | None = None,
 ) -> str:

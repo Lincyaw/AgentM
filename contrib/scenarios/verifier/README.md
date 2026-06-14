@@ -85,78 +85,75 @@ degraded* services (it can't tell a real tail-latency spike from
 throughput noise without re-querying everything). On the validation set,
 judge pruning was strongly net-negative, so only cascade promotion remains.
 
-## How to use
+## Usage
 
 ```bash
+cd contrib/scenarios
+
 # Single case
-uv run python contrib/scenarios/verifier/cli.py \
-    run <case_dir> --model litellm
+uv run python -m verifier.cli run <case_dir> [--model doubao] [--out /tmp/out]
 
 # Batch
-uv run python contrib/scenarios/verifier/cli.py \
-    batch <dataset_dir> --run-dir /tmp/verifier-run \
-    --model litellm --parallel 8 --case-parallel 30
-
-# Judge (post-processing, after hop agents complete)
-uv run python contrib/scenarios/verifier/cli.py \
-    judge-batch <dataset_dir> --run-dir /tmp/verifier-run \
-    --model litellm --parallel 30
-
-# Resume (cached results are skipped automatically)
-uv run python contrib/scenarios/verifier/cli.py \
-    batch <dataset_dir> --run-dir /tmp/verifier-run --model litellm
-
+uv run python -m verifier.cli batch <dataset_dir> \
+    --run-dir /tmp/verifier-run [--parallel 4] [--limit 10]
 ```
-
-All commands need the `eval` extra (`uv sync --extra eval`): duckdb,
-the fpg schema package, and the rca duckdb_sql atom.
 
 ## Output
 
-Each case produces under `<run-dir>/<case>/`:
+Each case produces under `<out_dir>/`:
 
 | File | Content |
 |------|---------|
-| `fpg_scenario.json` | THE result: a ground-truth scenario in the [fpg schema](https://github.com/Lincyaw/fpg-convention). Time-anchored EventNodes (predicate classified by the hop agent from the profile vocabulary, re-executable SQL evidence), mechanism-labeled edges, explicit injection records. Validated against the profile-bound schema (`fpg_profile.toml`) before writing — a written file is a valid scenario by construction. The judge phase rewrites it in place with cascade promotions applied. |
-| `run_meta.json` | Pipeline telemetry: hop log (incl. `skipped_seed_target` / `skipped_cycle` guards), all hop verdicts (confirmed + rejected) with their fpg evidence, rounds, judge review (`add` promotions with `via_service`, audit-only `suggested_remove`). |
-| `relationships.json` | Phase-0 relationship graph (service pairs + rel type). |
+| `fpg_scenario.json` | Validated fault-propagation graph (fpg schema). |
+| `run_meta.json` | All verdicts with evidence SQL + rationale, hop log, rounds. |
 
-The fpg structural rules are enforced at construction time, not
-filtered afterwards: injection seeds never gain incoming edges, an
-edge that would close a cycle is never evaluated, every edge —
-including between two already-confirmed services — goes through a hop
-agent, and a judge promotion must name the confirmed upstream it
-cascades through (so promoted nodes are connected, never spurious
-roots).
+## Debugging a run
 
-## Comparing against GT
+### Find sessions
 
-GT (`causal_graph.json`) uses `component_to_service` to map span-level
-nodes to services. When comparing:
+CLI prints `trace_id` on startup. List all child sessions:
 
-1. Extract GT service set via `component_to_service`, minus root causes
-2. Extract verifier service set from `fpg_scenario.json` graph nodes,
-   minus injection seeds (`injections[].node_id`)
-3. Classify discrepancies:
-   - **Verifier has, GT doesn't** — either verifier found real
-     propagation GT missed, or verifier false positive
-   - **GT has, verifier doesn't** — either GT over-labeled (e.g.
-     "fewer spans" ≠ service degradation), or verifier capability gap
-     (BFS didn't reach it, agent rejected incorrectly)
+```bash
+agentm trace index --format ndjson | grep <trace_id>
+```
 
-These are discrepancies to investigate, not accuracy metrics. Do NOT
-compute precision/recall treating GT as ground truth — the whole point
-is that GT may be wrong.
+Each child has a `session_id` and `scenario` (verifier/seed, verifier/hop).
 
-## Known limitations
+### Inspect a specific agent
 
-- **Infra sinks:** Confirmed infra nodes (mysql, redis, etc.) do not
-  fan out — a localized fault on one service's DB path does not
-  implicate all DB consumers.
-- **Co-deployed subtlety:** Network faults affect all pods on the
-  target's k8s node via tc netem, not just the target pod. Modeled
-  via `co_deployed` edges but only fires if node-level resource
-  degradation is detected.
-- **Composition artifacts:** When abnormal window has drastically fewer
-  spans with different type mix, percentile changes may reflect
-  composition shift rather than real degradation.
+```bash
+# Full conversation trajectory
+agentm trace messages --session <session_id> --format text
+
+# Tool calls (SQL queries + results)
+agentm trace tools --session <session_id> --format ndjson \
+  | jq '{tool: .tool, sql: .args.sql, result: .result.content[0].text}'
+
+# Verdict only
+agentm trace tools --session <session_id> --tool submit_hop_verdict --format ndjson \
+  | jq '.args | {verdict, predicate, rationale}'
+```
+
+### Find a specific edge's session
+
+```bash
+TRACE=<trace_id>
+for sid in $(agentm trace index --format ndjson | grep "$TRACE" \
+  | jq -r 'select(.scenario=="verifier/hop") | .session_id'); do
+  from=$(agentm trace messages --session "$sid" --role user --format text 2>&1 \
+    | grep -oP 'Confirmed degraded: \*\*\K[^*]+')
+  to=$(agentm trace messages --session "$sid" --role user --format text 2>&1 \
+    | grep -oP 'Target: \*\*\K[^*]+')
+  echo "$sid: $from -> $to"
+done
+```
+
+### Common misdiagnosis patterns
+
+| Pattern | What goes wrong | Root cause |
+|---|---|---|
+| Aggregate flat → reject | Agent checks aggregate error/latency, misses per-endpoint degradation on the fault-related call path | Agent doesn't break down by `span_name` before concluding |
+| Zero spans → reject | Agent sees 0 abnormal spans, concludes "no degradation" instead of "service unavailable" | Should be inconclusive (zero evidence ≠ evidence of health) |
+| Unit confusion | `duration` is nanoseconds; agent divides by 1e3 (→ μs) instead of 1e6 (→ ms), misreads magnitude | Agent didn't DESCRIBE the table or cross-check units |
+| Wrong propagation direction | Agent confirms a downstream for a latency fault (latency propagates UP not down) | Agent ignored fault doc's direction guidance |
+| Throughput-only rejection applied too broadly | Fault doc says "throughput drop without latency/error = not degradation," agent applies this even when the fault-related endpoint's spans vanished entirely | Rule is for uniform traffic dip, not for a specific dead call path |

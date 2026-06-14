@@ -14,11 +14,10 @@ afterwards:
   - a judge promotion must name the upstream service it cascades
     through, so promoted nodes are connected, never spurious roots.
 
-Input via ``ctx.args``:
-    data_dir, graph, injections, infra_nodes, node_map, fault_docs,
+Input via ``ctx.args`` (built by ``prepare.CaseContext.to_workflow_args``):
+    data_dir, graph, injections, infra_nodes, fault_docs,
     budget, out_dir, skip_propagate, skip_judge,
     window               -- fpg TimeInterval dict for this case
-    seed_nodes           -- {svc: fpg EventNode dict} prebuilt seeds
     rel_mechanism        -- {rel_type: fpg edge mechanism}
     existing_state       -- {nodes, edges, verdicts} for skip_propagate
 
@@ -33,7 +32,9 @@ from typing import Any, Required, TypedDict, cast
 
 from agentm.extensions.builtin.workflow import AgentResult, WorkflowContext
 
-from verifier.hop.hop_context import PriorVerdict, build_hop_prompt
+from .hop.hop_context import PriorVerdict, build_hop_prompt
+from .judge.judge_context import build_judge_prompt
+from .seed.seed_context import build_seed_prompt
 
 
 class Injection(TypedDict, total=False):
@@ -46,6 +47,14 @@ HopLogEntry = TypedDict(
     "HopLogEntry",
     {"round": int, "from": str, "to": str, "verdict": str},
 )
+
+
+class SeedResult(TypedDict, total=False):
+    verdict: Required[str]
+    predicate: str | None
+    rationale: str
+    evidence: list[dict[str, Any]]
+    claim: str
 
 
 class HopResult(TypedDict, total=False):
@@ -100,6 +109,25 @@ def _reaches(adj: dict[str, list[str]], src: str, dst: str) -> bool:
     return False
 
 
+def _node_from_seed(
+    svc: str,
+    verdict: SeedResult,
+    window: dict[str, str],
+) -> dict[str, Any]:
+    """Build an fpg EventNode dict from a confirmed seed verdict."""
+    predicate = verdict.get("predicate") or "other"
+    return {
+        "kind": "event",
+        "id": svc,
+        "subject": f"svc:{svc}",
+        "predicate": predicate,
+        "time": window,
+        "grounding": "observed",
+        "evidence": list(verdict.get("evidence", [])),
+        "annotation": "auto",
+    }
+
+
 def _node_from_verdict(
     svc: str,
     verdict: HopResult,
@@ -116,7 +144,7 @@ def _node_from_verdict(
                 + relationship.get("explanation", "see query"),
             }
         )
-    predicate = verdict.get("predicate") or "service_degraded"
+    predicate = verdict.get("predicate") or "other"
     node: dict[str, Any] = {
         "kind": "event",
         "id": svc,
@@ -206,20 +234,65 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             if inj.get("target")
         }
     else:
+        # -- Phase 0: verify seeds ----------------------------------------
+        ctx.phase("seed")
+        node_fault = {
+            inj["target"]: [inj["chaos_type"], inj["target"]]
+            for inj in injections
+            if inj.get("target")
+        }
+        nodes = {}
+
+        async def _verify_seed(inj: Injection) -> tuple[str, SeedResult | None]:
+            target = inj["target"]
+            fault_kind = inj.get("chaos_type", "unknown")
+            prompt = build_seed_prompt(
+                target=target,
+                fault_kind=fault_kind,
+                params=inj.get("params", ""),
+                fault_doc=fault_docs.get(fault_kind, ""),
+            )
+            result: AgentResult = await ctx.agent(
+                prompt,
+                scenario="verifier/seed",
+                atom_config={
+                    "duckdb_sql": {"data_dir": data_dir},
+                    "seed_finalize": {"data_dir": data_dir},
+                },
+            )
+            return target, cast(SeedResult, result) if isinstance(result, dict) else None
+
+        seed_coros: list[Awaitable[tuple[str, SeedResult | None]]] = [
+            _verify_seed(inj) for inj in injections if inj.get("target")
+        ]
+        seed_results = await ctx.parallel(seed_coros)
+
+        for target, seed_verdict in seed_results:
+            if seed_verdict and seed_verdict.get("verdict") == "confirmed":
+                nodes[target] = _node_from_seed(target, seed_verdict, window)
+                ctx.log(f"seed {target}: confirmed ({seed_verdict.get('predicate')})")
+            else:
+                v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
+                ctx.log(f"seed {target}: {v} — skipping")
+
+        if not nodes:
+            ctx.log("no seeds confirmed — aborting propagation")
+            return {
+                "nodes": [],
+                "edges": [],
+                "verdicts": {},
+                "hop_log": [],
+                "rounds": 0,
+            }
+
+        # -- Phase 1: propagate -------------------------------------------
         ctx.phase("propagate")
-        seed_nodes = cast(dict[str, dict[str, Any]], args.get("seed_nodes", {}))
-        nodes = dict(seed_nodes)
         edges = []
         adj = {}
         in_deg = {}
         verdicts = {}
         hop_log = []
         round_n = 0
-        node_fault = {
-            inj["target"]: [inj["chaos_type"], inj["target"]]
-            for inj in injections
-            if inj.get("target")
-        }
 
         queue = list(nodes)
         checked_edges: set[str] = set()
@@ -379,14 +452,15 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             ctx.phase("judge" if judge_round == 0 else f"judge-r{judge_round + 1}")
 
             verdict_by_target: dict[str, dict[str, Any]] = {}
-            for key, v in verdicts.items():
+            for key, vd in verdicts.items():
                 from_svc, to_svc = key.split("__", 1)
+                vdict = cast(dict[str, Any], vd)
                 verdict_by_target[to_svc] = {
                     "from": from_svc,
                     "to": to_svc,
-                    "verdict": v.get("verdict", ""),
-                    "rationale": v.get("rationale", ""),
-                    "evidence": v.get("evidence", []),
+                    "verdict": vdict.get("verdict", ""),
+                    "rationale": vdict.get("rationale", ""),
+                    "evidence": vdict.get("evidence", []),
                 }
             inconclusive_verdicts = [
                 v
@@ -399,27 +473,19 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 if v.get("verdict") == "rejected" and v["to"] not in nodes
             ]
 
+            judge_prompt = build_judge_prompt(
+                injections=injections,
+                confirmed=sorted(nodes),
+                seeds=seeds,
+                verdict_by_target=verdict_by_target,
+                inconclusive_verdicts=inconclusive_verdicts,
+                rejected_verdicts=rejected_verdicts,
+            )
             judge_text: AgentResult = await ctx.agent(
-                "Review the fault-propagation graph.",
+                judge_prompt,
                 scenario="verifier/judge",
                 atom_config={
                     "duckdb_sql": {"data_dir": data_dir},
-                    "judge_context": {
-                        "injections": injections,
-                        "dataset_profile": args.get("dataset_profile", {}),
-                        "vanished_endpoints": cast(
-                            dict[str, Any], args.get("vanished", {})
-                        ),
-                        "entry_services": cast(
-                            list[str], args.get("entry_services", [])
-                        ),
-                        "confirmed": sorted(nodes),
-                        "inconclusive_verdicts": inconclusive_verdicts,
-                        "rejected_verdicts": rejected_verdicts,
-                        "throughput": {},
-                        "seeds": sorted(seeds),
-                        "verdict_by_target": verdict_by_target,
-                    },
                 },
             )
             if isinstance(judge_text, dict):
@@ -442,7 +508,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     continue
                 prior = verdicts.get(via + "__" + svc)
                 evidence = list(prior.get("evidence", [])) if prior else []
-                predicate = promo.get("predicate") or "service_unavailable"
+                predicate = promo.get("predicate") or "process_killed"
                 node: dict[str, Any] = {
                     "kind": "event",
                     "id": svc,

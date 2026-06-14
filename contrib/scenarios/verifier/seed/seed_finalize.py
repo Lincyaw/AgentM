@@ -1,13 +1,8 @@
-"""Single-hop verdict submission tool for the verifier/hop scenario.
+"""Seed verification verdict submission tool.
 
-The verdict is fpg-native: evidence items are fpg ``Evidence`` objects
-(re-executable query + explanation) and the symptom classification is
-constrained to the node-predicate vocabulary of the verifier profile
-(fpg_profile.toml). Every SQL statement is re-executed against the case
-data before the verdict is accepted — a verdict that cites evidence
-which does not run, or returns nothing, is rejected at submission time.
+Same structure as hop_finalize but without the relationship field —
+seeds are injection targets, not propagation endpoints.
 """
-
 from __future__ import annotations
 
 import json
@@ -28,16 +23,17 @@ from agentm.core.abi import (
 from agentm.extensions import ExtensionManifest
 from fpg import Evidence, build_schema, load_profile
 
-class HopFinalizeConfig(BaseModel):
+
+class SeedFinalizeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     data_dir: str | None = None
 
 
 MANIFEST = ExtensionManifest(
-    name="hop_finalize",
-    description="Submit tool for single-hop verdict (fpg-native).",
-    registers=("tool:submit_hop_verdict",),
-    config_schema=HopFinalizeConfig,
+    name="seed_finalize",
+    description="Submit tool for seed verification verdict (fpg-native).",
+    registers=("tool:submit_seed_verdict",),
+    config_schema=SeedFinalizeConfig,
 )
 
 _PROFILE_PATH = Path(__file__).resolve().parents[1] / "fpg_profile.toml"
@@ -47,21 +43,18 @@ NodePredicate = cast(type[Enum], _SCHEMA.NodePredicate)
 _STRICT: Final = ConfigDict(extra="forbid")
 
 
-class HopVerdict(BaseModel):
+class SeedVerdict(BaseModel):
     model_config = _STRICT
     verdict: Literal["confirmed", "rejected", "inconclusive"] = Field(
-        description="confirmed = service is genuinely degraded by the upstream fault; "
-        "rejected = no genuine degradation found after thorough investigation; "
-        "inconclusive = ambiguous signal that requires global context to resolve "
-        "(e.g. zero traffic where you cannot tell if the service is down vs simply "
-        "not receiving requests due to upstream failure)."
+        description="confirmed = injection took effect, service is degraded; "
+        "rejected = no degradation found, injection had no observable effect; "
+        "inconclusive = ambiguous signal (e.g. zero data in both windows)."
     )
     predicate: NodePredicate | None = Field(  # type: ignore[valid-type]
         default=None,
-        description="The failure mode the target service exhibits, REQUIRED "
+        description="The failure mode the service exhibits, REQUIRED "
         "when confirmed. Pick the most specific value your evidence "
-        "supports; 'other' only with an "
-        "explanation in claim.",
+        "supports.",
     )
     rationale: str = Field(description="Why this verdict, citing the data.")
     evidence: list[Evidence] = Field(
@@ -69,36 +62,28 @@ class HopVerdict(BaseModel):
         "statements (query.language='sql') comparing normal vs abnormal "
         "windows, plus an explanation of what the result shows."
     )
-    relationship: Evidence | None = Field(
-        default=None,
-        description="Proof of the call relationship between the two "
-        "services (SQL + explanation). REQUIRED when confirmed.",
-    )
-    claim: str = Field(description="One-line summary of the hop.")
+    claim: str = Field(description="One-line summary.")
 
     @model_validator(mode="after")
-    def _verdict_contract(self) -> "HopVerdict":
+    def _verdict_contract(self) -> "SeedVerdict":
         if not self.evidence:
             raise ValueError("evidence is required for all verdicts")
         if self.verdict == "confirmed":
             if self.predicate is None:
                 raise ValueError("confirmed verdict requires predicate")
-            if self.relationship is None:
-                raise ValueError("confirmed verdict requires relationship evidence")
         return self
 
 
-def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
-    """Re-execute every evidence statement; collect failures."""
+def _validate_sqls(data_dir: Path, verdict: SeedVerdict) -> list[dict[str, str]]:
     try:
         import duckdb
     except ImportError:
         return []
     conn = duckdb.connect(":memory:")
-    _cap = os.environ.get("AGENTM_DUCKDB_THREADS")
-    if _cap:
+    cap = os.environ.get("AGENTM_DUCKDB_THREADS")
+    if cap:
         try:
-            conn.execute(f"SET threads={max(1, int(_cap))}")
+            conn.execute(f"SET threads={max(1, int(cap))}")
         except (ValueError, duckdb.Error):
             pass
     for pct in (("p50", "0.5"), ("p90", "0.9"), ("p95", "0.95"), ("p99", "0.99")):
@@ -115,18 +100,11 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
             )
 
     failures: list[dict[str, str]] = []
-    items: list[tuple[str, Evidence]] = [
-        (f"evidence[{i}]", ev) for i, ev in enumerate(verdict.evidence)
-    ]
-    if verdict.relationship is not None:
-        items.append(("relationship", verdict.relationship))
-
-    for location, ev in items:
+    for i, ev in enumerate(verdict.evidence):
         if ev.query.language != "sql":
             failures.append({
-                "location": location,
-                "error": "only query.language='sql' is executable against "
-                "this case's DuckDB data",
+                "location": f"evidence[{i}]",
+                "error": "only query.language='sql' is executable",
                 "sql": ev.query.statement,
             })
             continue
@@ -134,12 +112,12 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
             rows = conn.execute(ev.query.statement).fetchall()
             if not rows:
                 failures.append({
-                    "location": location,
+                    "location": f"evidence[{i}]",
                     "error": "0 rows", "sql": ev.query.statement,
                 })
         except Exception as exc:  # noqa: BLE001
             failures.append({
-                "location": location,
+                "location": f"evidence[{i}]",
                 "error": str(exc).splitlines()[0][:300],
                 "sql": ev.query.statement,
             })
@@ -148,12 +126,12 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
     return failures
 
 
-def install(api: ExtensionAPI, config: HopFinalizeConfig) -> None:
+def install(api: ExtensionAPI, config: SeedFinalizeConfig) -> None:
     data_dir = Path(config.data_dir) if config.data_dir else None
 
     async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:
         try:
-            verdict = HopVerdict.model_validate(args)
+            verdict = SeedVerdict.model_validate(args)
         except ValidationError as exc:
             return ToolResult(
                 content=[TextContent(
@@ -188,21 +166,18 @@ def install(api: ExtensionAPI, config: HopFinalizeConfig) -> None:
                     text=verdict.model_dump_json(by_alias=True),
                 )]
             ),
-            reason="hop:verdict-submitted",
+            reason="seed:verdict-submitted",
         )
 
     api.register_tool(
         FunctionTool(
-            name="submit_hop_verdict",
+            name="submit_seed_verdict",
             description=(
-                "Submit your verdict on this single propagation hop. "
-                "confirmed = the service is genuinely degraded by the "
-                "upstream fault (then predicate, evidence and relationship "
-                "are required and every SQL must re-execute successfully). "
-                "rejected = no genuine degradation; still include the "
-                "queries that showed no degradation."
+                "Submit your verdict on whether the fault injection took "
+                "effect on this service. confirmed = degradation observed "
+                "(predicate and evidence required). rejected = no effect."
             ),
-            parameters=HopVerdict,
+            parameters=SeedVerdict,
             fn=_submit,
         )
     )

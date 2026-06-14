@@ -59,8 +59,8 @@ class JudgePromotion(BaseModel):
     )
     predicate: NodePredicate = Field(  # type: ignore[valid-type]
         description="The failure mode the promoted service exhibits; "
-        "cascade promotions are typically service_unavailable or "
-        "throughput_collapse."
+        "cascade promotions are typically process_killed, "
+        "flow_interrupted, or resource_pool_exhausted."
     )
     rationale: str = Field(
         description="Why this service is genuinely degraded, citing data."
