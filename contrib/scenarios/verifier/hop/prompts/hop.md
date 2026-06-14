@@ -29,6 +29,12 @@ parent_span_id), then broaden only if those show nothing.
 Compare normal vs abnormal windows across dimensions: latency,
 error rate, span volume, logs.
 
+When the upstream has zero spans in the abnormal window, you
+cannot JOIN into it. Use the NORMAL window to identify which
+endpoints on the target interact with the upstream, then check
+whether those specific endpoints vanished or degraded in the
+abnormal window.
+
 ### 5. Judge
 - **confirmed** — evidence supports the hypothesis: the target
   shows degradation consistent with the fault propagating

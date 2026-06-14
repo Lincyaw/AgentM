@@ -94,6 +94,7 @@ class PropagationResult(TypedDict, total=False):
     rounds: Required[int]
     judge: JudgeReviewResult
     judge_rounds: list[dict[str, Any]]
+    unreachable_seeds: list[str]
 
 
 def _reaches(adj: dict[str, list[str]], src: str, dst: str) -> bool:
@@ -728,6 +729,46 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         else:
             node.pop("combine", None)
 
+    # -- Reachability check: every seed should reach an entry service --
+    ctx.phase("validate")
+    callers: set[str] = set()
+    callees: set[str] = set()
+    for svc, neighbors in graph.items():
+        for info in neighbors:
+            if info[1] == "caller_to_callee":
+                callers.add(svc)
+                callees.add(info[0])
+    entry_services = callers - callees
+
+    fpg_adj: dict[str, set[str]] = {}
+    for e in edges:
+        fpg_adj.setdefault(e["src"], set()).add(e["dst"])
+
+    unreachable: list[str] = []
+    for seed_svc in sorted(seeds):
+        if seed_svc not in nodes:
+            ctx.log(f"⚠ seed {seed_svc}: not confirmed")
+            unreachable.append(seed_svc)
+            continue
+        visited: set[str] = set()
+        queue = [seed_svc]
+        while queue:
+            cur = queue.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            for nxt in fpg_adj.get(cur, set()):
+                queue.append(nxt)
+        if not (visited & entry_services):
+            ctx.log(
+                f"⚠ seed {seed_svc}: no path to entry services "
+                f"{sorted(entry_services)} in fpg"
+            )
+            unreachable.append(seed_svc)
+
+    if not unreachable:
+        ctx.log("✓ all seeds reach entry services")
+
     result_out: PropagationResult = {
         "nodes": [nodes[k] for k in sorted(nodes)],
         "edges": edges,
@@ -739,4 +780,6 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         result_out["judge"] = judge_result
     if judge_rounds_log:
         result_out["judge_rounds"] = judge_rounds_log
+    if unreachable:
+        result_out["unreachable_seeds"] = unreachable
     return result_out
