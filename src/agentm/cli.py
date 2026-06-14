@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, TextIO, cast
 
@@ -20,18 +21,23 @@ import typer
 from dotenv import load_dotenv
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
+from agentm.cli_trace import app as _trace_app
+from agentm.cli_validate import app as _validate_app
+from agentm.cli_workflow import app as _workflow_app
 from agentm.core.abi import LoopConfig
-from agentm.core.abi.events import DiagnosticEvent, EventBus, MessagePersistedEvent
+from agentm.core.abi.events import (
+    DiagnosticEvent,
+    EventBus,
+    ExtensionInstallEvent,
+    MessagePersistedEvent,
+)
 from agentm.core.abi.session_store import SessionState, SessionStore
 from agentm.core.lib.render import final_summary
 from agentm.core.lib.user_config import (
     ModelProfile,
     apply_reasoning_effort,
-    resolve_model_profile,
 )
-from agentm.core.abi.events import ExtensionInstallEvent
-
-from dataclasses import dataclass, field
+from agentm.gateway.cli import app as _gateway_app
 
 
 # Default scenario when the user does not pass ``--scenario`` and does
@@ -255,6 +261,12 @@ def _parse_set_overrides(values: list[str] | None) -> dict[str, dict[str, Any]]:
     atom/key split is on the first ``.`` and the key is everything after it;
     surrounding whitespace on atom and key is trimmed so ``a.b = c`` keys on
     ``b`` rather than ``b ``.
+
+    Special forms:
+
+    - ``atom=@path.json`` (no dot in LHS): load the entire atom config from
+      the JSON/YAML file at *path*. The file must parse to a mapping.
+    - ``atom.key=@path.json``: load the value for one key from a file.
     """
 
     if not values:
@@ -271,10 +283,48 @@ def _parse_set_overrides(values: list[str] | None) -> dict[str, dict[str, Any]]:
             )
         atom, dot, key = lhs.partition(".")
         atom, key = atom.strip(), key.strip()
+
+        # Whole-atom config from file: ``atom=@path.json``
+        if not dot and value.startswith("@"):
+            file_path = Path(value[1:])
+            if not file_path.is_file():
+                raise typer.BadParameter(
+                    f"--set {raw!r}: file not found: {file_path}"
+                )
+            content = file_path.read_text(encoding="utf-8")
+            if file_path.suffix in (".yaml", ".yml"):
+                import yaml
+                data = yaml.safe_load(content)
+            else:
+                data = json.loads(content)
+            if not isinstance(data, dict):
+                raise typer.BadParameter(
+                    f"--set {raw!r}: file must contain a JSON/YAML mapping"
+                )
+            out.setdefault(atom, {}).update(data)
+            continue
+
         if not dot or not atom or not key:
             raise typer.BadParameter(
                 f"--set {raw!r}: left of '=' must be '<atom>.<key>'"
             )
+
+        # Single-key from file: ``atom.key=@path.json``
+        if value.startswith("@"):
+            file_path = Path(value[1:])
+            if not file_path.is_file():
+                raise typer.BadParameter(
+                    f"--set {raw!r}: file not found: {file_path}"
+                )
+            content = file_path.read_text(encoding="utf-8")
+            if file_path.suffix in (".yaml", ".yml"):
+                import yaml
+                value = yaml.safe_load(content)
+            else:
+                try:
+                    value = json.loads(content)
+                except json.JSONDecodeError:
+                    pass  # keep as raw string
         out.setdefault(atom, {})[key] = value
     return out
 
@@ -288,38 +338,15 @@ def _resolve_provider_model_cwd(
 ) -> tuple[str, str, str, ModelProfile | None]:
     """Apply ``CLI flag > env var > config.toml profile > built-in default``.
 
-    Resolved at command-invocation time, NOT at module import — so:
-
-    * ``--provider openai`` (without ``AGENTM_MODEL``) picks the OpenAI
-      registry's ``default_model`` rather than inheriting whichever
-      provider happened to win at import time;
-    * ``--cwd`` honours the directory the user names, not the process
-      cwd when ``agentm`` was first imported.
-
-    Returns ``(provider, model, cwd, profile)`` where *profile* is the
-    matched :class:`ModelProfile` if the resolved model name corresponds
-    to a ``~/.agentm/config.toml`` profile, or ``None`` otherwise.
+    Returns ``(provider, model, cwd, profile)``.
     """
+    from agentm.core.lib.user_config import resolve_provider_model
 
-    raw_model = model_flag or os.environ.get("AGENTM_MODEL")
-
-    # Check whether the model name matches a config.toml profile.
-    # When raw_model is None, resolve_model_profile falls back to
-    # config.default_model (if any).
-    profile = resolve_model_profile(raw_model)
-
-    if profile is not None:
-        # Explicit --provider overrides the profile's provider.
-        provider = provider_flag or os.environ.get("AGENTM_PROVIDER") or profile.provider
-        model = profile.model
-    else:
-        provider = (
-            provider_flag
-            or os.environ.get("AGENTM_PROVIDER")
-            or registry.default_provider().id
-        )
-        model = raw_model or registry.default_model(provider)
-
+    provider, model, profile = resolve_provider_model(
+        provider_flag=provider_flag,
+        model_flag=model_flag,
+        registry=registry,
+    )
     cwd = cwd_flag or os.environ.get("AGENTM_CWD") or os.getcwd()
     return provider, model, cwd, profile
 
@@ -574,11 +601,13 @@ async def run(
     session_config, session_manager = _build_session_config(
         config, bus=bus, loop_config=loop_config,
     )
-    if not config.quiet and session_manager.session_file is not None:
+    if not config.quiet:
         sid = session_manager.get_session_id()
-        print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
-        print(f"INFO: session id: {sid}", file=sys.stderr)
-        print(f"INFO: trace:  agentm trace messages --session {sid} --format text", file=sys.stderr)
+        if sid:
+            if session_manager.session_file is not None:
+                print(f"INFO: session log: {session_manager.session_file}", file=sys.stderr)
+            print(f"INFO: session id: {sid}", file=sys.stderr)
+            print(f"INFO: trace:  agentm trace messages --session {sid} --format text", file=sys.stderr)
 
     session = await AgentSession.create(session_config)
     try:
@@ -860,20 +889,8 @@ def run_cmd(
         scenario = os.environ.get("AGENTM_SCENARIO") or DEFAULT_SCENARIO
 
     if not prompt and not resume and not continue_recent and not fork:
-        print(
-            "ERROR: prompt is required for a fresh session.\n"
-            "       Pass --resume <sid> (or --continue) to advance an existing\n"
-            "       session whose first message is supplied by an extension.\n"
-            "       For multi-turn / chat use, run the single-process gateway\n"
-            "       and connect a chat client:\n"
-            "         agentm gateway --bind unix:///tmp/agentm/gw.sock\n"
-            "         agentm-terminal --connect unix:///tmp/agentm/gw.sock --format textual\n"
-            "       Cross-host (WebSocket + token):\n"
-            "         agentm gateway --bind ws://0.0.0.0:7777/agentm --bind-token-file /etc/agentm/tokens\n"
-            "         agentm-terminal --connect ws://gw.example.com:7777/agentm --token \"$AGENTM_TOKEN\"",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
+        print(ctx.get_help())
+        raise typer.Exit(code=0)
 
     rc = asyncio.run(
         run(CliRunConfig(
@@ -900,9 +917,6 @@ def run_cmd(
         ))
     )
     raise typer.Exit(code=rc)
-
-
-_run = run
 
 
 @app.command(name="list-extensions")
@@ -1035,116 +1049,20 @@ def list_extensions_cmd(
     print(f"\n{total} extension(s) shown.", file=sys.stderr)
 
 
-def _trace_main() -> None:
-    from agentm.cli_trace import main as trace_main
-
-    trace_main()
-
-
-def _gateway_main() -> None:
-    from agentm.gateway.cli import main as gateway_main
-
-    gateway_main()
-
-
-def _workflow_main() -> None:
-    from agentm.cli_workflow import main as workflow_main
-
-    workflow_main()
-
-
-def _validate_main() -> None:
-    from agentm.cli_validate import main as validate_main
-
-    validate_main()
-
-
-# Subcommands whose own Typer app owns argv parsing, help, and exit codes.
-# The importer is called only when that subcommand is actually dispatched, so
-# the default prompt path and ``agentm --help`` never import the ``trace`` /
-# ``gateway`` dependency closures (gateway pulls in the websockets server).
-# The short-help string mirrors each app's own short help so ``agentm --help``
-# can list the subcommand without importing it.
 @app.command(name="onboard")
 def onboard_cmd() -> None:
-    """Interactively bootstrap a fresh install.
-
-    Walks four sections — model/provider/key (-> ``$AGENTM_HOME/config.toml``),
-    workspace path, persona (SOUL.md / IDENTITY.md), and optional Feishu
-    credentials (-> ``<workspace>/.env``) — confirming before overwriting any
-    existing value, so re-running is safe.
-    """
+    """Interactively bootstrap a fresh install."""
     from agentm.onboard import run_onboard
 
     run_onboard()
 
 
-_LAZY_SUBCOMMANDS: dict[str, tuple[Any, str]] = {
-    "trace": (
-        _trace_main,
-        "Query an OTLP/JSON session log written by the observability atom.",
-    ),
-    "gateway": (
-        _gateway_main,
-        "Single-process gateway: hold all chat sessions and serve chat clients.",
-    ),
-    "workflow": (
-        _workflow_main,
-        "Run or validate workflow scripts.",
-    ),
-    "validate": (
-        _validate_main,
-        "Validate S11 atom contract compliance.",
-    ),
-}
-
-
-def _build_command() -> Any:
-    """Compile the Click command tree for the prompt / ``list-extensions`` path.
-
-    Only the default prompt runner (root callback) and ``list-extensions`` are
-    real commands here. ``trace`` and ``gateway`` are added as import-free
-    placeholder commands purely so ``agentm --help`` lists them with their
-    short help — they are never executed through this tree. Their real Typer
-    apps are dispatched out of band by :func:`main`, which imports the chosen
-    one lazily; so neither this build nor ``--help`` pays for their dependency
-    closures.
-    """
-
-    for name, (_importer, short_help) in _LAZY_SUBCOMMANDS.items():
-
-        def _placeholder() -> None:
-            raise RuntimeError("dispatched out of band")
-
-        _placeholder.__doc__ = short_help
-        app.command(name=name, hidden=False)(_placeholder)
-
-    return typer.main.get_command(app)
+app.add_typer(_trace_app, name="trace")
+app.add_typer(_workflow_app, name="workflow")
+app.add_typer(_validate_app, name="validate")
+app.add_typer(_gateway_app, name="gateway")
 
 
 def main() -> None:
-    """Entry point referenced by the ``agentm`` console script.
-
-    * ``agentm`` (no args) — show help with the subcommand list (exit 0).
-    * ``agentm -p "prompt" [options]`` — default single-shot prompt runner.
-    * ``agentm {trace,gateway} ...`` — lazily handed to that app (its own argv
-      parsing / help / exit codes); the other subcommand stays unimported.
-    * ``agentm list-extensions ...`` — runs in the compiled command tree.
-    """
-
-    argv = sys.argv[1:]
-    if argv and argv[0] in _LAZY_SUBCOMMANDS:
-        sub = argv[0]
-        # Rewrite argv so the subcommand's app sees ``<prog> <sub>`` as prog
-        # name and its own flags as args, matching standalone invocation.
-        sys.argv = [f"{sys.argv[0]} {sub}", *argv[1:]]
-        importer = _LAZY_SUBCOMMANDS[sub][0]
-        importer()
-        return
-
-    root = _build_command()
-    if not argv:
-        # Bare ``agentm`` shows help and exits 0 — without this the root
-        # callback would fire with an empty prompt and exit 2.
-        root(args=["--help"], standalone_mode=True)
-    root()
+    """Entry point for the ``agentm`` console script."""
+    app()

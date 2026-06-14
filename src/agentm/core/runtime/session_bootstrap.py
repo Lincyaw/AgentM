@@ -41,8 +41,8 @@ class ClickHouseSessionStore:
 
     @staticmethod
     def _ch() -> Any:
-        from agentm import cli_trace_ch
-        return cli_trace_ch
+        from agentm.core.observability import clickhouse
+        return clickhouse
 
     def create(self, cwd: Path) -> SessionState:
         from agentm.core.runtime.session_manager import SessionManager
@@ -110,8 +110,8 @@ def make_default_session_store(cwd: str) -> SessionStore:
     """
 
     try:
-        from agentm import cli_trace_ch
-        url = cli_trace_ch.get_url()
+        from agentm.core.observability import clickhouse
+        url = clickhouse.get_url()
         if url is not None:
             return ClickHouseSessionStore(url)  # type: ignore[return-value]
     except Exception:

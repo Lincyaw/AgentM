@@ -224,13 +224,13 @@ def test_merge_gateway_commands_folds_builtins(tmp_path: Any) -> None:
     # session_ready frames must gain the gateway's top-level command names so
     # chat clients surface /model, /new, /status in autocomplete.
     from agentm.gateway.chat_session_map import ChatSessionMap
-    from agentm.gateway.cli import _GatewayRuntime
+    from agentm.gateway.runtime import GatewayRuntime
     from agentm.gateway.commands import discover_commands
     from agentm.gateway.outbox import SqliteOutbox
 
     outbox = SqliteOutbox(str(tmp_path / "o.sqlite"))
     try:
-        runtime = _GatewayRuntime(
+        runtime = GatewayRuntime(
             cwd=".",
             scenario="local",
             outbox=outbox,

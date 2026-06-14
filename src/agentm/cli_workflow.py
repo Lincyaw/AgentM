@@ -94,19 +94,21 @@ async def _run_async(
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
     from agentm.core.abi.events import EventBus
     from agentm.core.abi.session_config import AgentSessionConfig
-    from agentm.core.lib.user_config import resolve_model_profile
+    from agentm.core.lib.user_config import (
+        apply_reasoning_effort,
+        resolve_provider_model,
+    )
     from agentm.core.runtime.session import AgentSession
     from agentm.extensions.builtin.workflow import WorkflowPhaseEvent
 
-    model_name = model_flag or os.environ.get("AGENTM_MODEL")
-    profile = resolve_model_profile(model_name)
+    provider_id, model_name, profile = resolve_provider_model(
+        model_flag=model_flag,
+    )
     if profile is not None:
         build_config = profile.to_build_config()
-        provider_id = os.environ.get("AGENTM_PROVIDER") or profile.provider
     else:
-        registry = DEFAULT_PROVIDER_REGISTRY
-        provider_id = os.environ.get("AGENTM_PROVIDER") or registry.default_provider().id
-        build_config = {"model": model_name or registry.default_model(provider_id)}
+        build_config = {"model": model_name}
+    apply_reasoning_effort(build_config, None)
 
     provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider_id, build_config)
 

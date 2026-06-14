@@ -16,7 +16,7 @@ gateway distinguishes a known session command (forward) from a name unknown to
 both layers (surface the diagnostic) using a per-session known-command set it
 learns from the ``session_ready`` frame.
 
-These tests drive ``_GatewayRuntime`` directly with stubs (no real LLM): they
+These tests drive ``GatewayRuntime`` directly with stubs (no real LLM): they
 assert the routing verdict — which path an inbound takes — rather than re-test
 the in-session dispatch (covered by the compaction/slash_commands suites).
 """
@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 from agentm.gateway.chat_session_map import ChatSessionMap
-from agentm.gateway.cli import _GatewayRuntime
+from agentm.gateway.runtime import GatewayRuntime
 from agentm.gateway.commands import CommandRouter, discover_commands
 from agentm.gateway.outbox import SqliteOutbox
 from agentm.gateway.wire import InboundBody
@@ -38,9 +38,9 @@ async def _unused_factory(*_a: Any) -> Any:  # _prompt_session is stubbed out
     raise AssertionError("session factory must not be called in these tests")
 
 
-def _runtime(tmp_path: Any) -> tuple[_GatewayRuntime, SqliteOutbox]:
+def _runtime(tmp_path: Any) -> tuple[GatewayRuntime, SqliteOutbox]:
     outbox = SqliteOutbox(str(tmp_path / "o.sqlite"))
-    runtime = _GatewayRuntime(
+    runtime = GatewayRuntime(
         cwd=".",
         scenario="local",
         outbox=outbox,
@@ -63,7 +63,7 @@ def _inbound(content: str) -> InboundBody:
     )
 
 
-def _capture_prompt(runtime: _GatewayRuntime, sink: list[tuple[str, str]]) -> None:
+def _capture_prompt(runtime: GatewayRuntime, sink: list[tuple[str, str]]) -> None:
     async def _prompt(session_key: str, scenario: str | None, body: InboundBody) -> None:
         del scenario
         sink.append((session_key, body.content))
@@ -71,7 +71,7 @@ def _capture_prompt(runtime: _GatewayRuntime, sink: list[tuple[str, str]]) -> No
     runtime._prompt_session = _prompt  # type: ignore[method-assign]
 
 
-def _capture_outbound(runtime: _GatewayRuntime, sink: list[dict[str, Any]]) -> None:
+def _capture_outbound(runtime: GatewayRuntime, sink: list[dict[str, Any]]) -> None:
     async def _emit(body: dict[str, Any]) -> None:
         sink.append(body)
 
