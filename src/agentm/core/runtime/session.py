@@ -31,6 +31,7 @@ from agentm.core.abi.events import (
     SessionShutdownEvent,
 )
 from agentm.core.abi.events import ContextEvent
+from agentm.core.abi.session import ENTRY_TYPE_TURN_COMMITTED
 from agentm.core.abi.loop import resolve_loop_action
 from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, bind_read_state_session
 from agentm.core.runtime.resource_loader import ResourceLoader
@@ -146,6 +147,10 @@ class AgentSession:
         self._bus.on(
             DecideTurnActionEvent.CHANNEL, self._on_decide_inbox_keep_alive
         )
+        # Registered BEFORE the wake handler so the durable boundary marker is
+        # persisted before ``prompt``/``tick`` waiters resolve and the caller
+        # may inspect or shut the session down.
+        self._bus.on(AgentEndEvent.CHANNEL, self._on_agent_end_commit_boundary)
         self._bus.on(AgentEndEvent.CHANNEL, self._on_agent_end_wake_waiters)
         try:
             asyncio.get_running_loop()
@@ -671,6 +676,30 @@ class AgentSession:
         fut: asyncio.Future[None] = loop.create_future()
         self._end_waiters.append(fut)
         return fut
+
+    def _on_agent_end_commit_boundary(self, event: AgentEndEvent) -> None:
+        """Persist a ``turn_committed`` marker delimiting a consistent point.
+
+        Entries persist incrementally mid-turn, but a hard crash (process
+        kill, OOM) never reaches this handler — only a clean termination does.
+        So every marker sits at a consistent boundary, and a crash leaves its
+        half-turn unmarked for ``_truncate_to_last_boundary`` to shed on the
+        next cold load. Skipped when the leaf is already a marker (repeated
+        no-op ticks / vetoes add no new content), so markers never stack.
+        """
+
+        leaf = self._session_manager.get_leaf_entry()
+        if leaf is not None and leaf.type == ENTRY_TYPE_TURN_COMMITTED:
+            return
+        cause = type(event.cause).__name__ if event.cause is not None else "unknown"
+        try:
+            self._session_manager.append_custom_entry(
+                ENTRY_TYPE_TURN_COMMITTED, {"cause": cause}
+            )
+        except Exception:
+            # A persistence hiccup here must never crash the driver round or
+            # block the prompt waiter the next handler resolves.
+            logger.exception("failed to append turn_committed boundary marker")
 
     def _on_agent_end_wake_waiters(self, event: AgentEndEvent) -> None:
         # #177: clear the pending backgrounded-terminate ONLY when the loop

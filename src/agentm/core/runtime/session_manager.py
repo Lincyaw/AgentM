@@ -24,6 +24,7 @@ from agentm.core.abi.session import (
     ENTRY_MATERIALIZERS,
     ENTRY_TYPE_COMPACTION,
     ENTRY_TYPE_MESSAGE,
+    ENTRY_TYPE_TURN_COMMITTED,
     SessionContext,
     SessionEntry,
     SessionHeader,
@@ -204,6 +205,7 @@ class SessionManager:
             mgr._entries[entry.id] = entry
             mgr._order.append(entry.id)
             mgr._leaf_id = entry.id
+        mgr._truncate_to_last_boundary()
         return mgr
 
     @classmethod
@@ -448,6 +450,7 @@ class SessionManager:
             self._cwd = latest_header.cwd
         else:
             self.new_session()
+        self._truncate_to_last_boundary()
 
     def _append_record(self, entry: SessionEntry) -> None:
         self._entries[entry.id] = entry
@@ -685,6 +688,25 @@ class SessionManager:
 
     def get_active_branch(self) -> list[SessionEntry]:
         return self.get_branch()
+
+    def _truncate_to_last_boundary(self) -> None:
+        """Drop a trailing incomplete turn after a cold load.
+
+        Entries persist incrementally during a turn; only a clean
+        ``agent_end`` appends a ``turn_committed`` marker (see
+        ``AgentSession._on_agent_end_commit_boundary``). A process killed
+        mid-turn leaves entries with no trailing marker — replaying them would
+        rebuild a context ending in a dangling tool_call. Move the active leaf
+        back to the last committed boundary so the half-turn is off the active
+        branch (it stays in the tree for audit). No-op for logs that carry no
+        markers at all (pre-feature sessions), so old traces resume verbatim.
+        """
+        last_marker_id: str | None = None
+        for entry in self.get_branch():
+            if entry.type == ENTRY_TYPE_TURN_COMMITTED:
+                last_marker_id = entry.id
+        if last_marker_id is not None and last_marker_id != self._leaf_id:
+            self._leaf_id = last_marker_id
 
     def get_tree(self) -> list[SessionTreeNode]:
         nodes = {

@@ -34,6 +34,13 @@ CURRENT_SESSION_VERSION = 1
 ENTRY_TYPE_MESSAGE = "message"
 ENTRY_TYPE_BRANCH_SUMMARY = "branch_summary"
 ENTRY_TYPE_COMPACTION = "compaction"
+# Durable turn-boundary marker. Appended at every clean ``agent_end`` (see
+# ``AgentSession._on_agent_end_commit_boundary``). It carries no materializer,
+# so ``build_session_context`` never turns it into an LLM message — it is a
+# resume-only signal: a process killed mid-turn never reaches the handler, so
+# its half-turn is left unmarked and ``_truncate_to_last_boundary`` sheds it on
+# the next cold load. Invisible to the model, visible to resume.
+ENTRY_TYPE_TURN_COMMITTED = "turn_committed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +125,16 @@ def compaction_entry(payload: Any, parent_id: str | None) -> SessionEntry:
     )
 
 
+def turn_committed_entry(parent_id: str | None, payload: Any = None) -> SessionEntry:
+    return SessionEntry(
+        type=ENTRY_TYPE_TURN_COMMITTED,
+        id=_new_id(),
+        parent_id=parent_id,
+        timestamp=_now(),
+        payload=payload,
+    )
+
+
 @runtime_checkable
 class SessionTree(Protocol):
     """Read-only window over the session tree.
@@ -157,6 +174,7 @@ __all__ = [
     "ENTRY_TYPE_BRANCH_SUMMARY",
     "ENTRY_TYPE_COMPACTION",
     "ENTRY_TYPE_MESSAGE",
+    "ENTRY_TYPE_TURN_COMMITTED",
     "EntryMaterializer",
     "SessionContext",
     "SessionEntry",
@@ -166,4 +184,5 @@ __all__ = [
     "branch_summary_entry",
     "compaction_entry",
     "message_entry",
+    "turn_committed_entry",
 ]
