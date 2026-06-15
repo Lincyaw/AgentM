@@ -701,12 +701,19 @@ class SessionManager:
         branch (it stays in the tree for audit). No-op for logs that carry no
         markers at all (pre-feature sessions), so old traces resume verbatim.
         """
-        last_marker_id: str | None = None
-        for entry in self.get_branch():
+        # Walk leaf -> root; the first marker we hit is the last on the active
+        # branch. Stops at the nearest boundary instead of scanning the whole
+        # branch, and never leaves the active path (a plain ``_order`` scan
+        # would wrongly consider markers on a forked/dead branch).
+        cursor = self._leaf_id
+        while cursor is not None:
+            entry = self._entries.get(cursor)
+            if entry is None:
+                return
             if entry.type == ENTRY_TYPE_TURN_COMMITTED:
-                last_marker_id = entry.id
-        if last_marker_id is not None and last_marker_id != self._leaf_id:
-            self._leaf_id = last_marker_id
+                self._leaf_id = cursor
+                return
+            cursor = entry.parent_id
 
     def get_tree(self) -> list[SessionTreeNode]:
         nodes = {

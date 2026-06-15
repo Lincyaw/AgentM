@@ -556,17 +556,19 @@ async def _arun(
         # Bound the drain: an in-flight turn wedged in a blocking LLM request or
         # subprocess won't honour cancellation, and an unbounded gather would
         # hang the process — and then re-hang asyncio.run's own task cleanup.
-        # On timeout, close the SQLite stores cleanly and hard-exit.
+        timed_out = False
         try:
             await asyncio.wait_for(server.stop(), timeout=5.0)
             await asyncio.wait_for(runtime.shutdown(), timeout=10.0)
         except (asyncio.TimeoutError, TimeoutError):
             logger.warning("graceful shutdown timed out — forcing exit")
-            outbox.close()
-            inbox.close()
-            os._exit(EXIT_SIGINT)
+            timed_out = True
+        # Close the SQLite stores cleanly before any hard exit — ``os._exit``
+        # below bypasses every ``finally``, so this must run first.
         outbox.close()
         inbox.close()
+        if timed_out:
+            os._exit(EXIT_SIGINT)
     return EXIT_OK
 
 
