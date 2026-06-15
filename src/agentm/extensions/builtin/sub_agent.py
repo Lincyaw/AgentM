@@ -722,9 +722,24 @@ class _ChildTaskManager:
         # provider=None → spawn_child_session auto-wires the
         # inherit_provider builtin so the child re-uses the parent's
         # active ProviderConfig without re-authenticating.
+        #
+        # scenario = the parent's scenario so that a dispatch with neither a
+        # persona nor an explicit ``extensions`` list (combined list empty)
+        # inherits the parent's curated atom set instead of degrading. An
+        # empty ``extensions`` is falsy, so ``_resolve_extensions`` skips the
+        # extensions branch; without a scenario it then falls through to the
+        # "auto-discover EVERY builtin with empty config" fallback, which both
+        # spams install errors (cost_budget/inherit_provider/memory/wire_driver
+        # can't load bare) and hands the worker a god-mode all-builtins set.
+        # A non-empty combined list still wins (extensions branch precedes the
+        # scenario branch), so explicit/persona dispatches are unaffected.
+        child_extensions_combined = (
+            persona_extensions + child_extensions + inherited_extensions
+        )
         child_config = {
             "cwd": self._api.cwd,
-            "extensions": persona_extensions + child_extensions + inherited_extensions,
+            "extensions": child_extensions_combined,
+            "scenario": self._api.scenario,
             "provider": None,
             "loop_config": child_loop_config,
             "task_id": task_id,
