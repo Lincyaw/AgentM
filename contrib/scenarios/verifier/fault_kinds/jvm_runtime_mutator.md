@@ -72,29 +72,30 @@ changes (HTTP 4xx/5xx from the corrupted request).
 
 ## How it propagates
 The cascade is driven by **data / functionality loss**, not
-latency. Distinguish upstream (callers of the target) from
-downstream (services the target calls):
+latency. Distinguish by call direction:
 
-### Upstream (callers)
+### Callers of the target
 A caller's endpoint that routes through the mutated method may
 vanish entirely: the mutated URL returns 404 or the corrupted
 data causes fast failure, so the caller's flow stops completing.
 The caller's aggregate may look healthy (other endpoints dilute
 it), but the specific endpoint that depends on the target lost
-its spans. This IS the caller's degradation — its user-facing
-flow is broken. Confirm with `flow_interrupted`.
+its spans.
 
-A caller may also show explicit errors (4xx/5xx, exceptions)
-if it validates the corrupted response. Confirm with
-`error_rate_elevated`.
+If the caller shows explicit errors (4xx/5xx, exceptions from
+validating the corrupted response), confirm with
+`error_rate_elevated`. If the only signal is that the
+fault-related endpoints vanished while others are healthy, mark
+as **inconclusive** — the judge can determine with the full
+graph whether the disappearance traces back to the mutation.
 
-### Downstream (callees)
+### Callees of the target
 Services the target calls may receive fewer or zero requests
-because the mutated path stopped sending them. If the
-downstream's own latency and error rate are unchanged and its
-only signal is "fewer calls", that is **not** the downstream's
-degradation — the target simply stopped calling it. Reject.
+because the mutated path stopped sending them. If the callee's
+own latency and error rate are unchanged and its only signal is
+"fewer calls", that is **not** the callee's degradation — the
+target simply stopped calling it. Reject.
 
-Confirm a downstream only when its OWN error rate rises or its
-OWN behaviour breaks (e.g. it receives a corrupted request and
+Confirm a callee only when its OWN error rate rises or its OWN
+behaviour breaks (e.g. it receives a corrupted request and
 rejects it).
