@@ -54,9 +54,14 @@ class _FakeAPI:
     def __init__(self, services: dict[str, Any]) -> None:
         self._services = services
         self.handlers: dict[str, list[Any]] = {}
+        self.registered: dict[str, Any] = {}
 
     def get_service(self, name: str) -> Any:
         return self._services.get(name)
+
+    def set_service(self, name: str, obj: Any) -> None:
+        self.registered[name] = obj
+        self._services[name] = obj
 
     def on(self, channel: str, handler: Any, **_kw: Any) -> None:
         self.handlers.setdefault(channel, []).append(handler)
@@ -352,3 +357,126 @@ async def test_sync_emitted_control_event_is_forwarded() -> None:
     assert meta["kind"] == "extension_reload"
     assert meta["is_self_modify"] is True
     assert meta["trigger"] == "agent"
+
+
+# --- session_ready carries the model-profile list --------------------------
+
+
+def test_session_ready_carries_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The session_ready frame must advertise the configured model-profile
+    names (same source as the gateway /model command) so a chat client can
+    populate a model switcher without a second round trip."""
+    from agentm.core.abi import Model
+    from agentm.core.abi.events import SessionReadyEvent
+
+    mod = _load_wire_driver()
+    monkeypatch.setattr(mod, "_available_model_names", lambda: ["doubao", "glm"])
+
+    ev = SessionReadyEvent(
+        cwd="/tmp",
+        session_id="s1",
+        tool_names=("read",),
+        command_names=("/help",),
+        extension_module_paths=(),
+        model=Model(id="doubao-seed", provider="openai", context_window=1, max_output_tokens=1),
+        root_session_id="r1",
+    )
+    body = mod._p_session_ready(ev)
+    assert body["kind"] == "session_ready"
+    assert body["model"] == "doubao-seed"
+    assert body["models"] == ["doubao", "glm"]
+
+
+# --- child-session trajectory forwarding -----------------------------------
+
+
+class _FakeChild:
+    """Minimal child-session stand-in: a real EventBus + a session_id."""
+
+    def __init__(self, bus: Any, session_id: str) -> None:
+        self.bus = bus
+        self.session_id = session_id
+
+
+@pytest.mark.asyncio
+async def test_child_trajectory_forwarded_with_child_id() -> None:
+    """A spawned child's own stream/tool/turn events must reach the PARENT's
+    wire_outbound, each stamped metadata.child_id; parent frames carry none."""
+    from agentm.core.abi import EventBus
+
+    out: list[dict] = []
+
+    async def sink(body: dict) -> None:
+        out.append(body)
+
+    api = _install_multi(sink)
+    forwarder = api.registered["child_wire_forwarder"]
+    assert forwarder is not None
+
+    child_bus = EventBus()
+    forwarder(_FakeChild(child_bus, "child-abc"))
+
+    # A parent frame first — it must NOT carry child_id.
+    await api.handlers[StreamDeltaEvent.CHANNEL][0](
+        StreamDeltaEvent(turn_index=0, delta=TextDelta(text="parent"), turn_id=1)
+    )
+    # Now the child's own bus emits its trajectory.
+    await child_bus.emit(
+        StreamDeltaEvent.CHANNEL,
+        StreamDeltaEvent(turn_index=0, delta=TextDelta(text="child-tok"), turn_id=2),
+    )
+    await child_bus.emit(
+        ToolCallEvent.CHANNEL,
+        ToolCallEvent(tool_call_id="tc1", tool_name="bash", args={"cmd": "ls"}),
+    )
+
+    parent_frame = out[0]
+    assert parent_frame["content"] == "parent"
+    assert "child_id" not in parent_frame["metadata"]
+
+    child_frames = [b for b in out if b["metadata"].get("child_id") == "child-abc"]
+    kinds = {b["metadata"]["kind"] for b in child_frames}
+    assert kinds == {"stream_text", "tool_call"}
+    stream = next(b for b in child_frames if b["metadata"]["kind"] == "stream_text")
+    assert stream["content"] == "child-tok"
+    # Child frames inherit the parent turn_context routing.
+    assert stream["channel"] == "terminal"
+    assert stream["_session_key"] == "terminal:t1"
+
+
+@pytest.mark.asyncio
+async def test_child_lifecycle_markers_not_double_emitted() -> None:
+    """child_session_start/end belong to the parent bus; forwarding the child
+    bus must not re-emit them (they'd double up)."""
+    from agentm.core.abi import ChildSessionStartEvent, EventBus
+
+    out: list[dict] = []
+
+    async def sink(body: dict) -> None:
+        out.append(body)
+
+    api = _install_multi(sink)
+    child_bus = EventBus()
+    api.registered["child_wire_forwarder"](_FakeChild(child_bus, "child-xyz"))
+
+    await child_bus.emit(
+        ChildSessionStartEvent.CHANNEL,
+        ChildSessionStartEvent(
+            child_session_id="grandchild",
+            parent_session_id="child-xyz",
+            purpose="nested",
+        ),
+    )
+    assert out == []
+
+
+def test_child_forwarder_skips_handle_without_bus() -> None:
+    out: list[dict] = []
+
+    async def sink(body: dict) -> None:  # pragma: no cover - never called
+        out.append(body)
+
+    api = _install_multi(sink)
+    # A child object missing bus/session_id is silently skipped.
+    api.registered["child_wire_forwarder"](object())
+    assert out == []

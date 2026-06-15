@@ -128,6 +128,23 @@ class _ChildSession(Protocol):
     async def shutdown(self) -> None: ...
 
 
+# Service registered by the ``wire_driver`` atom inside the gateway. Reached by
+# name (not import) so this atom keeps the §11 contract: no atom-to-atom import.
+_WIRE_CHILD_FORWARDER_SERVICE = "child_wire_forwarder"
+
+
+def _forward_child_to_wire(api: ExtensionAPI, child: Any) -> None:
+    """Fan a spawned child's trajectory onto the parent wire when the gateway's
+    ``child_wire_forwarder`` service is installed; a no-op otherwise."""
+    forwarder = api.get_service(_WIRE_CHILD_FORWARDER_SERVICE)
+    if forwarder is None:
+        return
+    try:
+        forwarder(child)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class _ArtifactStore(Protocol):
     """The ``artifact_store`` service surface used for the resume journal."""
 
@@ -755,6 +772,10 @@ class _WorkflowRun:
                     "prompt": prompt[:200],
                 })
                 self.budget_svc.attach(child)
+                # Stream the child's own trajectory onto the parent wire,
+                # stamped with the child's session id (no-op outside the
+                # gateway). Same service-by-name contract sub_agent uses.
+                _forward_child_to_wire(self.api, child)
                 try:
                     messages = await child.prompt(prompt)
                     output = _final_session_output(messages)

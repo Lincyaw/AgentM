@@ -86,7 +86,6 @@ members = [
     "contrib/extensions/mcp_bridge",
     "contrib/scenarios/harbor",
     "contrib/scenarios/rca",
-    "contrib/gateway-peers/terminal",
     "contrib/gateway-peers/feishu",
 ]
 
@@ -94,7 +93,6 @@ members = [
 # a published wheel takes over transparently outside the workspace.
 [tool.uv.sources]
 fpg = { git = "https://github.com/Lincyaw/fpg-convention" }
-agentm-terminal = { workspace = true }
 llmharness = { workspace = true }
 agentm-mcp-bridge = { workspace = true }
 agentm-harbor = { workspace = true }

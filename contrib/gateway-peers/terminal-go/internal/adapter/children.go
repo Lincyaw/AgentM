@@ -1,0 +1,221 @@
+package adapter
+
+import (
+	"context"
+	"log"
+	"sync"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
+)
+
+// childSession is the per-child state the ChildManager owns: a dedicated
+// *app.App (its own event fan-out drives a dedicated supervisor tab) and a
+// Translator that paints that app's transcript from child-stamped wire bodies.
+type childSession struct {
+	id         string
+	app        *app.App
+	sess       *session.Session
+	translator *Translator
+	finished   bool
+}
+
+// ChildManager routes child-session wire bodies (those carrying
+// metadata.child_id) into per-child sub-sessions so spawned sub-agents render
+// in their own switchable cagent tab, instead of bleeding into the parent
+// transcript.
+//
+// The bridge to the vendored TUI is the supervisor's SessionSpawner seam: the
+// TUI owns the supervisor and only ever calls the spawner from its
+// SpawnSessionMsg handler. So when a brand-new child_id appears, the manager
+//
+//  1. builds the child *app.App + session up front (keyed by child_id),
+//  2. parks it in spawnQueue, and
+//  3. sends a SpawnSessionMsg to the tea.Program.
+//
+// The TUI then calls supervisor.SpawnSession -> our Spawner, which pops the
+// parked child app. The supervisor registers it as a tab (routing key ==
+// child session ID == child_id) and switches to it. Every subsequent body for
+// that child_id is fed into the child's Translator, whose EmitEvent fans out as
+// RoutedMsg{SessionID: child_id} that the supervisor paints onto that tab.
+//
+// All public methods are concurrency-safe: Route/markStart/markEnd run on the
+// wire-pump goroutine while Spawn runs on the bubbletea goroutine.
+type ChildManager struct {
+	workingDir string
+
+	mu       sync.Mutex
+	program  *tea.Program
+	children map[string]*childSession
+	// spawnQueue holds child apps awaiting a supervisor.SpawnSession pull, in
+	// FIFO order keyed by child_id. A queued entry is removed once Spawn pops it.
+	spawnQueue []*childSession
+}
+
+// NewChildManager builds a ChildManager. workingDir labels spawned child tabs'
+// fallback title (the supervisor uses it when a session has no title) and is the
+// non-empty WorkingDir the SpawnSessionMsg carries so the TUI does not open the
+// working-dir picker.
+func NewChildManager(workingDir string) *ChildManager {
+	return &ChildManager{
+		workingDir: workingDir,
+		children:   make(map[string]*childSession),
+	}
+}
+
+// SetProgram wires the tea.Program the manager sends SpawnSessionMsg to. Called
+// from main once tui.New has produced the program. Safe to call before any
+// child appears.
+func (m *ChildManager) SetProgram(p *tea.Program) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.program = p
+}
+
+// Spawner returns the SessionSpawner the supervisor pulls parked child apps
+// from. It is the live replacement for ErrorSpawner: when a child app is queued
+// it returns that app (so the new tab adopts the child session); when the queue
+// is empty it errors, which is the correct behaviour for a genuine user-driven
+// "new tab" on a single-conversation wire peer.
+func (m *ChildManager) Spawner() func(ctx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
+	return func(ctx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
+		_, _ = ctx, workingDir
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if len(m.spawnQueue) == 0 {
+			return nil, nil, nil, ErrNoQueuedChild
+		}
+		cs := m.spawnQueue[0]
+		m.spawnQueue = m.spawnQueue[1:]
+		// Cleanup is a no-op: the child app's lifetime is bounded by the TUI ctx
+		// (the supervisor cancels its subscription on tab close / shutdown).
+		return cs.app, cs.sess, func() {}, nil
+	}
+}
+
+// Has reports whether child_id is a known child session. Used by the root
+// translator to decide whether a body must be routed to a child tab.
+func (m *ChildManager) Has(childID string) bool {
+	if childID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.children[childID]
+	return ok
+}
+
+// Start handles a child_start body: it creates the child sub-session (app +
+// session keyed by child_id + translator), parks it for the spawner, and asks
+// the TUI to open a tab for it. Idempotent on child_id.
+func (m *ChildManager) Start(childID, purpose string) {
+	if childID == "" {
+		return
+	}
+	m.mu.Lock()
+	if _, exists := m.children[childID]; exists {
+		m.mu.Unlock()
+		return
+	}
+
+	title := purpose
+	if title == "" {
+		title = "sub-agent"
+	}
+	// Key the child session ID to child_id so the supervisor routing key, the
+	// tab identity and the wire child_id are one and the same.
+	sess := session.New(
+		session.WithID(childID),
+		session.WithTitle(title),
+		session.WithWorkingDir(m.workingDir),
+	)
+	childApp := app.New(context.Background(), sess)
+	tr := NewTranslator(childApp, sess)
+	cs := &childSession{
+		id:         childID,
+		app:        childApp,
+		sess:       sess,
+		translator: tr,
+	}
+	m.children[childID] = cs
+	m.spawnQueue = append(m.spawnQueue, cs)
+	p := m.program
+	m.mu.Unlock()
+
+	if p == nil {
+		// No program yet (should not happen once SetProgram ran before the
+		// stream); the child app is still queued so a later spawn picks it up.
+		log.Printf("[adapter] child_start %s parked before program ready", childID)
+		return
+	}
+	// Drive the TUI's normal new-tab path, which pulls our queued child app via
+	// Spawner and switches to the freshly opened tab.
+	p.Send(messages.SpawnSessionMsg{WorkingDir: m.workingDir})
+}
+
+// Route feeds one child-stamped body into the child's translator so it paints
+// the child tab. Reports false when child_id is unknown (the caller then leaves
+// the body on the parent path). A child_start has not necessarily produced a
+// registered child yet when its trajectory races ahead; Start always precedes
+// Route for a given child because both arrive on the ordered parent wire.
+func (m *ChildManager) Route(childID string, body map[string]any) bool {
+	m.mu.Lock()
+	cs := m.children[childID]
+	m.mu.Unlock()
+	if cs == nil {
+		return false
+	}
+	cs.translator.handleOutbound(body)
+	return true
+}
+
+// End handles a child_end body: it marks the child finished and emits a
+// terminal breadcrumb onto the child's own tab (stream stop + a completion
+// note) so the tab reads as done while staying open for inspection.
+func (m *ChildManager) End(childID, errStr string, finalMsgCount int64) {
+	m.mu.Lock()
+	cs := m.children[childID]
+	if cs != nil {
+		cs.finished = true
+	}
+	m.mu.Unlock()
+	if cs == nil {
+		return
+	}
+
+	tr := cs.translator
+	// Close any open stream on the child so its spinner stops.
+	if tr.streaming {
+		tr.streaming = false
+		tr.emit(runtime.StreamStopped(tr.sessionID(), tr.agentName, "child_end"))
+	}
+	if errStr != "" {
+		tr.emit(runtime.Error("sub-agent failed: " + errStr))
+		return
+	}
+	note := "✓ sub-agent completed"
+	if finalMsgCount > 0 {
+		note += " (" + itoa(finalMsgCount) + " messages)"
+	}
+	tr.emit(runtime.AgentChoice(tr.agentName, tr.sessionID(), note))
+}
+
+// itoa renders a non-negative int64 without pulling strconv into the hot path's
+// import set elsewhere; kept local to children.go.
+func itoa(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}

@@ -87,6 +87,11 @@ Projector = Callable[[Any], ProjectorResult]
 
 _PREVIEW_LIMIT = 4000
 
+# Service name under which ``install`` registers the child-trajectory
+# forwarder. Child-spawning atoms reach it via ``api.get_service`` (§11: no
+# atom-to-atom import) and call it with a freshly spawned child session.
+WIRE_CHILD_FORWARDER_SERVICE = "child_wire_forwarder"
+
 class WireDriverConfig(BaseModel):
     model_config = {"extra": "allow"}
 
@@ -310,12 +315,28 @@ def _p_cost_budget(ev: CostBudgetExceededEvent) -> ProjectorResult:
         "currency": ev.currency,
     }
 
+def _available_model_names() -> list[str]:
+    """The configured model-profile names (``[models.<name>]`` keys).
+
+    Same source as the gateway ``/model`` command's ``list_models`` so the
+    chat client can populate a model-switcher without a second round trip.
+    Best-effort: a missing / unreadable user config yields an empty list
+    rather than failing the session_ready frame."""
+    try:
+        from agentm.core.lib.user_config import load_user_config
+
+        return list(load_user_config().models.keys())
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _p_session_ready(ev: SessionReadyEvent) -> ProjectorResult:
     return {
         "kind": "session_ready",
         "tool_names": list(ev.tool_names),
         "command_names": list(ev.command_names),
         "model": ev.model.id if ev.model is not None else None,
+        "models": _available_model_names(),
     }
 
 def _p_command_dispatched(ev: CommandDispatchedEvent) -> ProjectorResult:
@@ -337,6 +358,13 @@ _ASYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
     (ChildSessionStartEvent.CHANNEL, _p_child_start),
     (ChildSessionEndEvent.CHANNEL, _p_child_end),
     (AgentEndEvent.CHANNEL, _p_agent_end),
+)
+
+# child_session_* are emitted on the PARENT bus (the parent's own wire_driver
+# surfaces them). The child trajectory forwarder skips these channels so a
+# child's lifecycle markers are not double-emitted off its own bus.
+_CHILD_MARKER_CHANNELS: frozenset[str] = frozenset(
+    {ChildSessionStartEvent.CHANNEL, ChildSessionEndEvent.CHANNEL}
 )
 
 # Runtime control/observability channels dispatched via ``bus.emit_sync`` (or
@@ -361,6 +389,105 @@ _SYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
     (CommandDispatchedEvent.CHANNEL, _p_command_dispatched),
 )
 
+def _bodies(result: ProjectorResult) -> list[dict[str, Any]]:
+    if result is None:
+        return []
+    return [dict(result)] if isinstance(result, dict) else [dict(b) for b in result]
+
+
+def _make_ship(
+    *,
+    outbound_sink: Callable[[dict[str, Any]], Any],
+    session_key: str,
+    turn_context: dict[str, Any] | None,
+    child_id: str | None = None,
+) -> Callable[[dict[str, Any]], Any]:
+    """Build the ``async (projector_body) -> None`` sink shared by the parent
+    session and every child it spawns.
+
+    When ``child_id`` is set, every outbound body is stamped
+    ``metadata.child_id`` so the consumer can attribute the frame to the
+    spawned sub-agent session rather than the parent (shared wire contract).
+    Parent bodies carry no ``child_id``. Address fields are read from the
+    parent's live ``turn_context`` so a child's trajectory routes to the same
+    chat surface as the turn that spawned it."""
+
+    def _addr() -> dict[str, Any]:
+        ctx = turn_context or {}
+        return {
+            "channel": str(ctx.get("channel") or ""),
+            "chat_id": str(ctx.get("chat_id") or ""),
+            "thread_id": ctx.get("thread_id"),
+        }
+
+    async def _ship(proj: dict[str, Any]) -> None:
+        kind = proj.pop("kind")
+        content = proj.pop("content", "")
+        addr = _addr()
+        metadata: dict[str, Any] = {"kind": kind, **proj}
+        if child_id is not None:
+            metadata["child_id"] = child_id
+        body: dict[str, Any] = {
+            "channel": addr["channel"],
+            "chat_id": addr["chat_id"],
+            "content": content,
+            "metadata": metadata,
+            # Echoed onto the envelope by the gateway sink so a multi-surface
+            # client can attribute this outbound to its conversation (§2.5).
+            "_session_key": session_key,
+        }
+        if addr["thread_id"] is not None:
+            body["thread_id"] = addr["thread_id"]
+        await outbound_sink(body)
+
+    return _ship
+
+
+def attach_child_wire_forwarder(
+    child_bus: Any,
+    *,
+    wire_outbound: Callable[[dict[str, Any]], Any],
+    session_key: str,
+    child_id: str,
+    turn_context: dict[str, Any] | None,
+) -> None:
+    """Fan a spawned child session's own trajectory out over the PARENT's wire.
+
+    A child session runs on its own :class:`EventBus`; its ``stream_*`` /
+    ``tool_*`` / ``turn_*`` / ``agent_end`` / ``usage`` events never bubble to
+    the parent bus, so without this they reach no peer (only the
+    ``child_start`` / ``child_end`` markers emitted on the parent bus do).
+    This subscribes the child bus to the SAME async wire projectors the parent
+    uses (``_ASYNC_PROJECTORS``) and ships each body over ``wire_outbound``
+    stamped with ``metadata.child_id``.
+
+    Invoked at child-spawn sites (``sub_agent`` / ``workflow``) with the
+    parent's wire services pulled from ``api.get_service``. The child-lifecycle
+    markers (``child_session_start`` / ``child_session_end``) are intentionally
+    skipped here — they are emitted on the PARENT bus and surfaced by the
+    parent's own wire_driver, so re-forwarding them off the child bus would
+    double them."""
+    ship = _make_ship(
+        outbound_sink=wire_outbound,
+        session_key=session_key,
+        turn_context=turn_context,
+        child_id=child_id,
+    )
+
+    def _make_async(projector: Projector) -> Callable[[Any], Any]:
+        async def handler(ev: Any) -> None:
+            for body in _bodies(projector(ev)):
+                await ship(body)
+
+        return handler
+
+    for channel, projector in _ASYNC_PROJECTORS:
+        # child_session_* markers belong to the parent bus; don't echo them.
+        if channel in _CHILD_MARKER_CHANNELS:
+            continue
+        child_bus.on(channel, _make_async(projector))
+
+
 def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG001
     outbound_sink = api.get_service("wire_outbound")
     session_key = api.get_service("session_key")
@@ -377,35 +504,11 @@ def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG00
     # Holds scheduled control-frame tasks so the loop does not GC them mid-flight.
     bg_tasks: set[asyncio.Task[Any]] = set()
 
-    def _addr() -> dict[str, Any]:
-        ctx = turn_context or {}
-        return {
-            "channel": str(ctx.get("channel") or ""),
-            "chat_id": str(ctx.get("chat_id") or ""),
-            "thread_id": ctx.get("thread_id"),
-        }
-
-    async def _ship(proj: dict[str, Any]) -> None:
-        kind = proj.pop("kind")
-        content = proj.pop("content", "")
-        addr = _addr()
-        body: dict[str, Any] = {
-            "channel": addr["channel"],
-            "chat_id": addr["chat_id"],
-            "content": content,
-            "metadata": {"kind": kind, **proj},
-            # Echoed onto the envelope by the gateway sink so a multi-surface
-            # client can attribute this outbound to its conversation (§2.5).
-            "_session_key": session_key,
-        }
-        if addr["thread_id"] is not None:
-            body["thread_id"] = addr["thread_id"]
-        await outbound_sink(body)
-
-    def _bodies(result: ProjectorResult) -> list[dict[str, Any]]:
-        if result is None:
-            return []
-        return [dict(result)] if isinstance(result, dict) else [dict(b) for b in result]
+    _ship = _make_ship(
+        outbound_sink=outbound_sink,
+        session_key=session_key,
+        turn_context=turn_context,
+    )
 
     def _make_async(projector: Projector) -> Callable[[Any], Any]:
         async def handler(ev: Any) -> None:
@@ -459,3 +562,27 @@ def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG00
     # Approval gate runs alongside the tool_call projector; it returns a block
     # decision the loop acts on, independent of the outbound forwarding.
     api.on(ToolCallEvent.CHANNEL, _approval_gate)
+
+    def _forward_child(child: Any) -> None:
+        """Subscribe a freshly spawned child session to this session's wire.
+
+        Registered as the ``child_wire_forwarder`` service so child-spawning
+        atoms (``sub_agent`` / ``workflow``) can fan a child's trajectory onto
+        the parent wire WITHOUT importing this atom (§11) — they reach it by
+        name via ``api.get_service("child_wire_forwarder")``. A child object
+        that does not expose ``bus`` / ``session_id`` is silently skipped: the
+        markers (child_start/child_end) still flow on the parent bus, the
+        trajectory just stays local."""
+        child_bus = getattr(child, "bus", None)
+        child_id = getattr(child, "session_id", None)
+        if child_bus is None or not child_id:
+            return
+        attach_child_wire_forwarder(
+            child_bus,
+            wire_outbound=outbound_sink,
+            session_key=session_key,
+            child_id=str(child_id),
+            turn_context=turn_context,
+        )
+
+    api.set_service(WIRE_CHILD_FORWARDER_SERVICE, _forward_child)

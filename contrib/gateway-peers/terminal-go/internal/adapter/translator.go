@@ -18,7 +18,9 @@ package adapter
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"strconv"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
@@ -49,6 +51,12 @@ type Translator struct {
 	// The gateway runs one approval at a time per session (a blocking Future),
 	// so a single slot suffices.
 	pendingApprovalID string
+
+	// children routes child-session bodies (those carrying metadata.child_id)
+	// into per-child sub-sessions/tabs. Set only on the ROOT translator; nil on
+	// a child translator (a child does not spawn grandchild tabs of its own —
+	// the gateway flattens nested children onto the same parent wire).
+	children *ChildManager
 }
 
 // PendingApprovalID returns the approval_id awaiting resolution, or "".
@@ -108,6 +116,38 @@ func (t *Translator) handleOutbound(body map[string]any) {
 	meta, _ := body["metadata"].(map[string]any)
 	kind, _ := meta["kind"].(string)
 	content, _ := body["content"].(string)
+
+	// Child-session routing (root translator only). Every body that originates
+	// from a spawned sub-agent carries metadata.child_id; parent bodies carry
+	// none. child_start/child_end are control frames handled here on the parent
+	// so they open / finalize the child tab; all other child-stamped bodies are
+	// the child's live trajectory and must paint the child tab, not the parent
+	// transcript.
+	if t.children != nil {
+		childID, _ := meta["child_id"].(string)
+		switch kind {
+		case "child_start":
+			purpose, _ := meta["purpose"].(string)
+			t.children.Start(childID, purpose)
+			// Parent-side breadcrumb: a concise note that delegation happened,
+			// now that the real surface is a dedicated tab.
+			if purpose != "" {
+				t.emit(runtime.AgentChoice(t.agentName, t.sessionID(), "→ delegated to sub-agent: "+purpose))
+			} else {
+				t.emit(runtime.AgentChoice(t.agentName, t.sessionID(), "→ delegated to sub-agent"))
+			}
+			return
+		case "child_end":
+			errStr, _ := meta["error"].(string)
+			final := intField(meta, "final_message_count")
+			t.children.End(childID, errStr, final)
+			return
+		default:
+			if childID != "" && t.children.Route(childID, body) {
+				return
+			}
+		}
+	}
 
 	switch kind {
 	case "turn_start":
@@ -175,25 +215,64 @@ func (t *Translator) handleOutbound(body map[string]any) {
 		t.emit(runtime.Error(content))
 
 	case "session_ready":
-		t.emit(t.agentInfoEvent(meta))
+		t.handleSessionReady(meta)
 
 	case "child_start":
-		// Surface as a warning-styled note; the TUI has no nested sub-session
-		// panel on the wire path.
+		// Fallback only: reached when this translator has no child manager
+		// (i.e. it is itself a child translator). The root translator handles
+		// child_start above by opening a dedicated sub-session tab, so it never
+		// falls through to here. Defensive note in case the gateway ever forwards
+		// a nested child frame onto a child wire.
 		if purpose, _ := meta["purpose"].(string); purpose != "" {
 			t.emit(runtime.Warning("sub-agent started: "+purpose, t.agentName))
 		}
 
 	case "child_end":
+		// Fallback only (see child_start above).
 		if errStr, _ := meta["error"].(string); errStr != "" {
 			t.emit(runtime.Warning("sub-agent failed: "+errStr, t.agentName))
 		}
 
+	// --- runtime-control / observability signals -------------------------
+	// These have no bespoke cagent surface, so they render onto the two
+	// existing generic surfaces: ephemeral notices become Warning toasts;
+	// content-bearing ones become a system-styled assistant note (AgentChoice
+	// with a clear prefix). Nothing is silently dropped.
+	case "extension_install":
+		t.emit(t.extensionInstallEvent(meta))
+
+	case "extension_reload":
+		t.emit(t.extensionReloadEvent(meta))
+
+	case "extension_unload":
+		if name, _ := meta["name"].(string); name != "" {
+			t.emit(runtime.Warning("extension unloaded: "+name, t.agentName))
+		}
+
+	case "resource_write":
+		t.emit(t.resourceWriteNote(meta))
+
+	case "plan_submitted":
+		t.emit(t.planSubmittedNote(meta, content))
+
+	case "after_compact":
+		t.emit(t.afterCompactNote(meta, content))
+
+	case "cost_budget_exceeded":
+		t.emit(t.costBudgetEvent(meta))
+
+	case "command_dispatched":
+		t.emit(t.commandDispatchedEvent(meta))
+
+	case "api_register":
+		t.emit(t.apiRegisterEvent(meta))
+
+	case "api_send_user_message":
+		t.emit(t.apiUserMessageNote(meta, content))
+
 	default:
-		// extension_install/reload/unload, api_register, resource_write,
-		// plan_submitted, after_compact, cost_budget_exceeded,
-		// command_dispatched — runtime-control/observability kinds with no
-		// cagent render. Log and drop per the migration rule.
+		// Truly unmapped kinds (ping/ack-adjacent noise, future additions):
+		// log and drop. Reaching here is now the exception, not the rule.
 		if kind != "" {
 			log.Printf("[adapter] no cagent mapping for outbound kind=%q; dropping", kind)
 		}
@@ -269,10 +348,157 @@ func (t *Translator) confirmationEvent(meta map[string]any, content string, body
 	return runtime.ToolCallConfirmation(call, def, t.agentName)
 }
 
-// agentInfoEvent builds an AgentInfoEvent from a session_ready body.
-func (t *Translator) agentInfoEvent(meta map[string]any) runtime.Event {
+// handleSessionReady projects a session_ready frame onto the cagent sidebar and
+// capability surfaces. The frame carries tool_names / command_names (so /tools
+// and /skills populate), model (the active profile) and, per the shared wire
+// contract, models (the selectable profile names for the model picker). The
+// names are stashed on the App so CurrentAgentTools / CurrentAgentCommands /
+// AvailableModels return them; the sidebar gets a ToolsetInfo (tool count) and a
+// richer AgentInfo (active model).
+func (t *Translator) handleSessionReady(meta map[string]any) {
+	toolNames := stringSlice(meta["tool_names"])
+	commandNames := stringSlice(meta["command_names"])
+	modelNames := stringSlice(meta["models"])
 	model, _ := meta["model"].(string)
-	return runtime.AgentInfo(t.agentName, model, "", "")
+
+	if t.app != nil {
+		t.app.SetAgentInfo(toolNames, commandNames, modelNames, model)
+	}
+
+	desc := ""
+	if len(modelNames) > 1 {
+		desc = strconv.Itoa(len(modelNames)) + " models available"
+	}
+	t.emit(runtime.AgentInfo(t.agentName, model, desc, ""))
+	t.emit(runtime.ToolsetInfo(len(toolNames), false, t.agentName))
+}
+
+// extensionInstallEvent renders an extension_install frame. A non-empty error is
+// a warning; a successful install/registration is a quiet warning-styled notice.
+func (t *Translator) extensionInstallEvent(meta map[string]any) runtime.Event {
+	path, _ := meta["module_path"].(string)
+	phase, _ := meta["phase"].(string)
+	if errStr, _ := meta["error"].(string); errStr != "" {
+		return runtime.Warning("extension install failed ("+path+"): "+errStr, t.agentName)
+	}
+	msg := "extension installed: " + path
+	if phase != "" {
+		msg += " [" + phase + "]"
+	}
+	return runtime.Warning(msg, t.agentName)
+}
+
+// extensionReloadEvent renders an extension_reload frame, making a self-modify
+// reload prominent (the agent rewrote one of its own atoms).
+func (t *Translator) extensionReloadEvent(meta map[string]any) runtime.Event {
+	name, _ := meta["name"].(string)
+	selfMod, _ := meta["is_self_modify"].(bool)
+	if errStr, _ := meta["error"].(string); errStr != "" {
+		return runtime.Warning("extension reload failed ("+name+"): "+errStr, t.agentName)
+	}
+	if selfMod {
+		// Surface self-modification as a durable system note, not an ephemeral
+		// toast: it is a load-bearing identity event worth keeping in transcript.
+		return runtime.AgentChoice(t.agentName, t.sessionID(), "⟳ self-modified: "+name)
+	}
+	return runtime.Warning("extension reloaded: "+name, t.agentName)
+}
+
+// resourceWriteNote renders a resource_write frame as a system-styled note: the
+// path, the author and (when present) the rationale and post-write hash.
+func (t *Translator) resourceWriteNote(meta map[string]any) runtime.Event {
+	path, _ := meta["path"].(string)
+	author, _ := meta["author"].(string)
+	rationale, _ := meta["rationale"].(string)
+	post, _ := meta["post_sha"].(string)
+	msg := "📝 resource write: " + path
+	if author != "" {
+		msg += " (by " + author + ")"
+	}
+	if rationale != "" {
+		msg += " — " + rationale
+	}
+	if post != "" {
+		msg += " [" + shortSHA(post) + "]"
+	}
+	return runtime.AgentChoice(t.agentName, t.sessionID(), msg)
+}
+
+// planSubmittedNote renders a plan_submitted frame as a system-styled note
+// carrying the plan id and its content.
+func (t *Translator) planSubmittedNote(meta map[string]any, content string) runtime.Event {
+	planID, _ := meta["plan_id"].(string)
+	header := "🧭 plan submitted"
+	if planID != "" {
+		header += " (" + planID + ")"
+	}
+	if content != "" {
+		header += ":\n" + content
+	}
+	return runtime.AgentChoice(t.agentName, t.sessionID(), header)
+}
+
+// afterCompactNote renders an after_compact frame: how many messages were kept
+// vs discarded, plus the summary content.
+func (t *Translator) afterCompactNote(meta map[string]any, content string) runtime.Event {
+	kept := intField(meta, "kept")
+	discarded := intField(meta, "discarded")
+	msg := "🗜 history compacted: kept " + strconv.FormatInt(kept, 10) +
+		", discarded " + strconv.FormatInt(discarded, 10)
+	if content != "" {
+		msg += "\n" + content
+	}
+	return runtime.AgentChoice(t.agentName, t.sessionID(), msg)
+}
+
+// costBudgetEvent renders a cost_budget_exceeded frame as a warning toast.
+func (t *Translator) costBudgetEvent(meta map[string]any) runtime.Event {
+	currency, _ := meta["currency"].(string)
+	used := floatField(meta, "used")
+	limit := floatField(meta, "limit")
+	return runtime.Warning(
+		"cost budget exceeded: "+formatMoney(used, currency)+" / "+formatMoney(limit, currency),
+		t.agentName,
+	)
+}
+
+// commandDispatchedEvent renders a command_dispatched frame as a warning-styled
+// notice naming the command and its owner.
+func (t *Translator) commandDispatchedEvent(meta map[string]any) runtime.Event {
+	name, _ := meta["name"].(string)
+	owner, _ := meta["owner"].(string)
+	msg := "command dispatched: /" + name
+	if owner != "" {
+		msg += " (owner " + owner + ")"
+	}
+	return runtime.Warning(msg, t.agentName)
+}
+
+// apiRegisterEvent renders an api_register frame as a warning-styled notice: an
+// atom registered a capability (tool/command/event) at runtime.
+func (t *Translator) apiRegisterEvent(meta map[string]any) runtime.Event {
+	regKind, _ := meta["reg_kind"].(string)
+	name, _ := meta["name"].(string)
+	ext, _ := meta["extension"].(string)
+	msg := "registered " + regKind + " " + name
+	if ext != "" {
+		msg += " (by " + ext + ")"
+	}
+	return runtime.Warning(msg, t.agentName)
+}
+
+// apiUserMessageNote renders an api_send_user_message frame (an atom injected a
+// user-visible message) as a system-styled note attributing the source.
+func (t *Translator) apiUserMessageNote(meta map[string]any, content string) runtime.Event {
+	ext, _ := meta["extension"].(string)
+	prefix := "✉ message"
+	if ext != "" {
+		prefix += " from " + ext
+	}
+	if content != "" {
+		prefix += ": " + content
+	}
+	return runtime.AgentChoice(t.agentName, t.sessionID(), prefix)
 }
 
 // applyUsage updates the session token counters and emits a TokenUsageEvent.
@@ -311,6 +537,61 @@ func jsonString(v any) string {
 		return ""
 	}
 	return string(b)
+}
+
+// stringSlice coerces a JSON-decoded value into a []string, tolerating the
+// []any that encoding/json produces for JSON arrays. Non-string elements and
+// non-array values yield an empty slice.
+func stringSlice(v any) []string {
+	switch s := v.(type) {
+	case []string:
+		return s
+	case []any:
+		out := make([]string, 0, len(s))
+		for _, e := range s {
+			if str, ok := e.(string); ok {
+				out = append(out, str)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// floatField reads a numeric metadata field as a float64, tolerating the
+// float64 / json.Number forms encoding/json produces.
+func floatField(meta map[string]any, key string) float64 {
+	switch n := meta[key].(type) {
+	case float64:
+		return n
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	default:
+		return 0
+	}
+}
+
+// shortSHA truncates a hash to a readable prefix for one-line notes.
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
+// formatMoney renders a money amount with its currency for budget notices.
+func formatMoney(amount float64, currency string) string {
+	s := strconv.FormatFloat(amount, 'f', -1, 64)
+	if currency == "" {
+		return s
+	}
+	return fmt.Sprintf("%s %s", s, currency)
 }
 
 // intField reads a numeric metadata field, tolerating the float64 that
