@@ -1,16 +1,26 @@
+// Command agentm-terminal is the AgentM gateway's terminal chat-client peer.
+// It renders Docker cagent's TUI (vendored verbatim under internal/tui) but
+// sources every event from the AgentM gateway wire protocol (internal/wire)
+// via internal/adapter, instead of a local agent runtime.
 package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
-	"github.com/AoyangSpace/agentm-terminal/internal/app"
+	"github.com/AoyangSpace/agentm-terminal/internal/adapter"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui"
+	tuiinput "github.com/AoyangSpace/agentm-terminal/internal/tui/input"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
 	"github.com/AoyangSpace/agentm-terminal/internal/wire"
+
+	"flag"
 )
 
 func main() {
@@ -24,7 +34,7 @@ func main() {
 	logFile := flag.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
 	flag.Parse()
 
-	// Set up file logging. bubbletea owns stdout; stderr is unreliable in alt-screen.
+	// File logging: bubbletea owns stdout and stderr is unreliable in alt-screen.
 	logPath := *logFile
 	if logPath == "" {
 		logPath = "/tmp/agentm-terminal.log"
@@ -33,21 +43,33 @@ func main() {
 		defer f.Close()
 	}
 
-	cfg := app.Config{
-		SenderID: *senderID,
-		ChatID:   *chatID,
-		Scenario: *scenario,
-		Theme:    *themeName,
-	}
+	// Apply the requested theme before constructing the model.
+	styles.ApplyThemeRef(*themeName)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Resolve the gateway URL from the env when not given and not mocking.
 	if !*mockMode && *connectURL == "" {
-		// Check AGENTM_SOCKET env var
 		if envURL := os.Getenv("AGENTM_SOCKET"); envURL != "" {
 			*connectURL = envURL
 		}
 	}
 
-	if !*mockMode && *connectURL != "" {
+	var initialApp *app.App
+	var initialSession *session.Session
+	var spawner tui.SessionSpawner
+
+	switch {
+	case *mockMode || *connectURL == "":
+		// No gateway: render the TUI against an empty session with no backend.
+		// Methods are inert (the App has no Controller), so the UI is visible
+		// but does not talk to anything. Useful for layout/theme inspection.
+		initialSession = session.New(session.WithTitle("agentm (mock)"))
+		initialApp = app.New(ctx, initialSession)
+		spawner = adapter.ErrorSpawner()
+
+	default:
 		transport, err := wire.ResolveTransport(*connectURL, "")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -55,21 +77,59 @@ func main() {
 		}
 		client := wire.NewWireClient(transport, "terminal-go", *token)
 
-		// Timeout applies only to the dial + handshake, not the long-lived connection.
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		err = client.Connect(ctx)
-		cancel()
+		// The timeout covers only the dial + handshake, not the long-lived
+		// connection.
+		dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
+		err = client.Connect(dialCtx)
+		dialCancel()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "connect error: %v\n", err)
 			os.Exit(1)
 		}
 		defer client.Close()
 
-		cfg.WireClient = client
+		// Compose the session_key per the §3.4 default rule (<channel>:<chat_id>).
+		id := adapter.Identity{
+			Channel:    "terminal",
+			ChatID:     *chatID,
+			SenderID:   *senderID,
+			SessionKey: "terminal:" + *chatID,
+			Scenario:   *scenario,
+		}
+
+		ad := adapter.New(client, id, "")
+		ad.Start(ctx)
+
+		initialApp = ad.App
+		initialSession = ad.Session
+		spawner = ad.Spawner()
 	}
 
-	m := app.NewModel(cfg)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// Mirror cagent's runTUI program wiring: coalesce mouse-wheel events, build
+	// the model via tui.New, hand the *tea.Program back to the model so it can
+	// send itself messages, then run.
+	coalescer := tuiinput.NewWheelCoalescer()
+	filter := func(_ tea.Model, msg tea.Msg) tea.Msg {
+		wheelMsg, ok := msg.(tea.MouseWheelMsg)
+		if !ok {
+			return msg
+		}
+		if coalescer.Handle(wheelMsg) {
+			return nil
+		}
+		return msg
+	}
+
+	wd, _ := os.Getwd()
+	model := tui.New(ctx, spawner, initialApp, wd, func() {})
+
+	p := tea.NewProgram(model, tea.WithContext(ctx), tea.WithFilter(filter))
+	coalescer.SetSender(p.Send)
+
+	if m, ok := model.(interface{ SetProgram(p *tea.Program) }); ok {
+		m.SetProgram(p)
+	}
+
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
