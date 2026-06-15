@@ -155,7 +155,7 @@ def _last_key(returns: list[Any], key: str) -> Any | None:
 
 
 def _last_messages(returns: list[Any]) -> list[AgentMessage] | None:
-    """Return the last replacement message list (bare list or ``{"messages": [...]}``\ )."""
+    r"""Return the last replacement message list (bare list or ``{"messages": [...]}``\ )."""
     chosen: list[AgentMessage] | None = None
     for value in returns:
         if isinstance(value, list):

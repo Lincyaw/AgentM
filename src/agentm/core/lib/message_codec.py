@@ -5,7 +5,7 @@ Deserialize: JSON dict → typed ``UserMessage``/``AssistantMessage``/
 ``ToolResultMessage`` (``deserialize_payload``).
 
 Used by ``SessionManager`` for on-disk persistence. The bytes encoding
-(``{"__bytes__": [...]}``\ ) is the established on-disk format; do not
+(``{"__bytes__": [...]}``\\ ) is the established on-disk format; do not
 change without a migration.
 """
 
