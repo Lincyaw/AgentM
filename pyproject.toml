@@ -51,15 +51,11 @@ eval = [
 harbor = [
     "agentm-harbor>=0.1.0",
 ]
-terminal = [
-    "agentm-terminal",
-]
 llmharness = ["llmharness"]
 mcp = ["agentm-mcp-bridge"]
 all-contrib = [
     "llmharness",
     "agentm-mcp-bridge",
-    "agentm-terminal",
 ]
 
 [dependency-groups]
