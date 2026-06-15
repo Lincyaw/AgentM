@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -38,10 +40,16 @@ type Model struct {
 	ready         bool
 
 	status      components.StatusBar
+	sidebar     components.Sidebar
 	viewport    viewport.Model
 	input       components.Input
 	suggestions components.SuggestionList
 	toasts      components.ToastStack
+
+	// Scrollbar, selection, and URL detection components.
+	scrollbar   components.Scrollbar
+	selection   *components.Selection
+	urlDetector *components.URLDetector
 
 	theme *theme.Theme
 
@@ -69,6 +77,9 @@ type Model struct {
 	// focused is the collapsible block currently selected by the cursor.
 	// May be nil if no focus has been set yet.
 	focused blocks.Focusable
+
+	// Theme watcher
+	themeWatcher *theme.Watcher
 
 	// Wire integration
 	wireClient      *wire.WireClient
@@ -110,7 +121,11 @@ func NewModel(cfg Config) Model {
 
 	m := Model{
 		theme:           th,
+		sidebar:         components.NewSidebar(),
 		input:           components.NewInput(),
+		themeWatcher:    theme.NewWatcher(theme.ThemeConfPath()),
+		selection:       components.NewSelection(),
+		urlDetector:     components.NewURLDetector(),
 		wireClient:      cfg.WireClient,
 		senderID:        senderID,
 		chatID:          chatID,
@@ -129,7 +144,7 @@ func NewModel(cfg Config) Model {
 
 	if cfg.WireClient == nil {
 		// Mock mode: populate with test data
-		m.status.Update(components.StatusModel{
+		sm := components.StatusModel{
 			Phase:       theme.PhaseIdle,
 			Model:       "doubao",
 			TokensIn:    1234,
@@ -140,7 +155,15 @@ func NewModel(cfg Config) Model {
 			CostSession: 1.47,
 			SessionKey:  "terminal:default",
 			SessionAge:  23 * time.Minute,
-		})
+		}
+		m.status.Update(sm)
+		m.sidebar.SetData(sm)
+		for _, t := range m.tools {
+			m.sidebar.AddTool(t)
+		}
+		for _, c := range m.commands {
+			m.sidebar.AddCommand(c)
+		}
 		m.transcript = buildMockTranscript(cfg.Theme)
 		m.toasts.Push("mock mode -- no gateway connection", "info", 5*time.Second)
 	} else {
@@ -162,12 +185,21 @@ func buildMockTranscript(themeName string) []blocks.Block {
 	thinking1 := blocks.NewThinkingBlock()
 	thinking1.Text = "The user wants an overview of the codebase. Let me look at the directory structure and key files to understand the architecture..."
 
-	tool1 := blocks.NewToolBlock("Read", map[string]any{
+	toolRead := blocks.NewToolBlock("Read", map[string]any{
 		"file_path": "src/agentm/core/abi/__init__.py",
+		"offset":    float64(1),
+		"limit":     float64(40),
 	})
-	tool1.Done = true
-	tool1.OK = true
-	tool1.Result = "# ABI protocols for the pluggable architecture\nfrom .protocols import ..."
+	toolRead.Done = true
+	toolRead.OK = true
+	toolRead.Result = "# ABI protocols for the pluggable architecture\nfrom .protocols import ModelProvider\nfrom .protocols import ToolProvider\nfrom .protocols import ExtensionAPI\nfrom .protocols import SessionManager\nfrom .protocols import ObservationSink"
+
+	toolBash := blocks.NewToolBlock("Bash", map[string]any{
+		"command": "ls -la src/agentm/extensions/builtin/",
+	})
+	toolBash.Done = true
+	toolBash.OK = true
+	toolBash.Result = "total 128\ndrwxr-xr-x 2 user user 4096 Jun 10 14:00 .\n-rw-r--r-- 1 user user 3200 Jun 10 14:00 auto_commit.py\n-rw-r--r-- 1 user user 2800 Jun 10 14:00 context_injection.py\n-rw-r--r-- 1 user user 1900 Jun 10 14:00 reminder.py\n-rw-r--r-- 1 user user 4100 Jun 10 14:00 workflow.py"
 
 	text1 := &blocks.TextBlock{
 		GlamourStyle: glamourStyle,
@@ -189,10 +221,19 @@ func buildMockTranscript(themeName string) []blocks.Block {
 
 	assistant1 := &blocks.AssistantTurn{
 		GlamourStyle: glamourStyle,
-		Segments:     []blocks.Block{thinking1, tool1, text1},
+		Segments:     []blocks.Block{thinking1, toolRead, toolBash, text1},
 		Children:     []*blocks.SubagentBlock{child1},
 	}
 	assistant1.SetComplete()
+
+	toolEdit := blocks.NewToolBlock("Edit", map[string]any{
+		"file_path":  "src/agentm/core/runtime/session.py",
+		"old_string": "    def start(self):\n        self._running = True",
+		"new_string": "    def start(self) -> None:\n        self._running = True\n        self._start_time = time.monotonic()",
+	})
+	toolEdit.Done = true
+	toolEdit.OK = true
+	toolEdit.Result = "ok"
 
 	text2 := &blocks.TextBlock{
 		GlamourStyle: glamourStyle,
@@ -208,7 +249,7 @@ func buildMockTranscript(themeName string) []blocks.Block {
 
 	assistant2 := &blocks.AssistantTurn{
 		GlamourStyle: glamourStyle,
-		Segments:     []blocks.Block{text2},
+		Segments:     []blocks.Block{toolEdit, text2},
 	}
 	assistant2.SetComplete()
 
@@ -260,6 +301,7 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.input.Focus(),
 		tickCmd(),
+		m.themeWatcher.Watch(),
 	}
 	if m.wireClient != nil {
 		cmds = append(cmds, m.listenWire)
@@ -283,15 +325,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.sidebar.ClampWidth(m.width)
 
+		vpW := m.viewportWidth()
 		if !m.ready {
-			m.viewport = viewport.New(m.width, m.viewportHeight())
+			m.viewport = viewport.New(vpW, m.viewportHeight())
 			m.viewport.SetContent(m.renderTranscript())
 			m.transcriptDirty = false
 			m.viewport.GotoBottom()
+			m.syncScrollbar()
 			m.ready = true
 		} else {
-			m.viewport.Width = m.width
+			m.viewport.Width = vpW
 			m.viewport.Height = m.viewportHeight()
 			m.transcriptDirty = true
 		}
@@ -302,9 +347,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tea.MouseMsg:
-		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
-		return m, cmd
+		return m.handleMouse(msg)
 
 	case components.InputSubmitted:
 		return m.handleSubmit(msg)
@@ -314,6 +357,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case components.InputComplete:
 		return m.handleCompletion()
+
+	case theme.ThemeChangedMsg:
+		m.theme = theme.ForName(msg.Name)
+		m.glamourStyle = msg.Name
+		m.transcriptDirty = true
+		return m, m.themeWatcher.Watch()
 
 	case wireMsg:
 		m.router.Dispatch(&m, msg.body)
@@ -341,12 +390,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.status.Update(sm)
 		}
+		// Sync sidebar with current status
+		m.sidebar.SetData(m.status.GetModel())
 		if m.transcriptDirty && m.ready {
 			m.viewport.SetContent(m.renderTranscript())
 			m.transcriptDirty = false
 			if m.inFlight {
 				m.viewport.GotoBottom()
 			}
+			m.syncScrollbar()
 		}
 		cmds = append(cmds, tickCmd())
 		return m, tea.Batch(cmds...)
@@ -366,6 +418,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Global keys that bypass input
 	switch key {
 	case keyCtrlD:
+		m.themeWatcher.Close()
 		return m, tea.Quit
 
 	case keyCtrlC:
@@ -376,6 +429,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		now := time.Now()
 		if now.Sub(m.ctrlcTime) < doubleCtrlCWindow {
+			m.themeWatcher.Close()
 			return m, tea.Quit
 		}
 		m.ctrlcTime = now
@@ -392,6 +446,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keyCtrlE:
 		m.toggleFocused()
+		m.transcriptDirty = true
+		return m, nil
+
+	case keyCtrlBracketClose:
+		m.sidebar.Toggle()
+		m.sidebar.ClampWidth(m.width)
+		vpW := m.viewportWidth()
+		m.viewport.Width = vpW
 		m.transcriptDirty = true
 		return m, nil
 
@@ -426,10 +488,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keyPgUp:
 		m.viewport.HalfViewUp()
+		m.syncScrollbar()
 		return m, nil
 
 	case keyPgDown:
 		m.viewport.HalfViewDown()
+		m.syncScrollbar()
 		return m, nil
 	}
 
@@ -478,24 +542,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toasts.Push("no code blocks found", "warn", 2*time.Second)
 		}
 		return m, nil
-	}
 
-	// Approval digit keys: when a pending approval exists, 1-9 selects a button
-	if m.pendingApproval != nil && m.input.Text() == "" {
-		if key >= "1" && key <= "9" {
-			idx := int(key[0]-'0') - 1
-			if idx < len(m.pendingApproval.Buttons) {
-				m.sendApprovalResponse(m.pendingApproval.Buttons[idx].Value)
-				m.pendingApproval = nil
-			}
-			return m, nil
-		}
-		if key == "?" {
-			// Toggle approval detail view
-			m.pendingApproval.SetCollapsed(!m.pendingApproval.Collapsed())
-			m.transcriptDirty = true
-			return m, nil
-		}
+	case keyCtrlK:
+		m.overlay = NewPaletteOverlay(m.commands, m.tools)
+		return m, nil
 	}
 
 	// Block navigation (only when input is empty and not focused on multiline)
@@ -547,10 +597,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Esc always closes any overlay
+	// Esc on most overlays does a simple close. For approval and palette
+	// overlays, delegate to their own Update so they can handle Esc
+	// semantics (e.g. approval Esc = deny).
 	if msg.String() == keyEsc {
-		m.closeOverlay()
-		return m, nil
+		switch m.overlay.(type) {
+		case *ApprovalOverlay, *PaletteOverlay:
+			// Fall through to the overlay's Update handler below.
+		default:
+			m.closeOverlay()
+			return m, nil
+		}
 	}
 
 	updated, cmd, closed := m.overlay.Update(msg)
@@ -580,6 +637,74 @@ func (m Model) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.toasts.Push("saved to "+o.SavedPath(), "info", 3*time.Second)
 			} else if o.Error() != nil {
 				m.toasts.Push("save error: "+o.Error().Error(), "warn", 3*time.Second)
+			}
+
+		case *ApprovalOverlay:
+			if o.Resolved() {
+				m.sendApprovalResponse(o.Chosen())
+				m.pendingApproval = nil
+			}
+
+		case *PaletteOverlay:
+			if item := o.Chosen(); item != nil {
+				m.overlay = nil
+				if item.IsCommand {
+					m.input.SetText(item.Action)
+					return m.handleSubmit(components.InputSubmitted{Text: item.Action})
+				}
+				switch item.Action {
+				case "toggle_sidebar":
+					m.sidebar.Toggle()
+					m.sidebar.ClampWidth(m.width)
+					vpW := m.viewportWidth()
+					m.viewport.Width = vpW
+					m.transcriptDirty = true
+				case "search":
+					m.overlay = NewSearchOverlay(m.transcript)
+					return m, nil
+				case "bookmarks":
+					m.overlay = NewBookmarkOverlay(m.bookmarks)
+					return m, nil
+				case "toggle_expand":
+					m.transcriptMode = !m.transcriptMode
+					for _, b := range m.transcript {
+						if at, ok := b.(*blocks.AssistantTurn); ok {
+							for _, seg := range at.Segments {
+								if tb, ok := seg.(*blocks.ThinkingBlock); ok {
+									tb.SetCollapsed(!m.transcriptMode)
+								}
+								if tb, ok := seg.(*blocks.ToolBlock); ok {
+									tb.SetCollapsed(!m.transcriptMode)
+								}
+							}
+						}
+					}
+					m.transcriptDirty = true
+				case "resend":
+					m.overlay = NewResendOverlay(m.input.History())
+					return m, nil
+				case "save_code":
+					co := NewCodeSaveOverlay(m.transcript)
+					if co != nil {
+						m.overlay = co
+					} else {
+						m.toasts.Push("no code blocks found", "warn", 2*time.Second)
+					}
+					return m, nil
+				case "clear":
+					m.transcript = nil
+					m.activeTurn = nil
+					m.clearFocus()
+					m.transcriptDirty = true
+					if m.ready {
+						m.viewport.SetContent("")
+						m.viewport.GotoTop()
+					}
+				case "help":
+					m.overlay = NewHelpOverlay()
+					return m, nil
+				}
+				return m, cmd
 			}
 		}
 		m.overlay = nil
@@ -723,6 +848,7 @@ func (m Model) handleSubmit(msg components.InputSubmitted) (tea.Model, tea.Cmd) 
 		m.viewport.SetContent(m.renderTranscript())
 		m.transcriptDirty = false
 		m.viewport.GotoBottom()
+		m.syncScrollbar()
 	}
 
 	return m, nil
@@ -913,6 +1039,114 @@ func (m *Model) viewOverlayForFocused() *ViewOverlay {
 	return nil
 }
 
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	layout := m.computeLayout()
+	hit := HitTest(msg.X, msg.Y, layout)
+
+	switch hit.Target {
+	case TargetScrollbar:
+		vpHeight := m.viewportHeight()
+		newOffset, handled := m.scrollbar.HandleMouse(msg, vpHeight, layout.ScrollbarX, layout.ViewportY)
+		if handled {
+			m.viewport.SetYOffset(newOffset)
+			m.syncScrollbar()
+		}
+		return m, nil
+
+	case TargetViewport:
+		// Route to selection for drag tracking
+		m.selection.HandleMouse(msg, func(line int) string {
+			content := m.viewport.View()
+			lines := strings.Split(content, "\n")
+			if line >= 0 && line < len(lines) {
+				return lines[line]
+			}
+			return ""
+		})
+
+		// On left-click, check for URL hit
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			if span := m.urlDetector.HitTest(hit.X, hit.Y+m.viewport.YOffset); span != nil {
+				_ = openURL(span.URL)
+				return m, nil
+			}
+		}
+
+		// Forward wheel events to viewport for scrolling
+		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			m.syncScrollbar()
+			return m, cmd
+		}
+		return m, nil
+
+	default:
+		// Input area, status bar, etc: forward to viewport for default handling
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
+	}
+}
+
+// computeLayout returns the current LayoutInfo for hit testing.
+func (m *Model) computeLayout() LayoutInfo {
+	vpHeight := m.viewportHeight()
+	vpWidth := m.viewportWidth()
+
+	scrollbarX := -1
+	if m.scrollbar.Visible() {
+		scrollbarX = vpWidth
+	}
+
+	statusY := vpHeight
+	// Account for inline overlay (search bar)
+	inlineHeight := 0
+	if m.overlay != nil && m.overlay.Kind() == OverlaySearch {
+		inlineHeight = 1
+	}
+	sugHeight := 0
+	if m.suggestions.Visible() {
+		sugHeight = m.suggestions.Count()
+		if sugHeight > 5 {
+			sugHeight = 5
+		}
+	}
+	inputY := statusY + statusBarHeight + inlineHeight + sugHeight
+
+	return LayoutInfo{
+		ViewportX:      0,
+		ViewportY:      0,
+		ViewportWidth:  vpWidth,
+		ViewportHeight: vpHeight,
+		ScrollbarX:     scrollbarX,
+		InputY:         inputY,
+		InputHeight:    m.input.Height(),
+		StatusBarY:     statusY,
+	}
+}
+
+// viewportWidth returns the width available for the viewport content,
+// accounting for sidebar and scrollbar.
+func (m *Model) viewportWidth() int {
+	w := m.width
+	if m.sidebar.Visible() {
+		w -= m.sidebar.TotalWidth()
+	}
+	if m.scrollbar.Visible() {
+		w--
+	}
+	if w < 20 {
+		w = 20
+	}
+	return w
+}
+
+// syncScrollbar updates the scrollbar state from the current viewport.
+func (m *Model) syncScrollbar() {
+	m.scrollbar.SetContent(m.viewport.TotalLineCount(), m.viewport.Height, m.viewport.YOffset)
+}
+
 func (m *Model) jumpTurn(delta int) {
 	if len(m.blockLineOffsets) == 0 {
 		return
@@ -1041,6 +1275,7 @@ func (m *Model) addCommand(name string) {
 	m.commands = append(m.commands, name)
 }
 
+
 func (m Model) viewportHeight() int {
 	sugHeight := 0
 	if m.suggestions.Visible() {
@@ -1067,25 +1302,44 @@ func (m Model) View() string {
 		return "initializing..."
 	}
 
+	vpW := m.viewportWidth()
+	vpH := m.viewportHeight()
 	vpView := m.viewport.View()
+
+	// 1b. Scrollbar alongside viewport
+	if m.scrollbar.Visible() {
+		sbView := m.scrollbar.View(m.viewportHeight(), m.theme)
+		vpView = lipgloss.JoinHorizontal(lipgloss.Top, vpView, sbView)
+	}
 
 	// 2. Full overlays replace the viewport content
 	if m.overlay != nil {
 		switch m.overlay.Kind() {
-		case OverlayHelp, OverlayBookmarks, OverlayResend, OverlayCodeSave, OverlayView:
-			vpView = m.overlay.View(m.width, m.viewportHeight(), m.theme)
+		case OverlayHelp, OverlayBookmarks, OverlayResend, OverlayCodeSave, OverlayView,
+			OverlayApproval, OverlayPalette:
+			vpView = m.overlay.View(vpW, vpH, m.theme)
 		}
 	}
 
 	// 3. Toast overlay on viewport (only when no full overlay)
 	if m.overlay == nil || m.overlay.Kind() == OverlaySearch {
-		toastView := m.toasts.View(m.width/3, m.theme)
+		toastView := m.toasts.View(vpW/3, m.theme)
 		if toastView != "" {
-			vpView = overlayBottomRight(vpView, toastView, m.width)
+			vpView = overlayBottomRight(vpView, toastView, vpW)
 		}
 	}
 
-	// 4. Status line (1 line, between viewport and input)
+	// 3b. Join sidebar to the right of the viewport+status area
+	var mainArea string
+	if m.sidebar.Visible() {
+		handleView := components.RenderHandle(vpH, m.theme)
+		sidebarView := m.sidebar.View(vpH, m.theme)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, vpView, handleView, sidebarView)
+	} else {
+		mainArea = vpView
+	}
+
+	// 4. Status line (1 line, full width including sidebar area)
 	statusView := m.status.View(m.width, m.theme)
 
 	// 5. Inline overlays (search bar between viewport and input)
@@ -1100,8 +1354,8 @@ func (m Model) View() string {
 	// 7. Input
 	inputView := m.input.View(m.width, m.theme)
 
-	// 8. Compose vertically: viewport, status, [inline overlay], [suggestions], input
-	parts := []string{vpView, statusView}
+	// 8. Compose vertically: main area, status, [inline overlay], [suggestions], input
+	parts := []string{mainArea, statusView}
 	if inlineView != "" {
 		parts = append(parts, inlineView)
 	}
@@ -1118,6 +1372,7 @@ func (m *Model) renderTranscript() string {
 		m.blockLineOffsets = nil
 		return ""
 	}
+	w := m.viewportWidth()
 	var sb strings.Builder
 	m.blockLineOffsets = make([]int, len(m.transcript))
 	linePos := 0
@@ -1127,7 +1382,7 @@ func (m *Model) renderTranscript() string {
 			sb.WriteString("\n")
 			linePos++
 		}
-		rendered := b.Render(m.width, m.theme)
+		rendered := b.Render(w, m.theme)
 		if m.searchQuery != "" {
 			rendered = highlightMatches(rendered, m.searchQuery, m.theme)
 		}
@@ -1160,6 +1415,20 @@ func highlightMatches(text, query string, th *theme.Theme) string {
 		pos = matchEnd
 	}
 	return sb.String()
+}
+
+// openURL opens a URL in the user's default browser.
+func openURL(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start()
 }
 
 // overlayBottomRight composites the overlay string at the bottom-right of base.

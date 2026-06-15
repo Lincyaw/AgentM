@@ -9,22 +9,54 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/theme"
 )
 
-// RenderDiff produces a simple line-by-line diff view.
-// Lines from old are prefixed with "- " in the theme's DiffDel style,
-// lines from new are prefixed with "+ " in the theme's DiffAdd style.
+// RenderDiff produces a word-level diff view. Consecutive pairs of
+// removed+added lines are compared token-by-token so the exact changed
+// portions are highlighted with DiffDelHighlight / DiffAddHighlight.
+// Unpaired lines (pure additions or pure deletions) use the base
+// DiffDel / DiffAdd style as before.
 func RenderDiff(old, new string, th *theme.Theme) string {
 	var b strings.Builder
 	oldLines := splitLines(old)
 	newLines := splitLines(new)
-	for _, line := range oldLines {
-		b.WriteString(th.DiffDel.Render("- " + line))
+
+	paired := min(len(oldLines), len(newLines))
+
+	for i := 0; i < paired; i++ {
+		oldSegs, newSegs := WordDiff(oldLines[i], newLines[i])
+		b.WriteString(renderSegmentLine("- ", oldSegs, th.DiffDel, th.DiffDelHighlight))
+		b.WriteByte('\n')
+		b.WriteString(renderSegmentLine("+ ", newSegs, th.DiffAdd, th.DiffAddHighlight))
 		b.WriteByte('\n')
 	}
-	for _, line := range newLines {
-		b.WriteString(th.DiffAdd.Render("+ " + line))
+
+	// Remaining unpaired old lines (pure deletions).
+	for i := paired; i < len(oldLines); i++ {
+		b.WriteString(th.DiffDel.Render("- " + oldLines[i]))
 		b.WriteByte('\n')
 	}
+	// Remaining unpaired new lines (pure additions).
+	for i := paired; i < len(newLines); i++ {
+		b.WriteString(th.DiffAdd.Render("+ " + newLines[i]))
+		b.WriteByte('\n')
+	}
+
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderSegmentLine renders a diff line with per-segment styling. The
+// prefix ("- " or "+ ") and unchanged segments use baseStyle; changed
+// segments use highlightStyle so they stand out within the line.
+func renderSegmentLine(prefix string, segs []DiffSegment, baseStyle, highlightStyle lipgloss.Style) string {
+	var sb strings.Builder
+	sb.WriteString(baseStyle.Render(prefix))
+	for _, seg := range segs {
+		if seg.Changed {
+			sb.WriteString(highlightStyle.Render(seg.Text))
+		} else {
+			sb.WriteString(baseStyle.Render(seg.Text))
+		}
+	}
+	return sb.String()
 }
 
 // Truncate shortens s to at most maxLen display-width columns, appending

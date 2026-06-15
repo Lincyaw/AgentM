@@ -19,6 +19,11 @@ const (
 	OverlayResend                // Ctrl+R reverse-i-search
 	OverlayCodeSave              // Ctrl+S code block save
 	OverlayView                  // v  full-content view of focused block
+	OverlayApproval              // tool approval modal
+	OverlayPalette               // Ctrl+K command palette
+	OverlayMultiChoice           // generic multi-choice dialog
+	OverlayRejection             // tool rejection reason picker
+	OverlayElicitation           // structured question from agent/MCP
 )
 
 // Overlay is a transient UI mode that temporarily takes over key handling

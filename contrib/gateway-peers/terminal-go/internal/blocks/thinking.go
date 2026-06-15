@@ -3,6 +3,8 @@ package blocks
 import (
 	"strings"
 
+	"github.com/muesli/reflow/wordwrap"
+
 	"github.com/AoyangSpace/agentm-terminal/internal/theme"
 )
 
@@ -47,9 +49,14 @@ func (b *ThinkingBlock) renderCollapsed(_ int, th *theme.Theme) string {
 	return label + hint
 }
 
-func (b *ThinkingBlock) renderExpanded(_ int, th *theme.Theme) string {
+func (b *ThinkingBlock) renderExpanded(width int, th *theme.Theme) string {
 	header := th.ThinkingLabel.Render(theme.ThinkingGlyph + " Thinking...")
-	body := th.ThinkingText.Render("  " + strings.ReplaceAll(b.Text, "\n", "\n  "))
+	cw := width - 4 // 2 indent + 2 margin
+	if cw < 20 {
+		cw = 20
+	}
+	wrapped := wordwrap.String(b.Text, cw)
+	body := th.ThinkingText.Render("  " + strings.ReplaceAll(wrapped, "\n", "\n  "))
 	return header + "\n" + body
 }
 

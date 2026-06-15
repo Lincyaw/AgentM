@@ -69,8 +69,10 @@ type Theme struct {
 	// Tool block styles.
 	ToolTitle lipgloss.Style
 	ToolBody  lipgloss.Style
-	DiffAdd   lipgloss.Style
-	DiffDel   lipgloss.Style
+	DiffAdd          lipgloss.Style
+	DiffDel          lipgloss.Style
+	DiffAddHighlight lipgloss.Style // changed segments within an added line
+	DiffDelHighlight lipgloss.Style // changed segments within a deleted line
 
 	// Approval block styles.
 	ApprovalWarn   lipgloss.Style
@@ -103,6 +105,20 @@ type Theme struct {
 
 	// FocusBar is applied to the ▌ glyph prefixing each line of the focused block.
 	FocusBar lipgloss.Style
+
+	// Sidebar styles.
+	SidebarBorder lipgloss.Style
+	SidebarHeader lipgloss.Style
+	SidebarValue  lipgloss.Style
+	SidebarDim    lipgloss.Style
+
+	// Per-tool specialized renderer styles.
+	ToolCommand lipgloss.Style
+	ToolPath    lipgloss.Style
+
+	// Scrollbar styles.
+	ScrollThumb lipgloss.Style
+	ScrollTrack lipgloss.Style
 }
 
 // DarkTheme returns a theme suited for dark terminal backgrounds.
@@ -136,8 +152,10 @@ func DarkTheme() *Theme {
 
 		ToolTitle: lipgloss.NewStyle().Foreground(yellow).Bold(true),
 		ToolBody:  lipgloss.NewStyle().Foreground(dim),
-		DiffAdd:   lipgloss.NewStyle().Foreground(green),
-		DiffDel:   lipgloss.NewStyle().Foreground(red),
+		DiffAdd:          lipgloss.NewStyle().Foreground(green),
+		DiffDel:          lipgloss.NewStyle().Foreground(red),
+		DiffAddHighlight: lipgloss.NewStyle().Foreground(green).Bold(true).Underline(true),
+		DiffDelHighlight: lipgloss.NewStyle().Foreground(red).Bold(true).Underline(true),
 
 		ApprovalWarn:   lipgloss.NewStyle().Foreground(warn).Bold(true),
 		ApprovalChoice: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Dark: "#E5E7EB", Light: "#374151"}),
@@ -165,6 +183,17 @@ func DarkTheme() *Theme {
 		OverlayInput:    lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Background(lipgloss.Color("#1F2937")),
 		SearchHighlight: lipgloss.NewStyle().Background(lipgloss.Color("#FBBF24")).Foreground(lipgloss.Color("#1F2937")),
 		FocusBar:        lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA")).Bold(true),
+
+		SidebarBorder: lipgloss.NewStyle().Foreground(dim),
+		SidebarHeader: lipgloss.NewStyle().Foreground(accent).Bold(true),
+		SidebarValue:  lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")),
+		SidebarDim:    lipgloss.NewStyle().Foreground(dim),
+
+		ToolCommand: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5E7EB")),
+		ToolPath:    lipgloss.NewStyle().Foreground(accent),
+
+		ScrollThumb: lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")),
+		ScrollTrack: lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563")),
 	}
 }
 
@@ -199,8 +228,10 @@ func LightTheme() *Theme {
 
 		ToolTitle: lipgloss.NewStyle().Foreground(yellow).Bold(true),
 		ToolBody:  lipgloss.NewStyle().Foreground(dim),
-		DiffAdd:   lipgloss.NewStyle().Foreground(green),
-		DiffDel:   lipgloss.NewStyle().Foreground(red),
+		DiffAdd:          lipgloss.NewStyle().Foreground(green),
+		DiffDel:          lipgloss.NewStyle().Foreground(red),
+		DiffAddHighlight: lipgloss.NewStyle().Foreground(green).Bold(true).Underline(true),
+		DiffDelHighlight: lipgloss.NewStyle().Foreground(red).Bold(true).Underline(true),
 
 		ApprovalWarn:   lipgloss.NewStyle().Foreground(warn).Bold(true),
 		ApprovalChoice: lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Dark: "#374151", Light: "#374151"}),
@@ -228,6 +259,17 @@ func LightTheme() *Theme {
 		OverlayInput:    lipgloss.NewStyle().Foreground(lipgloss.Color("#374151")).Background(lipgloss.Color("#F3F4F6")),
 		SearchHighlight: lipgloss.NewStyle().Background(lipgloss.Color("#FBBF24")).Foreground(lipgloss.Color("#1F2937")),
 		FocusBar:        lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED")).Bold(true),
+
+		SidebarBorder: lipgloss.NewStyle().Foreground(dim),
+		SidebarHeader: lipgloss.NewStyle().Foreground(accent).Bold(true),
+		SidebarValue:  lipgloss.NewStyle().Foreground(lipgloss.Color("#374151")),
+		SidebarDim:    lipgloss.NewStyle().Foreground(dim),
+
+		ToolCommand: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#374151")),
+		ToolPath:    lipgloss.NewStyle().Foreground(accent),
+
+		ScrollThumb: lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")),
+		ScrollTrack: lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")),
 	}
 }
 
