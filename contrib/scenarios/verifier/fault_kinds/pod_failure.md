@@ -21,9 +21,18 @@ fixed signature:
   jumping from milliseconds to tens of seconds), and connection-refused /
   timeout **error spans** may appear.
 
-A near-total throughput collapse, a latency-tail explosion, and
-connection errors are all faces of the SAME kill; which dominates is a
-function of the case, not a fixed rule. In particular, a modest
+- alternatively, the caller's client library may detect the dead
+  connection instantly (connection refused) and return in microseconds
+  instead of milliseconds — **latency DROPS sharply** rather than
+  exploding. The client may not mark this as an error (gRPC/HTTP
+  frameworks often treat fast connection failures as non-error returns).
+  A latency drop from ms to μs on calls to a dead dependency is the
+  fast-fail signature, not evidence of health.
+
+A near-total throughput collapse, a latency-tail explosion, connection
+errors, AND fast-fail latency drops are all faces of the SAME kill;
+which dominates is a function of the client library and case, not a
+fixed rule. In particular, a modest
 span-count dip COMBINED with a latency tail blowing up from ms to tens of
 seconds is the kill biting just as much as a clean drop to zero is — do
 NOT dismiss an injection as ineffective merely because spans did not fall
@@ -58,26 +67,30 @@ drop alone is evidence of a hop ONLY when the two services actually call
 each other — confirm the call relationship (either direction, from the
 normal window) before counting a drop as propagation.
 
-### Throughput drop without latency / error change
-When a service's span count drops but its latency and error rate are
-unchanged, the service itself is healthy — its callers simply stopped
-sending it requests (because THEIR upstream died). This is NOT
-degradation of the checked service. Reject it.
+### Throughput drop — distinguish by call direction
 
-A genuine propagation hop shows the service's OWN health worsening:
-latency tail exploding, error rate rising, or connection errors
-appearing — not just "fewer requests arrived."
+**Callees of the target** (services the killed target used to call):
+they receive fewer requests because the target stopped calling them.
+Their own latency and error rate are unchanged — they are healthy,
+just idle. This is NOT degradation. Reject.
 
-### Aggregate latency drops after a kill (overloaded baseline)
-Sometimes the normal window already shows high latency (resource
-pressure before the fault). When the fault kills a dependency and
-traffic drops, contention eases and the surviving requests complete
-faster — so aggregate latency DROPS in the abnormal window.
+**Callers of the target** (services that call the killed target):
+a throughput-only drop does NOT automatically mean "healthy." The
+caller's aggregate may look fine because unaffected endpoints dilute
+it, but the specific endpoint(s) that depend on the dead target may
+have vanished. Use the NORMAL window to find which of the caller's
+endpoints interact with the target (JOIN on parent_span_id), then
+check whether those endpoints disappeared in the abnormal window.
 
-A latency drop does not automatically mean "fine." If the aggregate
-is ambiguous, check per-span_name: the call path that depends on
-the killed service may show its spans disappearing or fast-failing
-while unrelated paths stay normal.
+If the fault-related endpoints vanished while other endpoints are
+healthy, this is ambiguous from a single-edge view — mark as
+**inconclusive** so the judge can determine, with the full graph,
+whether the disappearance traces back to the confirmed fault.
+
+A caller whose aggregate latency drops after the kill is NOT
+automatically "fine." The drop often means the slow dependency is
+gone and surviving requests complete faster. Always check
+per-`span_name` before concluding.
 
 ### Uninstrumented backing components (DB / cache)
 These have no spans. Judge them via the CLIENT-side spans inside the

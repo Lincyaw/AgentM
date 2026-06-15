@@ -37,45 +37,174 @@ Key clarifications:
 
 ## Architecture
 
+### Workflow-based scheduling
+
+The verifier is a **workflow-orchestrated multi-agent system**. The CLI
+(`cli.py`) creates an AgentM `AgentSession`, loads the workflow engine,
+and executes `propagation_workflow.py` — a Python workflow script that
+uses `ctx.agent()` / `ctx.parallel()` / `ctx.phase()` to spawn and
+coordinate child agent sessions. Each child session runs its own
+scenario (seed / hop / judge) with its own manifest, system prompt,
+tools, and finalize atom.
+
+#### Overall orchestration flow
+
+```mermaid
+flowchart TB
+    CLI["<b>CLI</b> (cli.py)<br/>prepare_case() → CaseContext<br/>AgentSession.create()"]
+    WF["<b>propagation_workflow.py</b><br/>WorkflowContext: agent / parallel / phase"]
+
+    CLI --> WF
+
+    subgraph phase0 ["Phase 0: SEED"]
+        direction TB
+        S_PAR["ctx.parallel()"]
+        S1["Seed Agent<br/><i>scenario: verifier/seed</i>"]
+        S2["Seed Agent<br/><i>scenario: verifier/seed</i>"]
+        SN["..."]
+        S_PAR --> S1 & S2 & SN
+    end
+
+    subgraph phase1 ["Phase 1: PROPAGATE (BFS loop)"]
+        direction TB
+        BFS{"Queue<br/>not empty?"}
+        H_PAR["ctx.parallel()"]
+        H1["Hop Agent<br/><i>scenario: verifier/hop</i>"]
+        H2["Hop Agent<br/><i>scenario: verifier/hop</i>"]
+        HN["..."]
+        UPD["Update graph state<br/>enqueue newly confirmed"]
+        BFS -- yes --> H_PAR --> H1 & H2 & HN
+        H1 & H2 & HN --> UPD --> BFS
+    end
+
+    subgraph phase2 ["Phase 2: JUDGE (up to 2 rounds)"]
+        direction TB
+        J["Judge Agent<br/><i>scenario: verifier/judge</i>"]
+        JD{"Decision?"}
+        PROMO["Apply direct<br/>promotions"]
+        RE_PAR["ctx.parallel()<br/>re-evaluate hops"]
+        RE1["Hop Agent<br/><i>+ judge context</i>"]
+        RE2["Hop Agent<br/><i>+ judge context</i>"]
+        J --> JD
+        JD -- "add" --> PROMO
+        JD -- "re_evaluate" --> RE_PAR --> RE1 & RE2
+        RE1 & RE2 -.-> J
+    end
+
+    VALIDATE["Phase 3: VALIDATE<br/>Reachability check:<br/>every seed reaches entry services"]
+    OUTPUT["<b>Output</b><br/>fpg_scenario.json<br/>run_meta.json"]
+
+    WF --> phase0 --> phase1 --> phase2 --> VALIDATE --> OUTPUT
+
+    FPG["<b>FPG Graph State</b><br/>nodes · edges · adj (cycle guard)<br/><br/>Rules:<br/>• seeds never gain incoming edges<br/>• cycle-closing edges skipped<br/>• every edge through a hop agent<br/>• in-degree ≥ 2 → combine = OR"]
+
+    S1 -. "confirmed<br/>SeedResult" .-> FPG
+    S2 -. "confirmed<br/>SeedResult" .-> FPG
+    UPD -. "confirmed<br/>HopResult" .-> FPG
+    PROMO -. "promoted" .-> FPG
+    RE1 -. "confirmed /<br/>inconclusive" .-> FPG
+
+    style CLI fill:#e8f4fd,stroke:#2196f3
+    style WF fill:#fff3e0,stroke:#ff9800
+    style FPG fill:#e8f5e9,stroke:#4caf50
+    style OUTPUT fill:#f3e5f5,stroke:#9c27b0
+    style VALIDATE fill:#f3e5f5,stroke:#9c27b0
 ```
-injection seed(s)
-    │
-    ▼  BFS expansion
-┌─────────────────────────────────────────────┐
-│ For each edge (confirmed → neighbor):       │
-│   • target is a seed, or edge would close   │
-│     a cycle? → skipped (fpg root/DAG rules) │
-│   • otherwise → spawn hop agent (EVERY      │
-│     edge, incl. between confirmed services) │
-│     hop agent gets:                         │
-│       - fault type + injection config       │
-│       - upstream's fpg node (predicate +    │
-│         SQL evidence)                       │
-│       - relationship type                   │
-│       - instruction to find DIFFERENT       │
-│         signals on the downstream           │
-│   • confirmed → fpg node (predicate         │
-│     classified, evidence re-executed) +     │
-│     mechanism-labeled edge; fan out         │
-│   • rejected → this edge is done            │
-│     (target may still be reached via        │
-│      another edge in a later round)         │
-└─────────────────────────────────────────────┘
-    │
-    ▼  Post-processing
-┌─────────────────────────────────────────────┐
-│ Judge agent (promotion-only): per-edge hop  │
-│ verdicts are authoritative — judge does NOT │
-│ prune them. Its sole job is the global view │
-│ one edge can't see: under a system-wide     │
-│ cascade (>80% load-gen throughput drop) it  │
-│ PROMOTES services hop agents rejected for   │
-│ "fewer calls" that are in fact unavailable. │
-└─────────────────────────────────────────────┘
-    │
-    ▼
-fpg_scenario.json (fault-propagation-graph scenario:
-fpg EventNodes + mechanism-labeled edges + injections)
+
+#### Data preparation
+
+```mermaid
+flowchart LR
+    subgraph case_dir ["case_dir/"]
+        INJ["injection.json"]
+        NT["normal_traces.parquet"]
+        AT["abnormal_traces.parquet"]
+        NM["normal_metrics.parquet"]
+        AM["abnormal_metrics.parquet"]
+    end
+
+    subgraph lib ["lib/"]
+        GRAPH["graph.py<br/><code>build_neighbor_graph()</code><br/><code>get_infra_nodes()</code><br/><code>get_infra_edges()</code>"]
+        INJECTION["injection.py<br/><code>get_injections()</code><br/><code>load_fault_doc()</code>"]
+        FPG_LIB["fpg.py<br/><code>load_injection_meta()</code><br/><code>assemble_scenario()</code><br/><code>REL_MECHANISM</code>"]
+    end
+
+    FAULTS["fault_kinds/*.md<br/>per-fault-kind docs"]
+    PREPARE["<b>prepare.py</b><br/>prepare_case()"]
+    CTX["<b>CaseContext</b><br/>.injections<br/>.graph<br/>.infra_nodes<br/>.fault_docs<br/>.window<br/>.meta"]
+
+    NT & AT --> GRAPH
+    NM & AM --> GRAPH
+    INJ --> INJECTION
+    INJ --> FPG_LIB
+
+    GRAPH --> PREPARE
+    INJECTION --> PREPARE
+    FPG_LIB --> PREPARE
+    FAULTS --> PREPARE
+    PREPARE --> CTX
+
+    style CTX fill:#e8f5e9,stroke:#4caf50
+    style PREPARE fill:#fff3e0,stroke:#ff9800
+```
+
+#### Agent session internals
+
+```mermaid
+flowchart LR
+    WF["Workflow<br/>ctx.parallel()"]
+    subgraph session ["Child AgentSession"]
+        LLM["LLM reasoning"]
+        SQL["duckdb_sql<br/>query parquet data"]
+        FIN["submit_*_verdict<br/>(ToolTerminate)"]
+        LLM -->|"generates SQL"| SQL -->|"results"| LLM
+        LLM -->|"final verdict"| FIN
+    end
+    WF -->|"spawn"| session
+    FIN -->|"AgentResult"| WF
+
+    style WF fill:#fff3e0,stroke:#ff9800
+    style FIN fill:#e8f5e9,stroke:#4caf50
+```
+
+### Agent scenarios
+
+Each agent type has its own subdirectory with a manifest, system prompt,
+and finalize atom:
+
+| Agent | Scenario | System prompt | Finalize tool | Verdict |
+|-------|----------|---------------|---------------|---------|
+| Seed  | `verifier/seed` | `seed/prompts/seed.md` | `submit_seed_verdict` | confirmed / rejected / inconclusive |
+| Hop   | `verifier/hop`  | `hop/prompts/hop.md`   | `submit_hop_verdict`  | confirmed / rejected / inconclusive |
+| Judge | `verifier/judge`| `judge/prompts/judge.md`| `submit_judge_review` | add / re_evaluate / suggested_remove |
+
+All agents share:
+- `duckdb_sql` tool for querying case parquet data
+- `operations` (local backend) for file system access
+- `observability` + `tool_index` + `turn_reminder` + `retry_policy`
+- fpg profile vocabulary (`fpg_profile.toml`) for predicate/mechanism enums
+
+### Module dependency map
+
+```mermaid
+graph BT
+    CLI["cli.py"] --> PREPARE["prepare.py"]
+    CLI --> WF["propagation_workflow.py"]
+    PREPARE --> LIB_G["lib/graph.py"]
+    PREPARE --> LIB_I["lib/injection.py"]
+    PREPARE --> LIB_F["lib/fpg.py"]
+    LIB_G --> LIB_INIT["lib/__init__.py<br/>(duckdb_conn)"]
+    WF --> SEED_CTX["seed/seed_context.py"]
+    WF --> HOP_CTX["hop/hop_context.py"]
+    WF --> JUDGE_CTX["judge/judge_context.py"]
+    SEED_FIN["seed/seed_finalize.py"] -.->|"atom"| FPG_PROF["fpg_profile.toml"]
+    HOP_FIN["hop/hop_finalize.py"] -.->|"atom"| FPG_PROF
+    JUDGE_FIN["judge/judge_finalize.py"] -.->|"atom"| FPG_PROF
+    LIB_F --> FPG_PROF
+
+    style CLI fill:#e8f4fd,stroke:#2196f3
+    style WF fill:#fff3e0,stroke:#ff9800
+    style FPG_PROF fill:#fce4ec,stroke:#e91e63
 ```
 
 Why promotion-only: the hop agents already reason per-edge about error

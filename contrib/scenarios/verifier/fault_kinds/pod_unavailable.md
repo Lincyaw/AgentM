@@ -51,3 +51,12 @@ so verify each hop rather than assuming the chain reaches the entry tier.
 Because the outage reduces traffic system-wide, a throughput drop is
 evidence of a hop ONLY when the two services actually call each other —
 confirm the call relationship (either direction, normal window) first.
+
+### Throughput drop — distinguish by call direction
+Same rule as `pod_failure`: a callee that simply receives fewer
+requests (target stopped calling) is healthy — reject. But for a
+caller whose specific endpoint to the target vanished, mark as
+**inconclusive** — use the normal window to identify which caller
+endpoints interact with the target, then check if those vanished
+in the abnormal window. The judge can determine causality with the
+full graph context.

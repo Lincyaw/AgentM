@@ -23,17 +23,23 @@ Traffic collapse? Latency DROP with errors (fail-fast)? The
 fault reference tells you the direction and shape.
 
 ### 4. Query and verify
-Test your hypothesis against the data. Start from the endpoints
-that interact with the upstream (JOIN on trace_id /
-parent_span_id), then broaden only if those show nothing.
-Compare normal vs abnormal windows across dimensions: latency,
-error rate, span volume, logs.
 
-When the upstream has zero spans in the abnormal window, you
-cannot JOIN into it. Use the NORMAL window to identify which
-endpoints on the target interact with the upstream, then check
-whether those specific endpoints vanished or degraded in the
-abnormal window.
+**First, establish the call path from normal traces.** JOIN
+normal_traces on parent_span_id to find which specific endpoints
+on the target interact with the upstream. This tells you exactly
+which endpoints are in the fault's influence zone.
+
+**Then, check those endpoints in the abnormal window.** Compare
+their span count, latency, and error rate between windows.
+Signals to look for on fault-path endpoints:
+- span count drop or vanish
+- latency increase (blocking on slow/dead dependency)
+- latency DROP to near-zero (fast-fail: client detects dead
+  connection instantly and returns in μs instead of ms)
+- error rate increase
+
+Only broaden to aggregate or other endpoints if the fault-path
+endpoints show nothing.
 
 ### 5. Judge
 - **confirmed** — evidence supports the hypothesis: the target
