@@ -23,15 +23,15 @@ from loguru import logger
 from llmharness.schema import Edge, Event, Finding
 
 from ..replay.engine import run_phase_standalone
+from ._submit_oracle import SUBMIT_ORACLE_TOOL_NAME
+from ._submit_rewriter import SUBMIT_REWRITE_TOOL_NAME
+from .causal import CausalSnapshot, causal_mask
+from .gt import GroundTruth
 
 # Module paths for standard builtin atoms.
 OBSERVABILITY_MODULE = "agentm.extensions.builtin.observability"
 OPERATIONS_MODULE = "agentm.extensions.builtin.operations"
 SYSTEM_PROMPT_MODULE = "agentm.extensions.builtin.system_prompt"
-from ._submit_oracle import SUBMIT_ORACLE_TOOL_NAME
-from ._submit_rewriter import SUBMIT_REWRITE_TOOL_NAME
-from .causal import CausalSnapshot, causal_mask
-from .gt import GroundTruth
 
 _ORACLE_SUBMIT_MODULE = "llmharness.distill._submit_oracle"
 _REWRITER_SUBMIT_MODULE = "llmharness.distill._submit_rewriter"
