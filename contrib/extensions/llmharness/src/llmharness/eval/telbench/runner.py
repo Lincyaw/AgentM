@@ -208,7 +208,138 @@ async def evaluate_instance(
     )
 
 
+# ---------------------------------------------------------------------------
+# TEL agent mode
+# ---------------------------------------------------------------------------
+
+
+async def evaluate_instance_tel(
+    instance: TelBenchInstance,
+    *,
+    provider: tuple[str, dict[str, Any]] | None,
+    cwd: str,
+    prompt_name: str = "default",
+) -> EvalResult:
+    """Run the TEL agent directly on one TELBench instance and score.
+
+    The TEL agent receives all spans via its span store tool surface and
+    directly identifies error span IDs — no extractor/auditor pipeline.
+    """
+    import contextlib
+
+    from agentm.core.abi import AgentSessionConfig, AssistantMessage, ToolCallBlock
+    from agentm.core.runtime import AgentSession, create_agent_session
+    from loguru import logger
+
+    from ...agents.tel.tools import SUBMIT_TOOL_NAME
+
+    _OBS = "agentm.extensions.builtin.observability"
+    _OPS = "agentm.extensions.builtin.operations"
+    _TEL_CTX = "llmharness.agents.tel.context"
+    _TEL_TOOLS = "llmharness.agents.tel.tools"
+
+    notepad_path = str(Path(cwd) / f"tel_notepad_{instance.id}.md")
+
+    ctx_config: dict[str, Any] = {
+        "question": instance.question,
+        "spans": instance.spans,
+        "stages": instance.annotations.get("stage", {}),
+        "prompt_name": prompt_name,
+        "notepad_path": notepad_path,
+    }
+
+    extensions: list[tuple[str, dict[str, Any]]] = [
+        (_OBS, {}),
+        (_OPS, {}),
+        (_TEL_CTX, ctx_config),
+        (_TEL_TOOLS, {}),
+    ]
+
+    config = AgentSessionConfig(
+        cwd=cwd,
+        provider=provider,
+        extensions=extensions,
+        purpose=f"tel_eval_{instance.id}",
+        tool_allowlist=[
+            "list_spans",
+            "get_span",
+            "search_spans",
+            "submit_error_spans",
+        ],
+    )
+
+    try:
+        session = await create_agent_session(AgentSession, config)
+    except Exception as exc:
+        logger.error(f"[tel] session creation FAILED for {instance.id}: {exc}")
+        raise
+
+    sid = session.session_id
+    logger.info(f"[tel] {instance.id}: agentm trace messages --session {sid} --format text")
+
+    payload = json.dumps(
+        {
+            "task": "Identify error spans in this trajectory.",
+            "question": instance.question,
+            "n_spans": len(instance.spans),
+        },
+        ensure_ascii=False,
+    )
+
+    try:
+        messages = await session.prompt(payload)
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await session.shutdown()
+        logger.error(f"[tel] {instance.id} prompt FAILED (sid={sid}): {exc}")
+        gold = instance.gold_error_indices
+        scores = score_instance(set(), gold, len(instance.spans))
+        return EvalResult(
+            instance_id=instance.id,
+            predicted_error_indices=set(),
+            gold_error_indices=gold,
+            scores=scores,
+            n_spans=len(instance.spans),
+        )
+
+    with contextlib.suppress(Exception):
+        await session.shutdown()
+
+    # Extract the submit_error_spans tool call.
+    predicted_span_ids: list[str] = []
+    reasoning = ""
+    for msg in reversed(messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in reversed(msg.content):
+            if isinstance(block, ToolCallBlock) and block.name == SUBMIT_TOOL_NAME:
+                predicted_span_ids = list(block.arguments.get("error_span_ids", []))
+                reasoning = str(block.arguments.get("reasoning", ""))
+                break
+        if predicted_span_ids:
+            break
+
+    # Convert span IDs to 0-based indices for scoring.
+    id_to_idx = {s["id"]: i for i, s in enumerate(instance.spans)}
+    predicted_indices = {id_to_idx[sid] for sid in predicted_span_ids if sid in id_to_idx}
+
+    gold = instance.gold_error_indices
+    scores = score_instance(predicted_indices, gold, len(instance.spans))
+
+    return EvalResult(
+        instance_id=instance.id,
+        predicted_error_indices=predicted_indices,
+        gold_error_indices=gold,
+        scores=scores,
+        verdicts=[{"predicted_span_ids": predicted_span_ids, "reasoning": reasoning}]
+        if predicted_span_ids
+        else [],
+        n_spans=len(instance.spans),
+    )
+
+
 __all__ = [
     "EvalResult",
     "evaluate_instance",
+    "evaluate_instance_tel",
 ]

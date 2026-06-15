@@ -17,4 +17,9 @@ def auditor_scenario() -> str:
     return str(_AGENTS_DIR / "auditor")
 
 
-__all__ = ["auditor_scenario", "extractor_scenario"]
+def tel_scenario() -> str:
+    """Absolute path to the TEL agent directory (scenario-resolvable)."""
+    return str(_AGENTS_DIR / "tel")
+
+
+__all__ = ["auditor_scenario", "extractor_scenario", "tel_scenario"]

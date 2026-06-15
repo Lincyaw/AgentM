@@ -17,7 +17,7 @@ from typing import Annotated, Any
 import typer
 
 from .adapter import load_telbench
-from .runner import evaluate_instance
+from .runner import evaluate_instance, evaluate_instance_tel
 from .scoring import AggregateScores, SpanScores, aggregate_scores
 
 app = typer.Typer(help="TELBench span-level error localization evaluation.")
@@ -129,9 +129,9 @@ def telbench(
         typer.Option("--instance-ids", help="JSON file with list of instance IDs to run"),
     ] = None,
 ) -> None:
-    """Run TELBench evaluation with the cognitive-audit pipeline."""
-    if mode not in ("posthoc", "online"):
-        typer.echo(f"Error: --mode must be 'posthoc' or 'online', got '{mode}'", err=True)
+    """Run TELBench evaluation with the cognitive-audit pipeline or TEL agent."""
+    if mode not in ("posthoc", "online", "tel"):
+        typer.echo(f"Error: --mode must be 'posthoc', 'online', or 'tel', got '{mode}'", err=True)
         raise typer.Exit(1)
 
     instances = load_telbench(data)
@@ -178,15 +178,25 @@ def telbench(
                 inst_cwd = str(Path(resolved_cwd) / f"inst-{inst.id}")
                 Path(inst_cwd).mkdir(parents=True, exist_ok=True)
                 try:
-                    result = await evaluate_instance(
-                        inst,
-                        mode=eval_mode,
-                        provider=resolved_provider,
-                        cwd=inst_cwd,
-                        extractor_interval=extractor_interval,
-                        audit_interval=audit_interval,
-                        auditor_prompt=auditor_prompt,
-                    )
+                    if mode == "tel":
+                        result = await evaluate_instance_tel(
+                            inst,
+                            provider=resolved_provider,
+                            cwd=inst_cwd,
+                            prompt_name=auditor_prompt
+                            if auditor_prompt != "telbench"
+                            else "default",
+                        )
+                    else:
+                        result = await evaluate_instance(
+                            inst,
+                            mode=eval_mode,
+                            provider=resolved_provider,
+                            cwd=inst_cwd,
+                            extractor_interval=extractor_interval,
+                            audit_interval=audit_interval,
+                            auditor_prompt=auditor_prompt,
+                        )
                     scores[idx] = result.scores
                     done_count += 1
                     fea = "Y" if result.scores.first_error_accurate else "N"
