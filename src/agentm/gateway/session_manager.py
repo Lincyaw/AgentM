@@ -34,6 +34,19 @@ from .approval import ApprovalManager
 from .chat_session_map import ChatSessionMap
 from .wire import InboundBody
 
+
+def _available_model_names() -> list[str]:
+    """Configured model-profile names (``[models.<name>]`` keys), seeded into
+    the wire services so the wire_driver's session_ready frame can advertise a
+    model switcher. Best-effort and gateway-side (the gateway may read user
+    config; the wire_driver atom may not — §11.4.6)."""
+    try:
+        from agentm.core.lib.user_config import load_user_config
+
+        return list(load_user_config().models.keys())
+    except Exception:  # noqa: BLE001
+        return []
+
 # (cwd, session_key, scenario, resume_session_id, wire_services) -> AgentSession
 #
 # ``wire_services`` is seeded into the session's service registry BEFORE any
@@ -104,6 +117,11 @@ class SessionManager:
                 "wire_outbound": self._outbound_sink,
                 "session_key": session_key,
                 "turn_context": turn_ctx,
+                # Model-profile names the wire_driver's session_ready frame
+                # advertises so a chat client can populate a model switcher.
+                # Seeded here (gateway may read user config) so the atom needn't
+                # import agentm.core.lib sub-modules (§11.4.6).
+                "model_names": _available_model_names(),
             }
             if self._approval is not None:
                 wire_services["approval_manager"] = self._approval
