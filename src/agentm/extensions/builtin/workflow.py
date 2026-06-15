@@ -170,6 +170,7 @@ class WorkflowConfig(BaseModel):
     wall_clock_timeout_s: float | None = None
     default_scenario: str | None = None
     budget_tokens: int | None = None
+    default_agent_timeout_s: float | None = None
 
 
 MANIFEST = ExtensionManifest(
@@ -300,7 +301,6 @@ class _BudgetService:
     input_tokens: int = 0
     output_tokens: int = 0
     total_budget_tokens: int | None = None
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def attach(self, child: _ChildSession) -> None:
         """Subscribe to ``turn_end`` on the child's own bus.
@@ -310,15 +310,18 @@ class _BudgetService:
         bus: a configured ``budget_tokens`` ceiling backs ``loop-until-budget``
         scripts, so a silently-zero aggregator (ceiling never trips, spend
         runs away) is worse than failing loudly if the child contract breaks.
+
+        No lock needed: asyncio is single-threaded and the two integer
+        increments below are atomic (no ``await`` between them), so
+        concurrent child ``turn_end`` handlers cannot interleave here.
         """
 
-        async def _on_turn_end(event: TurnEndEvent) -> None:
+        def _on_turn_end(event: TurnEndEvent) -> None:
             usage = getattr(event.message, "usage", None)
             if usage is None:
                 return
-            async with self._lock:
-                self.input_tokens += int(getattr(usage, "input_tokens", 0) or 0)
-                self.output_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+            self.input_tokens += int(getattr(usage, "input_tokens", 0) or 0)
+            self.output_tokens += int(getattr(usage, "output_tokens", 0) or 0)
 
         child.bus.on(TurnEndEvent.CHANNEL, _on_turn_end)
 
@@ -441,6 +444,7 @@ class _WorkflowRun:
     agents_succeeded: int = 0
     agents_failed: int = 0
     agents_retried: int = 0
+    default_agent_timeout_s: float | None = None
     args_payload: dict[str, Any] = field(default_factory=dict)
     cwd_override: str | None = None
     provider_override: tuple[str, dict[str, Any]] | None = None
@@ -529,6 +533,9 @@ class _WorkflowRun:
                     )
                 self.agents_spawned += 1
 
+            effective_timeout = (
+                timeout if timeout is not None else self.default_agent_timeout_s
+            )
             try:
                 async with self.semaphore:
                     coro = self._spawn_and_drive(
@@ -541,8 +548,10 @@ class _WorkflowRun:
                         schema=json_schema,
                         session_id=session_id,
                     )
-                    if timeout is not None:
-                        result = await asyncio.wait_for(coro, timeout=timeout)
+                    if effective_timeout is not None:
+                        result = await asyncio.wait_for(
+                            coro, timeout=effective_timeout
+                        )
                     else:
                         result = await coro
             except TimeoutError as exc:
@@ -607,9 +616,17 @@ class _WorkflowRun:
     async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
         """Barrier fan-out: await every awaitable, return results in order.
         Each ``agent`` self-limits via the shared Semaphore, so this is a thin
-        ``gather``."""
+        ``gather``. An awaitable that raises resolves to ``None`` in the
+        result list — the call itself never rejects."""
 
-        return list(await asyncio.gather(*aws))
+        results = await asyncio.gather(*aws, return_exceptions=True)
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.warning(
+                    f"workflow parallel: item failed: "
+                    f"{type(r).__name__}: {r}"
+                )
+        return [None if isinstance(r, BaseException) else r for r in results]  # type: ignore[misc]
 
     async def pipeline(
         self,
@@ -619,14 +636,22 @@ class _WorkflowRun:
         """Run each item through ``stages`` independently — **no cross-item
         barrier**. Item A may be in stage 2 while item B is still in stage 1;
         wall-clock is the slowest single-item chain, not the sum of per-stage
-        maxima. Stages may be sync or async callables."""
+        maxima. Stages may be sync or async callables. A stage that raises
+        drops that item to ``None`` and skips its remaining stages."""
 
         async def _chain(item: Any) -> Any:
             cur: Any = item
             for stage in stages:
-                cur = stage(cur)
-                if inspect.isawaitable(cur):
-                    cur = await cur
+                try:
+                    cur = stage(cur)
+                    if inspect.isawaitable(cur):
+                        cur = await cur
+                except Exception as exc:
+                    logger.warning(
+                        f"workflow pipeline: stage failed, dropping item "
+                        f"to None: {type(exc).__name__}: {exc}"
+                    )
+                    return None
             return cur
 
         return list(await asyncio.gather(*(_chain(it) for it in items)))
@@ -720,33 +745,43 @@ class _WorkflowRun:
             session_manager=session_manager,
             session_id=session_id,
         )
-        try:
-            child: _ChildSession = await self.api.spawn_child_session(config)
-            self.child_sessions.append({
-                "session_id": child.session_id,
-                "scenario": scenario or self.default_scenario,
-                "prompt": prompt[:200],
-            })
-            self.budget_svc.attach(child)
+        last_exc: Exception | None = None
+        for attempt in range(2):
             try:
-                messages = await child.prompt(prompt)
-                output = _final_session_output(messages)
-                if not output:
-                    return json.dumps(_build_agent_error_info(messages))
-                return output
-            finally:
-                with contextlib.suppress(Exception):
-                    await child.shutdown()
-        except Exception as exc:
-            logger.warning(
-                f"workflow agent spawn/prompt failed: {type(exc).__name__}: {exc}"
-            )
-            return json.dumps(
-                {
-                    "_error": type(exc).__name__,
-                    "detail": str(exc)[:500],
-                }
-            )
+                child: _ChildSession = await self.api.spawn_child_session(config)
+                self.child_sessions.append({
+                    "session_id": child.session_id,
+                    "scenario": scenario or self.default_scenario,
+                    "prompt": prompt[:200],
+                })
+                self.budget_svc.attach(child)
+                try:
+                    messages = await child.prompt(prompt)
+                    output = _final_session_output(messages)
+                    if not output:
+                        return json.dumps(_build_agent_error_info(messages))
+                    return output
+                finally:
+                    with contextlib.suppress(Exception):
+                        await child.shutdown()
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    logger.warning(
+                        f"workflow agent spawn failed (attempt 1, retrying): "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    await asyncio.sleep(1)
+                    continue
+                logger.warning(
+                    f"workflow agent spawn/prompt failed: {type(exc).__name__}: {exc}"
+                )
+        return json.dumps(
+            {
+                "_error": type(last_exc).__name__ if last_exc else "unknown",
+                "detail": str(last_exc)[:500] if last_exc else "",
+            }
+        )
 
 
 class WorkflowContext:
@@ -1188,27 +1223,34 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
 
     if len(parts) > 1:
         # Script is inside a package — use normal import machinery.
+        # Narrow sys.path mutation to the synchronous import phase so it
+        # never spans an ``await`` — concurrent module-mode workflow
+        # coroutines on the same event loop cannot see each other's path
+        # entries (asyncio is cooperative; no yield ⇒ no interleaving).
         module_name = ".".join(parts)
         path_entry = str(current)
+        pkg_root = parts[0]
         added = path_entry not in sys.path
         if added:
             sys.path.insert(0, path_entry)
         try:
-            pkg_root = parts[0]
             module = importlib.import_module(module_name)
-            run_fn = getattr(module, "run", None)
-            if run_fn is None or not callable(run_fn):
-                raise RuntimeError(
-                    "module-mode script must define "
-                    "`async def run(ctx: WorkflowContext)`"
-                )
-            return await run_fn(ctx)
         finally:
             if added:
                 with contextlib.suppress(ValueError):
                     sys.path.remove(path_entry)
+        run_fn = getattr(module, "run", None)
+        if run_fn is None or not callable(run_fn):
+            raise RuntimeError(
+                "module-mode script must define "
+                "`async def run(ctx: WorkflowContext)`"
+            )
+        try:
+            return await run_fn(ctx)
+        finally:
             stale = [
-                k for k in sys.modules if k == pkg_root or k.startswith(pkg_root + ".")
+                k for k in sys.modules
+                if k == pkg_root or k.startswith(pkg_root + ".")
             ]
             for k in stale:
                 sys.modules.pop(k, None)
@@ -1312,6 +1354,7 @@ class WorkflowRunner:
         wall_clock_timeout: float | None,
         default_scenario: str | None,
         budget_tokens: int | None,
+        default_agent_timeout: float | None,
     ) -> None:
         self._api = api
         self._concurrency = concurrency
@@ -1319,6 +1362,7 @@ class WorkflowRunner:
         self._wall_clock_timeout = wall_clock_timeout
         self._default_scenario = default_scenario
         self._budget_tokens = budget_tokens
+        self._default_agent_timeout = default_agent_timeout
         self._last_run: _WorkflowRun | None = None
         self._last_wall_clock_s: float = 0.0
 
@@ -1497,6 +1541,7 @@ class WorkflowRunner:
             semaphore=asyncio.Semaphore(self._concurrency),
             default_scenario=self._default_scenario,
             max_agents=self._max_agents,
+            default_agent_timeout_s=self._default_agent_timeout,
             args_payload=dict(args_payload),
             cwd_override=cwd,
             provider_override=provider,
@@ -1518,6 +1563,9 @@ class WorkflowRunner:
                 raw = await asyncio.wait_for(coro, timeout=self._wall_clock_timeout)
             else:
                 raw = await coro
+
+            if run._bg_tasks:
+                await asyncio.gather(*run._bg_tasks, return_exceptions=True)
         self._last_wall_clock_s = time.monotonic() - t0
 
         result = _auto_parse(_coerce_result(raw))
@@ -1557,6 +1605,12 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
         if config.budget_tokens is not None and config.budget_tokens > 0
         else None
     )
+    default_agent_timeout: float | None = (
+        config.default_agent_timeout_s
+        if config.default_agent_timeout_s is not None
+        and config.default_agent_timeout_s > 0
+        else None
+    )
 
     from agentm.core.abi import MODEL_RESOLVER_SERVICE
 
@@ -1569,6 +1623,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
         wall_clock_timeout=wall_clock_timeout,
         default_scenario=default_scenario,
         budget_tokens=budget_tokens,
+        default_agent_timeout=default_agent_timeout,
     )
     api.set_service(_WORKFLOW_RUNNER_SERVICE, runner)
 
