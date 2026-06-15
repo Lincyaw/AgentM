@@ -289,7 +289,7 @@ def cli(
     scenario: Annotated[
         str,
         typer.Option("--scenario", envvar="AGENTM_SCENARIO", help="Default scenario."),
-    ] = "local",
+    ] = "chatbot",
     state_dir: Annotated[
         Path | None,
         typer.Option(
@@ -522,9 +522,24 @@ async def _arun(
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    signal_count = 0
+
+    def _on_signal() -> None:
+        # First signal starts a graceful drain; a second one means the user is
+        # impatient (or the drain is wedged on a stuck in-flight turn), so hard
+        # exit instead of swallowing it into another no-op ``stop_event.set()``.
+        nonlocal signal_count
+        signal_count += 1
+        if signal_count == 1:
+            stop_event.set()
+            logger.info("signal received — draining; press Ctrl-C again to force exit")
+        else:
+            logger.warning("second signal received — forcing exit")
+            os._exit(EXIT_SIGINT)
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop_event.set)
+            loop.add_signal_handler(sig, _on_signal)
         except (NotImplementedError, RuntimeError):  # pragma: no cover — Windows
             pass
 
@@ -538,8 +553,18 @@ async def _arun(
         await stop_event.wait()
     finally:
         logger.info("gateway shutting down")
-        await server.stop()
-        await runtime.shutdown()
+        # Bound the drain: an in-flight turn wedged in a blocking LLM request or
+        # subprocess won't honour cancellation, and an unbounded gather would
+        # hang the process — and then re-hang asyncio.run's own task cleanup.
+        # On timeout, close the SQLite stores cleanly and hard-exit.
+        try:
+            await asyncio.wait_for(server.stop(), timeout=5.0)
+            await asyncio.wait_for(runtime.shutdown(), timeout=10.0)
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning("graceful shutdown timed out — forcing exit")
+            outbox.close()
+            inbox.close()
+            os._exit(EXIT_SIGINT)
         outbox.close()
         inbox.close()
     return EXIT_OK

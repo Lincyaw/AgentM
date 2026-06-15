@@ -57,7 +57,20 @@ class WorkspaceResolver:
         if channel in self._overrides:
             ws_path = Path(self._overrides[channel]).expanduser().resolve()
         elif self._root is not None:
-            ws_path = self._root / channel
+            # ``channel`` is attacker-controlled (a remote peer stamps it on
+            # its inbound), so a ``../`` or absolute path would otherwise
+            # escape ``_root`` and point the session's cwd — and its file /
+            # bash tools — at arbitrary directories. Resolve and require the
+            # result to stay under ``_root``; fall back to the default cwd on
+            # any escape rather than honouring the traversal.
+            candidate = (self._root / channel).resolve()
+            if candidate != self._root and not candidate.is_relative_to(self._root):
+                logger.warning(
+                    f"workspace: rejecting out-of-root channel {channel!r} "
+                    f"(resolved to {candidate}); using default cwd"
+                )
+                return self._default_cwd
+            ws_path = candidate
         else:
             return self._default_cwd
 
