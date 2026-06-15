@@ -22,6 +22,7 @@ from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.core.lib.observability_dir import file_export_requested, resolve_observability_dir
 from agentm.core.lib.read_state import (
     FileReadState,
+    bind_session as bind_read_state_session,
     clear as clear_read_state,
     content_hash_for,
     file_modified_since_read,
@@ -45,6 +46,7 @@ __all__ = [
     "FileReadState",
     "Ref",
     "SlotLimitReached",
+    "bind_read_state_session",
     "StreamAccumulator",
     "ToolSpecAdapter",
     "Turn",
