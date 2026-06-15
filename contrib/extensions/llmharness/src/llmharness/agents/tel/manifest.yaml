@@ -1,0 +1,13 @@
+name: tel
+description: >
+  Trajectory Error Localization: identifies error spans in agent trajectories.
+  Given a question and the trajectory spans of an agent's reasoning, pinpoints
+  which spans contain errors that led to incorrect or unsound conclusions.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+  - module: agentm.extensions.builtin.observability
+  - module: llmharness.agents.tel.context
+    config:
+      config_file: ""
+  - module: llmharness.agents.tel.tools
