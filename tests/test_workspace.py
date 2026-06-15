@@ -52,6 +52,20 @@ class TestWorkspaceResolver:
         r.resolve("existing")
         assert marker.read_text() == "keep"
 
+    def test_traversal_channel_rejected(self, tmp_path: Path) -> None:
+        root = tmp_path / "root"
+        root.mkdir()
+        outside = tmp_path / "secret"
+        outside.mkdir()
+        r = WorkspaceResolver("/default", workspace_root=str(root))
+        # ``../secret`` and an absolute path both escape root → default cwd,
+        # and the resolver must NOT create/touch the out-of-root directory.
+        assert r.resolve("../secret") == "/default"
+        assert r.resolve("/etc") == "/default"
+        assert r.resolve("a/../../secret") == "/default"
+        # A nested in-root channel still resolves under root.
+        assert r.resolve("team/alpha") == str((root / "team" / "alpha").resolve())
+
 
 class TestLoadGatewayConfig:
     def test_missing_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
