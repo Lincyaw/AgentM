@@ -461,3 +461,15 @@ discussion about whether to move it toward a stateless / event-sourced model
 **Deferred (small, but a retention-window judgment call):** `inbox_seen` grows
 unbounded (`prune()` exists, no caller). Add a startup/periodic prune with a
 retention window — left for a follow-up.
+
+**Update (same day):** user authorized the `turn_committed` marker ("你觉得是
+优雅的就 ok"). Implemented as a new `SessionEntry` type (NOT a bus event) with
+no registered materializer → durable + invisible to LLM context. Producer:
+`AgentSession._on_agent_end_commit_boundary`. Consumer:
+`SessionManager._truncate_to_last_boundary` in `_load` + `from_records`.
+Backward-compatible (no-op on marker-less legacy logs). Tests: unit
+(`test_turn_boundary.py`) + integration (`test_turn_boundary_marker.py`).
+407-test regression green; mypy-clean (the 4 `_ExtensionAPIImpl` errors are a
+pre-existing package-wide `load_extension` signature pattern, not introduced
+here). **Core substrate change → on branch `fix/gateway-shutdown-workspace-
+traversal`, handed off for review, NOT self-merged.**
