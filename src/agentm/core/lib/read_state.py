@@ -1,10 +1,17 @@
-"""Shared read-file state for read-before-edit coordination.
+"""Session-scoped read-file state for read-before-edit coordination.
 
 After a successful read, the ``read`` tool calls :func:`record_read` so
 that the ``edit`` tool can later call :func:`get_read_state` to decide
-whether the file was fully or only partially read.  The module-level
-``_state`` dict is per-process, which is fine since each AgentM session
-runs in its own process.
+whether the file was fully or only partially read.
+
+State is keyed by ``(session_id, normalized_path)``.  The active session is
+bound on the :data:`_CURRENT_SESSION` ContextVar by the session driver
+(:meth:`AgentSession._driver`) via :func:`bind_session`; asyncio tasks copy
+the context at creation, so when many sessions run concurrently in one
+process (batch evaluation) each session's read-before-edit state is isolated
+and one session's read/edit of a path cannot clobber another's.  Calls made
+with no session bound (tests, standalone use) fall back to a shared ``""``
+session, preserving the original single-session behaviour.
 
 Aligned with Claude Code's ``readFileState`` — tracks mtime and a content
 hash so the ``edit`` tool can detect files modified between read and edit.
@@ -14,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 
@@ -27,7 +35,27 @@ class FileReadState:
     content_hash: str = ""
 
 
-_state: dict[str, FileReadState] = {}
+# Active session id for read-state attribution. Bound per session by the
+# driver task; a ContextVar (not a module global) so concurrent sessions in
+# one process do not share read-before-edit state.
+_CURRENT_SESSION: ContextVar[str] = ContextVar(
+    "agentm_read_state_session", default=""
+)
+
+_state: dict[tuple[str, str], FileReadState] = {}
+
+
+def bind_session(session_id: str) -> None:
+    """Bind *session_id* as the read-state scope for the current task.
+
+    Called once at the top of the session driver task so every read/edit
+    tool call within that session keys its state under its own session id.
+    """
+    _CURRENT_SESSION.set(session_id)
+
+
+def _key(normalized: str) -> tuple[str, str]:
+    return (_CURRENT_SESSION.get(), normalized)
 
 
 def record_read(
@@ -40,7 +68,7 @@ def record_read(
 ) -> None:
     """Record that *path* was read.  Called by the ``read`` tool."""
     normalized = os.path.normpath(path)
-    _state[normalized] = FileReadState(
+    _state[_key(normalized)] = FileReadState(
         total_lines=total_lines,
         is_partial=is_partial,
         mtime_ns=mtime_ns,
@@ -51,7 +79,7 @@ def record_read(
 def get_read_state(path: str) -> FileReadState | None:
     """Return the last recorded read state for *path*, or ``None``."""
     normalized = os.path.normpath(path)
-    return _state.get(normalized)
+    return _state.get(_key(normalized))
 
 
 def file_modified_since_read(path: str) -> bool:
@@ -61,7 +89,7 @@ def file_modified_since_read(path: str) -> bool:
     ``get_read_state`` for that) or if the file no longer exists.
     """
     normalized = os.path.normpath(path)
-    state = _state.get(normalized)
+    state = _state.get(_key(normalized))
     if state is None or state.mtime_ns == 0:
         return False
     try:
@@ -77,5 +105,5 @@ def content_hash_for(data: bytes) -> str:
 
 
 def clear() -> None:
-    """Clear all recorded state.  Useful for testing."""
+    """Clear all recorded state for every session.  Useful for testing."""
     _state.clear()

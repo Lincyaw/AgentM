@@ -32,7 +32,7 @@ from agentm.core.abi.events import (
 )
 from agentm.core.abi.events import ContextEvent
 from agentm.core.abi.loop import resolve_loop_action
-from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS
+from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, bind_read_state_session
 from agentm.core.runtime.resource_loader import ResourceLoader
 from agentm.core.runtime.session_helpers import (
     collect_start_veto,
@@ -533,6 +533,11 @@ class AgentSession:
 
     async def _driver(self) -> None:
         """Block on inbox; run one round; loop. Catches per-round exceptions."""
+
+        # Bind this session's read-before-edit scope on the driver task's
+        # context, so concurrent sessions in one process (batch eval) can't
+        # clobber each other's read_state. Child tasks copy this context.
+        bind_read_state_session(self._session_id)
 
         while not self._closed:
             # #179: parked = idle, blocked on the next item. SET before the
