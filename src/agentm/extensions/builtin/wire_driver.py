@@ -315,29 +315,26 @@ def _p_cost_budget(ev: CostBudgetExceededEvent) -> ProjectorResult:
         "currency": ev.currency,
     }
 
-def _available_model_names() -> list[str]:
-    """The configured model-profile names (``[models.<name>]`` keys).
+def _make_session_ready_projector(model_names: list[str]) -> Projector:
+    """Build the session_ready projector bound to the available model-profile
+    names the gateway seeds via the ``model_names`` service.
 
-    Same source as the gateway ``/model`` command's ``list_models`` so the
-    chat client can populate a model-switcher without a second round trip.
-    Best-effort: a missing / unreadable user config yields an empty list
-    rather than failing the session_ready frame."""
-    try:
-        from agentm.core.lib.user_config import load_user_config
+    The names mirror the gateway ``/model`` command's ``list_models`` so a chat
+    client can populate a model-switcher without a second round trip. They are
+    injected here rather than read from user config because an atom must not
+    import ``agentm.core.lib`` sub-modules (§11.4.6); the gateway, which legally
+    reads user config, supplies them through the service registry."""
 
-        return list(load_user_config().models.keys())
-    except Exception:  # noqa: BLE001
-        return []
+    def _project(ev: SessionReadyEvent) -> ProjectorResult:
+        return {
+            "kind": "session_ready",
+            "tool_names": list(ev.tool_names),
+            "command_names": list(ev.command_names),
+            "model": ev.model.id if ev.model is not None else None,
+            "models": list(model_names),
+        }
 
-
-def _p_session_ready(ev: SessionReadyEvent) -> ProjectorResult:
-    return {
-        "kind": "session_ready",
-        "tool_names": list(ev.tool_names),
-        "command_names": list(ev.command_names),
-        "model": ev.model.id if ev.model is not None else None,
-        "models": _available_model_names(),
-    }
+    return _project
 
 def _p_command_dispatched(ev: CommandDispatchedEvent) -> ProjectorResult:
     return {
@@ -385,8 +382,9 @@ _SYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
     (PlanSubmittedEvent.CHANNEL, _p_plan_submitted),
     (AfterCompactEvent.CHANNEL, _p_after_compact),
     (CostBudgetExceededEvent.CHANNEL, _p_cost_budget),
-    (SessionReadyEvent.CHANNEL, _p_session_ready),
     (CommandDispatchedEvent.CHANNEL, _p_command_dispatched),
+    # SessionReadyEvent is subscribed in install() instead — its projector is
+    # bound to the gateway-supplied ``model_names`` (see _make_session_ready_projector).
 )
 
 def _bodies(result: ProjectorResult) -> list[dict[str, Any]]:
@@ -559,6 +557,15 @@ def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG00
         api.on(channel, _make_async(projector))
     for channel, projector in _SYNC_PROJECTORS:
         api.on(channel, _make_sync(projector))
+    # session_ready advertises the available model-profile names so a chat
+    # client can populate a model switcher. The gateway seeds them via the
+    # optional ``model_names`` service (absent -> empty list); the atom must not
+    # read user config itself (§11.4.6).
+    model_names = api.get_service("model_names") or []
+    api.on(
+        SessionReadyEvent.CHANNEL,
+        _make_sync(_make_session_ready_projector(list(model_names))),
+    )
     # Approval gate runs alongside the tool_call projector; it returns a block
     # decision the loop acts on, independent of the outbound forwarding.
     api.on(ToolCallEvent.CHANNEL, _approval_gate)

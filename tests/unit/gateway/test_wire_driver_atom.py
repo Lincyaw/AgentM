@@ -362,7 +362,7 @@ async def test_sync_emitted_control_event_is_forwarded() -> None:
 # --- session_ready carries the model-profile list --------------------------
 
 
-def test_session_ready_carries_models(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_session_ready_carries_models() -> None:
     """The session_ready frame must advertise the configured model-profile
     names (same source as the gateway /model command) so a chat client can
     populate a model switcher without a second round trip."""
@@ -370,7 +370,10 @@ def test_session_ready_carries_models(monkeypatch: pytest.MonkeyPatch) -> None:
     from agentm.core.abi.events import SessionReadyEvent
 
     mod = _load_wire_driver()
-    monkeypatch.setattr(mod, "_available_model_names", lambda: ["doubao", "glm"])
+    # The gateway seeds the model-profile names via the ``model_names`` service;
+    # install() binds them into the session_ready projector (the atom does not
+    # read user config itself — §11.4.6).
+    project = mod._make_session_ready_projector(["doubao", "glm"])
 
     ev = SessionReadyEvent(
         cwd="/tmp",
@@ -381,7 +384,7 @@ def test_session_ready_carries_models(monkeypatch: pytest.MonkeyPatch) -> None:
         model=Model(id="doubao-seed", provider="openai", context_window=1, max_output_tokens=1),
         root_session_id="r1",
     )
-    body = mod._p_session_ready(ev)
+    body = project(ev)
     assert body["kind"] == "session_ready"
     assert body["model"] == "doubao-seed"
     assert body["models"] == ["doubao", "glm"]
