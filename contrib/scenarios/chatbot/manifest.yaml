@@ -1,43 +1,68 @@
 name: chatbot
 description: |
-  Conversational-assistant scenario for chat channels (Feishu, terminal,
-  …) driven through ``agentm-gateway --scenario chatbot``.
+  Conversational-assistant scenario, here in its **maximal test** form: it
+  mounts every builtin atom that can be safely enabled together, so the
+  scenario doubles as a load/smoke harness for the atom set. Drive it through
+  ``agentm-gateway --scenario chatbot`` (chat channels) or ``agentm --scenario
+  chatbot -p …``.
 
-  It is ``local`` (the minimal default) plus an identity
-  layer: the ``persona`` contrib atom reads file-driven character from the
-  workspace (SOUL.md / IDENTITY.md / USER.md) and the base prompt frames
-  the agent as a chat assistant rather than a one-shot CLI coder. Nothing
-  here is new mechanism — it is a different *composition* of atoms, which
-  is exactly how scenarios are meant to differ.
+  The conversational identity layer is unchanged from the minimal chatbot: the
+  ``persona`` atom reads file-driven character (SOUL.md / IDENTITY.md /
+  USER.md) and ``memory`` keeps evolving facts across sessions. Everything
+  else here is breadth — tool floor, guards, budgets, observability,
+  self-modification, sub-agents and workflows — wired so they coexist.
 
-  Curate character by editing the markdown files in the workspace; the
-  ``memory`` atom keeps evolving facts (user/project/feedback) across
-  sessions. Both land in the cache-stable system-prompt prefix.
+  Curate character by editing the markdown files in the workspace. User atoms
+  under ``<cwd>/.agentm/atoms/`` merge on top of this list so
+  ``api.install_atom`` / ``/atom:install`` calls persist across restarts.
 
-  Floor atoms (``compaction_prompts``, ``slash_commands``) are auto-mounted
-  by the session factory. User atoms under ``<cwd>/.agentm/atoms/`` merge
-  on top so ``api.install_atom`` calls persist across restarts.
+  Excluded on purpose (see the commented block at the bottom): provider atoms
+  (factory-injected via ``--model``), terminal/structured-output, OTLP export
+  (needs a live collector), and the evolution self-improvement cluster (tied
+  to eval suites + has trace-scanning / auto-rollback side effects).
 
 extensions:
-  # --- environment ports: local-FS / asyncio-bash Operations bundle.
+  # === environment ports: local-FS / asyncio-bash Operations bundle. =======
   # Listed first so tool atoms calling ``api.get_operations()`` at install
-  # see a registered bundle. ---
+  # see a registered bundle.
   - module: agentm.extensions.builtin.operations
     config:
       backend: local
 
-  # --- tool-result size cap: spill large outputs to disk ---
+  # === resilience: exponential-backoff retry policy the provider layer wraps.
+  - module: agentm.extensions.builtin.retry_policy
+
+  # === tool-result hygiene ==================================================
+  # cap: spill oversized outputs to disk; budget: truncate the in-context text.
   - module: agentm.extensions.builtin.tool_result_cap
+  - module: agentm.extensions.builtin.tool_result_budget
+  # Default English text for kernel-emitted ToolErrorEvent.
+  - module: agentm.extensions.builtin.tool_error_messages
 
-  # --- file I/O + shell: same minimal tool floor as local. ---
+  # === file I/O + shell tool floor =========================================
   - module: agentm.extensions.builtin.file_tools
+  # Serialize file-mutation tools with per-path locks (requires file_tools).
+  - module: agentm.extensions.builtin.file_mutation_queue
   - module: agentm.extensions.builtin.tool_bash
+  # Block destructive in-place shell edits (sed -i, awk inplace).
+  - module: agentm.extensions.builtin.tool_bash_guard
 
-  # --- observability: every turn lands in the JSONL trace store. ---
+  # === tool-call gating ====================================================
+  # Block recently repeated tool calls within a sliding window.
+  - module: agentm.extensions.builtin.dedup
+  # allow/deny tool-call gate — empty lists = allow-all (no-op by default).
+  - module: agentm.extensions.builtin.permission
+  # allow/deny catalog filter — empty lists = expose-all (no-op by default).
+  - module: agentm.extensions.builtin.tool_filter
+  # Append an <available_tools> index to the system prompt.
+  - module: agentm.extensions.builtin.tool_index
+
+  # === observability: every turn lands in the trace store ==================
   - module: agentm.extensions.builtin.observability
+  # Agent-defined wakeups (schedule_wakeup) + bus subscriptions (create_monitor).
+  - module: agentm.extensions.builtin.monitor
 
-  # --- prompt assembly: a conversational base frame. Persona files and
-  # memory layer on top of this at BeforeAgentStartEvent. ---
+  # === prompt assembly: a conversational base frame ========================
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
@@ -59,11 +84,9 @@ extensions:
         user can send /new.
   - module: agentm.extensions.builtin.runtime_context
 
-  # --- identity: file-driven persona (SOUL.md / IDENTITY.md / USER.md)
-  # from the workspace. ``defaults`` seed preset starter content into a
-  # fresh workspace on first run (absent files only — never clobbers the
-  # agent's own edits). Edit the files to change character; the next turn
-  # re-reads them. ---
+  # === identity: file-driven persona (SOUL.md / IDENTITY.md / USER.md) ======
+  # ``defaults`` seed preset starter content into a fresh workspace on first
+  # run (absent files only — never clobbers the agent's own edits).
   - module: agentm.extensions.builtin.persona
     config:
       defaults:
@@ -85,33 +108,87 @@ extensions:
           Nothing learned yet. Record durable facts about the user here as
           you go (name, preferences, ongoing projects).
 
-  # --- skill / template auto-discovery. ---
+  # === skill / template auto-discovery =====================================
   - module: agentm.extensions.builtin.skill_loader
     config:
       skill_paths:
         - contrib/scenarios/chatbot/skills
   - module: agentm.extensions.builtin.prompt_templates
+  # Floor atoms — auto-mounted anyway, listed here so the test scenario is a
+  # complete catalog of what's active.
+  - module: agentm.extensions.builtin.compaction_prompts
+  - module: agentm.extensions.builtin.slash_commands
 
-  # --- context compaction: long-lived chat sessions overflow the window
-  # eventually; summarize older turns into one structured checkpoint and
-  # rebuild context from the session tree. Resolves prompt bodies via the
-  # auto-mounted ``compaction_prompts`` floor atom. ``read_history`` lets the
-  # agent recover the verbatim content of any [Turn N] the summary cites. ---
+  # === context compaction ===================================================
+  # Summarize older turns into one structured checkpoint; read_history lets
+  # the agent recover the verbatim content of any [Turn N] the summary cites.
   - module: agentm.extensions.builtin.llm_compaction
   - module: agentm.extensions.builtin.read_history
 
-  # --- project-local persistent memory: MEMORY.md index + typed
-  # frontmatter files, the evolving-facts companion to persona. ---
+  # === project-local persistent memory ======================================
   - module: agentm.extensions.builtin.memory
 
-  # --- memory lifecycle: auto-extract, pre-compact sink, per-turn prefetch ---
-  - module: agentm.extensions.builtin.memory_lifecycle
+  # === budgets / runway =====================================================
+  # Loop turn / tool-call budget for the session.
+  - module: agentm.extensions.builtin.loop_budget
+  # Inject a budget runway warning as the loop approaches its caps.
+  - module: agentm.extensions.builtin.turn_reminder
+  # Track estimated LLM spend; emit cost_budget_exceeded on overflow.
+  - module: agentm.extensions.builtin.cost_budget
+    config:
+      limit: 5.0
+  # Retry the turn when the assistant message is thinking-only (no text/tools).
+  - module: agentm.extensions.builtin.thinking_retry
 
-  # --- auto-background long tools: a foreground tool call that overruns
-  # ``timeout`` is moved to the background (the turn gets an immediate
-  # ticket; the real result returns later via the SessionInbox), so a slow
-  # build / network call never blocks the chat. Companion tools
-  # check_background / wait_background / cancel_background poll or cancel it. ---
+  # === self-modification ====================================================
+  # install_atom / unload_atom / list_atoms — agent-driven atom self-install,
+  # live (hot) registration + persistence under <cwd>/.agentm/atoms/.
+  - module: agentm.extensions.builtin.atom_management
+
+  # === orchestration ========================================================
+  # Spawn nested AgentSession workers.
+  - module: agentm.extensions.builtin.sub_agent
+  # LLM-authored JS workflow orchestration over child sessions (needs artifact_store).
+  - module: agentm.extensions.builtin.artifact_store
+  - module: agentm.extensions.builtin.workflow
+
+  # === auto-background long tools ===========================================
+  # A foreground tool call that overruns ``timeout`` is moved to the background.
   - module: agentm.extensions.builtin.background_exec
     config:
       timeout: 120
+
+  # === TUI snapshot capture =================================================
+  - module: agentm.extensions.builtin.tui_snapshot
+
+  # === OPT-IN / deliberately excluded ======================================
+  # These exist but are NOT enabled here. Uncomment per test, mind the notes.
+  #
+  # Provider atoms — injected by the session factory from ``--model`` /
+  # config.toml, never listed in a scenario manifest. Listing them here
+  # double-registers the provider.
+  #   - module: agentm.extensions.builtin.llm_openai
+  #   - module: agentm.extensions.builtin.llm_anthropic
+  #   - module: agentm.extensions.builtin.inherit_provider   # child-session role; requires `provider` config
+  #
+  # Terminal structured output — registers a submit_result tool that ENDS the
+  # turn; conflicts with open-ended chat. Needs a `result_schema` to be useful.
+  #   - module: agentm.extensions.builtin.structured_output
+  #
+  # OTLP export — attaches process-level span/log exporters; needs a live
+  # collector endpoint or it just adds connection-failure noise.
+  #   - module: agentm.extensions.builtin.otlp_export
+  #     config: { endpoint: "http://localhost:4317" }
+  #
+  # Gateway wire translation — the single-process gateway wires this itself;
+  # not a scenario-level atom.
+  #   - module: agentm.extensions.builtin.wire_driver
+  #
+  # Evolution / self-improvement cluster — tied to eval suites + a
+  # `target_scenario`, with trace-scanning and (guard_watch) AUTO-ROLLBACK
+  # side effects at session_ready. Enable only when testing evolution.
+  #   - module: agentm.extensions.builtin.query_tools
+  #   - module: agentm.extensions.builtin.tool_eval_run
+  #   - module: agentm.extensions.builtin.tool_reflect
+  #   - module: agentm.extensions.builtin.tool_propose_change
+  #   - module: agentm.extensions.builtin.tool_guard_watch

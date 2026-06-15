@@ -12,6 +12,11 @@ receivers:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        # AgentM ships full event payloads (system prompt + message history +
+        # SQL) as log-record attributes; a 512-record batch easily exceeds the
+        # gRPC default 4 MiB receive limit and is rejected with
+        # RESOURCE_EXHAUSTED. Raise the ceiling so fat log batches land.
+        max_recv_msg_size_mib: 64
       http:
         endpoint: 0.0.0.0:4318
 
