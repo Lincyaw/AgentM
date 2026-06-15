@@ -402,3 +402,62 @@ and shared via aegis. Deeper root cause (non-atomic obs writer under CPU
 starvation) is core substrate — left to a separate pass; the eval-side
 tolerant reader makes the harness resilient regardless. **Always cap eval
 concurrency; the 200-concurrent run is what corrupted the JSONL.**
+
+### 2026-06-15 — Gateway review + hardening
+
+Context: deep design review of the single-process gateway, plus a strategy
+discussion about whether to move it toward a stateless / event-sourced model
+(and whether Go would help).
+
+**Shipped (branch `fix/gateway-shutdown-workspace-traversal`, self-merge candidate):**
+
+- **Graceful-shutdown bound + signal escalation** (L2: bug fix). Ctrl-C hung
+  because the signal handler only re-set `stop_event` (no force path) and
+  `runtime.shutdown()`'s `gather` on a wedged in-flight turn was unbounded.
+  Fix: 2nd signal → `os._exit`; drain wrapped in `asyncio.wait_for` (server 5s,
+  runtime 10s) → force-exit on timeout.
+- **Default scenario `local` → `chatbot`** (L1: convention — `test_systemd_render.py:91`
+  already asserts "defaults to chatbot in code"). Makes the out-of-box gateway
+  mount the full atom set incl. `tool_index` (the reason the user's session had
+  no `<available_tools>` block).
+- **Workspace path-traversal guard** (L3/security). `WorkspaceResolver.resolve`
+  joined attacker-controlled `channel` onto `workspace_root` with no
+  containment check → `../`/absolute escapes the root and points a session's
+  cwd/file/bash tools anywhere. Fix: resolve + `is_relative_to(root)`, else
+  fall back to default cwd. Added `test_traversal_channel_rejected`.
+
+**Measured (informs the strategy, not shipped):**
+
+- Cold-start `AgentSession.create()`: chatbot full atom set median **278ms**
+  (241–349), local **147ms**. → pure stateless per-turn rebuild is *latency-
+  viable* for chat; warm LRU is an optimization, not a requirement.
+- ClickHouse `from_records` resume: 1117-entry session = 58ms fetch + 14ms
+  rebuild = **~73ms**, compaction collapses 1117→18 messages. The multi-machine
+  resume path works today and is fast; the "snapshot-aware load" optimization
+  is unnecessary.
+
+**[flagged for review] Strategy direction — NOT implemented (large/architectural + touches write-protected core):**
+
+- Target model: **durable-log-backed, stateless-per-turn turns** (the user's
+  "a session is just data; a prompt is a stateless request" instinct = event
+  sourcing + stateless command handler, which AgentM's `SessionManager` tree
+  already is). Storage split: ClickHouse stays the async event projection/trace;
+  add a small transactional **coordination store** (SQLite→Postgres) for durable
+  inbox queue + per-session-id ownership lease + dedup (NOT events). Per-session
+  serialization = "inbox partitioned by session_id, single lane" (N=1 in-memory
+  active-set; multi-proc store lease).
+- **Blocking correctness gap (must precede any restart-resume reliance):**
+  messages persist incrementally mid-turn (by design, `session.py` /
+  `loop.py:532/764`) but `agent_end` does NOT persist a session entry — all
+  termination paths funnel cleanly through `loop.py:_finish_with_cause`. A crash
+  mid-turn leaves a half-turn (dangling tool_call) that resume rebuilds into a
+  provider-breaking context. Fix = append a `turn_committed` boundary entry in
+  the `AgentEndEvent` handler + truncate trailing past-boundary entries on
+  resume. This is a CORE change → handed off for review, not done autonomously.
+- Go: only worth it as a thin supervisor over isolated workers; statelessness
+  makes per-turn the isolation unit, dissolving the noisy-neighbor case that
+  motivated process isolation. Not a priority.
+
+**Deferred (small, but a retention-window judgment call):** `inbox_seen` grows
+unbounded (`prune()` exists, no caller). Add a startup/periodic prune with a
+retention window — left for a follow-up.
