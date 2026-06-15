@@ -26,5 +26,7 @@ const (
 	keyQuestion     = "?"
 	keyAltUp        = "alt+up"
 	keyAltDown      = "alt+down"
-	keyV            = "v"
+	keyV                 = "v"
+	keyCtrlBracketClose  = "ctrl+]"
+	keyCtrlK             = "ctrl+k"
 )

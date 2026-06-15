@@ -1,6 +1,8 @@
 package blocks
 
 import (
+	"github.com/muesli/reflow/wordwrap"
+
 	"github.com/AoyangSpace/agentm-terminal/internal/theme"
 	"github.com/AoyangSpace/agentm-terminal/internal/util"
 )
@@ -15,8 +17,10 @@ func (b *UserTurn) Collapsed() bool     { return false }
 func (b *UserTurn) SetCollapsed(_ bool) {} // no-op: user turns are always expanded
 
 func (b *UserTurn) Render(width int, th *theme.Theme) string {
-	content := util.Truncate(b.Content, contentWidth(width)*20)
-	style := th.UserMessageBg.Width(width).PaddingLeft(1).PaddingRight(1)
+	cw := contentWidth(width)
+	content := util.Truncate(b.Content, cw*20)
+	content = wordwrap.String(content, cw)
+	style := th.UserMessageBg.PaddingLeft(1).PaddingRight(1)
 	return style.Render(content)
 }
 

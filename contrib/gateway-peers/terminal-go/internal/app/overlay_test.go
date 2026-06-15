@@ -50,6 +50,10 @@ func TestOverlayInterfaceCompliance(t *testing.T) {
 	var _ Overlay = &BookmarkOverlay{}
 	var _ Overlay = &ResendOverlay{}
 	var _ Overlay = &CodeSaveOverlay{}
+	var _ Overlay = &ApprovalOverlay{}
+	var _ Overlay = &PaletteOverlay{}
+	var _ Overlay = &RejectionOverlay{}
+	var _ Overlay = &ElicitationOverlay{}
 }
 
 // -- HelpOverlay --
@@ -456,5 +460,677 @@ func TestBlockLabel(t *testing.T) {
 	}
 	if !strings.HasSuffix(label, "...") {
 		t.Error("truncated label should end with ...")
+	}
+}
+
+// -- ApprovalOverlay --
+
+func TestApprovalOverlayKind(t *testing.T) {
+	o := NewApprovalOverlay("test", "Bash", nil, []blocks.Button{
+		{Label: "Allow", Value: "allow"},
+	})
+	if o.Kind() != OverlayApproval {
+		t.Errorf("expected OverlayApproval, got %d", o.Kind())
+	}
+}
+
+func TestApprovalOverlayDigitSelectsButton(t *testing.T) {
+	buttons := []blocks.Button{
+		{Label: "Allow", Value: "allow"},
+		{Label: "Deny", Value: "deny"},
+		{Label: "Always", Value: "always"},
+	}
+	o := NewApprovalOverlay("test", "Bash", nil, buttons)
+
+	_, _, closed := o.Update(keyMsg("1"))
+	if !closed {
+		t.Error("digit 1 should close the overlay")
+	}
+	if !o.Resolved() {
+		t.Error("should be resolved after digit selection")
+	}
+	if o.Chosen() != "allow" {
+		t.Errorf("expected 'allow', got %q", o.Chosen())
+	}
+}
+
+func TestApprovalOverlayLetterShortcuts(t *testing.T) {
+	buttons := []blocks.Button{
+		{Label: "Allow", Value: "allow"},
+		{Label: "Deny", Value: "deny"},
+		{Label: "Always", Value: "always"},
+	}
+
+	// y = first button
+	o := NewApprovalOverlay("test", "Bash", nil, buttons)
+	_, _, closed := o.Update(keyMsg("y"))
+	if !closed || o.Chosen() != "allow" {
+		t.Errorf("y should select first button, got closed=%v chosen=%q", closed, o.Chosen())
+	}
+
+	// n = second button
+	o = NewApprovalOverlay("test", "Bash", nil, buttons)
+	_, _, closed = o.Update(keyMsg("n"))
+	if !closed || o.Chosen() != "deny" {
+		t.Errorf("n should select second button, got closed=%v chosen=%q", closed, o.Chosen())
+	}
+
+	// a = third button
+	o = NewApprovalOverlay("test", "Bash", nil, buttons)
+	_, _, closed = o.Update(keyMsg("a"))
+	if !closed || o.Chosen() != "always" {
+		t.Errorf("a should select third button, got closed=%v chosen=%q", closed, o.Chosen())
+	}
+}
+
+func TestApprovalOverlayTabCyclesButtons(t *testing.T) {
+	buttons := []blocks.Button{
+		{Label: "Allow", Value: "allow"},
+		{Label: "Deny", Value: "deny"},
+	}
+	o := NewApprovalOverlay("test", "Bash", nil, buttons)
+
+	if o.selected != 0 {
+		t.Errorf("initial selection should be 0, got %d", o.selected)
+	}
+
+	o.Update(keyMsg("tab"))
+	if o.selected != 1 {
+		t.Errorf("after tab, selection should be 1, got %d", o.selected)
+	}
+
+	o.Update(keyMsg("tab"))
+	if o.selected != 0 {
+		t.Errorf("after second tab, selection should wrap to 0, got %d", o.selected)
+	}
+}
+
+func TestApprovalOverlayEnterConfirms(t *testing.T) {
+	buttons := []blocks.Button{
+		{Label: "Allow", Value: "allow"},
+		{Label: "Deny", Value: "deny"},
+	}
+	o := NewApprovalOverlay("test", "Bash", nil, buttons)
+
+	// Tab to "Deny", then Enter.
+	o.Update(keyMsg("tab"))
+	_, _, closed := o.Update(keyMsg("enter"))
+	if !closed {
+		t.Error("enter should close the overlay")
+	}
+	if o.Chosen() != "deny" {
+		t.Errorf("expected 'deny', got %q", o.Chosen())
+	}
+}
+
+func TestApprovalOverlayEscDenies(t *testing.T) {
+	buttons := []blocks.Button{
+		{Label: "Allow", Value: "allow"},
+		{Label: "Deny", Value: "deny"},
+	}
+	o := NewApprovalOverlay("test", "Bash", nil, buttons)
+
+	_, _, closed := o.Update(keyMsg("esc"))
+	if !closed {
+		t.Error("esc should close the overlay")
+	}
+	if o.Chosen() != "deny" {
+		t.Errorf("esc should default to deny, got %q", o.Chosen())
+	}
+}
+
+func TestApprovalOverlayToggleDetails(t *testing.T) {
+	args := map[string]any{"command": "ls -la"}
+	o := NewApprovalOverlay("test", "Bash", args, []blocks.Button{
+		{Label: "Allow", Value: "allow"},
+	})
+
+	if o.expanded {
+		t.Error("should start collapsed")
+	}
+
+	o.Update(keyMsg("?"))
+	if !o.expanded {
+		t.Error("? should toggle expanded")
+	}
+
+	o.Update(keyMsg("?"))
+	if o.expanded {
+		t.Error("second ? should collapse")
+	}
+}
+
+func TestApprovalOverlayViewNonEmpty(t *testing.T) {
+	buttons := []blocks.Button{
+		{Label: "Allow", Value: "allow"},
+		{Label: "Deny", Value: "deny"},
+	}
+	o := NewApprovalOverlay("Run dangerous command", "Bash",
+		map[string]any{"command": "rm -rf /tmp/test"}, buttons)
+
+	view := o.View(80, 40, testTheme())
+	if view == "" {
+		t.Error("View should produce non-empty output")
+	}
+	if !strings.Contains(view, "Tool Approval") {
+		t.Error("View should contain title")
+	}
+	if !strings.Contains(view, "Bash") {
+		t.Error("View should contain tool name")
+	}
+	if !strings.Contains(view, "Allow") {
+		t.Error("View should contain button labels")
+	}
+}
+
+// -- PaletteOverlay --
+
+func TestPaletteOverlayKind(t *testing.T) {
+	o := NewPaletteOverlay([]string{"/help"}, nil)
+	if o.Kind() != OverlayPalette {
+		t.Errorf("expected OverlayPalette, got %d", o.Kind())
+	}
+}
+
+func TestPaletteOverlayPopulatesItems(t *testing.T) {
+	o := NewPaletteOverlay([]string{"/help", "/clear", "/status"}, nil)
+
+	// Should have slash commands + built-in UI actions.
+	if len(o.items) < 3 {
+		t.Errorf("expected at least 3 items, got %d", len(o.items))
+	}
+
+	// All items should be in filtered list initially.
+	if len(o.filtered) != len(o.items) {
+		t.Errorf("filtered = %d, items = %d; expected equal", len(o.filtered), len(o.items))
+	}
+}
+
+func TestPaletteOverlayFiltering(t *testing.T) {
+	o := NewPaletteOverlay([]string{"/help", "/clear", "/status"}, nil)
+	total := len(o.filtered)
+
+	// Type "help" to filter.
+	for _, ch := range "help" {
+		o.Update(keyMsg(string(ch)))
+	}
+
+	if o.query != "help" {
+		t.Errorf("expected query 'help', got %q", o.query)
+	}
+	if len(o.filtered) >= total {
+		t.Error("filtering should reduce the list")
+	}
+	// Should match /help and possibly "Help" UI action.
+	found := false
+	for _, item := range o.filtered {
+		if item.Label == "/help" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected /help in filtered results")
+	}
+}
+
+func TestPaletteOverlayNavigation(t *testing.T) {
+	o := NewPaletteOverlay([]string{"/help", "/clear"}, nil)
+
+	if o.cursor != 0 {
+		t.Errorf("initial cursor should be 0, got %d", o.cursor)
+	}
+
+	o.Update(keyMsg("down"))
+	if o.cursor != 1 {
+		t.Errorf("expected cursor 1 after down, got %d", o.cursor)
+	}
+
+	o.Update(keyMsg("up"))
+	if o.cursor != 0 {
+		t.Errorf("expected cursor 0 after up, got %d", o.cursor)
+	}
+}
+
+func TestPaletteOverlayEnterChooses(t *testing.T) {
+	o := NewPaletteOverlay([]string{"/help", "/clear"}, nil)
+
+	_, _, closed := o.Update(keyMsg("enter"))
+	if !closed {
+		t.Error("enter should close the palette")
+	}
+	if o.Chosen() == nil {
+		t.Fatal("expected a chosen item")
+	}
+	if o.Chosen().Label != "/help" {
+		t.Errorf("expected first item /help, got %q", o.Chosen().Label)
+	}
+}
+
+func TestPaletteOverlayEscClosesWithoutChoice(t *testing.T) {
+	o := NewPaletteOverlay([]string{"/help"}, nil)
+
+	_, _, closed := o.Update(keyMsg("esc"))
+	if !closed {
+		t.Error("esc should close the palette")
+	}
+	if o.Chosen() != nil {
+		t.Error("esc should not set a chosen item")
+	}
+}
+
+func TestPaletteOverlayBackspace(t *testing.T) {
+	o := NewPaletteOverlay([]string{"/help"}, nil)
+
+	for _, ch := range "xyz" {
+		o.Update(keyMsg(string(ch)))
+	}
+	if o.query != "xyz" {
+		t.Fatalf("expected 'xyz', got %q", o.query)
+	}
+
+	o.Update(keyMsg("backspace"))
+	if o.query != "xy" {
+		t.Errorf("expected 'xy' after backspace, got %q", o.query)
+	}
+}
+
+func TestPaletteOverlayViewNonEmpty(t *testing.T) {
+	o := NewPaletteOverlay([]string{"/help", "/clear"}, nil)
+
+	view := o.View(80, 40, testTheme())
+	if view == "" {
+		t.Error("View should produce non-empty output")
+	}
+	if !strings.Contains(view, "Command Palette") {
+		t.Error("View should contain title")
+	}
+}
+
+func TestPaletteOverlayCommandMarkedAsCommand(t *testing.T) {
+	o := NewPaletteOverlay([]string{"/help"}, nil)
+
+	// Find the /help item.
+	for _, item := range o.items {
+		if item.Label == "/help" {
+			if !item.IsCommand {
+				t.Error("/help should be marked IsCommand")
+			}
+			if item.Action != "/help" {
+				t.Errorf("action should be '/help', got %q", item.Action)
+			}
+			return
+		}
+	}
+	t.Error("/help item not found")
+}
+
+func TestPaletteOverlayUIActionNotCommand(t *testing.T) {
+	o := NewPaletteOverlay(nil, nil)
+
+	for _, item := range o.items {
+		if item.Action == "toggle_sidebar" {
+			if item.IsCommand {
+				t.Error("toggle_sidebar should not be IsCommand")
+			}
+			return
+		}
+	}
+	t.Error("toggle_sidebar action not found")
+}
+
+// -- RejectionOverlay --
+
+func TestRejectionOverlayKind(t *testing.T) {
+	r := NewRejectionOverlay("bash", nil)
+	if r.Kind() != OverlayRejection {
+		t.Errorf("expected OverlayRejection, got %d", r.Kind())
+	}
+}
+
+func TestRejectionOverlayNavigation(t *testing.T) {
+	r := NewRejectionOverlay("bash", nil)
+	if r.cursor != 0 {
+		t.Fatalf("expected cursor 0, got %d", r.cursor)
+	}
+
+	r.Update(keyMsg("down"))
+	if r.cursor != 1 {
+		t.Errorf("expected cursor 1 after down, got %d", r.cursor)
+	}
+
+	r.Update(keyMsg("up"))
+	if r.cursor != 0 {
+		t.Errorf("expected cursor 0 after up, got %d", r.cursor)
+	}
+
+	// Can't go above 0
+	r.Update(keyMsg("up"))
+	if r.cursor != 0 {
+		t.Errorf("expected cursor 0 after up at top, got %d", r.cursor)
+	}
+}
+
+func TestRejectionOverlayPresetSelect(t *testing.T) {
+	var got string
+	r := NewRejectionOverlay("bash", func(reason string) { got = reason })
+
+	// Move to second preset and confirm
+	r.Update(keyMsg("down"))
+	_, _, closed := r.Update(keyMsg("enter"))
+	if !closed {
+		t.Error("enter on preset should close overlay")
+	}
+	if got != "Try a different approach" {
+		t.Errorf("expected 'Try a different approach', got %q", got)
+	}
+}
+
+func TestRejectionOverlayDigitShortcut(t *testing.T) {
+	var got string
+	r := NewRejectionOverlay("bash", func(reason string) { got = reason })
+
+	_, _, closed := r.Update(keyMsg("3"))
+	if !closed {
+		t.Error("digit shortcut should close overlay")
+	}
+	if got != "The command is dangerous" {
+		t.Errorf("expected 'The command is dangerous', got %q", got)
+	}
+}
+
+func TestRejectionOverlayCustomInput(t *testing.T) {
+	var got string
+	r := NewRejectionOverlay("bash", func(reason string) { got = reason })
+
+	// Tab switches to custom mode
+	r.Update(keyMsg("tab"))
+	if !r.inCustom {
+		t.Fatal("tab should switch to custom mode")
+	}
+
+	// Type custom reason
+	for _, ch := range "bad idea" {
+		r.Update(keyMsg(string(ch)))
+	}
+	if r.custom != "bad idea" {
+		t.Errorf("expected custom 'bad idea', got %q", r.custom)
+	}
+
+	// Enter confirms
+	_, _, closed := r.Update(keyMsg("enter"))
+	if !closed {
+		t.Error("enter should close overlay")
+	}
+	if got != "bad idea" {
+		t.Errorf("expected 'bad idea', got %q", got)
+	}
+}
+
+func TestRejectionOverlayCustomBackspace(t *testing.T) {
+	r := NewRejectionOverlay("bash", nil)
+	r.Update(keyMsg("tab"))
+
+	for _, ch := range "abc" {
+		r.Update(keyMsg(string(ch)))
+	}
+	r.Update(keyMsg("backspace"))
+	if r.custom != "ab" {
+		t.Errorf("expected 'ab' after backspace, got %q", r.custom)
+	}
+}
+
+func TestRejectionOverlayCustomEscReturnsToList(t *testing.T) {
+	r := NewRejectionOverlay("bash", nil)
+	r.Update(keyMsg("tab"))
+	if !r.inCustom {
+		t.Fatal("expected custom mode")
+	}
+
+	_, _, closed := r.Update(keyMsg("esc"))
+	if closed {
+		t.Error("esc in custom mode should return to list, not close")
+	}
+	if r.inCustom {
+		t.Error("expected return to list mode")
+	}
+}
+
+func TestRejectionOverlayEscClosesFromList(t *testing.T) {
+	r := NewRejectionOverlay("bash", nil)
+	_, _, closed := r.Update(keyMsg("esc"))
+	if !closed {
+		t.Error("esc from list should close overlay")
+	}
+}
+
+func TestRejectionOverlayViewNonEmpty(t *testing.T) {
+	r := NewRejectionOverlay("bash", nil)
+	view := r.View(80, 40, testTheme())
+	if view == "" {
+		t.Error("RejectionOverlay.View should produce non-empty output")
+	}
+	if !strings.Contains(view, "Why reject") {
+		t.Error("view should contain title")
+	}
+	if !strings.Contains(view, "bash") {
+		t.Error("view should contain tool name")
+	}
+}
+
+func TestRejectionOverlayEmptyCustomDefaultsToRejected(t *testing.T) {
+	var got string
+	r := NewRejectionOverlay("bash", func(reason string) { got = reason })
+
+	r.Update(keyMsg("tab"))
+	_, _, closed := r.Update(keyMsg("enter"))
+	if !closed {
+		t.Error("enter should close overlay")
+	}
+	if got != "Rejected" {
+		t.Errorf("expected 'Rejected' for empty custom, got %q", got)
+	}
+}
+
+// -- ElicitationOverlay --
+
+func TestElicitationOverlayKind(t *testing.T) {
+	e := NewElicitationOverlay("Q", "", ElicitText, nil, nil)
+	if e.Kind() != OverlayElicitation {
+		t.Errorf("expected OverlayElicitation, got %d", e.Kind())
+	}
+}
+
+func TestElicitationTextInput(t *testing.T) {
+	var got string
+	e := NewElicitationOverlay("Name?", "Enter your name", ElicitText, nil,
+		func(result string) { got = result })
+
+	for _, ch := range "Alice" {
+		e.Update(keyMsg(string(ch)))
+	}
+	if e.textInput != "Alice" {
+		t.Fatalf("expected textInput 'Alice', got %q", e.textInput)
+	}
+
+	_, _, closed := e.Update(keyMsg("enter"))
+	if !closed {
+		t.Error("enter should close text overlay")
+	}
+	if got != "Alice" {
+		t.Errorf("expected result 'Alice', got %q", got)
+	}
+}
+
+func TestElicitationTextBackspace(t *testing.T) {
+	e := NewElicitationOverlay("Q", "", ElicitText, nil, nil)
+	for _, ch := range "abc" {
+		e.Update(keyMsg(string(ch)))
+	}
+	e.Update(keyMsg("backspace"))
+	if e.textInput != "ab" {
+		t.Errorf("expected 'ab' after backspace, got %q", e.textInput)
+	}
+}
+
+func TestElicitationTextEscCancels(t *testing.T) {
+	var got string
+	e := NewElicitationOverlay("Q", "", ElicitText, nil,
+		func(result string) { got = result })
+
+	_, _, closed := e.Update(keyMsg("esc"))
+	if !closed {
+		t.Error("esc should close text overlay")
+	}
+	if got != "" {
+		t.Errorf("esc should yield empty result, got %q", got)
+	}
+}
+
+func TestElicitationSelectNavigation(t *testing.T) {
+	opts := []ElicitationOption{
+		{Label: "Red", Value: "red"},
+		{Label: "Green", Value: "green"},
+		{Label: "Blue", Value: "blue"},
+	}
+	e := NewElicitationOverlay("Color?", "", ElicitSelect, opts, nil)
+
+	if e.cursor != 0 {
+		t.Fatalf("expected cursor 0, got %d", e.cursor)
+	}
+
+	e.Update(keyMsg("down"))
+	if e.cursor != 1 {
+		t.Errorf("expected cursor 1, got %d", e.cursor)
+	}
+
+	e.Update(keyMsg("down"))
+	if e.cursor != 2 {
+		t.Errorf("expected cursor 2, got %d", e.cursor)
+	}
+
+	// Can't go past end
+	e.Update(keyMsg("down"))
+	if e.cursor != 2 {
+		t.Errorf("expected cursor 2 at bottom, got %d", e.cursor)
+	}
+
+	e.Update(keyMsg("up"))
+	if e.cursor != 1 {
+		t.Errorf("expected cursor 1 after up, got %d", e.cursor)
+	}
+}
+
+func TestElicitationSelectConfirm(t *testing.T) {
+	opts := []ElicitationOption{
+		{Label: "Red", Value: "red"},
+		{Label: "Green", Value: "green"},
+	}
+	var got string
+	e := NewElicitationOverlay("Color?", "", ElicitSelect, opts,
+		func(result string) { got = result })
+
+	e.Update(keyMsg("down"))
+	_, _, closed := e.Update(keyMsg("enter"))
+	if !closed {
+		t.Error("enter should close select overlay")
+	}
+	if got != "green" {
+		t.Errorf("expected 'green', got %q", got)
+	}
+}
+
+func TestElicitationMultiSelectToggle(t *testing.T) {
+	opts := []ElicitationOption{
+		{Label: "A", Value: "a"},
+		{Label: "B", Value: "b"},
+		{Label: "C", Value: "c"},
+	}
+	e := NewElicitationOverlay("Pick", "", ElicitMultiSelect, opts, nil)
+
+	// Toggle first
+	e.Update(keyMsg(" "))
+	if !e.selected[0] {
+		t.Error("space should toggle selection on")
+	}
+
+	// Toggle off
+	e.Update(keyMsg(" "))
+	if e.selected[0] {
+		t.Error("second space should toggle selection off")
+	}
+}
+
+func TestElicitationMultiSelectConfirm(t *testing.T) {
+	opts := []ElicitationOption{
+		{Label: "A", Value: "a"},
+		{Label: "B", Value: "b"},
+		{Label: "C", Value: "c"},
+	}
+	var got string
+	e := NewElicitationOverlay("Pick", "", ElicitMultiSelect, opts,
+		func(result string) { got = result })
+
+	// Select A and C
+	e.Update(keyMsg(" "))       // toggle A
+	e.Update(keyMsg("down"))    // move to B
+	e.Update(keyMsg("down"))    // move to C
+	e.Update(keyMsg(" "))       // toggle C
+
+	_, _, closed := e.Update(keyMsg("enter"))
+	if !closed {
+		t.Error("enter should close multi-select overlay")
+	}
+	if got != "a,c" {
+		t.Errorf("expected 'a,c', got %q", got)
+	}
+}
+
+func TestElicitationMultiSelectEmptyConfirm(t *testing.T) {
+	opts := []ElicitationOption{
+		{Label: "A", Value: "a"},
+	}
+	var got string
+	e := NewElicitationOverlay("Pick", "", ElicitMultiSelect, opts,
+		func(result string) { got = result })
+
+	_, _, closed := e.Update(keyMsg("enter"))
+	if !closed {
+		t.Error("enter should close overlay")
+	}
+	if got != "" {
+		t.Errorf("expected empty result for no selection, got %q", got)
+	}
+}
+
+func TestElicitationViewNonEmpty(t *testing.T) {
+	th := testTheme()
+
+	// Text mode
+	e1 := NewElicitationOverlay("Name?", "What is your name?", ElicitText, nil, nil)
+	v1 := e1.View(80, 40, th)
+	if v1 == "" {
+		t.Error("text view should be non-empty")
+	}
+	if !strings.Contains(v1, "Name?") {
+		t.Error("text view should contain title")
+	}
+
+	// Select mode
+	opts := []ElicitationOption{{Label: "Yes", Value: "y"}, {Label: "No", Value: "n"}}
+	e2 := NewElicitationOverlay("Confirm?", "", ElicitSelect, opts, nil)
+	v2 := e2.View(80, 40, th)
+	if v2 == "" {
+		t.Error("select view should be non-empty")
+	}
+
+	// MultiSelect mode
+	e3 := NewElicitationOverlay("Features", "", ElicitMultiSelect, opts, nil)
+	v3 := e3.View(80, 40, th)
+	if v3 == "" {
+		t.Error("multi-select view should be non-empty")
+	}
+	if !strings.Contains(v3, "[ ]") && !strings.Contains(v3, "[x]") {
+		t.Error("multi-select view should contain checkboxes")
 	}
 }

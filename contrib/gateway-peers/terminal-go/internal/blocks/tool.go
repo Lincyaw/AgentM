@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/muesli/reflow/wordwrap"
+
 	"github.com/AoyangSpace/agentm-terminal/internal/theme"
 	"github.com/AoyangSpace/agentm-terminal/internal/util"
 )
@@ -56,7 +58,24 @@ func (b *ToolBlock) Render(width int, th *theme.Theme) string {
 func (b *ToolBlock) renderCollapsed(_ int, th *theme.Theme) string {
 	summary := b.summary()
 	dot := b.dotStyled(th)
-	label := th.ToolTitle.Render(b.Name)
+
+	// Use per-tool glyphs for specialized tools
+	lower := strings.ToLower(b.Name)
+	var glyph string
+	switch lower {
+	case "bash":
+		glyph = "⚙ "
+	case "read":
+		glyph = "📄 "
+	case "edit", "notebookedit":
+		glyph = "✎ "
+	case "write":
+		glyph = "✎ "
+	default:
+		glyph = ""
+	}
+
+	label := th.ToolTitle.Render(glyph + b.Name)
 	if summary != "" {
 		label += "(" + summary + ")"
 	}
@@ -67,11 +86,17 @@ func (b *ToolBlock) renderExpanded(width int, th *theme.Theme) string {
 	title := b.renderCollapsed(width, th)
 
 	var body string
-	if strings.EqualFold(b.Name, "edit") {
-		body = b.renderEditDiff(th)
-	} else if strings.EqualFold(b.Name, "write") {
+	lower := strings.ToLower(b.Name)
+	switch {
+	case lower == "edit" || lower == "notebookedit":
+		body = b.renderEditDiff(width, th)
+	case lower == "write":
 		body = b.renderWritePreview(width, th)
-	} else {
+	case lower == "bash":
+		body = b.renderShell(width, th)
+	case lower == "read":
+		body = b.renderFileRead(width, th)
+	default:
 		body = b.renderGenericBody(width, th)
 	}
 
@@ -82,11 +107,19 @@ func (b *ToolBlock) renderExpanded(width int, th *theme.Theme) string {
 			sb.WriteString("  " + line + "\n")
 		}
 	}
-	if b.Done && b.Result != "" {
-		resultText, truncated := truncateWithHint(b.Result, inlineTruncLimit)
-		sb.WriteString("  " + th.ToolBody.Render(resultText) + "\n")
-		if truncated {
-			sb.WriteString("  " + th.ToolBody.Render(" … (press v for full)") + "\n")
+	// For Bash and Read, the result is already rendered in the body
+	if lower != "bash" && lower != "read" {
+		if b.Done && b.Result != "" {
+			resultText, truncated := truncateWithHint(b.Result, inlineTruncLimit)
+			cw := width - 4
+			if cw < 20 {
+				cw = 20
+			}
+			resultText = wordwrap.String(resultText, cw)
+			sb.WriteString("  " + th.ToolBody.Render(resultText) + "\n")
+			if truncated {
+				sb.WriteString("  " + th.ToolBody.Render(" … (press v for full)") + "\n")
+			}
 		}
 	}
 	return strings.TrimRight(sb.String(), "\n")
@@ -102,14 +135,14 @@ func (b *ToolBlock) dotStyled(th *theme.Theme) string {
 	return th.AssistantDotErr.Render(theme.BlackCircle)
 }
 
-func (b *ToolBlock) renderEditDiff(th *theme.Theme) string {
-	oldStr, _ := asString(b.Args["old_string"])
-	newStr, _ := asString(b.Args["new_string"])
-	filePath, _ := asString(b.Args["file_path"])
+func (b *ToolBlock) renderEditDiff(_ int, th *theme.Theme) string {
+	oldStr, _ := AsString(b.Args["old_string"])
+	newStr, _ := AsString(b.Args["new_string"])
+	filePath, _ := AsString(b.Args["file_path"])
 
 	var sb strings.Builder
 	if filePath != "" {
-		sb.WriteString(th.ToolBody.Render("file: "+filePath) + "\n")
+		sb.WriteString(th.ToolPath.Render("✎ "+filePath) + "\n")
 	}
 	if oldStr != "" || newStr != "" {
 		sb.WriteString(util.RenderDiff(oldStr, newStr, th))
@@ -118,8 +151,8 @@ func (b *ToolBlock) renderEditDiff(th *theme.Theme) string {
 }
 
 func (b *ToolBlock) renderWritePreview(_ int, th *theme.Theme) string {
-	filePath, _ := asString(b.Args["file_path"])
-	content, _ := asString(b.Args["content"])
+	filePath, _ := AsString(b.Args["file_path"])
+	content, _ := AsString(b.Args["content"])
 
 	var sb strings.Builder
 	if filePath != "" {
@@ -138,15 +171,86 @@ func (b *ToolBlock) renderWritePreview(_ int, th *theme.Theme) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-func (b *ToolBlock) renderGenericBody(_ int, th *theme.Theme) string {
+const shellResultMaxLines = 15
+
+func (b *ToolBlock) renderShell(width int, th *theme.Theme) string {
+	command, _ := AsString(b.Args["command"])
+	cw := width - 4
+	if cw < 20 {
+		cw = 20
+	}
+
+	var sb strings.Builder
+	if command != "" {
+		sb.WriteString(th.ToolCommand.Render(wordwrap.String("$ "+command, cw)) + "\n")
+	}
+	if b.Done && b.Result != "" {
+		sb.WriteString(th.ToolBody.Render(strings.Repeat("─", min(20, cw))) + "\n")
+		lines := strings.Split(b.Result, "\n")
+		if len(lines) > shellResultMaxLines {
+			truncated := len(lines) - shellResultMaxLines
+			sb.WriteString(th.ToolBody.Render(fmt.Sprintf("... (%d lines truncated)", truncated)) + "\n")
+			lines = lines[len(lines)-shellResultMaxLines:]
+		}
+		resultText, tooLong := truncateWithHint(strings.Join(lines, "\n"), inlineTruncLimit)
+		resultText = wordwrap.String(resultText, cw)
+		sb.WriteString(th.ToolBody.Render(resultText))
+		if tooLong {
+			sb.WriteString("\n" + th.ToolBody.Render(" … (press v for full)"))
+		}
+	}
+	return sb.String()
+}
+
+func (b *ToolBlock) renderFileRead(width int, th *theme.Theme) string {
+	filePath, _ := AsString(b.Args["file_path"])
+	offset, hasOffset := toIntArg(b.Args["offset"])
+	limit, hasLimit := toIntArg(b.Args["limit"])
+
+	var sb strings.Builder
+	pathDisplay := filePath
+	if hasOffset || hasLimit {
+		if hasOffset && hasLimit {
+			pathDisplay = fmt.Sprintf("%s:%d-%d", filePath, offset, offset+limit)
+		} else if hasOffset {
+			pathDisplay = fmt.Sprintf("%s:%d-", filePath, offset)
+		} else if hasLimit {
+			pathDisplay = fmt.Sprintf("%s (limit %d)", filePath, limit)
+		}
+	}
+	if pathDisplay != "" {
+		sb.WriteString(th.ToolPath.Render(pathDisplay) + "\n")
+	}
+	if b.Done && b.Result != "" {
+		lines := strings.Split(b.Result, "\n")
+		lineCount := len(lines)
+		sb.WriteString(th.ToolBody.Render(fmt.Sprintf("(%d lines)", lineCount)))
+		if lineCount > 5 {
+			// Show first 5 lines as preview
+			preview := strings.Join(lines[:5], "\n")
+			sb.WriteString("\n" + th.ToolBody.Render(preview))
+			sb.WriteString("\n" + th.ToolBody.Render(" … (press v for full)"))
+		} else if lineCount > 0 {
+			sb.WriteString("\n" + th.ToolBody.Render(b.Result))
+		}
+	}
+	return sb.String()
+}
+
+func (b *ToolBlock) renderGenericBody(width int, th *theme.Theme) string {
 	if len(b.Args) == 0 {
 		return ""
+	}
+	cw := width - 4
+	if cw < 20 {
+		cw = 20
 	}
 	data, err := json.MarshalIndent(b.Args, "  ", "  ")
 	if err != nil {
 		return th.ToolBody.Render("(args unavailable)")
 	}
 	text, truncated := truncateWithHint(string(data), inlineTruncLimit)
+	text = wordwrap.String(text, cw)
 	result := th.ToolBody.Render(text)
 	if truncated {
 		result += "\n" + th.ToolBody.Render(" … (press v for full)")
@@ -160,9 +264,9 @@ func (b *ToolBlock) summary() string {
 	lower := strings.ToLower(b.Name)
 	switch {
 	case strings.EqualFold(b.Name, "bash"):
-		s, _ = asString(b.Args["command"])
+		s, _ = AsString(b.Args["command"])
 	case lower == "read" || lower == "write" || lower == "edit":
-		s, _ = asString(b.Args["file_path"])
+		s, _ = AsString(b.Args["file_path"])
 	default:
 		s = firstScalarValue(b.Args)
 	}
@@ -175,9 +279,9 @@ func (b *ToolBlock) FullContent() string {
 	var sb strings.Builder
 
 	if strings.EqualFold(b.Name, "edit") {
-		oldStr, _ := asString(b.Args["old_string"])
-		newStr, _ := asString(b.Args["new_string"])
-		filePath, _ := asString(b.Args["file_path"])
+		oldStr, _ := AsString(b.Args["old_string"])
+		newStr, _ := AsString(b.Args["new_string"])
+		filePath, _ := AsString(b.Args["file_path"])
 		if filePath != "" {
 			sb.WriteString("file: " + filePath + "\n\n")
 		}
@@ -186,8 +290,8 @@ func (b *ToolBlock) FullContent() string {
 		sb.WriteString("\n+++ new +++\n")
 		sb.WriteString(newStr)
 	} else if strings.EqualFold(b.Name, "write") {
-		filePath, _ := asString(b.Args["file_path"])
-		content, _ := asString(b.Args["content"])
+		filePath, _ := AsString(b.Args["file_path"])
+		content, _ := AsString(b.Args["content"])
 		if filePath != "" {
 			sb.WriteString("file: " + filePath + "\n\n")
 		}
@@ -221,7 +325,7 @@ func truncateWithHint(s string, limit int) (string, bool) {
 	return string(runes[:limit]), true
 }
 
-func asString(v any) (string, bool) {
+func AsString(v any) (string, bool) {
 	if v == nil {
 		return "", false
 	}
@@ -232,6 +336,23 @@ func asString(v any) (string, bool) {
 		return val.String(), true
 	default:
 		return fmt.Sprintf("%v", v), true
+	}
+}
+
+// toIntArg coerces a JSON number in tool args to int.
+func toIntArg(v any) (int, bool) {
+	if v == nil {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	default:
+		return 0, false
 	}
 }
 

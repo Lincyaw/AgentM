@@ -235,6 +235,7 @@ func (r *Router) sessionReady(m *Model, body map[string]any, meta map[string]any
 		for _, t := range tools {
 			if name, ok := t.(string); ok {
 				m.addToolToCatalog(name)
+				m.sidebar.AddTool(name)
 			}
 		}
 	}
@@ -242,9 +243,11 @@ func (r *Router) sessionReady(m *Model, body map[string]any, meta map[string]any
 		for _, c := range cmds {
 			if name, ok := c.(string); ok {
 				m.addCommand(name)
+				m.sidebar.AddCommand(name)
 			}
 		}
 	}
+	m.sidebar.SetData(m.status.GetModel())
 }
 
 func (r *Router) approvalRequest(m *Model, body map[string]any, meta map[string]any) {
@@ -271,15 +274,30 @@ func (r *Router) approvalRequest(m *Model, body map[string]any, meta map[string]
 		}
 	}
 
+	// Extract tool name and args from metadata when available.
+	toolName, _ := meta["tool_name"].(string)
+	if toolName == "" {
+		toolName, _ = meta["name"].(string)
+	}
+	var toolArgs map[string]any
+	if a, ok := meta["args"].(map[string]any); ok {
+		toolArgs = a
+	}
+
+	// Create the modal overlay instead of an inline block.
+	ao := NewApprovalOverlay(content, toolName, toolArgs, buttons)
+	m.overlay = ao
+
+	// Keep the inline approval block for transcript history and for
+	// the pending-approval reference used by sendApprovalResponse.
 	ab := blocks.NewApprovalBlock(content, buttons)
-	ab.SetCollapsed(false)
+	ab.SetCollapsed(true)
 
 	if turn := m.activeTurn; turn != nil {
 		turn.Approvals = append(turn.Approvals, ab)
 	} else {
-		// Standalone approval as a system block
 		m.transcript = append(m.transcript, &blocks.SystemTurn{
-			Content: content,
+			Content: "Awaiting approval for " + toolName,
 			Source:  "approval",
 		})
 	}
@@ -356,8 +374,10 @@ func (r *Router) apiRegister(m *Model, body map[string]any, meta map[string]any)
 	switch regType {
 	case "tool":
 		m.addToolToCatalog(name)
+		m.sidebar.AddTool(name)
 	case "command":
 		m.addCommand(name)
+		m.sidebar.AddCommand(name)
 	}
 }
 
