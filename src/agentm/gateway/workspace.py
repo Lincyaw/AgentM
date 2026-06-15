@@ -64,7 +64,7 @@ class WorkspaceResolver:
             # result to stay under ``_root``; fall back to the default cwd on
             # any escape rather than honouring the traversal.
             candidate = (self._root / channel).resolve()
-            if candidate != self._root and not candidate.is_relative_to(self._root):
+            if not candidate.is_relative_to(self._root):
                 logger.warning(
                     f"workspace: rejecting out-of-root channel {channel!r} "
                     f"(resolved to {candidate}); using default cwd"

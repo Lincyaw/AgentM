@@ -125,16 +125,6 @@ def compaction_entry(payload: Any, parent_id: str | None) -> SessionEntry:
     )
 
 
-def turn_committed_entry(parent_id: str | None, payload: Any = None) -> SessionEntry:
-    return SessionEntry(
-        type=ENTRY_TYPE_TURN_COMMITTED,
-        id=_new_id(),
-        parent_id=parent_id,
-        timestamp=_now(),
-        payload=payload,
-    )
-
-
 @runtime_checkable
 class SessionTree(Protocol):
     """Read-only window over the session tree.
@@ -184,5 +174,4 @@ __all__ = [
     "branch_summary_entry",
     "compaction_entry",
     "message_entry",
-    "turn_committed_entry",
 ]
