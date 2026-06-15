@@ -59,6 +59,7 @@ func main() {
 	var initialApp *app.App
 	var initialSession *session.Session
 	var spawner tui.SessionSpawner
+	var liveAdapter *adapter.Adapter
 
 	switch {
 	case *mockMode || *connectURL == "":
@@ -103,6 +104,7 @@ func main() {
 		initialApp = ad.App
 		initialSession = ad.Session
 		spawner = ad.Spawner()
+		liveAdapter = ad
 	}
 
 	// Mirror cagent's runTUI program wiring: coalesce mouse-wheel events, build
@@ -128,6 +130,12 @@ func main() {
 
 	if m, ok := model.(interface{ SetProgram(p *tea.Program) }); ok {
 		m.SetProgram(p)
+	}
+
+	// Hand the program to the adapter so its child manager can drive the TUI's
+	// new-tab path when a sub-agent session starts.
+	if liveAdapter != nil {
+		liveAdapter.SetProgram(p)
 	}
 
 	if _, err := p.Run(); err != nil {

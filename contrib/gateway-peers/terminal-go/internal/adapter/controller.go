@@ -183,3 +183,13 @@ func (c *Controller) RunBangCommand(ctx context.Context, command string) {
 func (c *Controller) NewSession() {
 	c.sendInbound(map[string]any{"content": "/new"})
 }
+
+// SwitchModel asks the gateway to switch the active model profile by sending a
+// "/model <name>" command (the gateway's switch_model command). A blank name is
+// ignored so an empty picker selection is a no-op.
+func (c *Controller) SwitchModel(name string) {
+	if name == "" {
+		return
+	}
+	c.sendInbound(map[string]any{"content": "/model " + name})
+}

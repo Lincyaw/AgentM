@@ -68,6 +68,8 @@ type Controller interface {
 	NewSession()
 	// FirstMessage returns the queued first message, if any, to send on launch.
 	FirstMessage() (content string, ok bool)
+	// SwitchModel asks the backend to switch the active model profile by name.
+	SwitchModel(name string)
 }
 
 // UndoSnapshotResult reports the outcome of an undo/reset operation.
@@ -91,6 +93,16 @@ type App struct {
 	readOnly               bool
 
 	controller Controller
+
+	// agentInfoMu guards the session_ready-sourced agent capability view
+	// (tool/command names, model list, active model). The translator writes it
+	// from the wire-reader goroutine; the TUI reads it from the bubbletea
+	// goroutine when opening /tools, /skills (commands) and the model picker.
+	agentInfoMu  sync.Mutex
+	toolNames    []string
+	commandNames []string
+	modelNames   []string
+	activeModel  string
 
 	// events is the raw event stream the backend pushes into via EmitEvent;
 	// startFanOut drains it and scatters every event to each SubscribeWith
@@ -224,11 +236,35 @@ func (a *App) CurrentAgentSkills() []skills.Skill {
 	return nil
 }
 
-// CurrentAgentCommands returns the commands for the active agent.
-// Stub: returns nil until the adapter takes over.
+// SetAgentInfo records the capability view projected from a session_ready
+// frame: the tool/command names, the selectable model-profile names and the
+// active model. The translator calls this so /tools, /skills (commands) and the
+// model picker populate. Slices are cloned to decouple from the caller's
+// decoded wire maps.
+func (a *App) SetAgentInfo(toolNames, commandNames, modelNames []string, activeModel string) {
+	a.agentInfoMu.Lock()
+	defer a.agentInfoMu.Unlock()
+	a.toolNames = slices.Clone(toolNames)
+	a.commandNames = slices.Clone(commandNames)
+	a.modelNames = slices.Clone(modelNames)
+	a.activeModel = activeModel
+}
+
+// CurrentAgentCommands returns the commands for the active agent, sourced from
+// the most recent session_ready frame. The wire protocol carries only command
+// names, so each command has an empty body (name-only completion entries).
 func (a *App) CurrentAgentCommands(ctx context.Context) types.Commands {
 	_ = ctx
-	return nil
+	a.agentInfoMu.Lock()
+	defer a.agentInfoMu.Unlock()
+	if len(a.commandNames) == 0 {
+		return nil
+	}
+	cmds := make(types.Commands, len(a.commandNames))
+	for _, name := range a.commandNames {
+		cmds[name] = types.Command{}
+	}
+	return cmds
 }
 
 // SkillCommandFork reports whether input is a slash command for a fork-mode
@@ -374,17 +410,27 @@ func (a *App) SwitchAgent(agentName string) error {
 	return nil
 }
 
-// SetCurrentAgentModel overrides the active agent's model. Stub: returns nil
-// until the adapter takes over.
+// SetCurrentAgentModel overrides the active agent's model by forwarding a
+// "/model <name>" command to the gateway (which owns the switch_model command).
+// An empty ref (the picker's "select default" path) is ignored since the wire
+// protocol has no notion of clearing an override.
 func (a *App) SetCurrentAgentModel(ctx context.Context, modelRef string) error {
-	_, _ = ctx, modelRef
+	_ = ctx
+	if modelRef == "" {
+		return nil
+	}
+	if a.controller != nil {
+		a.controller.SwitchModel(modelRef)
+	}
 	return nil
 }
 
 // SupportsModelSwitching reports whether the current backend can switch models.
-// Stub: returns false until the adapter takes over.
+// True once a session_ready frame advertised at least one selectable model.
 func (a *App) SupportsModelSwitching() bool {
-	return false
+	a.agentInfoMu.Lock()
+	defer a.agentInfoMu.Unlock()
+	return len(a.modelNames) > 0
 }
 
 // CycleAgentThinkingLevel advances the active agent's thinking-effort level.
@@ -395,11 +441,26 @@ func (a *App) CycleAgentThinkingLevel(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// AvailableModels lists the models selectable for the current agent.
-// Stub: returns nil until the adapter takes over.
+// AvailableModels lists the models selectable for the current agent, sourced
+// from the session_ready model-profile names. The wire protocol carries only
+// names (no catalog/pricing metadata), so each choice is a bare name with its
+// IsCurrent flag set to match the active model.
 func (a *App) AvailableModels(ctx context.Context) []runtime.ModelChoice {
 	_ = ctx
-	return nil
+	a.agentInfoMu.Lock()
+	defer a.agentInfoMu.Unlock()
+	if len(a.modelNames) == 0 {
+		return nil
+	}
+	choices := make([]runtime.ModelChoice, 0, len(a.modelNames))
+	for _, name := range a.modelNames {
+		choices = append(choices, runtime.ModelChoice{
+			Name:      name,
+			Ref:       name,
+			IsCurrent: name == a.activeModel,
+		})
+	}
+	return choices
 }
 
 // PermissionsInfo returns the team-level permission patterns. Stub: returns
@@ -408,11 +469,21 @@ func (a *App) PermissionsInfo() *runtime.PermissionsInfo {
 	return nil
 }
 
-// CurrentAgentTools returns the tools available to the active agent.
-// Stub: returns nil until the adapter takes over.
+// CurrentAgentTools returns the tools available to the active agent, sourced
+// from the most recent session_ready frame. The wire protocol carries only tool
+// names, so each tool is a name-only definition (no schema/description).
 func (a *App) CurrentAgentTools(ctx context.Context) ([]tools.Tool, error) {
 	_ = ctx
-	return nil, nil
+	a.agentInfoMu.Lock()
+	defer a.agentInfoMu.Unlock()
+	if len(a.toolNames) == 0 {
+		return nil, nil
+	}
+	ts := make([]tools.Tool, 0, len(a.toolNames))
+	for _, name := range a.toolNames {
+		ts = append(ts, tools.Tool{Name: name})
+	}
+	return ts, nil
 }
 
 // CurrentAgentToolsetStatuses returns the lifecycle status of each toolset.
