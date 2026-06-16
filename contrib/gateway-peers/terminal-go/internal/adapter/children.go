@@ -87,25 +87,18 @@ func (m *ChildManager) SetProgram(p *tea.Program) {
 	m.program = p
 }
 
-// Spawner returns the SessionSpawner the supervisor pulls parked child apps
-// from. It is the live replacement for ErrorSpawner: when a child app is queued
-// it returns that app (so the new tab adopts the child session); when the queue
-// is empty it errors, which is the correct behaviour for a genuine user-driven
-// "new tab" on a single-conversation wire peer.
-func (m *ChildManager) Spawner() func(ctx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
-	return func(ctx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
-		_, _ = ctx, workingDir
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if len(m.spawnQueue) == 0 {
-			return nil, nil, nil, ErrNoQueuedChild
-		}
-		cs := m.spawnQueue[0]
-		m.spawnQueue = m.spawnQueue[1:]
-		// Cleanup is a no-op: the child app's lifetime is bounded by the TUI ctx
-		// (the supervisor cancels its subscription on tab close / shutdown).
-		return cs.app, cs.sess, func() {}, nil
+// TryPop atomically pops the next queued child app, or returns nil if the
+// queue is empty. Used by the adapter's multi-session spawner to distinguish
+// sub-agent child spawns (queued via Start) from user-initiated new tabs.
+func (m *ChildManager) TryPop() *childSession {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.spawnQueue) == 0 {
+		return nil
 	}
+	cs := m.spawnQueue[0]
+	m.spawnQueue = m.spawnQueue[1:]
+	return cs
 }
 
 // Has reports whether child_id is a known child session. Used by the root
