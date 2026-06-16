@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 
+from agentm.gateway.child_registry import ChildSessionRegistry
 from agentm.gateway.runtime import GatewayRuntime
 from agentm.gateway.peer import PeerSession
 from agentm.gateway.wire import WIRE_VERSION, Envelope
@@ -57,6 +58,7 @@ async def test_interrupt_inbound_calls_session_interrupt_and_spawns_no_task() ->
     rt._sessions = cast(Any, _FakeSessions(sess))
     rt._peer_channels = {}
     rt._inflight = set()
+    rt._child_registry = ChildSessionRegistry()
 
     peer = PeerSession(peer_id="p1", transport_writer=cast(Any, None))
     await rt.handle_inbound(peer, _interrupt_inbound())

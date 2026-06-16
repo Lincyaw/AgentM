@@ -11,6 +11,7 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
+	"github.com/AoyangSpace/agentm-terminal/internal/wire"
 )
 
 // childSession is the per-child state the ChildManager owns: a dedicated
@@ -47,6 +48,12 @@ type childSession struct {
 // wire-pump goroutine while Spawn runs on the bubbletea goroutine.
 type ChildManager struct {
 	workingDir string
+	// client + baseID let each child tab drive its OWN wire-backed Controller,
+	// addressed by the child's session id, so the human can chat with a live
+	// sub-agent (interactive-subagent design). Without them a child tab would be
+	// observe-only.
+	client *wire.WireClient
+	baseID Identity
 
 	mu       sync.Mutex
 	program  *tea.Program
@@ -59,10 +66,14 @@ type ChildManager struct {
 // NewChildManager builds a ChildManager. workingDir labels spawned child tabs'
 // fallback title (the supervisor uses it when a session has no title) and is the
 // non-empty WorkingDir the SpawnSessionMsg carries so the TUI does not open the
-// working-dir picker.
-func NewChildManager(workingDir string) *ChildManager {
+// working-dir picker. client + baseID are the wire handle and platform identity
+// each child tab's Controller reuses (re-keyed to the child's session id) so a
+// typed message routes to that live sub-agent.
+func NewChildManager(workingDir string, client *wire.WireClient, baseID Identity) *ChildManager {
 	return &ChildManager{
 		workingDir: workingDir,
+		client:     client,
+		baseID:     baseID,
 		children:   make(map[string]*childSession),
 	}
 }
@@ -133,8 +144,24 @@ func (m *ChildManager) Start(childID, purpose string) {
 		session.WithTitle(title),
 		session.WithWorkingDir(m.workingDir),
 	)
-	childApp := app.New(context.Background(), sess)
-	tr := NewTranslator(childApp, sess)
+	// Build translator -> child Controller -> App in the same order the root
+	// adapter uses (App needs the Controller; the Controller needs the
+	// translator; the translator needs the App). The child Controller is keyed
+	// to childID so a typed message in this tab is delivered to the live
+	// sub-agent's inbox by the gateway, not the main conversation.
+	tr := NewTranslator(nil, sess)
+	var childApp *app.App
+	if m.client != nil {
+		childIdentity := m.baseID
+		childIdentity.SessionKey = childID
+		childIdentity.Scenario = ""
+		ctrl := NewChildController(m.client, childIdentity, tr)
+		childApp = app.New(context.Background(), sess, app.WithController(ctrl))
+	} else {
+		// No wire handle (mock/launch paths): observe-only child tab.
+		childApp = app.New(context.Background(), sess)
+	}
+	tr.app = childApp
 	cs := &childSession{
 		id:         childID,
 		app:        childApp,

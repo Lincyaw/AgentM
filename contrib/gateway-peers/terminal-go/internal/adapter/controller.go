@@ -52,6 +52,21 @@ func NewController(client *wire.WireClient, id Identity, tr *Translator, firstMe
 	}
 }
 
+// NewChildController builds the Controller a sub-agent tab drives: its inbounds
+// carry the child's session_id as session_key, so the gateway routes a typed
+// message into that live child's inbox (interactive-subagent design) instead of
+// the main conversation. The child session already exists server-side, so the
+// scenario must NOT ride its inbounds — scenarioSent starts true. id.SessionKey
+// MUST be the child's session id (== the wire child_id).
+func NewChildController(client *wire.WireClient, id Identity, tr *Translator) *Controller {
+	return &Controller{
+		client:       client,
+		id:           id,
+		translator:   tr,
+		scenarioSent: true,
+	}
+}
+
 // FirstMessage returns the queued launch prompt once; subsequent calls report
 // none so the message is not re-sent on session reset.
 func (c *Controller) FirstMessage() (string, bool) {

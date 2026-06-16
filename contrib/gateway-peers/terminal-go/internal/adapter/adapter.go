@@ -48,7 +48,7 @@ func New(client *wire.WireClient, id Identity, firstMessage string, appOpts ...a
 	// with metadata.child_id) into their own switchable cagent tabs. Its
 	// working-dir label seeds child tab titles and the SpawnSessionMsg payload.
 	wd, _ := os.Getwd()
-	children := NewChildManager(wd)
+	children := NewChildManager(wd, client, id)
 
 	// Build the App first so the Translator and Controller can reference it,
 	// then attach the Controller via an option. The root translator delegates
