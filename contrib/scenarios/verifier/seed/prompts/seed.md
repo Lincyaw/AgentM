@@ -22,23 +22,34 @@ all available signal dimensions: latency, error rate, span
 volume, logs, resource metrics. Discover the schema first
 (DESCRIBE tables, SELECT DISTINCT on low-cardinality columns).
 
-### 3b. Check the caller side (link-type faults)
-For network and HTTP faults: if the target's own latency and
-error rate look normal but its span volume dropped significantly,
-the fault may have severed the link so that requests never reach
-the target. The signal lives on the CALLER side:
+### 3b. Check the caller side
+If the target's own latency and error rate look normal, do NOT
+stop. The signal may live on the CALLER side. This applies to
+all fault types:
 
+- A severed network link means requests never reach the target —
+  callers block until their timeout.
+- A killed pod that restarts quickly looks normal in aggregate,
+  but callers got errors during the brief outage.
+- JVM stress causes GC pauses that block in-flight requests past
+  their timeout — those requests never complete a span, so only
+  the fast survivors appear in trace data (survivorship bias).
+
+Steps:
 1. JOIN `parent_span_id` in the **normal** window to find which
    services call the target and on which endpoints.
 2. In the **abnormal** window, check whether those callers' calls
-   to the target vanished or their latency spiked to the timeout
-   ceiling (e.g. 20 s max).
-3. If caller-side calls vanished or hit timeout while the target's
-   surviving requests are healthy, the injection IS effective —
-   it just blocked traffic before it reached the target.
+   to the target vanished, returned errors, or had latency spike
+   significantly beyond the normal range.
+3. If caller-side signals are present while the target's surviving
+   requests look healthy, the injection IS effective — the signal
+   just manifests on the caller side, not on the target.
+4. For JVM / resource faults, also check resource metrics
+   (memory usage, CPU, GC indicators) on the target — these may
+   confirm the injection effect even when trace latency does not.
 
-The fault reference document describes this pattern for each
-applicable fault type.
+The fault reference document describes the specific pattern for
+each fault type.
 
 ### 4. Judge
 - **confirmed** — the target shows clear degradation consistent

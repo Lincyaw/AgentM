@@ -21,9 +21,10 @@ own latency and error rate stay flat while its span volume drops.
 
 **This does not mean the injection failed.** The signal is on the
 caller side of the severed link: callers that used to reach the
-target through the partitioned path now time out (typically 20 s).
-The timeout blocks synchronous callers, which blocks THEIR callers,
-cascading up to the load generator and collapsing overall throughput.
+target through the partitioned path now time out at the caller's
+configured timeout. The timeout blocks synchronous callers, which
+blocks THEIR callers, cascading up to the load generator and
+collapsing overall throughput.
 
 When the target itself shows reduced traffic but no degradation:
 
@@ -31,7 +32,7 @@ When the target itself shows reduced traffic but no degradation:
    services call the target and on which endpoints.
 2. Check those callers in the **abnormal** window: did their calls
    to the target vanish? Did their latency on those endpoints spike
-   toward the timeout ceiling (e.g. 20 s)?
+   significantly — especially toward the system's timeout ceiling?
 3. If caller-side calls vanished or hit timeout while the target's
    surviving requests are healthy → the partition is effective but
    the signal is on the caller side. Mark **confirmed** with

@@ -40,6 +40,33 @@ to near-zero. The container's restart counter typically increments at the
 boundaries. Judge from what the data actually shows, across traces,
 metrics and logs.
 
+### When the target looks healthy (quick restart)
+
+If kubelet restarts the pod quickly (< 60 s), the target's aggregate
+metrics over the full abnormal window may look nearly normal — the
+brief outage is diluted by the healthy period after restart. The
+signal then lives on the **caller side** during the kill window:
+
+- Callers return **5xx** or connection errors on requests that
+  hit the dead pod — sometimes with short latency (fast connection
+  refused), sometimes with longer latency (waiting for timeout).
+- The caller's HTTP status breakdown or Error-status spans are
+  concentrated in a narrow time band matching the kill window.
+- k8s deployment-available metrics may stay at their normal value
+  if the sampling interval is coarser than the outage.
+
+When the target's own span count and latency look nearly unchanged,
+check the caller side:
+
+1. JOIN `parent_span_id` in the normal window to find callers.
+2. In the abnormal window, check those callers for error responses,
+   Error-status spans, or latency spikes on calls to the target.
+3. Also check container restart metrics for the target — an
+   increment confirms the kill even when other metrics missed it.
+
+If caller-side errors appear on the target's call path, the kill
+worked. Mark **confirmed** with `process_killed`.
+
 ## How the failure tends to propagate
 The impact runs UP the call graph — the OPPOSITE of the request-call
 direction (callers depend on the target, so the target's failure drags

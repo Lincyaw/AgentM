@@ -19,7 +19,8 @@ Heavy packet loss can cause callers to time out before the request
 reaches the target. Requests that DO arrive (surviving the loss)
 complete normally — so the target's own latency and error rate stay
 flat while span volume drops sharply. The signal is on the caller
-side: callers show timeout-level latency (e.g. p99 jumping to 20 s)
+side: callers show timeout-level latency (p99 jumping far beyond
+the normal range, toward the system's timeout ceiling)
 and the timeout blocks synchronous callers up the chain, collapsing
 global throughput.
 
