@@ -130,6 +130,16 @@ def telbench(
     ] = None,
 ) -> None:
     """Run TELBench evaluation with the cognitive-audit pipeline or TEL agent."""
+    # Load .env the same way the ``agentm`` CLI does, so child sessions inherit
+    # OTEL_EXPORTER_OTLP_ENDPOINT (trajectories ship to ClickHouse) and the
+    # model/provider profile without the caller having to ``source .env`` first.
+    try:
+        from agentm.cli import autoload_dotenv
+
+        autoload_dotenv()
+    except ImportError:
+        pass
+
     if mode not in ("posthoc", "online", "tel"):
         typer.echo(f"Error: --mode must be 'posthoc', 'online', or 'tel', got '{mode}'", err=True)
         raise typer.Exit(1)
@@ -247,3 +257,7 @@ def main() -> None:
 
 
 __all__ = ["app", "main"]
+
+
+if __name__ == "__main__":
+    main()

@@ -278,7 +278,8 @@ async def evaluate_instance_tel(
         raise
 
     sid = session.session_id
-    logger.info(f"[tel] {instance.id}: agentm trace messages --session {sid} --format text")
+    # The ``agentm trace`` debug command is logged centrally by
+    # create_agent_session (purpose=tel_eval_<id>), so it is not repeated here.
 
     payload = json.dumps(
         {

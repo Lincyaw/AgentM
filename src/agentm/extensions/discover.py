@@ -411,8 +411,23 @@ def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
             module = importlib.import_module(module_path)
         except (ImportError, RuntimeError, SyntaxError) as exc:
             _LAST_DISCOVERY_FAILURES.append((module_path, exc))
-            logger.warning(
-                f"entrypoint atom: failed to import {module_path} ({type(exc).__name__}: {exc})"
+            # An optional plugin whose own package/module is simply not installed
+            # (e.g. the ``agent-env`` extra was not synced) raises
+            # ModuleNotFoundError naming the entrypoint's own module/top package.
+            # That is an expected, benign absence — log it at debug so it does
+            # not scream on every session. A genuinely broken *installed* atom
+            # (SyntaxError, RuntimeError, or an ImportError naming some other
+            # transitive module) stays a warning.
+            missing = getattr(exc, "name", None)
+            top_pkg = module_path.split(".", 1)[0]
+            not_installed = isinstance(exc, ModuleNotFoundError) and missing in (
+                module_path,
+                top_pkg,
+            )
+            log = logger.debug if not_installed else logger.warning
+            log(
+                f"entrypoint atom: failed to import {module_path} "
+                f"({type(exc).__name__}: {exc})"
             )
             continue
         manifest_obj: Any = getattr(module, "MANIFEST", None)
