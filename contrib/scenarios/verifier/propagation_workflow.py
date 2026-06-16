@@ -116,9 +116,9 @@ def _node_from_seed(
     verdict: SeedResult,
     window: dict[str, str],
 ) -> dict[str, Any]:
-    """Build an fpg EventNode dict from a confirmed seed verdict."""
+    """Build an fpg EventNode dict from a confirmed or inconclusive seed verdict."""
     predicate = verdict.get("predicate") or "other"
-    return {
+    node: dict[str, Any] = {
         "kind": "event",
         "id": svc,
         "subject": f"svc:{svc}",
@@ -128,6 +128,9 @@ def _node_from_seed(
         "evidence": list(verdict.get("evidence", [])),
         "annotation": "auto",
     }
+    if predicate == "other":
+        node["description"] = verdict.get("rationale", verdict.get("claim", "inconclusive"))
+    return node
 
 
 def _node_from_verdict(
@@ -273,6 +276,9 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             if seed_verdict and seed_verdict.get("verdict") == "confirmed":
                 nodes[target] = _node_from_seed(target, seed_verdict, window)
                 ctx.log(f"seed {target}: confirmed ({seed_verdict.get('predicate')})")
+            elif seed_verdict and seed_verdict.get("verdict") == "inconclusive":
+                nodes[target] = _node_from_seed(target, seed_verdict, window)
+                ctx.log(f"seed {target}: inconclusive — including for judge review")
             else:
                 v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
                 ctx.log(f"seed {target}: {v} — skipping")
