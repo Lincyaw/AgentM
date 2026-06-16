@@ -34,24 +34,43 @@ their span count, latency, and error rate between windows.
 Signals to look for on fault-path endpoints:
 - span count drop or vanish
 - latency increase (blocking on slow/dead dependency)
-- latency DROP to near-zero (fast-fail: client detects dead
-  connection instantly and returns in μs instead of ms)
+- latency DROP (fast-fail / fail-fast): when an upstream
+  dependency dies or errors out, the caller's slow endpoints
+  vanish and surviving requests complete much faster than
+  normal. A dramatic p99 decrease on the target's endpoints
+  is propagation evidence — the dependency failure changed the
+  target's behavior, just in the "faster" direction.
 - error rate increase
 
+**Error signals live in multiple columns.** Trace-level
+`attr.status_code` is one error indicator, but not the only one.
+Run `SELECT DISTINCT` on columns that might carry error or status
+information (e.g. HTTP response status codes, span names that
+suggest error handlers) in both windows. A service can return HTTP
+5xx while its trace status stays non-ERROR — always check both.
+Also look for new span names in the abnormal window that don't
+appear in normal (e.g. error-handler spans).
+
 Only broaden to aggregate or other endpoints if the fault-path
-endpoints show nothing.
+endpoints show nothing across all dimensions.
 
 ### 5. Judge
 - **confirmed** — evidence supports the hypothesis: the target
   shows degradation consistent with the fault propagating
-  through this relationship.
-- **rejected** — all dimensions examined, no signal on
-  fault-related endpoints, traffic stable.
-- **inconclusive** — the data itself is ambiguous (zero spans
-  AND zero logs in abnormal window; traffic vanished with no
-  error/latency signal) and you cannot resolve it without global
-  context. Not a hedge — use only when the answer genuinely
-  depends on information you don't have. On re-evaluation with
-  zero data, stay inconclusive.
+  through this relationship. Degradation includes latency
+  increase, error surge, HTTP 5xx, AND fail-fast (dramatic
+  latency drop because a dependency died).
+- **rejected** — all dimensions examined, no signal on any
+  fault-related endpoint: traffic stable, latency unchanged,
+  no errors, no HTTP status changes, no fail-fast pattern.
+  Use only when there is genuinely nothing anomalous.
+- **inconclusive** — some anomaly exists but you cannot
+  determine from this single edge whether the fault caused it.
+  Examples: latency shifted but no errors; traffic dropped but
+  could be global; endpoint vanished but no error signal;
+  HTTP status distribution changed but marginally.
+  Prefer inconclusive over rejected when ANY anomaly is present
+  on fault-path endpoints — the judge has the full graph and
+  can resolve what you cannot from one hop.
 
 Submit via `submit_hop_verdict` with re-executable SQL evidence.
