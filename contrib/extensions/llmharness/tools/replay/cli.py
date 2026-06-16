@@ -28,12 +28,12 @@ from typing import Annotated, Any, cast
 
 import typer
 
+from llmharness.replay.engine import PhaseResult
 from llmharness.replay.record import Phase, ReplayRecord, iter_records
+from llmharness.replay.runner import replay_auditor_record, replay_extractor_record
 
 from .chain import ChainResult, PhaseFilter, chain_replay_sync
-from .engine import PhaseResult
 from .prefix_replay import PrefixReplayError, make_plan
-from .runner import replay_auditor_record, replay_extractor_record
 
 app = typer.Typer(
     name="llmharness-replay",
