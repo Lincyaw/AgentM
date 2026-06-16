@@ -64,6 +64,7 @@ type Model interface {
 	AppendToLastMessage(agentName, content string) tea.Cmd
 	AppendReasoning(agentName, content string) tea.Cmd
 	AddShellOutputMessage(content string) tea.Cmd
+	AddSystemMessage(title, content string) tea.Cmd
 	LoadFromSession(sess *session.Session) tea.Cmd
 
 	RemoveSpinner()
@@ -1235,6 +1236,11 @@ func (m *model) AddErrorMessage(content string) tea.Cmd {
 
 func (m *model) AddShellOutputMessage(content string) tea.Cmd {
 	return m.addMessage(types.ShellOutput(content))
+}
+
+func (m *model) AddSystemMessage(title, content string) tea.Cmd {
+	m.removeSpinner()
+	return m.addMessage(types.System(title, content))
 }
 
 func (m *model) AddAssistantMessage() tea.Cmd {

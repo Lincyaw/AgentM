@@ -95,7 +95,22 @@ func (c *Controller) Run(ctx context.Context, cancel context.CancelFunc, message
 	if message == "" {
 		return
 	}
+	c.echoUserMessage(message)
 	c.sendInbound(map[string]any{"content": message})
+}
+
+// echoUserMessage renders the user's turn into the transcript locally. The
+// gateway does not echo inbound user messages back over the wire (there is no
+// user_message outbound kind), and unlike the in-process cagent runtime the
+// wire-backed controller has no other path that surfaces the prompt. Without
+// this the user's own message never appears in the TUI. ReplaceLoadingWithUser
+// tolerates the absence of a loading placeholder, so a plain UserMessageEvent
+// is enough to paint the bubble.
+func (c *Controller) echoUserMessage(content string) {
+	if c.translator == nil || content == "" {
+		return
+	}
+	c.translator.emit(runtime.UserMessage(content, c.translator.sessionID(), nil))
 }
 
 // RunWithMessage sends a pre-built message. The wire protocol carries plain
@@ -109,6 +124,7 @@ func (c *Controller) RunWithMessage(ctx context.Context, cancel context.CancelFu
 	if content == "" {
 		return
 	}
+	c.echoUserMessage(content)
 	c.sendInbound(map[string]any{"content": content})
 }
 
@@ -119,6 +135,7 @@ func (c *Controller) CompactSession(ctx context.Context, cancel context.CancelFu
 	if additionalPrompt != "" {
 		content += " " + additionalPrompt
 	}
+	c.echoUserMessage(content)
 	c.sendInbound(map[string]any{"content": content})
 }
 
@@ -176,11 +193,13 @@ func (c *Controller) RunBangCommand(ctx context.Context, command string) {
 	if command == "" {
 		return
 	}
+	c.echoUserMessage("!" + command)
 	c.sendInbound(map[string]any{"content": "!" + command})
 }
 
 // NewSession starts a fresh gateway session via the /new command.
 func (c *Controller) NewSession() {
+	c.echoUserMessage("/new")
 	c.sendInbound(map[string]any{"content": "/new"})
 }
 
@@ -191,5 +210,6 @@ func (c *Controller) SwitchModel(name string) {
 	if name == "" {
 		return
 	}
+	c.echoUserMessage("/model " + name)
 	c.sendInbound(map[string]any{"content": "/model " + name})
 }

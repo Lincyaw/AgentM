@@ -22,6 +22,9 @@ const (
 	MessageTypeToolResult
 	MessageTypeWelcome
 	MessageTypeLoading
+	// MessageTypeSystem is a system notice — the output of a control command
+	// (/status, /help, ...). Rendered neutrally, with no agent author.
+	MessageTypeSystem
 )
 
 const (
@@ -106,6 +109,17 @@ func Cancelled() *Message {
 func Welcome(content string) *Message {
 	return &Message{
 		Type:    MessageTypeWelcome,
+		Content: strings.ReplaceAll(content, "\t", "    "),
+	}
+}
+
+// System builds a system-notice message (control-command output). An optional
+// title is carried in Sender so the renderer can show it as a header without a
+// dedicated field.
+func System(title, content string) *Message {
+	return &Message{
+		Type:    MessageTypeSystem,
+		Sender:  title,
 		Content: strings.ReplaceAll(content, "\t", "    "),
 	}
 }

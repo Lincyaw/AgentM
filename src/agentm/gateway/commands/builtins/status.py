@@ -34,7 +34,7 @@ class StatusCommand:
             f"- turns this session: {turn_count}\n"
             f"- pending approvals: {pending}"
         )
-        return CommandResult(outbound=[ctx.reply(body)])
+        return CommandResult(outbound=[ctx.notice(body)])
 
 
 HANDLER = StatusCommand()

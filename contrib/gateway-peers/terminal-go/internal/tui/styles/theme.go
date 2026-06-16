@@ -1013,6 +1013,14 @@ func rebuildStyles() {
 		BorderStyle(lipgloss.ThickBorder()).
 		Foreground(Error)
 
+	// SystemMessageStyle renders control-command output (/status, /help, ...) as
+	// a muted, unobtrusive notice — distinct from agent speech and from errors.
+	SystemMessageStyle = BaseMessageStyle.
+		BorderLeft(true).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(BorderSecondary).
+		Foreground(TextMuted)
+
 	SelectedMessageStyle = AssistantMessageStyle.
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(Success)

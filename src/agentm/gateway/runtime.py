@@ -109,9 +109,53 @@ class GatewayRuntime:
         self._inflight: set[asyncio.Task[Any]] = set()
         self._peer_channels: dict[str, str] = {}
         self._session_commands: dict[str, set[str]] = {}
+        # Per-chat prompt count, surfaced by /status. Incremented on each
+        # conversational turn (a prompt, not a control command).
+        self._turn_counts: dict[str, int] = {}
 
     def attach_server(self, server: WireServer) -> None:
         self._server = server
+
+    def describe_capabilities(self) -> dict[str, Any]:
+        """Static, session-independent capabilities for the welcome handshake.
+
+        A chat client connects (and gets the welcome) *before* it sends a first
+        message, but a session — and thus the ``session_ready`` frame that
+        advertises the scenario's tools and in-session commands — is created
+        only on that first prompt. So the welcome carries what the gateway knows
+        without a live session: the configured model profiles, the active model,
+        the scenario name, and the gateway's own command catalog (name + kind +
+        summary). The terminal seeds its model picker and command palette from
+        this immediately; ``session_ready`` later augments it with
+        session-specific tools/commands."""
+        from agentm.core.lib.user_config import load_user_config
+
+        try:
+            models = list(load_user_config().models.keys())
+        except Exception:
+            logger.exception("describe_capabilities: failed to read model profiles")
+            models = []
+        all_handlers = list(self._command_router.registry.all())
+        commands = [
+            {"name": h.name, "kind": h.kind, "summary": h.summary}
+            for h in all_handlers
+            if h.namespace is None
+        ]
+        # Skills are gateway-registered commands under the "skill" namespace
+        # (invoked as /skill:<name>). They are discovered at startup and static,
+        # so the welcome frame can advertise them for the terminal's /skills view.
+        skills = [
+            {"name": h.name, "summary": h.summary}
+            for h in all_handlers
+            if h.namespace == "skill"
+        ]
+        return {
+            "models": models,
+            "model": self._model_name,
+            "scenario": self._scenario or "",
+            "commands": commands,
+            "skills": skills,
+        }
 
     # -- outbound sink ------------------------------------------------
 
@@ -280,6 +324,7 @@ class GatewayRuntime:
             session_key, scenario or self._scenario, body
         )
         self._sessions.set_turn_context(session_key, body)
+        self._turn_counts[session_key] = self._turn_counts.get(session_key, 0) + 1
         await sess.prompt(body.content)
 
     # -- command-context plumbing -------------------------------------
@@ -289,15 +334,17 @@ class GatewayRuntime:
     ) -> CommandContext:
         async def end_session() -> None:
             await self._sessions.shutdown_session(session_key)
+            self._turn_counts.pop(session_key, None)
 
         async def forget_chat_mapping() -> None:
             self._sessions.forget(session_key)
             self._session_commands.pop(session_key, None)
+            self._turn_counts.pop(session_key, None)
 
         def get_route_stats() -> dict[str, Any]:
             return {
                 "session_id": self._sessions.session_id(session_key),
-                "turn_count": 0,
+                "turn_count": self._turn_counts.get(session_key, 0),
                 "pending_approvals": self._approval.pending_count,
             }
 
@@ -317,6 +364,15 @@ class GatewayRuntime:
             await self._sessions.shutdown_session(session_key)
             self._sessions.set_chat_mapping(session_key, target_sid)
 
+        async def fork_session(up_to: int | None) -> str | None:
+            source_sid = self._sessions.session_id(session_key)
+            if not source_sid:
+                return None
+            await self._sessions.shutdown_session(session_key)
+            self._sessions.set_pending_fork(session_key, source_sid, up_to)
+            self._turn_counts.pop(session_key, None)
+            return source_sid
+
         def list_session_commands() -> list[str]:
             return sorted(self._session_commands.get(session_key, set()))
 
@@ -335,6 +391,7 @@ class GatewayRuntime:
             switch_model=switch_model,
             cwd=self._cwd,
             resume_session=resume_session,
+            fork_session=fork_session,
             list_session_commands=list_session_commands,
         )
 

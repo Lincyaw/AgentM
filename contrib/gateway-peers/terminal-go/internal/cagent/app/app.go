@@ -103,6 +103,7 @@ type App struct {
 	commandNames []string
 	modelNames   []string
 	activeModel  string
+	skills       []skills.Skill
 
 	// events is the raw event stream the backend pushes into via EmitEvent;
 	// startFanOut drains it and scatters every event to each SubscribeWith
@@ -230,10 +231,22 @@ func (a *App) ResumeElicitation(ctx context.Context, action tools.ElicitationAct
 	return nil
 }
 
-// CurrentAgentSkills returns the available skills for the current agent.
-// Stub: returns nil until the adapter takes over.
+// CurrentAgentSkills returns the available skills for the current agent,
+// sourced from the welcome-handshake capability block (skills are gateway
+// commands under the "skill" namespace). Empty until SetSkills runs.
 func (a *App) CurrentAgentSkills() []skills.Skill {
-	return nil
+	a.agentInfoMu.Lock()
+	defer a.agentInfoMu.Unlock()
+	return slices.Clone(a.skills)
+}
+
+// SetSkills records the skill catalog projected from the welcome handshake.
+// Each entry carries a name and a one-line summary (the wire protocol does not
+// carry skill bodies, so only the listing fields are populated).
+func (a *App) SetSkills(skillList []skills.Skill) {
+	a.agentInfoMu.Lock()
+	defer a.agentInfoMu.Unlock()
+	a.skills = slices.Clone(skillList)
 }
 
 // SetAgentInfo records the capability view projected from a session_ready

@@ -35,7 +35,7 @@ class ResumeCommand:
             sid = stats.get("session_id") or "(none)"
             return CommandResult(
                 outbound=[
-                    ctx.reply(
+                    ctx.notice(
                         f"Current session: `{sid}`\nUsage: `/resume <session_id>`"
                     )
                 ]
@@ -67,7 +67,7 @@ class ResumeCommand:
         await ctx.resume_session(target)
         return CommandResult(
             outbound=[
-                ctx.reply(
+                ctx.notice(
                     f"\U0001f504 Resumed session `{target[:12]}…`. "
                     "Next message continues from that session's transcript."
                 )

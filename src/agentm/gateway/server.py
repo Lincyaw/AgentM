@@ -99,6 +99,7 @@ class WireServer:
         delivery_batch_max: int = 32,
         slow_consumer_high_water: int = 1000,
         max_delivery_attempts: int = MAX_DELIVERY_ATTEMPTS,
+        capabilities_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         # ``socket_path=`` is a Unix-socket convenience shortcut equivalent to
         # ``transport=UnixServerTransport(socket_path)``; pass exactly one.
@@ -126,6 +127,7 @@ class WireServer:
         self._outbox = outbox
         self._inbox = inbox
         self._on_inbound = on_inbound
+        self._capabilities_provider = capabilities_provider
         self._auth: Authenticator = authenticator or AllowAllAuthenticator()
         self._delivery_batch_max = delivery_batch_max
         self._high_water = slow_consumer_high_water
@@ -242,18 +244,20 @@ class WireServer:
                 capabilities=dict(body.get("capabilities") or {}),
             )
             self._registry.register(session)
-            await _send(
-                writer,
-                _make_env(
-                    KIND_WELCOME,
-                    {
-                        "server_version": SERVER_VERSION,
-                        "wire_version": WIRE_VERSION,
-                        "peer_id": peer_id,
-                        "session_resume": [],
-                    },
-                ),
-            )
+            welcome_body: dict[str, Any] = {
+                "server_version": SERVER_VERSION,
+                "wire_version": WIRE_VERSION,
+                "peer_id": peer_id,
+                "session_resume": [],
+            }
+            if self._capabilities_provider is not None:
+                try:
+                    welcome_body["capabilities"] = self._capabilities_provider()
+                except Exception:
+                    logger.exception(
+                        "gateway: capabilities_provider raised; welcome sent without it"
+                    )
+            await _send(writer, _make_env(KIND_WELCOME, welcome_body))
 
             # Size the unified send queue to the slow-consumer high-water,
             # then prefill any durable rows left unacked by a prior

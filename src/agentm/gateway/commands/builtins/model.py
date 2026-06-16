@@ -33,13 +33,13 @@ class ModelCommand:
         arg = inv.args.strip()
 
         if not arg:
-            return CommandResult(outbound=[ctx.reply(_render_list(current, available))])
+            return CommandResult(outbound=[ctx.notice(_render_list(current, available))])
 
         ok, message = await ctx.switch_model(arg)
         if ok:
             return CommandResult(
                 outbound=[
-                    ctx.reply(
+                    ctx.notice(
                         f"🔀 Switched to `{message}`. Fresh session started."
                     )
                 ]

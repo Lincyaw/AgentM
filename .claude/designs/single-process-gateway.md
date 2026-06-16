@@ -139,7 +139,7 @@ Seven kinds. Half of v1's set.
 
 | kind | body shape | purpose |
 |---|---|---|
-| `welcome` | `{server_version, wire_version, peer_id, session_resume[]}` | Reply to `hello`. |
+| `welcome` | `{server_version, wire_version, peer_id, session_resume[], capabilities?}` | Reply to `hello`. `capabilities` (optional) carries the gateway's static, session-independent view — `{models[], model, scenario, commands:[{name,kind,summary}], skills:[{name,summary}]}` — so a chat client can populate its model picker, command palette, and skill list *before* its first message creates a session. Session-specific capabilities (the scenario's tools, in-session commands) still arrive later on the `session_ready` outbound. Sourced from `GatewayRuntime.describe_capabilities` via the `WireServer(capabilities_provider=…)` hook. |
 | `outbound` | §2.5 | Render-and-send-this in the chat platform. |
 | `error` | `{code, message, fatal}` | Protocol-level error. |
 | `ping` | `{}` | Liveness probe. |
@@ -181,12 +181,14 @@ Gone from v1: `bye` (close-on-socket is fine), `delivery_batch` / `ack_batch` (p
     {"label": "Deny",    "value": "appr-deadbeef:deny",    "style": "danger"}
   ],
   "metadata": {
-    "kind": "assistant_text" | "approval_request" | "approval_resolved" | "diagnostic_warning" | "diagnostic_error"
+    "kind": "assistant_text" | "command_result" | "approval_request" | "approval_resolved" | "diagnostic_warning" | "diagnostic_error"
   }
 }
 ```
 
 `metadata.kind` is a typed discriminator: chat clients use it to pick a rendering style (plain text vs alert card vs interactive approval). `metadata` does not carry routing fields.
+
+`command_result` is the output of a **control command** (`/status`, `/help`, `/context`, `/model`, `/new`, `/resume`, …) — distinct from `assistant_text` (the LLM speaking). A chat client renders it as a *system notice*: no agent author, no working spinner, and it is not part of the conversation transcript fed back to the model. It is durable (a control reply is a reliability-floor response, like `assistant_text`). The gateway emits it directly from the command router (`CommandContext.notice`), not through a session's `wire_driver`. Control-command *errors* still use `diagnostic_error`.
 
 ### 2.6 Delivery semantics
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/skills"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui"
 	"github.com/AoyangSpace/agentm-terminal/internal/wire"
 )
@@ -60,6 +61,12 @@ func New(client *wire.WireClient, id Identity, firstMessage string, appOpts ...a
 	a := app.New(context.Background(), sess, opts...)
 	tr.app = a
 
+	// Seed the App's capability view from the welcome handshake so the model
+	// picker and command palette work before the first message creates a
+	// session (the session_ready frame later augments this with the scenario's
+	// tools and in-session commands).
+	seedFromCapabilities(a, client.Capabilities())
+
 	return &Adapter{
 		App:        a,
 		Session:    sess,
@@ -68,6 +75,68 @@ func New(client *wire.WireClient, id Identity, firstMessage string, appOpts ...a
 		client:     client,
 		children:   children,
 	}
+}
+
+// seedFromCapabilities projects the welcome-handshake capability block onto the
+// App so the model picker and command palette are populated before any session
+// exists. Tolerant of a nil/partial block: missing fields just leave the
+// corresponding view empty (as before this frame existed).
+func seedFromCapabilities(a *app.App, caps map[string]any) {
+	if a == nil || caps == nil {
+		return
+	}
+	models := stringSlice(caps["models"])
+	model, _ := caps["model"].(string)
+	commandNames := capabilityCommandNames(caps["commands"])
+	// No tool names pre-session; session_ready supplies those later. Setting
+	// empty slices on a fresh App is harmless (nothing to overwrite yet).
+	a.SetAgentInfo(nil, commandNames, models, model)
+	a.SetSkills(capabilitySkills(caps["skills"]))
+}
+
+// capabilitySkills extracts the skill catalog from the welcome capability block.
+// Each entry is a {name, summary} map; the wire protocol carries no skill body,
+// so only Name/Description are populated.
+func capabilitySkills(v any) []skills.Skill {
+	entries, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]skills.Skill, 0, len(entries))
+	for _, e := range entries {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := m["name"].(string)
+		if name == "" {
+			continue
+		}
+		summary, _ := m["summary"].(string)
+		out = append(out, skills.Skill{Name: name, Description: summary})
+	}
+	return out
+}
+
+// capabilityCommandNames extracts the bare command names from the welcome
+// capability block's command catalog (each entry is a {name, kind, summary}
+// map). Non-conforming entries are skipped.
+func capabilityCommandNames(v any) []string {
+	entries, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, ok := m["name"].(string); ok && name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // SetProgram hands the tea.Program to the child manager so it can drive the

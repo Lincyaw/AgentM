@@ -26,7 +26,7 @@ class HelpCommand:
     ) -> CommandResult:
         del inv
         body = _format_help(ctx.list_commands(), ctx.list_session_commands())
-        return CommandResult(outbound=[ctx.reply(body)])
+        return CommandResult(outbound=[ctx.notice(body)])
 
 
 HANDLER = HelpCommand()

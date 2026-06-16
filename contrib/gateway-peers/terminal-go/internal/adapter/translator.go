@@ -182,6 +182,14 @@ func (t *Translator) handleOutbound(body map[string]any) {
 			t.emit(runtime.AgentChoice(t.agentName, t.sessionID(), content))
 		}
 
+	case "command_result":
+		// Output of a gateway control command (/status, /help, /context, ...).
+		// Not agent speech — render as a system notice with no author. The chat
+		// page also settles the working spinner the slash command triggered,
+		// since a control command runs no turn (no agent_end is coming).
+		title, _ := meta["title"].(string)
+		t.emit(runtime.SystemNote(content, t.sessionID(), title))
+
 	case "tool_call":
 		t.emit(t.toolCallEvent(meta))
 
@@ -210,9 +218,11 @@ func (t *Translator) handleOutbound(body map[string]any) {
 
 	case "diagnostic_warning":
 		t.emit(runtime.Warning(content, t.agentName))
+		t.settleIdle()
 
 	case "diagnostic_error":
 		t.emit(runtime.Error(content))
+		t.settleIdle()
 
 	case "session_ready":
 		t.handleSessionReady(meta)
@@ -286,6 +296,20 @@ func (t *Translator) ensureStreaming() {
 		t.streaming = true
 		t.emit(runtime.StreamStarted(t.sessionID(), t.agentName))
 	}
+}
+
+// settleIdle clears the TUI's optimistic working spinner for replies that
+// arrive outside any turn. Gateway control commands (/status, /help, ...) reply
+// with a single frame and run no agent turn, so they never emit the agent_end
+// the chat page relies on to stop working. A StreamStopped at depth zero is the
+// chat page's settle path (clears working + pending, drains the queue); the
+// "command" reason keeps it out of the success-chime branch. No-op when a real
+// stream is in flight — that turn's own agent_end will settle it.
+func (t *Translator) settleIdle() {
+	if t.streaming {
+		return
+	}
+	t.emit(runtime.StreamStopped(t.sessionID(), t.agentName, "command"))
 }
 
 // toolCallEvent builds a ToolCallEvent from a tool_call body.

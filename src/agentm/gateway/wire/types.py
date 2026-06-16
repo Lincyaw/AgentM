@@ -40,6 +40,7 @@ ButtonStyle = Literal["primary", "danger", "default"]
 OutboundMetaKind = Literal[
     # -- durable (reliability floor) --
     "assistant_text",
+    "command_result",
     "approval_request",
     "approval_resolved",
     "diagnostic_warning",
@@ -73,6 +74,7 @@ OutboundMetaKind = Literal[
 DURABLE_OUTBOUND_KINDS: frozenset[str] = frozenset(
     {
         "assistant_text",
+        "command_result",
         "approval_request",
         "approval_resolved",
         "diagnostic_warning",

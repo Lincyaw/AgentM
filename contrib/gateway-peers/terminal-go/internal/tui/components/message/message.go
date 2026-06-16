@@ -381,6 +381,19 @@ func (mv *messageModel) render(width int) string {
 			rendered = msg.Content
 		}
 		return messageStyle.Width(width - 1).Render(strings.TrimRight(rendered, "\n\r\t "))
+	case types.MessageTypeSystem:
+		messageStyle := styles.SystemMessageStyle
+		// preserveLineBreaks keeps single newlines (control-command output is
+		// often a `- key: value` list) from collapsing under markdown.
+		body := preserveLineBreaks(msg.Content)
+		if msg.Sender != "" {
+			body = "**" + msg.Sender + "**\n\n" + body
+		}
+		rendered, err := markdown.NewRenderer(width - messageStyle.GetHorizontalFrameSize()).Render(body)
+		if err != nil {
+			rendered = msg.Content
+		}
+		return messageStyle.Width(width - 1).Render(strings.TrimRight(rendered, "\n\r\t "))
 	case types.MessageTypeError:
 		return styles.ErrorMessageStyle.Width(width - 1).Render(msg.Content)
 	case types.MessageTypeLoading:

@@ -54,6 +54,10 @@ async def _default_resume(_sid: str) -> None:
     raise NotImplementedError("resume_session not wired")
 
 
+async def _default_fork(_up_to: int | None) -> str | None:
+    raise NotImplementedError("fork_session not wired")
+
+
 @dataclass(frozen=True, slots=True)
 class CommandInbound:
     """The slash-command-relevant slice of an inbound envelope.
@@ -160,6 +164,14 @@ class CommandContext:
     ``session_id`` so the next inbound message resumes from that
     session's transcript."""
 
+    fork_session: Callable[[int | None], Awaitable[str | None]] = (
+        lambda _up_to: _default_fork(_up_to)
+    )
+    """Fork the current session: shut it down and arrange for the next inbound
+    message to start a *new* session seeded with the current transcript (up to
+    ``up_to`` messages, or all when ``None``). Returns the source session id, or
+    ``None`` when there is no active session to fork."""
+
     list_session_commands: Callable[[], list[str]] = lambda: []
     """Returns the bare names of commands registered *inside* this chat's
     session (dispatched by the in-session ``slash_commands`` atom, e.g.
@@ -170,6 +182,27 @@ class CommandContext:
     def reply(self, text: str, **meta: Any) -> OutboundBody:
         """Build a plain ``assistant_text`` outbound back to this chat."""
         metadata: dict[str, Any] = {"kind": "assistant_text"}
+        metadata.update(meta)
+        return OutboundBody(
+            channel=self.channel,
+            chat_id=self.chat_id,
+            content=text,
+            thread_id=self.thread_id,
+            metadata=metadata,
+        )
+
+    def notice(self, text: str, *, title: str | None = None, **meta: Any) -> OutboundBody:
+        """Build a ``command_result`` outbound — the output of a *control*
+        command (``/status``, ``/help``, ...).
+
+        Distinct from :meth:`reply` (``assistant_text``) so a chat client can
+        render control-command output as a system notice rather than as agent
+        speech: no agent author, no working spinner, not part of the LLM
+        transcript. ``title`` is an optional header the client may show above
+        the body."""
+        metadata: dict[str, Any] = {"kind": "command_result"}
+        if title is not None:
+            metadata["title"] = title
         metadata.update(meta)
         return OutboundBody(
             channel=self.channel,
