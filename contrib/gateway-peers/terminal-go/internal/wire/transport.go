@@ -56,6 +56,13 @@ func (t *WSTransport) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
 		return nil, fmt.Errorf("websocket dial %s: %w", t.URL, err)
 	}
 
+	// nhooyr defaults to a 32 KiB per-message read limit; a single wire frame
+	// (e.g. the welcome handshake carrying the full capability catalog —
+	// scenario skills + commands + models) can exceed that. Lift the limit to
+	// our framing ceiling so the length-prefix reader, not the WebSocket layer,
+	// is the one authority on frame size.
+	conn.SetReadLimit(MaxFrameSize)
+
 	// Use a background context for read/write — the dial context is only
 	// for the handshake timeout and must not cancel the long-lived connection.
 	return &wsReadWriteCloser{conn: conn, ctx: context.Background()}, nil
