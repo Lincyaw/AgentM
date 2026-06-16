@@ -118,6 +118,17 @@ addopts = "-m 'not ui' --ignore=contrib/extensions/llmharness --ignore=contrib/e
 # collect as stray doctests. Keep collection out of them at any depth.
 norecursedirs = ["*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}", "runs", "jobs"]
 
+[tool.ruff.lint]
+# Default rule set (E/F) plus a guard against silently-swallowed exceptions:
+#   S110 — try/except/pass
+#   S112 — try/except/continue
+# Every caught exception must at least be logged or surfaced, never dropped on
+# the floor. A handler that genuinely needs to swallow must log (debug for
+# expected/benign, warning+ for error-hiding) — see the silent-exception
+# discipline applied across src/agentm. Suppress with an explicit
+# ``# noqa: S110`` + reason only when logging is truly impossible.
+extend-select = ["S110", "S112"]
+
 [tool.mypy]
 python_version = "3.12"
 mypy_path = ["src", "contrib/scenarios/rca/src", "contrib/extensions/llmharness/src"]

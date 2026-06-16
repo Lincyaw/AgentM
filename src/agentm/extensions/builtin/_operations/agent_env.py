@@ -747,11 +747,13 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
         try:
             session.delete_sandbox()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # A failed sandbox deletion can orphan a remote (k8s) sandbox —
+            # surface it so the leak is diagnosable.
+            logger.warning("agent_env: sandbox deletion failed on shutdown: {}", exc)
         try:
             session.close()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("agent_env: session close failed on shutdown: {}", exc)
 
     api.on(SessionShutdownEvent.CHANNEL, _on_shutdown)

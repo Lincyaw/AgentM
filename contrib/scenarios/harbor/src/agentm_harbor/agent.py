@@ -15,6 +15,7 @@ from harbor.agents.installed.base import (
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.paths import EnvironmentPaths
+from loguru import logger
 
 SCENARIO_MANIFEST = """\
 name: harbor_bench
@@ -249,8 +250,9 @@ class AgentMAgent(BaseInstalledAgent):
                         f"{agent_dir}/observability/ 2>/dev/null || true"
                     ),
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # Best-effort copy of the observability dir out of the sandbox.
+                logger.debug("harbor: observability copy-out failed: {}", exc)
 
     def populate_context_post_run(self, context: AgentContext) -> None:
         obs_dir = self.logs_dir / "observability"

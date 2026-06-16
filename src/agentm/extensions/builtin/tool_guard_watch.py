@@ -256,8 +256,10 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
         turn_count += 1
         try:
             error_count += int(body.get("tool_error_count") or 0)
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as exc:
+            # Malformed tool_error_count in a turn summary — skip this turn's
+            # contribution rather than fail the whole rate computation.
+            logger.debug("tool_guard_watch: bad tool_error_count in turn summary: {}", exc)
     if turn_count == 0:
         return None
     rate = float(error_count) / float(turn_count)

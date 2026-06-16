@@ -31,6 +31,7 @@ import argparse
 import asyncio
 import inspect
 import json
+import sys
 from collections import Counter
 from typing import Any
 
@@ -114,12 +115,12 @@ async def _run(args: argparse.Namespace) -> int:
                 {"channel": "terminal", "sender_id": args.sender_id,
                  "chat_id": args.chat_id, "content": "/end"}, **call)
             await asyncio.sleep(0.5)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            print(f"probe: sending /end failed: {exc}", file=sys.stderr)
     try:
         await client.close()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        print(f"probe: client close failed: {exc}", file=sys.stderr)
     return 0
 
 

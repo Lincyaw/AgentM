@@ -426,6 +426,18 @@ class _ExtensionAPIImpl:
             )
         self._operations_holder.bundle = Operations(file=file, bash=bash)
 
+    def register_message_renderer(
+        self, custom_type: str, renderer: Renderer
+    ) -> None:
+        self._assert_active()
+        self._renderers[custom_type] = renderer
+        self._emit_register("renderer", custom_type, renderer)
+
+    def register_tool_renderer(self, tool_name: str, renderer: Renderer) -> None:
+        self._assert_active()
+        self._renderers[tool_name] = renderer
+        self._emit_register("renderer", tool_name, renderer)
+
     # --- Actions -----------------------------------------------------------
 
     def post_inbox(
@@ -539,6 +551,14 @@ class _ExtensionAPIImpl:
     def list_atoms(self) -> list[AtomInfo]:
         self._assert_active()
         return self._gateway.list_atoms()
+
+    def freeze_current(self, name: str) -> str:
+        self._assert_active()
+        return self._gateway.freeze_current(name)
+
+    def is_constitution_path(self, path: str) -> bool:
+        self._assert_active()
+        return self._gateway.is_constitution_path(path)
 
     def get_resource_writer(self) -> ResourceWriter:
         self._assert_active()

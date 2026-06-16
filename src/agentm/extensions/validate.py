@@ -36,6 +36,8 @@ from importlib import import_module
 from pathlib import Path
 from types import ModuleType
 
+from loguru import logger
+
 from agentm.core._internal.catalog import manifest as core_manifest_mod
 from agentm.extensions import ExtensionManifest, parse_register_tag
 from agentm.extensions.discover import discover_builtin
@@ -192,8 +194,15 @@ def validate_builtin() -> list[ValidationIssue]:
                             message=(f"'install' must accept (api, config); got {sig}"),
                         )
                     )
-            except (TypeError, ValueError):  # pragma: no cover — defensive
-                pass
+            except (TypeError, ValueError) as exc:  # pragma: no cover — defensive
+                # Signature introspection failed (e.g. a C-level callable);
+                # the arity rule simply can't be checked for this install.
+                logger.debug(
+                    "extensions.validate: could not introspect install() "
+                    "signature for {}: {}",
+                    module_path,
+                    exc,
+                )
 
         # Rule 3 + 4: manifest already validated by discover_builtin (it
         # raises if missing or stem-mismatched). Nothing to add here.

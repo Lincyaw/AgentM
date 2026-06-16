@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from loguru import logger
+
 
 __version__ = "0.2.0"
 
@@ -63,8 +65,9 @@ def _load_dotenv_files(cwd: Path) -> None:
                 if "[tool.uv.workspace]" in manifest.read_text(encoding="utf-8"):
                     candidates.append(walker / ".env")
                     break
-            except OSError:
-                pass
+            except OSError as exc:
+                # Unreadable pyproject while walking up for the workspace .env.
+                logger.debug("gateway: could not read {} during .env discovery: {}", manifest, exc)
         if walker.parent == walker:
             break
         walker = walker.parent

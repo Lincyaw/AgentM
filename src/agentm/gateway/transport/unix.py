@@ -9,10 +9,11 @@ close; the client opens via :func:`asyncio.open_unix_connection`.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import errno
 import os
 import socket
+
+from loguru import logger
 
 from .base import ConnectionHandler
 
@@ -75,8 +76,11 @@ class UnixServerTransport:
                     f"socket {self._socket_path} is already in use by "
                     "another gateway"
                 )
-            with contextlib.suppress(FileNotFoundError):
+            try:
                 os.unlink(self._socket_path)
+            except FileNotFoundError as exc:
+                # Stale socket vanished between the check and the unlink — fine.
+                logger.debug("unix transport: stale socket already gone: {}", exc)
         # Restrict the socket to the bind user (issue #4): with the
         # default umask the AF_UNIX node would be world-connectable,
         # letting any local user impersonate a peer. Set 0o077 around
@@ -93,17 +97,30 @@ class UnixServerTransport:
         # Belt-and-braces: assert the resulting perms actually exclude
         # group/other. asyncio.start_unix_server honours the umask we
         # set, but the explicit chmod makes the invariant testable.
-        with contextlib.suppress(OSError):
+        try:
             os.chmod(self._socket_path, 0o600)
+        except OSError as exc:
+            # Perms-tightening failure could leave the socket group/other
+            # connectable — surface it as a security-relevant warning.
+            logger.warning(
+                "unix transport: could not chmod 0600 socket {}; it may be "
+                "over-permissive: {}",
+                self._socket_path,
+                exc,
+            )
 
     async def close(self) -> None:
         if self._server is not None:
             self._server.close()
-            with contextlib.suppress(Exception):
+            try:
                 await self._server.wait_closed()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("unix transport: server wait_closed raised: {}", exc)
             self._server = None
-        with contextlib.suppress(FileNotFoundError):
+        try:
             os.unlink(self._socket_path)
+        except FileNotFoundError as exc:
+            logger.debug("unix transport: socket already removed on close: {}", exc)
 
 
 class UnixClientTransport:

@@ -53,8 +53,13 @@ async def install(api: ExtensionAPI, config: OperationsConfig) -> None:
 
         install_local(api, config_dict)
     elif backend == "agent_env":
-        from agentm.extensions.builtin._operations.agent_env import install_agent_env
+        from agentm.extensions.builtin._operations.agent_env import (
+            AgentEnvConfig,
+            install_agent_env,
+        )
 
-        install_agent_env(api, config_dict)
+        install_agent_env(
+            api, AgentEnvConfig.model_validate(config.model_dump(exclude={"backend"}))
+        )
     else:
         raise ValueError(f"Unknown operations backend: {backend!r}")

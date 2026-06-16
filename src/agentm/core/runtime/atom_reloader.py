@@ -177,8 +177,14 @@ class AtomReloader:
         ) -> Any:
             try:
                 setattr(handler, "_agentm_obs_owner", owner)
-            except (AttributeError, TypeError):
-                pass
+            except (AttributeError, TypeError) as exc:
+                # Some handlers (builtins, bound C methods) reject attributes;
+                # the obs-owner tag is best-effort, so continue without it.
+                logger.debug(
+                    "atom_reloader: could not tag handler with obs owner {!r}: {}",
+                    owner,
+                    exc,
+                )
             unsub = original_on(channel, handler, priority=priority)
             self._handlers_by_atom.setdefault(owner, []).append(unsub)
             return unsub
@@ -262,8 +268,10 @@ class AtomReloader:
         for pyc in cache_dir.glob(f"{path.stem}*.pyc"):
             try:
                 pyc.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                # Stale bytecode that we couldn't remove is non-fatal (the
+                # source mtime invalidates it); log for diagnosis.
+                logger.debug("atom_reloader: could not unlink bytecode {}: {}", pyc, exc)
 
     def _validate_reload_source(
         self, name: str, module_path: str, new_source: str
@@ -1138,15 +1146,29 @@ class AtomReloader:
         if not file_existed:
             try:
                 target_file.unlink()
-            except OSError:
-                pass
+            except OSError as exc:
+                # Rollback failure: a newly-written atom file is left on disk
+                # after a failed install, so on-disk state may diverge from the
+                # running session. Surface loudly so an operator can clean up.
+                logger.warning(
+                    "atom_reloader: failed to roll back new atom file {} after "
+                    "install error; on-disk state may be inconsistent: {}",
+                    target_file,
+                    exc,
+                )
             if write_result.committed and write_result.commit_sha_before is not None:
                 try:
                     self._resource_writer.restore(
                         target_file, write_result.commit_sha_before
                     )
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "atom_reloader: failed to git-restore {} to {} after "
+                        "install error; on-disk state may be inconsistent: {}",
+                        target_file,
+                        write_result.commit_sha_before,
+                        exc,
+                    )
 
     def current_version_for_path(self, path: str) -> str | None:
         return self._resource_writer.current_version_for_path(path)

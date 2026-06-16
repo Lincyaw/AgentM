@@ -25,8 +25,6 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.xdist_group("session_inbox")
-
 from agentm.core.abi import (
     AssistantMessage,
     DecideTurnActionEvent,
@@ -42,6 +40,8 @@ from agentm.core.abi import MessageAppendedEvent
 from agentm.core.abi import ProviderConfig
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
+
+pytestmark = pytest.mark.xdist_group("session_inbox")
 
 
 # ---------------------------------------------------------------------------

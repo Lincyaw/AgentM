@@ -25,6 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Final
 
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
@@ -131,7 +132,10 @@ async def _seed_defaults(
                 text.encode("utf-8"),
                 rationale="persona: seed preset identity file",
             )
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            # A preset identity file failed to seed — the agent will run
+            # without it, so surface the failure rather than hiding it.
+            logger.warning("persona: failed to seed identity file {}: {}", path, exc)
             continue
 
 def install(api: ExtensionAPI, config: PersonaConfig) -> None:

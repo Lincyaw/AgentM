@@ -65,11 +65,7 @@ MANIFEST = ExtensionManifest(
         "event:before_agent_start",
         "event:rca.graph.mutated",
     ),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    config_schema=None,
     requires=("rca_hgraph_store", "rca_falsification_gate"),
 )
 

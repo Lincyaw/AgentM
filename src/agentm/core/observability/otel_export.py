@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import IO, Any, Sequence
 
 from google.protobuf.json_format import MessageToDict
+from loguru import logger
 from opentelemetry.exporter.otlp.proto.common._log_encoder import encode_logs
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry._logs import Logger
@@ -208,8 +209,10 @@ class _FileOtlpExporter:
             self._fh.flush()
             try:
                 os.fsync(self._fh.fileno())
-            except (OSError, ValueError):  # pragma: no cover
-                pass
+            except (OSError, ValueError) as exc:  # pragma: no cover
+                # Best-effort durability: the line is already written+flushed,
+                # so a failed fsync is non-fatal. Log for diagnosis.
+                logger.debug("otel_export: fsync failed on {}: {}", self._path, exc)
         return success
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
@@ -402,13 +405,13 @@ def shutdown_process_telemetry() -> None:
     if tp is not None:
         try:
             tp.shutdown()
-        except Exception:  # pragma: no cover
-            pass
+        except Exception as exc:  # pragma: no cover
+            logger.debug("otel_export: tracer provider shutdown failed: {}", exc)
     if lp is not None:
         try:
             lp.shutdown()
-        except Exception:  # pragma: no cover
-            pass
+        except Exception as exc:  # pragma: no cover
+            logger.debug("otel_export: logger provider shutdown failed: {}", exc)
 
 
 def _remove_span_processor(
@@ -463,7 +466,8 @@ def _remove_log_processor(
             try:
                 current.remove(processor)
             except ValueError:
-                pass
+                # Processor already detached — expected when shutdown races.
+                logger.debug("otel_export: processor already removed from provider")
 
 
 @dataclass(slots=True)
@@ -656,13 +660,13 @@ class SessionTelemetry:
         # running in the same process keep emitting. Provider lives on.
         try:
             self.span_processor.shutdown()
-        except Exception:  # pragma: no cover
-            pass
+        except Exception as exc:  # pragma: no cover
+            logger.debug("otel_export: span processor shutdown failed: {}", exc)
         try:
             if self.log_processor is not None:
                 self.log_processor.shutdown()
-        except Exception:  # pragma: no cover
-            pass
+        except Exception as exc:  # pragma: no cover
+            logger.debug("otel_export: log processor shutdown failed: {}", exc)
         _remove_span_processor(self.tracer_provider, self.span_processor)
         if self.log_processor is not None:
             _remove_log_processor(self.logger_provider, self.log_processor)

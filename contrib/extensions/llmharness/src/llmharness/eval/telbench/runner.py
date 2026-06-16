@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from loguru import logger
+
 from .adapter import TelBenchInstance, spans_to_messages
 from .scoring import SpanScores, score_instance
 
@@ -117,8 +119,9 @@ async def evaluate_instance(
                         firing_cursor=data["window_hi"],
                         firing_id=firing_id,
                     )
-                except Exception:
-                    pass  # extractor failure — continue with whatever graph we have
+                except Exception as exc:
+                    # extractor failure — continue with whatever graph we have
+                    logger.warning("telbench: extractor firing failed: {}", exc)
 
         # --- Auditor ---
         if auditor_due:
@@ -171,8 +174,9 @@ async def evaluate_instance(
                                 if isinstance(verdict_raw, dict):
                                     cumulative.absorb_auditor_verdict(verdict_raw)
                                 break
-            except Exception:
-                pass  # auditor failure — continue
+            except Exception as exc:
+                # auditor failure — continue
+                logger.warning("telbench: auditor verdict absorption failed: {}", exc)
 
     # --- Score ---
     events, _edges, _phases = cumulative.graph_view()
@@ -229,7 +233,6 @@ async def evaluate_instance_tel(
 
     from agentm.core.abi import AgentSessionConfig, AssistantMessage, ToolCallBlock
     from agentm.core.runtime import AgentSession, create_agent_session
-    from loguru import logger
 
     from ...agents.tel.tools import SUBMIT_TOOL_NAME
 

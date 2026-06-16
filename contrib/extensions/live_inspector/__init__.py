@@ -241,8 +241,8 @@ class _Server:
                 try:
                     if self.loop is not None and not self.loop.is_closed():
                         self.loop.close()
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("live_inspector: event loop close failed: {}", exc)
 
         self.thread = threading.Thread(
             target=runner,
@@ -447,8 +447,8 @@ def _get_or_create_server(
         try:
             sys.stderr.write(f"LIVE INSPECT: {url}\n")
             sys.stderr.flush()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("live_inspector: could not write inspect URL to stderr: {}", exc)
         if url_file:
             try:
                 with open(url_file, "w", encoding="utf-8") as fh:

@@ -53,7 +53,7 @@ from agentm.core.abi import (
     TextContent,
     ToolResult,
 )
-from agentm.core.lib import parse_frontmatter
+from agentm.core.lib import parse_frontmatter, with_model_note
 from agentm.extensions import ExtensionManifest
 
 
@@ -239,10 +239,15 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             return _error("query is empty")
 
         entries: list[tuple[str, str, str]] = []
+        skipped: list[str] = []
         for path in await _list_memory_files(file_ops, base_path):
             try:
                 data = await file_ops.read_file(str(path))
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                # Skip an unreadable memory file rather than failing the search,
+                # but record it so the model learns recall may be incomplete.
+                logger.debug("memory: skipping unreadable file {}: {}", path, exc)
+                skipped.append(path.name)
                 continue
             meta, _body = parse_frontmatter(data.decode("utf-8", errors="replace"))
             name = str(meta.get("name", path.stem))
@@ -253,10 +258,19 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
                 entries.append((name, mem_type, description))
 
         if not entries:
-            return _ok(f"no memories matched {query!r}")
-        entries.sort(key=lambda row: row[0])
-        lines = [f"- {name} [{mem_type}] — {desc}" for name, mem_type, desc in entries[:limit]]
-        return _ok("\n".join(lines))
+            result = _ok(f"no memories matched {query!r}")
+        else:
+            entries.sort(key=lambda row: row[0])
+            lines = [f"- {name} [{mem_type}] — {desc}" for name, mem_type, desc in entries[:limit]]
+            result = _ok("\n".join(lines))
+        if skipped:
+            # Surface the silently-skipped files to the model, not just the log.
+            with_model_note(
+                result,
+                f"{len(skipped)} memory file(s) could not be read and were "
+                f"skipped ({', '.join(skipped)}); this recall may be incomplete.",
+            )
+        return result
 
     async def _delete(args: dict[str, Any]) -> ToolResult:
         name = str(args["name"])
@@ -366,7 +380,9 @@ async def _resolve_memory_path(file_ops: Any, base: Path, name: str) -> Path | N
         try:
             if await file_ops.access(str(candidate)):
                 return candidate
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            # Access check failed for this type variant — try the next one.
+            logger.debug("memory: access check failed for {}: {}", candidate, exc)
             continue
     return None
 
@@ -417,7 +433,9 @@ async def _rewrite_index(
     for path in await _list_memory_files(file_ops, base):
         try:
             data = await file_ops.read_file(str(path))
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            # Skip an unreadable memory file when rebuilding the index.
+            logger.debug("memory: skipping unreadable file {} during reindex: {}", path, exc)
             continue
         meta, _body = parse_frontmatter(data.decode("utf-8", errors="replace"))
         name = str(meta.get("name", path.stem))

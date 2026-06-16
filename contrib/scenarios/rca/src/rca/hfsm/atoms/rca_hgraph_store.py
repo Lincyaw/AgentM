@@ -50,11 +50,7 @@ MANIFEST = ExtensionManifest(
         "token claimed via the rca.hgraph.claim_write service."
     ),
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    config_schema=None,
     requires=(),
 )
 

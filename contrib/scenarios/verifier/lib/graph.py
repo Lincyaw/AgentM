@@ -5,6 +5,8 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+from loguru import logger
+
 from . import duckdb_conn
 
 SYNTHETIC = {
@@ -80,8 +82,9 @@ def get_relationships(data_dir: Path) -> list[Rel]:
             if svc_a not in SYNTHETIC and svc_b not in SYNTHETIC:
                 rels.append((svc_a, svc_b, "co_deployed"))
                 rels.append((svc_b, svc_a, "co_deployed"))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Dependency table may be absent for this case — skip co-deploy edges.
+        logger.debug("verifier graph: co-deploy relation query failed: {}", exc)
 
     conn.close()
     return rels
@@ -106,7 +109,9 @@ def _trace_services(conn) -> set[str]:  # noqa: ANN001
     for tbl in ("normal_traces", "abnormal_traces"):
         try:
             rows = conn.execute(f"SELECT DISTINCT service_name FROM {tbl}").fetchall()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Trace table {tbl} may not exist for this case — try the next one.
+            logger.debug("verifier graph: service query on {} failed: {}", tbl, exc)
             continue
         out.update(r[0] for r in rows if r[0])
     return out
@@ -153,8 +158,9 @@ def get_infra_edges(data_dir: Path, infra_nodes: set[str]) -> list[Rel]:
             ).fetchall()
             if r[0] and r[0] not in SYNTHETIC
         ]
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Source table absent/empty for this case — leave the list as-is.
+        logger.debug("verifier graph: high-frequency caller query failed: {}", exc)
 
     trace_svcs = _trace_services(conn)
     conn.close()
@@ -201,7 +207,9 @@ def profile_dataset(
                     ).fetchone()[0]
                     for win in ("normal", "abnormal")
                 )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # Cardinality query failed (missing column/table) — skip column.
+                logger.debug("verifier graph: cardinality query failed: {}", exc)
                 continue
             if max(n_card, a_card) > max_distinct:
                 continue
@@ -239,7 +247,9 @@ def vanished_endpoints(
                 "ORDER BY n.cnt DESC",
                 [svc, svc, min_normal],
             ).fetchall()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Per-service query failed for this case — skip to the next service.
+            logger.debug("verifier graph: per-service edge query failed: {}", exc)
             continue
         if rows:
             out[svc] = [

@@ -15,6 +15,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Iterator
 
+from loguru import logger
+
 
 # ---------------------------------------------------------------------------
 # HTTP client
@@ -33,8 +35,10 @@ def get_url() -> str | None:
         ) as r:
             if r.status == 200:
                 return "http://localhost:8123"
-    except (urllib.error.URLError, OSError):
-        pass
+    except (urllib.error.URLError, OSError) as exc:
+        # No local ClickHouse reachable — expected when running without the
+        # observability stack; caller falls back to the JSONL backend.
+        logger.debug("clickhouse: localhost:8123 ping failed, no CH backend: {}", exc)
     return None
 
 

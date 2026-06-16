@@ -69,6 +69,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Final
 
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -1321,14 +1322,16 @@ def _prune_dominated_candidates(decisions_dir: Path) -> None:
             if flag.is_file():
                 try:
                     flag.unlink()
-                except OSError:
-                    pass
+                except OSError as exc:
+                    # Best-effort prune-flag bookkeeping; a stale flag at worst
+                    # hides a candidate until the next recompute.
+                    logger.debug("propose_change: could not clear prune flag {}: {}", flag, exc)
         else:
             if not flag.is_file():
                 try:
                     flag.write_text("", encoding="utf-8")
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger.debug("propose_change: could not write prune flag {}: {}", flag, exc)
 
 def _count_consecutive_rejections(activations_path: Path) -> int:
     """B-9: walk ``activations.jsonl`` from the most recent entry backward

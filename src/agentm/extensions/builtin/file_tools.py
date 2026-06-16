@@ -30,6 +30,7 @@ import shlex
 from pathlib import Path, PurePath
 from typing import Any, Final
 
+from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
 from agentm.core.abi import (
@@ -728,8 +729,10 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         try:
             await writer.read(path)
             file_exists = True
-        except Exception:
-            pass
+        except Exception as exc:
+            # Read failed → treat as not-yet-existing (covers not-found and
+            # unreadable paths alike); the write below will surface hard errors.
+            logger.debug("file_tools: existence probe read({!r}) failed: {}", path, exc)
 
         if file_exists and require_read:
             rs = get_read_state(normalized)
@@ -782,8 +785,10 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             try:
                 disk_stat = await _get_file_ops().stat(normalized)
                 record_kwargs["mtime_ns"] = disk_stat.mtime_ns
-            except OSError:
-                pass
+            except OSError as exc:
+                # mtime is an optimisation for read-state tracking; omit it if
+                # the post-write stat fails rather than failing the write.
+                logger.debug("file_tools: post-write stat({}) failed: {}", normalized, exc)
             record_read(normalized, **record_kwargs)
 
             action = "Updated" if file_exists else "Created"

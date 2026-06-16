@@ -21,9 +21,9 @@ We target the modern :mod:`websockets.asyncio` connection class
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from typing import Any
 
+from loguru import logger
 from websockets.asyncio.connection import Connection
 from websockets.exceptions import ConnectionClosed
 
@@ -142,12 +142,14 @@ class WebSocketStreamWriter:
 
     async def wait_closed(self) -> None:
         if self._close_task is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await self._close_task
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("ws adapter: close task raised: {}", exc)
         try:
             await self._ws.wait_closed()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ws adapter: wait_closed raised: {}", exc)
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         # Peer-cred auth calls ``get_extra_info("socket")``; WS has no

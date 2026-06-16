@@ -72,11 +72,7 @@ MANIFEST = ExtensionManifest(
         "agent_start; non-idempotent tools pass through untouched."
     ),
     registers=("event:agent_start",),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    config_schema=None,
     requires=("rca_hgraph_store", "rca_falsification_gate"),
 )
 

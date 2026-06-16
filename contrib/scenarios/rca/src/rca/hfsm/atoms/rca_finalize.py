@@ -58,11 +58,7 @@ MANIFEST = ExtensionManifest(
         "shows a genuine investigation (not speculation)."
     ),
     registers=("tool:submit_final_report",),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    config_schema=None,
     requires=("rca_hgraph_store",),
 )
 

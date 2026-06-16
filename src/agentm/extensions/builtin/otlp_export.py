@@ -36,6 +36,7 @@ import os
 import threading
 from typing import Any, Final
 
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.extensions import ExtensionManifest
@@ -194,12 +195,12 @@ def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
         def _shutdown() -> None:
             try:
                 span_processor.shutdown()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("otlp_export: span processor shutdown failed: {}", exc)
             try:
                 log_processor.shutdown()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("otlp_export: log processor shutdown failed: {}", exc)
 
         atexit.register(_shutdown)
         _attached = True

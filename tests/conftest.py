@@ -17,8 +17,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         from agentm.core.observability.otel_export import shutdown_process_telemetry
 
         shutdown_process_telemetry()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Best-effort teardown; a failure here must not mask test results.
+        print(f"conftest: telemetry shutdown failed: {exc}")
 
 # The harness configures the constitution-boundary manifest path on session
 # start; for unit tests that exercise the loader directly (or tests that
