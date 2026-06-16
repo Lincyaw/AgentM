@@ -65,6 +65,14 @@ class CommandRouter:
         if not inv.name:
             return CommandResult(outbound=[ctx.notice(_EMPTY_REPLY)])
         handler = self.registry.lookup(namespace=inv.namespace, name=inv.name)
+        if handler is None and inv.namespace is None:
+            # Skills are registered under the ``skill:`` namespace, but the
+            # ergonomic (and what chat clients send) invocation is the bare
+            # ``/<name>`` — mirroring Claude Code's ``/<skill>``. So a bare name
+            # that is not a builtin falls back to a same-named skill. Builtins
+            # are looked up first (above), so they always win a collision; the
+            # explicit ``/skill:<name>`` form keeps working unchanged.
+            handler = self.registry.lookup(namespace="skill", name=inv.name)
         if handler is None:
             return None
         try:
