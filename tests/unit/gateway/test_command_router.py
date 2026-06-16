@@ -139,6 +139,56 @@ async def test_markdown_command_expands_and_falls_through(tmp_path: Any) -> None
     assert result.expanded_prompt == "Summarise yesterday's commits in one line."
 
 
+@pytest.mark.asyncio
+async def test_bare_name_resolves_skill(tmp_path: Any) -> None:
+    # Chat clients invoke a skill as the bare ``/<name>`` (mirroring Claude
+    # Code), but skills register under the ``skill:`` namespace. A bare name
+    # that is not a builtin must fall back to the same-named skill instead of
+    # being rejected as unknown.
+    from agentm.gateway.commands.skill_command import SkillCommand
+
+    skill_dir = tmp_path / "find-skills"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\ndescription: find things\n---\nBody of the skill.",
+        encoding="utf-8",
+    )
+    reg = _registry(HelpCommand(), SkillCommand.from_dir(skill_dir, "find-skills"))
+    router = CommandRouter(registry=reg)
+
+    result = await router.try_dispatch(_inbound("/find-skills go"), _ctx(_Calls(), reg))
+    assert result is not None
+    # Skill is a prompt command: its body is expanded and falls through.
+    assert result.expanded_prompt is not None
+    assert "Body of the skill." in result.expanded_prompt
+    # The explicit namespaced form keeps working too.
+    result2 = await router.try_dispatch(
+        _inbound("/skill:find-skills go"), _ctx(_Calls(), reg)
+    )
+    assert result2 is not None
+    assert result2.expanded_prompt is not None
+
+
+@pytest.mark.asyncio
+async def test_builtin_wins_over_skill_on_bare_name(tmp_path: Any) -> None:
+    # A skill named like a builtin must never shadow the builtin: bare-name
+    # lookup tries the builtin (namespace=None) first.
+    from agentm.gateway.commands.skill_command import SkillCommand
+
+    skill_dir = tmp_path / "help"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("Skill help body.", encoding="utf-8")
+    reg = _registry(HelpCommand(), SkillCommand.from_dir(skill_dir, "help"))
+    router = CommandRouter(registry=reg)
+
+    result = await router.try_dispatch(_inbound("/help"), _ctx(_Calls(), reg))
+    assert result is not None
+    # The builtin /help replies locally (no expanded prompt); the skill would
+    # have produced an expanded_prompt instead.
+    assert result.expanded_prompt is None
+    assert "commands" in result.outbound[0].content.lower()
+
+
 def _model_ctx(
     *,
     list_models: Any = None,
