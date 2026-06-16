@@ -21,6 +21,7 @@ from loguru import logger
 
 from agentm.gateway.approval import ApprovalManager
 from agentm.gateway.chat_session_map import ChatSessionMap
+from agentm.gateway.child_registry import ChildSessionRegistry
 from agentm.gateway.commands import (
     UNKNOWN_REPLY,
     CommandContext,
@@ -98,12 +99,18 @@ class GatewayRuntime:
             always_block=block,
             timeout_seconds=timeout,
         )
+        # Live sub-agent sessions, addressable by id. Shared with the
+        # SessionManager (which seeds it as a per-session service the sub_agent
+        # atom registers children into) and read here to route a child-addressed
+        # inbound to that child's inbox (see interactive-subagent design).
+        self._child_registry = ChildSessionRegistry()
         self._sessions = SessionManager(
             cwd=cwd,
             chat_map=chat_map,
             session_factory=session_factory,
             outbound_sink=self._emit_outbound,
             approval_manager=self._approval,
+            child_registry=self._child_registry,
         )
         self._server: WireServer | None = None
         self._inflight: set[asyncio.Task[Any]] = set()
@@ -243,11 +250,23 @@ class GatewayRuntime:
         body = decision.body
         if body.channel:
             self._peer_channels[peer.peer_id] = body.channel
-        if decision.action is RouterAction.INTERRUPT:
-            self._interrupt_session(session_key)
-            return
         if decision.action is RouterAction.RESOLVE_APPROVAL:
             self._resolve_approval(body)
+            return
+        # A session_key that names a registered child is interactive sub-agent
+        # input: deliver it to that child's own inbox (the child's driver runs
+        # the turn and its trajectory forwards back over the child_id-stamped
+        # wire) rather than treating the id as a chat key for get_or_create.
+        # The child is caller-agnostic — the human's message rides the same
+        # inbox the parent's inject_instruction would (interactive-subagent §A).
+        if session_key in self._child_registry:
+            if decision.action is RouterAction.INTERRUPT:
+                self._interrupt_child(session_key)
+            else:
+                self._deliver_child_input(session_key, body)
+            return
+        if decision.action is RouterAction.INTERRUPT:
+            self._interrupt_session(session_key)
             return
         task = asyncio.create_task(
             self._dispatch_command_or_prompt(session_key, env.scenario, decision.action, body),
@@ -276,6 +295,32 @@ class GatewayRuntime:
         sess = self._sessions.get(session_key)
         if sess is not None:
             sess.interrupt()
+
+    def _interrupt_child(self, child_id: str) -> None:
+        child = self._child_registry.get(child_id)
+        if child is not None:
+            child.interrupt()
+
+    def _deliver_child_input(self, child_id: str, body: InboundBody) -> None:
+        """Push a human turn into a live child's inbox as ``source="user"``.
+
+        This is the inbound twin of ``child_wire_forwarder``: the child runs on
+        its own driver, so we never call ``prompt()`` (that would contend with
+        whatever already drives the child's loop — the parent's monitor while
+        the task is live, or the child's own idle driver afterward). A plain
+        inbox push is drained at the child's next turn boundary by whoever owns
+        the loop, which is exactly the caller-agnostic semantics the design
+        wants (the parent perceives it too, since the message lands in the
+        child's shared, parent-forwarded trajectory)."""
+        from agentm.core.runtime.session_inbox import InboxItem
+
+        child = self._child_registry.get(child_id)
+        if child is None:
+            return
+        content = body.content or ""
+        if not content.strip():
+            return
+        child.inbox.push(InboxItem(source="user", payload=content))
 
     def _resolve_approval(self, body: InboundBody) -> None:
         if body.button_value:

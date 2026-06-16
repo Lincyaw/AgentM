@@ -202,6 +202,13 @@ def _extract_return_response_text(messages: list[Any]) -> str | None:
 # name (not import) so this atom keeps the §11 contract: no atom-to-atom import.
 _WIRE_CHILD_FORWARDER_SERVICE = "child_wire_forwarder"
 
+# Service the single-process gateway seeds so a spawned child can be registered
+# as interactively addressable by its session id (the human can chat with it).
+# Reached by name, never imported (§11) — its presence also signals interactive
+# mode: when set, children are kept alive after their task instead of being
+# torn down on finalize. See ``.claude/designs/interactive-subagent.md``.
+_CHILD_SESSION_REGISTRY_SERVICE = "child_session_registry"
+
 
 def _forward_child_to_wire(api: ExtensionAPI, child: Any) -> None:
     """Hand a freshly spawned child to the wire forwarder if one is installed.
@@ -471,6 +478,7 @@ class _ChildTaskManager:
         available_inherited: dict[str, Any],
         max_workers: int,
         system_prompt_module: str,
+        child_registry: Any | None = None,
         shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
     ) -> None:
         self._api = api
@@ -479,6 +487,10 @@ class _ChildTaskManager:
         self._system_prompt_module = system_prompt_module
         self._max_workers = max_workers
         self._shutdown_grace_seconds = shutdown_grace_seconds
+        # When set (interactive gateway), spawned children are registered here
+        # for human addressing and kept alive after their task instead of being
+        # torn down on finalize. None outside the gateway → legacy teardown.
+        self._child_registry = child_registry
         self._registry: BackgroundTaskRegistry[_ChildTask] = BackgroundTaskRegistry(
             max_workers=max_workers
         )
@@ -594,6 +606,14 @@ class _ChildTaskManager:
                 "sub_agent: inbox stale after reload; dropped finding for {}",
                 state.task_id,
             )
+        if self._child_registry is not None:
+            # Interactive mode: leave the child's session alive and registered
+            # so the human can keep chatting with it after its dispatched task
+            # finishes (interactive-subagent §"continue after death"). The
+            # parent already perceives completion via the inbox finding posted
+            # above; the child's child_end marker fires only at real teardown
+            # (on_session_shutdown), so the UI shows one lifecycle per child.
+            return
         if error is None:
             await state.session.shutdown()
         else:
@@ -791,6 +811,14 @@ class _ChildTaskManager:
         # sees the sub-agent working live. No-op outside the gateway (the
         # wire_driver atom is the only thing that registers this service).
         _forward_child_to_wire(self._api, child)
+        # Make the child interactively addressable by id (the human can chat
+        # with it). No-op outside the interactive gateway. When present, this
+        # also keeps the child alive after its task (see _finalize_state).
+        if self._child_registry is not None:
+            try:
+                self._child_registry.register(child)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("sub_agent: child registry registration failed: {}", exc)
 
         abort_signal = asyncio.Event()
         state = _ChildTask(
@@ -986,18 +1014,36 @@ class _ChildTaskManager:
         async with self._registry.lock:
             children = self._registry.values()
         pending = [child for child in children if child.status == _RUNNING]
-        if not pending:
+        if pending:
+            done, still_running = await asyncio.wait(
+                [child.task for child in pending],
+                timeout=self._shutdown_grace_seconds,
+            )
+            _ = done
+            if still_running:
+                for child in pending:
+                    if child.task in still_running:
+                        child.abort_signal.set()
+                await asyncio.gather(*still_running, return_exceptions=True)
+        # Interactive mode kept completed children alive for post-task chat;
+        # the parent is now going away, so tear them all down (one child_end
+        # each, emitted by AgentSession.shutdown) and drop their registry
+        # entries so a stale id can never route an inbound to a dead session.
+        if self._child_registry is None:
             return
-        done, still_running = await asyncio.wait(
-            [child.task for child in pending],
-            timeout=self._shutdown_grace_seconds,
-        )
-        _ = done
-        if still_running:
-            for child in pending:
-                if child.task in still_running:
-                    child.abort_signal.set()
-            await asyncio.gather(*still_running, return_exceptions=True)
+        async with self._registry.lock:
+            children = self._registry.values()
+        for child in children:
+            try:
+                await child.session.shutdown()
+            except Exception:
+                logger.exception(
+                    "sub_agent: interactive child shutdown failed for {}",
+                    child.task_id,
+                )
+            child_sid = getattr(child.session, "session_id", None)
+            if child_sid:
+                self._child_registry.deregister(str(child_sid))
 
 async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
     inherit_extensions = list(config.inherit_extensions)
@@ -1028,6 +1074,12 @@ async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
         available_inherited=available_inherited,
         max_workers=config.max_workers,
         system_prompt_module=system_prompt.module_path,
+        # Present only inside the interactive gateway: makes spawned children
+        # human-addressable and keeps them alive after their task. ``getattr``
+        # guards minimal stub APIs that omit the service registry.
+        child_registry=getattr(api, "get_service", lambda _n: None)(
+            _CHILD_SESSION_REGISTRY_SERVICE
+        ),
         shutdown_grace_seconds=config.shutdown_grace_seconds,
     )
 

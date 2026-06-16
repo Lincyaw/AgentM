@@ -32,6 +32,7 @@ from loguru import logger
 
 from .approval import ApprovalManager
 from .chat_session_map import ChatSessionMap
+from .child_registry import CHILD_SESSION_REGISTRY_SERVICE, ChildSessionRegistry
 from .wire import InboundBody
 
 
@@ -75,12 +76,17 @@ class SessionManager:
         session_factory: SessionFactory,
         outbound_sink: OutboundSink,
         approval_manager: ApprovalManager | None = None,
+        child_registry: ChildSessionRegistry | None = None,
     ) -> None:
         self._cwd = cwd
         self._chat_map = chat_map
         self._factory = session_factory
         self._outbound_sink = outbound_sink
         self._approval = approval_manager
+        # Shared with the gateway runtime: seeded into every session's service
+        # map so the sub_agent atom can register spawned children, making them
+        # interactively addressable by id (see interactive-subagent design).
+        self._child_registry = child_registry
         self._sessions: dict[str, Any] = {}
         # Per-session mutable turn-context dict the wire_driver reads when
         # building approval cards. Updated on each prompt.
@@ -137,6 +143,12 @@ class SessionManager:
                 wire_services["fork_up_to"] = fork[1]
             if self._approval is not None:
                 wire_services["approval_manager"] = self._approval
+            # Hand the child-session registry to the session so its sub_agent
+            # atom can register spawned children for interactive addressing.
+            # Absent outside the interactive gateway (sub_agent then tears
+            # children down on finalize as before).
+            if self._child_registry is not None:
+                wire_services[CHILD_SESSION_REGISTRY_SERVICE] = self._child_registry
 
             sess = await self._factory(
                 self._cwd, session_key, scenario, prior_session_id, wire_services
