@@ -475,6 +475,7 @@ class _BusObserver(EventBusObserver):
         result: Any,
         error: BaseException | None,
         duration_ns: int,
+        owner: str | None = None,
     ) -> None:
         return None
 

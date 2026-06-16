@@ -166,8 +166,6 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-_HANDLER_OWNER_ATTR = "_agentm_obs_owner"
-
 def _handler_label(handler: Handler) -> str:
     mod = getattr(handler, "__module__", None) or "<unknown>"
     qual = getattr(handler, "__qualname__", None) or repr(handler)
@@ -286,12 +284,12 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
             result: Any,
             error: BaseException | None,
             duration_ns: int,
+            owner: str | None = None,
         ) -> None:
             del result
             self._record_mutation(channel, handler, event, error)
             if not include_handlers or channel in exclude_channels:
                 return
-            owner = getattr(handler, _HANDLER_OWNER_ATTR, None)
             dispatch_id = getattr(event, "dispatch_id", "") or ""
             attrs: dict[str, Any] = {
                 "agentm.session.id": api.session_id,

@@ -175,16 +175,9 @@ class AtomReloader:
             *,
             priority: int = BusPriority.NORMAL,
         ) -> Any:
-            try:
-                setattr(handler, "_agentm_obs_owner", owner)
-            except (AttributeError, TypeError) as exc:
-                # Some handlers (builtins, bound C methods) reject attributes;
-                # the obs-owner tag is best-effort, so continue without it.
-                logger.debug(
-                    "atom_reloader: could not tag handler with obs owner {!r}: {}",
-                    owner,
-                    exc,
-                )
+            # Owner attribution lives on the bus subscription (stamped by
+            # _ExtensionAPIImpl.on from its own identity), so this wrapper only
+            # records the unsub token for per-atom teardown on reload/unload.
             unsub = original_on(channel, handler, priority=priority)
             self._handlers_by_atom.setdefault(owner, []).append(unsub)
             return unsub
@@ -432,7 +425,7 @@ class AtomReloader:
         positions: dict[str, int] = {}
         for channel in self._bus.channels():
             for idx, sub in enumerate(self._bus.subscriptions_for(channel)):
-                if getattr(sub.handler, "_agentm_obs_owner", None) == owner:
+                if sub.owner == owner:
                     positions[channel] = idx
                     break
         return positions
@@ -442,18 +435,10 @@ class AtomReloader:
             subs = self._bus.subscriptions_for(channel)
             if not subs:
                 continue
-            owner_subs = [
-                sub
-                for sub in subs
-                if getattr(sub.handler, "_agentm_obs_owner", None) == owner
-            ]
+            owner_subs = [sub for sub in subs if sub.owner == owner]
             if not owner_subs:
                 continue
-            non_owner = [
-                sub
-                for sub in subs
-                if getattr(sub.handler, "_agentm_obs_owner", None) != owner
-            ]
+            non_owner = [sub for sub in subs if sub.owner != owner]
             clamp = min(anchor_idx, len(non_owner))
             self._bus.replace_subscriptions(
                 channel,

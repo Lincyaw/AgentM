@@ -415,12 +415,11 @@ async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
                 value: Any,
                 err: BaseException | None,
                 duration_ns: int,
+                owner: str | None = None,
             ) -> None:
-                del event, err, duration_ns
+                del handler, event, err, duration_ns
                 if channel == ResourcesDiscoverEvent.CHANNEL and isinstance(value, dict):
-                    response_owners[id(value)] = str(
-                        getattr(handler, "_agentm_obs_owner", "<unknown>")
-                    )
+                    response_owners[id(value)] = owner or "<unknown>"
 
             def on_emit_end(
                 self, channel: str, event: Any, results: list[Any]
