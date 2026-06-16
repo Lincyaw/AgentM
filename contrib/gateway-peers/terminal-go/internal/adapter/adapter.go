@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -20,6 +21,18 @@ import (
 // user-driven "new tab", which a single-conversation wire peer does not support.
 var ErrNoQueuedChild = errors.New("agentm-terminal: no sub-agent session to open; multi-session spawning is not supported over the wire")
 
+// tabSession holds the per-tab state for an independently-spawned gateway
+// session (user-driven new tab via Ctrl+T / "+"). Each tab talks to a
+// distinct session_key on the same wire connection.
+type tabSession struct {
+	sessionKey string
+	app        *app.App
+	sess       *session.Session
+	translator *Translator
+	controller *Controller
+	children   *ChildManager
+}
+
 // Adapter binds a WireClient to a cagent *app.App: it constructs the App with a
 // wire-backed Controller, owns the Translator, and pumps the client's outbound
 // envelope channel into the Translator. The result is a fully-wired App the TUI
@@ -31,6 +44,14 @@ type Adapter struct {
 	controller *Controller
 	client     *wire.WireClient
 	children   *ChildManager
+
+	// Multi-session support: session_key → tab for independently-spawned tabs.
+	// The root session is NOT in this map (it's the fallback in routeOutbound).
+	mu      sync.Mutex
+	rootKey string                 // session_key of the initial/root session
+	baseID  Identity               // template for new tab identities
+	tabs    map[string]*tabSession // session_key → spawned tab
+	program *tea.Program           // cached for new tab child managers
 }
 
 // New builds an Adapter for a connected WireClient.
@@ -74,6 +95,9 @@ func New(client *wire.WireClient, id Identity, firstMessage string, appOpts ...a
 		controller: ctrl,
 		client:     client,
 		children:   children,
+		rootKey:    id.SessionKey,
+		baseID:     id,
+		tabs:       make(map[string]*tabSession),
 	}
 }
 
@@ -142,6 +166,9 @@ func capabilityCommandNames(v any) []string {
 // SetProgram hands the tea.Program to the child manager so it can drive the
 // TUI's new-tab path when a sub-agent starts. main calls this after tui.New.
 func (ad *Adapter) SetProgram(p *tea.Program) {
+	ad.mu.Lock()
+	ad.program = p
+	ad.mu.Unlock()
 	if ad.children != nil {
 		ad.children.SetProgram(p)
 	}
@@ -153,28 +180,123 @@ func (ad *Adapter) Start(ctx context.Context) {
 	go ad.pump(ctx)
 }
 
-// ErrorSpawner is a non-nil SessionSpawner that always fails. The wire peer
-// maps one TUI to one gateway conversation, so spawning a *second* independent
-// session is not supported. A non-nil spawner is mandatory because the TUI's
-// tab-restore path calls it unconditionally for every persisted tab beyond the
-// first (a nil spawner panics there); the error makes the TUI log and skip the
-// tab. Used by both the live and mock launch paths.
+// ErrorSpawner is a non-nil SessionSpawner that always fails. Used by the mock
+// launch path where no wire client exists and multi-session spawning is not
+// meaningful. A non-nil spawner is mandatory because the TUI's tab-restore
+// path calls it unconditionally for every persisted tab beyond the first (a
+// nil spawner panics there); the error makes the TUI log and skip the tab.
 func ErrorSpawner() tui.SessionSpawner {
 	return func(ctx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
 		_, _ = ctx, workingDir
-		return nil, nil, nil, errors.New("agentm-terminal: multi-session spawning is not supported over the wire")
+		return nil, nil, nil, errors.New("agentm-terminal: multi-session spawning is not supported without a gateway connection")
 	}
 }
 
-// Spawner returns the wire peer's SessionSpawner. It is backed by the child
-// manager: the supervisor calls it from its SpawnSessionMsg handler, and the
-// manager returns whichever sub-agent child app it queued for that spawn (or
-// ErrNoQueuedChild for a user-driven new tab).
+// Spawner returns the wire peer's SessionSpawner. It supports two kinds of
+// spawn: sub-agent child tabs (queued by ChildManager.Start) and user-initiated
+// independent sessions (Ctrl+T / "+" button). The spawner tries child queues
+// first; if none has a pending child, it creates a new independent session on
+// the same wire connection with a fresh session_key.
 func (ad *Adapter) Spawner() tui.SessionSpawner {
-	if ad.children != nil {
-		return ad.children.Spawner()
+	return func(ctx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
+		// 1. Check if any child manager (root or spawned tab) has a queued
+		//    sub-agent child — these take priority over independent sessions
+		//    because the SpawnSessionMsg was driven by a child_start frame.
+		if cs := ad.tryPopChild(); cs != nil {
+			return cs.app, cs.sess, func() {}, nil
+		}
+		// 2. User-initiated new tab: create an independent gateway session.
+		return ad.createTab(ctx)
 	}
-	return ErrorSpawner()
+}
+
+// tryPopChild checks the root child manager and all spawned-tab child managers
+// for a queued sub-agent child app. Returns nil if none is pending.
+func (ad *Adapter) tryPopChild() *childSession {
+	if ad.children != nil {
+		if cs := ad.children.TryPop(); cs != nil {
+			return cs
+		}
+	}
+	ad.mu.Lock()
+	defer ad.mu.Unlock()
+	for _, tab := range ad.tabs {
+		if tab.children != nil {
+			if cs := tab.children.TryPop(); cs != nil {
+				return cs
+			}
+		}
+	}
+	return nil
+}
+
+// createTab builds a new independent session on the same wire connection. The
+// new session gets a unique session_key so the gateway creates a fresh
+// AgentSession; outbound frames with that key are routed to this tab's
+// translator by the pump.
+func (ad *Adapter) createTab(_ context.Context) (*app.App, *session.Session, func(), error) {
+	newKey := ad.rootKey + ":" + wire.NewID()
+
+	wd, _ := os.Getwd()
+	sess := session.New(session.WithTitle("agentm"))
+
+	tabID := newKey // identity for the child manager
+	childID := ad.baseID
+	childID.SessionKey = newKey
+	childID.Scenario = ad.baseID.Scenario
+
+	children := NewChildManager(wd, ad.client, childID)
+
+	tr := NewTranslator(nil, sess)
+	tr.children = children
+	ctrl := NewController(ad.client, childID, tr, "")
+
+	a := app.New(context.Background(), sess, app.WithController(ctrl))
+	tr.app = a
+
+	seedFromCapabilities(a, ad.client.Capabilities())
+
+	tab := &tabSession{
+		sessionKey: newKey,
+		app:        a,
+		sess:       sess,
+		translator: tr,
+		controller: ctrl,
+		children:   children,
+	}
+
+	ad.mu.Lock()
+	ad.tabs[newKey] = tab
+	p := ad.program
+	ad.mu.Unlock()
+
+	if p != nil {
+		children.SetProgram(p)
+	}
+
+	cleanup := func() {
+		ad.mu.Lock()
+		delete(ad.tabs, tabID)
+		ad.mu.Unlock()
+	}
+
+	return a, sess, cleanup, nil
+}
+
+// routeOutbound dispatches an outbound envelope to the translator that owns its
+// session_key. Spawned tabs are checked first; the root translator is the
+// fallback for the root session_key or any envelope with an empty/unknown key.
+func (ad *Adapter) routeOutbound(env *wire.Envelope) {
+	if env.SessionKey != "" {
+		ad.mu.Lock()
+		tab, ok := ad.tabs[env.SessionKey]
+		ad.mu.Unlock()
+		if ok {
+			tab.translator.HandleEnvelope(env)
+			return
+		}
+	}
+	ad.translator.HandleEnvelope(env)
 }
 
 func (ad *Adapter) pump(ctx context.Context) {
@@ -192,7 +314,7 @@ func (ad *Adapter) pump(ctx context.Context) {
 			if !ok {
 				return
 			}
-			ad.translator.HandleEnvelope(env)
+			ad.routeOutbound(env)
 		}
 	}
 }

@@ -38,6 +38,13 @@ type Controller struct {
 	scenarioSent bool
 	firstMessage string
 	hasFirstMsg  bool
+
+	// prevRunCtx tracks the ctx from the most recent Run/RunWithMessage/
+	// CompactSession call. When the TUI cancels it (ESC or new message) and a
+	// new Run follows, we send {control:"interrupt"} synchronously before the
+	// new message so the gateway stops the old turn. A background goroutine
+	// watches it for the ESC-only case (no new Run follows).
+	prevRunCtx context.Context
 }
 
 // NewController builds a Controller. firstMessage is the optional prompt to send
@@ -103,15 +110,61 @@ func (c *Controller) sendInbound(body map[string]any) {
 	}
 }
 
+// sendInterrupt sends a control=interrupt inbound to stop the current gateway
+// turn. The gateway's router (§3.2) dispatches it to session.interrupt().
+func (c *Controller) sendInterrupt() {
+	log.Printf("[adapter] sending interrupt for session_key=%s", c.id.SessionKey)
+	c.sendInbound(map[string]any{"control": "interrupt"})
+}
+
+// interruptIfPending checks whether the previous Run's ctx was cancelled by the
+// TUI (ESC or new-message-replaces-old). If so, sends an interrupt to the
+// gateway before the next message, ensuring the old turn is stopped promptly.
+func (c *Controller) interruptIfPending() {
+	c.mu.Lock()
+	prev := c.prevRunCtx
+	c.mu.Unlock()
+	if prev == nil {
+		return
+	}
+	select {
+	case <-prev.Done():
+		c.sendInterrupt()
+	default:
+	}
+}
+
+// trackRun stores the current Run's ctx and spawns a goroutine that sends an
+// interrupt if the ctx is cancelled (ESC without a following new message).
+// At most one goroutine per Controller is "leaked" (the last completed turn's
+// watcher); subsequent Run calls supersede the old watcher via prevRunCtx.
+func (c *Controller) trackRun(ctx context.Context) {
+	c.mu.Lock()
+	c.prevRunCtx = ctx
+	c.mu.Unlock()
+
+	go func() {
+		<-ctx.Done()
+		c.mu.Lock()
+		isCurrent := c.prevRunCtx == ctx
+		c.mu.Unlock()
+		if isCurrent {
+			c.sendInterrupt()
+		}
+	}()
+}
+
 // Run sends one user turn to the gateway.
 func (c *Controller) Run(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
-	_, _ = ctx, cancel
-	_ = attachments // attachments are not yet surfaced over the wire protocol
+	_ = cancel
+	_ = attachments
 	if message == "" {
 		return
 	}
+	c.interruptIfPending()
 	c.echoUserMessage(message)
 	c.sendInbound(map[string]any{"content": message})
+	c.trackRun(ctx)
 }
 
 // echoUserMessage renders the user's turn into the transcript locally. The
@@ -131,7 +184,7 @@ func (c *Controller) echoUserMessage(content string) {
 // RunWithMessage sends a pre-built message. The wire protocol carries plain
 // text, so the message's textual content is forwarded.
 func (c *Controller) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg *session.Message) {
-	_, _ = ctx, cancel
+	_ = cancel
 	if msg == nil {
 		return
 	}
@@ -139,19 +192,23 @@ func (c *Controller) RunWithMessage(ctx context.Context, cancel context.CancelFu
 	if content == "" {
 		return
 	}
+	c.interruptIfPending()
 	c.echoUserMessage(content)
 	c.sendInbound(map[string]any{"content": content})
+	c.trackRun(ctx)
 }
 
 // CompactSession asks the gateway to compact history via the /compact command.
 func (c *Controller) CompactSession(ctx context.Context, cancel context.CancelFunc, additionalPrompt string) {
-	_, _ = ctx, cancel
+	_ = cancel
 	content := "/compact"
 	if additionalPrompt != "" {
 		content += " " + additionalPrompt
 	}
+	c.interruptIfPending()
 	c.echoUserMessage(content)
 	c.sendInbound(map[string]any{"content": content})
+	c.trackRun(ctx)
 }
 
 // Resume delivers a tool-confirmation decision by sending an inbound carrying
