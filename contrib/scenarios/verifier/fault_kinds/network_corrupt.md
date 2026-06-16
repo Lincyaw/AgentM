@@ -11,6 +11,15 @@ rule-bearing side. Occasional decode / deserialisation / schema-
 validation errors at the receiver. Error rate is usually below what
 `loss` produces but visible.
 
+### When the target looks healthy but traffic dropped
+
+Heavy corruption can cause TCP to drop/retransmit so many packets
+that callers time out. Requests that survive arrive intact and
+complete normally at the target. When the target's latency and
+error rate look fine but span volume dropped significantly, check
+the caller side — the same methodology as network_partition and
+network_loss applies.
+
 ## How to observe on a neighbour
 Like network_loss, corruption causes retransmissions that appear as
 **tail-latency spikes** (p99/max). Average latency may look flat.

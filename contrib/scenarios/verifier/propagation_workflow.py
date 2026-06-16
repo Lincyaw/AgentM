@@ -95,6 +95,7 @@ class PropagationResult(TypedDict, total=False):
     judge: JudgeReviewResult
     judge_rounds: list[dict[str, Any]]
     unreachable_seeds: list[str]
+    seed_verdicts: dict[str, SeedResult]
 
 
 def _reaches(adj: dict[str, list[str]], src: str, dst: str) -> bool:
@@ -276,6 +277,11 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
                 ctx.log(f"seed {target}: {v} — skipping")
 
+        seed_verdicts: dict[str, SeedResult] = {}
+        for target, seed_verdict in seed_results:
+            if seed_verdict:
+                seed_verdicts[target] = seed_verdict
+
         if not nodes:
             ctx.log("no seeds confirmed — aborting propagation")
             return {
@@ -284,6 +290,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 "verdicts": {},
                 "hop_log": [],
                 "rounds": 0,
+                "seed_verdicts": seed_verdicts,
             }
 
         # -- Phase 1: propagate -------------------------------------------

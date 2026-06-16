@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Annotated, Any
@@ -92,9 +94,12 @@ async def _run_workflow(
         if runner is None:
             raise RuntimeError("workflow_runner service not found")
         result = await runner.run_file(WORKFLOW_SCRIPT, workflow_args)
-        return result if isinstance(result, dict) else {}
     finally:
-        await session.shutdown()
+        try:
+            await session.shutdown()
+        except Exception:  # noqa: BLE001
+            logger.warning("session shutdown failed", exc_info=True)
+    return result if isinstance(result, dict) else {}
 
 
 def _write_outputs(
@@ -115,6 +120,10 @@ def _write_outputs(
         run_meta["judge_rounds"] = result["judge_rounds"]
     if result.get("judge"):
         run_meta["judge"] = result["judge"]
+    if result.get("unreachable_seeds"):
+        run_meta["unreachable_seeds"] = result["unreachable_seeds"]
+    if result.get("seed_verdicts"):
+        run_meta["seed_verdicts"] = result["seed_verdicts"]
     (out / "run_meta.json").write_text(
         json.dumps(run_meta, indent=2, ensure_ascii=False, default=str) + "\n"
     )
@@ -136,6 +145,12 @@ def _run_one(case_dir: Path, out_dir: Path, budget: int = 15) -> dict:
 
     if not result.get("nodes"):
         logger.warning("No seeds confirmed.")
+        (out / "run_meta.json").write_text(
+            json.dumps({
+                "error": "no seeds confirmed",
+                "seed_verdicts": result.get("seed_verdicts", {}),
+            }, indent=2, ensure_ascii=False, default=str) + "\n"
+        )
         return {"case": data_dir.name, "error": "no seeds confirmed"}
 
     _write_outputs(out, ctx.meta, result)
@@ -159,21 +174,29 @@ def _run_one(case_dir: Path, out_dir: Path, budget: int = 15) -> dict:
 
 def _read_cached(out_dir: Path, case_name: str) -> dict | None:
     scenario_path = out_dir / "fpg_scenario.json"
-    if not scenario_path.exists():
-        return None
-    try:
-        scenario = json.loads(scenario_path.read_text())
-    except Exception:  # noqa: BLE001
-        return None
-    seeds = [i["node_id"] for i in scenario.get("injections", [])]
-    confirmed = [n["id"] for n in scenario.get("graph", {}).get("nodes", [])]
-    return {
-        "case": case_name,
-        "seeds": seeds,
-        "confirmed": confirmed,
-        "propagated": [s for s in confirmed if s not in seeds],
-        "cached": True,
-    }
+    meta_path = out_dir / "run_meta.json"
+    if scenario_path.exists():
+        try:
+            scenario = json.loads(scenario_path.read_text())
+        except Exception:  # noqa: BLE001
+            return None
+        seeds = [i["node_id"] for i in scenario.get("injections", [])]
+        confirmed = [n["id"] for n in scenario.get("graph", {}).get("nodes", [])]
+        return {
+            "case": case_name,
+            "seeds": seeds,
+            "confirmed": confirmed,
+            "propagated": [s for s in confirmed if s not in seeds],
+            "cached": True,
+        }
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:  # noqa: BLE001
+            return None
+        if meta.get("error"):
+            return {"case": case_name, "error": meta["error"], "cached": True}
+    return None
 
 
 # ------------------------------------------------------------------
@@ -249,23 +272,52 @@ def batch(
             logger.error("[{}] {}", name, exc)
             return {"case": name, "error": str(exc)}
 
-    if parallel <= 1:
-        summaries = [_do(name, i) for i, name in enumerate(cases, 1)]
-    else:
-        results: dict[str, dict] = {}
-        with ThreadPoolExecutor(max_workers=parallel) as pool:
-            futures = {
-                pool.submit(_do, name, i): name
-                for i, name in enumerate(cases, 1)
-            }
-            for future in as_completed(futures):
-                results[futures[future]] = future.result()
-        summaries = [results[name] for name in cases]
+    shutdown_event = threading.Event()
+
+    def _sigint_handler(sig: int, frame: object) -> None:
+        logger.warning("Ctrl+C received — finishing in-progress cases, no new ones will start")
+        shutdown_event.set()
+
+    original_handler = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    def _do_guarded(name: str, idx: int) -> dict:
+        if shutdown_event.is_set():
+            return {"case": name, "error": "interrupted"}
+        return _do(name, idx)
+
+    try:
+        if parallel <= 1:
+            summaries = []
+            for i, name in enumerate(cases, 1):
+                if shutdown_event.is_set():
+                    logger.info("Skipping remaining cases")
+                    break
+                summaries.append(_do(name, i))
+        else:
+            results: dict[str, dict] = {}
+            with ThreadPoolExecutor(max_workers=parallel) as pool:
+                futures = {
+                    pool.submit(_do_guarded, name, i): name
+                    for i, name in enumerate(cases, 1)
+                }
+                for future in as_completed(futures):
+                    results[futures[future]] = future.result()
+                    if shutdown_event.is_set():
+                        for f in futures:
+                            f.cancel()
+                        break
+            summaries = [
+                results.get(name, {"case": name, "error": "interrupted"})
+                for name in cases
+            ]
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
 
     summary_path = out / "run_summary.jsonl"
-    with open(summary_path, "w") as f:
+    with open(summary_path, "w") as fout:
         for s in summaries:
-            f.write(json.dumps(s, ensure_ascii=False) + "\n")
+            fout.write(json.dumps(s, ensure_ascii=False) + "\n")
 
     ok = sum(1 for s in summaries if "error" not in s)
     fail = total - ok
