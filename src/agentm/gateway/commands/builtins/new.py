@@ -32,7 +32,7 @@ class NewCommand:
         await ctx.forget_chat_mapping()
         return CommandResult(
             outbound=[
-                ctx.reply("🌱 New session started. History cleared.")
+                ctx.notice("🌱 New session started. History cleared.")
             ]
         )
 

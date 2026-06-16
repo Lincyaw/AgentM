@@ -20,6 +20,18 @@ type WireClient struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	lastErr   error // last error from readLoop, readable after Done() fires
+
+	// capabilities is the static capability block the gateway stamped on the
+	// welcome frame (models, active model, scenario, gateway command catalog).
+	// Captured at Connect so the TUI can populate its model picker and command
+	// palette before any session exists. Nil if the gateway sent none.
+	capabilities map[string]any
+}
+
+// Capabilities returns the static capability block from the welcome handshake
+// (or nil). Safe to read after Connect returns.
+func (c *WireClient) Capabilities() map[string]any {
+	return c.capabilities
 }
 
 // NewWireClient creates a new client (does not connect yet).
@@ -79,6 +91,9 @@ func (c *WireClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("unexpected response kind: %s", resp.Kind)
 	}
 
+	if caps, ok := resp.Body["capabilities"].(map[string]any); ok {
+		c.capabilities = caps
+	}
 	log.Printf("[wire] connected, welcome from server_version=%v", resp.Body["server_version"])
 	go c.readLoop()
 	return nil

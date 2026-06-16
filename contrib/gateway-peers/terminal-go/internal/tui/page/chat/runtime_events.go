@@ -90,6 +90,17 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 	case *runtime.ShellOutputEvent:
 		return true, p.messages.AddShellOutputMessage(msg.Output)
 
+	case *runtime.SystemNoteEvent:
+		// Control-command output (/status, /help, ...). Render as a system
+		// notice and settle any working state the slash command triggered —
+		// control commands run no agent turn, so no StreamStopped is coming.
+		p.setPendingResponse(false)
+		return true, tea.Batch(
+			p.messages.AddSystemMessage(msg.Title, msg.Content),
+			p.setWorking(false),
+			p.messages.ScrollToBottom(),
+		)
+
 	// ===== Tool Events =====
 	case *runtime.PartialToolCallEvent:
 		return true, p.handlePartialToolCall(msg)

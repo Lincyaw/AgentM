@@ -85,6 +85,10 @@ class SessionManager:
         # Per-session mutable turn-context dict the wire_driver reads when
         # building approval cards. Updated on each prompt.
         self._turn_ctx: dict[str, dict[str, Any]] = {}
+        # Pending fork requests: session_key -> (source_session_id, up_to). Set by
+        # /fork; consumed by the next get_or_create, which seeds a NEW session
+        # from the source transcript instead of resuming the chat's prior id.
+        self._pending_fork: dict[str, tuple[str, int | None]] = {}
         self._lock = asyncio.Lock()
 
     # -- public -------------------------------------------------------
@@ -97,7 +101,12 @@ class SessionManager:
             if sess is not None:
                 return sess
 
-            prior_session_id = self._chat_map.get(session_key)
+            # A pending /fork overrides the resume path: start a NEW session
+            # seeded from the source transcript rather than resuming the chat's
+            # prior id. resume is forced None so resolve_session_state takes the
+            # fork branch; the fork params ride wire_services to the factory.
+            fork = self._pending_fork.pop(session_key, None)
+            prior_session_id = None if fork else self._chat_map.get(session_key)
 
             turn_ctx: dict[str, Any] = {
                 "channel": inbound.channel,
@@ -123,6 +132,9 @@ class SessionManager:
                 # import agentm.core.lib sub-modules (§11.4.6).
                 "model_names": _available_model_names(),
             }
+            if fork is not None:
+                wire_services["fork_source"] = fork[0]
+                wire_services["fork_up_to"] = fork[1]
             if self._approval is not None:
                 wire_services["approval_manager"] = self._approval
 
@@ -195,6 +207,14 @@ class SessionManager:
     def set_chat_mapping(self, session_key: str, session_id: str) -> None:
         """Point the persistent ChatSessionMap entry to ``session_id``."""
         self._chat_map.set(session_key, session_id)
+
+    def set_pending_fork(
+        self, session_key: str, source_session_id: str, up_to: int | None
+    ) -> None:
+        """Arrange for the next :meth:`get_or_create` for ``session_key`` to fork
+        a new session from ``source_session_id`` (up to ``up_to`` messages, or
+        all when ``None``) instead of resuming the chat's prior session."""
+        self._pending_fork[session_key] = (source_session_id, up_to)
 
     async def shutdown_all(self) -> None:
         async with self._lock:

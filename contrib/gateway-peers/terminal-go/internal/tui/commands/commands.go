@@ -96,28 +96,6 @@ func builtInSessionCommands() []Item {
 			},
 		},
 		{
-			ID:           "session.undo",
-			Label:        "Undo",
-			SlashCommand: "/undo",
-			Description:  "Restore file changes from the latest snapshot",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(string) tea.Cmd {
-				return core.CmdHandler(messages.UndoSnapshotMsg{})
-			},
-		},
-		{
-			ID:           "session.snapshots",
-			Label:        "Snapshots",
-			SlashCommand: "/snapshots",
-			Description:  "List captured snapshots",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(string) tea.Cmd {
-				return core.CmdHandler(messages.ShowSnapshotsDialogMsg{})
-			},
-		},
-		{
 			ID:           "session.cost",
 			Label:        "Cost",
 			SlashCommand: "/cost",
@@ -126,28 +104,6 @@ func builtInSessionCommands() []Item {
 			Immediate:    true,
 			Execute: func(string) tea.Cmd {
 				return core.CmdHandler(messages.ShowCostDialogMsg{})
-			},
-		},
-		{
-			ID:           "session.eval",
-			Label:        "Eval",
-			SlashCommand: "/eval",
-			Description:  "Create an evaluation report (usage: /eval [filename])",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(arg string) tea.Cmd {
-				return core.CmdHandler(messages.EvalSessionMsg{Filename: arg})
-			},
-		},
-		{
-			ID:           "session.fork",
-			Label:        "Fork",
-			SlashCommand: "/fork",
-			Description:  "Fork the current session into a new tab",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(string) tea.Cmd {
-				return core.CmdHandler(messages.ForkSessionMsg{})
 			},
 		},
 		{
@@ -185,24 +141,21 @@ func builtInSessionCommands() []Item {
 			},
 		},
 		{
-			ID:           "session.export",
-			Label:        "Export",
-			SlashCommand: "/export",
-			Description:  "Export the session as HTML (usage: /export [filename])",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(arg string) tea.Cmd {
-				return core.CmdHandler(messages.ExportSessionMsg{Filename: arg})
-			},
-		},
-		{
 			ID:           "session.model",
 			Label:        "Model",
 			SlashCommand: "/model",
 			Description:  "Change the model for the current agent",
 			Category:     "Session",
 			Immediate:    true,
-			Execute: func(string) tea.Cmd {
+			Execute: func(arg string) tea.Cmd {
+				// `/model <name>` switches directly via the gateway's
+				// switch_model command, which is always available with a
+				// remote runtime. Only the bare `/model` (no argument) needs
+				// the local picker, which depends on the gateway having
+				// advertised a model list in session_ready.
+				if name := strings.TrimSpace(arg); name != "" {
+					return core.CmdHandler(messages.ChangeModelMsg{ModelRef: name})
+				}
 				return core.CmdHandler(messages.OpenModelPickerMsg{})
 			},
 		},
@@ -215,39 +168,6 @@ func builtInSessionCommands() []Item {
 			Immediate:    true,
 			Execute: func(string) tea.Cmd {
 				return core.CmdHandler(messages.NewSessionMsg{})
-			},
-		},
-		{
-			ID:           "session.pause",
-			Label:        "Pause",
-			SlashCommand: "/pause",
-			Description:  "Pause/resume the runtime loop after the current request",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(string) tea.Cmd {
-				return core.CmdHandler(messages.TogglePauseMsg{})
-			},
-		},
-		{
-			ID:           "session.permissions",
-			Label:        "Permissions",
-			SlashCommand: "/permissions",
-			Description:  "Show tool permission rules for this session",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(string) tea.Cmd {
-				return core.CmdHandler(messages.ShowPermissionsDialogMsg{})
-			},
-		},
-		{
-			ID:           "session.history",
-			Label:        "Sessions",
-			SlashCommand: "/sessions",
-			Description:  "Browse and load past sessions",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(string) tea.Cmd {
-				return core.CmdHandler(messages.OpenSessionBrowserMsg{})
 			},
 		},
 		{
@@ -293,35 +213,6 @@ func builtInSessionCommands() []Item {
 			Immediate:    true,
 			Execute: func(string) tea.Cmd {
 				return core.CmdHandler(messages.ShowSkillsDialogMsg{})
-			},
-		},
-		{
-			ID:           "session.toolset.restart",
-			Label:        "Restart Toolset",
-			SlashCommand: "/toolset-restart",
-			Description:  "Force a supervisor-driven restart of one toolset (usage: /toolset-restart <name>)",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(arg string) tea.Cmd {
-				name := strings.TrimSpace(arg)
-				return core.CmdHandler(messages.RestartToolsetMsg{Name: name})
-			},
-		},
-		{
-			ID:           "session.title",
-			Label:        "Title",
-			SlashCommand: "/title",
-			Description:  "Set or regenerate session title (usage: /title [new title])",
-			Category:     "Session",
-			Immediate:    true,
-			Execute: func(arg string) tea.Cmd {
-				arg = strings.TrimSpace(arg)
-				if arg == "" {
-					// No argument: regenerate title
-					return core.CmdHandler(messages.RegenerateTitleMsg{})
-				}
-				// With argument: set title
-				return core.CmdHandler(messages.SetSessionTitleMsg{Title: arg})
 			},
 		},
 		{

@@ -501,12 +501,13 @@ func (m *appModel) handleMCPPrompt(promptName string, arguments map[string]strin
 // --- Model picker ---
 
 func (m *appModel) handleOpenModelPicker() (tea.Model, tea.Cmd) {
-	if !m.application.SupportsModelSwitching() {
-		return m, notification.InfoCmd("Model switching is not supported with remote runtimes")
-	}
+	// Switching itself is always supported by the gateway (switch_model). The
+	// picker only needs the advertised model list from session_ready; when that
+	// is empty we can still switch by name, so guide the user there instead of
+	// claiming switching is unsupported.
 	models := m.application.AvailableModels(context.Background())
 	if len(models) == 0 {
-		return m, notification.InfoCmd("No models available for selection")
+		return m, notification.InfoCmd("No model list advertised — use /model <name> to switch")
 	}
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewModelPickerDialog(models),

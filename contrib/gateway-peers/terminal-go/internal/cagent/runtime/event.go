@@ -274,6 +274,32 @@ func ShellOutput(output string) Event {
 	}
 }
 
+// SystemNoteEvent carries the output of a control command (/status, /help, ...)
+// — a system notice, not agent speech. The TUI renders it as a neutral
+// system-styled transcript entry with no agent author and no working spinner.
+type SystemNoteEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	Title     string `json:"title,omitempty"`
+	Content   string `json:"content"`
+}
+
+func (e *SystemNoteEvent) GetSessionID() string { return e.SessionID }
+
+// SystemNote builds a SystemNoteEvent. An optional title is rendered as a
+// header above the body.
+func SystemNote(content, sessionID, title string) Event {
+	return &SystemNoteEvent{
+		Type:         "system_note",
+		SessionID:    sessionID,
+		Title:        title,
+		Content:      content,
+		AgentContext: newAgentContext(""),
+	}
+}
+
 type WarningEvent struct {
 	AgentContext
 

@@ -63,7 +63,7 @@ class CommandRouter:
         if inv is None:
             return None
         if not inv.name:
-            return CommandResult(outbound=[ctx.reply(_EMPTY_REPLY)])
+            return CommandResult(outbound=[ctx.notice(_EMPTY_REPLY)])
         handler = self.registry.lookup(namespace=inv.namespace, name=inv.name)
         if handler is None:
             return None

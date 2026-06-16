@@ -246,8 +246,18 @@ def _build_session_factory(
             channel = (wire_services.get("turn_context") or {}).get("channel", "")
             cwd = workspace.resolve(channel)
         store = make_default_session_store(cwd)
+        # A /fork seeds fork_source / fork_up_to into wire_services; when present
+        # resolve_session_state branches to SessionStore.fork (a new session
+        # seeded from the source transcript) instead of resume/create.
+        fork_source = wire_services.get("fork_source")
+        fork_up_to = wire_services.get("fork_up_to")
         state = resolve_session_state(
-            cwd=cwd, resume=resume, continue_recent=False, session_store=store
+            cwd=cwd,
+            resume=resume,
+            continue_recent=False,
+            session_store=store,
+            fork=fork_source,
+            fork_up_to=fork_up_to,
         )
         if profile is not None:
             build_config = profile.to_build_config()
@@ -521,6 +531,7 @@ async def _arun(
         inbox=inbox,
         on_inbound=runtime.handle_inbound,
         authenticator=_build_authenticator(bind_spec),
+        capabilities_provider=runtime.describe_capabilities,
     )
     runtime.attach_server(server)
 

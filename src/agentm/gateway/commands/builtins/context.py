@@ -26,19 +26,19 @@ class ContextCommand:
         stats = ctx.get_route_stats()
         session_id = stats.get("session_id")
         if not session_id:
-            return CommandResult(outbound=[ctx.reply("No active session.")])
+            return CommandResult(outbound=[ctx.notice("No active session.")])
 
         from agentm.core.observability.otel_export import resolve_observability_dir
 
         trace_path = resolve_observability_dir(ctx.cwd) / f"{session_id}.jsonl"
         if not trace_path.exists():
-            return CommandResult(outbound=[ctx.reply("No trace data yet.")])
+            return CommandResult(outbound=[ctx.notice("No trace data yet.")])
 
         from agentm.core.abi import TraceReader
 
         records = TraceReader(trace_path).load_turn_summaries()
         if not records:
-            return CommandResult(outbound=[ctx.reply("No turns recorded yet.")])
+            return CommandResult(outbound=[ctx.notice("No turns recorded yet.")])
 
         total_input = sum(r.get("input_tokens", 0) for r in records)
         total_output = sum(r.get("output_tokens", 0) for r in records)
@@ -58,7 +58,7 @@ class ContextCommand:
             f"output tokens:    {total_output:>12,}\n"
             f"total tokens:     {total:>12,}\n"
         )
-        return CommandResult(outbound=[ctx.reply(body)])
+        return CommandResult(outbound=[ctx.notice(body)])
 
 
 HANDLER = ContextCommand()
