@@ -369,7 +369,11 @@ class _ExtensionAPIImpl:
         priority: int = 500,
     ) -> Any:
         self._assert_active()
-        return self._bus.on(channel, handler, priority=priority)
+        # Stamp the registering atom onto the subscription (not the handler
+        # object) so attribution survives bound methods / builtins.
+        return self._bus.on(
+            channel, handler, priority=priority, owner=self._owner_name
+        )
 
     def add_observer(self, callback: Any) -> Any:
         self._assert_active()

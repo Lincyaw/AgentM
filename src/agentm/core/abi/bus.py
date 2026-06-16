@@ -58,6 +58,7 @@ class EventBusObserver(Protocol):
         result: Any,
         error: BaseException | None,
         duration_ns: int,
+        owner: str | None,
     ) -> None: ...
 
     def on_emit_end(
@@ -76,11 +77,17 @@ class _Subscription:
     counter assigned at subscribe time so two same-priority handlers are
     ordered by registration (FIFO within tier). Sorting is purely on
     ``(priority, seq)``; ``handler`` is the payload the bus invokes.
+
+    ``owner`` is the atom module-path that registered this handler (stamped
+    by ``_ExtensionAPIImpl.on`` from its own identity). It travels with the
+    registration — not the handler object — so observation attribution and
+    reload position-restore work for bound methods and builtins alike.
     """
 
     priority: int
     seq: int
     handler: Handler
+    owner: str | None = None
 
 
 def _sub_key(sub: _Subscription) -> tuple[int, int]:
@@ -96,7 +103,9 @@ class EventBus:
     # ``on``/``unsubscribe`` mutation. Avoids rebuilding ``[s.handler for s
     # in subs]`` on every emit — load-bearing on hot channels like
     # ``stream_delta`` (one emission per provider chunk).
-    _handler_cache: dict[str, list[Handler]] = field(default_factory=dict)
+    _handler_cache: dict[str, list[tuple[Handler, str | None]]] = field(
+        default_factory=dict
+    )
     _observer: EventBusObserver | None = None
     _observer_callbacks: list[ObserverRegistration] = field(default_factory=list)
     _strict_sync_handlers: bool = False
@@ -233,6 +242,7 @@ class EventBus:
         handler: Handler,
         *,
         priority: int = BusPriority.NORMAL,
+        owner: str | None = None,
     ) -> Callable[[], None]: ...
     def on(
         self,
@@ -240,16 +250,22 @@ class EventBus:
         handler: Handler,
         *,
         priority: int = BusPriority.NORMAL,
+        owner: str | None = None,
     ) -> Callable[[], None]:
         """Subscribe ``handler`` to ``channel``; return an unsubscribe fn.
 
         Calling the returned function removes this exact handler. Calling it
         a second time is a no-op (idempotent). ``priority`` selects the
         dispatch tier — see :class:`BusPriority`. Within a tier, registration
-        order is preserved (FIFO).
+        order is preserved (FIFO). ``owner`` records the registering atom so
+        observers and the reloader can attribute the subscription; it is
+        stamped automatically by ``_ExtensionAPIImpl.on`` and need not be
+        supplied by other callers.
         """
 
-        sub = _Subscription(priority=priority, seq=self._next_seq, handler=handler)
+        sub = _Subscription(
+            priority=priority, seq=self._next_seq, handler=handler, owner=owner
+        )
         self._next_seq += 1
         bisect.insort(
             self._handlers.setdefault(channel, []),
@@ -359,7 +375,7 @@ class EventBus:
         handlers = self._handler_cache.get(channel)
         if handlers is None:
             registered = self._handlers.get(channel)
-            handlers = [sub.handler for sub in (registered or ())]
+            handlers = [(sub.handler, sub.owner) for sub in (registered or ())]
             self._handler_cache[channel] = handlers
         observer_callbacks = tuple(self._observer_callbacks)
         observer = self._observer
@@ -372,7 +388,7 @@ class EventBus:
             event.dispatch_id = uuid.uuid4().hex
         self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
-        for h in handlers:
+        for h, owner in handlers:
             err: BaseException | None = None
             start_ns = time.perf_counter_ns() if observe_handlers else 0
             if observe_handlers:
@@ -394,6 +410,7 @@ class EventBus:
                     value,
                     err,
                     time.perf_counter_ns() - start_ns,
+                    owner,
                 )
             results.append(value)
         self._safe_observe("on_emit_end", channel, event, results)
@@ -442,7 +459,7 @@ class EventBus:
         handlers = self._handler_cache.get(channel)
         if handlers is None:
             registered = self._handlers.get(channel)
-            handlers = [sub.handler for sub in (registered or ())]
+            handlers = [(sub.handler, sub.owner) for sub in (registered or ())]
             self._handler_cache[channel] = handlers
         observer_callbacks = tuple(self._observer_callbacks)
         observer = self._observer
@@ -456,7 +473,7 @@ class EventBus:
         async_violation: tuple[str, Any] | None = None
         self._safe_observe("on_emit_start", channel, event)
         results: list[Any] = []
-        for h in handlers:
+        for h, owner in handlers:
             err: BaseException | None = None
             start_ns = time.perf_counter_ns() if observe_handlers else 0
             if observe_handlers:
@@ -484,6 +501,7 @@ class EventBus:
                     value,
                     err,
                     time.perf_counter_ns() - start_ns,
+                    owner,
                 )
             results.append(value)
         self._safe_observe("on_emit_end", channel, event, results)
