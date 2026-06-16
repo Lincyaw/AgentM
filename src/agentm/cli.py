@@ -590,7 +590,12 @@ async def run(
     *,
     output: TextIO = sys.stdout,
 ) -> int:
+    from agentm.core.observability.otel_export import attach_loguru_otel_sink
     from agentm.core.runtime.session import AgentSession
+
+    # Ship operational logs into the OTel logs pipeline (→ collector →
+    # ClickHouse) when an OTLP endpoint is configured. No-op otherwise.
+    attach_loguru_otel_sink()
 
     bus = EventBus()
     diagnostic_state = _attach_default_diagnostics(bus)
