@@ -19,8 +19,8 @@ from typing import Any
 from agentm.core.abi import AgentMessage, AssistantMessage
 from loguru import logger
 
-from llmharness.atom import CumulativeAuditState
 from llmharness.schema import Reminder
+from llmharness.state import CumulativeAuditState
 
 from .offline import InMemorySink, StandaloneChildRunner
 from .runner import AuditorSettings, ExtractorSettings

@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from distill.binding import read_sample_meta
-from replay.fork_tree import read_fork_tree_header
 
+from llmharness.replay.fork_tree import read_fork_tree_header
 from llmharness.replay.record import ReplayRecord, iter_records
 
 from .case import CaseData, CaseMeta, FiringRecord, FiringStatus, GraphSnapshot

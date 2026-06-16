@@ -52,8 +52,8 @@ from agentm.core.abi import (
 )
 from loguru import logger
 
-from llmharness.atom import CumulativeAuditState
 from llmharness.replay.record import ReplayRecord, write_record
+from llmharness.state import CumulativeAuditState
 
 from .offline import InMemorySink, StandaloneChildRunner
 from .offline_driver import SurfaceFiring, replay_pipeline_over_trajectory

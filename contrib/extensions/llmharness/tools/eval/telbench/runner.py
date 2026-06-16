@@ -29,9 +29,9 @@ from agentm.core.abi import (
 from loguru import logger
 
 from llmharness.agents.auditor.context import load_auditor_prompt
+from llmharness.replay.offline_driver import replay_pipeline_over_trajectory
+from llmharness.replay.runner import AuditorSettings, ExtractorSettings
 
-from ...replay.offline_driver import replay_pipeline_over_trajectory
-from ...replay.runner import AuditorSettings, ExtractorSettings
 from .adapter import TelBenchInstance, spans_to_messages
 from .scoring import SpanScores, score_instance
 
