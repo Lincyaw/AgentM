@@ -51,6 +51,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from loguru import logger
+
 from agentm.core.abi import (
     ExtensionAPI,
     ExtensionStaleError,
@@ -579,10 +581,10 @@ class _MonitorManager:
         elif state.kind == _KIND_CHANNEL and state.unsubscribe is not None:
             try:
                 state.unsubscribe()
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 # An unsubscribe failure must not crash the tool — the monitor
                 # is now marked cancelled and its handler is the no-op branch.
-                pass
+                logger.debug("monitor: unsubscribe failed cancelling {}: {}", monitor_id, exc)
         return _tool_result({"monitor_id": monitor_id, "status": _CANCELLED})
 
     # --- lifecycle ---------------------------------------------------------
@@ -617,8 +619,9 @@ class _MonitorManager:
             elif state.kind == _KIND_CHANNEL and state.unsubscribe is not None:
                 try:
                     state.unsubscribe()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    # Best-effort teardown during shutdown — keep draining.
+                    logger.debug("monitor: unsubscribe failed during shutdown: {}", exc)
         if not wakeup_tasks:
             return
         await asyncio.wait(wakeup_tasks, timeout=self._shutdown_grace_seconds)

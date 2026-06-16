@@ -38,11 +38,7 @@ MANIFEST = ExtensionManifest(
         "hypothesis-blinded Markdown briefs for L3 worker dispatch."
     ),
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    config_schema=None,
     requires=("rca_hgraph_store",),
 )
 

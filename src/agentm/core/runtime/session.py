@@ -785,10 +785,18 @@ class AgentSession:
             self._driver_task.cancel()
             try:
                 await self._driver_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+                # We cancelled the driver after a shutdown-grace timeout, so a
+                # CancelledError is expected; any other error here is during
+                # teardown and non-fatal.
+                logger.debug(
+                    "agentm session driver: post-cancel await raised "
+                    "{} during shutdown; continuing",
+                    type(exc).__name__,
+                )
         except asyncio.CancelledError:
-            pass
+            # Shutdown await itself was cancelled — expected during teardown.
+            logger.debug("agentm session driver: shutdown await cancelled; continuing")
         except Exception as exc:  # noqa: BLE001
             logger.exception(f"agentm session driver: shutdown await raised ({type(exc).__name__}); continuing")
             driver_exc = exc

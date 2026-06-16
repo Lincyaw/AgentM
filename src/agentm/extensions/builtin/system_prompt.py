@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI, SYSTEM_PROMPT_PROVIDER
@@ -42,8 +44,14 @@ def _discover_context_files(cwd: str) -> str:
             if candidate.is_file():
                 try:
                     parts.append(candidate.read_text(encoding="utf-8").rstrip())
-                except OSError:
-                    pass
+                except OSError as exc:
+                    # The file exists but is unreadable — its context is dropped
+                    # from the system prompt, so flag it rather than stay silent.
+                    logger.warning(
+                        "system_prompt: could not read context file {}: {}",
+                        candidate,
+                        exc,
+                    )
     return "\n\n".join(parts)
 
 

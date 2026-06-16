@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from loguru import logger
 
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi import ExtensionLoadError
@@ -76,8 +77,9 @@ def _candidate_roots() -> list[Path]:
         home = agentm_home_dir()
         if (home / "contrib").is_dir():
             roots.append(home)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Home-contrib discovery is a best-effort scenario root; skip it.
+        logger.debug("scenario loader: home contrib root discovery failed: {}", exc)
     try:
         import agentm  # local import to dodge circular at module load time
 
@@ -96,8 +98,9 @@ def _candidate_roots() -> list[Path]:
                 roots.append(walker)
                 break
             walker = walker.parent
-    except Exception:  # noqa: BLE001 — best-effort fallback
-        pass
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback
+        # Package-relative contrib walk is a dev-time fallback; skip on failure.
+        logger.debug("scenario loader: package-relative root walk failed: {}", exc)
     return roots
 
 # Conservative cap: src/agentm → src → worktree-root covers the editable
@@ -456,7 +459,10 @@ def sort_extensions_by_requires(
     for module_path, config in extensions:
         try:
             module = importlib.import_module(module_path)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # A configured extension that fails to import is silently dropped
+            # from the active set otherwise — warn so the omission is visible.
+            logger.warning("scenario loader: extension {} failed to import, skipping: {}", module_path, exc)
             continue
         manifest = getattr(module, "MANIFEST", None)
         if not isinstance(manifest, ExtensionManifest):

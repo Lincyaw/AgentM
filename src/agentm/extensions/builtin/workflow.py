@@ -141,8 +141,9 @@ def _forward_child_to_wire(api: ExtensionAPI, child: Any) -> None:
         return
     try:
         forwarder(child)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Wire forwarding is observability, never load-bearing for the child.
+        logger.debug("workflow: child wire forwarding failed: {}", exc)
 
 
 class _ArtifactStore(Protocol):
@@ -685,7 +686,7 @@ class _WorkflowRun:
         self.progress.append({"kind": kind, "text": text})
         # Fire-and-forget: schedule the emit on the running loop and hold a
         # reference so it is not GC'd mid-flight.
-        with contextlib.suppress(RuntimeError):
+        try:
             task = asyncio.create_task(
                 self.api.events.emit(
                     WorkflowPhaseEvent.CHANNEL,
@@ -694,6 +695,10 @@ class _WorkflowRun:
             )
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
+        except RuntimeError as exc:
+            # No running loop to schedule the emit on — progress is still
+            # recorded in ``self.progress``; only the live event is dropped.
+            logger.debug("workflow: could not schedule phase emit ({}): {}", kind, exc)
 
     async def _spawn_and_drive(
         self,
@@ -783,8 +788,10 @@ class _WorkflowRun:
                         return json.dumps(_build_agent_error_info(messages))
                     return output
                 finally:
-                    with contextlib.suppress(Exception):
+                    try:
                         await child.shutdown()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("workflow: child shutdown failed: {}", exc)
             except Exception as exc:
                 last_exc = exc
                 if attempt == 0:
@@ -1010,8 +1017,9 @@ def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
         parsed = json.loads(text)
         if isinstance(parsed, (dict, list)):
             return parsed
-    except (json.JSONDecodeError, TypeError):
-        pass
+    except (json.JSONDecodeError, TypeError) as exc:
+        # Free-text agent output that isn't JSON — return it verbatim.
+        logger.debug("workflow: agent output not JSON, returning as text: {}", exc)
     return text
 
 
@@ -1258,8 +1266,11 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
             module = importlib.import_module(module_name)
         finally:
             if added:
-                with contextlib.suppress(ValueError):
+                try:
                     sys.path.remove(path_entry)
+                except ValueError as exc:
+                    # Another importer already removed our temporary entry.
+                    logger.debug("workflow: sys.path entry already removed: {}", exc)
         run_fn = getattr(module, "run", None)
         if run_fn is None or not callable(run_fn):
             raise RuntimeError(

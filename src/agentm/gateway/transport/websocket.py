@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import ssl
 
+from loguru import logger
 from websockets.asyncio.client import ClientConnection, connect as ws_connect
 from websockets.asyncio.server import ServerConnection, serve as ws_serve
 
@@ -88,8 +89,8 @@ class WebSocketServerTransport:
         if wait_fn is not None:
             try:
                 await wait_fn()
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("ws server: wait_closed raised during shutdown: {}", exc)
 
 
 class WebSocketClientTransport:

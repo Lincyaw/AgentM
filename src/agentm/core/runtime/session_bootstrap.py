@@ -24,6 +24,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from agentm.core.abi.session_store import SessionState, SessionStore
 
 
@@ -114,8 +116,10 @@ def make_default_session_store(cwd: str) -> SessionStore:
         url = clickhouse.get_url()
         if url is not None:
             return ClickHouseSessionStore(url)  # type: ignore[return-value]
-    except Exception:
-        pass
+    except Exception as exc:
+        # ClickHouse store unavailable/misconfigured — fall back to the local
+        # JSONL store. Log so an operator who expected CH knows why it fell back.
+        logger.debug("session store: ClickHouse unavailable, using JSONL store: {}", exc)
     from agentm.core.runtime.session_manager import JsonlSessionStore
     return JsonlSessionStore(cwd=Path(cwd))
 

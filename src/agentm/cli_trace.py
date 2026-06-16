@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Annotated, Any, Callable, TextIO
 
 import typer
+from loguru import logger
 
 from agentm.core.abi import LogRecord, Span, TraceReader
 
@@ -614,7 +615,8 @@ def _follow_ch_messages(
                 sink.flush()
             offset = len(records)
     except KeyboardInterrupt:
-        pass
+        # User stopped the follow loop with Ctrl-C — clean exit.
+        logger.debug("trace: messages follow interrupted by user")
 
 
 def _tail_messages(
@@ -675,7 +677,8 @@ def _tail_messages(
                             sink.write("\n")
                         sink.flush()
         except KeyboardInterrupt:
-            pass
+            # User stopped the follow loop with Ctrl-C — clean exit.
+            logger.debug("trace: logs follow interrupted by user")
 
 
 # ---------- messages --------------------------------------------------------
@@ -1475,8 +1478,9 @@ def _load_index_cache(obs_dir: Path) -> dict[str, Any]:
             data = json.load(fh)
             if isinstance(data, dict):
                 return data
-    except (OSError, json.JSONDecodeError, ValueError):
-        pass
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        # Missing/corrupt index cache — rebuild from scratch (returns empty).
+        logger.debug("trace: index cache unreadable at {}, rebuilding: {}", cache_path, exc)
     return {}
 
 

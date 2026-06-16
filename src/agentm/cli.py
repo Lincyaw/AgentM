@@ -137,8 +137,10 @@ def autoload_dotenv(cwd: Path | None = None) -> None:
                     if workspace_env != candidates[0]:
                         candidates.append(workspace_env)
                     break
-            except OSError:
-                pass
+            except OSError as exc:
+                # Unreadable pyproject while walking up for the workspace .env —
+                # skip this level and keep searching ancestors.
+                logger.debug("cli: could not read {} during .env discovery: {}", manifest, exc)
         if walker.parent == walker:
             break
         walker = walker.parent
@@ -324,8 +326,9 @@ def _parse_set_overrides(values: list[str] | None) -> dict[str, dict[str, Any]]:
             else:
                 try:
                     value = json.loads(content)
-                except json.JSONDecodeError:
-                    pass  # keep as raw string
+                except json.JSONDecodeError as exc:
+                    # Non-JSON file content is kept as a raw string value.
+                    logger.debug("cli: --set file {} not JSON, keeping raw: {}", file_path, exc)
         out.setdefault(atom, {})[key] = value
     return out
 

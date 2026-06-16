@@ -20,6 +20,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
+from loguru import logger
+
 from agentm.core.abi import (
     ChildSessionEndEvent,
     DecideTurnActionEvent,
@@ -212,9 +214,9 @@ def _forward_child_to_wire(api: ExtensionAPI, child: Any) -> None:
         return
     try:
         forwarder(child)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         # Forwarding is observability, never load-bearing for the child's run.
-        pass
+        logger.debug("sub_agent: child wire forwarding failed: {}", exc)
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
@@ -588,7 +590,10 @@ class _ChildTaskManager:
             # Atom reloaded between dispatch and finalize: the inbox we hold
             # is stale; nothing to deliver into. Same step-3 Major-3
             # discipline background_exec / monitor use.
-            pass
+            logger.debug(
+                "sub_agent: inbox stale after reload; dropped finding for {}",
+                state.task_id,
+            )
         if error is None:
             await state.session.shutdown()
         else:

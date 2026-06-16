@@ -5,6 +5,8 @@ import json
 import re
 from pathlib import Path
 
+from loguru import logger
+
 _FAULT_BOILERPLATE = {
     "app", "chaos_type", "namespace", "system", "system_type",
     "time_offset", "duration",
@@ -67,8 +69,10 @@ def get_injections(data_dir: Path) -> list[dict[str, str]]:
         chaos_type = str(map_chaos_type(
             chaos_type_from_index(int(chaos_type))
         ).value)
-    except Exception:
-        pass
+    except Exception as exc:
+        # rcabench_platform unavailable or unmapped index — keep the raw
+        # fault_type string rather than failing injection parsing.
+        logger.debug("verifier injection: chaos-type mapping failed, using raw: {}", exc)
     return [{"target": target, "chaos_type": chaos_type, "params": ""}]
 
 

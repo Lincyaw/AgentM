@@ -94,11 +94,7 @@ MANIFEST = ExtensionManifest(
         "based on the judges' verdicts."
     ),
     registers=(),
-    config_schema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
+    config_schema=None,
     requires=("rca_hgraph_store",),
 )
 

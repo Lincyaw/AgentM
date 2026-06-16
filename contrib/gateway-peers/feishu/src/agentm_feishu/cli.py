@@ -37,6 +37,7 @@ import signal
 import sys
 import uuid
 import warnings
+from types import FrameType
 from typing import Annotated
 
 import typer
@@ -387,10 +388,12 @@ def cli(
 
     class _InterceptHandler(_stdlib_logging.Handler):
         def emit(self, record: _stdlib_logging.LogRecord) -> None:
+            level: str | int
             try:
                 level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
+            frame: FrameType | None
             frame, depth = _stdlib_logging.currentframe(), 2
             while frame and frame.f_code.co_filename == _stdlib_logging.__file__:
                 frame = frame.f_back

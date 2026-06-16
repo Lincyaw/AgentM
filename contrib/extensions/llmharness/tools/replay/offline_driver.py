@@ -11,11 +11,13 @@ threading internally.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import AgentMessage, AssistantMessage
+from loguru import logger
 
 from llmharness.atom import CumulativeAuditState
 from llmharness.schema import Reminder
@@ -93,10 +95,10 @@ async def replay_pipeline_over_trajectory(
     """
     _ = trigger_registry  # Not used in simplified version
     _ = sidecar_path  # Sidecar writing removed from offline path
+    _ = sink  # Sink/sidecar writing removed from offline path
 
     resolved_trace_id = trace_id if trace_id is not None else session_id
     cumulative = seed_cumulative if seed_cumulative is not None else CumulativeAuditState.fresh()
-    sink_used = sink if sink is not None else InMemorySink()
     child_used = child if child is not None else StandaloneChildRunner(
         cwd,
         parent_session_id=session_id,
@@ -142,20 +144,16 @@ async def replay_pipeline_over_trajectory(
                 if isinstance(nxt, int) and nxt >= 1:
                     state.next_event_id = nxt
                 for k, v in (data.get("turn_texts") or {}).items():
-                    try:
+                    with contextlib.suppress(TypeError, ValueError):
                         state.turn_texts[int(k)] = str(v)
-                    except (TypeError, ValueError):
-                        pass
 
                 recent_graph_raw = data.get("recent_graph") or []
                 from llmharness.schema import Edge, Event
                 recent_events: list[Event] = []
                 for entry in recent_graph_raw:
                     if isinstance(entry, dict):
-                        try:
+                        with contextlib.suppress(KeyError, ValueError, TypeError):
                             recent_events.append(Event.from_dict(entry))
-                        except (KeyError, ValueError, TypeError):
-                            pass
                 state.recent_graph = tuple(recent_events)
                 state.recent_graph_dict = {e.id: e for e in recent_events}
 
@@ -163,16 +161,14 @@ async def replay_pipeline_over_trajectory(
                 recent_edges: list[Edge] = []
                 for entry in recent_edges_raw:
                     if isinstance(entry, dict):
-                        try:
+                        with contextlib.suppress(KeyError, ValueError, TypeError):
                             recent_edges.append(Edge.from_dict(entry))
-                        except (KeyError, ValueError, TypeError):
-                            pass
                 state.recent_edges_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
                 state._refold()
 
                 prompt_text = extractor_settings.base_prompt or load_extractor_prompt("default")
                 try:
-                    ok, raw_blocks = await child_used.run_extractor(
+                    _ok, _raw_blocks = await child_used.run_extractor(
                         state=state,
                         prompt_text=prompt_text,
                         provider=provider,
@@ -188,8 +184,10 @@ async def replay_pipeline_over_trajectory(
                             firing_cursor=data["window_hi"],
                             firing_id=firing_id,
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Extractor firing failed for this turn during replay —
+                    # continue with the graph accumulated so far.
+                    logger.warning("offline_driver: extractor firing failed at turn replay: {}", exc)
 
         # --- Auditor ---
         if auditor_due:

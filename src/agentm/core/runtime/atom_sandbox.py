@@ -21,6 +21,8 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+from loguru import logger
+
 from agentm.core.abi import EventBus
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.resource import ResourceWriter
@@ -91,8 +93,15 @@ async def apply_atom_source_overrides(
         if loaded_mod is not None:
             try:
                 loaded_mod.__file__ = str(sandbox_path)
-            except (AttributeError, TypeError):
-                pass
+            except (AttributeError, TypeError) as exc:
+                # Non-writable module object: future reloads fall back to the
+                # original __file__, which is harmless for the sandbox.
+                logger.debug(
+                    "atom_sandbox: could not redirect {} __file__ to {}: {}",
+                    atom.module_path,
+                    sandbox_path,
+                    exc,
+                )
         result = reloader.reload_atom(
             atom_name,
             new_source,

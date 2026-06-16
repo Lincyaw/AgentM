@@ -30,7 +30,6 @@ single-envelope push is enough at this scale (§2.3).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -155,9 +154,11 @@ class WireClient:
             err_body = first.body if isinstance(first.body, dict) else {}
             code = str(err_body.get("code", "unknown"))
             message = str(err_body.get("message", ""))
-            with contextlib.suppress(Exception):
+            try:
                 self._writer.close()
                 await self._writer.wait_closed()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("wire client: writer close after auth error failed: {}", exc)
             raise AuthError(code, message)
         if first.kind != KIND_WELCOME:
             raise ConnectionRefusedError(f"expected welcome, got {first.kind!r}")
@@ -177,13 +178,17 @@ class WireClient:
         # ``_closed`` and exit instead of re-dialling.
         self._disconnected.set()
         if self._writer is not None and not self._writer.is_closing():
-            with contextlib.suppress(Exception):
+            try:
                 self._writer.close()
                 await self._writer.wait_closed()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("wire client: writer close on shutdown failed: {}", exc)
         if self._read_task is not None:
             self._read_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await self._read_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+                logger.debug("wire client: read task drain on close raised: {}", exc)
 
     # -- reconnect supervisor ----------------------------------------
 
@@ -239,12 +244,16 @@ class WireClient:
             # Tear down the dead read task before re-dialling.
             if self._read_task is not None:
                 self._read_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                try:
                     await self._read_task
+                except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+                    logger.debug("wire client: read task drain on reconnect raised: {}", exc)
                 self._read_task = None
-            with contextlib.suppress(Exception):
+            try:
                 if self._writer is not None and not self._writer.is_closing():
                     self._writer.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("wire client: writer close on reconnect failed: {}", exc)
 
             delay = min(backoff, self._backoff_cap)
             delay += random.uniform(0.0, delay)  # full jitter
@@ -387,8 +396,10 @@ class WireClient:
                     body={},
                 )
                 self._writer.write(encode(pong))
-                with contextlib.suppress(Exception):
+                try:
                     await self._writer.drain()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("wire client: pong drain failed: {}", exc)
             return
 
 

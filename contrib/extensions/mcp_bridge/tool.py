@@ -13,6 +13,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Final
 
+from loguru import logger
+
 from agentm.core.abi import ImageContent, TextContent, ToolResult
 
 from .client import _SessionLike
@@ -75,8 +77,9 @@ class MCPTool:
                 rpc_task.cancel()
                 try:
                     await rpc_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+                    # Draining the cancelled in-flight RPC after timeout/signal.
+                    logger.debug("mcp_bridge: cancelled RPC drain raised: {}", exc)
                 if cancel_task is not None and not cancel_task.done():
                     cancel_task.cancel()
                 reason = (

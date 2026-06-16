@@ -12,6 +12,7 @@ import re
 import time
 from typing import Any, Final
 
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -462,7 +463,8 @@ def _allocate_id_sync(artifacts_dir: Path) -> str:
         try:
             lock_path.unlink()
         except FileNotFoundError:
-            pass
+            # Lock already removed by another holder — expected under contention.
+            logger.debug("artifact_store: lock file {} already gone", lock_path)
 
 def _coerce_tags(value: Any) -> list[str]:
     if value is None:

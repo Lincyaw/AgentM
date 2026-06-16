@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Final, TypedDict
 
 import yaml
-
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -396,7 +396,9 @@ def _load_tasks(tasks_dir: Path) -> list[dict[str, Any]]:
     for path in sorted(tasks_dir.glob("*.yaml")):
         try:
             payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Skip a malformed eval-task file rather than aborting the suite.
+            logger.warning("tool_eval_run: skipping unparsable task file {}: {}", path, exc)
             continue
         if isinstance(payload, dict):
             payload.setdefault("id", path.stem)
@@ -507,8 +509,8 @@ async def _run_single_sample(
     finally:
         try:
             await child.shutdown()
-        except Exception:  # noqa: BLE001 - best effort
-            pass
+        except Exception as exc:  # noqa: BLE001 - best effort
+            logger.debug("tool_eval_run: child shutdown failed: {}", exc)
 
     return {
         "final_text": final_text,

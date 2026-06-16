@@ -3,13 +3,15 @@
 Defines the structural contract for the per-session OTel handle returned by
 ``ExtensionAPI.get_session_telemetry()``. The concrete implementation
 (:class:`~agentm.core.runtime.otel_export.SessionTelemetry`) is a dataclass
-that satisfies this Protocol; atoms depend only on this module so the ABI
-layer stays free of ``opentelemetry`` imports.
+that satisfies this Protocol; atoms depend only on this module for the
+telemetry handle's shape.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
+
+from opentelemetry._logs import SeverityNumber
 
 
 @runtime_checkable
@@ -41,7 +43,7 @@ class SessionTelemetry(Protocol):
         *,
         body: Any = None,
         attributes: dict[str, Any] | None = None,
-        severity: int = 9,
+        severity: SeverityNumber = SeverityNumber.INFO,
     ) -> None: ...
 
     def shutdown(self) -> None: ...

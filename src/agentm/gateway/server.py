@@ -21,7 +21,6 @@ dispatching; duplicates are skipped.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -165,8 +164,11 @@ class WireServer:
             task.cancel()
         all_tasks = list(self._delivery_tasks.values()) + list(self._conn_tasks)
         for task in all_tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            try:
                 await task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+                # Draining cancelled delivery/conn tasks during shutdown.
+                logger.debug("gateway: task raised while draining on shutdown: {}", exc)
         self._delivery_tasks.clear()
         self._conn_tasks.clear()
         await self._transport.close()
@@ -267,11 +269,14 @@ class WireServer:
                 await self._read_loop(session, reader)
             finally:
                 sender.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
+                try:
                     await sender
+                except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+                    logger.debug("gateway: sender task drain raised for {}: {}", peer_id, exc)
                 self._delivery_tasks.pop(peer_id, None)
-        except (ConnectionResetError, BrokenPipeError):
-            pass
+        except (ConnectionResetError, BrokenPipeError) as exc:
+            # Peer dropped the connection — normal client disconnect.
+            logger.debug("gateway: peer {} connection reset: {}", peer_id, exc)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -279,9 +284,11 @@ class WireServer:
         finally:
             if peer_id is not None:
                 self._registry.deregister(peer_id)
-            with contextlib.suppress(Exception):
+            try:
                 writer.close()
                 await writer.wait_closed()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("gateway: writer close failed for {}: {}", peer_id, exc)
             if task is not None:
                 self._conn_tasks.discard(task)
 
@@ -397,8 +404,10 @@ class WireServer:
                 if item.outbox_id is not None:
                     await asyncio.to_thread(self._outbox.ack, [item.outbox_id])
         except _ConnectionLost:
-            with contextlib.suppress(Exception):
+            try:
                 session.transport_writer.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("gateway: transport writer close failed on lost conn: {}", exc)
             return
         except asyncio.CancelledError:
             raise
@@ -460,8 +469,9 @@ async def _send(writer: asyncio.StreamWriter, env: Envelope) -> None:
     writer.write(encode(env))
     try:
         await writer.drain()
-    except (ConnectionResetError, BrokenPipeError):
-        pass
+    except (ConnectionResetError, BrokenPipeError) as exc:
+        # Peer gone mid-send — normal disconnect; the read loop will clean up.
+        logger.debug("gateway: drain failed, peer disconnected: {}", exc)
 
 
 __all__ = [

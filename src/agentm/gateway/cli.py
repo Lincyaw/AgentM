@@ -524,24 +524,39 @@ async def _arun(
     loop = asyncio.get_running_loop()
     signal_count = 0
 
-    def _on_signal() -> None:
+    def _on_signal(_signum: int, _frame: Any) -> None:
         # First signal starts a graceful drain; a second one means the user is
         # impatient (or the drain is wedged on a stuck in-flight turn), so hard
         # exit instead of swallowing it into another no-op ``stop_event.set()``.
+        #
+        # This is a low-level ``signal.signal`` handler, NOT
+        # ``loop.add_signal_handler``, and that distinction is the whole point:
+        # an add_signal_handler callback only runs when the event loop reaches
+        # its next scheduling point. If an in-flight turn wedges the loop
+        # thread on a synchronous blocking call, that callback never fires —
+        # and neither do the ``wait_for`` drain timeouts below — so Ctrl-C gets
+        # swallowed no matter how many times it is pressed. A signal.signal
+        # handler runs synchronously in the main thread the instant the signal
+        # lands, so the second press can force an exit even past a wedged loop.
         nonlocal signal_count
         signal_count += 1
         if signal_count == 1:
-            stop_event.set()
-            logger.info("signal received — draining; press Ctrl-C again to force exit")
+            # stop_event.set() is not safe to call directly from a handler that
+            # may have interrupted the loop mid-step; hop back onto the loop.
+            # os.write to fd 2 is async-signal-safe (loguru's lock is not).
+            loop.call_soon_threadsafe(stop_event.set)
+            os.write(2, b"signal received - draining; press Ctrl-C again to force exit\n")
         else:
-            logger.warning("second signal received — forcing exit")
+            os.write(2, b"second signal received - forcing exit\n")
             os._exit(EXIT_SIGINT)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, _on_signal)
-        except (NotImplementedError, RuntimeError):  # pragma: no cover — Windows
-            pass
+            signal.signal(sig, _on_signal)
+        except (ValueError, OSError) as exc:  # pragma: no cover — non-main thread / Windows
+            # Signal handlers can't be set off the main thread / on Windows;
+            # the gateway still runs, just without graceful-drain on this signal.
+            logger.debug("gateway: could not install handler for {}: {}", sig, exc)
 
     await server.start()
     if bind_spec.scheme == "unix":
