@@ -21,6 +21,17 @@ with the configured delay. Break down by `span_name` if the caller
 has mixed endpoints: only call paths that route through the delayed
 service are affected; unrelated endpoints stay flat.
 
+### When the target looks healthy but traffic dropped
+
+If the injected delay is large enough to push callers past their
+timeout, callers time out before the target finishes processing.
+The target's own spans show the added delay (or fewer spans arrive
+because callers gave up), but surviving requests look normal.
+The signal moves to the caller side — same pattern as
+network_partition: callers show timeout-level latency and reduced
+call volume to the target. Check the caller side when the target's
+traffic dropped significantly but its latency is flat.
+
 ## How the failure tends to propagate
 This is a link-type fault. Latency cascades **upward**: a slow callee
 makes its synchronous callers block, so they slow too, and so on up

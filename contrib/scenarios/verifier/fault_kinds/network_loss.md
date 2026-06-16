@@ -13,6 +13,27 @@ errors — the caller logs failures against the target, and the
 target logs failures against its outbound dependencies that route
 through the same interface.
 
+### When the target looks healthy but traffic dropped
+
+Heavy packet loss can cause callers to time out before the request
+reaches the target. Requests that DO arrive (surviving the loss)
+complete normally — so the target's own latency and error rate stay
+flat while span volume drops sharply. The signal is on the caller
+side: callers show timeout-level latency (e.g. p99 jumping to 20 s)
+and the timeout blocks synchronous callers up the chain, collapsing
+global throughput.
+
+When the target itself shows reduced traffic but no degradation:
+
+1. JOIN `parent_span_id` in the **normal** window to find which
+   services call the target.
+2. Check those callers in the **abnormal** window: did their p99
+   latency spike to the timeout ceiling? Did call volume to the
+   target drop disproportionately?
+3. If caller-side latency exploded while the target's surviving
+   requests are healthy → the loss is effective but the signal is
+   on the caller side. Mark **confirmed** with `flow_interrupted`.
+
 ## How to observe on a neighbour
 Packet loss causes TCP retransmissions, which produce **tail-latency
 spikes** (p99/max), not average-latency shifts. Most requests
