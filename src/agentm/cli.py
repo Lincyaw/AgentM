@@ -617,7 +617,8 @@ async def run(
             if session_manager.session_file is not None:
                 logger.info("session log: {path}", path=session_manager.session_file)
             logger.info("session id: {sid}", sid=sid)
-            logger.info("trace:  agentm trace messages --session {sid} --format text", sid=sid)
+            # The ``agentm trace`` command is logged centrally by
+            # create_agent_session for every session, so it is not repeated here.
 
     session = await AgentSession.create(session_config)
     try:
