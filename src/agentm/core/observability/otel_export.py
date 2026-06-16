@@ -73,6 +73,7 @@ __all__ = [
     "FileLogExporter",
     "FileSpanExporter",
     "SessionTelemetry",
+    "attach_loguru_otel_sink",
     "iter_log_records",
     "iter_spans",
     "otlp_unwrap",
@@ -341,7 +342,10 @@ def _maybe_attach_otlp_exporters(
                 endpoint=endpoint, insecure=insecure,
                 headers=headers, timeout=timeout,
             )
-    except Exception:
+    except Exception as exc:
+        # Exporter construction failed (bad endpoint, missing optional deps) —
+        # run without network export rather than crashing telemetry setup.
+        logger.warning("otel_export: OTLP exporter setup failed, network export disabled: {}", exc)
         return
 
     span_proc = BatchSpanProcessor(span_exp)
@@ -388,6 +392,83 @@ def setup_process_telemetry() -> tuple[TracerProvider, LoggerProvider]:
             atexit.register(shutdown_process_telemetry)
             _global_atexit_registered = True
         return _global_tracer_provider, _global_logger_provider
+
+
+# --- Operational-log bridge -------------------------------------------------
+# Forward loguru (operator-facing stderr logs) into the OTel *logs* signal so
+# they ship to the collector → ClickHouse alongside structured trace events,
+# queryable via ``agentm trace logs``. This is the log signal, NOT traces:
+# operational logs become OTLP LogRecords on the process-level LoggerProvider.
+
+# loguru level name → OTLP SeverityNumber.
+_LOGURU_OTEL_SEVERITY: dict[str, SeverityNumber] = {
+    "TRACE": SeverityNumber.TRACE,
+    "DEBUG": SeverityNumber.DEBUG,
+    "INFO": SeverityNumber.INFO,
+    "SUCCESS": SeverityNumber.INFO2,
+    "WARNING": SeverityNumber.WARN,
+    "ERROR": SeverityNumber.ERROR,
+    "CRITICAL": SeverityNumber.FATAL,
+}
+
+# Reentrancy guard: the OTel export path itself logs via loguru, so without
+# this a failing exporter could recurse through the sink indefinitely.
+_loguru_otel_reentry = threading.local()
+
+
+def _emit_loguru_record_to_otel(message: Any) -> None:
+    """loguru sink: forward one operational log record to the process OTel
+    ``LoggerProvider`` (and thus the network exporter, when configured)."""
+    if getattr(_loguru_otel_reentry, "active", False):
+        return
+    lp = _global_logger_provider
+    if lp is None:
+        return
+    record = message.record
+    _loguru_otel_reentry.active = True
+    try:
+        otel_logger = lp.get_logger("agentm.operational", _agentm_version())
+        level_name = str(record["level"].name)
+        attributes: dict[str, Any] = {
+            "code.filepath": str(record["file"].path),
+            "code.function": str(record["function"]),
+            "code.lineno": int(record["line"]),
+            "logger.name": str(record["name"]),
+        }
+        exc = record["exception"]
+        if exc is not None and exc.type is not None:
+            attributes["exception.type"] = exc.type.__name__
+            attributes["exception.message"] = str(exc.value)
+        otel_logger.emit(
+            body=str(record["message"]),
+            severity_number=_LOGURU_OTEL_SEVERITY.get(level_name, SeverityNumber.INFO),
+            severity_text=level_name,
+            event_name="agentm.operational.log",
+            attributes=attributes,
+        )
+    except Exception:  # noqa: S110 — logging here would recurse through the sink
+        # Operational logging must never break the app, and we cannot route
+        # this failure back through loguru (it would re-enter this sink).
+        pass
+    finally:
+        _loguru_otel_reentry.active = False
+
+
+def attach_loguru_otel_sink(*, level: str = "DEBUG") -> int | None:
+    """Add a loguru sink that ships operational logs into the OTel logs
+    pipeline. No-op (returns ``None``) unless ``OTEL_EXPORTER_OTLP_ENDPOINT``
+    is set — there must be a collector to receive them. Set
+    ``AGENTM_OTEL_LOGS=false`` to force it off. Returns the loguru sink id."""
+    if os.environ.get("AGENTM_OTEL_LOGS", "").lower() in ("false", "0", "no"):
+        return None
+    if not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        return None
+    from loguru import logger as _logger
+
+    # Ensure the process-level provider + network log exporter exist before
+    # the first operational record arrives.
+    setup_process_telemetry()
+    return _logger.add(_emit_loguru_record_to_otel, level=level, format="{message}")
 
 
 def shutdown_process_telemetry() -> None:

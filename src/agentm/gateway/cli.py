@@ -377,6 +377,10 @@ def cli(
     log_level = str(log_level).upper()
     logger.remove()
     logger.add(sys.stderr, level=log_level, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> <level>{level: <7}</level> <cyan>{file}:{line}</cyan> <level>{message}</level>")
+    # Also ship operational logs into the OTel logs pipeline (→ collector →
+    # ClickHouse) when an OTLP endpoint is configured. No-op otherwise.
+    from agentm.core.observability.otel_export import attach_loguru_otel_sink
+    attach_loguru_otel_sink(level=log_level)
     _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
     resolved_cwd = cwd or str(Path.cwd())
     try:
