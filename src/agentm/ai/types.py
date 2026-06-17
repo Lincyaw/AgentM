@@ -57,6 +57,8 @@ class ProviderDescriptor:
     verify_ssl_env: str | None = None
     default_query_ticket_env: str | None = None
     default_headers_env: str | None = None
+    azure_endpoint_env: str | None = None
+    api_version_env: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +187,10 @@ class ProviderRegistry:
             source.get(descriptor.verify_ssl_env), default=True
         ):
             values.setdefault("verify_ssl", False)
+        if descriptor.azure_endpoint_env and source.get(descriptor.azure_endpoint_env):
+            values.setdefault("azure_endpoint", source[descriptor.azure_endpoint_env])
+        if descriptor.api_version_env and source.get(descriptor.api_version_env):
+            values.setdefault("api_version", source[descriptor.api_version_env])
         return (descriptor.extension_module, values)
 
 
@@ -258,6 +264,10 @@ DEFAULT_PROVIDER_DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         api="openai-responses",
         env_var_precedence=("AZURE_OPENAI_API_KEY",),
         aliases=("azure-openai",),
+        extension_module="agentm.extensions.builtin.llm_openai",
+        azure_endpoint_env="AZURE_OPENAI_ENDPOINT",
+        api_version_env="AZURE_OPENAI_API_VERSION",
+        default_headers_env="AZURE_OPENAI_DEFAULT_HEADERS",
     ),
     ProviderDescriptor(
         id="openai-codex",

@@ -24,6 +24,8 @@ class ModelBuildConfig(TypedDict, total=False):
     max_output_tokens: int
     reasoning_effort: str
     extra_body: dict[str, Any]
+    azure_endpoint: str
+    api_version: str
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,8 @@ class ModelProfile:
     max_output_tokens: int | None = None
     reasoning_effort: str | None = None
     extra_body: dict[str, Any] | None = None
+    azure_endpoint: str | None = None
+    api_version: str | None = None
 
     def to_build_config(self) -> ModelBuildConfig:
         """Build the config dict for ``ProviderRegistry.build()``."""
@@ -57,6 +61,10 @@ class ModelProfile:
             config["reasoning_effort"] = self.reasoning_effort
         if self.extra_body:
             config["extra_body"] = self.extra_body
+        if self.azure_endpoint:
+            config["azure_endpoint"] = self.azure_endpoint
+        if self.api_version:
+            config["api_version"] = self.api_version
         return config
 
 
@@ -98,6 +106,8 @@ def _parse_profile(key: str, raw: dict[str, Any]) -> ModelProfile | None:
     max_output_tokens = raw.get("max_output_tokens")
     reasoning_effort = raw.get("reasoning_effort")
     extra_body = raw.get("extra_body")
+    azure_endpoint = raw.get("azure_endpoint")
+    api_version = raw.get("api_version")
 
     return ModelProfile(
         provider=provider,
@@ -113,6 +123,8 @@ def _parse_profile(key: str, raw: dict[str, Any]) -> ModelProfile | None:
             reasoning_effort if isinstance(reasoning_effort, str) else None
         ),
         extra_body=extra_body if isinstance(extra_body, dict) else None,
+        azure_endpoint=azure_endpoint if isinstance(azure_endpoint, str) else None,
+        api_version=api_version if isinstance(api_version, str) else None,
     )
 
 

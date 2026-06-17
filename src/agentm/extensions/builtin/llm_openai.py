@@ -38,7 +38,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from agentm.core.abi import (
     Aborted,
@@ -80,9 +80,6 @@ from agentm.extensions import ExtensionManifest
 from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 from agentm.core.lib.tool_schema import _force_strict
 
-if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
-    from openai import AsyncOpenAI
-
 
 class LlmOpenaiConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -97,6 +94,8 @@ class LlmOpenaiConfig(BaseModel):
     context_window: int | None = None
     max_output_tokens: int | None = None
     thinking_round_trip: Literal["drop", "system_note", "raise"] | None = None
+    azure_endpoint: str | None = None
+    api_version: str | None = None
 
 MANIFEST = ExtensionManifest(
     name="llm_openai",
@@ -483,12 +482,14 @@ class OpenAIStreamFn:
     verify_ssl: bool = True
     retry_policy: RetryPolicy | None = None
     httpx_client_factory: Callable[..., Any] | None = None
-    client: AsyncOpenAI | None = None
+    client: Any = None
     clock: Callable[[], float] = time.time
     thinking_round_trip: Literal["drop", "system_note", "raise"] = "drop"
     reasoning_effort: str | None = None
     extra_body: dict[str, Any] | None = None
     events: EventBus | None = None
+    azure_endpoint: str | None = None
+    api_version: str | None = None
     _reported_thinking_drop: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
@@ -515,14 +516,32 @@ class OpenAIStreamFn:
             ),
         )
 
-    def _get_client(self) -> AsyncOpenAI:
+    def _get_client(self) -> Any:
         if self.client is not None:
             return self.client
         # Imported lazily so module import doesn't require the SDK to be
         # configured (e.g. in offline test environments using injected client).
-        from openai import AsyncOpenAI as _AsyncOpenAI
 
         api_key = self.api_key or os.environ.get("OPENAI_API_KEY")
+        if self.azure_endpoint is not None:
+            from openai import AzureOpenAI as _AzureOpenAI
+
+            azure_kwargs: dict[str, Any] = {
+                "azure_endpoint": self.azure_endpoint,
+                "api_key": api_key,
+            }
+            if self.api_version is not None:
+                azure_kwargs["api_version"] = self.api_version
+            if self.default_headers:
+                azure_kwargs["default_headers"] = dict(self.default_headers)
+            if not self.verify_ssl:
+                factory = self.httpx_client_factory or _default_httpx_client
+                azure_kwargs["http_client"] = factory(verify=False)
+            self.client = _AzureOpenAI(**azure_kwargs)
+            return self.client
+
+        from openai import AsyncOpenAI as _AsyncOpenAI
+
         kwargs: dict[str, Any] = {"api_key": api_key}
         if self.base_url is not None:
             kwargs["base_url"] = self.base_url
@@ -814,6 +833,8 @@ def install(api: Any, config: LlmOpenaiConfig) -> None:
         reasoning_effort=extra.get("reasoning_effort"),
         extra_body=extra.get("extra_body"),
         events=getattr(api, "events", None),
+        azure_endpoint=config.azure_endpoint,
+        api_version=config.api_version,
     )
 
     model_kwargs: dict[str, int] = {}
