@@ -236,17 +236,10 @@ async def evaluate_instance_tel(
     from agentm.core.abi import AgentSessionConfig, AssistantMessage, ToolCallBlock
     from agentm.core.runtime import AgentSession, create_agent_session
 
-    from ...agents.tel.tools import SUBMIT_CHAINS_TOOL_NAME, SUBMIT_TOOL_NAME
+    from ...agents.tel.tools import SUBMIT_TOOL_NAME
 
     if prompt_name == "2pass":
         return await _run_tel_2pass(instance, provider=provider, cwd=cwd)
-
-    # The "chains" prompt reframes the task: the agent reports error chains
-    # (origin -> propagation -> commitment) via submit_error_chains instead of
-    # a flat span list. Scoring flattens the union of all chain spans, so the
-    # downstream metric path is identical.
-    use_chains = prompt_name == "chains"
-    submit_tool = SUBMIT_CHAINS_TOOL_NAME if use_chains else SUBMIT_TOOL_NAME
 
     _OBS = "agentm.extensions.builtin.observability"
     _OPS = "agentm.extensions.builtin.operations"
@@ -286,7 +279,7 @@ async def evaluate_instance_tel(
             "get_span",
             "search_spans",
             "note",
-            submit_tool,
+            SUBMIT_TOOL_NAME,
         ],
     )
 
@@ -328,29 +321,16 @@ async def evaluate_instance_tel(
     with contextlib.suppress(Exception):
         await session.shutdown()
 
-    # Extract the terminal submit call. For the chains variant, flatten the
-    # union of all chain span ids (preserving first-seen order); for the flat
-    # variant, take error_span_ids directly.
     predicted_span_ids: list[str] = []
     reasoning = ""
     for msg in reversed(messages):
         if not isinstance(msg, AssistantMessage):
             continue
         for block in reversed(msg.content):
-            if not (isinstance(block, ToolCallBlock) and block.name == submit_tool):
+            if not (isinstance(block, ToolCallBlock) and block.name == SUBMIT_TOOL_NAME):
                 continue
-            if use_chains:
-                seen: set[str] = set()
-                chains = block.arguments.get("chains", []) or []
-                for chain in chains:
-                    for sid_ in chain.get("span_ids", []) or []:
-                        if sid_ not in seen:
-                            seen.add(sid_)
-                            predicted_span_ids.append(sid_)
-                reasoning = " | ".join(str(c.get("fault", "")) for c in chains if c.get("fault"))
-            else:
-                predicted_span_ids = list(block.arguments.get("error_span_ids", []))
-                reasoning = str(block.arguments.get("reasoning", ""))
+            predicted_span_ids = list(block.arguments.get("error_span_ids", []))
+            reasoning = str(block.arguments.get("reasoning", ""))
             break
         if predicted_span_ids:
             break
