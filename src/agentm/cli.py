@@ -44,7 +44,7 @@ from agentm.gateway.cli import app as _gateway_app
 # Default scenario when the user does not pass ``--scenario`` and does
 # not opt out via ``--no-extensions``. Module-level constant so it can
 # be patched from tests and referenced by env-var fallthrough below.
-DEFAULT_SCENARIO = "local"
+DEFAULT_SCENARIO = "chatbot"
 
 # #201: defense-in-depth bound on the one-shot ``idle()`` wait. The unbounded
 # wait makes one-shot exit hinge entirely on ``track_background`` accounting
@@ -57,18 +57,10 @@ ONESHOT_IDLE_TIMEOUT_SECONDS = 120.0
 
 _PACKAGE_WALK_DEPTH = 8
 
-
-# Single command tree for the ``agentm`` console script. The default prompt
-# runner is the root callback (``run_cmd``); ``list-extensions`` is a sibling
-# command; ``trace`` and ``gateway`` are mounted from their own Typer apps.
-# ``trace`` / ``gateway`` live in the same ``agentm`` package and dependency
-# closure as this module, so they compose as ordinary subcommands — there is
-# no vendor-SDK isolation reason to dispatch them out of band. (The peer CLIs
-# ``agentm-terminal`` / ``agentm-feishu`` are the genuinely isolated binaries;
-# they ship their own console scripts and are not ``agentm`` subcommands.)
 app = typer.Typer(
     add_completion=False,
     context_settings={"help_option_names": ["-h", "--help"]},
+    pretty_exceptions_enable=False
 )
 
 
