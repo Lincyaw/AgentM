@@ -30,6 +30,7 @@ def build_tel_system_prompt(
     question: str,
     n_spans: int,
     base_prompt: str | None = None,
+    prior_notes: str = "",
 ) -> str:
     framing = base_prompt if base_prompt is not None else load_tel_prompt("default")
     sections: list[str] = [framing.rstrip(), ""]
@@ -46,6 +47,11 @@ def build_tel_system_prompt(
     )
     sections.append("")
 
+    if prior_notes:
+        sections.append("## NOTES FROM FIRST READING")
+        sections.append(prior_notes)
+        sections.append("")
+
     return "\n".join(sections)
 
 
@@ -60,6 +66,7 @@ class TelContextConfig(BaseModel):
     stages: dict[str, str] = {}
     prompt_name: str = "default"
     config_file: str = ""
+    prior_notes: str = ""
 
 
 MANIFEST = ExtensionManifest(
@@ -91,6 +98,7 @@ def install(api: ExtensionAPI, config: TelContextConfig) -> None:
         question=question,
         n_spans=len(spans),
         base_prompt=base_prompt,
+        prior_notes=config.prior_notes,
     )
 
     def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
