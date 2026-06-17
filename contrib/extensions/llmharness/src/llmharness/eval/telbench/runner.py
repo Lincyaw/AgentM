@@ -97,9 +97,7 @@ async def evaluate_instance(
                 try:
                     session = await create_agent_session(AgentSession, config)
                     try:
-                        await session.prompt(
-                            json.dumps(data, ensure_ascii=False, default=str)
-                        )
+                        await session.prompt(json.dumps(data, ensure_ascii=False, default=str))
                     finally:
                         await session.shutdown()
 
@@ -150,12 +148,16 @@ async def evaluate_instance(
                 session = await create_agent_session(AgentSession, config)
                 try:
                     child_msgs = await session.prompt(
-                        json.dumps({
-                            "graph": [e.to_dict() for e in events],
-                            "continuation_notes_from_prior_firing": list(
-                                cumulative.last_continuation_notes
-                            ),
-                        }, ensure_ascii=False, default=str)
+                        json.dumps(
+                            {
+                                "graph": [e.to_dict() for e in events],
+                                "continuation_notes_from_prior_firing": list(
+                                    cumulative.last_continuation_notes
+                                ),
+                            },
+                            ensure_ascii=False,
+                            default=str,
+                        )
                     )
                 finally:
                     await session.shutdown()
@@ -234,28 +236,44 @@ async def evaluate_instance_tel(
     from agentm.core.abi import AgentSessionConfig, AssistantMessage, ToolCallBlock
     from agentm.core.runtime import AgentSession, create_agent_session
 
-    from ...agents.tel.tools import SUBMIT_TOOL_NAME
+    from ...agents.tel.tools import SUBMIT_CHAINS_TOOL_NAME, SUBMIT_TOOL_NAME
+
+    if prompt_name == "2pass":
+        return await _run_tel_2pass(instance, provider=provider, cwd=cwd)
+
+    # The "chains" prompt reframes the task: the agent reports error chains
+    # (origin -> propagation -> commitment) via submit_error_chains instead of
+    # a flat span list. Scoring flattens the union of all chain spans, so the
+    # downstream metric path is identical.
+    use_chains = prompt_name == "chains"
+    submit_tool = SUBMIT_CHAINS_TOOL_NAME if use_chains else SUBMIT_TOOL_NAME
 
     _OBS = "agentm.extensions.builtin.observability"
     _OPS = "agentm.extensions.builtin.operations"
     _TEL_CTX = "llmharness.agents.tel.context"
     _TEL_TOOLS = "llmharness.agents.tel.tools"
 
-    notepad_path = str(Path(cwd) / f"tel_notepad_{instance.id}.md")
+    # Notepads from every instance in a run collect in one inspectable dir
+    # (a sibling of the per-instance cwds), each file named by session id so it
+    # lines up with the ``agentm trace`` command the session logs.
+    notepad_dir = Path(cwd).parent / "notepads"
 
     ctx_config: dict[str, Any] = {
         "question": instance.question,
         "spans": instance.spans,
-        "stages": instance.annotations.get("stage", {}),
+        # NOTE: span ``stage`` lives under dataset ``annotations`` (alongside the
+        # gold ``error_type``), NOT in the raw span objects, and correlates ~0.7
+        # with being a gold error span. Feeding it to the agent leaks the label.
+        # The trajectory input is raw span text only.
+        "stages": {},
         "prompt_name": prompt_name,
-        "notepad_path": notepad_path,
     }
 
     extensions: list[tuple[str, dict[str, Any]]] = [
         (_OBS, {}),
         (_OPS, {}),
         (_TEL_CTX, ctx_config),
-        (_TEL_TOOLS, {}),
+        (_TEL_TOOLS, {"notepad_dir": str(notepad_dir)}),
     ]
 
     config = AgentSessionConfig(
@@ -267,7 +285,8 @@ async def evaluate_instance_tel(
             "list_spans",
             "get_span",
             "search_spans",
-            "submit_error_spans",
+            "note",
+            submit_tool,
         ],
     )
 
@@ -278,7 +297,8 @@ async def evaluate_instance_tel(
         raise
 
     sid = session.session_id
-    logger.info(f"[tel] {instance.id}: agentm trace messages --session {sid} --format text")
+    # The ``agentm trace`` debug command is logged centrally by
+    # create_agent_session (purpose=tel_eval_<id>), so it is not repeated here.
 
     payload = json.dumps(
         {
@@ -308,17 +328,30 @@ async def evaluate_instance_tel(
     with contextlib.suppress(Exception):
         await session.shutdown()
 
-    # Extract the submit_error_spans tool call.
+    # Extract the terminal submit call. For the chains variant, flatten the
+    # union of all chain span ids (preserving first-seen order); for the flat
+    # variant, take error_span_ids directly.
     predicted_span_ids: list[str] = []
     reasoning = ""
     for msg in reversed(messages):
         if not isinstance(msg, AssistantMessage):
             continue
         for block in reversed(msg.content):
-            if isinstance(block, ToolCallBlock) and block.name == SUBMIT_TOOL_NAME:
+            if not (isinstance(block, ToolCallBlock) and block.name == submit_tool):
+                continue
+            if use_chains:
+                seen: set[str] = set()
+                chains = block.arguments.get("chains", []) or []
+                for chain in chains:
+                    for sid_ in chain.get("span_ids", []) or []:
+                        if sid_ not in seen:
+                            seen.add(sid_)
+                            predicted_span_ids.append(sid_)
+                reasoning = " | ".join(str(c.get("fault", "")) for c in chains if c.get("fault"))
+            else:
                 predicted_span_ids = list(block.arguments.get("error_span_ids", []))
                 reasoning = str(block.arguments.get("reasoning", ""))
-                break
+            break
         if predicted_span_ids:
             break
 
@@ -329,6 +362,25 @@ async def evaluate_instance_tel(
     gold = instance.gold_error_indices
     scores = score_instance(predicted_indices, gold, len(instance.spans))
 
+    # Append the outcome to this session's notepad file so each file is a
+    # self-contained record (notes the agent took + what it predicted + gold +
+    # score), inspectable live as a batch run progresses.
+    idx_to_id = {i: s["id"] for i, s in enumerate(instance.spans)}
+    footer = (
+        f"\n\n## result ({instance.id}, session {sid})\n"
+        f"- predicted: {predicted_span_ids}\n"
+        f"- gold:      {[idx_to_id[i] for i in sorted(gold) if i in idx_to_id]}\n"
+        f"- P={scores.precision:.3f} R={scores.recall:.3f} F1={scores.f1:.3f} "
+        f"FEA={'Y' if scores.first_error_accurate else 'N'}\n"
+        f"- reasoning: {reasoning}\n"
+    )
+    try:
+        notepad_dir.mkdir(parents=True, exist_ok=True)
+        with open(notepad_dir / f"{sid}.md", "a", encoding="utf-8") as fh:
+            fh.write(footer)
+    except OSError as exc:
+        logger.warning("telbench: notepad footer write failed: {}", exc)
+
     return EvalResult(
         instance_id=instance.id,
         predicted_error_indices=predicted_indices,
@@ -338,6 +390,100 @@ async def evaluate_instance_tel(
         if predicted_span_ids
         else [],
         n_spans=len(instance.spans),
+    )
+
+
+_TEL_WORKFLOW_SCRIPT = Path(__file__).resolve().parents[2] / "agents" / "tel" / "workflow.py"
+
+
+async def _run_tel_2pass(
+    instance: TelBenchInstance,
+    *,
+    provider: tuple[str, dict[str, Any]] | None,
+    cwd: str,
+) -> EvalResult:
+    """Two-pass TEL via the workflow module (note → reason → submit)."""
+    from agentm.core.abi import AgentSessionConfig
+    from agentm.core.runtime import AgentSession
+
+    notepad_dir = Path(cwd).parent / "notepads"
+    gold = instance.gold_error_indices
+    n_spans = len(instance.spans)
+
+    wf_args: dict[str, Any] = {
+        "question": instance.question,
+        "spans": instance.spans,
+        "notepad_dir": str(notepad_dir),
+        "instance_id": instance.id,
+    }
+
+    config = AgentSessionConfig(
+        cwd=cwd,
+        provider=provider,
+        extensions=[
+            ("agentm.extensions.builtin.observability", {}),
+            ("agentm.extensions.builtin.operations", {}),
+            ("agentm.extensions.builtin.artifact_store", {}),
+            ("agentm.extensions.builtin.workflow", {}),
+        ],
+        purpose=f"tel_2pass_{instance.id}",
+        auto_commit=False,
+    )
+
+    session = await AgentSession.create(config)
+    sid = session.session_id
+    logger.info(
+        "[tel-2pass] {} — children: agentm trace index --format ndjson | grep {}",
+        instance.id, sid,
+    )
+
+    try:
+        runner = session.get_service("workflow_runner")
+        if runner is None:
+            raise RuntimeError("workflow_runner service not found")
+        result = await runner.run_file(_TEL_WORKFLOW_SCRIPT, wf_args)
+    finally:
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            await session.shutdown()
+
+    predicted_span_ids: list[str] = []
+    reasoning = ""
+    if isinstance(result, dict):
+        predicted_span_ids = list(result.get("predicted_span_ids", []))
+        reasoning = str(result.get("reasoning", ""))
+
+    id_to_idx = {s["id"]: i for i, s in enumerate(instance.spans)}
+    predicted_indices = {id_to_idx[sid] for sid in predicted_span_ids if sid in id_to_idx}
+    scores = score_instance(predicted_indices, gold, n_spans)
+
+    # Result footer
+    idx_to_id = {i: s["id"] for i, s in enumerate(instance.spans)}
+    footer = (
+        f"\n\n## result ({instance.id}, 2pass)\n"
+        f"- predicted: {predicted_span_ids}\n"
+        f"- gold:      {[idx_to_id[i] for i in sorted(gold) if i in idx_to_id]}\n"
+        f"- P={scores.precision:.3f} R={scores.recall:.3f} F1={scores.f1:.3f} "
+        f"FEA={'Y' if scores.first_error_accurate else 'N'}\n"
+        f"- reasoning: {reasoning}\n"
+    )
+    try:
+        notepad_dir.mkdir(parents=True, exist_ok=True)
+        with open(notepad_dir / f"2pass_{instance.id}.md", "w", encoding="utf-8") as fh:
+            fh.write(footer)
+    except OSError as exc:
+        logger.warning("telbench: notepad footer write failed: {}", exc)
+
+    return EvalResult(
+        instance_id=instance.id,
+        predicted_error_indices=predicted_indices,
+        gold_error_indices=gold,
+        scores=scores,
+        verdicts=[{"predicted_span_ids": predicted_span_ids, "reasoning": reasoning}]
+        if predicted_span_ids
+        else [],
+        n_spans=n_spans,
     )
 
 

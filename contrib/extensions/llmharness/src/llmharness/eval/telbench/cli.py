@@ -36,9 +36,7 @@ def _resolve_provider(
             profile = resolve_model_profile(model_name)
             if profile is not None:
                 registry = DEFAULT_PROVIDER_REGISTRY
-                return registry.build(
-                    profile.provider, profile.to_build_config(), env=os.environ
-                )
+                return registry.build(profile.provider, profile.to_build_config(), env=os.environ)
         except ImportError:
             pass
 
@@ -50,9 +48,7 @@ def _resolve_provider(
             profile = resolve_model_profile(None)
             if profile is not None:
                 registry = DEFAULT_PROVIDER_REGISTRY
-                return registry.build(
-                    profile.provider, profile.to_build_config(), env=os.environ
-                )
+                return registry.build(profile.provider, profile.to_build_config(), env=os.environ)
         except ImportError:
             pass
         return None
@@ -115,9 +111,7 @@ def telbench(
         "."
     ),
     provider: Annotated[str | None, typer.Option("--provider", help="LLM provider spec")] = None,
-    model: Annotated[
-        str | None, typer.Option("--model", help="config.toml profile name")
-    ] = None,
+    model: Annotated[str | None, typer.Option("--model", help="config.toml profile name")] = None,
     auditor_prompt: Annotated[
         str, typer.Option("--auditor-prompt", help="Auditor prompt variant name")
     ] = "telbench",
@@ -130,8 +124,21 @@ def telbench(
     ] = None,
 ) -> None:
     """Run TELBench evaluation with the cognitive-audit pipeline or TEL agent."""
+    # Load .env the same way the ``agentm`` CLI does, so child sessions inherit
+    # OTEL_EXPORTER_OTLP_ENDPOINT (trajectories ship to ClickHouse) and the
+    # model/provider profile without the caller having to ``source .env`` first.
+    try:
+        from agentm.cli import autoload_dotenv
+
+        autoload_dotenv()
+    except ImportError:
+        pass
+
     if mode not in ("posthoc", "online", "tel"):
-        typer.echo(f"Error: --mode must be 'posthoc', 'online', or 'tel', got '{mode}'", err=True)
+        typer.echo(
+            f"Error: --mode must be 'posthoc', 'online', or 'tel', got '{mode}'",
+            err=True,
+        )
         raise typer.Exit(1)
 
     instances = load_telbench(data)
@@ -166,15 +173,24 @@ def telbench(
 
     eval_mode: Any = mode
 
-    async def _run_all() -> tuple[list[SpanScores], list[str]]:
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("", encoding="utf-8")  # truncate; lines appended live
+
+    async def _run_all() -> list[SpanScores]:
         sem = asyncio.Semaphore(concurrency)
         scores: list[SpanScores | None] = [None] * total
-        lines: list[str | None] = [None] * total
+        write_lock = asyncio.Lock()
         done_count = 0
+        shutting_down = False
 
         async def _run_one(idx: int, inst: Any) -> None:
-            nonlocal done_count
+            nonlocal done_count, shutting_down
+            if shutting_down:
+                return
             async with sem:
+                if shutting_down:
+                    return
                 inst_cwd = str(Path(resolved_cwd) / f"inst-{inst.id}")
                 Path(inst_cwd).mkdir(parents=True, exist_ok=True)
                 try:
@@ -206,34 +222,49 @@ def telbench(
                         f"F1={result.scores.f1:.3f} FEA={fea}"
                     )
                     if output is not None:
-                        lines[idx] = json.dumps({
-                            "instance_id": result.instance_id,
-                            "predicted_error_indices": sorted(result.predicted_error_indices),
-                            "gold_error_indices": sorted(result.gold_error_indices),
-                            "n_spans": result.n_spans,
-                            "precision": result.scores.precision,
-                            "recall": result.scores.recall,
-                            "f1": result.scores.f1,
-                            "first_error_accurate": result.scores.first_error_accurate,
-                            "n_verdicts": len(result.verdicts),
-                        }, ensure_ascii=False)
+                        line = json.dumps(
+                            {
+                                "instance_id": result.instance_id,
+                                "predicted_error_indices": sorted(result.predicted_error_indices),
+                                "gold_error_indices": sorted(result.gold_error_indices),
+                                "n_spans": result.n_spans,
+                                "precision": result.scores.precision,
+                                "recall": result.scores.recall,
+                                "f1": result.scores.f1,
+                                "first_error_accurate": result.scores.first_error_accurate,
+                                "n_verdicts": len(result.verdicts),
+                            },
+                            ensure_ascii=False,
+                        )
+                        async with write_lock:
+                            with open(output, "a", encoding="utf-8") as fh:
+                                fh.write(line + "\n")
+                except asyncio.CancelledError:
+                    return
                 except Exception as exc:
                     done_count += 1
                     typer.echo(f"  [{done_count}/{total}] {inst.id} ERROR: {exc}", err=True)
 
-        await asyncio.gather(*[_run_one(i, inst) for i, inst in enumerate(instances)])
-        return (
-            [s for s in scores if s is not None],
-            [ln for ln in lines if ln is not None],
-        )
+        tasks = [asyncio.create_task(_run_one(i, inst)) for i, inst in enumerate(instances)]
+        try:
+            await asyncio.gather(*tasks)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            shutting_down = True
+            typer.echo("\n⏹ Interrupted — cancelling pending tasks…", err=True)
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            typer.echo(f"  {done_count}/{total} instances completed before interrupt.", err=True)
+        return [s for s in scores if s is not None]
 
-    instance_scores, output_lines = asyncio.run(_run_all())
+    try:
+        instance_scores = asyncio.run(_run_all())
+    except KeyboardInterrupt:
+        typer.echo("\n⏹ Aborted.", err=True)
+        instance_scores = []
 
-    if output is not None and output_lines:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        with open(output, "w", encoding="utf-8") as f:
-            for line in output_lines:
-                f.write(line + "\n")
+    if output is not None:
         typer.echo(f"\nPer-instance results written to {output}")
 
     agg = aggregate_scores(instance_scores)
@@ -247,3 +278,7 @@ def main() -> None:
 
 
 __all__ = ["app", "main"]
+
+
+if __name__ == "__main__":
+    main()
