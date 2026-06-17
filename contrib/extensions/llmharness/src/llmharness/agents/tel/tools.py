@@ -92,11 +92,10 @@ class Notepad:
     notes: list[str] = field(default_factory=list)
     path: Path | None = None
 
-    def add(self, text: str) -> str:
+    def add(self, text: str) -> int:
         self.notes.append(text.strip())
-        rendered = self.render()
-        self._persist(rendered)
-        return rendered
+        self._persist(self.render())
+        return len(self.notes)
 
     def render(self) -> str:
         if not self.notes:
@@ -262,17 +261,17 @@ def build_note_tool(notepad: Notepad) -> FunctionTool:
                 content=[TextContent(type="text", text=f"note rejected: {exc}")],
                 is_error=True,
             )
-        running = notepad.add(parsed.text)
+        count = notepad.add(parsed.text)
         return ToolResult(
-            content=[TextContent(type="text", text=f"notepad so far:\n{running}")]
+            content=[TextContent(type="text", text=f"note saved ({count} total)")]
         )
 
     return FunctionTool(
         name="note",
         description=(
             "Append one observation to your notepad as you read the trajectory. "
-            "Returns the full notepad so far, so you can review it before "
-            "deciding which spans are errors."
+            "Returns only a short acknowledgement; the full notepad is persisted "
+            "for the next pass."
         ),
         parameters=NoteArgs,
         fn=_handler,

@@ -565,16 +565,15 @@ async def create_agent_session(
             ),
         )
 
-    # Surface the trajectory-inspection command for every freshly created
-    # session, mirroring what the top-level ``agentm -p`` CLI prints. Any
-    # caller that spawns sessions programmatically (eval harnesses, workflow
-    # orchestrators, child subagents) gets a copy-pasteable debug handle for
-    # free, without threading session ids back through their own entry points.
-    logger.info(
-        "trace ({purpose}):  agentm trace messages --session {sid} --format text",
-        purpose=config.purpose or "session",
-        sid=session_id,
-    )
+    # Surface the trajectory-inspection command for sessions that directly hold
+    # a useful conversation. Programmatic wrapper sessions can suppress this and
+    # log their meaningful child handles instead.
+    if config.log_trace_command:
+        logger.info(
+            "trace ({purpose}):  agentm trace messages --session {sid} --format text",
+            purpose=config.trace_label or config.purpose or "session",
+            sid=session_id,
+        )
 
     return instance
 

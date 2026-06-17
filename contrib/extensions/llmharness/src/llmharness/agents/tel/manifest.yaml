@@ -11,3 +11,5 @@ extensions:
     config:
       config_file: ""
   - module: llmharness.agents.tel.tools
+  - module: agentm.extensions.builtin.tool_index
+

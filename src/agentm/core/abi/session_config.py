@@ -150,6 +150,15 @@ class AgentSessionConfig:
     """Caller-defined purpose label, e.g. ``"subagent:worker"``;
     surfaces verbatim in :class:`ChildSessionStartEvent`."""
 
+    log_trace_command: bool = True
+    """When True, session creation logs a copy-pasteable ``agentm trace``
+    command. Programmatic wrapper sessions that never receive prompts can set
+    this False and surface their meaningful child-session handles instead."""
+
+    trace_label: str | None = None
+    """Optional human-facing label for the creation-time trace command. This is
+    observability-only; ``purpose`` remains the lifecycle/atom-policy label."""
+
     # --- Per-task evolution loop (see per-task-evolution-loop.md) --------
 
     task_class: str | None = None

@@ -428,14 +428,10 @@ async def _run_tel_2pass(
         ],
         purpose=f"tel_2pass_{instance.id}",
         auto_commit=False,
+        log_trace_command=False,
     )
 
     session = await AgentSession.create(config)
-    sid = session.session_id
-    logger.info(
-        "[tel-2pass] {} — children: agentm trace index --format ndjson | grep {}",
-        instance.id, sid,
-    )
 
     try:
         runner = session.get_service("workflow_runner")

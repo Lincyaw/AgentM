@@ -61,6 +61,7 @@ async def run(ctx: WorkflowContext) -> TelWorkflowResult:
             "n_spans": n_spans,
         }, ensure_ascii=False),
         scenario=_TEL_SCENARIO,
+        trace_label=f"tel_2pass_{instance_id}_note",
         atom_config={
             "tel_context": {
                 "question": question,
@@ -103,6 +104,7 @@ async def run(ctx: WorkflowContext) -> TelWorkflowResult:
             "n_spans": n_spans,
         }, ensure_ascii=False),
         scenario=_TEL_SCENARIO,
+        trace_label=f"tel_2pass_{instance_id}_reason",
         atom_config={
             "tel_context": {
                 "question": question,

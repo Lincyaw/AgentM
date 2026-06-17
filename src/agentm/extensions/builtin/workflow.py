@@ -486,6 +486,7 @@ class _WorkflowRun:
         retry: int = 0,
         timeout: float | None = None,
         session_id: str | None = None,
+        trace_label: str | None = None,
     ) -> AgentResult:
         """Spawn one child agent session, drive it to completion, return its
         output. Journaled by ``hash(prompt, opts)`` — a re-run resumes from
@@ -507,6 +508,7 @@ class _WorkflowRun:
         ``session_id=`` resumes an existing session instead of starting
         fresh. The prompt is appended to the session's history. The resumed
         session retains its full prior context.
+        ``trace_label=`` overrides the child session's trace-command label.
         """
 
         # Resolve Pydantic model → JSON Schema dict.
@@ -565,6 +567,7 @@ class _WorkflowRun:
                         atom_config=atom_config,
                         schema=json_schema,
                         session_id=session_id,
+                        trace_label=trace_label,
                     )
                     if effective_timeout is not None:
                         result = await asyncio.wait_for(
@@ -711,6 +714,7 @@ class _WorkflowRun:
         atom_config: AtomConfigMap | None = None,
         schema: JsonSchema | None = None,
         session_id: str | None = None,
+        trace_label: str | None = None,
     ) -> str:
         extensions: list[ExtensionEntry] = []
         atom_config_overrides: AtomConfigMap = dict(atom_config or {})
@@ -764,6 +768,7 @@ class _WorkflowRun:
             atom_config_overrides=atom_config_overrides,
             tool_allowlist=tool_allowlist,
             purpose=_WORKER_PURPOSE,
+            trace_label=trace_label,
             session_manager=session_manager,
             session_id=session_id,
         )
@@ -853,6 +858,7 @@ class WorkflowContext:
         retry: int = ...,
         timeout: float | None = ...,
         session_id: str | None = ...,
+        trace_label: str | None = ...,
     ) -> _M: ...
 
     @overload
@@ -869,6 +875,7 @@ class WorkflowContext:
         retry: int = ...,
         timeout: float | None = ...,
         session_id: str | None = ...,
+        trace_label: str | None = ...,
     ) -> AgentResult: ...
 
     async def agent(
@@ -884,6 +891,7 @@ class WorkflowContext:
         retry: int = 0,
         timeout: float | None = None,
         session_id: str | None = None,
+        trace_label: str | None = None,
     ) -> AgentResult:
         """Spawn one child agent session and return its output.
 
@@ -891,6 +899,7 @@ class WorkflowContext:
         ``retry=N`` retries on agent failure or validation failure.
         ``timeout=`` caps wall-clock seconds for the agent call.
         ``session_id=`` resumes an existing session with the prompt.
+        ``trace_label=`` overrides the child session's trace-command label.
         """
         return await self._run.agent(
             prompt,
@@ -903,6 +912,7 @@ class WorkflowContext:
             retry=retry,
             timeout=timeout,
             session_id=session_id,
+            trace_label=trace_label,
         )
 
     async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
