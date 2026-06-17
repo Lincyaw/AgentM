@@ -66,6 +66,8 @@ async def _run_evolve(
         extensions=[
             ("agentm.extensions.builtin.observability", {}),
             ("agentm.extensions.builtin.operations", {}),
+            ("agentm.extensions.builtin.file_tools", {}),
+            ("agentm.extensions.builtin.tool_bash", {}),
         ],
         purpose="tel_evolve",
         auto_commit=False,
