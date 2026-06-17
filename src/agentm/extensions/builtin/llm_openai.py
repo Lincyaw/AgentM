@@ -524,7 +524,7 @@ class OpenAIStreamFn:
 
         api_key = self.api_key or os.environ.get("OPENAI_API_KEY")
         if self.azure_endpoint is not None:
-            from openai import AzureOpenAI as _AzureOpenAI
+            from openai import AsyncAzureOpenAI as _AsyncAzureOpenAI
 
             azure_kwargs: dict[str, Any] = {
                 "azure_endpoint": self.azure_endpoint,
@@ -537,7 +537,7 @@ class OpenAIStreamFn:
             if not self.verify_ssl:
                 factory = self.httpx_client_factory or _default_httpx_client
                 azure_kwargs["http_client"] = factory(verify=False)
-            self.client = _AzureOpenAI(**azure_kwargs)
+            self.client = _AsyncAzureOpenAI(**azure_kwargs)
             return self.client
 
         from openai import AsyncOpenAI as _AsyncOpenAI
