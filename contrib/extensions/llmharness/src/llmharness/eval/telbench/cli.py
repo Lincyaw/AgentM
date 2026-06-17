@@ -16,8 +16,8 @@ from typing import Annotated, Any
 
 import typer
 
-from .adapter import load_telbench
-from .runner import evaluate_instance, evaluate_instance_tel
+from .adapter import TelBenchInstance, load_telbench
+from .runner import EvalResult, evaluate_instance, evaluate_instance_tel, reflect_on_result
 from .scoring import AggregateScores, SpanScores, aggregate_scores
 
 app = typer.Typer(help="TELBench span-level error localization evaluation.")
@@ -122,6 +122,10 @@ def telbench(
         Path | None,
         typer.Option("--instance-ids", help="JSON file with list of instance IDs to run"),
     ] = None,
+    reflect: Annotated[
+        bool,
+        typer.Option("--reflect", help="Run reflection on wrong cases after eval"),
+    ] = False,
 ) -> None:
     """Run TELBench evaluation with the cognitive-audit pipeline or TEL agent."""
     # Load .env the same way the ``agentm`` CLI does, so child sessions inherit
@@ -177,9 +181,10 @@ def telbench(
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("", encoding="utf-8")  # truncate; lines appended live
 
-    async def _run_all() -> list[SpanScores]:
+    async def _run_all() -> tuple[list[SpanScores], list[tuple[EvalResult, TelBenchInstance]]]:
         sem = asyncio.Semaphore(concurrency)
         scores: list[SpanScores | None] = [None] * total
+        wrong_cases: list[tuple[EvalResult, TelBenchInstance]] = []
         write_lock = asyncio.Lock()
         done_count = 0
         shutting_down = False
@@ -214,6 +219,9 @@ def telbench(
                             auditor_prompt=auditor_prompt,
                         )
                     scores[idx] = result.scores
+                    if result.scores.f1 < 1.0:
+                        async with write_lock:
+                            wrong_cases.append((result, inst))
                     done_count += 1
                     fea = "Y" if result.scores.first_error_accurate else "N"
                     typer.echo(
@@ -256,13 +264,36 @@ def telbench(
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             typer.echo(f"  {done_count}/{total} instances completed before interrupt.", err=True)
-        return [s for s in scores if s is not None]
+        return [s for s in scores if s is not None], wrong_cases
+
+    async def _reflect_all(
+        wrong: list[tuple[EvalResult, TelBenchInstance]],
+    ) -> None:
+        reflect_dir = Path(resolved_cwd) / "reflections"
+        reflect_dir.mkdir(parents=True, exist_ok=True)
+        typer.echo(f"\n--- Reflection ({len(wrong)} wrong cases) ---")
+
+        for i, (result, inst) in enumerate(wrong, 1):
+            typer.echo(f"  [{i}/{len(wrong)}] reflecting on {result.instance_id}…")
+            try:
+                text = await reflect_on_result(
+                    result, inst,
+                    provider=resolved_provider,
+                    cwd=resolved_cwd,
+                )
+                out_path = reflect_dir / f"{result.instance_id}.md"
+                out_path.write_text(text, encoding="utf-8")
+                typer.echo(f"    → {out_path}")
+            except Exception as exc:
+                typer.echo(f"    ERROR: {exc}", err=True)
+
+        typer.echo(f"Reflections written to {reflect_dir}")
 
     try:
-        instance_scores = asyncio.run(_run_all())
+        instance_scores, wrong_cases = asyncio.run(_run_all())
     except KeyboardInterrupt:
         typer.echo("\n⏹ Aborted.", err=True)
-        instance_scores = []
+        instance_scores, wrong_cases = [], []
 
     if output is not None:
         typer.echo(f"\nPer-instance results written to {output}")
@@ -270,6 +301,12 @@ def telbench(
     agg = aggregate_scores(instance_scores)
     typer.echo(f"\n--- Aggregate ({agg.n_instances} instances, mode={mode}) ---")
     typer.echo(_format_aggregate(agg))
+
+    if reflect and wrong_cases:
+        try:
+            asyncio.run(_reflect_all(wrong_cases))
+        except KeyboardInterrupt:
+            typer.echo("\n⏹ Reflection aborted.", err=True)
 
 
 def main() -> None:
