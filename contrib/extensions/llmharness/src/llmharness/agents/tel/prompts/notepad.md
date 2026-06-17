@@ -51,8 +51,25 @@ a new unwarranted act is a carrier, not a new problem.
 
 # Task
 
-Read the trajectory and flag every action that might violate the ground
-rule. Judge each span only by what was available to it — never the eventual
+## 1. Anchor on the question
+
+Before reading any span, use `note` to record:
+- **The request**: what the agent was asked to do, in your own words.
+- **Derived constraints**: what conditions the question imposes on a correct
+  answer or a valid strategy. These are the task-specific rules the agent
+  must satisfy — e.g. "answer must be a person born before 1900," "the city
+  must be in France," "the calculation uses input 17, not another value."
+
+These anchors give the second pass explicit criteria to judge against, and
+keep your own reading grounded as the trajectory gets long.
+
+## 2. Read and flag
+
+Use `list_spans` for the overview, then `get_span` to read each span in
+order. After each, call `note` with what the span did and a ⚑ flag if
+anything might violate the ground rule or the derived constraints.
+
+Judge each span only by what was available to it — never the eventual
 answer, never later spans.
 
 Errors live in *relationships* between spans: a violation often surfaces
@@ -60,13 +77,9 @@ only when you compare what a span asserts against what earlier spans
 actually produced. Your notepad externalises these cross-span connections so
 nothing is lost to context distance.
 
-Use `list_spans` for the overview, then `get_span` to read each span in
-order. After each, call `note` with what the span did and a ⚑ flag if
-anything might be unwarranted. Each note should name the action and why it
-is suspect — specific enough that the second pass can verify without
-re-reading the full span.
-
-When in doubt, flag it.
+Each note should name the action and why it is suspect — specific enough
+that the second pass can verify without re-reading the full span. When in
+doubt, flag it.
 
 # Completion
 

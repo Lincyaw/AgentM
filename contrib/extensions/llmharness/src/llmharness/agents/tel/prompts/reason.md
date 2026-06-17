@@ -44,7 +44,21 @@ patterns. Skim unflagged spans — especially those adjacent to confirmed
 errors, and any span that makes strong claims or commits to a final answer.
 Errors the first pass missed are your unique contribution.
 
-## 3. Submit
+## 3. Trace causality
+
+When multiple spans look wrong, distinguish origins from propagation.
+
+**Counterfactual test**: if a suspect span had not made its unwarranted
+claim, would a downstream span still commit its own unwarranted act? If
+yes, the downstream span is an independent error — it introduced something
+new that is not warranted. If no, it merely inherited the earlier span's
+flawed conclusion and is a carrier, not a new error.
+
+Multiple independent error origins can coexist in one trajectory. A single
+error can also cascade through several carrier spans. Submit the origins,
+not the carriers.
+
+## 4. Submit
 
 Your final set may be a subset of the flags, all of them, a superset with
 newly discovered errors, or an entirely different set. Submit what the
