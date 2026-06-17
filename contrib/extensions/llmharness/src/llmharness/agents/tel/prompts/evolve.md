@@ -38,6 +38,14 @@ statement of an existing one.**
   "Verify the answer satisfies all conditions stated in the question" is
   the right level.
 
+# Prioritisation
+
+Reflections are sorted by F1 score, worst first. A case scoring F1=0 has
+far more to teach than one scoring F1=0.8 — focus your attention and
+evolution effort on the low-scoring cases. Near-perfect cases are included
+for context but should not drive changes unless they reveal a pattern
+shared with the low scorers.
+
 # Task
 
 1. Read all reflection reports. Find recurring methodology gaps.

@@ -271,22 +271,37 @@ def telbench(
     ) -> None:
         reflect_dir = Path(resolved_cwd) / "reflections"
         reflect_dir.mkdir(parents=True, exist_ok=True)
-        typer.echo(f"\n--- Reflection ({len(wrong)} wrong cases) ---")
+        total_wrong = len(wrong)
+        typer.echo(f"\n--- Reflection ({total_wrong} wrong cases, concurrency={concurrency}) ---")
 
-        for i, (result, inst) in enumerate(wrong, 1):
-            typer.echo(f"  [{i}/{len(wrong)}] reflecting on {result.instance_id}…")
-            try:
-                text = await reflect_on_result(
-                    result, inst,
-                    provider=resolved_provider,
-                    cwd=resolved_cwd,
-                )
-                out_path = reflect_dir / f"{result.instance_id}.md"
-                out_path.write_text(text, encoding="utf-8")
-                typer.echo(f"    → {out_path}")
-            except Exception as exc:
-                typer.echo(f"    ERROR: {exc}", err=True)
+        reflect_sem = asyncio.Semaphore(concurrency)
+        done_count = 0
 
+        async def _reflect_one(result: EvalResult, inst: TelBenchInstance) -> None:
+            nonlocal done_count
+            async with reflect_sem:
+                try:
+                    text = await reflect_on_result(
+                        result, inst,
+                        provider=resolved_provider,
+                        cwd=resolved_cwd,
+                    )
+                    fea_tag = "Y" if result.scores.first_error_accurate else "N"
+                    score_header = (
+                        f"> **Case score**: F1={result.scores.f1:.3f}"
+                        f"  P={result.scores.precision:.3f}"
+                        f"  R={result.scores.recall:.3f}"
+                        f"  FEA={fea_tag}\n\n"
+                    )
+                    out_path = reflect_dir / f"{result.instance_id}.md"
+                    out_path.write_text(score_header + text, encoding="utf-8")
+                    done_count += 1
+                    typer.echo(f"  [{done_count}/{total_wrong}] {result.instance_id} → {out_path}")
+                except Exception as exc:
+                    done_count += 1
+                    typer.echo(f"  [{done_count}/{total_wrong}] {result.instance_id} ERROR: {exc}", err=True)
+
+        await asyncio.gather(*[_reflect_one(r, i) for r, i in wrong])
         typer.echo(f"Reflections written to {reflect_dir}")
 
     try:

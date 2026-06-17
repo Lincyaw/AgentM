@@ -19,18 +19,27 @@ _PROMPTS_DIR = Path(__file__).resolve().parents[2] / "agents" / "tel" / "prompts
 app = typer.Typer(help="Evolve TEL prompts from reflection reports.")
 
 
-def _load_reflections(directory: Path) -> list[dict[str, str]]:
-    """Read all reflection markdown files from *directory*."""
-    reflections = []
+def _load_reflections(directory: Path) -> list[dict[str, str | float]]:
+    """Read all reflection markdown files, sorted by F1 ascending (worst first)."""
+    import re
+
+    reflections: list[dict[str, str | float]] = []
+    f1_pat = re.compile(r"F1=([\d.]+)")
     for md in sorted(directory.glob("*.md")):
         text = md.read_text(encoding="utf-8").strip()
-        if text:
-            reflections.append({"instance_id": md.stem, "content": text})
+        if not text:
+            continue
+        f1 = 1.0
+        m = f1_pat.search(text.split("\n", 1)[0])
+        if m:
+            f1 = float(m.group(1))
+        reflections.append({"instance_id": md.stem, "content": text, "f1": f1})
+    reflections.sort(key=lambda r: r["f1"])
     return reflections
 
 
 async def _run_evolve(
-    reflections: list[dict[str, str]],
+    reflections: list[dict[str, str | float]],
     provider: tuple[str, dict[str, Any]] | None,
     cwd: str,
 ) -> str:
@@ -43,7 +52,8 @@ async def _run_evolve(
     evolve_prompt = (_PROMPTS_DIR / "evolve.md").read_text(encoding="utf-8")
 
     reflections_block = "\n\n---\n\n".join(
-        f"### Case: {r['instance_id']}\n\n{r['content']}" for r in reflections
+        f"### Case: {r['instance_id']} (F1={r['f1']:.3f})\n\n{r['content']}"
+        for r in reflections
     )
 
     notepad_path = _PROMPTS_DIR / "notepad.md"
@@ -105,6 +115,9 @@ def evolve(
     model: Annotated[
         str | None, typer.Option("--model", help="config.toml profile name")
     ] = None,
+    summary_file: Annotated[
+        Path | None, typer.Option("--summary-file", help="Write raw agent summary to this file")
+    ] = None,
 ) -> None:
     """Read reflection reports and evolve prompt files in-place."""
     import os
@@ -163,6 +176,10 @@ def evolve(
     summary = asyncio.run(
         _run_evolve(reflection_data, resolved_provider, str(cwd.resolve()))
     )
+
+    if summary_file:
+        summary_file.parent.mkdir(parents=True, exist_ok=True)
+        summary_file.write_text(summary, encoding="utf-8")
 
     typer.echo(f"\n{summary}")
     typer.echo(

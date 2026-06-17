@@ -81,6 +81,7 @@ class IterationRecord:
     summary: str
 
     def to_tsv_row(self) -> str:
+        safe_summary = self.summary.replace("\n", " ").replace("\r", " ").replace("\t", " ").strip()
         return "\t".join([
             str(self.iteration),
             self.timestamp,
@@ -90,7 +91,7 @@ class IterationRecord:
             f"{self.macro_r:.4f}",
             f"{self.fea:.4f}",
             self.decision,
-            self.summary,
+            safe_summary,
         ])
 
 
@@ -191,20 +192,26 @@ def iterate(
         subprocess.run(cmd, check=True, env=os.environ)
         return _parse_eval_output(out_jsonl)
 
-    def run_evolve(iter_dir: Path) -> str:
-        """Run evolve on the reflections in *iter_dir*."""
-        reflect_dir = iter_dir / "reflections"
+    def run_evolve(prev_dir: Path, cur_dir: Path) -> str:
+        """Run evolve on the reflections in *prev_dir*, write summary to *cur_dir*."""
+        reflect_dir = prev_dir / "reflections"
         if not reflect_dir.is_dir() or not list(reflect_dir.glob("*.md")):
             return "no reflections"
+        cur_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = cur_dir / "evolve_summary.md"
         cmd = [
             "uv", "run", "llmharness-evolve",
             "--reflections", str(reflect_dir),
+            "--summary-file", str(summary_path),
         ]
         if model:
             cmd.extend(["--model", model])
-        result = subprocess.run(cmd, capture_output=True, text=True, env=os.environ)
-        summary = result.stdout.strip().split("\n")[-1] if result.stdout else "(no summary)"
-        return summary[:200]
+        subprocess.run(cmd, check=True, env=os.environ)
+        if summary_path.is_file():
+            full = summary_path.read_text(encoding="utf-8").strip()
+            first_line = full.split("\n", 1)[0].strip()
+            return first_line[:200] if first_line else full[:200]
+        return "(no summary)"
 
     # --- Baseline (iter 0) ---
     typer.echo("=== Iteration 0 (baseline) ===")
@@ -235,14 +242,11 @@ def iterate(
 
         # Evolve prompts based on previous reflections
         prev_dir = runs_dir / f"iter-{i - 1}"
-        typer.echo("  evolving prompts…")
-        evolve_summary = run_evolve(prev_dir)
-
         iter_dir = runs_dir / f"iter-{i}"
-        _snapshot_prompts(iter_dir)
+        typer.echo("  evolving prompts…")
+        evolve_summary = run_evolve(prev_dir, iter_dir)
 
-        # Save evolve summary
-        (iter_dir / "evolve_summary.md").write_text(evolve_summary, encoding="utf-8")
+        _snapshot_prompts(iter_dir)
 
         # Re-evaluate with evolved prompts
         typer.echo("  evaluating…")
@@ -271,7 +275,7 @@ def iterate(
             macro_r=scores.macro_recall,
             fea=scores.first_error_accuracy,
             decision=decision,
-            summary=evolve_summary[:200],
+            summary=evolve_summary,
         ))
 
         if consecutive_discards >= max_discard:
