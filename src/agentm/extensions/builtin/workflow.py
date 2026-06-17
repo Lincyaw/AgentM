@@ -935,6 +935,11 @@ class WorkflowContext:
         """Start a named phase (groups subsequent agents in the progress view)."""
         self._run.phase(name)
 
+    @property
+    def child_sessions(self) -> list[dict[str, Any]]:
+        """Metadata of all child sessions spawned so far (read-only copy)."""
+        return list(self._run.child_sessions)
+
 
 # ---------------------------------------------------------------------------
 # Output extraction / error helpers

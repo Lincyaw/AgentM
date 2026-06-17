@@ -86,9 +86,14 @@ async def run(ctx: WorkflowContext) -> TelWorkflowResult:
                 if notes:
                     break
 
+    note_session_id = ctx.child_sessions[-1]["session_id"] if ctx.child_sessions else ""
+
     if not notes:
         ctx.log(f"[{instance_id}] pass 1 produced no notes — aborting")
-        return {"predicted_span_ids": [], "reasoning": "no notes from pass 1"}
+        return {
+            "predicted_span_ids": [], "reasoning": "no notes from pass 1",
+            "note_session_id": note_session_id,
+        }
 
     ctx.log(f"[{instance_id}] pass 1 done, {len(notes)} chars of notes")
 
@@ -127,9 +132,13 @@ async def run(ctx: WorkflowContext) -> TelWorkflowResult:
     elif isinstance(reason_result, str):
         reasoning = reason_result
 
+    reason_session_id = ctx.child_sessions[-1]["session_id"] if len(ctx.child_sessions) >= 2 else ""
+
     ctx.log(f"[{instance_id}] pass 2 done, predicted {len(predicted)} spans")
 
     return {
         "predicted_span_ids": predicted,
         "reasoning": reasoning,
+        "note_session_id": note_session_id,
+        "reason_session_id": reason_session_id,
     }

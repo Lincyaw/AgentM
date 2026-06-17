@@ -32,6 +32,8 @@ class EvalResult:
     scores: SpanScores
     verdicts: list[dict[str, Any]] = field(default_factory=list)
     n_spans: int = 0
+    session_id: str = ""
+    reason_session_id: str = ""
 
 
 async def evaluate_instance(
@@ -370,6 +372,8 @@ async def evaluate_instance_tel(
         if predicted_span_ids
         else [],
         n_spans=len(instance.spans),
+        session_id=sid,
+        reason_session_id=sid,
     )
 
 
@@ -426,9 +430,11 @@ async def _run_tel_2pass(
 
     predicted_span_ids: list[str] = []
     reasoning = ""
+    reason_session_id = ""
     if isinstance(result, dict):
         predicted_span_ids = list(result.get("predicted_span_ids", []))
         reasoning = str(result.get("reasoning", ""))
+        reason_session_id = str(result.get("reason_session_id", ""))
 
     id_to_idx = {s["id"]: i for i, s in enumerate(instance.spans)}
     predicted_indices = {id_to_idx[sid] for sid in predicted_span_ids if sid in id_to_idx}
@@ -460,11 +466,104 @@ async def _run_tel_2pass(
         if predicted_span_ids
         else [],
         n_spans=n_spans,
+        session_id=session.session_id,
+        reason_session_id=reason_session_id,
     )
+
+
+async def reflect_on_result(
+    result: EvalResult,
+    instance: TelBenchInstance,
+    *,
+    provider: tuple[str, dict[str, Any]] | None = None,
+    cwd: str = "/tmp/tel_reflect",
+) -> str:
+    """Resume the reason session with gold labels and a reflection prompt.
+
+    Returns the reflection text (structured methodology lessons).
+    """
+    import contextlib
+
+    from agentm.core.abi import AgentSessionConfig
+    from agentm.core.runtime import AgentSession
+    from agentm.core.runtime.session_bootstrap import make_default_session_store
+
+    if not result.reason_session_id:
+        return f"[{result.instance_id}] no reason_session_id — cannot reflect"
+
+    idx_to_id = {i: s["id"] for i, s in enumerate(instance.spans)}
+    predicted_ids = [idx_to_id[i] for i in sorted(result.predicted_error_indices) if i in idx_to_id]
+    gold_ids = [idx_to_id[i] for i in sorted(result.gold_error_indices) if i in idx_to_id]
+    missed = sorted(set(gold_ids) - set(predicted_ids))
+    false_pos = sorted(set(predicted_ids) - set(gold_ids))
+
+    correction = (
+        f"## CORRECTION\n\n"
+        f"- Your predicted error spans: {predicted_ids}\n"
+        f"- Gold (correct) error spans: {gold_ids}\n"
+        f"- Missed (false negatives): {missed}\n"
+        f"- Wrongly flagged (false positives): {false_pos}\n"
+        f"- Scores: P={result.scores.precision:.3f} R={result.scores.recall:.3f} "
+        f"F1={result.scores.f1:.3f}\n"
+    )
+
+    store = make_default_session_store(cwd)
+    try:
+        session_manager: Any = store.open(result.reason_session_id)
+    except FileNotFoundError:
+        return (
+            f"[{result.instance_id}] session {result.reason_session_id} "
+            f"not found in store — cannot resume for reflection"
+        )
+
+    _TEL_CTX = "llmharness.agents.tel.context"
+    _TEL_TOOLS = "llmharness.agents.tel.tools"
+
+    config = AgentSessionConfig(
+        cwd=cwd,
+        provider=provider,
+        session_manager=session_manager,
+        session_id=result.reason_session_id,
+        extensions=[
+            ("agentm.extensions.builtin.observability", {}),
+            ("agentm.extensions.builtin.operations", {}),
+            (_TEL_CTX, {
+                "question": instance.question,
+                "spans": instance.spans,
+                "stages": {},
+                "prompt_name": "reflect",
+            }),
+            (_TEL_TOOLS, {}),
+        ],
+        purpose=f"tel_reflect_{result.instance_id}",
+        tool_allowlist=["list_spans", "get_span", "search_spans"],
+    )
+
+    session = await AgentSession.create(config)
+
+    try:
+        messages = await session.prompt(correction)
+    finally:
+        with contextlib.suppress(Exception):
+            await session.shutdown()
+
+    from agentm.core.abi import AssistantMessage, TextContent
+
+    for msg in reversed(messages):
+        if isinstance(msg, AssistantMessage):
+            parts = [
+                b.text for b in msg.content
+                if isinstance(b, TextContent) and b.text.strip()
+            ]
+            if parts:
+                return "\n".join(parts)
+
+    return f"[{result.instance_id}] reflection produced no text output"
 
 
 __all__ = [
     "EvalResult",
     "evaluate_instance",
     "evaluate_instance_tel",
+    "reflect_on_result",
 ]
