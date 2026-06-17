@@ -1,9 +1,8 @@
-"""TEL prompt evolution: aggregate reflections → propose prompt changes.
+"""TEL prompt evolution: aggregate reflections → edit prompt files directly.
 
 Usage::
 
     llmharness-evolve --reflections ./failed_cases/reflections/
-    llmharness-evolve --reflections ./reflections/ --apply
 """
 
 from __future__ import annotations
@@ -30,23 +29,12 @@ def _load_reflections(directory: Path) -> list[dict[str, str]]:
     return reflections
 
 
-def _load_current_prompts() -> dict[str, str]:
-    """Read current notepad/reason prompts."""
-    prompts = {}
-    for name in ("notepad", "reason"):
-        p = _PROMPTS_DIR / f"{name}.md"
-        if p.is_file():
-            prompts[name] = p.read_text(encoding="utf-8")
-    return prompts
-
-
 async def _run_evolve(
     reflections: list[dict[str, str]],
-    current_prompts: dict[str, str],
     provider: tuple[str, dict[str, Any]] | None,
     cwd: str,
 ) -> str:
-    """Create an AgentM session to aggregate reflections and propose changes."""
+    """Create an AgentM session that edits prompt files directly."""
     import contextlib
 
     from agentm.core.abi import AgentSessionConfig, AssistantMessage, TextContent
@@ -58,17 +46,18 @@ async def _run_evolve(
         f"### Case: {r['instance_id']}\n\n{r['content']}" for r in reflections
     )
 
-    prompts_block = "\n\n---\n\n".join(
-        f"### {name}.md\n\n```markdown\n{content}\n```"
-        for name, content in current_prompts.items()
-    )
+    notepad_path = _PROMPTS_DIR / "notepad.md"
+    reason_path = _PROMPTS_DIR / "reason.md"
 
     user_message = (
         f"{evolve_prompt}\n\n"
         f"# Reflection reports ({len(reflections)} cases)\n\n"
         f"{reflections_block}\n\n"
-        f"# Current prompts\n\n"
-        f"{prompts_block}"
+        f"# Prompt file paths\n\n"
+        f"Read and edit these files directly:\n"
+        f"- `{notepad_path}`\n"
+        f"- `{reason_path}`\n\n"
+        f"After editing, summarise what you changed and why."
     )
 
     config = AgentSessionConfig(
@@ -79,6 +68,7 @@ async def _run_evolve(
             ("agentm.extensions.builtin.operations", {}),
         ],
         purpose="tel_evolve",
+        auto_commit=False,
     )
 
     session = await AgentSession.create(config)
@@ -113,16 +103,13 @@ def evolve(
     model: Annotated[
         str | None, typer.Option("--model", help="config.toml profile name")
     ] = None,
-    output: Annotated[
-        Path | None,
-        typer.Option("--output", "-o", help="Write proposal to file (default: stdout)"),
-    ] = None,
 ) -> None:
-    """Read reflection reports and propose prompt improvements."""
+    """Read reflection reports and evolve prompt files in-place."""
     import os
 
     try:
         from agentm.cli import autoload_dotenv
+
         autoload_dotenv()
     except ImportError:
         pass
@@ -136,11 +123,7 @@ def evolve(
         typer.echo(f"No reflection files found in {reflections}", err=True)
         raise typer.Exit(1)
 
-    current_prompts = _load_current_prompts()
-    typer.echo(
-        f"Loaded {len(reflection_data)} reflections, "
-        f"{len(current_prompts)} current prompts"
-    )
+    typer.echo(f"Loaded {len(reflection_data)} reflections")
 
     resolved_provider: tuple[str, dict[str, Any]] | None = None
     if model:
@@ -175,29 +158,16 @@ def evolve(
             pass
 
     typer.echo("Running evolve agent…")
-    proposal = asyncio.run(
-        _run_evolve(
-            reflection_data,
-            current_prompts,
-            resolved_provider,
-            str(cwd.resolve()),
-        )
+    summary = asyncio.run(
+        _run_evolve(reflection_data, resolved_provider, str(cwd.resolve()))
     )
 
-    if output:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(proposal, encoding="utf-8")
-        typer.echo(f"\nProposal written to {output}")
-    else:
-        typer.echo("\n" + "=" * 60)
-        typer.echo(proposal)
-        typer.echo("=" * 60)
-
+    typer.echo(f"\n{summary}")
     typer.echo(
-        f"\nPrompt files at:\n"
+        f"\nPrompt files edited in-place:\n"
         f"  {_PROMPTS_DIR / 'notepad.md'}\n"
         f"  {_PROMPTS_DIR / 'reason.md'}\n"
-        f"Review the proposals above and edit the prompts manually."
+        f"Review changes with: git diff"
     )
 
 
