@@ -1,57 +1,71 @@
 # Role
 
-You are the same reasoner who just analysed this trajectory and submitted
-error span predictions. Your predictions have been scored against the
-ground truth, and some were wrong. Your task now is to reflect on **why**
-and extract **general methodology lessons** — not case-specific fixes.
+You are the same reasoner who just analysed this trajectory. Your
+predictions have been scored against ground truth, and some were wrong.
+Reflect on **why** — not at the level of this specific case, but at the
+level of the methodology that produced the error.
 
 # What you got wrong
 
-The CORRECTION section in your context shows:
-- Your predicted error spans vs. the gold (correct) error spans.
-- Which spans you missed (false negatives) and which you wrongly flagged
-  (false positives).
+The CORRECTION section in your context shows your predicted error spans
+vs. the gold spans, with false negatives (missed) and false positives
+(over-flagged).
+
+# The ground rule
+
+Your analysis was governed by:
+
+> An agent's action is warranted only when it follows from what is
+> actually available to it at that point.
+
+Your reflection should trace back to this rule: where did your
+application of it break down?
 
 # Task
 
-## 1. Diagnose
+## 1. Re-read
 
-Use `get_span` to re-read the missed and wrongly-flagged spans. For each
-discrepancy, ask:
-- **False negative (missed)**: What made this span's error invisible to
-  you? Was it a constraint you failed to derive from the question? A
-  cross-span relationship you didn't trace? An error pattern you didn't
-  consider?
-- **False positive (over-flagged)**: What made you think this span was an
-  error when it wasn't? Did you misread the evidence, apply a rule too
-  broadly, or confuse a carrier with an origin?
+Use `get_span` to re-read the missed and wrongly-flagged spans. Understand
+what actually happened before diagnosing why you got it wrong.
 
-## 2. Generalise
+## 2. Diagnose
 
-Distil each diagnosis into a **general principle** — something that applies
-across trajectories, not just this one. Frame it as methodology guidance:
-"When analysing trajectories, [do X / watch for Y / avoid Z]."
+For each discrepancy, determine which of these applies:
 
-Bad: "The agent searched for 'Basel' which is not in France."
-Good: "When the question imposes a geographic constraint, verify that the
-agent's final answer satisfies it — don't assume the agent checked."
+- **Prompt gap**: the current prompt's principles genuinely don't make
+  this failure mode salient. The ground rule covers it in theory, but no
+  stated consequence points the reasoner toward it. → This is a real
+  methodology gap worth reporting.
+- **Execution failure**: the prompt already covers this (e.g. "claims must
+  be proportional to evidence") but you failed to apply it. → Note it
+  but mark it as an execution failure, not a prompt gap.
+- **Judgement call**: reasonable people could disagree on whether this span
+  is an error. → Note the ambiguity but don't treat it as a gap.
 
-## 3. Summarise
+This distinction matters: only prompt gaps should drive prompt evolution.
+Execution failures mean the prompt is fine; the model just needs to follow
+it more carefully.
 
-Produce a structured summary:
+## 3. Generalise
+
+For each prompt gap, frame the lesson as a sharpening of the existing
+ground rule or its consequences — not a new standalone rule. Ask: "What
+existing principle, stated more precisely, would have caught this?"
+
+## 4. Summarise
 
 ```
-## Missed errors (false negatives)
-- [span_id]: [one-line diagnosis]
-  → Lesson: [general principle]
+## Prompt gaps
+- [one-line description of the gap]
+  → Existing principle to sharpen: [which consequence of the ground rule]
+  → Proposed sharpening: [how to reword it]
 
-## False positives
-- [span_id]: [one-line diagnosis]
-  → Lesson: [general principle]
+## Execution failures
+- [one-line description]: covered by [which existing principle]
 
-## Methodology gaps
-- [each unique lesson, deduplicated, as a directive sentence]
+## Ambiguous cases
+- [one-line description]: [why it's ambiguous]
 ```
 
-The "Methodology gaps" section is what matters most — these are the
-candidate amendments for future prompts.
+The "Prompt gaps" section is what drives evolution. Keep it focused —
+fewer sharp insights beat many vague ones.
