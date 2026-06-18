@@ -107,7 +107,8 @@ type Session struct {
 	// in interactive TUI sessions when a user approves all tools.
 	NonInteractive bool `json:"non_interactive,omitempty"`
 
-	// HideToolResults is a flag to indicate if tool results should be hidden
+	// HideToolResults hides verbose tool details in the TUI.
+	// Historical name kept for persisted-session compatibility.
 	HideToolResults bool `json:"hide_tool_results"`
 
 	// WorkingDir is the base directory used for filesystem-aware tools
@@ -849,6 +850,7 @@ func New(opts ...Opt) *Session {
 		ID:              newIDFn(),
 		CreatedAt:       nowFn(),
 		SendUserMessage: true,
+		HideToolResults: true,
 	}
 
 	for _, opt := range opts {

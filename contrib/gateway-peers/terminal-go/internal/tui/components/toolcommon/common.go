@@ -183,7 +183,7 @@ func FormatToolResult(content string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func RenderTool(msg *types.Message, inProgress spinner.Spinner, args, result string, width int, hideToolResults bool) string {
+func RenderTool(msg *types.Message, inProgress spinner.Spinner, args, result string, width int, hideToolDetails bool) string {
 	nameStyle := styles.ToolName
 	resultStyle := styles.ToolMessageStyle
 	if msg.ToolStatus == types.ToolStatusError {
@@ -198,13 +198,13 @@ func RenderTool(msg *types.Message, inProgress spinner.Spinner, args, result str
 
 	if header, ok := RenderFriendlyHeader(msg, inProgress); ok {
 		content := header
-		if args != "" {
+		if args != "" && !hideToolDetails {
 			firstLineWidth := width - lipgloss.Width(content) - 1
 			subsequentLineWidth := width - styles.ToolCompletedIcon.GetMarginLeft()
 			wrappedArgs := wrapTextWithIndent(args, firstLineWidth, subsequentLineWidth)
 			content += " " + wrappedArgs
 		}
-		if result != "" && !hideToolResults {
+		if result != "" && !hideToolDetails {
 			if strings.Count(content, "\n") > 0 || strings.Count(result, "\n") > 0 {
 				content += "\n" + resultStyle.MarginLeft(styles.ToolCompletedIcon.GetMarginLeft()).Render(result)
 			} else {
@@ -224,13 +224,13 @@ func RenderTool(msg *types.Message, inProgress spinner.Spinner, args, result str
 
 	content := fmt.Sprintf("%s%s", icon, name)
 
-	if args != "" {
+	if args != "" && !hideToolDetails {
 		firstLineWidth := width - lipgloss.Width(content) - 1 // -1 for space before args
 		subsequentLineWidth := width - styles.ToolCompletedIcon.GetMarginLeft()
 		wrappedArgs := wrapTextWithIndent(args, firstLineWidth, subsequentLineWidth)
 		content += " " + wrappedArgs
 	}
-	if result != "" && !hideToolResults {
+	if result != "" && !hideToolDetails {
 		if strings.Count(content, "\n") > 0 || strings.Count(result, "\n") > 0 {
 			content += "\n" + resultStyle.MarginLeft(styles.ToolCompletedIcon.GetMarginLeft()).Render(result)
 		} else {

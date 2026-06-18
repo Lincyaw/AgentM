@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
@@ -91,6 +92,20 @@ func (c *Controller) FirstMessage() (string, bool) {
 func (c *Controller) sendInbound(body map[string]any) {
 	c.mu.Lock()
 	scenario := ""
+	if _, hasBodyContent := body["content"]; hasBodyContent {
+		if _, ok := body["request_id"]; !ok {
+			body["request_id"] = wire.NewID()
+		}
+		if _, hasAction := body["action"]; !hasAction {
+			content, _ := body["content"].(string)
+			if _isSlashCommand(content) {
+				body["action"] = "run_command"
+			} else {
+				body["action"] = "submit"
+				body["policy"] = "interrupt_first"
+			}
+		}
+	}
 	if !c.scenarioSent {
 		scenario = c.id.Scenario
 		c.scenarioSent = true
@@ -108,6 +123,10 @@ func (c *Controller) sendInbound(body map[string]any) {
 			c.translator.emit(runtime.Error("failed to reach gateway: " + err.Error()))
 		}
 	}
+}
+
+func _isSlashCommand(content string) bool {
+	return strings.HasPrefix(content, "/") && !strings.HasPrefix(content, "//")
 }
 
 // sendInterrupt sends a control=interrupt inbound to stop the current gateway

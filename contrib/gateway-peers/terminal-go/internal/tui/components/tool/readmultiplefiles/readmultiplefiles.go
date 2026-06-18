@@ -32,6 +32,9 @@ func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionS
 	if msg.ToolStatus == types.ToolStatusPending || msg.ToolStatus == types.ToolStatusRunning {
 		return toolcommon.RenderTool(msg, s, formatFilesList(args.Paths), "", width, sessionState.HideToolResults())
 	}
+	if sessionState.HideToolResults() {
+		return toolcommon.RenderTool(msg, s, "", "", width, true)
+	}
 
 	// For completed/error state, render each file line
 	var meta *filesystem.ReadMultipleFilesMeta

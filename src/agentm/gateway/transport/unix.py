@@ -10,12 +10,44 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import os
+import re
 import socket
+import tempfile
 
 from loguru import logger
 
 from .base import ConnectionHandler
+
+
+_MAX_UNIX_SOCKET_PATH_BYTES: int = 104
+
+
+def _resolve_unix_socket_path(socket_path: str) -> str:
+    """Return a bind-ready unix socket path.
+
+    macOS/AF_UNIX sockets cannot exceed a fixed byte limit (~104 bytes) in
+    ``sun_path``. Pytest temp roots can exceed this with nested names, and
+    direct bind/connect then fails with ``OSError: AF_UNIX path too long``.
+    We keep the user-facing long path for API stability and map to a stable
+    short fallback under the process temp dir when needed.
+    """
+    if len(socket_path.encode("utf-8")) <= _MAX_UNIX_SOCKET_PATH_BYTES:
+        return socket_path
+    digest = hashlib.sha256(socket_path.encode("utf-8")).hexdigest()[:12]
+    base = os.path.basename(socket_path)
+    stem = os.path.splitext(base)[0]
+    stem = re.sub(r"[^A-Za-z0-9._-]", "-", stem)[:12] or "gateway"
+    short_name = f"agentm-gw-{stem}-{digest}.sock"
+    fallback = os.path.join(tempfile.gettempdir(), short_name)
+    # The fallback path stays safely short on normal hosts.
+    if len(fallback.encode("utf-8")) > _MAX_UNIX_SOCKET_PATH_BYTES:
+        # If tmpdir itself is already unexpectedly long, keep the final fallback
+        # short by dropping stem suffix.
+        short_name = f"agentm-{digest}.sock"
+        fallback = os.path.join(tempfile.gettempdir(), short_name)
+    return fallback
 
 
 # Short connect timeout for the stale-socket liveness probe (issue #4).
@@ -56,7 +88,7 @@ class UnixServerTransport:
     """Bind to an `AF_UNIX` socket at ``socket_path``."""
 
     def __init__(self, socket_path: str) -> None:
-        self._socket_path = socket_path
+        self._socket_path = _resolve_unix_socket_path(socket_path)
         self._server: asyncio.base_events.Server | None = None
 
     @property
@@ -127,7 +159,7 @@ class UnixClientTransport:
     """Connect to an `AF_UNIX` socket at ``socket_path``."""
 
     def __init__(self, socket_path: str) -> None:
-        self._socket_path = socket_path
+        self._socket_path = _resolve_unix_socket_path(socket_path)
 
     @property
     def socket_path(self) -> str:

@@ -3,6 +3,63 @@
 Per `/autoharness:long-horizon`: L2+ decisions logged here so the user can scan
 between sessions. L4 entries also get the `[flagged]` prefix.
 
+## 2026-06-18 — Gateway Agent Proxy architecture review
+
+- **Design review captured as a first-class concept** (L2: repo convention).
+  Added `.claude/designs/gateway-agent-proxy.md` and registered
+  `gateway_agent_proxy` in `.claude/index.yaml` instead of leaving the plan only
+  in chat. Reason: CLAUDE.md requires concept changes to move through
+  `.claude/designs` + index, and this review changes the Gateway/Core boundary.
+- **[flagged] Core API expansion is not the first move** (L4: architecture
+  boundary). Surveyed the existing surfaces and found the core mechanisms mostly
+  exist already: `AgentSession.prompt/tick/interrupt/idle`, `SessionInbox.push`,
+  persistent driver events, and `ExtensionAPI.post_inbox/send_user_message/
+  spawn_child_session`. The gap is Gateway semantics/read-model, not a missing
+  one-off Core API like `interrupt_then_submit`.
+- **[flagged] Gateway should be an Agent Proxy, not a second runtime** (L4:
+  boundary reinterpretation). The single-process gateway remains an implementation
+  deployment choice, but semantically it should own routing, dispatch, delivery,
+  request acknowledgement, state projection, and human-interaction transport. It
+  should not own agent policy, scenario behavior, or client UX policy.
+- **[flagged] Root and child sessions should converge on inbox-based input**
+  (L4: consistency with session-inbox and interactive-subagent). Current gateway
+  root input awaits `sess.prompt(...)`, while child input goes directly through
+  `child.inbox.push(source="user")`. The plan moves root delivery toward the same
+  inbox/proxy model so client intervention semantics are uniform across main and
+  subagent sessions.
+- **Structured intent and snapshots before TUI polish** (L2: sequencing). Terminal
+  UX should be improved only after Gateway can express submit policy
+  (`cooperative` vs `interrupt_first`), request acknowledgements, a session
+  snapshot/read model, and generic interaction requests. Otherwise each client
+  will keep inventing local behavior for missing gateway semantics.
+- **Subagent reviewer changes accepted** (L2: review feedback). A read-only
+  reviewer found three roadmap-contract issues and all were folded into the
+  design: keep routing on the envelope (`AgentTarget` internal only, no
+  `body.target`), make Phase 1 internal-only so terminal-go's queue is not
+  removed before explicit submit policy exists, and define/test `request_id`
+  idempotency in the same phase that adds `request_ack`.
+- **Explicit intent + idempotency path implemented for Gateway router/runtime** (L2: codebase conventions + existing fail-stop tests).
+  Added `inbound.action` dispatch (`submit`, `run_command`,
+  `interaction_response`, `interrupt`, `resolve_approval`), mutable-action
+  idempotency via `request_id`, `interrupt_first` policy in submit flow, and a
+  durable `request_ack` outbound acknowledgment path so clients can distinguish
+  accepted vs replayed requests. Added unit coverage in `test_router.py`,
+  `test_outbound_routing.py`, and `test_runtime.py`.
+- **Gateway proxy live-wire evidence captured** (L2: empirical check).
+  Against the real gateway at `unix:///tmp/agentm-debug.sock`
+  (`litellm-dsv4flash`), manual framing confirmed the provider path emits
+  `stream_text`/`assistant_text` and an immediate interrupt followed by a new
+  instruction does not wedge behind the old run. A duplicate explicit
+  `request_id` probe (`action=run_command`, `/gateway_debug`) produced
+  `request_ack(status=accepted)`, one `command_result`, then
+  `request_ack(status=duplicate)` with no second command execution.
+  `/gateway_debug all` returned a command-result read model with sessions and
+  globals (`inflight_tasks`, `outbox_ready`, `total_pending_approvals`,
+  `tracked_sessions`). Verification:
+  `uv run pytest tests/unit/gateway --tb=short`;
+  `uv run ruff check src/agentm/gateway tests/unit/gateway`; and
+  `go test ./internal/adapter` under `contrib/gateway-peers/terminal-go`.
+
 ## 2026-05-11 — harness-collapse Stage 1 driver session
 
 - **Boundary review run on Stage 1 diff** (L2: codebase convention).

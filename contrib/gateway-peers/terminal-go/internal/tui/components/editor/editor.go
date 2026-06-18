@@ -90,6 +90,8 @@ type Editor interface {
 	EnterHistorySearch() (layout.Model, tea.Cmd)
 	// SendContent triggers sending the current editor content
 	SendContent() tea.Cmd
+	// SetCompletions replaces the registered completion providers.
+	SetCompletions(comps ...completions.Completion) tea.Cmd
 }
 
 // fileLoadResultMsg is sent when async file loading completes.
@@ -170,6 +172,23 @@ func WithCompletions(comps ...completions.Completion) Option {
 	return func(e *editor) {
 		e.completions = comps
 	}
+}
+
+// SetCompletions replaces the completion providers for the editor.
+func (e *editor) SetCompletions(comps ...completions.Completion) tea.Cmd {
+	e.completions = comps
+	e.currentCompletion = nil
+	e.completionWord = ""
+	e.fileLoadStarted = false
+	e.fileFullLoadStarted = false
+	if e.fileLoadCancel != nil {
+		e.fileLoadCancel()
+	}
+	e.fileLoadCancel = nil
+	if e.fileLoadID > 0 {
+		e.fileLoadID++
+	}
+	return core.CmdHandler(completion.CloseMsg{})
 }
 
 // WithReadOnly disables the editor so no new messages can be composed.

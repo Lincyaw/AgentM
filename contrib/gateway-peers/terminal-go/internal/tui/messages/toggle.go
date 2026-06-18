@@ -10,7 +10,7 @@ type (
 	// in-flight LLM request and its tool calls complete.
 	TogglePauseMsg struct{}
 
-	// ToggleHideToolResultsMsg toggles hiding of tool results.
+	// ToggleHideToolResultsMsg toggles hiding of verbose tool details.
 	ToggleHideToolResultsMsg struct{}
 
 	// ToggleSidebarMsg toggles sidebar visibility.

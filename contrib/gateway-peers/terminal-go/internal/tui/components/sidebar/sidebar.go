@@ -1367,7 +1367,7 @@ func (m *model) toolsetInfo(contentWidth int) string {
 		shortcut string
 	}{
 		{m.sessionState.YoloMode(), "YOLO mode enabled", "^y"},
-		{m.sessionState.HideToolResults(), "Tool output hidden", "^o"},
+		{m.sessionState.HideToolResults(), "Tool details hidden", "^o"},
 		{m.sessionState.SplitDiffView(), "Split Diff View", "/split-diff"},
 	}
 

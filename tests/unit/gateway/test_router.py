@@ -16,6 +16,10 @@ from agentm.gateway.wire import WIRE_VERSION, Envelope
 def _inbound(
     content: str = "",
     button_value: str | None = None,
+    action: str | None = None,
+    policy: str | None = None,
+    interaction_id: str | None = None,
+    request_id: str | None = None,
     control: str | None = None,
 ) -> Envelope:
     body: dict[str, object] = {
@@ -26,6 +30,14 @@ def _inbound(
     }
     if button_value is not None:
         body["button_value"] = button_value
+    if action is not None:
+        body["action"] = action
+    if policy is not None:
+        body["policy"] = policy
+    if interaction_id is not None:
+        body["interaction_id"] = interaction_id
+    if request_id is not None:
+        body["request_id"] = request_id
     if control is not None:
         body["control"] = control
     return Envelope(
@@ -56,6 +68,49 @@ def test_double_slash_is_a_prompt_not_a_command() -> None:
 def test_plain_text_routes_to_prompt_session() -> None:
     decision = dispatch(_inbound(content="hello there"))
     assert decision.action is RouterAction.PROMPT_SESSION
+
+
+def test_explicit_submit_routes_to_submit() -> None:
+    decision = dispatch(
+        _inbound(
+            content="new message",
+            action="submit",
+            request_id="r1",
+        )
+    )
+    assert decision.action is RouterAction.SUBMIT
+
+
+def test_explicit_run_command_routes_to_run_command() -> None:
+    decision = dispatch(
+        _inbound(
+            content="/model gpt",
+            action="run_command",
+        )
+    )
+    assert decision.action is RouterAction.RUN_COMMAND
+
+
+def test_explicit_interrupt_routes_to_interrupt() -> None:
+    decision = dispatch(_inbound(action="interrupt"))
+    assert decision.action is RouterAction.INTERRUPT
+
+
+def test_explicit_interaction_response_routes_to_interaction_response() -> None:
+    decision = dispatch(
+        _inbound(
+            action="interaction_response",
+            button_value="appr-x:approve",
+            interaction_id="ix-1",
+        )
+    )
+    assert decision.action is RouterAction.INTERACTION_RESPONSE
+    assert decision.body.interaction_id == "ix-1"
+
+
+def test_explicit_unknown_action_raises() -> None:
+    with pytest.raises(ProtocolError):
+        dispatch(_inbound(action="weird"))
 
 
 def test_button_value_wins_over_slash_content() -> None:

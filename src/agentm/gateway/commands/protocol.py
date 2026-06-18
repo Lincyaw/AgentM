@@ -140,6 +140,14 @@ class CommandContext:
     """Returns every handler the router currently knows about. Used by
     ``/help``. The list is a snapshot — handlers must not mutate it."""
 
+    get_gateway_debug_state: Callable[[], dict[str, Any]] = lambda: {}
+    """Returns a compact gateway runtime snapshot used by ``/gateway_debug``.
+
+    The payload is intentionally opaque to callers: it may include
+    internal fields useful for client-side diagnostics and should be rendered
+    verbatim (``json.dumps(..., indent=2)``) rather than interpreted as a
+    stable control API."""
+
     get_extension_api: Callable[[], Any | None] = lambda: None
     """Live ``ExtensionAPI`` for this chat's session, or ``None`` if the
     session has not been created yet. Used by ``/atom:*`` commands."""

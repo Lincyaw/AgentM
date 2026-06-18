@@ -35,7 +35,7 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/types"
 )
 
-// ToggleHideToolResultsMsg triggers hiding/showing tool results
+// ToggleHideToolResultsMsg triggers hiding/showing verbose tool details.
 type ToggleHideToolResultsMsg struct{}
 
 type toggleableView interface {

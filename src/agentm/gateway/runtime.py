@@ -14,7 +14,10 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Literal
 from typing import Any
 
 from loguru import logger
@@ -42,6 +45,38 @@ from agentm.gateway.wire import (
     Envelope,
     InboundBody,
 )
+
+
+SessionPhase = Literal[
+    "idle",
+    "running",
+    "waiting_interaction",
+    "interrupting",
+    "errored",
+    "unknown",
+]
+
+
+@dataclass
+class _SessionSnapshot:
+    phase: SessionPhase = "idle"
+    active_turn_id: str | None = None
+    tool_names: list[str] = field(default_factory=list)
+    command_names: list[str] = field(default_factory=list)
+    pending_interactions: list[str] = field(default_factory=list)
+    children: list[str] = field(default_factory=list)
+    last_error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "phase": self.phase,
+            "active_turn_id": self.active_turn_id,
+            "tool_names": self.tool_names,
+            "command_names": self.command_names,
+            "pending_interactions": self.pending_interactions,
+            "children": self.children,
+            "last_error": self.last_error,
+        }
 
 
 def route_targets(
@@ -116,9 +151,14 @@ class GatewayRuntime:
         self._inflight: set[asyncio.Task[Any]] = set()
         self._peer_channels: dict[str, str] = {}
         self._session_commands: dict[str, set[str]] = {}
+        self._session_routes: dict[str, tuple[str, str, str | None]] = {}
+        self._snapshots: dict[str, _SessionSnapshot] = {}
+        self._request_id_cache: OrderedDict[str, None] = OrderedDict()
+        self._max_request_cache_size = 2048
         # Per-chat prompt count, surfaced by /status. Incremented on each
         # conversational turn (a prompt, not a control command).
         self._turn_counts: dict[str, int] = {}
+
 
     def attach_server(self, server: WireServer) -> None:
         self._server = server
@@ -189,6 +229,13 @@ class GatewayRuntime:
             if session_key is not None:
                 self._remember_session_commands(session_key, meta)
             self._merge_gateway_commands(meta)
+        if session_key is not None:
+            self._record_session_route(session_key, body)
+            # Outbound helpers in tests may use a hand-built runtime object.
+            if isinstance(meta, dict) and kind != "session_snapshot":
+                changed = self._update_session_snapshot(session_key, kind, meta)
+                if changed:
+                    await self._emit_session_snapshot(session_key)
         env = Envelope(
             v=WIRE_VERSION,
             id=f"out-{uuid.uuid4().hex[:12]}",
@@ -210,6 +257,199 @@ class GatewayRuntime:
                     self._outbox.enqueue, peer.peer_id, env
                 )
             peer.send_q.put(env, outbox_id)
+
+    def _record_session_route(self, session_key: str, body: dict[str, Any]) -> None:
+        routes = getattr(self, "_session_routes", None)
+        if routes is None:
+            routes = {}
+            self._session_routes = routes
+        channel = str(body.get("channel") or "")
+        chat_id = str(body.get("chat_id") or "")
+        if not channel or not chat_id:
+            return
+        thread_id = body.get("thread_id")
+        if thread_id is not None and not isinstance(thread_id, str):
+            thread_id = str(thread_id)
+        routes[session_key] = (channel, chat_id, thread_id)
+
+    def _snapshot_for(self, session_key: str) -> _SessionSnapshot:
+        snapshots = getattr(self, "_snapshots", None)
+        if snapshots is None:
+            snapshots = {}
+            self._snapshots = snapshots
+        return snapshots.setdefault(session_key, _SessionSnapshot())
+
+    def _set_children_snapshot(self, snapshot: _SessionSnapshot) -> None:
+        snapshot.children = sorted(self._child_registry.ids())
+
+    def _set_pending_interactions_snapshot(self, session_key: str, snapshot: _SessionSnapshot) -> None:
+        snapshot.pending_interactions = sorted(self._approval.pending_for_session(session_key))
+
+    def _derive_phase_from_snapshot(self, snapshot: _SessionSnapshot) -> SessionPhase:
+        if snapshot.last_error:
+            return "errored"
+        if snapshot.pending_interactions:
+            return "waiting_interaction"
+        if snapshot.active_turn_id:
+            return "running"
+        if snapshot.phase in {"interrupting", "unknown"}:
+            return snapshot.phase
+        return "idle"
+
+    def _get_gateway_debug_state(self, session_key: str) -> dict[str, Any]:
+        session_routes = getattr(self, "_session_routes", {})
+        snapshots = getattr(self, "_snapshots", {})
+        current_session_route = session_routes.get(session_key)
+        child_registry = getattr(self, "_child_registry", None)
+        child_ids = child_registry.ids() if child_registry is not None else []
+        approval = getattr(self, "_approval", None)
+
+        sessions_state: dict[str, Any] = {}
+        for key in sorted(set(session_routes.keys()) | set(snapshots.keys())):
+            route = session_routes.get(key)
+            sessions_state[key] = {
+                "session_id": self._sessions.session_id(key),
+                "route": (
+                    {
+                        "channel": route[0],
+                        "chat_id": route[1],
+                        "thread_id": route[2],
+                    }
+                    if route is not None
+                    else None
+                ),
+                "snapshot": self._snapshot_for(key).as_dict(),
+            }
+
+        return {
+            "session_key": session_key,
+            "session": {
+                "session_id": self._sessions.session_id(session_key),
+                "route": (
+                    {
+                        "channel": current_session_route[0],
+                        "chat_id": current_session_route[1],
+                        "thread_id": current_session_route[2],
+                    }
+                    if current_session_route is not None
+                    else None
+                ),
+                "snapshot": self._snapshot_for(session_key).as_dict(),
+                "command_names": sorted(self._session_commands.get(session_key, set())),
+                "turn_count": self._turn_counts.get(session_key, 0),
+                "pending_approvals": (
+                    approval.pending_for_session(session_key)
+                    if approval is not None
+                    else []
+                ),
+                "child_sessions": child_ids,
+            },
+            "sessions": sessions_state,
+            "global": {
+                "inflight_tasks": len(self._inflight),
+                "tracked_sessions": len(session_routes),
+                "outbox_ready": getattr(self, "_outbox", None) is not None,
+                "total_pending_approvals": (
+                    approval.pending_count if approval is not None else 0
+                ),
+            },
+        }
+
+    def _update_session_snapshot(
+        self, session_key: str, kind: str, metadata: dict[str, Any]
+    ) -> bool:
+        snapshot = self._snapshot_for(session_key)
+        before = snapshot.as_dict()
+
+        if kind == "session_ready":
+            tools = metadata.get("tool_names")
+            if isinstance(tools, list):
+                snapshot.tool_names = sorted({str(t) for t in tools if isinstance(t, str)})
+            commands = metadata.get("command_names")
+            if isinstance(commands, list):
+                snapshot.command_names = sorted(
+                    {str(c) for c in commands if isinstance(c, str)}
+                )
+        elif kind == "turn_start":
+            turn_id = metadata.get("turn_id")
+            if isinstance(turn_id, str):
+                snapshot.active_turn_id = turn_id
+            snapshot.phase = "running"
+            snapshot.last_error = None
+        elif kind == "turn_end":
+            snapshot.active_turn_id = None
+        elif kind == "agent_end":
+            cause = metadata.get("cause")
+            if isinstance(cause, str) and cause:
+                lowered = cause.lower()
+                if lowered in {"none", "cancel", "cancelled", "keyboardinterrupt"}:
+                    snapshot.last_error = None
+                else:
+                    snapshot.last_error = cause
+            snapshot.active_turn_id = None
+        elif kind == "child_start":
+            self._set_children_snapshot(snapshot)
+        elif kind == "child_end":
+            self._set_children_snapshot(snapshot)
+        elif kind == "approval_request":
+            approval_id = metadata.get("approval_id")
+            if isinstance(approval_id, str) and approval_id:
+                pending = self._approval.pending_for_session(session_key)
+                if approval_id not in pending:
+                    pending.append(approval_id)
+                snapshot.pending_interactions = sorted(set(pending))
+            snapshot.phase = "waiting_interaction"
+        elif kind == "approval_resolved":
+            approval_id = metadata.get("approval_id")
+            if isinstance(approval_id, str) and approval_id:
+                snapshot.pending_interactions = sorted(
+                    [i for i in snapshot.pending_interactions if i != approval_id]
+                )
+            else:
+                # Fallback to authoritative source when id is missing.
+                self._set_pending_interactions_snapshot(session_key, snapshot)
+        else:
+            return False
+
+        # Child/approval snapshots can change quickly and are derived from other
+        # services. Keep them always current after any mutation.
+        if kind in {"child_start", "child_end", "approval_request", "approval_resolved"}:
+            self._set_children_snapshot(snapshot)
+            self._set_pending_interactions_snapshot(session_key, snapshot)
+
+        snapshot.phase = self._derive_phase_from_snapshot(snapshot)
+
+        if kind == "approval_request":
+            if not snapshot.pending_interactions:
+                self._set_pending_interactions_snapshot(session_key, snapshot)
+
+        return snapshot.as_dict() != before
+
+    async def _emit_session_snapshot(self, session_key: str) -> None:
+        routes = getattr(self, "_session_routes", None)
+        route = routes.get(session_key) if routes is not None else None
+        if route is None:
+            return
+        snapshot = self._snapshot_for(session_key)
+        self._set_children_snapshot(snapshot)
+        self._set_pending_interactions_snapshot(session_key, snapshot)
+        snapshot.phase = self._derive_phase_from_snapshot(snapshot)
+
+        channel, chat_id, thread_id = route
+        await self._emit_outbound(
+            {
+                "channel": channel,
+                "chat_id": chat_id,
+                "content": "",
+                **({"thread_id": thread_id} if thread_id is not None else {}),
+                "metadata": {
+                    "kind": "session_snapshot",
+                    "session_id": self._sessions.session_id(session_key),
+                    **snapshot.as_dict(),
+                },
+                "_session_key": session_key,
+            }
+        )
 
     def _remember_session_commands(
         self, session_key: str, meta: dict[str, Any]
@@ -235,6 +475,64 @@ class GatewayRuntime:
                 seen.add(handler.name)
         meta["command_names"] = names
 
+    def _is_mutating_action(self, action: RouterAction) -> bool:
+        return action in {
+            RouterAction.SUBMIT,
+            RouterAction.RESOLVE_APPROVAL,
+            RouterAction.RUN_COMMAND,
+            RouterAction.INTERACTION_RESPONSE,
+            RouterAction.INTERRUPT,
+            RouterAction.PROMPT_SESSION,
+        }
+
+    def _request_cache_key(
+        self, peer_id: str, session_key: str, action: RouterAction, request_id: str
+    ) -> str:
+        return f"{peer_id}|{session_key}|{action.value}|{request_id}"
+
+    def _is_duplicate_request(
+        self, peer_id: str, session_key: str, action: RouterAction, request_id: str
+    ) -> bool:
+        key = self._request_cache_key(peer_id, session_key, action, request_id)
+        if key in self._request_id_cache:
+            self._request_id_cache.move_to_end(key)
+            return True
+        self._request_id_cache[key] = None
+        while len(self._request_id_cache) > self._max_request_cache_size:
+            self._request_id_cache.popitem(last=False)
+        return False
+
+    async def _emit_request_ack(
+        self,
+        session_key: str,
+        body: InboundBody,
+        action: RouterAction,
+        *,
+        duplicate: bool,
+    ) -> None:
+        if body.request_id is None:
+            return
+        status = "duplicate" if duplicate else "accepted"
+        metadata = {
+            "kind": "request_ack",
+            "request_id": body.request_id,
+            "action": action.value,
+            "status": status,
+            "policy": body.policy or "cooperative",
+        }
+        if body.interaction_id is not None:
+            metadata["interaction_id"] = body.interaction_id
+        await self._emit_outbound(
+            {
+                "channel": body.channel,
+                "chat_id": body.chat_id,
+                "thread_id": body.thread_id,
+                "_session_key": session_key,
+                "content": "",
+                "metadata": metadata,
+            }
+        )
+
     # -- inbound handler ----------------------------------------------
 
     async def handle_inbound(self, peer: PeerSession, env: Envelope) -> None:
@@ -250,9 +548,27 @@ class GatewayRuntime:
         body = decision.body
         if body.channel:
             self._peer_channels[peer.peer_id] = body.channel
-        if decision.action is RouterAction.RESOLVE_APPROVAL:
-            self._resolve_approval(body)
+
+        if (
+            body.request_id is not None
+            and self._is_mutating_action(decision.action)
+        ):
+            duplicate = self._is_duplicate_request(
+                peer.peer_id, session_key, decision.action, body.request_id
+            )
+            await self._emit_request_ack(
+                session_key, body, decision.action, duplicate=duplicate
+            )
+            if duplicate:
+                return
+
+        if decision.action in {
+            RouterAction.RESOLVE_APPROVAL,
+            RouterAction.INTERACTION_RESPONSE,
+        }:
+            self._resolve_interaction(session_key, body)
             return
+
         # A session_key that names a registered child is interactive sub-agent
         # input: deliver it to that child's own inbox (the child's driver runs
         # the turn and its trajectory forwards back over the child_id-stamped
@@ -285,8 +601,12 @@ class GatewayRuntime:
         try:
             if action is RouterAction.RUN_COMMAND:
                 await self._run_command(session_key, body)
+            elif action in {RouterAction.SUBMIT, RouterAction.PROMPT_SESSION}:
+                await self._submit_session_input(session_key, scenario, body)
             else:
-                await self._prompt_session(session_key, scenario, body)
+                logger.error(
+                    f"unsupported action in _dispatch_command_or_prompt: {action}"
+                )
         except Exception as exc:
             logger.exception(f"error handling inbound from {session_key}")
             await self._send_error(session_key, body, exc)
@@ -295,6 +615,12 @@ class GatewayRuntime:
         sess = self._sessions.get(session_key)
         if sess is not None:
             sess.interrupt()
+            snapshot = self._snapshot_for(session_key)
+            if snapshot.phase != "interrupting":
+                snapshot.phase = "interrupting"
+            snapshot.active_turn_id = None
+            if not snapshot.pending_interactions:
+                self._schedule_session_snapshot(session_key)
 
     def _interrupt_child(self, child_id: str) -> None:
         child = self._child_registry.get(child_id)
@@ -312,7 +638,6 @@ class GatewayRuntime:
         the loop, which is exactly the caller-agnostic semantics the design
         wants (the parent perceives it too, since the message lands in the
         child's shared, parent-forwarded trajectory)."""
-        from agentm.core.runtime.session_inbox import InboxItem
 
         child = self._child_registry.get(child_id)
         if child is None:
@@ -320,11 +645,22 @@ class GatewayRuntime:
         content = body.content or ""
         if not content.strip():
             return
-        child.inbox.push(InboxItem(source="user", payload=content))
+        self._push_user_input(child.inbox, body, content)
 
-    def _resolve_approval(self, body: InboundBody) -> None:
+    def _resolve_interaction(self, session_key: str, body: InboundBody) -> None:
         if body.button_value:
             self._approval.resolve(body.button_value, body.sender_id)
+            # Waits for approval_request/approval_resolved outbound to drive the
+            # definitive projection, but keep an immediate state write for
+            # clients that are sensitive to control latency.
+            self._schedule_session_snapshot(session_key)
+
+    def _schedule_session_snapshot(self, session_key: str) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._emit_session_snapshot(session_key))
 
     async def _run_command(self, session_key: str, body: InboundBody) -> None:
         ctx = self._command_context(session_key, body)
@@ -344,7 +680,7 @@ class GatewayRuntime:
                 if known is not None and inv.name not in known:
                     await self._emit_unknown_command(session_key, body, inv.raw)
                     return
-            await self._prompt_session(session_key, None, body)
+            await self._submit_session_input(session_key, None, body)
             return
         for out in result.outbound:
             out_body = out.to_dict()
@@ -362,15 +698,62 @@ class GatewayRuntime:
                 session_key, None, replace(body, content=result.expanded_prompt)
             )
 
-    async def _prompt_session(
+    def _push_user_input(
+        self, inbox: Any, body: InboundBody, content: str
+    ) -> None:
+        from agentm.core.runtime.session_inbox import InboxItem
+
+        request_id = (
+            body.request_id
+            if body.request_id is not None
+            else (
+                body.raw.get("request_id")
+                if isinstance(body.raw, dict) and body.raw.get("request_id") is not None
+                else None
+            )
+        )
+        # Preserve existing behavior for old clients that send no request_id:
+        # no dedup hint is used.
+        if request_id is None:
+            inbox.push(InboxItem(source="user", payload=content))
+            return
+        inbox.push(
+            InboxItem(
+                source="user",
+                payload=content,
+                dedup_key=str(request_id),
+            )
+        )
+
+    async def _submit_session_input(
         self, session_key: str, scenario: str | None, body: InboundBody
     ) -> None:
+        if body.policy is not None and body.policy.lower() == "interrupt_first":
+            self._interrupt_session(session_key)
         sess = await self._sessions.get_or_create(
             session_key, scenario or self._scenario, body
         )
         self._sessions.set_turn_context(session_key, body)
         self._turn_counts[session_key] = self._turn_counts.get(session_key, 0) + 1
-        await sess.prompt(body.content)
+        # Route context may be required before we can send a session snapshot.
+        self._record_session_route(
+            session_key,
+            {
+                "channel": body.channel,
+                "chat_id": body.chat_id,
+                "thread_id": body.thread_id,
+            },
+        )
+        self._snapshot_for(session_key)
+        if body.content == "":
+            return
+        self._push_user_input(sess.inbox, body, body.content)
+        await self._emit_session_snapshot(session_key)
+
+    async def _prompt_session(
+        self, session_key: str, scenario: str | None, body: InboundBody
+    ) -> None:
+        await self._submit_session_input(session_key, scenario, body)
 
     # -- command-context plumbing -------------------------------------
 
@@ -380,11 +763,15 @@ class GatewayRuntime:
         async def end_session() -> None:
             await self._sessions.shutdown_session(session_key)
             self._turn_counts.pop(session_key, None)
+            self._snapshots.pop(session_key, None)
+            self._session_routes.pop(session_key, None)
 
         async def forget_chat_mapping() -> None:
             self._sessions.forget(session_key)
             self._session_commands.pop(session_key, None)
             self._turn_counts.pop(session_key, None)
+            self._snapshots.pop(session_key, None)
+            self._session_routes.pop(session_key, None)
 
         def get_route_stats() -> dict[str, Any]:
             return {
@@ -392,6 +779,9 @@ class GatewayRuntime:
                 "turn_count": self._turn_counts.get(session_key, 0),
                 "pending_approvals": self._approval.pending_count,
             }
+
+        def get_gateway_debug_state() -> dict[str, Any]:
+            return self._get_gateway_debug_state(session_key)
 
         def get_extension_api() -> Any | None:
             sess = self._sessions.get(session_key)
@@ -430,6 +820,7 @@ class GatewayRuntime:
             end_session=end_session,
             forget_chat_mapping=forget_chat_mapping,
             get_route_stats=get_route_stats,
+            get_gateway_debug_state=get_gateway_debug_state,
             list_commands=self._command_router.registry.all,
             get_extension_api=get_extension_api,
             list_models=list_models,

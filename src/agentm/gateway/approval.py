@@ -51,8 +51,8 @@ class ApprovalManager:
         self._require = require_approval
         self._block = always_block
         self._timeout = timeout_seconds
-        # approval_id -> (future, requester_sender_id)
-        self._pending: dict[str, tuple[asyncio.Future[bool], str]] = {}
+        # approval_id -> (future, requester_sender_id, session_key)
+        self._pending: dict[str, tuple[asyncio.Future[bool], str, str]] = {}
 
     # -- policy -------------------------------------------------------
 
@@ -90,7 +90,7 @@ class ApprovalManager:
             return False
         approval_id = f"appr-{uuid.uuid4().hex[:12]}"
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        self._pending[approval_id] = (future, sender_id)
+        self._pending[approval_id] = (future, sender_id, session_key)
         await self._sink(
             self._render_card(
                 approval_id=approval_id,
@@ -116,6 +116,7 @@ class ApprovalManager:
                     tool_name=tool_name,
                     decision=_DENY,
                     by_user="timeout",
+                    approval_id=approval_id,
                 )
             )
             return False
@@ -135,7 +136,7 @@ class ApprovalManager:
         entry = self._pending.get(approval_id)
         if entry is None:
             return False  # stale, already resolved or timed out
-        future, requester_sender_id = entry
+        future, requester_sender_id, _ = entry
         if clicker_sender_id != requester_sender_id:
             logger.info(f"approval {approval_id} click by {clicker_sender_id} ignored (expected {requester_sender_id})")
             return False  # identity mismatch, silently drop
@@ -147,6 +148,19 @@ class ApprovalManager:
     @property
     def pending_count(self) -> int:
         return len(self._pending)
+
+    def pending_for_session(self, session_key: str) -> list[str]:
+        """List still-pending interaction ids for a session key.
+
+        ``ApprovalManager`` is gateway-local and all approvals route through
+        the same process, so this can be projected into session snapshots
+        without asking core for new APIs.
+        """
+        return [
+            approval_id
+            for approval_id, (_, _, sid) in self._pending.items()
+            if sid == session_key
+        ]
 
     # -- rendering ----------------------------------------------------
 
@@ -211,6 +225,7 @@ class ApprovalManager:
         tool_name: str,
         decision: str,
         by_user: str,
+        approval_id: str | None = None,
     ) -> dict[str, Any]:
         icon = "✅" if decision == _APPROVE else "🛑"
         verb = "approved" if decision == _APPROVE else "denied"
@@ -218,7 +233,11 @@ class ApprovalManager:
             "channel": channel,
             "chat_id": chat_id,
             "content": f"{icon} `{tool_name}` {verb} by {by_user}",
-            "metadata": {"kind": "approval_resolved", "decision": decision},
+            "metadata": {
+                "kind": "approval_resolved",
+                "decision": decision,
+                **({"approval_id": approval_id} if approval_id is not None else {}),
+            },
             "_session_key": session_key,
         }
         if thread_id is not None:

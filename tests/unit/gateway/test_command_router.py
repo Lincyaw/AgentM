@@ -22,6 +22,7 @@ from agentm.gateway.commands import (
 )
 from agentm.gateway.commands.builtins.help import HelpCommand
 from agentm.gateway.commands.builtins.new import NewCommand
+from agentm.gateway.commands.builtins.gateway_debug import GatewayDebugCommand
 from agentm.gateway.commands.markdown_command import MarkdownPromptCommand
 
 
@@ -31,7 +32,19 @@ class _Calls:
     forgot: int = 0
 
 
-def _ctx(calls: _Calls, registry: CommandRegistry) -> CommandContext:
+def _ctx(
+    calls: _Calls,
+    registry: CommandRegistry,
+    *,
+    debug_state: dict[str, Any] | None = None,
+) -> CommandContext:
+    debug_state = debug_state or {
+        "session_key": "terminal:t1",
+        "session": {"session_id": "sid-1", "turn_count": 0, "pending_approvals": []},
+        "sessions": {},
+        "global": {"inflight_tasks": 0, "tracked_sessions": 0},
+    }
+
     async def end_session() -> None:
         calls.ended += 1
 
@@ -47,6 +60,7 @@ def _ctx(calls: _Calls, registry: CommandRegistry) -> CommandContext:
         end_session=end_session,
         forget_chat_mapping=forget,
         get_route_stats=lambda: {"session_id": "sid-1", "turn_count": 2, "pending_approvals": 0},
+        get_gateway_debug_state=lambda: debug_state,
         list_commands=registry.all,
     )
 
@@ -167,6 +181,73 @@ async def test_bare_name_resolves_skill(tmp_path: Any) -> None:
     )
     assert result2 is not None
     assert result2.expanded_prompt is not None
+
+
+@pytest.mark.asyncio
+async def test_gateway_debug_shows_current_session_state() -> None:
+    reg = _registry(GatewayDebugCommand())
+    router = CommandRouter(registry=reg)
+    state = {
+        "session_key": "terminal:t1",
+        "session": {
+            "session_id": "sid-1",
+            "route": {"channel": "terminal", "chat_id": "c1", "thread_id": "thread-a"},
+            "snapshot": {"phase": "running", "pending_interactions": ["appr-1"]},
+            "command_names": ["help", "gateway_debug"],
+            "turn_count": 3,
+            "pending_approvals": ["appr-1"],
+            "child_sessions": ["child-a"],
+        },
+        "sessions": {
+            "terminal:t1": {
+                "session_id": "sid-1",
+                "route": {"channel": "terminal", "chat_id": "c1", "thread_id": "thread-a"},
+                "snapshot": {"phase": "running", "pending_interactions": ["appr-1"]},
+            }
+        },
+        "global": {"inflight_tasks": 1, "tracked_sessions": 1, "outbox_ready": True, "total_pending_approvals": 1},
+    }
+    result = await router.try_dispatch(
+        _inbound("/gateway_debug"), _ctx(_Calls(), reg, debug_state=state)
+    )
+    assert result is not None
+    body = result.outbound[0].content
+    assert "Gateway Debug" in body
+    assert '"session_key": "terminal:t1"' in body
+    assert '"inflight_tasks": 1' in body
+    assert '"sid-1"' in body
+
+
+@pytest.mark.asyncio
+async def test_gateway_debug_all_lists_multiple_sessions() -> None:
+    reg = _registry(GatewayDebugCommand())
+    router = CommandRouter(registry=reg)
+    state = {
+        "session_key": "terminal:t1",
+        "session": {"session_id": "sid-1"},
+        "sessions": {
+            "terminal:t1": {
+                "session_id": "sid-1",
+                "route": {"channel": "terminal", "chat_id": "c1", "thread_id": None},
+                "snapshot": {"phase": "running", "pending_interactions": []},
+            },
+            "terminal:t2": {
+                "session_id": "sid-2",
+                "route": {"channel": "terminal", "chat_id": "c2", "thread_id": None},
+                "snapshot": {"phase": "waiting_interaction", "pending_interactions": ["a2"]},
+            },
+        },
+        "global": {"inflight_tasks": 2, "tracked_sessions": 2},
+    }
+    result = await router.try_dispatch(
+        _inbound("/gateway_debug all"), _ctx(_Calls(), reg, debug_state=state)
+    )
+    assert result is not None
+    body = result.outbound[0].content
+    assert "terminal:t1" in body
+    assert "terminal:t2" in body
+    assert "waiting_interaction" in body
+    assert "inflight_tasks: 2" in body
 
 
 @pytest.mark.asyncio

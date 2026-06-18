@@ -131,6 +131,8 @@ def _runtime_with(peer: PeerSession, outbox: _RecordingOutbox) -> GatewayRuntime
     rt = object.__new__(GatewayRuntime)
     rt._server = cast(Any, _FakeServer([peer]))
     rt._outbox = cast(Any, outbox)
+    rt._session_routes: dict[str, tuple[str, str, str | None]] = {}
+    rt._snapshots: dict[str, Any] = {}
     rt._peer_channels = {peer.peer_id: "terminal"}
     return rt
 
@@ -183,6 +185,21 @@ async def test_ephemeral_kind_queues_without_persisting() -> None:
     assert item.outbox_id is None
     assert item.envelope.body["metadata"]["kind"] == "stream_text"
     assert bytes(writer.buf) == b""
+
+
+@pytest.mark.asyncio
+async def test_request_ack_is_durable() -> None:
+    outbox = _RecordingOutbox()
+    writer = _RecordingWriter()
+    peer = PeerSession(peer_id="terminal-1", transport_writer=cast(Any, writer))
+    rt = _runtime_with(peer, outbox)
+
+    await rt._emit_outbound(_body("request_ack"))
+
+    assert len(outbox.enqueued) == 1
+    item = await peer.send_q.get()
+    assert item.outbox_id == 1
+    assert item.envelope.body["metadata"]["kind"] == "request_ack"
 
 
 @pytest.mark.asyncio

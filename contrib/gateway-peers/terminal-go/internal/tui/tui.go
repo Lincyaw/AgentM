@@ -22,6 +22,8 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/history"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/userconfig"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/version"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/animation"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/commands"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/completion"
@@ -41,8 +43,6 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service/supervisor"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service/tuistate"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/userconfig"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/version"
 )
 
 // SessionSpawner creates new sessions with their own runtime.
@@ -327,7 +327,12 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	sessID := initialApp.Session().ID
 
 	m := &appModel{
-		buildCommandCategories: func(ctx context.Context, _ tea.Model) []commands.Category {
+		buildCommandCategories: func(ctx context.Context, model tea.Model) []commands.Category {
+			if model != nil {
+				if m, ok := model.(*appModel); ok && m.application != nil {
+					return commands.BuildCommandCategories(ctx, m.application)
+				}
+			}
 			return commands.BuildCommandCategories(ctx, initialApp)
 		},
 		supervisor:                    sv,
@@ -454,6 +459,24 @@ func (m *appModel) commandCategories() []commands.Category {
 		filtered = append(filtered, cat)
 	}
 	return filtered
+}
+
+// refreshCommandInputs rebuilds and injects the active command parser/completion
+// providers into the current chat + editor pair.
+func (m *appModel) refreshCommandInputs() tea.Cmd {
+	categories := m.commandCategories()
+
+	if m.chatPage != nil {
+		m.chatPage.SetCommandParser(commands.NewParser(categories...))
+	}
+	if m.editor != nil {
+		return m.editor.SetCompletions(
+			completions.NewCommandCompletion(categories),
+			completions.NewFileCompletion(),
+		)
+	}
+
+	return nil
 }
 
 // chatPageOpts returns the chat.PageOption slice derived from the current
@@ -816,7 +839,11 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case *runtime.AgentInfoEvent:
 		m.sessionState.SetCurrentAgentName(msg.AgentName)
 		m.application.TrackCurrentAgentModel(msg.Model)
-		return m.forwardChat(msg)
+		chatModel, cmd := m.forwardChat(msg)
+		if refreshCmd := m.refreshCommandInputs(); refreshCmd != nil {
+			return chatModel, tea.Batch(cmd, refreshCmd)
+		}
+		return chatModel, cmd
 
 	case *runtime.SessionTitleEvent:
 		m.sessionState.SetSessionTitle(msg.Title)
@@ -1442,6 +1469,8 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	}
 
 	m.reapplyKeyboardEnhancements()
+	var refreshCmd tea.Cmd
+	refreshCmd = m.refreshCommandInputs()
 	m.persistActiveTab(m.persistedSessionID(sessionID))
 
 	// Sync editor working state and reset working spinner.
@@ -1471,6 +1500,9 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	}
 	if closeBackgroundDialogCmd != nil {
 		cmds = append(cmds, closeBackgroundDialogCmd)
+	}
+	if refreshCmd != nil {
+		cmds = append(cmds, refreshCmd)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -1756,7 +1788,7 @@ func (m *appModel) AllBindings() []key.Binding {
 		),
 		key.NewBinding(
 			key.WithKeys("ctrl+o"),
-			key.WithHelp("Ctrl+o", "toggle hide tool results"),
+			key.WithHelp("Ctrl+o", "toggle tool details"),
 		),
 		key.NewBinding(
 			key.WithKeys("ctrl+s"),

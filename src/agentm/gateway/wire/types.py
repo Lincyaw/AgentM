@@ -43,6 +43,8 @@ OutboundMetaKind = Literal[
     "command_result",
     "approval_request",
     "approval_resolved",
+    "session_snapshot",
+    "request_ack",
     "diagnostic_warning",
     "diagnostic_error",
     # -- ephemeral: conversation (live transcript) --
@@ -77,6 +79,8 @@ DURABLE_OUTBOUND_KINDS: frozenset[str] = frozenset(
         "command_result",
         "approval_request",
         "approval_resolved",
+        "session_snapshot",
+        "request_ack",
         "diagnostic_warning",
         "diagnostic_error",
     }
@@ -131,8 +135,15 @@ class InboundBody:
     chat_id: str
     content: str = ""
     thread_id: str | None = None
+    action: str | None = None
+    # Submit/rejection policy for user-submission actions. ``cooperative`` means
+    # user input is queued in the inbox at the next turn boundary; ``interrupt_first``
+    # means the session is interrupted before the same content lands in inbox.
+    policy: str | None = None
+    interaction_id: str | None = None
     sender_id: str = ""
     sender_name: str = ""
+    request_id: str | None = None
     button_value: str | None = None
     # Out-of-band control verb that is NOT a conversational turn. Currently
     # ``"interrupt"`` — preempt the in-flight prompt (the gateway routes it to
@@ -144,8 +155,27 @@ class InboundBody:
     @classmethod
     def from_dict(cls, body: dict[str, Any]) -> InboundBody:
         button = body.get("button_value")
+        action = body.get("action")
+        policy = body.get("policy")
+        interaction_id = body.get("interaction_id")
+        request_id = body.get("request_id")
         control = body.get("control")
         raw = body.get("raw")
+        normalized_action = (
+            str(action).strip().lower()
+            if isinstance(action, str)
+            else str(action) if action is not None else None
+        )
+        normalized_policy = (
+            str(policy).strip().lower()
+            if isinstance(policy, str)
+            else str(policy) if policy is not None else None
+        )
+        normalized_interaction_id = (
+            str(interaction_id)
+            if interaction_id is not None
+            else None
+        )
         return cls(
             channel=str(body.get("channel") or ""),
             chat_id=str(body.get("chat_id") or ""),
@@ -155,8 +185,12 @@ class InboundBody:
                 if body.get("thread_id") is not None
                 else None
             ),
+            action=normalized_action,
+            policy=normalized_policy,
+            interaction_id=normalized_interaction_id,
             sender_id=str(body.get("sender_id") or ""),
             sender_name=str(body.get("sender_name") or ""),
+            request_id=str(request_id) if request_id is not None else None,
             button_value=str(button) if button is not None else None,
             control=str(control) if control is not None else None,
             raw=raw if isinstance(raw, dict) else None,
@@ -174,10 +208,18 @@ class InboundBody:
             out["sender_id"] = self.sender_id
         if self.sender_name:
             out["sender_name"] = self.sender_name
+        if self.request_id is not None:
+            out["request_id"] = self.request_id
         if self.button_value is not None:
             out["button_value"] = self.button_value
         if self.control is not None:
             out["control"] = self.control
+        if self.action is not None:
+            out["action"] = self.action
+        if self.policy is not None:
+            out["policy"] = self.policy
+        if self.interaction_id is not None:
+            out["interaction_id"] = self.interaction_id
         if self.raw is not None:
             out["raw"] = self.raw
         return out

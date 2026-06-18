@@ -8,7 +8,7 @@ import (
 // StaticSessionState is a SessionStateReader with fixed, conservative
 // values for embedders that render message and tool views outside the
 // full TUI application: unified (non-split) diff view, collapsed thinking,
-// tool results shown, no yolo mode. Embed or use it directly instead of
+// tool details shown, no yolo mode. Embed or use it directly instead of
 // hand-rolling a stub, so views keep working with sensible defaults when
 // the reader interface grows.
 type StaticSessionState struct {

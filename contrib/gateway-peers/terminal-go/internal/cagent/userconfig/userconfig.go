@@ -14,7 +14,8 @@ const DefaultSoundThreshold = 10
 
 // Settings represents global user settings.
 type Settings struct {
-	// HideToolResults hides tool call results in the TUI by default.
+	// HideToolResults hides verbose tool parameters and results in the TUI by default.
+	// Historical config name kept for compatibility.
 	HideToolResults bool `yaml:"hide_tool_results,omitempty"`
 	// ExpandThinking expands reasoning/tool blocks in the TUI by default.
 	ExpandThinking *bool `yaml:"expand_thinking,omitempty"`

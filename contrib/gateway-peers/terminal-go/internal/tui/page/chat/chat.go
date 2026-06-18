@@ -104,6 +104,8 @@ type Page interface {
 	IsInlineEditing() bool
 	// QueueLength returns the number of queued messages
 	QueueLength() int
+	// SetCommandParser replaces the slash-command parser for the chat page.
+	SetCommandParser(*commands.Parser)
 	// FocusMessages gives focus to the messages panel for keyboard scrolling
 	FocusMessages() tea.Cmd
 	// FocusMessageAt gives focus and selects the message at the given screen coordinates
@@ -639,8 +641,13 @@ func (p *chatPage) parseImmediateCommand(content string) tea.Cmd {
 	return p.commandParser.Parse(content)
 }
 
-// handleSendMsg handles incoming messages from the editor, either processing
-// them immediately or queuing them if the agent is busy.
+// SetCommandParser replaces the slash-command parser for the chat page.
+func (p *chatPage) SetCommandParser(parser *commands.Parser) {
+	p.commandParser = parser
+}
+
+// handleSendMsg handles incoming messages from the editor and always processes
+// them immediately.
 func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	// Handle "exit", "quit", and ":q" as special keywords to quit the session
 	// immediately, equivalent to the /exit slash command.
@@ -671,28 +678,10 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 		return p, cmd
 	}
 
-	// If not working, process immediately
-	if !p.working {
-		cmd := p.processMessage(msg)
-		return p, cmd
-	}
-
-	// If queue is full, reject the message
-	if len(p.messageQueue) >= maxQueuedMessages {
-		return p, notification.WarningCmd(fmt.Sprintf("Queue full (max %d messages). Please wait.", maxQueuedMessages))
-	}
-
-	// Add to queue
-	p.messageQueue = append(p.messageQueue, queuedMessage{
-		content:     msg.Content,
-		attachments: msg.Attachments,
-	})
-	p.syncQueueToSidebar()
-
-	queueLen := len(p.messageQueue)
-	notifyMsg := fmt.Sprintf("Message queued (%d waiting) · Ctrl+X to clear", queueLen)
-
-	return p, notification.InfoCmd(notifyMsg)
+	// Keep the response path live by interrupting the in-flight run and
+	// submitting this message immediately.
+	cmd := p.processMessage(msg)
+	return p, cmd
 }
 
 func (p *chatPage) handleEditUserMessage(msg msgtypes.EditUserMessageMsg) (layout.Model, tea.Cmd) {
