@@ -10,6 +10,7 @@ dependencies = [
     "pytz>=2025.1",
     "pydantic>=2.11.0",
     "tiktoken>=0.12.0",
+    "fpg>=0.1.0",
     "rcabench-platform[sdk,llm-eval]>=0.4.44",
 ]
 
@@ -22,3 +23,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rca", "src/rca_eval"]
+
+[tool.uv.sources]
+fpg = { git = "https://github.com/Lincyaw/fpg-convention" }

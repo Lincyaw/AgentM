@@ -23,7 +23,7 @@ extensions:
     config:
       include_defaults: false
       inherit_claude: false
-  - module: rca.default.rcabench_contract
+  - module: rca.default.fpg_contract
 
   # Multi-agent wiring. ``prompt_loader`` (shared with rca:baseline) loads
   # ``prompts/orchestrator.md`` into the system prompt; ``personas: true``

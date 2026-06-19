@@ -282,9 +282,9 @@ requirements:
   - id: REQ-102-rca-scenario-cleanup
     title: RCA scenario shared contract and inherited extension hygiene
     description: >
-      RCA scenarios must share one rcabench contract atom, emit a visible
-      warning plus explicit unavailable contract placeholder when the vendor
-      contract module is absent, use typed event channel constants for RCA
+      RCA scenarios must share one fpg ModelRCAOutput contract atom, emit a
+      visible warning plus explicit unavailable contract placeholder when the
+      schema cannot be loaded, use typed event channel constants for RCA
       prompt/persona wiring, inherit sub-agent extension config by manifest
       name, and mount real RCA tool atoms directly so wrapper atoms do not hide
       installed tool registers.
@@ -292,14 +292,21 @@ requirements:
     status: tested
     confidence: confirmed
     code:
-      - path: contrib/extensions/rcabench_contract/__init__.py
+      - path: contrib/scenarios/rca/fpg_profile.toml
       - path: contrib/scenarios/rca/manifest.yaml
-      - path: contrib/scenarios/rca/src/agentm_rca/prompt_loader.py
+      - path: contrib/scenarios/rca/overlays/base-investigator.yaml
+      - path: contrib/scenarios/rca/src/rca/fpg_schema.py
+      - path: contrib/scenarios/rca/src/rca/default/fpg_contract.py
+      - path: contrib/scenarios/rca/src/rca/default/rcabench_contract.py
+      - path: contrib/scenarios/rca/src/rca/default/finalize.py
+      - path: contrib/scenarios/rca/src/rca/default/prompt_loader.py
+      - path: contrib/scenarios/rca/eval/grader.py
+      - path: contrib/scenarios/rca/src/rca_eval/agent.py
       - path: contrib/scenarios/rca/manifest.baseline.yaml
-      - path: contrib/scenarios/rca/prompts/investigator.md
-      - path: contrib/scenarios/rca/src/agentm_rca/tools/thinkdepth_sql.py
-      - path: contrib/scenarios/rca/src/agentm_rca/tools/duckdb_sql.py
-      - path: contrib/scenarios/rca/src/agentm_rca/tools/hypothesis_tools.py
+      - path: contrib/scenarios/rca/prompts/orchestration/orchestrator.md
+      - path: contrib/scenarios/rca/prompts/orchestration/critic.md
+      - path: contrib/scenarios/rca/src/rca/default/duckdb_sql.py
+      - path: contrib/scenarios/rca/src/rca/default/hypothesis_tools.py
       - path: src/agentm/extensions/builtin/sub_agent.py
       - path: src/agentm/harness/atom_reloader.py
       - path: src/agentm/harness/events.py
@@ -310,6 +317,7 @@ requirements:
       - path: contrib/scenarios/rca/tests/test_rca_prompt_loader.py
       - path: tests/integration/test_rca_baseline_tuner_wiring.py
       - path: tests/unit/extensions/test_scenario_variant_syntax.py
+      - path: tests/unit/rca/test_fpg_schema.py
       - path: contrib/scenarios/rca/tests/test_thinkdepth_sql.py
       - path: contrib/scenarios/rca/tests/test_duckdb_remote.py
       - path: tests/integration/test_sub_agent_lifecycle.py

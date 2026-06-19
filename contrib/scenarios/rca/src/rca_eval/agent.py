@@ -2,19 +2,17 @@
 
 Discovered by ``rcabench-platform``'s ``llm_eval.agents`` entry point and
 invoked via ``rca llm-eval run --agent agentm``. Bridges the
-``incident + data_dir -> AgentRCAOutput JSON`` contract to an in-process
+``incident + data_dir -> fpg ModelRCAOutput JSON`` contract to an in-process
 ``AgentSession`` running the local ``rca`` scenario.
 
 Two pieces of glue do the work:
 
 * The orchestrator's ``submit_final_report`` tool in
-  :mod:`atoms.default.finalize` validates against the rcabench-platform
-  ``AgentRCAOutput`` contract and emits the model's
-  ``model_dump_json(by_alias=True)`` as its tool result. The adapter
-  subscribes to ``tool_result`` on the session bus and parses that
-  authoritative payload via :meth:`AgentRCAOutput.parse_str` — never the
-  unvalidated ``tool_call`` args. A failed validation re-runs the model
-  without polluting captured state.
+  :mod:`rca.default.finalize` validates against the fpg ``ModelRCAOutput``
+  contract and emits the validated model JSON as its tool result. The
+  adapter subscribes to ``tool_result`` on the session bus and parses that
+  authoritative payload via fpg — never the unvalidated ``tool_call`` args.
+  A failed validation re-runs the model without polluting captured state.
 * The session's final message list is walked once after ``prompt`` returns
   and translated into a ``rcabench-platform`` :class:`Trajectory`. The
   system prompt is captured separately from the first
@@ -55,12 +53,13 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"
 # reached. Bump the default and let the framework's ``--max-steps`` (or
 # ``--ak max_turns=N``) override.
 _DEFAULT_MAX_TURNS = 128
-# Empty AgentRCAOutput-shaped fallback when the orchestrator never reaches
+# Empty ModelRCAOutput-shaped fallback when the orchestrator never reaches
 # ``submit_final_report``. Keeps the wire shape consistent with successful
 # runs so the platform's parsers don't choke.
-_EMPTY_AGENT_RCA_OUTPUT: dict[str, list[Any]] = {
+_EMPTY_MODEL_RCA_OUTPUT: dict[str, list[Any]] = {
+    "nodes": [],
+    "edges": [],
     "root_causes": [],
-    "propagation": [],
 }
 
 # Module path of the llmharness cognitive-audit adapter. A scenario that
@@ -420,7 +419,7 @@ class AgentMAgent(BaseAgent):
         )
         from agentm.core.runtime import AgentSession
         from agentm.core.runtime import create_agent_session
-        from rcabench_platform.v3.sdk.evaluation.v2 import AgentRCAOutput
+        from fpg import ModelRCAOutput
 
         ctx: RunContext | None = kwargs.get("ctx")
         max_turns = _coerce_max_turns(kwargs.get("max_steps"), self._max_turns)
@@ -442,7 +441,7 @@ class AgentMAgent(BaseAgent):
                 if isinstance(block, _TextContent)
             )
             try:
-                output = AgentRCAOutput.parse_str(text)
+                output = ModelRCAOutput.model_validate_json(text)
             except Exception:
                 # Tool returned a non-conforming payload; treat as missing.
                 return
@@ -534,13 +533,13 @@ class AgentMAgent(BaseAgent):
         finally:
             await session.shutdown()
 
-        submission: AgentRCAOutput | None = captured["submission"]
+        submission: ModelRCAOutput | None = captured["submission"]
         if submission is None:
-            response = json.dumps(_EMPTY_AGENT_RCA_OUTPUT)
+            response = json.dumps(_EMPTY_MODEL_RCA_OUTPUT)
             submission_dump: Any = None
         else:
-            response = submission.model_dump_json(by_alias=True)
-            submission_dump = submission.model_dump(mode="json", by_alias=True)
+            response = submission.model_dump_json()
+            submission_dump = submission.model_dump(mode="json")
 
         trajectory = _build_trajectory(
             agent_name=f"agentm:{scenario}",

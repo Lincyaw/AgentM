@@ -224,6 +224,7 @@ def install(api: ExtensionAPI, config: ToolEvalRunConfig) -> None:
             turns_log: list[int] = []
             feedback_texts: list[str] = []
             failure_kinds: list[str | None] = []
+            dimension_samples: dict[str, list[float]] = {}
             # Last-write-wins union per design §3.2 / task A-3 acceptance:
             # multiple samples on the same task overwrite earlier module
             # feedback. Documented here so callers don't expect joining.
@@ -256,6 +257,8 @@ def install(api: ExtensionAPI, config: ToolEvalRunConfig) -> None:
                 turns_log.append(int(outcome.get("turns", 0)))
                 feedback_texts.append(grade["feedback_text"])
                 failure_kinds.append(grade.get("failure_kind"))
+                for name, value in grade["dimensions"].items():
+                    dimension_samples.setdefault(name, []).append(value)
                 module_feedback_union.update(grade["module_feedback"])
                 if (
                     len(feedback_corpus) < _FEEDBACK_CORPUS_CAP
@@ -281,6 +284,8 @@ def install(api: ExtensionAPI, config: ToolEvalRunConfig) -> None:
                     "turns_mean": _mean([float(t) for t in turns_log]),
                     "feedback_texts": feedback_texts,
                     "failure_kinds": failure_kinds,
+                    "dimension_samples": dimension_samples,
+                    "dimension_means": _dimension_means(dimension_samples),
                     "module_feedback_union": module_feedback_union,
                     "usd_used": task_cost_usd,
                 }
@@ -712,6 +717,15 @@ def _stderr_of_mean(values: list[float], total_samples: int) -> float:
         return 0.0
     sigma = _stddev(values)
     return sigma / math.sqrt(max(1, total_samples))
+
+
+def _dimension_means(dimension_samples: dict[str, list[float]]) -> dict[str, float]:
+    return {
+        name: _mean(values)
+        for name, values in sorted(dimension_samples.items())
+        if values
+    }
+
 
 def _append_run_records(
     path: Path,

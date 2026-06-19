@@ -16,8 +16,8 @@ artifact_kinds: [query_result, finding, hypothesis, brief_rejection]
 Your dispatcher (the orchestrator) MUST provide:
 - objective: what specifically you should challenge (e.g., "is `ts-X` truly
   the root cause vs. a downstream victim?")
-- current_conclusion: the orchestrator's present candidate — service, fault
-  kind, and any propagation chain it has drafted
+- current_conclusion: the orchestrator's present candidate — service/entity,
+  fpg failure predicate, and any propagation chain it has drafted
 - supporting_evidence: the SQL queries / metrics / spans the orchestrator is
   leaning on, quoted concretely (not "the trace data we looked at")
 - output_format: the verdict structure the orchestrator expects back
@@ -85,58 +85,36 @@ weakest links in the orchestrator's chain. Suggested order:
    a gap.
 5. **Mechanism plausibility** — is there an independent signal (resource
    exhaustion, error log pattern, config change, deployment event) supporting
-   the named `fault_kind`? Symptom-only conclusions are weak.
-6. **fault_kind disambiguation** — THIS IS LOAD-BEARING. Empirically the
+   the named fpg `predicate`? Symptom-only conclusions are weak.
+6. **Predicate disambiguation** — THIS IS LOAD-BEARING. Empirically the
    orchestrator picks the right service but maps surface symptoms (503
-   errors, latency, error rate) to the wrong `fault_kind`. For each candidate
-   `fault_kind`, name the 1–2 closest siblings inside the same family and
+   errors, latency, error rate) to the wrong fpg predicate. For each
+   candidate `predicate`, name the 1–2 closest siblings in the vocabulary and
    run a query that distinguishes them. You MUST do this every dispatch.
 
-   Family-to-discriminator cheatsheet:
-   - **network_*** family (`network_delay` / `network_loss` /
-     `network_partition` / `network_corrupt` / `network_duplicate` /
-     `network_bandwidth_limit`): they all manifest as elevated error/latency
-     downstream, but differ in trace patterns. Discriminators: span
-     completion ratio (partition → entire bursts of missing children), tail
-     latency shape (delay → uniform shift; bandwidth_limit → load-correlated;
-     duplicate → repeated identical request_ids), error type distribution
-     (corrupt → checksum / parse / decode errors in logs; loss → timeout +
-     retry storms; partition → connection refused / no route).
-   - **http_*** family (`http_aborted` / `http_slow` / `http_payload_modified`
-     / `http_response_status_modified`): all show in trace status codes.
-     Discriminators: aborted → connection reset / 5xx with no response body;
-     slow → high latency with valid 2xx; payload_modified → 2xx but
-     response_body / response_size diverges between normal and abnormal;
-     status_modified → response code itself flipped (e.g. 200 → 500) without
-     latency change.
-   - **stress / jvm_*** family (`cpu_stress` / `mem_stress` /
-     `jvm_heap_stress` / `jvm_gc_pressure` / `jvm_thread_cpu_stress`): they
-     all degrade latency. Discriminators: cpu_stress → process CPU spike
-     independent of GC; jvm_thread_cpu_stress → specific thread CPU spike,
-     others normal; mem_stress → RSS / page-fault spike without JVM heap
-     signal; jvm_heap_stress → heap_used near max, allocation rate elevated;
-     jvm_gc_pressure → GC time / count spike with heap not necessarily full.
-   - **jvm_method_*** family (`jvm_method_exception` / `jvm_method_latency`
-     / `jvm_method_mutated` / `jvm_jdbc_exception` / `jvm_jdbc_latency`):
-     all show at the application layer. Discriminators: exception →
-     `attr.exception.*` columns populated, error spans; latency → no
-     exception, just method-level duration spike; mutated → return value or
-     side-effect pattern divergence; jdbc_* → SQL spans specifically (not
-     general method spans) carry the signal.
-   - **pod_failure vs pod_unavailable**: pod_failure → pod restart count /
-     phase transitions visible; pod_unavailable → pod status reachable but
-     readiness=0 / available_replicas=0 with desired>0.
-   - **dns_resolution_failed vs dns_resolution_wrong**: failed → DNS lookup
-     returns NXDOMAIN / SERVFAIL, downstream connection never established;
-     wrong → lookup succeeds but resolves to wrong IP (connection succeeds,
-     hits unintended endpoint or refused).
-   - **clock_skew**: standalone — disambiguator is system_clock / time-related
-     metrics, not request-path symptoms.
+   Predicate-to-discriminator cheatsheet:
+   - `network_degraded` vs `network_partitioned`: both can manifest as
+     elevated downstream error/latency. Discriminators: span completion ratio,
+     missing child bursts, timeout / connection-refused distribution, retry
+     patterns, and tail-latency shape.
+   - `latency_degraded` vs `error_rate_elevated` vs `flow_interrupted`:
+     compare status-code shape, request completion ratio, and p95/p99 latency
+     deltas. Do not label a pure error spike as latency, or a partial
+     endpoint outage as whole-service degradation.
+   - `cpu_saturated` vs `memory_exhausted` vs `gc_pressure`: compare process
+     CPU, RSS / page faults, JVM heap usage, GC time / count, and allocation
+     rate.
+   - `process_killed` vs `flow_interrupted`: check restart count / phase
+     transition / liveness evidence versus request-path-only interruption.
+   - `dns_broken` vs `network_degraded`: check DNS lookup errors and resolved
+     endpoints separately from transport timeout / latency symptoms.
+   - `clock_skewed`: standalone — disambiguator is system_clock /
+     time-related metrics, not request-path symptoms.
 
-   If the orchestrator's candidate `fault_kind` is in a family above and you
+   If the orchestrator's candidate `predicate` has a plausible sibling and you
    did not run a discriminator query for at least one sibling, your verdict
    MUST be CONTRADICTED or INCONCLUSIVE — not SUPPORTED. A SUPPORTED verdict
-   without a fault_kind discrimination probe is invalid.
+   without a predicate discrimination probe is invalid.
 
 7. **Alternative hypothesis** — name at least one plausible alternative the
    orchestrator did not rule out, or state explicitly that you tried and

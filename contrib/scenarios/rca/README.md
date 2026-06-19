@@ -176,19 +176,9 @@ and Doubao as both rollout-model and per-evidence judge.
 
 ### Prerequisites
 
-1. **Latest `rcabench-platform` installed editable.** The lockfile
-   pins `>=0.4.43` from PyPI; if you also keep the upstream worktree
-   locally (e.g. at `~/AoyangSpace/aegis/rcabench-platform`), point the
-   ambient Python at it so registered processers / agents stay in sync
-   with HEAD:
-
-   ```bash
-   pip install -e ~/AoyangSpace/aegis/rcabench-platform
-   ```
-
-   Then refresh the AgentM workspace so its `.venv` picks up
-   `rcabench-platform[sdk,llm-eval]` (sqlmodel etc. live behind the
-   `llm-eval` extra — `uv sync` alone is not enough):
+1. **Workspace dependencies synced.** The rcabench-platform package is still
+   used as the llm-eval runner, but AgentM's final report payload is now the
+   fpg `ModelRCAOutput` structure from `fpg-convention`:
 
    ```bash
    uv sync --all-packages
@@ -196,7 +186,13 @@ and Doubao as both rollout-model and per-evidence judge.
 
 2. **`ops-lite` cases on disk** under
    `datasets/ops-lite/cases/<case_name>/` (parquet + `causal_graph.json`
-   + `injection.json`).
+   + `injection.json`). When a case also provides
+   `causal_graph_verified.json`, the local grader compares the submitted fpg
+   `ModelRCAOutput` against that graph and emits root/node/edge precision,
+   recall, and F1 dimensions. It also replays final `evidence[].query`
+   SQL against the case parquet views and emits `fpg_sql_*` executability
+   dimensions; replay results are grader feedback only, not part of the
+   model output contract.
 
 3. **`eval.db` ingested** with `dataset='ops-lite'`. The repo ships an
    `eval.db` already populated for both `RCABench` (openrca2-lite slice)
@@ -205,9 +201,8 @@ and Doubao as both rollout-model and per-evidence judge.
 
 4. **`.env`** with `AGENTM_PROVIDER=openai`, `OPENAI_BASE_URL`,
    `WARPGATE_TICKET`, and `OPENAI_VERIFY_SSL=false` — same wiring the
-   agent uses. `agentm_rca.eval` monkey-patches the rcabench-platform
-   judge client at import time so the judge call also flows through the
-   Warpgate ticket header; nothing extra to do for the judge.
+   agent uses. The eval config's `ModelProviderConfig.extra_query`,
+   `extra_headers`, and `verify_ssl` fields configure the judge client.
 
 ### Run
 
@@ -236,8 +231,8 @@ extractor children fire synchronously every turn).
 |------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `manifest.{baseline,harness,harness.sync}.yaml`                        | Prepend `agentm.extensions.builtin.operations_local`                                                                      | Post `harness-collapse` (commit `e062913`) the session factory fail-stops if no atom registered Operations. ThinkDepthAI tools never use it but the registration is mandatory.    |
 | `eval/config.ops-lite.yaml`                                            | New config for the `ops-lite` slice with `dataset: ops-lite`, `tags: [ops-lite]`, plain `${VAR}` placeholders (no `:-`)   | The shipped `config.yaml` targets RCABench/`openrca2-lite` and uses `:-` defaults that `envsubst` leaves un-expanded.                                                             |
+| `rca.default.finalize` / `rca.default.fpg_contract`                    | Validate and prompt for fpg `ModelRCAOutput` (`nodes`, `edges`, `root_causes`)                                             | The final answer contract now comes from `fpg-convention`, while rcabench-platform remains only the eval runner.                                                                  |
 | `agentm_rca/eval/__init__.py` — `_register_processer_aliases`          | `PROCESSER_FACTORY.register("ops-lite", RCABenchProcesser)` (and `opslite`)                                               | rcabench-platform routes preprocess/judge by `sample.dataset.lower()`. `ops-lite` has no native processer; its on-disk layout matches RCABench, so it can reuse RCABenchProcesser. |
-| `agentm_rca/eval/__init__.py` — `_patch_judge_client_for_warpgate`     | Replace `BaseLLMJudgeProcesser.judge_client` with a property that injects `default_query={"warpgate-ticket": ...}` + skips TLS verify | `ModelProviderConfig` has no `extra_query` / `verify_ssl` field. Without this patch the per-evidence judge gets 401/403 against the LiteLLM-behind-Warpgate gateway.              |
 
 All changes live in the AgentM tree — the `rcabench-platform` checkout
 is untouched.

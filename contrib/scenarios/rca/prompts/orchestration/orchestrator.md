@@ -46,7 +46,7 @@ The `critic` is your adversarial reviewer. Use it like this:
 
 **When to call the critic** — proactively, not as an afterthought:
 - Whenever you have just formed or materially revised a candidate root cause
-  (a `service` + `fault_kind` + propagation chain) and want to pressure-test
+  (a service/entity + failure predicate + propagation chain) and want to pressure-test
   it before investing more rounds.
 - Mandatorily before `submit_final_report` — at minimum once on the exact
   conclusion you intend to submit.
@@ -61,7 +61,7 @@ you're sure" — that is your job.
 **Brief contents** — every critic dispatch must be self-contained and include:
 - `objective`: what specifically to challenge (e.g., "is `ts-X` the root
   cause vs. a downstream victim of `ts-Y`?")
-- `current_conclusion`: service + fault_kind + propagation chain you are
+- `current_conclusion`: service/entity + failure predicate + propagation chain you are
   considering submitting
 - `supporting_evidence`: the concrete SQL queries / metrics / spans you are
   leaning on, quoted directly. NOT "the trace data we looked at."
@@ -76,7 +76,7 @@ You MUST NOT call `submit_final_report` unless ALL of the following hold for
 the conclusion you are submitting:
 
 1. You have dispatched the critic at least once against the current
-   `service` + `fault_kind` + propagation chain (not an earlier draft).
+   service/entity + failure predicate + propagation chain (not an earlier draft).
 2. The critic's most recent verdict on this exact conclusion is **SUPPORTED**.
 3. Every CONTRADICTED or INCONCLUSIVE concern from any prior critic pass has
    been resolved by either:
@@ -202,8 +202,9 @@ When you see asymmetric errors, investigate the link, not either side.
    critic returns CONTRADICTED on a flimsy concern, run the disproof query
    yourself; if it survives, document why and dispatch the critic again
    citing the resolution. Do not silently dismiss critic concerns.
-3. **Root cause granularity**: identify which SERVICE is the origin (not
-   node/pod/host).
+3. **Root cause granularity**: identify which SERVICE or SERVICE LINK is
+   the origin (not node/pod/host). If the fault is between two services,
+   model the relationship itself as the root cause, not either endpoint.
 4. Keep hypotheses bounded (max ~10) — reject or merge weak ones early.
 5. **Evidence-backed links**: each edge A -> B needs trace evidence
    (span_id/parent_span_id) or co-location. Temporal coincidence alone is
@@ -266,36 +267,30 @@ Before finalizing, every check below must pass.
    exact conclusion you intend to submit, returned SUPPORTED, and no prior
    concerns remain unresolved. See `<critic_protocol>`.
 
-7. **fault_kind disambiguated against siblings?** Empirically, identifying
-   the right service is the easy half — picking the right `fault_kind` is
-   where most wrong reports come from, because surface symptoms (503,
-   high latency, error rate) map onto multiple kinds. Before finalizing,
+7. **Failure predicate disambiguated against siblings?** Empirically,
+   identifying the right service is the easy half — picking the right fpg
+   `predicate` is where most wrong reports come from, because surface
+   symptoms (503, high latency, error rate) map onto multiple kinds. Before finalizing,
    you MUST have:
-   - Named the candidate `fault_kind` from the contract enum.
-   - Identified its **family** (network_*, http_*, stress/jvm_*,
-     jvm_method_*, pod_*, dns_*, or standalone like `clock_skew`).
-   - Listed at least 1 sibling kind in the same family that could
+   - Named the candidate `predicate` from the fpg contract vocabulary.
+   - Identified the closest sibling predicates that could
      plausibly explain the observed symptoms.
    - Run a query that distinguishes your candidate from each listed
      sibling — citing the SQL and the result that rules the sibling out.
 
    Concrete sibling pairings to consider (non-exhaustive):
-   - network_corrupt vs network_loss vs network_partition: trace
+   - `network_degraded` vs `network_partitioned`: trace
      completion ratio, error type in logs (checksum/parse vs timeout
      vs connection refused), retry pattern.
-   - http_aborted vs http_payload_modified vs http_response_status_modified
-     vs http_slow: response status, response_body / response_size
-     divergence, latency vs status code shape.
-   - cpu_stress vs jvm_heap_stress vs jvm_gc_pressure vs
-     jvm_thread_cpu_stress vs mem_stress: which specific resource
+   - `latency_degraded` vs `error_rate_elevated` vs `flow_interrupted`:
+     response status, latency shape, and request completion ratio.
+   - `cpu_saturated` vs `memory_exhausted` vs `gc_pressure`:
+     which specific resource
      metric spikes (process CPU vs JVM heap_used vs GC time vs RSS).
-   - jvm_method_exception vs jvm_method_latency vs jvm_jdbc_exception
-     vs jvm_jdbc_latency: presence of `attr.exception.*` columns,
-     SQL-span vs general-method-span scope.
-   - pod_failure vs pod_unavailable: restart count / phase transition
-     vs readiness=0 with desired>0.
+   - `process_killed` vs `flow_interrupted`: restart / phase transition
+     evidence vs request-path-only interruption.
 
-   If your `fault_kind` is in a family and you have not produced a
+   If your `predicate` has close siblings and you have not produced a
    discriminator query against at least one sibling, this check fails.
    Run the query before dispatching the critic — and expect the critic
    to challenge you on this exact axis (its prompt requires it).
@@ -330,25 +325,33 @@ yet — collect coverage first.
 
 **Termination:**
 When confirmed AND all `<root_cause_depth>` checks pass AND the critic gate
-is satisfied, call `submit_final_report` with the **rcabench-platform agent
-contract** payload — see the `<agent_contract>` block at the end of this
-system prompt for the authoritative schema, `fault_kind` enum, and field
-rules. Summary of what you must produce:
+is satisfied, call `submit_final_report` with the **fpg ModelRCAOutput**
+payload — see the `<agent_contract>` block at the end of this system prompt
+for the authoritative schema, predicate vocabulary, and field rules. Summary
+of what you must produce:
 
-- `root_causes[]` — one entry per distinct fault. Each entry has:
-  - `service` — must be a string that **literally appears in the data**
-    (run `query_sql` if you need to confirm; do NOT invent names like
-    `mysql-database` when the actual service_name is `mysql`). Synthetic
-    generators (`loadgenerator`, `locust`, `wrk2`, `dsb-wrk2`, `k6`) are
-    NOT services.
-  - `fault_kind` — exactly one of the enum values listed in the contract.
-  - `evidence[]` — at least one DuckDB SQL + claim that backs the assertion.
-- `propagation[]` — directed edges FROM the failing service TOWARD the
-  user-visible alarm tier (NOT the request-call direction). Each edge needs
-  evidence too.
+- `nodes[]` — one entry per anomalous service or link state. Each node has:
+  - `id` — a stable node id you invent, then reuse in `edges` and
+    `root_causes`.
+  - `subject` — a profile entity ref:
+    `svc:<service_name>` for a service state, where `<service_name>`
+    **literally appears in the data**, or
+    `link:<source_service>-><target_service>` for a faulty network path
+    between two observed services. Run `query_sql` if you need to confirm;
+    do NOT invent names like `mysql-database` when the actual service is
+    `mysql`. Synthetic generators (`loadgenerator`, `locust`, `wrk2`,
+    `dsb-wrk2`, `k6`) are NOT services. For link faults, make the `link:*`
+    node the root cause and connect it to the affected service symptom.
+  - `predicate` — exactly one fpg vocabulary value listed in the contract.
+  - `time` — anomaly interval with ISO timestamps.
+  - `evidence[]` — at least one evidence item unless `hypothesis=true`;
+    for DuckDB, use `query.language="sql"` and put SQL in
+    `query.statement`.
+- `edges[]` — directed edges FROM cause node id TOWARD effect node id.
+- `root_causes[]` — node ids from `nodes[]`, ordered by confidence. If
+  multiple distinct faults exist, list them all; do not collapse them.
 
-If multiple distinct faults exist, list them all in `root_causes` — do not
-collapse. A wrong root cause is worse than a slow investigation.
+A wrong root cause is worse than a slow investigation.
 `submit_final_report` is the ONLY sanctioned termination action — see
 `<termination_protocol>` at the top.
 </workflow>

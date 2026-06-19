@@ -1,5 +1,5 @@
 # Shared investigator stack: operations + SQL + finalize + observability +
-# rcabench contract + prompt loader (investigator.md, single-agent mode).
+# fpg contract + prompt loader (investigator.md, single-agent mode).
 # Used by baseline and harness strategies.
 extensions:
   - module: agentm.extensions.builtin.operations
@@ -11,7 +11,7 @@ extensions:
         - conclusion.parquet
   - module: rca.default.finalize
   - module: agentm.extensions.builtin.observability
-  - module: rca.default.rcabench_contract
+  - module: rca.default.fpg_contract
   - module: rca.default.prompt_loader
     config:
       prompt: default/default.md

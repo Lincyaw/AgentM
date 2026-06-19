@@ -1,21 +1,18 @@
 """Termination protocol for the RCA orchestrator.
 
 The orchestrator submits its final answer via ``submit_final_report``. The
-schema is the **official rcabench-platform agent contract**
-(:class:`rcabench_platform.v3.sdk.evaluation.v2.AgentRCAOutput`):
+schema is the fpg ``ModelRCAOutput`` contract bound to this scenario's
+``fpg_profile.toml``:
 
-* ``root_causes[]`` — each carries ``service`` (must match a string present
-  in the data), ``fault_kind`` (one of the platform's enum values), and
-  ``evidence[]`` (DuckDB SQL + natural-language claim).
-* ``propagation[]`` — directed edges from upstream failing service toward
-  user-facing tier, each with evidence.
+* ``nodes[]`` — anomalous service or link states, with ``subject`` such as
+  ``svc:checkout`` or ``link:checkout->payment``, a profile-bound
+  ``predicate``, interval, and evidence.
+* ``edges[]`` — directed causal links from cause node id to effect node id.
+* ``root_causes[]`` — explicit root-cause node ids, ordered by confidence.
 
-We validate by handing the raw tool args to :class:`AgentRCAOutput` —
-``service`` vocabulary alignment is enforced in the prompt (see
-``rcabench_contract`` atom which splices in
-``get_agent_contract_prompt()``); shape correctness is enforced by Pydantic
-here. A failed validation returns ``is_error=True`` so the model can retry;
-a successful validation returns :class:`ToolTerminate` so the loop exits
+We validate by handing raw tool args to the profile-bound Pydantic model.
+A failed validation returns ``is_error=True`` so the model can retry; a
+successful validation returns :class:`ToolTerminate` so the loop exits
 cleanly.
 
 A ``decide_turn_action`` handler keeps the orchestrator from voluntarily
@@ -33,7 +30,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Final
 
-from pydantic import BaseModel
+from pydantic import ConfigDict
 
 from agentm.core.abi import (
     DecideTurnActionEvent,
@@ -51,8 +48,17 @@ from agentm.core.abi import (
     ToolTerminate,
 )
 from agentm.extensions import ExtensionManifest
+from rca.fpg_schema import (
+    FpgOutputConfig,
+    model_output_model,
+    model_output_tool_schema,
+    resolve_profile_path,
+)
 
-class FinalizeConfig(BaseModel):
+
+class FinalizeConfig(FpgOutputConfig):
+    model_config = ConfigDict(extra="forbid")
+
     continuation_instruction: str | None = None
 
 MANIFEST = ExtensionManifest(
@@ -85,17 +91,16 @@ class _State:
     submitted: bool = False
 
 def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
-    # Imported lazily so ``import rca.finalize`` does not
-    # require rcabench-platform at module-load time (e.g. for static
-    # analysis or tooling without the SDK installed).
-    from rcabench_platform.v3.sdk.evaluation.v2 import AgentRCAOutput
+    profile_path = resolve_profile_path(config.profile_path, scenario_dir=api.scenario_dir)
+    output_model = model_output_model(profile_path)
+    tool_parameters = model_output_tool_schema(profile_path)
 
     state = _State()
     instruction = config.continuation_instruction or _DEFAULT_INSTRUCTION
 
     async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:
         try:
-            output = AgentRCAOutput.model_validate(args)
+            output = output_model.model_validate(args)
         except Exception as exc:  # pydantic ValidationError + anything weird
             return ToolResult(
                 content=[
@@ -103,7 +108,7 @@ def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
                         type="text",
                         text=json.dumps(
                             {
-                                "error": "agent_contract_validation_failed",
+                                "error": "fpg_model_output_validation_failed",
                                 "detail": str(exc),
                             },
                             ensure_ascii=False,
@@ -112,33 +117,16 @@ def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
                 ],
                 is_error=True,
             )
-        if not output.root_causes:
-            return ToolResult(
-                content=[
-                    TextContent(
-                        type="text",
-                        text=json.dumps(
-                            {
-                                "error": "root_causes must be non-empty — "
-                                "submit at least one RootCauseClaim with "
-                                "service + fault_kind + >=1 evidence."
-                            }
-                        ),
-                    )
-                ],
-                is_error=True,
-            )
         state.submitted = True
         # Serialize via the model so the wire payload is always
-        # contract-conformant (alias ``from`` survives, enums become their
-        # string values). Eval adapter calls ``AgentRCAOutput.parse_str``
-        # on this exact text.
+        # contract-conformant. Eval adapter parses this exact text with
+        # fpg.ModelRCAOutput.
         return ToolTerminate(
             result=ToolResult(
                 content=[
                     TextContent(
                         type="text",
-                        text=output.model_dump_json(by_alias=True),
+                        text=output.model_dump_json(),
                     )
                 ]
             ),
@@ -149,13 +137,14 @@ def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
         FunctionTool(
             name="submit_final_report",
             description=(
-                "Submit the final root-cause analysis as the official "
-                "rcabench-platform AgentRCAOutput. This is the only "
-                "sanctioned way to terminate. Service names must match "
-                "strings present in the data; fault_kind must be one of "
-                "the enum values listed in the agent contract above."
+                "Submit the final root-cause analysis as fpg ModelRCAOutput. "
+                "This is the only sanctioned way to terminate. Subjects are "
+                "profile entity refs such as svc:<service> or "
+                "link:<source_service>-><target_service>; predicates must use the "
+                "vocabulary listed in the agent contract; root_causes must "
+                "reference node ids from nodes[]."
             ),
-            parameters=_AGENT_RCA_OUTPUT_SCHEMA,
+            parameters=tool_parameters,
             fn=_submit,
         )
     )
@@ -184,127 +173,5 @@ def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
         )
 
     api.on("decide_turn_action", _on_decide_turn_action)
-
-# Inlined (no $defs / $ref) JSON schema mirroring AgentRCAOutput, so any
-# LLM tool-call backend that doesn't resolve refs still works. Kept
-# manually in sync with the upstream Pydantic models — Pydantic remains
-# the source of truth at validation time, this is just the wire schema
-# the model sees.
-_EVIDENCE_SCHEMA: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "kind": {
-            "type": "string",
-            "enum": ["metric", "trace", "log"],
-        },
-        "sql": {
-            "type": "string",
-            "description": (
-                "DuckDB SQL the platform can re-execute against the case "
-                "parquets to verify the claim."
-            ),
-        },
-        "claim": {
-            "type": "string",
-            "description": (
-                "<=20-word natural-language assertion the SQL rows back."
-            ),
-        },
-    },
-    "required": ["kind", "sql", "claim"],
-}
-
-# Mirrors ``rcabench_platform...FaultKind`` (``[k.value for k in FaultKind]``).
-# Hand-listed rather than derived so this module stays import-light — it does
-# NOT pull rcabench_platform at import time (see the lazy import in
-# ``install``). Drift against the platform enum is locked by
-# ``tests/test_finalize_contract.py::test_fault_kind_enum_matches_platform``.
-_FAULT_KIND_ENUM: Final[list[str]] = [
-    "pod_failure",
-    "pod_unavailable",
-    "network_delay",
-    "network_loss",
-    "network_partition",
-    "network_corrupt",
-    "network_duplicate",
-    "network_bandwidth_limit",
-    "http_aborted",
-    "http_slow",
-    "http_payload_modified",
-    "http_response_status_modified",
-    "cpu_stress",
-    "jvm_thread_cpu_stress",
-    "mem_stress",
-    "jvm_heap_stress",
-    "jvm_gc_pressure",
-    "jvm_method_exception",
-    "jvm_jdbc_exception",
-    "jvm_method_latency",
-    "jvm_jdbc_latency",
-    "jvm_method_mutated",
-    "dns_resolution_failed",
-    "dns_resolution_wrong",
-    "clock_skew",
-    "unknown",
-]
-
-_AGENT_RCA_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "root_causes": {
-            "type": "array",
-            "minItems": 1,
-            "description": (
-                "One entry per distinct root cause. Do NOT collapse "
-                "multiple distinct faults into a single entry."
-            ),
-            "items": {
-                "type": "object",
-                "properties": {
-                    "service": {
-                        "type": "string",
-                        "description": (
-                            "Canonical service_name as it appears in the "
-                            "data — must match strings present in the "
-                            "parquets / views; do not invent."
-                        ),
-                    },
-                    "fault_kind": {
-                        "type": "string",
-                        "enum": _FAULT_KIND_ENUM,
-                    },
-                    "evidence": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": _EVIDENCE_SCHEMA,
-                    },
-                },
-                "required": ["service", "fault_kind", "evidence"],
-            },
-        },
-        "propagation": {
-            "type": "array",
-            "description": (
-                "Fault-impact chain edges — FROM the failing service "
-                "TOWARD the user-visible alarm tier. Not the request-call "
-                "direction. Synthetic generators (loadgenerator, locust, "
-                "wrk2, dsb-wrk2, k6) are NOT services."
-            ),
-            "items": {
-                "type": "object",
-                "properties": {
-                    "from": {"type": "string"},
-                    "to": {"type": "string"},
-                    "evidence": {
-                        "type": "array",
-                        "items": _EVIDENCE_SCHEMA,
-                    },
-                },
-                "required": ["from", "to"],
-            },
-        },
-    },
-    "required": ["root_causes"],
-}
 
 __all__: Final = ["MANIFEST", "install"]
