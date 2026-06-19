@@ -227,6 +227,8 @@ class ExtensionAPIScope:
     parent_session_id: str | None
     purpose: str
     scenario: str | None
+    lineage: dict[str, Any] | None
+    experiment: dict[str, Any] | None
     session: ReadonlySession
     tools: list[Tool]
     commands: dict[str, CommandSpec]
@@ -255,6 +257,8 @@ def build_extension_api_scope(
     parent_session_id: str | None = None,
     purpose: str = "root",
     scenario: str | None = None,
+    lineage: dict[str, Any] | None = None,
+    experiment: dict[str, Any] | None = None,
     session: ReadonlySession,
     tools: list[Tool],
     commands: dict[str, CommandSpec],
@@ -286,6 +290,8 @@ def build_extension_api_scope(
         parent_session_id=parent_session_id,
         purpose=purpose,
         scenario=scenario,
+        lineage=lineage,
+        experiment=experiment,
         session=session,
         tools=tools,
         commands=commands,
@@ -328,6 +334,8 @@ class _ExtensionAPIImpl:
         self._parent_session_id = scope.parent_session_id
         self._purpose = scope.purpose
         self._scenario = scope.scenario
+        self._lineage = scope.lineage
+        self._experiment = scope.experiment
         self._session = scope.session
         self._tools = scope.tools
         self._commands = scope.commands
@@ -614,6 +622,14 @@ class _ExtensionAPIImpl:
     @property
     def scenario(self) -> str | None:
         return self._scenario
+
+    @property
+    def lineage(self) -> dict[str, Any] | None:
+        return self._lineage
+
+    @property
+    def experiment(self) -> dict[str, Any] | None:
+        return self._experiment
 
     @property
     def tools(self) -> list[Tool]:

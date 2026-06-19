@@ -127,9 +127,13 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/core/abi/events.py
+      - path: src/agentm/core/abi/extension.py
       - path: src/agentm/core/abi/resource.py
+      - path: src/agentm/core/abi/session_config.py
       - path: src/agentm/core/lib/serialization.py
       - path: src/agentm/core/lib/__init__.py
+      - path: src/agentm/core/runtime/extension.py
+      - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/harness/extension.py
       - path: src/agentm/harness/resource_writer.py
       - path: src/agentm/harness/session.py
@@ -179,12 +183,17 @@ requirements:
     status: tested
     confidence: confirmed
     code:
+      - path: src/agentm/core/abi/extension.py
       - path: src/agentm/core/abi/events.py
       - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/core/abi/session_config.py
+      - path: src/agentm/core/runtime/extension.py
+      - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/harness/extension.py
       - path: src/agentm/harness/atom_reloader.py
       - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/sub_agent.py
+      - path: src/agentm/extensions/builtin/workflow.py
       - path: src/agentm/extensions/builtin/artifact_store.py
       - path: src/agentm/extensions/builtin/llm_compaction.py
       - path: contrib/scenarios/rca/src/agentm_rca/tools/hypothesis_tools.py
@@ -310,6 +319,28 @@ requirements:
     depends_on:
       - REQ-087-builtin-atoms-extension-api
 
+  - id: REQ-103-rca-reminder-case-study-export
+    title: RCA reminder fork case-study export
+    description: >
+      Reminder-injection ablations over recorded RCA sessions must be
+      exportable without coupling to llmharness internals. The exporter reads
+      session data through public `agentm trace` commands, discovers fork
+      variants from baseline session lineage metadata, compares baseline and
+      fork final reports, optionally runs the RCA judge against a case
+      directory, and writes CSV plus Markdown tables for case-study analysis.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: scripts/export_reminder_case_study.py
+    tests:
+      - path: tests/unit/test_export_reminder_case_study.py
+    docs:
+      - path: CONTEXT.md
+    depends_on:
+      - REQ-096-cli-provider-session-seams
+      - REQ-102-rca-scenario-cleanup
+
   - id: REQ-089-file-tool-io-seams
     title: File tool atoms use documented read and write seams
     description: >
@@ -431,13 +462,20 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/cli.py
+      - path: src/agentm/cli_workflow.py
+      - path: src/agentm/gateway/cli.py
       - path: src/agentm/ai/types.py
       - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/core/abi/session_store.py
+      - path: src/agentm/core/observability/clickhouse.py
+      - path: src/agentm/core/runtime/session_bootstrap.py
       - path: src/agentm/harness/session_manager.py
       - path: src/agentm/harness/session_config.py
       - path: src/agentm/modes/textual_app.py
     tests:
+      - path: tests/unit/test_cli_session_config.py
+      - path: tests/unit/gateway/test_cli_session_factory.py
+      - path: tests/unit/core/test_clickhouse_session_resolution.py
       - path: tests/unit/test_cli_pluggable_boundaries.py
       - path: tests/ai/test_provider_registry.py
     docs:

@@ -39,6 +39,9 @@ from agentm.extensions.builtin import observability
 
 
 class _SessionView:
+    def get_session_id(self) -> str:
+        return "session-1"
+
     def get_messages(self) -> list[Any]:
         return []
 
@@ -60,11 +63,18 @@ class _SessionView:
         return "entry"
 
 
-def _api(tmp_path: Path) -> _ExtensionAPIImpl:
+def _api(
+    tmp_path: Path,
+    *,
+    lineage: dict[str, Any] | None = None,
+    experiment: dict[str, Any] | None = None,
+) -> _ExtensionAPIImpl:
     scope = build_extension_api_scope(
         bus=EventBus(),
         cwd=str(tmp_path),
         session_id="session-1",
+        lineage=lineage,
+        experiment=experiment,
         session=_SessionView(),
         tools=[],
         commands={},
@@ -118,6 +128,13 @@ def _attrs_dict(record: dict[str, Any]) -> dict[str, Any]:
             except (TypeError, ValueError):
                 out[key] = value_wrapper["doubleValue"]
     return out
+
+
+def _body_dict(record: dict[str, Any]) -> dict[str, Any]:
+    from agentm.core.observability.otlp import otlp_unwrap
+
+    body = otlp_unwrap(record.get("body", {}))
+    return body if isinstance(body, dict) else {}
 
 
 def _handler(event: dict[str, Any]) -> dict[str, Any]:
@@ -193,3 +210,48 @@ async def test_observability_strips_messages_from_before_send_to_llm(
         "messages field must be stripped — trajectory lives in agentm.message.appended"
     )
     assert payload.get("system") == "sys"
+
+
+def test_session_start_records_lineage_and_experiment_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AGENTM_OBSERVABILITY_DIR", str(tmp_path / ".agentm" / "observability")
+    )
+    reminder_text = "Check the ts-route-plan-service to ts-travel2-service edge."
+    api = _api(
+        tmp_path,
+        lineage={
+            "kind": "fork",
+            "entrypoint": "agentm.cli",
+            "source_session_id": "baseline-session",
+            "fork_point": {"turn_index": 12},
+        },
+        experiment={
+            "kind": "reminder_injection",
+            "id": "ablation-1",
+            "case_id": "1188",
+            "reminder_id": "r1",
+            "insert_turn_index": 12,
+            "reminder_text": reminder_text,
+        },
+    )
+    observability.install(api, observability.ObservabilityConfig())
+    api.get_session_telemetry().shutdown()
+
+    records = _log_records(_read_otlp(_trace_file(tmp_path)))
+    starts = [r for r in records if r.get("eventName") == "agentm.session.start"]
+    assert len(starts) == 1
+
+    body = _body_dict(starts[0])
+    attrs = _attrs_dict(starts[0])
+    assert body["lineage"]["source_session_id"] == "baseline-session"
+    assert body["experiment"]["reminder_text"] == reminder_text
+    assert attrs["agentm.session.lineage.kind"] == "fork"
+    assert attrs["agentm.session.lineage.source_session_id"] == "baseline-session"
+    assert attrs["agentm.session.lineage.fork.turn_index"] == 12
+    assert attrs["agentm.session.experiment.kind"] == "reminder_injection"
+    assert attrs["agentm.session.experiment.id"] == "ablation-1"
+    assert attrs["agentm.session.experiment.case_id"] == "1188"
+    assert "agentm.session.experiment.reminder_text_hash" in attrs
+    assert "reminder_text" not in attrs

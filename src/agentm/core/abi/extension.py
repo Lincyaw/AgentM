@@ -564,6 +564,25 @@ class ExtensionAPI(Protocol):
         ...
 
     @property
+    def lineage(self) -> dict[str, Any] | None:
+        """Caller-supplied provenance metadata from
+        :class:`AgentSessionConfig.lineage`.
+
+        Atoms should treat this as read-only descriptive context for trace
+        reconstruction. It has no runtime semantics."""
+        ...
+
+    @property
+    def experiment(self) -> dict[str, Any] | None:
+        """Caller-supplied study metadata from
+        :class:`AgentSessionConfig.experiment`.
+
+        Used by evals, ablations, and reminder-injection runs to attach
+        external experiment context to a session without coupling that logic to
+        the core runtime."""
+        ...
+
+    @property
     def tools(self) -> list[Tool]:
         """The live tool-catalog list for the session.
 

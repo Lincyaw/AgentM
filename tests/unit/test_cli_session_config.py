@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agentm.cli import CliRunConfig, _build_session_config
+from agentm.cli import CliRunConfig, _build_cli_lineage, _build_session_config
 from agentm.core.abi import EventBus
 from agentm.core.abi.session import SessionContext, SessionHeader
 from agentm.core.lib.user_config import ModelProfile
@@ -144,3 +144,76 @@ def test_profile_model_override_replaces_inherited_provider(tmp_path: Path) -> N
 
     assert session_config.provider == ("built.openai", {"model": "gpt-4", "name": "fast"})
     assert registry.calls == [("openai", {"model": "gpt-4", "name": "fast"})]
+
+
+def test_cli_lineage_defaults_to_root_for_new_prompt(tmp_path: Path) -> None:
+    lineage = _build_cli_lineage(
+        CliRunConfig(
+            provider="openai",
+            model="gpt-4",
+            cwd=str(tmp_path),
+            prompt="hello",
+            no_extensions=True,
+        ),
+        stored=None,
+    )
+
+    assert lineage == {
+        "kind": "root",
+        "entrypoint": "agentm.cli",
+        "prompt": True,
+    }
+
+
+def test_cli_lineage_records_fork_selector(tmp_path: Path) -> None:
+    lineage = _build_cli_lineage(
+        CliRunConfig(
+            provider="openai",
+            model="gpt-4",
+            cwd=str(tmp_path),
+            fork="source-session",
+            fork_turn_index=3,
+            no_extensions=True,
+        ),
+        stored={"lineage": {"kind": "root", "entrypoint": "agentm.cli"}},
+    )
+
+    assert lineage == {
+        "kind": "fork",
+        "entrypoint": "agentm.cli",
+        "source_session_id": "source-session",
+        "fork_point": {"turn_index": 3},
+        "source_lineage": {"kind": "root", "entrypoint": "agentm.cli"},
+    }
+
+
+def test_cli_fork_sets_parent_session_id_for_trace_index(tmp_path: Path) -> None:
+    state = _State(
+        {
+            "provider": [
+                "agentm.extensions.builtin.llm_anthropic",
+                {"name": "anthropic", "model": "old-model"},
+            ],
+        }
+    )
+
+    session_config, _ = _build_session_config(
+        CliRunConfig(
+            provider="openai",
+            model="gpt-4",
+            cwd=str(tmp_path),
+            fork="source",
+            fork_turn_index=3,
+            no_extensions=True,
+        ),
+        bus=EventBus(),
+        session_store=_Store(state),
+    )
+
+    assert session_config.parent_session_id == "source"
+    assert session_config.lineage == {
+        "kind": "fork",
+        "entrypoint": "agentm.cli",
+        "source_session_id": "source",
+        "fork_point": {"turn_index": 3},
+    }

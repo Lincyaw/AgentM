@@ -771,6 +771,15 @@ class _WorkflowRun:
             trace_label=trace_label,
             session_manager=session_manager,
             session_id=session_id,
+            lineage={
+                "kind": "workflow_agent",
+                "parent_session_id": self.api.session_id,
+                "root_session_id": self.api.root_session_id,
+                "purpose": _WORKER_PURPOSE,
+                "trace_label": trace_label,
+                "workflow_node_id": trace_label,
+            },
+            experiment=self.api.experiment,
         )
         last_exc: Exception | None = None
         for attempt in range(2):

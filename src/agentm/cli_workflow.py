@@ -95,6 +95,7 @@ async def _run_async(
     from agentm.core.abi.events import EventBus
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.lib.user_config import (
+        ModelBuildConfig,
         apply_reasoning_effort,
         resolve_provider_model,
     )
@@ -104,6 +105,7 @@ async def _run_async(
     provider_id, model_name, profile = resolve_provider_model(
         model_flag=model_flag,
     )
+    build_config: ModelBuildConfig
     if profile is not None:
         build_config = profile.to_build_config()
     else:
@@ -126,6 +128,11 @@ async def _run_async(
         extensions=[(m, dict(c)) for m, c in _WORKFLOW_EXTENSIONS],
         auto_commit=False,
         bus=bus,
+        lineage={
+            "kind": "root",
+            "entrypoint": "agentm.workflow",
+            "workflow_script": str(script_path),
+        },
     )
     session = await AgentSession.create(config)
     try:

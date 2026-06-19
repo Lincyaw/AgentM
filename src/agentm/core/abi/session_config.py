@@ -159,6 +159,21 @@ class AgentSessionConfig:
     """Optional human-facing label for the creation-time trace command. This is
     observability-only; ``purpose`` remains the lifecycle/atom-policy label."""
 
+    lineage: dict[str, Any] | None = None
+    """JSON-safe provenance metadata for reconstructing the session tree.
+
+    This is intentionally descriptive rather than behavioral: the runtime only
+    persists and emits it so external stores can join root sessions, forks,
+    sub-agents, workflow workers, and other derived sessions without coupling
+    that analysis to a specific harness implementation."""
+
+    experiment: dict[str, Any] | None = None
+    """JSON-safe experiment metadata for case studies and interventions.
+
+    Callers can use this for reminder-injection runs, ablations, eval cases, or
+    any other study-level context. AgentM does not interpret it during agent
+    execution; observability records it on session start."""
+
     # --- Per-task evolution loop (see per-task-evolution-loop.md) --------
 
     task_class: str | None = None

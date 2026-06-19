@@ -35,6 +35,7 @@ from agentm.core.abi.events import (
 from agentm.core.abi.session_store import SessionState, SessionStore
 from agentm.core.lib.render import final_summary
 from agentm.core.lib.user_config import (
+    ModelBuildConfig,
     ModelProfile,
     apply_reasoning_effort,
 )
@@ -400,7 +401,52 @@ def _get_stored_session_config(session_state: Any) -> dict[str, Any] | None:
     header = getattr(session_state, "get_header", lambda: None)()
     if header is None:
         return None
-    return getattr(header, "config", None)
+    stored_config = getattr(header, "config", None)
+    return stored_config if isinstance(stored_config, dict) else None
+
+
+def _stored_metadata(
+    stored: dict[str, Any] | None, key: str
+) -> dict[str, Any] | None:
+    value = stored.get(key) if stored else None
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _build_cli_lineage(
+    config: CliRunConfig,
+    stored: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if config.fork:
+        fork_point: dict[str, Any] = {}
+        if config.fork_up_to is not None:
+            fork_point["up_to"] = config.fork_up_to
+        if config.fork_message_id is not None:
+            fork_point["message_id"] = config.fork_message_id
+        if config.fork_turn_id is not None:
+            fork_point["turn_id"] = config.fork_turn_id
+        if config.fork_turn_index is not None:
+            fork_point["turn_index"] = config.fork_turn_index
+        if not fork_point:
+            fork_point["up_to"] = "end"
+        lineage: dict[str, Any] = {
+            "kind": "fork",
+            "entrypoint": "agentm.cli",
+            "source_session_id": config.fork,
+            "fork_point": fork_point,
+        }
+        source_lineage = _stored_metadata(stored, "lineage")
+        if source_lineage is not None:
+            lineage["source_lineage"] = source_lineage
+        return lineage
+
+    stored_lineage = _stored_metadata(stored, "lineage")
+    if stored_lineage is not None:
+        return stored_lineage
+    return {
+        "kind": "root",
+        "entrypoint": "agentm.cli",
+        "prompt": bool(config.prompt),
+    }
 
 
 def _make_install_warner() -> Any:
@@ -552,12 +598,13 @@ def _build_session_config(
         and not (config.model_explicit and config.profile is not None)
     ):
         stored_cfg = stored_provider[1] if isinstance(stored_provider[1], dict) else {}
-        provider_cfg = dict(stored_cfg)
+        provider_cfg = cast(ModelBuildConfig, dict(stored_cfg))
         if config.model_explicit:
             provider_cfg["model"] = config.model
         apply_reasoning_effort(provider_cfg, config.reasoning_effort)
         provider_spec = (stored_provider[0], provider_cfg)
     else:
+        build_config: ModelBuildConfig
         if config.profile is not None:
             build_config = config.profile.to_build_config()
         else:
@@ -584,6 +631,11 @@ def _build_session_config(
     traceparent = _parse_traceparent(os.environ.get("TRACEPARENT"))
     if traceparent is not None:
         root_session_id, parent_session_id = traceparent
+    if config.fork is not None and parent_session_id is None:
+        parent_session_id = config.fork
+
+    lineage = _build_cli_lineage(config, stored)
+    experiment = _stored_metadata(stored, "experiment")
 
     return (
         AgentSessionConfig(
@@ -602,6 +654,8 @@ def _build_session_config(
             loop_config=loop_config,
             root_session_id=root_session_id,
             parent_session_id=parent_session_id,
+            lineage=lineage,
+            experiment=experiment,
         ),
         session_state,
     )

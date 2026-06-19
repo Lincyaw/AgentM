@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import AgentMessage, AssistantMessage, ToolCallBlock
@@ -180,6 +181,7 @@ async def replay_one(
     data_dir = data_dir_override or _find_data_dir_from_config(stored)
     if data_dir:
         os.environ["AGENTM_RCA_DATA_DIR"] = data_dir
+    rca_case_id = Path(data_dir).name if data_dir else session_id
 
     # 2. Judge control
     judge = RcabenchJudge()
@@ -233,6 +235,20 @@ async def replay_one(
             scenario=scenario,
             provider=agent_provider,
             loop_config=LoopConfig(max_turns=max_turns),
+            parent_session_id=session_id,
+            lineage={
+                "kind": "fork",
+                "entrypoint": "rca.replay_fork",
+                "source_session_id": session_id,
+                "fork_point": {"turn_index": s.turn_index},
+            },
+            experiment={
+                "kind": "reminder_injection",
+                "case_id": rca_case_id,
+                "baseline_session_id": session_id,
+                "insert_turn_index": s.turn_index,
+                "reminder_text": s.reminder_text,
+            },
         )
         session = await create_agent_session(AgentSession, config)
         try:

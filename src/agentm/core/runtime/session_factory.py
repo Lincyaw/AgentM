@@ -401,6 +401,8 @@ async def create_agent_session(
         parent_session_id=config.parent_session_id,
         purpose=config.purpose,
         scenario=config.scenario,
+        lineage=config.lineage,
+        experiment=config.experiment,
         session=session_view,
         tools=tools,
         commands=commands,
@@ -433,12 +435,17 @@ async def create_agent_session(
         _install_with_events, bus=bus, api_factory=api_factory, reloader=reloader,
     )
 
-    session_manager.set_session_config({
+    session_config_payload: dict[str, Any] = {
         "scenario": config.scenario,
         "provider": list(config.provider) if config.provider else None,
         "extensions": [[mod, cfg] for mod, cfg in to_load],
         "env": {k: v for k, v in os.environ.items() if k.startswith("AGENTM_")},
-    })
+    }
+    if config.lineage is not None:
+        session_config_payload["lineage"] = config.lineage
+    if config.experiment is not None:
+        session_config_payload["experiment"] = config.experiment
+    session_manager.set_session_config(session_config_payload)
 
     for module_path, ext_cfg in to_load:
         try:

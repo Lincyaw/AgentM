@@ -792,6 +792,15 @@ class _ChildTaskManager:
             "persona": persona_name,
             "purpose": purpose,
             "tool_allowlist": persona_tool_allowlist,
+            "lineage": {
+                "kind": "subagent",
+                "parent_session_id": self._api.session_id,
+                "root_session_id": self._api.root_session_id,
+                "task_id": task_id,
+                "persona": persona_name,
+                "purpose": purpose,
+            },
+            "experiment": self._api.experiment,
         }
         try:
             child = await self._api.spawn_child_session(**child_config)

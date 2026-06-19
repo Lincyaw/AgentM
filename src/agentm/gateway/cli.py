@@ -225,7 +225,7 @@ def _build_session_factory(
     from typing import cast as _cast
 
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-    from agentm.core.lib.user_config import apply_reasoning_effort
+    from agentm.core.lib.user_config import ModelBuildConfig, apply_reasoning_effort
     from agentm.core.abi import EventBus
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.runtime.session import AgentSession
@@ -259,6 +259,34 @@ def _build_session_factory(
             fork=fork_source,
             fork_up_to=fork_up_to,
         )
+        header = getattr(state, "get_header", lambda: None)()
+        stored_config = getattr(header, "config", None) if header is not None else None
+        stored_lineage = (
+            stored_config.get("lineage") if isinstance(stored_config, dict) else None
+        )
+        stored_experiment = (
+            stored_config.get("experiment") if isinstance(stored_config, dict) else None
+        )
+        if fork_source:
+            fork_point: dict[str, Any] = {
+                "up_to": fork_up_to if fork_up_to is not None else "end"
+            }
+            lineage: dict[str, Any] = {
+                "kind": "fork",
+                "entrypoint": "agentm.gateway",
+                "source_session_id": fork_source,
+                "fork_point": fork_point,
+            }
+            if isinstance(stored_lineage, dict):
+                lineage["source_lineage"] = dict(stored_lineage)
+        elif isinstance(stored_lineage, dict):
+            lineage = dict(stored_lineage)
+        else:
+            lineage = {"kind": "root", "entrypoint": "agentm.gateway"}
+        experiment = (
+            dict(stored_experiment) if isinstance(stored_experiment, dict) else None
+        )
+        build_config: ModelBuildConfig
         if profile is not None:
             build_config = profile.to_build_config()
         else:
@@ -273,6 +301,9 @@ def _build_session_factory(
             bus=EventBus(),
             initial_services=dict(wire_services),
             extra_extensions=[("agentm.extensions.builtin.wire_driver", {})],
+            parent_session_id=fork_source if fork_source else None,
+            lineage=lineage,
+            experiment=experiment,
         )
         return await AgentSession.create(config)
 

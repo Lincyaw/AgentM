@@ -273,6 +273,13 @@ async def _run_child(
         extra_extensions=extra_extensions or [],
         atom_config_overrides=atom_config_overrides or {},
         purpose=purpose,
+        lineage={
+            "kind": "llmharness_child",
+            "parent_session_id": api.session_id,
+            "root_session_id": api.root_session_id,
+            "purpose": purpose,
+        },
+        experiment=api.experiment,
     )
     for attempt in range(_CHILD_MAX_RETRIES):
         try:

@@ -388,7 +388,7 @@ def info(url: str, sid: str) -> dict[str, Any]:
             "SELECT Body FROM otel_logs "
             "WHERE EventName = {ev:String} "
             "  AND LogAttributes['agentm.session.id'] = {sid:String} "
-            "LIMIT 1",
+            "ORDER BY Timestamp DESC LIMIT 1",
             params={"ev": event_name, "sid": sid},
         )
         if rows:

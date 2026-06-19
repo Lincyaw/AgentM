@@ -6,6 +6,9 @@ extensions:
     config:
       backend: local
   - module: rca.default.duckdb_sql
+    config:
+      exclude:
+        - conclusion.parquet
   - module: rca.default.finalize
   - module: agentm.extensions.builtin.observability
   - module: rca.default.rcabench_contract

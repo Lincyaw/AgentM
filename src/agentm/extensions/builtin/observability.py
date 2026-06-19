@@ -29,6 +29,7 @@ in ``tests/unit/extensions/test_observability_semconv.py`` lock it down.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from loguru import logger
 import time
@@ -105,6 +106,85 @@ _MUTABLE_CHANNELS = frozenset(
         BeforeCompactEvent.CHANNEL,
     }
 )
+
+_ATTRIBUTE_STRING_LIMIT = 512
+
+
+def _nested_get(data: dict[str, Any], path: str) -> Any:
+    current: Any = data
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _add_metadata_attribute(
+    attrs: dict[str, Any], key: str, value: Any
+) -> None:
+    if key in attrs or value is None:
+        return
+    if isinstance(value, (bool, int, float)):
+        attrs[key] = value
+        return
+    if isinstance(value, str):
+        attrs[key] = (
+            value
+            if len(value) <= _ATTRIBUTE_STRING_LIMIT
+            else value[:_ATTRIBUTE_STRING_LIMIT]
+        )
+
+
+def _session_metadata_attributes(
+    lineage: dict[str, Any] | None,
+    experiment: dict[str, Any] | None,
+) -> dict[str, Any]:
+    attrs: dict[str, Any] = {}
+    if lineage:
+        lineage_paths = {
+            "kind": "agentm.session.lineage.kind",
+            "entrypoint": "agentm.session.lineage.entrypoint",
+            "source_session_id": "agentm.session.lineage.source_session_id",
+            "parent_session_id": "agentm.session.lineage.parent_session_id",
+            "root_session_id": "agentm.session.lineage.root_session_id",
+            "task_id": "agentm.session.lineage.task_id",
+            "persona": "agentm.session.lineage.persona",
+            "purpose": "agentm.session.lineage.purpose",
+            "trace_label": "agentm.session.lineage.trace_label",
+            "workflow_run_id": "agentm.session.lineage.workflow_run_id",
+            "workflow_node_id": "agentm.session.lineage.workflow_node_id",
+            "fork_point.up_to": "agentm.session.lineage.fork.up_to",
+            "fork_point.message_id": "agentm.session.lineage.fork.message_id",
+            "fork_point.turn_id": "agentm.session.lineage.fork.turn_id",
+            "fork_point.turn_index": "agentm.session.lineage.fork.turn_index",
+        }
+        for path, attr_key in lineage_paths.items():
+            _add_metadata_attribute(attrs, attr_key, _nested_get(lineage, path))
+
+    if experiment:
+        experiment_paths = {
+            "kind": "agentm.session.experiment.kind",
+            "id": "agentm.session.experiment.id",
+            "experiment_id": "agentm.session.experiment.id",
+            "case_id": "agentm.session.experiment.case_id",
+            "baseline_session_id": "agentm.session.experiment.baseline_session_id",
+            "reminder_id": "agentm.session.experiment.reminder_id",
+            "insert_turn_index": "agentm.session.experiment.insert_turn_index",
+            "insert_message_id": "agentm.session.experiment.insert_message_id",
+            "reminder_text_hash": "agentm.session.experiment.reminder_text_hash",
+            "variant": "agentm.session.experiment.variant",
+        }
+        for path, attr_key in experiment_paths.items():
+            _add_metadata_attribute(attrs, attr_key, _nested_get(experiment, path))
+        reminder_text = experiment.get("reminder_text")
+        if isinstance(reminder_text, str) and reminder_text:
+            _add_metadata_attribute(
+                attrs,
+                "agentm.session.experiment.reminder_text_hash",
+                hashlib.sha256(reminder_text.encode("utf-8")).hexdigest(),
+            )
+    return attrs
+
 
 # Channels whose translation lives on :meth:`Event.to_otel`. The atom
 # subscribes a uniform delegator per channel; if a new Event class lands
@@ -240,24 +320,33 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
     pending_diff_snapshots: list[tuple[str, Handler, Any, Any]] = []
 
     # --- Session bootstrap log record -------------------------------------
+    session_start_body: dict[str, Any] = {
+        "session_id": api.session_id,
+        "root_session_id": api.root_session_id,
+        "parent_session_id": api.parent_session_id,
+        "purpose": api.purpose,
+        "scenario": api.scenario,
+        "cwd": api.cwd,
+    }
+    if api.lineage is not None:
+        session_start_body["lineage"] = to_jsonable(api.lineage)
+    if api.experiment is not None:
+        session_start_body["experiment"] = to_jsonable(api.experiment)
+    session_start_attrs: dict[str, Any] = {
+        "agentm.session.id": api.session_id,
+        "agentm.session.root_id": api.root_session_id,
+        "agentm.session.parent_id": api.parent_session_id or "",
+        "agentm.session.purpose": api.purpose,
+        "agentm.session.scenario": api.scenario or "",
+        "agentm.session.cwd": api.cwd,
+    }
+    session_start_attrs.update(
+        _session_metadata_attributes(api.lineage, api.experiment)
+    )
     telemetry.emit_log(
         "agentm.session.start",
-        body={
-            "session_id": api.session_id,
-            "root_session_id": api.root_session_id,
-            "parent_session_id": api.parent_session_id,
-            "purpose": api.purpose,
-            "scenario": api.scenario,
-            "cwd": api.cwd,
-        },
-        attributes={
-            "agentm.session.id": api.session_id,
-            "agentm.session.root_id": api.root_session_id,
-            "agentm.session.parent_id": api.parent_session_id or "",
-            "agentm.session.purpose": api.purpose,
-            "agentm.session.scenario": api.scenario or "",
-            "agentm.session.cwd": api.cwd,
-        },
+        body=session_start_body,
+        attributes=session_start_attrs,
     )
 
     # --- Bus observer for dispatch / handler.invoke records ---------------

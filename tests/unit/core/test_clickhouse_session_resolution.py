@@ -47,3 +47,34 @@ def test_most_recent_session_id_falls_back_for_legacy_rows(monkeypatch: Any) -> 
 
     assert clickhouse.most_recent_session_id("http://ch", "/workspace") == "legacy-session"
     assert calls == [{"cwd": "/workspace"}, {}]
+
+
+def test_info_reads_latest_metadata_records(monkeypatch: Any) -> None:
+    calls: list[tuple[str, dict[str, Any] | None]] = []
+
+    def fake_query(
+        url: str,
+        sql: str,
+        params: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> list[dict[str, str]]:
+        del url
+        calls.append((sql, params))
+        assert "ORDER BY Timestamp DESC LIMIT 1" in sql
+        if params == {"ev": "agentm.session.header", "sid": "s1"}:
+            return [{"Body": '{"id":"s1","config":{"scenario":"rca:baseline"}}'}]
+        if params == {"ev": "agentm.session.fingerprint", "sid": "s1"}:
+            return [{"Body": '{"scenario":"rca:baseline"}'}]
+        return []
+
+    monkeypatch.setattr(clickhouse, "_query", fake_query)
+
+    assert clickhouse.info("http://ch", "s1") == {
+        "header": {"id": "s1", "config": {"scenario": "rca:baseline"}},
+        "fingerprint": {"scenario": "rca:baseline"},
+    }
+    assert [params for _, params in calls] == [
+        {"ev": "agentm.session.header", "sid": "s1"},
+        {"ev": "agentm.session.fingerprint", "sid": "s1"},
+    ]
+
