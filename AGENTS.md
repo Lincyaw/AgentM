@@ -119,6 +119,8 @@ Concept-change flow: update the design doc → check `index.yaml`
 Quality over quantity. A test exists only to protect a **fail-stop
 position**:
 
+- Do **not** add trivial, ad hoc, or shape-only tests just because a file changed. Before adding any new test case, first confirm with the user that the behavior is load-bearing enough to lock down.
+
 | Position | Why load-bearing |
 |---|---|
 | Constitution boundary (`is_constitution_path`, manifest reload) | Agent self-modifies kernel |

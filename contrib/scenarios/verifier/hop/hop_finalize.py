@@ -48,6 +48,35 @@ NodePredicate = cast(type[Enum], _SCHEMA.NodePredicate)
 _STRICT: Final = ConfigDict(extra="forbid")
 
 
+class InvestigationCoverage(BaseModel):
+    model_config = _STRICT
+    schema_discovery: str = Field(
+        description="What table/schema/value discovery you performed before "
+        "writing detailed SQL, e.g. list_tables plus SELECT DISTINCT/DESCRIBE "
+        "for status columns, log levels/templates, metric names, span names. "
+        "If a discovery step was impossible, say why."
+    )
+    trace: str = Field(
+        description="Trace coverage: call-relationship query, fault-path "
+        "endpoint comparison, status/error/latency/span-count findings, and "
+        "target service total/sibling endpoint checks when relevant."
+    )
+    metrics: str = Field(
+        description="Metric coverage: metric names discovered and the target "
+        "resource/deployment/JVM/pod/container signals checked. If metrics "
+        "are unavailable or uninformative, state that explicitly."
+    )
+    logs: str = Field(
+        description="Log coverage: log levels/templates/messages discovered "
+        "and normal-vs-abnormal target log findings. If logs are unavailable "
+        "or uninformative, state that explicitly."
+    )
+    fault_specific_reasoning: str = Field(
+        description="Why the trace/metric/log findings support this verdict "
+        "for this specific fault kind and relationship direction."
+    )
+
+
 class HopVerdict(BaseModel):
     model_config = _STRICT
     verdict: Literal["confirmed", "rejected", "inconclusive"] = Field(
@@ -75,6 +104,12 @@ class HopVerdict(BaseModel):
         default=None,
         description="Proof of the call relationship between the two "
         "services (SQL + explanation). REQUIRED when confirmed.",
+    )
+    investigation_coverage: InvestigationCoverage = Field(
+        description="REQUIRED for all verdicts. Summarize the schema "
+        "discovery plus trace, metric, log, and fault-specific checks you "
+        "performed. This is audit metadata; do not replace SQL evidence with "
+        "free text."
     )
     claim: str = Field(description="One-line summary of the hop.")
 

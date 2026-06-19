@@ -53,20 +53,22 @@ _REL_DESCRIPTIONS: Final = {
 def _fault_context(
     all_faults: list[tuple[str, str, str]],
     edge_fault_kind: str,
-) -> str:
+) -> list[str]:
     primary = next(
         ((fk, tgt, params) for fk, tgt, params in all_faults if fk == edge_fault_kind),
         all_faults[0],
     )
     fk, tgt, params = primary
     suffix = f" ({params})" if params else ""
-    line = f"Fault on this propagation chain: {fk} on {tgt}{suffix}"
+    lines = [f"- Fault on this propagation chain: {fk} on {tgt}{suffix}"]
 
     others = [(fk2, tgt2) for fk2, tgt2, _ in all_faults if fk2 != edge_fault_kind]
     if others:
-        line += "\nOther faults in the system (evaluated on separate edges): "
-        line += ", ".join(f"{fk2} on {tgt2}" for fk2, tgt2 in others)
-    return line
+        lines.append(
+            "- Other faults in the system (evaluated on separate edges): "
+            + ", ".join(f"{fk2} on {tgt2}" for fk2, tgt2 in others)
+        )
+    return lines
 
 
 def _format_upstream_node(node: EventNode | dict) -> str:  # type: ignore[type-arg]
@@ -96,40 +98,42 @@ def build_hop_prompt(
 ) -> str:
     """Build the complete user prompt for a hop agent.
 
-    Sections follow the reasoning framework in hop.md:
-    fault scenario → starting point → this edge → (re-evaluation context).
+    Keep the reference document separate from case state:
+    fault reference → current state → task → (re-evaluation context).
     """
     sections: list[str] = []
 
-    # -- 1. Fault scenario -------------------------------------------------
-    fault_lines = [_fault_context(all_faults, fault_kind)]
+    # -- 1. Fault reference document ----------------------------------------
     if fault_kind in fault_docs:
-        fault_lines.append(fault_docs[fault_kind])
-    sections.append("## Fault scenario\n" + "\n\n".join(fault_lines))
+        sections.append(f"## Fault reference document: {fault_kind}\n{fault_docs[fault_kind]}")
+    else:
+        sections.append(f"## Fault reference document: {fault_kind}\n(no reference document available)")
 
-    # -- 2. Starting point: upstream evidence ------------------------------
-    upstream_lines = [f"Confirmed degraded: **{from_service}**"]
+    # -- 2. Current state: fault instance + upstream evidence ----------------
+    state_lines = _fault_context(all_faults, fault_kind)
+    state_lines.append(f"- Confirmed degraded upstream: **{from_service}**")
     if upstream_evidence is not None:
         ev_text = _format_upstream_node(upstream_evidence)
         if ev_text:
-            upstream_lines.append(ev_text)
-    sections.append("## Starting point\n" + "\n".join(upstream_lines))
+            state_lines.append("\nUpstream evidence:\n" + ev_text)
+    sections.append("## Current state\n" + "\n".join(state_lines))
 
-    # -- 3. This edge: relationship + target -------------------------------
+    # -- 3. Task: relationship + target -------------------------------------
     rel_desc = _REL_DESCRIPTIONS.get(rel_type, "{frm} and {to} are related.")
     rel_text = rel_desc.format(frm=from_service, to=to_service)
-    edge_lines = [
+    task_lines = [
         f"Target: **{to_service}**",
         f"Relationship: {rel_text}",
+        f"Task: verify whether the fault propagated from **{from_service}** to **{to_service}** on this single edge.",
     ]
     if is_infra:
-        edge_lines.append(
+        task_lines.append(
             f"`{to_service}` is an uninstrumented backing component — it "
             f"has no spans of its own. Verify via client spans inside "
             f"`{from_service}` (attr.span_kind = 'Client') and/or "
             f"`{to_service}`'s own resource metrics."
         )
-    sections.append("## This edge\n" + "\n".join(edge_lines))
+    sections.append("## Task\n" + "\n".join(task_lines))
 
     # -- 4. Re-evaluation context (optional) --------------------------------
     if prior_verdict and prior_verdict.verdict:
