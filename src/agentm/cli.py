@@ -76,6 +76,8 @@ class CliRunConfig:
     model: str
     cwd: str
     prompt: str = ""
+    provider_explicit: bool = False
+    model_explicit: bool = False
     scenario: str | None = None
     extra_extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     no_extensions: bool = False
@@ -87,6 +89,9 @@ class CliRunConfig:
     continue_recent: bool = False
     fork: str | None = None
     fork_up_to: int | None = None
+    fork_message_id: str | None = None
+    fork_turn_id: int | None = None
+    fork_turn_index: int | None = None
     max_turns: int | None = None
     max_tool_calls: int | None = None
     atom_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -360,6 +365,9 @@ def _resolve_session_state(
     continue_recent: bool,
     fork: str | None = None,
     fork_up_to: int | None = None,
+    fork_message_id: str | None = None,
+    fork_turn_id: int | None = None,
+    fork_turn_index: int | None = None,
     session_store: SessionStore,
 ) -> SessionState:
     from agentm.core.runtime.session_bootstrap import resolve_session_state
@@ -371,6 +379,9 @@ def _resolve_session_state(
             continue_recent=continue_recent,
             fork=fork,
             fork_up_to=fork_up_to,
+            fork_message_id=fork_message_id,
+            fork_turn_id=fork_turn_id,
+            fork_turn_index=fork_turn_index,
             session_store=session_store,
         )
     except FileNotFoundError as exc:
@@ -378,6 +389,10 @@ def _resolve_session_state(
         raise typer.BadParameter(
             f"{flag}: no session found for cwd {cwd!r}"
         ) from exc
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _get_stored_session_config(session_state: Any) -> dict[str, Any] | None:
@@ -513,6 +528,9 @@ def _build_session_config(
         continue_recent=config.continue_recent,
         fork=config.fork,
         fork_up_to=config.fork_up_to,
+        fork_message_id=config.fork_message_id,
+        fork_turn_id=config.fork_turn_id,
+        fork_turn_index=config.fork_turn_index,
         session_store=store,
     )
 
@@ -522,21 +540,33 @@ def _build_session_config(
     scenario = config.scenario
     if scenario is None and stored:
         scenario = stored.get("scenario")
-    provider_to_use = config.provider
-    if stored and stored.get("provider") and config.profile is None:
-        stored_prov = stored["provider"]
-        if isinstance(stored_prov, list) and len(stored_prov) == 2:
-            provider_to_use = provider_to_use or stored_prov[1].get("name", config.provider)
-
-    try:
+    if scenario is None and not config.no_extensions:
+        scenario = DEFAULT_SCENARIO
+    stored_provider = stored.get("provider") if stored else None
+    provider_spec: Any
+    if (
+        isinstance(stored_provider, list)
+        and len(stored_provider) == 2
+        and isinstance(stored_provider[0], str)
+        and not config.provider_explicit
+        and not (config.model_explicit and config.profile is not None)
+    ):
+        stored_cfg = stored_provider[1] if isinstance(stored_provider[1], dict) else {}
+        provider_cfg = dict(stored_cfg)
+        if config.model_explicit:
+            provider_cfg["model"] = config.model
+        apply_reasoning_effort(provider_cfg, config.reasoning_effort)
+        provider_spec = (stored_provider[0], provider_cfg)
+    else:
         if config.profile is not None:
             build_config = config.profile.to_build_config()
         else:
             build_config = {"model": config.model}
         apply_reasoning_effort(build_config, config.reasoning_effort)
-        provider_spec = provider_registry.build(provider_to_use, build_config)
-    except KeyError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+        try:
+            provider_spec = provider_registry.build(config.provider, build_config)
+        except KeyError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     from agentm.core.runtime.resource_loader import DefaultResourceLoader
 
     resource_loader = DefaultResourceLoader(
@@ -812,6 +842,36 @@ def run_cmd(
             ),
         ),
     ] = None,
+    message_id: Annotated[
+        str | None,
+        typer.Option(
+            "--message-id",
+            help=(
+                "Used with --fork: fork at an exact persisted message entry id. "
+                "Copy the id from `agentm trace messages`."
+            ),
+        ),
+    ] = None,
+    turn_id: Annotated[
+        int | None,
+        typer.Option(
+            "--turn-id",
+            help=(
+                "Used with --fork: fork at the unique trace turn_id. "
+                "If ambiguous, use --message-id."
+            ),
+        ),
+    ] = None,
+    turn_index: Annotated[
+        int | None,
+        typer.Option(
+            "--turn-index",
+            help=(
+                "Used with --fork: fork at the unique trace turn_index. "
+                "If ambiguous, use --message-id."
+            ),
+        ),
+    ] = None,
     max_turns: Annotated[
         int | None,
         typer.Option(
@@ -881,6 +941,8 @@ def run_cmd(
     # ``--cwd /b`` still consults ``/b/.env`` not the process cwd.
     pre_cwd = cwd or os.environ.get("AGENTM_CWD") or os.getcwd()
     autoload_dotenv(Path(pre_cwd))
+    provider_was_explicit = provider is not None
+    model_was_explicit = model is not None
     provider, model, cwd, profile = _resolve_provider_model_cwd(
         provider_flag=provider,
         model_flag=model,
@@ -889,11 +951,29 @@ def run_cmd(
 
     extra_extensions = _parse_extensions(extension)
     if scenario is None and not no_extensions:
-        scenario = os.environ.get("AGENTM_SCENARIO") or DEFAULT_SCENARIO
+        env_scenario = os.environ.get("AGENTM_SCENARIO")
+        if env_scenario is not None:
+            scenario = env_scenario
+        elif not (resume or continue_recent or fork):
+            scenario = DEFAULT_SCENARIO
 
     if not prompt and not resume and not continue_recent and not fork:
         print(ctx.get_help())
         raise typer.Exit(code=0)
+    fork_selectors = [
+        from_turn is not None,
+        message_id is not None,
+        turn_id is not None,
+        turn_index is not None,
+    ]
+    if sum(fork_selectors) > 1:
+        raise typer.BadParameter(
+            "--from-turn, --message-id, --turn-id, and --turn-index are mutually exclusive"
+        )
+    if not fork and any(fork_selectors):
+        raise typer.BadParameter(
+            "--from-turn, --message-id, --turn-id, and --turn-index require --fork"
+        )
 
     rc = asyncio.run(
         run(CliRunConfig(
@@ -901,6 +981,8 @@ def run_cmd(
             provider=provider,
             model=model,
             cwd=cwd,
+            provider_explicit=provider_was_explicit,
+            model_explicit=model_was_explicit,
             scenario=scenario,
             extra_extensions=extra_extensions,
             no_extensions=no_extensions,
@@ -912,6 +994,202 @@ def run_cmd(
             continue_recent=continue_recent,
             fork=fork,
             fork_up_to=from_turn,
+            fork_message_id=message_id,
+            fork_turn_id=turn_id,
+            fork_turn_index=turn_index,
+            max_turns=max_turns,
+            max_tool_calls=max_tool_calls,
+            atom_config_overrides=_parse_set_overrides(set_config),
+            profile=profile,
+            reasoning_effort=reasoning_effort,
+        ))
+    )
+    raise typer.Exit(code=rc)
+
+
+@app.command(name="fork")
+def fork_cmd(
+    source: Annotated[
+        str,
+        typer.Argument(
+            help=(
+                "Source session id or .jsonl path. Use `agentm trace messages` "
+                "or `agentm trace turns` to choose the fork point."
+            ),
+        ),
+    ],
+    prompt: Annotated[
+        str,
+        typer.Option(
+            "--prompt",
+            "-p",
+            help="User prompt to send after creating the fork.",
+        ),
+    ],
+    message_id: Annotated[
+        str | None,
+        typer.Option(
+            "--message-id",
+            help="Fork at an exact persisted message entry id.",
+        ),
+    ] = None,
+    turn_id: Annotated[
+        int | None,
+        typer.Option(
+            "--turn-id",
+            help="Fork at a unique trace turn_id.",
+        ),
+    ] = None,
+    turn_index: Annotated[
+        int | None,
+        typer.Option(
+            "--turn-index",
+            help="Fork at a unique trace turn_index.",
+        ),
+    ] = None,
+    scenario: Annotated[
+        str | None,
+        typer.Option(
+            "--scenario",
+            help="Override the source session's inherited scenario.",
+        ),
+    ] = None,
+    extension: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--extension",
+            "-e",
+            help=(
+                "Mount an extra atom on top of the inherited scenario. "
+                "Repeatable; same format as root `agentm -e`."
+            ),
+        ),
+    ] = None,
+    no_extensions: Annotated[
+        bool,
+        typer.Option(
+            "--no-extensions",
+            help="Skip atom discovery and loading; agent runs with no tools.",
+        ),
+    ] = False,
+    no_skills: Annotated[
+        bool,
+        typer.Option(
+            "--no-skills",
+            help="Skip skill discovery in the resource loader.",
+        ),
+    ] = False,
+    no_prompt_templates: Annotated[
+        bool,
+        typer.Option(
+            "--no-prompt-templates",
+            help="Skip prompt-template discovery in the resource loader.",
+        ),
+    ] = False,
+    tools: Annotated[
+        str | None,
+        typer.Option(
+            "--tools",
+            help="Comma-separated allowlist applied to atom-registered tools.",
+        ),
+    ] = None,
+    provider: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            help="Override the source session's inherited provider.",
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help="Override the source session's inherited model/profile.",
+        ),
+    ] = None,
+    cwd: Annotated[
+        str | None,
+        typer.Option(
+            "--cwd",
+            help="Working directory exposed to extensions.",
+        ),
+    ] = None,
+    quiet: Annotated[
+        bool,
+        typer.Option("--quiet", help="Suppress final-output printout."),
+    ] = False,
+    max_turns: Annotated[
+        int | None,
+        typer.Option("--max-turns", min=1, help="Hard ceiling on loop turns."),
+    ] = None,
+    max_tool_calls: Annotated[
+        int | None,
+        typer.Option(
+            "--max-tool-calls",
+            min=1,
+            help="Hard ceiling on total tool calls across the run.",
+        ),
+    ] = None,
+    reasoning_effort: Annotated[
+        str | None,
+        typer.Option(
+            "--reasoning-effort",
+            envvar="AGENTM_REASONING_EFFORT",
+            help="Provider reasoning-effort hint.",
+        ),
+    ] = None,
+    set_config: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--set",
+            "-S",
+            help="Override one atom config key; same format as root `agentm -S`.",
+        ),
+    ] = None,
+) -> None:
+    """Fork a session at a message/turn boundary and continue with a prompt."""
+
+    selectors = [
+        message_id is not None,
+        turn_id is not None,
+        turn_index is not None,
+    ]
+    if sum(selectors) != 1:
+        raise typer.BadParameter(
+            "specify exactly one of --message-id, --turn-id, or --turn-index"
+        )
+
+    pre_cwd = cwd or os.environ.get("AGENTM_CWD") or os.getcwd()
+    autoload_dotenv(Path(pre_cwd))
+    provider_was_explicit = provider is not None
+    model_was_explicit = model is not None
+    provider, model, cwd, profile = _resolve_provider_model_cwd(
+        provider_flag=provider,
+        model_flag=model,
+        cwd_flag=cwd,
+    )
+    if scenario is None and not no_extensions:
+        scenario = os.environ.get("AGENTM_SCENARIO")
+
+    rc = asyncio.run(
+        run(CliRunConfig(
+            prompt=prompt,
+            provider=provider,
+            model=model,
+            cwd=cwd,
+            provider_explicit=provider_was_explicit,
+            model_explicit=model_was_explicit,
+            scenario=scenario,
+            extra_extensions=_parse_extensions(extension),
+            no_extensions=no_extensions,
+            no_skills=no_skills,
+            no_prompt_templates=no_prompt_templates,
+            tool_allowlist=_parse_tools(tools),
+            quiet=quiet,
+            fork=source,
+            fork_message_id=message_id,
+            fork_turn_id=turn_id,
+            fork_turn_index=turn_index,
             max_turns=max_turns,
             max_tool_calls=max_tool_calls,
             atom_config_overrides=_parse_set_overrides(set_config),

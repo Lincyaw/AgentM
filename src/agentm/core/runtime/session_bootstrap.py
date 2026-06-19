@@ -21,6 +21,7 @@ Two functions:
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +68,7 @@ class ClickHouseSessionStore:
 
     def most_recent(self, cwd: Path) -> SessionState | None:
         ch = self._ch()
-        sid = ch.most_recent_session_id(self._url)
+        sid = ch.most_recent_session_id(self._url, str(cwd))
         if sid is None:
             return None
         return self.open(sid)
@@ -77,14 +78,42 @@ class ClickHouseSessionStore:
         source_id: str,
         *,
         up_to: int | None = None,
+        message_id: str | None = None,
+        turn_id: int | None = None,
+        turn_index: int | None = None,
     ) -> SessionState:
         from agentm.core.abi.session import AgentMessage
         from agentm.core.runtime.session_manager import (
             ENTRY_TYPE_MESSAGE,
             SessionManager,
+            resolve_turn_leaf_id,
         )
 
         source: SessionManager = self.open(source_id)  # type: ignore[assignment]
+        selector_count = sum(
+            value is not None for value in (message_id, turn_id, turn_index)
+        )
+        if selector_count > 1:
+            raise ValueError("message_id, turn_id, and turn_index are mutually exclusive")
+
+        if message_id is not None:
+            entry = source.get_entry(message_id)
+            if entry is None:
+                raise KeyError(f"unknown message id: {message_id}")
+            if entry.type != ENTRY_TYPE_MESSAGE:
+                raise ValueError(f"entry {message_id!r} is not a message entry")
+            return source.fork_at_entry(message_id, persist=False)
+
+        if turn_id is not None or turn_index is not None:
+            turns = list(self._ch().turns(self._url, source_id))
+            leaf_id = resolve_turn_leaf_id(
+                source,
+                turns,
+                turn_id=turn_id,
+                turn_index=turn_index,
+            )
+            return source.fork_at_entry(leaf_id, persist=False)
+
         branch = source.get_branch()
         messages = [
             e.payload
@@ -99,6 +128,9 @@ class ClickHouseSessionStore:
             persist=False,
             parent_session=source.get_session_id(),
         )
+        header = source.get_header()
+        if header is not None and header.config:
+            forked.set_session_config(copy.deepcopy(header.config))
         for msg in messages:
             forked.append_message(msg)
         return forked
@@ -132,6 +164,9 @@ def resolve_session_state(
     session_store: SessionStore,
     fork: str | None = None,
     fork_up_to: int | None = None,
+    fork_message_id: str | None = None,
+    fork_turn_id: int | None = None,
+    fork_turn_index: int | None = None,
 ) -> SessionState:
     """Pick the right :class:`SessionState` for a session bootstrap.
 
@@ -148,7 +183,13 @@ def resolve_session_state(
     """
 
     if fork:
-        return session_store.fork(fork, up_to=fork_up_to)
+        return session_store.fork(
+            fork,
+            up_to=fork_up_to,
+            message_id=fork_message_id,
+            turn_id=fork_turn_id,
+            turn_index=fork_turn_index,
+        )
     if resume:
         return session_store.open(resume)
     if continue_recent:

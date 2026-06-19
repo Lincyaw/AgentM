@@ -45,7 +45,7 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
 def test_bare_invocation_shows_help_and_exits_zero() -> None:
     proc = _run(["agentm"])
     assert proc.returncode == 0
-    for name in ("list-extensions", "trace", "gateway"):
+    for name in ("fork", "list-extensions", "trace", "gateway"):
         assert name in proc.stdout
 
 
@@ -70,3 +70,11 @@ def test_gateway_routes_to_gateway_app() -> None:
     proc = _run(["agentm", "gateway", "--help"])
     assert proc.returncode == 0
     assert "--bind" in proc.stdout
+
+
+def test_fork_command_is_available() -> None:
+    proc = _run(["agentm", "fork", "--help"])
+    assert proc.returncode == 0
+    assert "--message-id" in proc.stdout
+    assert "--turn-id" in proc.stdout
+    assert "--prompt" in proc.stdout

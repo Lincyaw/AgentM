@@ -138,6 +138,7 @@ class AgentSession:
         self._prompt_lock: asyncio.Lock = asyncio.Lock()
         # Latched by a terminal=True inbox item; consumed at turn boundary.
         self._pending_terminate: ToolTerminated | None = None
+        self._last_round_turn: tuple[int, int] | None = None
 
         self._bus.on(
             MessagePersistedEvent.CHANNEL, self._on_message_persisted
@@ -286,6 +287,7 @@ class AgentSession:
         else:
             self._session_manager.branch(leaf)
         self._session_manager.append_message(event.message)
+        self._last_round_turn = (event.turn_index, event.turn_id)
 
     # --- Construction -----------------------------------------------------
 
@@ -508,6 +510,7 @@ class AgentSession:
             # so observers see the unchanged-list "nothing happened" outcome.
             messages = self._session_manager.get_messages()
             cause = action.cause if isinstance(action, Stop) else default_action.cause
+            self._last_round_turn = None
             await self._bus.emit(
                 AgentEndEvent.CHANNEL,
                 AgentEndEvent(messages=messages, cause=cause),
@@ -623,6 +626,7 @@ class AgentSession:
         )
         self._in_run = True
         try:
+            self._last_round_turn = None
             messages = self._session_manager.build_session_context().messages
             system_prompt = ""
             before_returns = await self._bus.emit(
@@ -692,10 +696,16 @@ class AgentSession:
         if leaf is not None and leaf.type == ENTRY_TYPE_TURN_COMMITTED:
             return
         cause = type(event.cause).__name__ if event.cause is not None else "unknown"
+        payload: dict[str, Any] = {"cause": cause}
+        if self._last_round_turn is not None:
+            turn_index, turn_id = self._last_round_turn
+            payload["turn_index"] = turn_index
+            payload["turn_id"] = turn_id
         try:
             self._session_manager.append_custom_entry(
-                ENTRY_TYPE_TURN_COMMITTED, {"cause": cause}
+                ENTRY_TYPE_TURN_COMMITTED, payload
             )
+            self._last_round_turn = None
         except Exception:
             # A persistence hiccup here must never crash the driver round or
             # block the prompt waiter the next handler resolves.

@@ -79,20 +79,13 @@ def _int(v: Any, default: int = 0) -> int:
 
 
 def resolve_session(
-    url: str, session: str | None, latest: bool,
+    url: str, session: str | None, latest: bool, cwd: str | None = None,
 ) -> str | None:
     """Map ``--session``/``--latest`` to a concrete session_id."""
     if session:
         return session
     if latest:
-        rows = _query(
-            url,
-            "SELECT LogAttributes['agentm.session.id'] AS sid "
-            "FROM otel_logs "
-            "WHERE EventName = 'agentm.session.start' "
-            "ORDER BY Timestamp DESC LIMIT 1",
-        )
-        return rows[0]["sid"] if rows else None
+        return most_recent_session_id(url, cwd)
     return None
 
 
@@ -188,13 +181,23 @@ def session_entries(url: str, sid: str) -> list[dict[str, Any]]:
 
 def most_recent_session_id(url: str, cwd: str | None = None) -> str | None:
     """Return the session_id of the most recently started session."""
+    where = ["EventName = 'agentm.session.start'"]
+    params: dict[str, Any] = {}
+    if cwd:
+        where.append("LogAttributes['agentm.session.cwd'] = {cwd:String}")
+        params["cwd"] = cwd
     rows = _query(
         url,
         "SELECT LogAttributes['agentm.session.id'] AS sid "
         "FROM otel_logs "
-        "WHERE EventName = 'agentm.session.start' "
+        f"WHERE {' AND '.join(where)} "
         "ORDER BY Timestamp DESC LIMIT 1",
+        params=params,
     )
+    if not rows and cwd:
+        # Backward compatibility for traces written before session.cwd was
+        # stamped as an attribute.
+        return most_recent_session_id(url, None)
     return rows[0]["sid"] if rows else None
 
 

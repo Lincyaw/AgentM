@@ -256,6 +256,7 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
             "agentm.session.parent_id": api.parent_session_id or "",
             "agentm.session.purpose": api.purpose,
             "agentm.session.scenario": api.scenario or "",
+            "agentm.session.cwd": api.cwd,
         },
     )
 

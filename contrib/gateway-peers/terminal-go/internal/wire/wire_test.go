@@ -2,11 +2,16 @@ package wire
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestNewID_Length(t *testing.T) {
@@ -299,5 +304,106 @@ func TestNowReturnsReasonableTimestamp(t *testing.T) {
 	// Should be after 2020-01-01 (1577836800) and before 2100-01-01 (4102444800).
 	if ts < 1577836800 || ts > 4102444800 {
 		t.Errorf("Now() = %f, expected a timestamp between 2020 and 2100", ts)
+	}
+}
+
+type reconnectTestTransport struct {
+	t             *testing.T
+	mu            sync.Mutex
+	connects      int
+	releaseSecond chan struct{}
+}
+
+func (tr *reconnectTestTransport) Connect(ctx context.Context) (io.ReadWriteCloser, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	client, server := net.Pipe()
+	tr.mu.Lock()
+	connectIndex := tr.connects
+	tr.connects++
+	tr.mu.Unlock()
+
+	go func() {
+		defer server.Close()
+		_ = server.SetDeadline(time.Now().Add(2 * time.Second))
+		hello, err := ReadFrame(server)
+		if err != nil {
+			tr.t.Errorf("server ReadFrame hello: %v", err)
+			return
+		}
+		if hello.Kind != KindHello {
+			tr.t.Errorf("hello kind = %q, want %q", hello.Kind, KindHello)
+			return
+		}
+		if err := WriteFrame(server, &Envelope{
+			V:    2,
+			ID:   "bbbbbbbbbbbb",
+			Kind: KindWelcome,
+			TS:   2.0,
+			Body: map[string]any{"server_version": "test"},
+		}); err != nil {
+			tr.t.Errorf("server WriteFrame welcome: %v", err)
+			return
+		}
+		if connectIndex == 0 {
+			return
+		}
+		_ = server.SetDeadline(time.Time{})
+		<-tr.releaseSecond
+	}()
+
+	return client, nil
+}
+
+func TestWireClientKeepsDoneOpenAfterSuccessfulReconnect(t *testing.T) {
+	transport := &reconnectTestTransport{
+		t:             t,
+		releaseSecond: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() {
+		close(transport.releaseSecond)
+	})
+	client := NewWireClient(transport, "peer", "")
+	reconnected := make(chan struct{})
+	var reconnectOnce sync.Once
+	client.OnReconnect = func() {
+		reconnectOnce.Do(func() {
+			close(reconnected)
+		})
+	}
+
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	select {
+	case <-client.Done():
+		t.Fatal("Done closed during a successful reconnect")
+	case <-reconnected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reconnect")
+	}
+
+	select {
+	case <-client.Done():
+		t.Fatal("Done closed after reconnect succeeded")
+	default:
+	}
+
+	releaseOnce.Do(func() {
+		close(transport.releaseSecond)
+	})
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case <-client.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Done after Close")
 	}
 }

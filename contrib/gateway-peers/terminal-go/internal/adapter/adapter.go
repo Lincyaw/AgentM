@@ -88,6 +88,12 @@ func New(client *wire.WireClient, id Identity, firstMessage string, appOpts ...a
 	// tools and in-session commands).
 	seedFromCapabilities(a, client.Capabilities())
 
+	// Register the OnReconnect callback so the App's capability view is
+	// refreshed after a reconnection.
+	client.OnReconnect = func() {
+		seedFromCapabilities(a, client.Capabilities())
+	}
+
 	return &Adapter{
 		App:        a,
 		Session:    sess,
@@ -300,8 +306,8 @@ func (ad *Adapter) routeOutbound(env *wire.Envelope) {
 }
 
 func (ad *Adapter) pump(ctx context.Context) {
-	outbound := ad.client.Outbound()
 	for {
+		outbound := ad.client.Outbound()
 		select {
 		case <-ctx.Done():
 			return
@@ -310,9 +316,32 @@ func (ad *Adapter) pump(ctx context.Context) {
 				log.Printf("[adapter] wire client closed: %v", err)
 			}
 			return
+		case <-ad.client.Reconnecting():
+			// The wire client is reconnecting. Wait for either a new outbound
+			// channel (reconnect succeeded) or permanent closure.
+			log.Printf("[adapter] wire client reconnecting, waiting for recovery...")
+			reconnected := ad.client.Reconnected()
+			select {
+			case <-ad.client.Done():
+				if err := ad.client.Err(); err != nil {
+					log.Printf("[adapter] wire client reconnect failed: %v", err)
+				}
+				return
+			case <-ctx.Done():
+				return
+			case <-reconnected:
+				// New outbound channel is available via Outbound() — loop back
+				// and re-select with the fresh channel.
+				continue
+			}
 		case env, ok := <-outbound:
 			if !ok {
-				return
+				select {
+				case <-ad.client.Done():
+					return
+				default:
+					continue
+				}
 			}
 			ad.routeOutbound(env)
 		}

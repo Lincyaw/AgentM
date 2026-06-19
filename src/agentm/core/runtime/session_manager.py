@@ -595,6 +595,47 @@ class SessionManager:
         fork._leaf_id = entry_id
         return fork
 
+    def fork_at_entry(
+        self,
+        entry_id: str,
+        *,
+        persist: bool,
+        session_dir: Path | None = None,
+        copy_config: bool = True,
+    ) -> Self:
+        """Create a new session from this branch up to ``entry_id``.
+
+        Unlike the legacy ``SessionStore.fork(up_to=N)`` path, this copies the
+        entry tree prefix, not only materialized chat messages. That preserves
+        durable boundary markers and any extension-owned entries already on the
+        active path while still minting fresh entry ids for the new branch.
+        """
+        branch = self.get_branch(entry_id)
+        if not branch:
+            raise KeyError(f"unknown entry id: {entry_id}")
+
+        forked = SessionManager(
+            cwd=self._cwd,
+            session_dir=session_dir,
+            persist=persist,
+            parent_session=self.get_session_id() or None,
+        )
+        if copy_config and self._header is not None and self._header.config:
+            forked.set_session_config(copy.deepcopy(self._header.config))
+
+        prev_new_id: str | None = None
+        for original in branch:
+            copied = SessionEntry(
+                type=original.type,
+                id=_new_id(),
+                parent_id=prev_new_id,
+                timestamp=original.timestamp,
+                payload=copy.deepcopy(original.payload),
+            )
+            forked.append(copied)
+            prev_new_id = copied.id
+        return forked
+
     def create_branched_session(self, leaf_id: str) -> str | None:
         branch = self.get_branch(leaf_id)
         if not branch:
@@ -830,6 +871,86 @@ class SessionManager:
         ]
 
 
+def _is_assistant_message_entry(entry: SessionEntry) -> bool:
+    if entry.type != ENTRY_TYPE_MESSAGE:
+        return False
+    payload = entry.payload
+    return getattr(payload, "role", None) == "assistant"
+
+
+def _turn_marker_value(entry: SessionEntry, key: str) -> Any:
+    if entry.type != ENTRY_TYPE_TURN_COMMITTED:
+        return None
+    payload = entry.payload
+    if not isinstance(payload, dict):
+        return None
+    return payload.get(key)
+
+
+def resolve_turn_leaf_id(
+    manager: SessionManager,
+    turns: list[dict[str, Any]],
+    *,
+    turn_id: int | None = None,
+    turn_index: int | None = None,
+) -> str:
+    """Resolve a trace turn selector to a session-entry leaf id.
+
+    Turn summaries are emitted once per assistant LLM turn. Message entries do
+    not currently persist turn ids, so the stable bridge is ordinal: find the
+    unique matching turn summary, then choose the matching assistant message on
+    the active branch and extend the cut through any immediate non-assistant
+    entries before the next assistant turn.
+    """
+    if (turn_id is None) == (turn_index is None):
+        raise ValueError("exactly one of turn_id or turn_index is required")
+
+    key = "turn_id" if turn_id is not None else "turn_index"
+    expected = turn_id if turn_id is not None else turn_index
+    branch = manager.get_active_branch()
+    marker_matches = [
+        entry.id for entry in branch if _turn_marker_value(entry, key) == expected
+    ]
+    if len(marker_matches) == 1:
+        return marker_matches[0]
+    if len(marker_matches) > 1:
+        raise ValueError(
+            f"{key}={expected!r} is ambiguous ({len(marker_matches)} boundary markers); "
+            "use --message-id"
+        )
+
+    matches = [i for i, item in enumerate(turns) if item.get(key) == expected]
+    if not matches:
+        raise KeyError(f"no turn summary with {key}={expected!r}")
+    if len(matches) > 1:
+        raise ValueError(
+            f"{key}={expected!r} is ambiguous ({len(matches)} matches); use --message-id"
+        )
+    assistant_ordinal = matches[0]
+
+    assistant_positions = [
+        i for i, entry in enumerate(branch) if _is_assistant_message_entry(entry)
+    ]
+    if assistant_ordinal >= len(assistant_positions):
+        raise KeyError(
+            f"turn summary ordinal {assistant_ordinal} has no matching assistant message"
+        )
+
+    start = assistant_positions[assistant_ordinal]
+    next_assistant = (
+        assistant_positions[assistant_ordinal + 1]
+        if assistant_ordinal + 1 < len(assistant_positions)
+        else len(branch)
+    )
+    leaf_idx = start
+    for i in range(start + 1, next_assistant):
+        # Keep the full post-assistant turn tail: tool_result, injected
+        # messages, and boundary/extension entries all belong to the same
+        # context window before the next assistant turn begins.
+        leaf_idx = i
+    return branch[leaf_idx].id
+
+
 class JsonlSessionStore:
     """Default presenter session store backed by JSONL SessionManager files."""
 
@@ -869,8 +990,49 @@ class JsonlSessionStore:
         source_id: str,
         *,
         up_to: int | None = None,
+        message_id: str | None = None,
+        turn_id: int | None = None,
+        turn_index: int | None = None,
     ) -> SessionManager:
         source = self.open(source_id)
+        selector_count = sum(
+            value is not None for value in (message_id, turn_id, turn_index)
+        )
+        if selector_count > 1:
+            raise ValueError("message_id, turn_id, and turn_index are mutually exclusive")
+
+        source_sid = source.get_session_id()
+        cwd = source._cwd or str(self._cwd or Path.cwd())
+        directory = self._session_dir or SessionManager.default_session_dir(cwd)
+
+        if message_id is not None:
+            entry = source.get_entry(message_id)
+            if entry is None:
+                raise KeyError(f"unknown message id: {message_id}")
+            if entry.type != ENTRY_TYPE_MESSAGE:
+                raise ValueError(f"entry {message_id!r} is not a message entry")
+            return source.fork_at_entry(
+                message_id,
+                persist=True,
+                session_dir=directory,
+            )
+
+        if turn_id is not None or turn_index is not None:
+            if source.session_file is None:
+                raise FileNotFoundError(source_id)
+            turns = TraceReader(source.session_file).load_turn_summaries()
+            leaf_id = resolve_turn_leaf_id(
+                source,
+                turns,
+                turn_id=turn_id,
+                turn_index=turn_index,
+            )
+            return source.fork_at_entry(
+                leaf_id,
+                persist=True,
+                session_dir=directory,
+            )
+
         branch = source.get_branch()
         messages = [
             e.payload
@@ -880,16 +1042,15 @@ class JsonlSessionStore:
         if up_to is not None:
             messages = messages[:up_to]
 
-        source_sid = source.get_session_id()
-        cwd = source._cwd or str(self._cwd or Path.cwd())
-        directory = self._session_dir or SessionManager.default_session_dir(cwd)
-
         forked = SessionManager(
             cwd=cwd,
             session_dir=directory,
             persist=True,
             parent_session=source_sid,
         )
+        header = source.get_header()
+        if header is not None and header.config:
+            forked.set_session_config(copy.deepcopy(header.config))
         for msg in messages:
             forked.append_message(msg)
         return forked

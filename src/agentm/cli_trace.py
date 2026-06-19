@@ -46,7 +46,7 @@ def _ch() -> Any:
 
 
 def _ch_session(
-    file: Path | None, session: str | None, latest: bool,
+    file: Path | None, session: str | None, latest: bool, cwd: Path | None = None,
 ) -> tuple[str, str] | None:
     """Try to resolve a ClickHouse-backed session.
 
@@ -60,7 +60,10 @@ def _ch_session(
     url = ch.get_url()
     if url is None:
         return None
-    sid = ch.resolve_session(url, session, latest)
+    resolved_cwd = cwd.expanduser().resolve() if cwd is not None else None
+    sid = ch.resolve_session(
+        url, session, latest, str(resolved_cwd) if resolved_cwd is not None else None
+    )
     if sid is None:
         return None
     return url, sid
@@ -758,18 +761,27 @@ def messages_cmd(
         def _render(entry: dict[str, Any]) -> str:
             payload = entry.get("payload") or {}
             role_str = str(payload.get("role") or entry.get("type") or "?")
+            entry_id = str(entry.get("id") or "")
+            id_suffix = f" id={entry_id}" if entry_id else ""
             color_key = role_str if role_str in _ANSI else "kind"
-            header = _paint(f"[{role_str}]", color_key, color)
+            header = _paint(f"[{role_str}{id_suffix}]", color_key, color)
             lines = _render_content_blocks(
                 payload.get("content"),
                 color=color,
                 hide_thinking=hide_thinking,
             )
+            if not lines and payload and "content" not in payload:
+                lines = [
+                    f"  {line}"
+                    for line in json.dumps(
+                        payload, ensure_ascii=False, indent=2
+                    ).splitlines()
+                ]
             body = "\n".join([header, *lines]) if lines else header
             return body + "\n"
 
         # ClickHouse path (primary)
-        ch = _ch_session(file, session, latest)
+        ch = _ch_session(file, session, latest, cwd)
         if ch:
             url, sid = ch
             records = _ch().messages(
@@ -855,8 +867,10 @@ def turns_cmd(
         chosen_fmt = _resolve_format(fmt, sink)
 
         def _render(turn: dict[str, Any]) -> str:
+            turn_id = turn.get("turn_id")
+            id_part = f" id={turn_id}" if turn_id is not None else ""
             return (
-                f"[turn {turn.get('turn_index','?')}] "
+                f"[turn index={turn.get('turn_index','?')}{id_part}] "
                 f"stop={turn.get('stop_reason','?')} "
                 f"tool_calls={turn.get('tool_call_count',0)} "
                 f"errors={turn.get('tool_error_count',0)} "
@@ -864,7 +878,7 @@ def turns_cmd(
                 f"out={turn.get('output_tokens',0)}"
             )
 
-        ch = _ch_session(file, session, latest)
+        ch = _ch_session(file, session, latest, cwd)
         if ch:
             url, sid = ch
             records: Any = _ch().turns(url, sid)
@@ -902,7 +916,7 @@ def usage_cmd(
     try:
         chosen_fmt = _resolve_format(fmt, sink)
 
-        ch = _ch_session(file, session, latest)
+        ch = _ch_session(file, session, latest, cwd)
         if ch:
             url, sid = ch
             summary = _ch().usage(url, sid)
@@ -1016,7 +1030,7 @@ def chats_cmd(
                         continue
                 yield d
 
-        ch = _ch_session(file, session, latest)
+        ch = _ch_session(file, session, latest, cwd)
         if ch:
             url, sid = ch
             raw = _ch().chats(url, sid)
@@ -1127,7 +1141,7 @@ def tools_cmd(
                     continue
                 yield d
 
-        ch = _ch_session(file, session, latest)
+        ch = _ch_session(file, session, latest, cwd)
         if ch:
             url, sid = ch
             raw = _ch().tools(url, sid)
@@ -1180,7 +1194,7 @@ def info_cmd(
         chosen_fmt = _resolve_format(fmt, sink)
 
         payload: dict[str, Any]
-        ch = _ch_session(file, session, latest)
+        ch = _ch_session(file, session, latest, cwd)
         if ch:
             url, sid = ch
             payload = _ch().info(url, sid)
@@ -1278,7 +1292,7 @@ def spans_cmd(
                     continue
                 yield d
 
-        ch = _ch_session(file, session, latest)
+        ch = _ch_session(file, session, latest, cwd)
         if ch:
             url, sid = ch
             raw = _ch().spans(url, sid, name=name, name_prefix=name_prefix)
@@ -1352,7 +1366,7 @@ def logs_cmd(
                     continue
                 yield d
 
-        ch = _ch_session(file, session, latest)
+        ch = _ch_session(file, session, latest, cwd)
         if ch:
             url, sid = ch
             raw = _ch().logs(url, sid, name=name, name_prefix=name_prefix)
@@ -1405,7 +1419,7 @@ def stats_cmd(
     try:
         chosen_fmt = _resolve_format(fmt, sink)
 
-        ch = _ch_session(file, session, latest)
+        ch = _ch_session(file, session, latest, cwd)
         if ch:
             url, sid = ch
             summary = _ch().stats(url, sid)

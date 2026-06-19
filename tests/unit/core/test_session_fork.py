@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from agentm.core.abi import TextContent, UserMessage, AssistantMessage, text_message
-from agentm.core.abi.session import ENTRY_TYPE_MESSAGE
+from agentm.core.abi.session import ENTRY_TYPE_MESSAGE, ENTRY_TYPE_TURN_COMMITTED
 from agentm.core.runtime.session_manager import JsonlSessionStore, SessionManager
 
 
@@ -62,6 +62,47 @@ class TestFork:
         assert len(messages) == 2
         assert messages[0].content[0].text == "hello"  # type: ignore[union-attr]
         assert messages[1].content[0].text == "world"  # type: ignore[union-attr]
+
+    def test_fork_at_message_id_copies_entry_prefix(self, tmp_path: Path) -> None:
+        source = _make_source(tmp_path)
+        branch = source.get_branch()
+        fork_point = branch[1].id
+        store = JsonlSessionStore(session_dir=tmp_path)
+
+        forked = store.fork(source.get_session_id(), message_id=fork_point)
+        forked_branch = forked.get_branch()
+        messages = [e.payload for e in forked_branch if e.type == ENTRY_TYPE_MESSAGE]
+
+        assert len(messages) == 2
+        assert messages[0].content[0].text == "hello"  # type: ignore[union-attr]
+        assert messages[1].content[0].text == "world"  # type: ignore[union-attr]
+        assert [e.id for e in forked_branch] != [e.id for e in branch[:2]]
+
+    def test_fork_at_turn_id_uses_boundary_marker(self, tmp_path: Path) -> None:
+        source = SessionManager(cwd=str(tmp_path), session_dir=tmp_path, persist=True)
+        source.append_message(_user("turn 1"))
+        source.append_message(_assistant("done 1"))
+        source.append_custom_entry(
+            ENTRY_TYPE_TURN_COMMITTED,
+            {"cause": "ModelEndTurn", "turn_index": 0, "turn_id": 101},
+        )
+        source.append_message(_user("turn 2"))
+        source.append_message(_assistant("done 2"))
+        source.append_custom_entry(
+            ENTRY_TYPE_TURN_COMMITTED,
+            {"cause": "ModelEndTurn", "turn_index": 1, "turn_id": 102},
+        )
+        store = JsonlSessionStore(session_dir=tmp_path)
+
+        forked = store.fork(source.get_session_id(), turn_id=101)
+        branch = forked.get_branch()
+
+        assert [e.type for e in branch] == [
+            ENTRY_TYPE_MESSAGE,
+            ENTRY_TYPE_MESSAGE,
+            ENTRY_TYPE_TURN_COMMITTED,
+        ]
+        assert branch[-1].payload["turn_id"] == 101
 
     def test_fork_creates_new_session_id(self, tmp_path: Path) -> None:
         source = _make_source(tmp_path)
@@ -133,12 +174,10 @@ class TestFork:
         store = JsonlSessionStore(session_dir=tmp_path)
         forked = store.fork(source.get_session_id(), up_to=2)
 
-        # Forked session gets its own header (parent_session set), but
-        # does NOT copy the source's config — it's a new session that
-        # will get its own config when create_agent_session runs.
         header = forked.get_header()
         assert header is not None
         assert header.parent_session == source.get_session_id()
-        # The source's config is still readable for the CLI to use as defaults
+        assert header.config == {"scenario": "rca:baseline", "custom": "data"}
+
         source_reloaded = store.open(source.get_session_id())
         assert source_reloaded.get_header().config["scenario"] == "rca:baseline"  # type: ignore[index]

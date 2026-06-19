@@ -36,6 +36,9 @@ class SessionStore(Protocol):
         source_id: str,
         *,
         up_to: int | None = None,
+        message_id: str | None = None,
+        turn_id: int | None = None,
+        turn_index: int | None = None,
     ) -> SessionState:
         """Create a new session seeded with messages from an existing one.
 
@@ -43,10 +46,9 @@ class SessionStore(Protocol):
         fresh session. The new session's header records the source via
         ``parent_session`` so the fork relationship is queryable.
 
-        ``up_to`` limits the number of message entries copied (``None`` =
-        all). This is the only parameter because "which messages to keep"
-        is the sole degree of freedom; everything else (cwd, session_dir)
-        is inherited from the source.
+        ``message_id`` forks at an exact persisted message entry. ``turn_id``
+        and ``turn_index`` fork at a resolved turn boundary. ``up_to`` is the
+        legacy message-count selector retained for compatibility.
         """
         ...
 

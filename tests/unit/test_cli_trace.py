@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from agentm import cli_trace
 from agentm.cli_trace import app
 
 
@@ -145,6 +146,7 @@ def trace_file(tmp_path: Path) -> Path:
             "agentm.turn.summary",
             {
                 "turn_index": 0,
+                "turn_id": 17,
                 "stop_reason": "stop",
                 "tool_calls": [],
                 "tool_call_count": 0,
@@ -192,6 +194,40 @@ def test_no_source_exits_2() -> None:
     assert err["kind"] == "argument"
 
 
+def test_clickhouse_latest_resolves_relative_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str | None, bool, str | None]] = []
+
+    def resolve_session(
+        url: str,
+        session: str | None,
+        latest: bool,
+        cwd: str | None,
+    ) -> str:
+        assert url == "http://clickhouse"
+        calls.append((session, latest, cwd))
+        return "session-1"
+
+    fake_ch = type(
+        "FakeClickHouse",
+        (),
+        {
+            "get_url": staticmethod(lambda: "http://clickhouse"),
+            "resolve_session": staticmethod(resolve_session),
+        },
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_trace, "_ch_mod", fake_ch)
+
+    assert cli_trace._ch_session(None, None, True, Path(".")) == (
+        "http://clickhouse",
+        "session-1",
+    )
+    assert calls == [(None, True, str(tmp_path.resolve()))]
+
+
 
 
 
@@ -219,6 +255,28 @@ def test_data_on_stdout_info_on_stderr(trace_file: Path) -> None:
         parsed = json.loads(ln)
         assert parsed["type"] == "message"
     assert "message(s)" in result.stderr
+
+
+def test_messages_text_includes_entry_id(trace_file: Path) -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["messages", "--file", str(trace_file), "--format", "text", "--no-color"],
+    )
+
+    assert result.exit_code == 0
+    assert "[user id=m-user-hi]" in result.stdout
+    assert "[assistant id=m-assistant-hello back]" in result.stdout
+
+
+def test_turns_text_includes_turn_id(trace_file: Path) -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        app, ["turns", "--file", str(trace_file), "--format", "text"]
+    )
+
+    assert result.exit_code == 0
+    assert "[turn index=0 id=17]" in result.stdout
 
 
 
@@ -342,8 +400,6 @@ def test_index_missing_dir_exits_3(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Verb-specific projections
 # ---------------------------------------------------------------------------
-
-
 
 
 
