@@ -9,10 +9,13 @@ and are invisible to any single hop agent.
 service or one edge at a time. They may miss signals that only
 become apparent with the full graph — and they may reject edges
 that are actually affected. Treat their rejections as hypotheses
-to verify, not as final answers. When a rejection's rationale
-mentions "no errors" or "traffic drop proportional to system,"
-that is exactly the kind of conclusion that needs your global
-cross-check.
+to verify, not as final answers.
+
+However, do not turn every graph-wide traffic reduction into a
+confirmed node. A proportional span-count drop on an otherwise
+healthy downstream dependency is usually reduced demand from an
+upstream bottleneck. It is useful evidence for the upstream path,
+but it is not by itself a target-side anomaly node.
 
 ## Reasoning framework
 
@@ -25,13 +28,14 @@ paths and identify where the gaps are.
 Given the fault type and confirmed path, which rejections look
 suspicious? Common blind spots of per-edge reasoning:
 
-- Service rejected for "fewer calls" but ALL upstream paths to it
-  are confirmed dead — the service has no traffic because its
-  dependencies failed, not because it's healthy.
+- Service rejected for "fewer calls" but the endpoint is itself an
+  alarm/user-visible path, disappeared selectively, or has timeout /
+  error / fail-fast evidence beyond ordinary reduced demand.
 - Aggregate metrics look healthy but the fault-specific endpoint
   vanished entirely — other endpoints dilute the aggregate.
-- System-wide cascade: individual "less traffic" rejections miss
-  that traffic disappeared everywhere.
+- System-wide cascade: use graph-wide traffic collapse as context,
+  but do not promote every downstream service whose traffic fell
+  proportionally and whose own latency/errors/resources stay healthy.
 - Hop agent checked `attr.status_code` (trace-level errors) but
   missed HTTP-level errors (`attr.http.response.status_code`) or
   error-handler spans (e.g. `BasicErrorController.error`). Errors
@@ -50,6 +54,25 @@ when a rejection looks suspicious. In particular, check the
 caller's own endpoint-level HTTP status breakdown — not just the
 caller→target span JOIN that the hop agent would have used.
 
+### Flow-interruption boundary
+`flow_interrupted` is for a meaningful path failure, not ordinary
+load reduction. You may promote or re-evaluate a service for
+`flow_interrupted` only when at least one of these is true:
+
+- the interrupted endpoint is an alarm, entrypoint, or user-visible
+  business path that the final graph needs to explain;
+- the interruption is selective to a fault-related path rather than
+  a proportional system-wide throughput drop;
+- the target shows timeout/error/fail-fast evidence, missing
+  required child calls, or resource symptoms;
+- all independent upstream paths to that target are confirmed
+  interrupted, so zero traffic is itself the failure being explained.
+
+If the evidence is only "the slow caller sent fewer requests and
+the callee stayed healthy", keep that fact as evidence on the
+upstream edge. Do not `add` the callee and do not send it back for
+re-evaluation solely on that basis.
+
 ### 4. Decide
 - **re_evaluate** (preferred): send the edge back to a hop agent
   with your global context explaining what to reconsider. The hop
@@ -58,6 +81,8 @@ caller→target span JOIN that the hop agent would have used.
   evidence without re-investigation.
 - Every `add` must name `via_service` and `predicate`.
 - Every `re_evaluate` must name `via_service` and `context`.
+- Do not use `add` or `re_evaluate` for ordinary proportional
+  reduced demand alone; it is edge evidence, not a final node.
 - `suggested_remove` is audit-only and never applied.
 
 ## Data units

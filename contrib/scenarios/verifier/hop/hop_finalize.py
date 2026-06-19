@@ -54,7 +54,8 @@ class HopVerdict(BaseModel):
         "rejected = no genuine degradation found after thorough investigation; "
         "inconclusive = ambiguous signal that requires global context to resolve "
         "(e.g. zero traffic where you cannot tell if the service is down vs simply "
-        "not receiving requests due to upstream failure)."
+        "not receiving requests due to upstream failure). Proportional reduced "
+        "demand from a slow caller alone is not a confirmed target degradation."
     )
     predicate: NodePredicate | None = Field(  # type: ignore[valid-type]
         default=None,
@@ -199,6 +200,8 @@ def install(api: ExtensionAPI, config: HopFinalizeConfig) -> None:
                 "confirmed = the service is genuinely degraded by the "
                 "upstream fault (then predicate, evidence and relationship "
                 "are required and every SQL must re-execute successfully). "
+                "A proportional request-volume drop alone is evidence, not "
+                "a confirmed target node. "
                 "rejected = no genuine degradation; still include the "
                 "queries that showed no degradation."
             ),

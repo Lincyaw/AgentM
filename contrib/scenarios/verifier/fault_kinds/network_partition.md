@@ -33,10 +33,12 @@ When the target itself shows reduced traffic but no degradation:
 2. Check those callers in the **abnormal** window: did their calls
    to the target vanish? Did their latency on those endpoints spike
    significantly — especially toward the system's timeout ceiling?
-3. If caller-side calls vanished or hit timeout while the target's
-   surviving requests are healthy → the partition is effective but
-   the signal is on the caller side. Mark **confirmed** with
-   `flow_interrupted`.
+3. If caller-side calls across the partitioned link vanished or hit
+   timeout while the target's surviving requests are healthy → the
+   partition is effective but the signal is on the caller side. Mark
+   the affected link/caller path **confirmed** with `flow_interrupted`.
+   Do not generalize this to unrelated downstream callees that merely
+   receive proportionally fewer requests from a blocked caller.
 
 ## How the failure tends to propagate
 Link-type fault. The edge `rule-bearing side → peer` is the
@@ -44,3 +46,11 @@ link-spanning hop. From the rule-bearing side, any further callers
 that depended on it completing work that required the peer also
 become anomalous — cascade up the call-graph from the rule-bearing
 side.
+
+Downstream dependencies that merely receive fewer calls from a
+blocked caller should usually stay out of the final graph. Their
+span-count drop is evidence that the caller path is interrupted, not
+proof that the callee service is anomalous. Promote a downstream
+`flow_interrupted` node only when the interrupted endpoint is itself
+an alarm/user-visible path, disappears selectively, or has timeout /
+error / fail-fast evidence beyond ordinary reduced demand.

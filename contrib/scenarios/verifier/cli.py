@@ -136,7 +136,10 @@ def _run_one(case_dir: Path, out_dir: Path, budget: int = 15) -> dict:
 
     ctx = prepare_case(data_dir)
 
-    logger.info("Injections: {}", [(i['target'], i['chaos_type']) for i in ctx.injections])
+    logger.info(
+        "Injections: {}",
+        [(i.get("node_id", i["target"]), i["chaos_type"]) for i in ctx.injections],
+    )
     logger.info("Graph: {} edges, {} services",
                 sum(len(v) for v in ctx.graph.values()), len(ctx.graph))
 
@@ -155,7 +158,7 @@ def _run_one(case_dir: Path, out_dir: Path, budget: int = 15) -> dict:
 
     _write_outputs(out, ctx.meta, result)
 
-    seeds = {i["target"] for i in ctx.injections}
+    seeds = {i.get("node_id", i["target"]) for i in ctx.injections}
     confirmed = [n["id"] for n in result["nodes"]]
     propagated = [s for s in confirmed if s not in seeds]
 

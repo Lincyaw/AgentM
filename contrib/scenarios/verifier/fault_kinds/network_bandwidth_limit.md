@@ -24,11 +24,21 @@ When the target shows reduced traffic but no degradation:
    spike to the timeout ceiling? Did their call volume to the
    target drop?
 3. If caller-side latency exploded → the bandwidth cap is effective
-   but the signal is on the caller side. Mark **confirmed** with
-   `flow_interrupted`.
+   but the signal is on the caller side. Mark the affected link/caller
+   path **confirmed** with `flow_interrupted`. Do not generalize this
+   to unrelated downstream callees that merely receive proportionally
+   fewer requests from a blocked caller.
 
 ## How the failure tends to propagate
 Link-type fault. Edge: `rule-bearing side → peer`. Cascade reaches
 callers whose own latency budget depends on big payload transfers
 through the rule-bearing side; lightweight callers are usually
 unaffected.
+
+Downstream dependencies that merely receive fewer calls from a
+blocked caller should usually stay out of the final graph. Their
+span-count drop is evidence that the caller path is interrupted, not
+proof that the callee service is anomalous. Promote a downstream
+`flow_interrupted` node only when the interrupted endpoint is itself
+an alarm/user-visible path, disappears selectively, or has timeout /
+error / fail-fast evidence beyond ordinary reduced demand.

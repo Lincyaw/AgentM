@@ -12,7 +12,7 @@
 # auto-injected by the fpg factory as the escape hatch.
 
 name = "microservices"
-version = "0.4.0"
+version = "0.5.0"
 extends = "core"
 
 # --- node predicates ----------------------------------------------------------
@@ -86,9 +86,16 @@ brief = "Services on the same k8s node contend for node resources affected by th
 [edge_mechanisms.shared_infra_dependency]
 brief = "Degradation transfers through a shared backing component (DB/cache/broker)"
 
+[edge_mechanisms.network_path_effect]
+brief = "A degraded or partitioned service-to-service link manifests on the service endpoint using that path"
+
 # --- entity types ---------------------------------------------------------------
-# The verifier works at service granularity; backing components
-# (mysql, mongodb-profile, ...) are also addressed as services.
+# The verifier works at service/link granularity. Backing components
+# (mysql, mongodb-profile, ...) are addressed as services; network chaos
+# that names a peer service is addressed as a reified service link.
 
 [entity_types.svc]
 brief = "A service in the benchmark system, instrumented or backing (e.g. svc:frontend, svc:mongodb-profile)"
+
+[entity_types.link]
+brief = "A directed service-to-service network relationship that can itself be faulty (e.g. link:frontend->profile)"

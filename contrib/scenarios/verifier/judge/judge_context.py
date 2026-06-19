@@ -37,7 +37,7 @@ def build_judge_prompt(
 
     # -- Fault injection --
     inj_lines = [
-        f"- {i['target']} ({i['chaos_type']})"
+        f"- {i.get('subject') or i.get('node_id') or i['target']} ({i['chaos_type']})"
         for i in injections
         if i.get("target")
     ]

@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .injection import enrich_injection_entry, fault_parameter_dict
+
 PROFILE_PATH = Path(__file__).resolve().parents[1] / "fpg_profile.toml"
 
 REL_MECHANISM = {
@@ -16,13 +18,9 @@ REL_MECHANISM = {
     "caller_to_callee": "request_flow_disruption",
     "infra_dependency": "shared_infra_dependency",
     "co_deployed": "co_deployment_contention",
+    "link_to_service": "network_path_effect",
 }
 
-
-_FAULT_BOILERPLATE = {
-    "app", "chaos_type", "namespace", "system", "system_type",
-    "time_offset", "duration",
-}
 
 _NAME_FAULT_TOKENS = (
     ("container-kill", "ContainerKill"),
@@ -111,20 +109,20 @@ def load_injection_meta(case_dir: Path) -> dict[str, Any]:
 
 def build_injection_records(meta: dict[str, Any]) -> list[dict[str, Any]]:
     """fpg Injection records, one per engine_config entry."""
-    return [
-        {
-            "node_id": entry["app"],
-            "fault_type": entry.get("chaos_type", "unknown"),
-            "target_entity": f"svc:{entry['app']}",
-            "parameters": {
-                k: v for k, v in entry.items()
-                if k not in _FAULT_BOILERPLATE and v not in (None, "")
-            },
-            "time": meta["window"],
-            "replay_count": 0,
-        }
-        for entry in meta["engine"]
-    ]
+    records: list[dict[str, Any]] = []
+    for entry in meta["engine"]:
+        normalized = enrich_injection_entry(entry)
+        records.append(
+            {
+                "node_id": normalized["node_id"],
+                "fault_type": normalized["chaos_type"],
+                "target_entity": normalized["target_entity"],
+                "parameters": fault_parameter_dict(entry),
+                "time": meta["window"],
+                "replay_count": 0,
+            }
+        )
+    return records
 
 
 

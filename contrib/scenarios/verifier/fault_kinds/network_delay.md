@@ -38,6 +38,16 @@ makes its synchronous callers block, so they slow too, and so on up
 the call graph. It does **not** flow downward — a service the target
 merely *calls* is not slowed by the target's added inbound delay.
 
+If a slow caller sends fewer requests to its downstream dependencies,
+that reduced demand is useful evidence that the upstream path is
+blocked. Do not promote those downstream callees as final anomalous
+nodes solely because their span count fell proportionally while their
+latency, errors, resources, and sibling behavior stayed healthy.
+Confirm a downstream `flow_interrupted` node only when the interrupted
+endpoint is itself an alarm/user-visible path, disappears selectively,
+or shows timeout/error/fail-fast evidence beyond ordinary reduced
+demand.
+
 **Magnitude must be commensurate.** The propagated slowdown is a
 blocking effect: a caller that waits on the slowed path gains roughly
 the configured delay (seconds, typically), attenuating only mildly up

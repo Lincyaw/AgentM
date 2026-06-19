@@ -33,7 +33,10 @@ When the target itself shows reduced traffic but no degradation:
    target drop disproportionately?
 3. If caller-side latency exploded while the target's surviving
    requests are healthy → the loss is effective but the signal is
-   on the caller side. Mark **confirmed** with `flow_interrupted`.
+   on the caller side. Mark the affected link/caller path
+   **confirmed** with `flow_interrupted`. Do not generalize this
+   to unrelated downstream callees that merely receive
+   proportionally fewer requests from a blocked caller.
 
 ## How to observe on a neighbour
 Packet loss causes TCP retransmissions, which produce **tail-latency
@@ -49,3 +52,11 @@ Link-type fault. Write the link edge as `rule-bearing side → peer`.
 Cascade from the rule-bearing side outward through its callers: a
 failed call into the rule-bearing side translates into the caller's
 own anomaly only if the caller cannot mask the error.
+
+Downstream dependencies that merely receive fewer calls from a
+blocked caller should usually stay out of the final graph. Their
+span-count drop is evidence that the caller path is interrupted, not
+proof that the callee service is anomalous. Promote a downstream
+`flow_interrupted` node only when the interrupted endpoint is itself
+an alarm/user-visible path, disappears selectively, or has timeout /
+error / fail-fast evidence beyond ordinary reduced demand.

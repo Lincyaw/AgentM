@@ -35,7 +35,11 @@ _REL_DESCRIPTIONS: Final = {
     "data-corruption / bad-request faults (it sends {to} "
     "a wrong or corrupted request). A merely slow or "
     "failing caller does NOT by itself degrade {to} — be "
-    "skeptical of confirming on this edge.",
+    "skeptical of confirming on this edge. If {frm} simply "
+    "sends fewer calls, use that as evidence about {frm}'s "
+    "interrupted path; do not confirm {to} unless {to} has "
+    "its own alarm/user-visible path interruption or stronger "
+    "timeout/error/fail-fast evidence.",
     "co_deployed": "{frm} and {to} share a k8s node — ONLY a node-level "
     "resource fault (CPU/memory/disk exhaustion) on one can "
     "degrade the other. An app-logic, JVM, or network fault "

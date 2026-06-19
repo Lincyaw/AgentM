@@ -41,6 +41,12 @@ class Injection(TypedDict, total=False):
     target: Required[str]
     chaos_type: Required[str]
     params: str
+    node_id: str
+    subject: str
+    target_entity: str
+    effect_target: str
+    edge_source: str
+    edge_target: str
 
 
 HopLogEntry = TypedDict(
@@ -111,13 +117,67 @@ def _reaches(adj: dict[str, list[str]], src: str, dst: str) -> bool:
     return False
 
 
+def _injection_node_id(inj: Injection) -> str:
+    return inj.get("node_id") or inj["target"]
+
+
+def _injection_subject(inj: Injection) -> str:
+    return inj.get("subject") or inj.get("target_entity") or f"svc:{inj['target']}"
+
+
+def _injection_effect_target(inj: Injection) -> str:
+    return inj.get("effect_target") or inj["target"]
+
+
+def _is_link_injection(inj: Injection) -> bool:
+    return _injection_subject(inj).startswith("link:")
+
+
+def _fault_record(inj: Injection) -> list[str]:
+    return [inj["chaos_type"], _injection_node_id(inj), inj.get("params", "")]
+
+
+def _link_root_predicate(inj: Injection) -> str:
+    chaos_type = inj.get("chaos_type", "").lower()
+    if "partition" in chaos_type:
+        return "network_partitioned"
+    return "network_degraded"
+
+
 def _node_from_seed(
-    svc: str,
+    inj: Injection,
     verdict: SeedResult,
     window: dict[str, str],
 ) -> dict[str, Any]:
     """Build an fpg EventNode dict from a confirmed or inconclusive seed verdict."""
-    predicate = verdict.get("predicate") or "other"
+    predicate = (
+        _link_root_predicate(inj)
+        if _is_link_injection(inj)
+        else verdict.get("predicate") or "other"
+    )
+    node: dict[str, Any] = {
+        "kind": "event",
+        "id": _injection_node_id(inj),
+        "subject": _injection_subject(inj),
+        "predicate": predicate,
+        "time": window,
+        "grounding": "observed",
+        "evidence": list(verdict.get("evidence", [])),
+        "annotation": "auto",
+    }
+    if predicate == "other":
+        node["description"] = verdict.get("rationale", verdict.get("claim", "inconclusive"))
+    return node
+
+
+def _node_from_link_effect(
+    inj: Injection,
+    verdict: SeedResult,
+    window: dict[str, str],
+) -> dict[str, Any]:
+    """Build the service-side symptom node for a confirmed link injection."""
+    svc = _injection_effect_target(inj)
+    predicate = verdict.get("predicate") or "flow_interrupted"
     node: dict[str, Any] = {
         "kind": "event",
         "id": svc,
@@ -194,7 +254,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     injections = cast(list[Injection], args["injections"])
     window = cast(dict[str, str], args["window"])
     rel_mechanism = cast(dict[str, str], args.get("rel_mechanism", {}))
-    seeds = {inj["target"] for inj in injections if inj.get("target")}
+    seeds = {_injection_node_id(inj) for inj in injections if inj.get("target")}
 
     nodes: dict[str, dict[str, Any]]  # svc -> fpg EventNode dict
     edges: list[dict[str, Any]]
@@ -212,7 +272,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     fault_docs: dict[str, str] = args.get("fault_docs", {})
 
     all_faults = [
-        [inj["chaos_type"], inj["target"], inj.get("params", "")]
+        _fault_record(inj)
         for inj in injections
         if inj.get("target")
     ]
@@ -234,21 +294,30 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         round_n = int(existing.get("rounds", 0))
         adj, in_deg = _rebuild_adjacency()
         node_fault = {
-            inj["target"]: [inj["chaos_type"], inj["target"]]
+            _injection_node_id(inj): _fault_record(inj)
             for inj in injections
             if inj.get("target")
         }
+        for inj in injections:
+            if inj.get("target") and _is_link_injection(inj):
+                node_fault[_injection_effect_target(inj)] = _fault_record(inj)
     else:
         # -- Phase 0: verify seeds ----------------------------------------
         ctx.phase("seed")
         node_fault = {
-            inj["target"]: [inj["chaos_type"], inj["target"]]
+            _injection_node_id(inj): _fault_record(inj)
             for inj in injections
             if inj.get("target")
         }
         nodes = {}
+        edges = []
+        adj = {}
+        in_deg = {}
+        verdicts = {}
+        hop_log = []
+        round_n = 0
 
-        async def _verify_seed(inj: Injection) -> tuple[str, SeedResult | None]:
+        async def _verify_seed(inj: Injection) -> tuple[Injection, SeedResult | None]:
             target = inj["target"]
             fault_kind = inj.get("chaos_type", "unknown")
             prompt = build_seed_prompt(
@@ -265,28 +334,61 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     "seed_finalize": {"data_dir": data_dir},
                 },
             )
-            return target, cast(SeedResult, result) if isinstance(result, dict) else None
+            return inj, cast(SeedResult, result) if isinstance(result, dict) else None
 
-        seed_coros: list[Awaitable[tuple[str, SeedResult | None]]] = [
+        seed_coros: list[Awaitable[tuple[Injection, SeedResult | None]]] = [
             _verify_seed(inj) for inj in injections if inj.get("target")
         ]
         seed_results = await ctx.parallel(seed_coros)
+        propagation_roots: list[str] = []
 
-        for target, seed_verdict in seed_results:
+        def _accept_seed_node(inj: Injection, seed_verdict: SeedResult) -> str:
+            root_id = _injection_node_id(inj)
+            nodes[root_id] = _node_from_seed(inj, seed_verdict, window)
+            if not _is_link_injection(inj):
+                propagation_roots.append(root_id)
+                return root_id
+
+            effect_target = _injection_effect_target(inj)
+            if effect_target not in nodes:
+                nodes[effect_target] = _node_from_link_effect(
+                    inj,
+                    seed_verdict,
+                    window,
+                )
+            node_fault[effect_target] = _fault_record(inj)
+            edges.append(
+                _edge_dict(
+                    root_id,
+                    effect_target,
+                    "link_to_service",
+                    rel_mechanism,
+                    "link fault manifests on the rule-bearing service side",
+                )
+            )
+            adj.setdefault(root_id, []).append(effect_target)
+            in_deg[effect_target] = in_deg.get(effect_target, 0) + 1
+            propagation_roots.append(effect_target)
+            return root_id
+
+        for inj, seed_verdict in seed_results:
+            root_id = _injection_node_id(inj)
             if seed_verdict and seed_verdict.get("verdict") == "confirmed":
-                nodes[target] = _node_from_seed(target, seed_verdict, window)
-                ctx.log(f"seed {target}: confirmed ({seed_verdict.get('predicate')})")
+                root_id = _accept_seed_node(inj, seed_verdict)
+                ctx.log(
+                    f"seed {root_id}: confirmed ({seed_verdict.get('predicate')})"
+                )
             elif seed_verdict and seed_verdict.get("verdict") == "inconclusive":
-                nodes[target] = _node_from_seed(target, seed_verdict, window)
-                ctx.log(f"seed {target}: inconclusive — including for judge review")
+                root_id = _accept_seed_node(inj, seed_verdict)
+                ctx.log(f"seed {root_id}: inconclusive — including for judge review")
             else:
                 v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
-                ctx.log(f"seed {target}: {v} — skipping")
+                ctx.log(f"seed {root_id}: {v} — skipping")
 
         seed_verdicts: dict[str, SeedResult] = {}
-        for target, seed_verdict in seed_results:
+        for inj, seed_verdict in seed_results:
             if seed_verdict:
-                seed_verdicts[target] = seed_verdict
+                seed_verdicts[_injection_node_id(inj)] = seed_verdict
 
         if not nodes:
             ctx.log("no seeds confirmed — aborting propagation")
@@ -301,14 +403,8 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
 
         # -- Phase 1: propagate -------------------------------------------
         ctx.phase("propagate")
-        edges = []
-        adj = {}
-        in_deg = {}
-        verdicts = {}
-        hop_log = []
-        round_n = 0
 
-        queue = list(nodes)
+        queue = list(dict.fromkeys(propagation_roots or list(nodes)))
         checked_edges: set[str] = set()
 
         while queue:

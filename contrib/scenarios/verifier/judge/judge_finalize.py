@@ -47,7 +47,7 @@ _STRICT: Final = ConfigDict(extra="forbid")
 
 
 class JudgePromotion(BaseModel):
-    """One cascade promotion: a rejected service that is in fact down."""
+    """One cascade promotion: a rejected service with a real target anomaly."""
 
     model_config = _STRICT
     service: str = Field(description="The rejected service to promote.")
@@ -63,7 +63,9 @@ class JudgePromotion(BaseModel):
         "flow_interrupted, or resource_pool_exhausted."
     )
     rationale: str = Field(
-        description="Why this service is genuinely degraded, citing data."
+        description="Why this service is genuinely degraded, citing data. "
+        "Do not promote ordinary proportional reduced demand from a slow "
+        "caller; that belongs in edge evidence, not as a final node."
     )
 
 
@@ -93,7 +95,9 @@ class JudgeReview(BaseModel):
     add: list[JudgePromotion] = Field(
         description="Services to PROMOTE directly — you have enough "
         "evidence from the global view to confirm them without "
-        "re-investigation (e.g. system-wide cascade unavailability). "
+        "re-investigation (e.g. a user-visible path failure, selective "
+        "endpoint disappearance, timeout/error/fail-fast evidence). "
+        "Do not use direct promotion for proportional traffic drops alone. "
         "Empty if none."
     )
     re_evaluate: list[JudgeReEval] = Field(
@@ -102,7 +106,9 @@ class JudgeReview(BaseModel):
         "agent for re-investigation with your global context. Use when "
         "you believe the prior verdict is wrong but want the hop agent "
         "to verify with data queries. Prefer this over direct promotion "
-        "when the evidence needs re-examination.",
+        "when the evidence needs re-examination. Do not request "
+        "re-evaluation solely because the callee received proportionally "
+        "fewer requests from a slow caller.",
     )
     suggested_remove: list[str] = Field(
         default_factory=list,
@@ -149,7 +155,8 @@ def install(api: ExtensionAPI, config: JudgeFinalizeConfig) -> None:
                 "directly. `re_evaluate` sends edges back to hop agents "
                 "with your global context for re-investigation (preferred "
                 "when evidence needs re-examination). `suggested_remove` "
-                "is audit-only and not applied."
+                "is audit-only and not applied. Proportional reduced demand "
+                "alone is not enough to add or re-evaluate a node."
             ),
             parameters=JudgeReview,
             fn=_submit_judge,

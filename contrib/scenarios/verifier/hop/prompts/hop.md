@@ -22,6 +22,13 @@ What signal would you expect? Latency increase? Error surge?
 Traffic collapse? Latency DROP with errors (fail-fast)? The
 fault reference tells you the direction and shape.
 
+Important boundary: reduced request volume is an observation, not
+automatically a target failure state. If a slow or blocked upstream
+simply sends fewer calls to an otherwise healthy downstream service,
+that volume drop is evidence about the upstream path, but it does
+not by itself justify adding the downstream service as a confirmed
+`flow_interrupted` node.
+
 ### 4. Query and verify
 
 **First, establish the call path from normal traces.** JOIN
@@ -42,6 +49,17 @@ Signals to look for on fault-path endpoints:
   target's behavior, just in the "faster" direction.
 - error rate increase
 
+For span count drops, distinguish:
+- **Confirmable flow interruption**: the endpoint is itself an
+  alarm/user-visible path, the operation completely vanishes or
+  fails on a specific path, the drop is selective rather than a
+  graph-wide proportional throughput reduction, or the drop is
+  accompanied by timeout/error/fail-fast evidence.
+- **Reduced demand only**: the caller emitted fewer requests because
+  it was blocked upstream, while the target's latency, errors,
+  resources, and sibling behavior remain healthy. Treat this as
+  edge/path evidence, not as a confirmed target node.
+
 **Error signals live in multiple columns.** Trace-level
 `attr.status_code` is one error indicator, but not the only one.
 Run `SELECT DISTINCT` on columns that might carry error or status
@@ -59,7 +77,10 @@ endpoints show nothing across all dimensions.
   shows degradation consistent with the fault propagating
   through this relationship. Degradation includes latency
   increase, error surge, HTTP 5xx, AND fail-fast (dramatic
-  latency drop because a dependency died).
+  latency drop because a dependency died). For `flow_interrupted`,
+  the interruption must be a meaningful target-side path failure
+  or alarm, not merely proportional reduced demand from a slow
+  caller.
 - **rejected** — all dimensions examined, no signal on any
   fault-related endpoint: traffic stable, latency unchanged,
   no errors, no HTTP status changes, no fail-fast pattern.
@@ -67,8 +88,9 @@ endpoints show nothing across all dimensions.
 - **inconclusive** — some anomaly exists but you cannot
   determine from this single edge whether the fault caused it.
   Examples: latency shifted but no errors; traffic dropped but
-  could be global; endpoint vanished but no error signal;
-  HTTP status distribution changed but marginally.
+  could be global/reduced demand; endpoint vanished but no error
+  signal or alarm context; HTTP status distribution changed but
+  marginally.
   Prefer inconclusive over rejected when ANY anomaly is present
   on fault-path endpoints — the judge has the full graph and
   can resolve what you cannot from one hop.

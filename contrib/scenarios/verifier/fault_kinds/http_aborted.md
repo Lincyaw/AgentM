@@ -7,6 +7,23 @@ aborts requests matching the configured path / method, returning
 matches the rule are affected; sibling endpoints on the same
 service pass through.
 
+## Root-cause granularity
+This is often a relationship/path fault, not a broken application
+process. The proxy-bearing service may keep normal CPU, memory,
+logs, and unrelated endpoints. If the injection metadata names a
+peer service, treat the root cause as the affected HTTP link
+(`link:source->target`). If no peer is named, decide from evidence:
+caller-side failures on one endpoint with healthy target internals
+point to a link/path-scoped root; broad target-side failures point
+to a service-scoped anomaly.
+
+If an upstream caller later sends fewer requests to unrelated
+downstream dependencies, treat that reduced demand as evidence for
+the upstream interrupted path, not as a final node for every healthy
+callee. Promote a downstream `flow_interrupted` node only when the
+interrupted endpoint is itself an alarm/user-visible path or has
+timeout/error/fail-fast evidence.
+
 ## What the data should show
 Inbound spans on the target on the matched path show 5xx / connection
 errors. The error is emitted by the proxy at the target — no
