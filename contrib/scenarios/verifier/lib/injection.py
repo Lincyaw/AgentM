@@ -125,8 +125,20 @@ def get_injections(data_dir: Path) -> list[dict[str, str]]:
 
     point = display.get("injection_point", {})
     target = None
+    peer = None
+    params: dict[str, Any] = {}
     if isinstance(point, dict):
-        target = point.get("source_service") or point.get("app_label")
+        target = (
+            point.get("source_service")
+            or point.get("app_label")
+            or point.get("app_name")
+        )
+        peer = point.get("target_service") or point.get("server_address")
+        params = {
+            k: point.get(k)
+            for k in ("method", "route", "path", "server_port")
+            if point.get(k) not in (None, "")
+        }
     if not target:
         gt = injection.get("ground_truth")
         if isinstance(gt, dict):
@@ -154,7 +166,12 @@ def get_injections(data_dir: Path) -> list[dict[str, str]]:
         logger.debug("verifier injection: chaos-type mapping failed, using raw: {}", exc)
     return [
         enrich_injection_entry(
-            {"app": target, "chaos_type": chaos_type}
+            {
+                "app": target,
+                "chaos_type": chaos_type,
+                "target_service": peer,
+                **params,
+            }
         )
     ]
 

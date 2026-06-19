@@ -27,6 +27,7 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 from fpg import Evidence, build_schema, load_profile
+from verifier.lib.finalize_feedback import sql_validation_error_payload
 
 class HopFinalizeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -173,11 +174,10 @@ def install(api: ExtensionAPI, config: HopFinalizeConfig) -> None:
                 return ToolResult(
                     content=[TextContent(
                         type="text",
-                        text=json.dumps({
-                            "error": "sql_validation_failed",
-                            "failures": failures,
-                            "hint": "Fix the failing SQLs and resubmit.",
-                        }, ensure_ascii=False),
+                        text=json.dumps(
+                            sql_validation_error_payload(failures),
+                            ensure_ascii=False,
+                        ),
                     )],
                     is_error=True,
                 )

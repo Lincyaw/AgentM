@@ -24,7 +24,13 @@ REL_MECHANISM = {
 
 _NAME_FAULT_TOKENS = (
     ("container-kill", "ContainerKill"),
+    ("response-replace-code", "HTTPResponseStatusModified"),
+    ("request-abort", "HTTPAborted"),
     ("response-abort", "HTTPAborted"),
+    ("request-delay", "HTTPSlow"),
+    ("response-delay", "HTTPSlow"),
+    ("request-replace", "HTTPPayloadModified"),
+    ("response-replace", "HTTPPayloadModified"),
     ("pod-failure", "PodFailure"),
     ("pod-kill", "PodKill"),
     ("partition", "NetworkPartition"),
@@ -52,6 +58,26 @@ def _fault_from_name(injection_name: str) -> str | None:
     return None
 
 
+def _engine_entry_from_normalized_injection(
+    injection: dict[str, str],
+) -> dict[str, Any]:
+    """Rebuild an engine-like entry without losing link endpoints."""
+    target = injection["target"]
+    entry: dict[str, Any] = {
+        "app": target,
+        "chaos_type": injection["chaos_type"],
+    }
+    src = injection.get("edge_source")
+    dst = injection.get("edge_target")
+    if src and dst:
+        if src == target:
+            entry["target_service"] = dst
+        else:
+            entry["target_service"] = src
+            entry["direction"] = "from"
+    return entry
+
+
 def load_injection_meta(case_dir: Path) -> dict[str, Any]:
     """Window, testbed, scenario id, and per-target engine entries."""
     injection = json.loads((case_dir / "injection.json").read_text())
@@ -69,7 +95,7 @@ def load_injection_meta(case_dir: Path) -> dict[str, Any]:
         from .injection import get_injections
 
         entries = [
-            {"app": i["target"], "chaos_type": i["chaos_type"]}
+            _engine_entry_from_normalized_injection(i)
             for i in get_injections(case_dir)
             if i.get("target")
         ]
