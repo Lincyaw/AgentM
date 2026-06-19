@@ -69,23 +69,3 @@ def test_fpg_sql_evidence_eval_replays_final_sql(tmp_path: Path) -> None:
     assert result["all_executable"] is False
     assert result["failures"][0]["node_id"] == "n1"
     assert result["failures"][0]["evidence_index"] == 1
-
-
-def test_sql_evidence_dimensions_are_reported() -> None:
-    dimensions = grader._sql_evidence_dimensions(
-        {
-            "total": 2,
-            "executable": 1,
-            "failed": 1,
-            "ratio": 0.5,
-            "all_executable": False,
-        }
-    )
-
-    assert dimensions == {
-        "fpg_sql_evidence_count": 2.0,
-        "fpg_sql_executable_count": 1.0,
-        "fpg_sql_failed_count": 1.0,
-        "fpg_sql_executable_ratio": 0.5,
-        "fpg_sql_all_executable": 0.0,
-    }

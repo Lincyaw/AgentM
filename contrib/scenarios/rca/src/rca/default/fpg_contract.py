@@ -16,7 +16,6 @@ from agentm.extensions import ExtensionManifest
 
 from rca.fpg_schema import (
     FpgOutputConfig,
-    contract_json_schema,
     resolve_profile_path,
     vocab_for_contract,
 )
@@ -47,7 +46,6 @@ async def _load_agent_contract_block(
             config.profile_path, scenario_dir=api.scenario_dir
         )
         vocab = vocab_for_contract(profile_path)
-        schema_text = contract_json_schema(profile_path)
     except Exception as exc:  # noqa: BLE001
         reason = str(exc) or exc.__class__.__name__
         await api.events.emit(
@@ -81,10 +79,6 @@ async def _load_agent_contract_block(
         "descending confidence. Do not infer roots from missing edges.\n\n"
         "Predicate vocabulary:\n"
         f"{vocab_lines}\n\n"
-        "Tool JSON schema:\n"
-        "```json\n"
-        f"{schema_text}\n"
-        "```\n"
         "</agent_contract>"
     )
 
@@ -109,7 +103,7 @@ async def install(api: ExtensionAPI, config: _FpgContractConfig) -> None:
         if not cached_contract:
             return None
         existing = event.system or ""
-        merged = f"{cached_contract}\n\n{existing}" if existing else cached_contract
+        merged = f"{existing}\n\n{cached_contract}" if existing else cached_contract
         event.system = merged
         return {"system": merged}
 
