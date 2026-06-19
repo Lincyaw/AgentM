@@ -46,6 +46,7 @@ def test_builtin_catalog_passes_section_11_contract() -> None:
     # these usages are config fields, not atom-to-atom references.
     _D4_FALSE_POSITIVES = {
         ("agentm.extensions.builtin.artifact_store", "11.4.D4-peer-requires"),
+        ("agentm.extensions.builtin.observability", "11.4.D4-peer-requires"),
         ("agentm.extensions.builtin.sub_agent", "11.4.D4-peer-requires"),
     }
 
@@ -434,7 +435,9 @@ def test_validate_atom_package_clean_package_passes(tmp_path: Path) -> None:
     assert not error_issues, f"clean package should have no errors; got: {error_issues}"
 
 
-def test_runtime_load_extension_blocks_bad_atom(tmp_path: Path) -> None:
+def test_runtime_load_extension_blocks_bad_atom(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """load_extension with validate=True rejects an atom with a forbidden import."""
 
     import sys
@@ -443,28 +446,14 @@ def test_runtime_load_extension_blocks_bad_atom(tmp_path: Path) -> None:
     from agentm.core.abi.extension import ExtensionLoadError
     from agentm.core.runtime.extension import load_extension
 
-    # Write a bad atom file that imports a forbidden module.
-    atom_file = tmp_path / "bad_atom.py"
+    module_name = f"_agentm_test_bad_atom_{id(tmp_path)}"
+    atom_file = tmp_path / f"{module_name}.py"
     atom_file.write_text(
         "from agentm.core.runtime.session import AgentSession\n"
         "def install(api, config): pass\n",
         encoding="utf-8",
     )
-
-    # Synthetically register the module so importlib.import_module works.
-    import importlib.util
-
-    module_name = f"_agentm_test_bad_atom_{id(atom_file)}"
-    spec = importlib.util.spec_from_file_location(module_name, atom_file)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    except ImportError:
-        # The forbidden import will fail — that's fine, we already seeded
-        # sys.modules so import_module returns it. The __file__ is set.
-        pass
+    monkeypatch.syspath_prepend(str(tmp_path))
 
     api = MagicMock()
     try:
@@ -477,7 +466,9 @@ def test_runtime_load_extension_blocks_bad_atom(tmp_path: Path) -> None:
         sys.modules.pop(module_name, None)
 
 
-def test_runtime_load_extension_skips_validation_when_disabled(tmp_path: Path) -> None:
+def test_runtime_load_extension_skips_validation_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """load_extension with validate=False does not run checks."""
 
     import sys
@@ -485,20 +476,13 @@ def test_runtime_load_extension_skips_validation_when_disabled(tmp_path: Path) -
 
     from agentm.core.runtime.extension import load_extension
 
-    atom_file = tmp_path / "ok_atom.py"
+    module_name = f"_agentm_test_ok_atom_{id(tmp_path)}"
+    atom_file = tmp_path / f"{module_name}.py"
     atom_file.write_text(
         "def install(api, config): pass\n",
         encoding="utf-8",
     )
-
-    import importlib.util
-
-    module_name = f"_agentm_test_ok_atom_{id(atom_file)}"
-    spec = importlib.util.spec_from_file_location(module_name, atom_file)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    monkeypatch.syspath_prepend(str(tmp_path))
 
     api = MagicMock()
     try:

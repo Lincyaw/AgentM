@@ -144,6 +144,7 @@ requirements:
       - path: tests/unit/harness/test_extension_api_infra.py
       - path: tests/unit/core/lib/test_serialization.py
       - path: tests/unit/extensions/test_extension_contract.py
+      - path: tests/unit/test_no_adhoc_test_imports.py
       - path: tests/integration/test_resource_writer.py
     docs:
       - path: .claude/designs/extension-as-scenario.md

@@ -1,20 +1,11 @@
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
-
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "export_reminder_case_study.py"
-_SPEC = importlib.util.spec_from_file_location("export_reminder_case_study", _SCRIPT)
-assert _SPEC is not None and _SPEC.loader is not None
-export_reminder_case_study = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = export_reminder_case_study
-_SPEC.loader.exec_module(export_reminder_case_study)
+from scripts import export_reminder_case_study
 
 
 def test_effect_marks_secondary_metric_regression_as_harmed_partial() -> None:

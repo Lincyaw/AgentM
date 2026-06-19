@@ -9,8 +9,6 @@ the approval manager, the gateway is mute or unsafe.
 from __future__ import annotations
 
 import asyncio
-import importlib.util
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -26,19 +24,11 @@ from agentm.core.abi import (
 from agentm.core.abi import AssistantMessage, TextContent, Usage
 from agentm.core.abi.stream import TextDelta, ThinkingDelta
 from agentm.core.abi.tool import ToolResult
-
-_WIRE_DRIVER = (
-    Path(__file__).resolve().parents[3]
-    / "src/agentm/extensions/builtin/wire_driver.py"
-)
+from agentm.extensions.builtin import wire_driver
 
 
 def _load_wire_driver() -> Any:
-    spec = importlib.util.spec_from_file_location("_wire_driver_test", _WIRE_DRIVER)
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    return wire_driver
 
 
 class _FakeAPI:

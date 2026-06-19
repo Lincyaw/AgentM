@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import types
@@ -17,7 +16,6 @@ from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
 
 _PROVIDER_MODULE = "agentm._tests.artifact_store_provider"
-_HYPOTHESIS_MODULE = "agentm._tests.rca_hypothesis_tools"
 
 
 def _install_provider_module() -> str:
@@ -62,19 +60,6 @@ def _install_provider_module() -> str:
     module.install = install  # type: ignore[attr-defined]
     sys.modules[_PROVIDER_MODULE] = module
     return _PROVIDER_MODULE
-
-
-def _install_hypothesis_module() -> str:
-    if _HYPOTHESIS_MODULE in sys.modules:
-        return _HYPOTHESIS_MODULE
-    repo_root = Path(__file__).resolve().parents[2]
-    file_path = repo_root / "contrib" / "scenarios" / "rca" / "src" / "agentm_rca" / "tools" / "hypothesis_tools.py"
-    spec = importlib.util.spec_from_file_location(_HYPOTHESIS_MODULE, file_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[_HYPOTHESIS_MODULE] = module
-    spec.loader.exec_module(module)
-    return _HYPOTHESIS_MODULE
 
 
 async def _create_session(
@@ -206,7 +191,6 @@ async def test_artifact_store_shares_by_root_session_and_isolates_other_roots(
         await shared_a.shutdown()
         await shared_b.shutdown()
         await isolated.shutdown()
-
 
 
 
