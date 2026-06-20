@@ -612,7 +612,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     if not judge_needed:
         ctx.log("skipping judge: no confirmed or candidate nodes to audit")
     if not skip_judge and judge_needed:
-        max_judge_rounds = 2
+        max_judge_rounds = 3
         for judge_round in range(max_judge_rounds):
             ctx.phase("judge" if judge_round == 0 else f"judge-r{judge_round + 1}")
 
@@ -657,6 +657,19 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     "duckdb_sql": {"data_dir": data_dir},
                 },
             )
+            if not isinstance(judge_text, dict):
+                ctx.log("  judge returned no structured review; retrying once")
+                judge_text = await ctx.agent(
+                    judge_prompt
+                    + "\n\nIMPORTANT: Your previous response was not a structured "
+                    "submit_judge_review tool result. Call submit_judge_review now; "
+                    "do not answer in prose.",
+                    scenario="verifier/judge",
+                    model=judge_model,
+                    atom_config={
+                        "duckdb_sql": {"data_dir": data_dir},
+                    },
+                )
             if isinstance(judge_text, dict):
                 judge_result = cast(JudgeReviewResult, judge_text)
                 if judge_result.get("entry_explanation"):
@@ -668,6 +681,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     )
 
             # Apply direct promotions (judge has enough evidence to decide)
+            direct_promotion_added = False
             for promo in (judge_result or {}).get("add", []):
                 svc = promo.get("service", "")
                 via = promo.get("via_service", "")
@@ -710,6 +724,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 edges.append(edge)
                 adj.setdefault(via, []).append(svc)
                 in_deg[svc] = in_deg.get(svc, 0) + 1
+                direct_promotion_added = True
                 ctx.log(f"  judge add: {via} -> {svc} ({predicate})")
 
             # Re-evaluate edges the judge flagged for re-investigation
@@ -730,10 +745,12 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                         "round": judge_round + 1,
                         "judge_decision": dict(judge_result) if judge_result else {},
                         "re_eval_results": [],
-                        "new_confirmed": False,
+                        "new_confirmed": direct_promotion_added,
                     }
                 )
-                break
+                if not direct_promotion_added or not _unreachable_seed_nodes():
+                    break
+                continue
 
             ctx.phase(f"re-evaluate-r{judge_round + 1}")
             ctx.log(f"Re-evaluating {len(re_eval)} edges")
@@ -792,7 +809,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             ]
             re_results = await ctx.parallel(re_coros)
 
-            any_new_confirmed = False
+            any_new_confirmed = direct_promotion_added
             for idx_r in range(len(re_eval)):
                 re_item = re_eval[idx_r]
                 svc = re_item["service"]

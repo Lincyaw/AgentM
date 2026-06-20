@@ -31,6 +31,8 @@ Always inspect the listed entry services. Compare normal vs abnormal endpoint-le
 
 Then ask whether the confirmed causal graph explains those entry symptoms. A confirmed path merely reaching `frontend` is not enough. The path must line up with the affected entry endpoint and symptom shape. If the entry symptom is on `/checkout`, a path that only explains `/recommendations` is incomplete. If the graph explains only reduced demand but the entry shows 5xx or timeout, there is a missing or wrong hop.
 
+If your explanation depends on a confirmed or newly promoted service causing an entry/frontend endpoint symptom, the graph must include the final causal hop into that entry service. Add or re-evaluate that `affected_service -> entry_service` edge explicitly. Do not say the graph explains an entry symptom while leaving every confirmed seed without a path to an entry service.
+
 If entry observations are not explained by the current graph, use `re_evaluate` on the most plausible rejected/inconclusive edge and include the entry symptom in the context. If no plausible edge exists, report the gap in `unexplained_entry_observations` and explain why the current seed/hop result is insufficient.
 
 ### 3. Form hypotheses
@@ -90,6 +92,9 @@ re-evaluation solely on that basis.
   evidence without re-investigation.
 - Every `add` must name `via_service` and `predicate`.
 - Every `re_evaluate` must name `via_service` and `context`.
+- When promoting an entry/frontend node, set `service` to the entry
+  service and `via_service` to the affected upstream business service
+  whose traces explain that exact entry endpoint.
 - Do not use `add` or `re_evaluate` for ordinary proportional
   reduced demand alone; it is edge evidence, not a final node.
 - `suggested_remove` is audit-only and never applied.
