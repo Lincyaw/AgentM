@@ -13,6 +13,14 @@ Error rates usually stay flat unless the added delay pushes callers
 past their timeout. The rule physically sits on ONE side of the
 link, recorded as `injection_point.source_service`.
 
+For link targets such as `link:A->B`, do not use only B's server span
+as the latency measurement. The peer server span often measures B's
+application work after the delayed packet arrives, so it can stay flat.
+The most direct signal is A's own outbound/client span to B: its
+duration should increase by roughly the configured delay. A slow A
+client span plus a healthy B server span is the expected shape of a
+link delay, not evidence that the injection failed.
+
 ## How to observe on a neighbour
 Network delay adds a fixed latency to every packet, so the signal
 on a caller is a flat latency shift (not just a tail spike). Check
@@ -20,6 +28,12 @@ both average AND p99 — but the shift should be roughly commensurate
 with the configured delay. Break down by `span_name` if the caller
 has mixed endpoints: only call paths that route through the delayed
 service are affected; unrelated endpoints stay flat.
+
+When the source service has explicit client spans, compare those
+spans directly across windows. Discover them from the schema and data
+(`attr.span_kind`, span names containing the peer/RPC method, or peer
+attributes), but do not rely on a single encoding being present in all
+cases.
 
 ### When the target looks healthy but traffic dropped
 

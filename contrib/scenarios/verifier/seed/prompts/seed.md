@@ -29,6 +29,7 @@ You MUST investigate traces, metrics, and logs before submitting a verdict. Do n
 - Always establish normal call paths with a `normal_traces` self-join on `parent_span_id`. When `trace_id` exists, join on both `parent.span_id = child.parent_span_id` and `parent.trace_id = child.trace_id`; do not rely on `span_id` alone across unrelated traces. This is the primary way to find callers and endpoints. Do NOT reject a link/path fault just because `attr.span_kind = 'CLIENT'` is absent, zero, or encoded differently.
 - For service targets, find which services call the target in the normal window and which caller endpoints own those calls.
 - For link targets like `link:A->B`, use the normal window to establish which direction is actually exercised. If the injection direction is `both`, unknown, or the named direction has no normal parent-child calls, check both `A -> B` and `B -> A` and use the direction that exists in normal traces.
+- For link targets, the joined `child` row is usually the peer service's server span. That server span can remain healthy even when the link is degraded. Also query the rule-bearing/source service's own outbound/client spans to the peer (discover them by `service_name`, `span_name`, `attr.span_kind`, RPC/HTTP names, and peer/service attributes). A source client span that slows by the configured magnitude while the peer server span stays flat is strong link-fault evidence, not a contradiction.
 - In the abnormal window, do not require successful caller->callee child spans across a partitioned, lost, aborted, or corrupted link. Their disappearance can be the fault's expected signature. Instead compare the caller-owned spans and endpoints that normally depend on the link: count, p99/max latency, trace status, HTTP status, new error-handler spans, timeout-like durations, and selective call disappearance.
 - Also check the callers' own inbound endpoints. A caller may return HTTP 5xx or time out on its inbound span even when the cross-service child span is missing.
 
@@ -50,3 +51,8 @@ Caller-side evidence can confirm the injection even when the target's surviving 
 - **inconclusive**: some anomaly exists but this single seed view cannot prove the injection caused it, or required data is unavailable and the remaining evidence cannot disambiguate.
 
 Submit via `submit_seed_verdict` with re-executable SQL evidence and the required `investigation_coverage` object. The coverage object must summarize schema discovery, target trace checks, caller/link trace checks, metric checks, log checks, and fault-specific reasoning. It is audit metadata and does not replace SQL evidence.
+
+## Data units
+
+- `*_traces.duration` is nanoseconds. Divide by `1e6` for milliseconds. Do not divide by `1000` and call the result milliseconds.
+- `*_metrics_histogram.sum` is seconds and `.count` is the sample count.
