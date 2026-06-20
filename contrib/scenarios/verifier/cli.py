@@ -108,7 +108,13 @@ def _write_outputs(
     meta: dict[str, Any],
     result: dict[str, Any],
 ) -> None:
-    scenario = assemble_scenario(meta, result["nodes"], result["edges"])
+    confirmed_seed_ids = set(result.get("confirmed_seeds", []))
+    scenario = assemble_scenario(
+        meta,
+        result["nodes"],
+        result["edges"],
+        confirmed_seed_ids=confirmed_seed_ids,
+    )
     (out / "fpg_scenario.json").write_text(
         json.dumps(scenario, indent=2, ensure_ascii=False) + "\n"
     )
@@ -125,6 +131,8 @@ def _write_outputs(
         run_meta["unreachable_seeds"] = result["unreachable_seeds"]
     if result.get("seed_verdicts"):
         run_meta["seed_verdicts"] = result["seed_verdicts"]
+    if result.get("confirmed_seeds") is not None:
+        run_meta["confirmed_seeds"] = result.get("confirmed_seeds", [])
     (out / "run_meta.json").write_text(
         json.dumps(run_meta, indent=2, ensure_ascii=False, default=str) + "\n"
     )

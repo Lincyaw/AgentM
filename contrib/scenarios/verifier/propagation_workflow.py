@@ -104,6 +104,7 @@ class PropagationResult(TypedDict, total=False):
     judge_rounds: list[dict[str, Any]]
     unreachable_seeds: list[str]
     seed_verdicts: dict[str, SeedResult]
+    confirmed_seeds: list[str]
 
 
 def _reaches(adj: dict[str, list[str]], src: str, dst: str) -> bool:
@@ -266,6 +267,8 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     hop_log: list[HopLogEntry]
     round_n: int
     node_fault: dict[str, list[str]]
+    seed_verdicts: dict[str, SeedResult]
+    confirmed_seed_ids: set[str]
 
     graph: dict[str, list[list[str]]] = args["graph"]
     infra_set = set(args.get("infra_nodes", []))
@@ -332,6 +335,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         verdicts = cast(dict[str, HopResult], existing.get("verdicts", {}))
         hop_log = cast(list[HopLogEntry], existing.get("hop_log", []))
         round_n = int(existing.get("rounds", 0))
+        seed_verdicts = cast(dict[str, SeedResult], existing.get("seed_verdicts", {}))
+        confirmed_seed_ids = set(existing.get("confirmed_seeds", []))
+        if not confirmed_seed_ids and not seed_verdicts:
+            confirmed_seed_ids = {seed for seed in seeds if seed in nodes}
         adj, in_deg = _rebuild_adjacency()
         node_fault = {
             _injection_node_id(inj): _fault_record(inj)
@@ -356,6 +363,8 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         verdicts = {}
         hop_log = []
         round_n = 0
+        seed_verdicts = {}
+        confirmed_seed_ids = set()
 
         async def _verify_seed(inj: Injection) -> tuple[Injection, SeedResult | None]:
             target = inj["target"]
@@ -415,6 +424,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             root_id = _injection_node_id(inj)
             if seed_verdict and seed_verdict.get("verdict") == "confirmed":
                 root_id = _accept_seed_node(inj, seed_verdict)
+                confirmed_seed_ids.add(root_id)
                 ctx.log(
                     f"seed {root_id}: confirmed ({seed_verdict.get('predicate')})"
                 )
@@ -425,7 +435,6 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
                 ctx.log(f"seed {root_id}: {v} — skipping")
 
-        seed_verdicts: dict[str, SeedResult] = {}
         for inj, seed_verdict in seed_results:
             if seed_verdict:
                 seed_verdicts[_injection_node_id(inj)] = seed_verdict
@@ -439,6 +448,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 "hop_log": [],
                 "rounds": 0,
                 "seed_verdicts": seed_verdicts,
+                "confirmed_seeds": [],
             }
 
         # -- Phase 1: propagate -------------------------------------------
@@ -885,7 +895,6 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 f"⚠ seed {seed_svc}: no path to entry services "
                 f"{sorted(entry_services)} in fpg"
             )
-            unreachable.append(seed_svc)
 
     if not unreachable:
         ctx.log("✓ all seeds reach entry services")
@@ -896,6 +905,8 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         "verdicts": verdicts,
         "hop_log": hop_log,
         "rounds": round_n,
+        "seed_verdicts": seed_verdicts,
+        "confirmed_seeds": sorted(confirmed_seed_ids),
     }
     if judge_result:
         result_out["judge"] = judge_result

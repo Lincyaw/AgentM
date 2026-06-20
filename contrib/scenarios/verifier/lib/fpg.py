@@ -158,6 +158,7 @@ def assemble_scenario(
     meta: dict[str, Any],
     nodes: list[dict[str, Any]],
     edges: list[dict[str, Any]],
+    confirmed_seed_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble and validate the scenario against the fpg schema."""
     from fpg import SCHEMA_VERSION, build_schema, load_profile
@@ -167,6 +168,7 @@ def assemble_scenario(
     injections = [
         r for r in build_injection_records(meta)
         if r["node_id"] in node_ids
+        and (confirmed_seed_ids is None or r["node_id"] in confirmed_seed_ids)
     ]
     scenario = {
         "schema_version": SCHEMA_VERSION,

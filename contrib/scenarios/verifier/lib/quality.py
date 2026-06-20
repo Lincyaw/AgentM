@@ -62,9 +62,32 @@ def _fault_tuple(faults: list[dict[str, Any]]) -> str:
     return " + ".join(str(k) for k in kinds) if kinds else "unknown"
 
 
+def _fault_seed_ids(faults: list[dict[str, Any]]) -> list[str]:
+    seeds: list[str] = []
+    for fault in faults:
+        seed = fault.get("node_id") or fault.get("target")
+        if isinstance(seed, str) and seed:
+            seeds.append(seed)
+    return seeds
+
+
+def _seed_verdict_map(meta: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not meta:
+        return {}
+    raw = meta.get("seed_verdicts", {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        seed: verdict
+        for seed, verdict in raw.items()
+        if isinstance(seed, str) and isinstance(verdict, dict)
+    }
+
+
 def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, Any]:
     case_name = case_dir.name
     faults = _case_faults(dataset_dir, case_name)
+    dataset_seeds = _fault_seed_ids(faults)
     meta_path = case_dir / "run_meta.json"
     scenario_path = case_dir / "fpg_scenario.json"
     meta = _load_json(meta_path) if meta_path.exists() else None
@@ -80,9 +103,9 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
         }
 
     if meta and meta.get("error") == "no seeds confirmed":
-        seed_verdicts = meta.get("seed_verdicts", {})
-        if isinstance(seed_verdicts, dict) and any(
-            isinstance(verdict, dict) and verdict.get("_error")
+        seed_verdicts = _seed_verdict_map(meta)
+        if any(
+            verdict.get("_error")
             for verdict in seed_verdicts.values()
         ):
             return {
@@ -95,19 +118,26 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
                 "error": meta.get("error"),
                 "seed_verdicts": seed_verdicts,
             }
-        seeds = sorted(seed_verdicts) if isinstance(seed_verdicts, dict) else []
-        error_seed_status = []
-        if isinstance(seed_verdicts, dict):
-            for seed, verdict in sorted(seed_verdicts.items()):
-                predicate = verdict.get("predicate") if isinstance(verdict, dict) else None
-                error_seed_status.append({
-                    "seed": seed,
-                    "confirmed": False,
-                    "node_present": False,
-                    "predicate": predicate,
-                    "reaches_entry": False,
-                    "reached_entry": [],
-                })
+        seeds = sorted(set(dataset_seeds) | set(seed_verdicts))
+        error_seed_status: list[dict[str, Any]] = []
+        for seed in seeds:
+            verdict = seed_verdicts.get(seed)
+            predicate = verdict.get("predicate") if verdict else None
+            seed_verdict = verdict.get("verdict") if verdict else None
+            error_seed_status.append({
+                "seed": seed,
+                "confirmed": False,
+                "seed_verdict_available": verdict is not None,
+                "seed_verdict": seed_verdict,
+                "seed_verdict_confirmed": seed_verdict == "confirmed"
+                if verdict is not None
+                else None,
+                "node_present": False,
+                "graph_confirmed": False,
+                "predicate": predicate,
+                "reaches_entry": False,
+                "reached_entry": [],
+            })
         error_failures = ["seed_not_confirmed"]
         if not seeds:
             error_failures.append("missing_seed_records")
@@ -155,15 +185,31 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
             "failures": ["missing_fpg"],
         }
 
-    case_name = str(scenario.get("scenario_id") or case_name)
+    scenario_case_name = str(scenario.get("scenario_id") or case_name)
+    if scenario_case_name != case_name:
+        case_name = scenario_case_name
+        scenario_faults = _case_faults(dataset_dir, case_name)
+        if scenario_faults:
+            faults = scenario_faults
+            dataset_seeds = _fault_seed_ids(faults)
     graph = scenario.get("graph", {})
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
     injections = scenario.get("injections", [])
     scenario_seeds = [i.get("node_id") for i in injections if i.get("node_id")]
+    seed_verdicts = _seed_verdict_map(meta)
+    raw_confirmed_seeds = meta.get("confirmed_seeds", []) if meta else []
+    confirmed_seed_records = {
+        seed for seed in raw_confirmed_seeds if isinstance(seed, str)
+    }
     raw_workflow_unreachable = meta.get("unreachable_seeds", []) if meta else []
     workflow_unreachable = list(dict.fromkeys(raw_workflow_unreachable))
-    seeds = sorted(set(scenario_seeds) | set(workflow_unreachable))
+    seeds = sorted(
+        set(dataset_seeds)
+        | set(seed_verdicts)
+        | set(scenario_seeds)
+        | set(workflow_unreachable)
+    )
     node_by_id = {
         node_id: n
         for n in nodes
@@ -187,15 +233,30 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
     for seed in seeds:
         seed_node = node_by_id.get(seed)
         predicate = seed_node.get("predicate") if seed_node else None
-        confirmed = seed_node is not None and predicate != "other"
-        reachable = _reachable_from(seed, adj) if confirmed else set()
+        graph_confirmed = seed_node is not None and predicate != "other"
+        verdict = seed_verdicts.get(seed)
+        seed_verdict = verdict.get("verdict") if verdict else None
+        if verdict is not None:
+            confirmed = seed_verdict == "confirmed" and graph_confirmed
+        elif confirmed_seed_records:
+            confirmed = seed in confirmed_seed_records and graph_confirmed
+        else:
+            confirmed = graph_confirmed
+        reachable = _reachable_from(seed, adj) if seed_node is not None else set()
         reached_entry = sorted(reachable & entry_nodes)
         seed_status.append({
             "seed": seed,
             "confirmed": confirmed,
+            "seed_verdict_available": verdict is not None,
+            "seed_verdict": seed_verdict,
+            "seed_verdict_confirmed": seed_verdict == "confirmed"
+            if verdict is not None
+            else None,
             "node_present": seed_node is not None,
+            "included_in_fpg_injections": seed in scenario_seeds,
+            "graph_confirmed": graph_confirmed,
             "predicate": predicate,
-            "reaches_entry": bool(reached_entry),
+            "reaches_entry": confirmed and bool(reached_entry),
             "reached_entry": reached_entry,
         })
 
@@ -237,6 +298,8 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
         "entry_nodes": sorted(entry_nodes),
         "node_count": len(nodes),
         "edge_count": len(edges),
+        "seed_verdicts": seed_verdicts,
+        "confirmed_seeds": sorted(confirmed_seed_records),
     }
 
 
