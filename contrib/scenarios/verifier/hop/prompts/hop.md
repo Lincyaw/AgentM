@@ -44,6 +44,7 @@ Trace signals can include count drop/vanish, latency increase, fail-fast latency
 - For callee-to-caller edges, dependency faults may degrade the caller through latency, errors, fail-fast behavior, validation failures, or vanished dependent endpoints.
 - For data-corruption or runtime-mutation faults, aggregate health can look normal. Focus on the affected call path and semantic symptoms: wrong endpoint, 404, skipped processing, validation failure, vanished downstream path, or fast but incorrect completion.
 - For span-count drops, separate confirmable flow interruption from reduced demand. A confirmable interruption is selective, user-visible or alarm-relevant, or accompanied by timeout/error/fail-fast/log/metric evidence.
+- Treat "fail-fast latency drop" as a strong, selective behavioral change, not any lower percentile. It should be concentrated on the fault-path endpoint and usually accompanied by errors, vanished child spans, near-total selective disappearance, or a dramatic drop from the normal dependency latency scale. A small p99 decrease with zero errors and proportional span-count drop is reduced demand/noise, not confirmed propagation.
 
 ## Verdict Policy
 

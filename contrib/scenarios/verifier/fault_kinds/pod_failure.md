@@ -73,7 +73,16 @@ tables such as `normal_metrics_sum` / `abnormal_metrics_sum`, not in the
 gauge table. Discover metric names across all metric-like tables before
 claiming restart evidence is absent; exact metric names vary, so prefer
 pattern searches such as `%cpu%time%`, `%class%loaded%`, `%memory%usage%`,
-`%rss%`, and `%restart%`.
+`%rss%`, and `%restart%`. For monotonic counters, compare the last
+normal sample with the first abnormal sample. A lower abnormal value is
+the reset signal; it does not need to be exactly zero. Do not summarize
+only min/max and conclude "no reset" when the abnormal counter range is
+below the normal window's end value.
+
+Seed confirmation is separate from propagation confirmation. A restart
+fingerprint can confirm the injected pod kill on the target even when no
+caller or entrypoint is visibly degraded. Propagation to callers still
+requires the caller-side evidence described below.
 
 When the target's own span count and latency look nearly unchanged,
 check the caller side:
@@ -110,9 +119,15 @@ merely because `from` is not the injection target is the single most
 common mistake on this fault.
 
 Because killing a dependency reduces traffic system-wide, a throughput
-drop alone is evidence of a hop ONLY when the two services actually call
-each other — confirm the call relationship (either direction, from the
-normal window) before counting a drop as propagation.
+drop alone is only investigation evidence, not a confirmed hop. First
+confirm the call relationship (either direction, from the normal window),
+then require a caller-side failure signal before marking propagation:
+HTTP/gRPC errors, timeout-level p99/max, near-total/selective
+disappearance of the endpoint that normally calls the killed dependency,
+or a dramatic fail-fast latency drop on that same endpoint. A small
+proportional count drop with zero errors and slightly lower latency is
+not flow interruption; reject it if metrics/logs are otherwise healthy,
+or mark inconclusive only when the path vanished but context is missing.
 
 ### Throughput drop — distinguish by call direction
 
@@ -137,7 +152,11 @@ whether the disappearance traces back to the confirmed fault.
 A caller whose aggregate latency drops after the kill is NOT
 automatically "fine." The drop often means the slow dependency is
 gone and surviving requests complete faster. Always check
-per-`span_name` before concluding.
+per-`span_name` before concluding. But do not overread tiny latency
+drops: fast-fail propagation means the dependency call path changed
+materially. If the caller endpoint has the same shape, no errors, no
+timeout, no selective disappearance, and only a modest lower p99 during
+a proportional traffic dip, the caller is not confirmed degraded.
 
 ### Uninstrumented backing components (DB / cache)
 These have no spans. Judge them via the CLIENT-side spans inside the
