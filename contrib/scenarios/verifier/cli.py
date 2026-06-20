@@ -2,11 +2,11 @@
 """Fault propagation verifier CLI.
 
 Usage (single case):
-    uv run python -m verifier.cli run <case_dir> [--model X]
+    uv run python -m verifier.cli run <case_dir> [--model X] [--judge-model Y]
 
 Usage (batch):
     uv run python -m verifier.cli batch <dataset_dir> \\
-        --run-dir /tmp/verifier-run --model doubao --limit 10
+        --run-dir /tmp/verifier-run --model doubao --judge-model azure-gpt --limit 10
 """
 from __future__ import annotations
 
@@ -138,7 +138,12 @@ def _write_outputs(
     )
 
 
-def _run_one(case_dir: Path, out_dir: Path, budget: int = 15) -> dict:
+def _run_one(
+    case_dir: Path,
+    out_dir: Path,
+    budget: int = 15,
+    judge_model: str | None = None,
+) -> dict:
     data_dir = case_dir.resolve()
     out = out_dir.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -152,7 +157,11 @@ def _run_one(case_dir: Path, out_dir: Path, budget: int = 15) -> dict:
     logger.info("Graph: {} edges, {} services",
                 sum(len(v) for v in ctx.graph.values()), len(ctx.graph))
 
-    workflow_args = ctx.to_workflow_args(out_dir=str(out), budget=budget)
+    workflow_args = ctx.to_workflow_args(
+        out_dir=str(out),
+        budget=budget,
+        judge_model=judge_model,
+    )
     result = asyncio.run(_run_workflow(workflow_args, out))
 
     if not result.get("nodes"):
@@ -238,12 +247,19 @@ def run(
     out: Annotated[Path | None, typer.Option(help="output directory")] = None,
     budget: Annotated[int, typer.Option(help="tool-call budget per agent")] = 15,
     model: Annotated[str | None, typer.Option(help="config.toml profile name")] = None,
+    judge_model: Annotated[
+        str | None,
+        typer.Option(
+            "--judge-model",
+            help="config.toml profile name used only by the judge agent",
+        ),
+    ] = None,
 ) -> None:
     """Run propagation check on a single case."""
     if model:
         os.environ["AGENTM_MODEL"] = model
     out_dir = out or case_dir.resolve() / ".verify_propagate"
-    summary = _run_one(case_dir, out_dir, budget=budget)
+    summary = _run_one(case_dir, out_dir, budget=budget, judge_model=judge_model)
     if "error" in summary:
         raise typer.Exit(1)
 
@@ -286,6 +302,13 @@ def batch(
     budget: Annotated[int, typer.Option(help="tool-call budget per agent")] = 15,
     parallel: Annotated[int, typer.Option(help="concurrent cases")] = 1,
     model: Annotated[str | None, typer.Option(help="config.toml profile name")] = None,
+    judge_model: Annotated[
+        str | None,
+        typer.Option(
+            "--judge-model",
+            help="config.toml profile name used only by the judge agent",
+        ),
+    ] = None,
     limit: Annotated[int | None, typer.Option(help="max cases")] = None,
     offset: Annotated[int, typer.Option(help="skip first N cases")] = 0,
 ) -> None:
@@ -310,7 +333,12 @@ def batch(
             return cached
         logger.info("[{}/{}] {} ...", idx, total, name)
         try:
-            return _run_one(dataset / name, case_out, budget=budget)
+            return _run_one(
+                dataset / name,
+                case_out,
+                budget=budget,
+                judge_model=judge_model,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("[{}] {}", name, exc)
             return {"case": name, "error": str(exc)}

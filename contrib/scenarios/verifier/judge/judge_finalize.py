@@ -92,6 +92,18 @@ class JudgeReview(BaseModel):
     """Whole-graph review verdict."""
 
     model_config = _STRICT
+    entry_explanation: str = Field(
+        description="Whether and how the current confirmed graph explains "
+        "the entry/frontend observations. Mention the entry endpoints and "
+        "symptom shape checked. If there is no meaningful entry anomaly, "
+        "say so explicitly."
+    )
+    unexplained_entry_observations: list[str] = Field(
+        default_factory=list,
+        description="Entry/frontend symptoms that the current graph does "
+        "not explain. Empty means the graph explains the entry symptoms or "
+        "there is no meaningful entry anomaly."
+    )
     add: list[JudgePromotion] = Field(
         description="Services to PROMOTE directly — you have enough "
         "evidence from the global view to confirm them without "

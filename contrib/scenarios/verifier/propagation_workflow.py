@@ -88,6 +88,8 @@ class JudgeReEval(TypedDict, total=False):
 
 
 class JudgeReviewResult(TypedDict, total=False):
+    entry_explanation: str
+    unexplained_entry_observations: list[str]
     add: list[JudgePromotion]
     re_evaluate: list[JudgeReEval]
     suggested_remove: list[str]
@@ -274,6 +276,12 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     infra_set = set(args.get("infra_nodes", []))
     data_dir: str = args["data_dir"]
     skip_judge: bool = args.get("skip_judge", False)
+    judge_model_raw = args.get("judge_model")
+    judge_model = (
+        judge_model_raw.strip()
+        if isinstance(judge_model_raw, str) and judge_model_raw.strip()
+        else None
+    )
     fault_docs: dict[str, str] = args.get("fault_docs", {})
 
     def _entry_services_from_graph() -> set[str]:
@@ -600,10 +608,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     # -- Judge + re-evaluation loop --
     judge_result: JudgeReviewResult | None = None
     judge_rounds_log: list[dict[str, Any]] = []
-    judge_needed = bool(_unreachable_seed_nodes())
+    judge_needed = bool(nodes)
     if not judge_needed:
-        ctx.log("skipping judge: all confirmed seeds already reach entry services")
-    if not skip_judge and verdicts and judge_needed:
+        ctx.log("skipping judge: no confirmed or candidate nodes to audit")
+    if not skip_judge and judge_needed:
         max_judge_rounds = 2
         for judge_round in range(max_judge_rounds):
             ctx.phase("judge" if judge_round == 0 else f"judge-r{judge_round + 1}")
@@ -633,6 +641,9 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             judge_prompt = build_judge_prompt(
                 injections=injections,
                 confirmed=sorted(nodes),
+                confirmed_edges=edges,
+                entry_services=sorted(entry_services),
+                unreachable_seeds=_unreachable_seed_nodes(),
                 seeds=seeds,
                 verdict_by_target=verdict_by_target,
                 inconclusive_verdicts=inconclusive_verdicts,
@@ -641,12 +652,20 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             judge_text: AgentResult = await ctx.agent(
                 judge_prompt,
                 scenario="verifier/judge",
+                model=judge_model,
                 atom_config={
                     "duckdb_sql": {"data_dir": data_dir},
                 },
             )
             if isinstance(judge_text, dict):
                 judge_result = cast(JudgeReviewResult, judge_text)
+                if judge_result.get("entry_explanation"):
+                    ctx.log("  judge entry audit: " + judge_result["entry_explanation"][:500])
+                if judge_result.get("unexplained_entry_observations"):
+                    ctx.log(
+                        "  judge unexplained entry observations: "
+                        + "; ".join(judge_result["unexplained_entry_observations"])
+                    )
 
             # Apply direct promotions (judge has enough evidence to decide)
             for promo in (judge_result or {}).get("add", []):

@@ -23,6 +23,9 @@ def build_judge_prompt(
     *,
     injections: Sequence[Mapping[str, Any]],
     confirmed: Sequence[str],
+    confirmed_edges: Sequence[Mapping[str, Any]],
+    entry_services: Sequence[str],
+    unreachable_seeds: Sequence[str],
     seeds: set[str],
     verdict_by_target: Mapping[str, Mapping[str, Any]],
     inconclusive_verdicts: Sequence[Mapping[str, Any]],
@@ -61,6 +64,26 @@ def build_judge_prompt(
     sections.append(
         f"## Confirmed graph ({len(confirmed)} services)\n"
         + ("\n".join(confirmed_lines) or "(none)")
+    )
+
+    edge_lines = [
+        f"- {e.get('src', '?')} → {e.get('dst', '?')}: {e.get('description', '')}"
+        for e in confirmed_edges
+    ]
+    sections.append(
+        f"## Confirmed causal edges ({len(confirmed_edges)})\n"
+        + ("\n".join(edge_lines) or "(none)")
+    )
+
+    entry_lines = [f"- {svc}" for svc in sorted(entry_services)]
+    unreachable_lines = [f"- {svc}" for svc in sorted(unreachable_seeds)]
+    sections.append(
+        "## Entry explanation audit\n"
+        + "Entry services to inspect:\n"
+        + ("\n".join(entry_lines) or "(none discovered)")
+        + "\n\nConfirmed seeds without an entry path:\n"
+        + ("\n".join(unreachable_lines) or "(none)")
+        + "\n\nReverse-check whether the confirmed causal edges explain the entry services' abnormal-window symptoms. Query entry endpoint metrics directly; do not assume reachability alone is explanation."
     )
 
     # -- Inconclusive edges --

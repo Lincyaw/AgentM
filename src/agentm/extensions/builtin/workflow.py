@@ -10,7 +10,7 @@ The script is plain ``async`` Python, run as a coroutine on the host event
 loop with a **curated namespace** that exposes only an orchestration SDK —
 bound to *already-existing* APIs:
 
-- ``agent(prompt, *, schema=, scenario=, isolation=, tool_allowlist=, extra_extensions=, atom_config=, retry=, timeout=)`` —
+- ``agent(prompt, *, schema=, scenario=, model=, isolation=, tool_allowlist=, extra_extensions=, atom_config=, retry=, timeout=)`` —
   :meth:`ExtensionAPI.spawn_child_session` → ``child.prompt`` → last
   ``AssistantMessage`` text → ``child.shutdown``. ``schema=PydanticModel``
   returns a validated model instance (auto-retry on validation failure).
@@ -100,6 +100,12 @@ AtomConfigMap = dict[str, dict[str, Any]]
 
 ExtensionEntry = tuple[str, dict[str, Any]]
 """``(module_path, config)`` pair for ``extra_extensions``."""
+
+ProviderOverride = tuple[str, dict[str, Any]]
+"""Resolved provider override tuple accepted by ``AgentSessionConfig``."""
+
+ModelResolver = Callable[[str], ProviderOverride | None]
+"""Resolve a named model profile to a provider override."""
 
 AgentResult = str | dict[str, Any] | list[Any] | BaseModel
 """Return type of ``agent()`` — ``dict``/``list`` for structured output,
@@ -465,7 +471,8 @@ class _WorkflowRun:
     default_agent_timeout_s: float | None = None
     args_payload: dict[str, Any] = field(default_factory=dict)
     cwd_override: str | None = None
-    provider_override: tuple[str, dict[str, Any]] | None = None
+    provider_override: ProviderOverride | None = None
+    model_resolver: ModelResolver | None = None
     progress: list[dict[str, str]] = field(default_factory=list)
     child_sessions: list[dict[str, Any]] = field(default_factory=list)
     _agent_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -479,6 +486,7 @@ class _WorkflowRun:
         *,
         schema: type[BaseModel] | JsonSchema | None = None,
         scenario: str | None = None,
+        model: str | None = None,
         isolation: str | None = None,
         tool_allowlist: list[str] | None = None,
         extra_extensions: list[ExtensionEntry] | None = None,
@@ -508,6 +516,7 @@ class _WorkflowRun:
         ``session_id=`` resumes an existing session instead of starting
         fresh. The prompt is appended to the session's history. The resumed
         session retains its full prior context.
+        ``model=`` resolves a named model profile for this child only.
         ``trace_label=`` overrides the child session's trace-command label.
         """
 
@@ -533,6 +542,9 @@ class _WorkflowRun:
             "extra_extensions": extra_extensions,
             "atom_config": atom_config,
         }
+        model_name = model.strip() if isinstance(model, str) and model.strip() else None
+        if model_name is not None:
+            opts["model"] = model_name
         key = _Journal.key(prompt, opts)
         cached = await self.journal.lookup(key)
         if cached is not None:
@@ -561,6 +573,7 @@ class _WorkflowRun:
                     coro = self._spawn_and_drive(
                         current_prompt,
                         scenario,
+                        model_name,
                         isolation,
                         tool_allowlist,
                         extra_extensions=extra_extensions,
@@ -707,6 +720,7 @@ class _WorkflowRun:
         self,
         prompt: str,
         scenario: str | None,
+        model: str | None,
         isolation: str | None,
         tool_allowlist: list[str] | None,
         *,
@@ -759,10 +773,21 @@ class _WorkflowRun:
                 )
             session_manager = store.open(session_id)
 
+        provider_override = self.provider_override
+        if isinstance(model, str) and model.strip():
+            if self.model_resolver is None:
+                raise RuntimeError(
+                    "workflow: agent(model=...) requires the model_resolver "
+                    "service, but it is not available in this session"
+                )
+            provider_override = self.model_resolver(model.strip())
+            if provider_override is None:
+                raise RuntimeError(f"workflow: unknown model profile {model!r}")
+
         config = AgentSessionConfig(
             cwd=self.cwd_override or self.api.cwd,
             # Resolved upfront via MODEL_RESOLVER_SERVICE; None = inherit parent's provider.
-            provider=self.provider_override,
+            provider=provider_override,
             scenario=scenario or self.default_scenario or self.api.scenario,
             extra_extensions=extensions,
             atom_config_overrides=atom_config_overrides,
@@ -788,6 +813,7 @@ class _WorkflowRun:
                 self.child_sessions.append({
                     "session_id": child.session_id,
                     "scenario": scenario or self.default_scenario,
+                    "model": model.strip() if isinstance(model, str) else None,
                     "prompt": prompt[:200],
                 })
                 self.budget_svc.attach(child)
@@ -860,6 +886,7 @@ class WorkflowContext:
         *,
         schema: type[_M],
         scenario: str | None = ...,
+        model: str | None = ...,
         isolation: str | None = ...,
         tool_allowlist: list[str] | None = ...,
         extra_extensions: list[ExtensionEntry] | None = ...,
@@ -877,6 +904,7 @@ class WorkflowContext:
         *,
         schema: None = ...,
         scenario: str | None = ...,
+        model: str | None = ...,
         isolation: str | None = ...,
         tool_allowlist: list[str] | None = ...,
         extra_extensions: list[ExtensionEntry] | None = ...,
@@ -893,6 +921,7 @@ class WorkflowContext:
         *,
         schema: type[BaseModel] | JsonSchema | None = None,
         scenario: str | None = None,
+        model: str | None = None,
         isolation: str | None = None,
         tool_allowlist: list[str] | None = None,
         extra_extensions: list[ExtensionEntry] | None = None,
@@ -905,6 +934,7 @@ class WorkflowContext:
         """Spawn one child agent session and return its output.
 
         ``schema=PydanticModel`` returns a validated model instance.
+        ``model=`` resolves a named model profile for this child only.
         ``retry=N`` retries on agent failure or validation failure.
         ``timeout=`` caps wall-clock seconds for the agent call.
         ``session_id=`` resumes an existing session with the prompt.
@@ -914,6 +944,7 @@ class WorkflowContext:
             prompt,
             schema=schema,
             scenario=scenario,
+            model=model,
             isolation=isolation,
             tool_allowlist=tool_allowlist,
             extra_extensions=extra_extensions,
@@ -1341,7 +1372,7 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
             "type": "string",
             "description": (
                 "Async Python orchestration script. Available names: "
-                "agent(prompt, *, schema=, scenario=, isolation=, "
+                "agent(prompt, *, schema=, scenario=, model=, isolation=, "
                 "tool_allowlist=, extra_extensions=, atom_config=, retry=0) "
                 "(awaitable -> str | dict when schema set; retry=N retries on failure), "
                 "parallel(list_of_awaitables) -> list, "
@@ -1411,6 +1442,7 @@ class WorkflowRunner:
         default_scenario: str | None,
         budget_tokens: int | None,
         default_agent_timeout: float | None,
+        model_resolver: ModelResolver | None,
     ) -> None:
         self._api = api
         self._concurrency = concurrency
@@ -1419,6 +1451,7 @@ class WorkflowRunner:
         self._default_scenario = default_scenario
         self._budget_tokens = budget_tokens
         self._default_agent_timeout = default_agent_timeout
+        self._model_resolver = model_resolver
         self._last_run: _WorkflowRun | None = None
         self._last_wall_clock_s: float = 0.0
 
@@ -1601,6 +1634,7 @@ class WorkflowRunner:
             args_payload=dict(args_payload),
             cwd_override=cwd,
             provider_override=provider,
+            model_resolver=self._model_resolver,
         )
 
         try:
@@ -1680,6 +1714,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
         default_scenario=default_scenario,
         budget_tokens=budget_tokens,
         default_agent_timeout=default_agent_timeout,
+        model_resolver=model_resolver,
     )
     api.set_service(_WORKFLOW_RUNNER_SERVICE, runner)
 
