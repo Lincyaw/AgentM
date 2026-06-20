@@ -1035,7 +1035,8 @@ def _final_session_output(messages: list[AgentMessage]) -> str:
        (the agent likely hit its budget without submitting a result).
     """
 
-    # Walk backward — first non-error tool result or assistant text wins.
+    # Finalize-tool results are authoritative even if the model emits a
+    # trailing assistant acknowledgement after the tool call.
     for msg in reversed(messages):
         if isinstance(msg, ToolResultMessage):
             for result_block in reversed(msg.content):
@@ -1045,7 +1046,9 @@ def _final_session_output(messages: list[AgentMessage]) -> str:
                     text = getattr(inner, "text", None)
                     if isinstance(text, str) and text:
                         return text
-        elif isinstance(msg, AssistantMessage):
+
+    for msg in reversed(messages):
+        if isinstance(msg, AssistantMessage):
             for block in reversed(msg.content):
                 text = getattr(block, "text", None)
                 if isinstance(text, str) and text:
