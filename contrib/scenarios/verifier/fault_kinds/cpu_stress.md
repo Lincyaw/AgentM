@@ -7,7 +7,11 @@ every request handler is starved of cycles, so it answers SLOWLY. This is a
 LATENCY fault. It is not an outage and not an error fault.
 
 ## Data profile — what "effective" looks like
-The single load-bearing signature is on the TARGET's own spans:
+The seed-level signature is the TARGET's own CPU/resource metrics:
+
+- target-specific CPU metrics such as `container.cpu.usage`, `k8s.pod.cpu.usage`, CPU utilization, or CPU throttling rise sharply in the abnormal window. This resource jump is enough to confirm the injection took effect on the seed, even if application traces stay flat.
+
+The service-degradation / propagation signature is on spans:
 
 - inbound span `duration` on the target RISES in the abnormal window vs the
   normal window, across endpoints (the bottleneck is the CPU, not one code
@@ -19,14 +23,23 @@ The single load-bearing signature is on the TARGET's own spans:
   secondary effect if a caller's timeout trips. Do not look for errors to
   confirm CPU stress — look for latency.
 
-Concretely: compare `AVG(duration)` and p95 `duration` on the target in the
-normal vs abnormal window. A clear, target-specific increase = it materialised.
+Concretely: compare target CPU metrics first, then compare `AVG(duration)` and
+p95 `duration` on the target in the normal vs abnormal window. A clear
+target-specific CPU increase = the seed materialised. A clear latency increase
+= the resource pressure degraded the service and can propagate.
 
 ## When it did NOT materialise (effectiveness gate)
-If the target's own latency is essentially UNCHANGED between the two windows,
-the injection did not engage. Report `injection_effective: false` (or
+If target CPU/resource metrics are essentially UNCHANGED between the two
+windows, the injection did not engage. Report `injection_effective: false` (or
 `ambiguous`) and emit NO propagation edges from it — even if other services
-look different. Two confounds that are NEVER edge evidence:
+look different.
+
+If target CPU/resource metrics spike but target/caller spans stay healthy, the
+seed is confirmed but the cascade stops there. Do NOT reject the seed merely
+because traces are flat; also do NOT invent propagation edges from a pure
+resource-metric-only effect.
+
+Two confounds that are NEVER edge evidence:
 
 - a roughly UNIFORM drop in span COUNT across many/all services (everything
   ~30-40% fewer spans) is load / throughput variation in the capture window,
@@ -36,8 +49,8 @@ look different. Two confounds that are NEVER edge evidence:
   is not propagation. Without (1) a target latency rise AND (2) a direct call
   carrying that latency to the neighbour, there is no edge.
 
-A weak injection that produced no measurable latency change is exactly the
-case that must NOT be turned into a propagation graph.
+A weak injection that produced CPU pressure but no measurable latency change is
+an isolated confirmed seed, not a propagation graph.
 
 ## How it propagates (only if it materialised)
 In-pod fault — the target is the `from`. A direct caller of the target waits

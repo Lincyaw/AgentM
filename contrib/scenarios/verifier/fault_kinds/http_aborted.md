@@ -17,6 +17,14 @@ caller-side failures on one endpoint with healthy target internals
 point to a link/path-scoped root; broad target-side failures point
 to a service-scoped anomaly.
 
+When metadata has `app_name`/rule-bearing service plus
+`server_address`/peer service, the configured `route` is usually the
+peer endpoint seen on the child span, not a route served by the
+rule-bearing service itself. Establish the normal path with
+`app_name -> server_address` parent-span joins before searching for the
+route. Do not reject because the route is absent from the app service's
+own span names.
+
 If an upstream caller later sends fewer requests to unrelated
 downstream dependencies, treat that reduced demand as evidence for
 the upstream interrupted path, not as a final node for every healthy

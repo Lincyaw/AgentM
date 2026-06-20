@@ -23,6 +23,7 @@ import typer
 from loguru import logger
 
 from .lib.fpg import assemble_scenario
+from .lib.quality import build_quality_report
 from .prepare import prepare_case
 
 REPO = Path(__file__).resolve().parents[3]
@@ -237,6 +238,37 @@ def run(
     summary = _run_one(case_dir, out_dir, budget=budget)
     if "error" in summary:
         raise typer.Exit(1)
+
+
+@app.command()
+def quality_report(
+    run_dir: Annotated[Path, typer.Argument(help="verifier batch run directory")],
+    out: Annotated[Path | None, typer.Option(help="output JSON path")] = None,
+    dataset_dir: Annotated[
+        Path | None,
+        typer.Option(help="dataset cases directory, used to include fault grouping"),
+    ] = None,
+) -> None:
+    """Write a JSON quality report for a completed verifier batch run."""
+    run = run_dir.resolve()
+    if not run.is_dir():
+        raise typer.BadParameter(f"run_dir does not exist or is not a directory: {run}")
+    dataset = dataset_dir.resolve() if dataset_dir else None
+    if dataset is not None and not dataset.is_dir():
+        raise typer.BadParameter(
+            f"dataset_dir does not exist or is not a directory: {dataset}"
+        )
+    report = build_quality_report(run, dataset)
+    out_path = out.resolve() if out else run / "quality_report.json"
+    out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+    summary = report["summary"]
+    logger.info(
+        "Quality: total={} passed={} failed={}",
+        summary["total_cases"],
+        summary["passed"],
+        summary["failed"],
+    )
+    logger.info("Report: {}", out_path)
 
 
 @app.command()

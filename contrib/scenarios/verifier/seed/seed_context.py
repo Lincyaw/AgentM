@@ -14,22 +14,28 @@ def build_seed_prompt(
     """Build the user prompt for verifying an injection target."""
     sections: list[str] = []
 
-    # -- Fault scenario --
+    # -- Fault reference document --
+    if fault_doc:
+        sections.append(f"## Fault reference document: {fault_kind}\n{fault_doc}")
+    else:
+        sections.append(f"## Fault reference document: {fault_kind}\n(no reference document available)")
+
+    # -- Current injection --
     line = _FAULT_CONTEXT_TEMPLATE.format(fault_kind=fault_kind, target=target)
     if params:
         line += f" ({params})"
-    fault_lines = [line]
-    if fault_doc:
-        fault_lines.append(fault_doc)
-    sections.append("## Fault scenario\n" + "\n\n".join(fault_lines))
+    sections.append("## Current injection\n" + line)
 
-    # -- Target --
-    sections.append(
-        f"## Target\n"
-        f"Service: **{target}**\n"
-        f"This is the injection target. Verify that the fault actually "
-        f"took effect by comparing its behavior in the normal vs "
-        f"abnormal windows."
-    )
+    # -- Task --
+    task_lines = [
+        f"Target: **{target}**",
+        "Verify whether this injected fault actually took effect by comparing normal vs abnormal traces, metrics, logs, and caller/link behavior for the target.",
+    ]
+    if target.startswith("link:") and "->" in target:
+        left, right = target.removeprefix("link:").split("->", 1)
+        task_lines.append(
+            f"Link endpoints: **{left}** and **{right}**. Establish which direction is actually exercised with normal parent-span joins; if the configured direction is both or unclear, check both `{left} -> {right}` and `{right} -> {left}`. In the abnormal window, missing child spans across a partitioned link can be the expected fault signature, so verify caller-owned timeout/error/latency symptoms instead of treating missing calls as no effect."
+        )
+    sections.append("## Task\n" + "\n".join(task_lines))
 
     return "\n\n".join(sections)

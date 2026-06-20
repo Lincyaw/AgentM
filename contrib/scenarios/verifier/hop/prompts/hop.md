@@ -20,7 +20,7 @@ You MUST investigate traces, metrics, and logs before submitting a verdict. Do n
 
 ### 2. Trace checks
 
-- Establish the normal call path with a `normal_traces` self-join on `parent_span_id`. Identify the target endpoints in the upstream's influence zone.
+- Establish the normal call path with a `normal_traces` self-join on `parent_span_id`. When `trace_id` exists, join on both `parent.span_id = child.parent_span_id` and `parent.trace_id = child.trace_id`; do not rely on `span_id` alone across unrelated traces. Identify the target endpoints in the upstream's influence zone.
 - Compare those target endpoints across normal and abnormal windows: span count, latency percentiles, trace status, HTTP status, and appearing/disappearing span names.
 - Also compare target service totals and sibling endpoints. This tells you whether the anomaly is selective to the fault path, service-wide, graph-wide traffic drift, or reduced demand.
 

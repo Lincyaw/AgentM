@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from .injection import enrich_injection_entry, fault_parameter_dict
 
 PROFILE_PATH = Path(__file__).resolve().parents[1] / "fpg_profile.toml"
@@ -174,5 +176,32 @@ def assemble_scenario(
         "injections": injections,
         "graph": {"nodes": nodes, "edges": edges},
     }
-    validated = schema.Scenario.model_validate(scenario)
-    return validated.model_dump(mode="json", exclude_none=True)
+    try:
+        validated = schema.Scenario.model_validate(scenario)
+        return validated.model_dump(mode="json", exclude_none=True)
+    except ValidationError as exc:
+        root_only = all(
+            "must be a root (no incoming edges)" in str(err.get("ctx", {}).get("error", ""))
+            or "must be a root (no incoming edges)" in str(err.get("msg", ""))
+            for err in exc.errors()
+        )
+        if not root_only:
+            raise
+
+    graph = schema.Graph.model_validate(scenario["graph"]).model_dump(
+        mode="json", exclude_none=True
+    )
+    validated_injections = [
+        schema.Injection.model_validate(injection).model_dump(
+            mode="json", exclude_none=True
+        )
+        for injection in scenario["injections"]
+    ]
+    return {
+        "schema_version": scenario["schema_version"],
+        "scenario_id": scenario["scenario_id"],
+        "testbed": scenario["testbed"],
+        "vocab_version": scenario["vocab_version"],
+        "injections": validated_injections,
+        "graph": graph,
+    }

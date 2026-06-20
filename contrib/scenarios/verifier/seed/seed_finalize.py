@@ -44,6 +44,41 @@ NodePredicate = cast(type[Enum], _SCHEMA.NodePredicate)
 _STRICT: Final = ConfigDict(extra="forbid")
 
 
+class InvestigationCoverage(BaseModel):
+    model_config = _STRICT
+    schema_discovery: str = Field(
+        description="What table/schema/value discovery you performed before "
+        "writing detailed SQL, e.g. list_tables plus SELECT DISTINCT/DESCRIBE "
+        "for status columns, span-kind values, log levels/templates, metric "
+        "names, span names, and target/caller identifiers. If a discovery "
+        "step was impossible, say why."
+    )
+    target_trace: str = Field(
+        description="Target trace coverage: target service or rule-bearing "
+        "side normal-vs-abnormal span counts, endpoints, latency, status, "
+        "HTTP status, and appearing/disappearing span names."
+    )
+    caller_link_trace: str = Field(
+        description="Caller/link coverage: parent_span_id join used to find "
+        "normal callers or link endpoints, plus abnormal caller/link checks. "
+        "Do not rely only on attr.span_kind values."
+    )
+    metrics: str = Field(
+        description="Metric coverage: target and relevant caller/link "
+        "resource/deployment/JVM/container/network signals checked. If "
+        "metrics are unavailable or uninformative, state that explicitly."
+    )
+    logs: str = Field(
+        description="Log coverage: target and relevant caller/link log "
+        "levels/templates/messages discovered and normal-vs-abnormal findings. "
+        "If logs are unavailable or uninformative, state that explicitly."
+    )
+    fault_specific_reasoning: str = Field(
+        description="Why the trace/metric/log/caller-link findings support "
+        "this verdict for this specific fault kind."
+    )
+
+
 class SeedVerdict(BaseModel):
     model_config = _STRICT
     verdict: Literal["confirmed", "rejected", "inconclusive"] = Field(
@@ -62,6 +97,12 @@ class SeedVerdict(BaseModel):
         description="REQUIRED for all verdicts. Re-executable DuckDB SQL "
         "statements (query.language='sql') comparing normal vs abnormal "
         "windows, plus an explanation of what the result shows."
+    )
+    investigation_coverage: InvestigationCoverage = Field(
+        description="REQUIRED for all verdicts. Summarize schema discovery "
+        "plus target trace, caller/link trace, metric, log, and fault-specific "
+        "checks. This is audit metadata; do not replace SQL evidence with "
+        "free text."
     )
     claim: str = Field(description="One-line summary.")
 
@@ -175,7 +216,9 @@ def install(api: ExtensionAPI, config: SeedFinalizeConfig) -> None:
             description=(
                 "Submit your verdict on whether the fault injection took "
                 "effect on this service. confirmed = degradation observed "
-                "(predicate and evidence required). rejected = no effect."
+                "(predicate and evidence required). rejected = no effect. "
+                "For link/path faults, use parent_span_id joins to verify "
+                "caller/link behavior; do not rely only on attr.span_kind."
             ),
             parameters=SeedVerdict,
             fn=_submit,

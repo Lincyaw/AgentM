@@ -6,7 +6,9 @@ edges are fpg Edge dicts, built incrementally as hops confirm. The fpg
 structural rules are enforced at construction time, not filtered
 afterwards:
 
-  - injection seeds never gain incoming edges (they stay roots);
+  - injection seeds are verified independently, but a seed-to-seed edge may
+    still be accepted when a hop agent confirms that one injected fault
+    propagated into another injected target;
   - an edge that would close a cycle is never evaluated;
   - EVERY edge goes through a hop agent — including edges between two
     already-confirmed services (topological adjacency alone is not
@@ -271,6 +273,21 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     skip_judge: bool = args.get("skip_judge", False)
     fault_docs: dict[str, str] = args.get("fault_docs", {})
 
+    def _entry_services_from_graph() -> set[str]:
+        callers: set[str] = set()
+        callees: set[str] = set()
+        for svc, neighbors in graph.items():
+            for info in neighbors:
+                if info[1] == "caller_to_callee":
+                    callers.add(svc)
+                    callees.add(info[0])
+        explicit_entries = {
+            svc for svc in callers | callees if svc in {"frontend", "ts-ui-dashboard"}
+        }
+        return explicit_entries or (callers - callees)
+
+    entry_services = _entry_services_from_graph()
+
     all_faults = [
         _fault_record(inj)
         for inj in injections
@@ -284,6 +301,29 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             a.setdefault(e["src"], []).append(e["dst"])
             d[e["dst"]] = d.get(e["dst"], 0) + 1
         return a, d
+
+    def _unreachable_seed_nodes() -> list[str]:
+        fpg_adj: dict[str, set[str]] = {}
+        for e in edges:
+            fpg_adj.setdefault(e["src"], set()).add(e["dst"])
+
+        unreachable: list[str] = []
+        for seed_svc in sorted(seeds):
+            if seed_svc not in nodes:
+                unreachable.append(seed_svc)
+                continue
+            visited: set[str] = set()
+            queue = [seed_svc]
+            while queue:
+                cur = queue.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                for nxt in fpg_adj.get(cur, set()):
+                    queue.append(nxt)
+            if not (visited & entry_services):
+                unreachable.append(seed_svc)
+        return unreachable
 
     if skip_propagate:
         existing = cast(dict[str, Any], args.get("existing_state", {}))
@@ -422,17 +462,6 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                         continue
                     checked_edges.add(edge_key)
 
-                    # fpg root rule: seeds never gain incoming edges.
-                    if neighbor in seeds:
-                        hop_log.append(
-                            {
-                                "round": round_n,
-                                "from": current,
-                                "to": neighbor,
-                                "verdict": "skipped_seed_target",
-                            }
-                        )
-                        continue
                     # fpg DAG rule: never evaluate an edge that would
                     # close a cycle through already-accepted edges.
                     if neighbor in nodes and _reaches(adj, neighbor, current):
@@ -553,6 +582,11 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 adj.setdefault(from_svc, []).append(to_svc)
                 in_deg[to_svc] = in_deg.get(to_svc, 0) + 1
 
+            if not _unreachable_seed_nodes():
+                ctx.log("all seeds reach entry services; stopping propagation")
+                queue = []
+                break
+
     # -- Judge + re-evaluation loop --
     judge_result: JudgeReviewResult | None = None
     judge_rounds_log: list[dict[str, Any]] = []
@@ -605,7 +639,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             for promo in (judge_result or {}).get("add", []):
                 svc = promo.get("service", "")
                 via = promo.get("via_service", "")
-                if not svc or svc in nodes or svc in seeds:
+                if not svc or svc in nodes:
                     ctx.log(f"  judge add {svc!r}: skipped (missing/already present)")
                     continue
                 if via not in nodes:
@@ -656,7 +690,6 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 for r in re_eval_raw
                 if r.get("service")
                 and r["service"] not in nodes
-                and r["service"] not in seeds
             ]
             if not re_eval:
                 judge_rounds_log.append(
@@ -753,8 +786,6 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 )
                 if not should_add:
                     continue
-                if svc in nodes or svc in seeds:
-                    continue
                 if _reaches(adj, svc, via):
                     continue
 
@@ -788,21 +819,25 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     (info[1] for info in graph.get(via, []) if info[0] == svc),
                     "",
                 )
-                edges.append(
-                    _edge_dict(
-                        via,
-                        svc,
-                        rel_type,
-                        rel_mechanism,
-                        re_item.get("context", "")[:200]
-                        if verdict == "inconclusive"
-                        else str(
-                            result.get("claim", "") if isinstance(result, dict) else ""
-                        ),
+                if svc not in adj.get(via, []):
+                    edges.append(
+                        _edge_dict(
+                            via,
+                            svc,
+                            rel_type,
+                            rel_mechanism,
+                            re_item.get("context", "")[:200]
+                            if verdict == "inconclusive"
+                            else str(
+                                result.get("claim", "")
+                                if isinstance(result, dict)
+                                else ""
+                            ),
+                        )
                     )
-                )
-                adj.setdefault(via, []).append(svc)
-                in_deg[svc] = in_deg.get(svc, 0) + 1
+                    adj.setdefault(via, []).append(svc)
+                    in_deg[svc] = in_deg.get(svc, 0) + 1
+                    any_new_confirmed = True
 
             # Log this judge round
             re_eval_log: list[dict[str, Any]] = []
@@ -840,35 +875,12 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
 
     # -- Reachability check: every seed should reach an entry service --
     ctx.phase("validate")
-    callers: set[str] = set()
-    callees: set[str] = set()
-    for svc, neighbors in graph.items():
-        for info in neighbors:
-            if info[1] == "caller_to_callee":
-                callers.add(svc)
-                callees.add(info[0])
-    entry_services = callers - callees
-
-    fpg_adj: dict[str, set[str]] = {}
-    for e in edges:
-        fpg_adj.setdefault(e["src"], set()).add(e["dst"])
-
-    unreachable: list[str] = []
+    unreachable = _unreachable_seed_nodes()
     for seed_svc in sorted(seeds):
         if seed_svc not in nodes:
             ctx.log(f"⚠ seed {seed_svc}: not confirmed")
-            unreachable.append(seed_svc)
             continue
-        visited: set[str] = set()
-        queue = [seed_svc]
-        while queue:
-            cur = queue.pop()
-            if cur in visited:
-                continue
-            visited.add(cur)
-            for nxt in fpg_adj.get(cur, set()):
-                queue.append(nxt)
-        if not (visited & entry_services):
+        if seed_svc in unreachable:
             ctx.log(
                 f"⚠ seed {seed_svc}: no path to entry services "
                 f"{sorted(entry_services)} in fpg"
