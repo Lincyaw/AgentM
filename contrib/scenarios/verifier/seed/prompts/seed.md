@@ -10,6 +10,8 @@ The effect may appear on the target itself, on callers of the target, or on a li
 
 You MUST investigate traces, metrics, and logs before submitting a verdict. Do not assume table names, column names, status encodings, metric names, log schemas, or span-kind values are stable across cases.
 
+Once you have sampled every required modality that exists in the case and have enough evidence for confirmed, rejected, or inconclusive, stop exploring and call `submit_seed_verdict`. Do not keep expanding to unrelated services or generic resource metrics after the fault-specific trace, metric, and log checks are covered.
+
 ### 1. Discover available data first
 
 - Call `list_tables` first.
@@ -30,6 +32,7 @@ You MUST investigate traces, metrics, and logs before submitting a verdict. Do n
 - For service targets, find which services call the target in the normal window and which caller endpoints own those calls.
 - For link targets like `link:A->B`, use the normal window to establish which direction is actually exercised. If the injection direction is `both`, unknown, or the named direction has no normal parent-child calls, check both `A -> B` and `B -> A` and use the direction that exists in normal traces.
 - For link targets, the joined `child` row is usually the peer service's server span. That server span can remain healthy even when the link is degraded. Also query the rule-bearing/source service's own outbound/client spans to the peer (discover them by `service_name`, `span_name`, `attr.span_kind`, RPC/HTTP names, and peer/service attributes). A source client span that slows by the configured magnitude while the peer server span stays flat is strong link-fault evidence, not a contradiction.
+- For datastore/backing-service link targets such as `mysql`, `postgres`, `redis`, or `mongodb`, the peer may not appear as a separate `service_name`. Discover datastore spans under the rule-bearing service by SQL/cache operation span names (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE`), repository/DAO names, `attr.span_kind` values, and metric peer attributes. Compare those spans directly in normal vs abnormal windows. When writing pattern predicates, parenthesize `OR` groups so a broad pattern does not accidentally include every service.
 - In the abnormal window, do not require successful caller->callee child spans across a partitioned, lost, aborted, or corrupted link. Their disappearance can be the fault's expected signature. Instead compare the caller-owned spans and endpoints that normally depend on the link: count, p99/max latency, trace status, HTTP status, new error-handler spans, timeout-like durations, and selective call disappearance.
 - Also check the callers' own inbound endpoints. A caller may return HTTP 5xx or time out on its inbound span even when the cross-service child span is missing.
 

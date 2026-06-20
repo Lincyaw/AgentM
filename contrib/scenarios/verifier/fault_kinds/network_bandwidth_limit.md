@@ -9,6 +9,15 @@ Latency rises only on spans whose payloads are large enough to
 saturate the cap. Small spans look normal. Throughput metrics on
 the rule-bearing side flatten.
 
+For links to backing datastores such as MySQL, the peer may not be
+instrumented as a separate trace service. In that case, look on the
+rule-bearing service for datastore/client spans: SQL operation span
+names such as `SELECT ...`, `INSERT ...`, `UPDATE ...`, `DELETE ...`,
+`ALTER ...`, repository/DAO spans, client span-kind values, and metric
+attributes that name the source or destination workload. A bandwidth
+cap is visible only if those datastore spans slow, time out, disappear
+selectively, or cause caller-side timeout/error symptoms.
+
 ### When the target looks healthy but traffic dropped
 
 A tight bandwidth cap can cause callers to time out waiting for

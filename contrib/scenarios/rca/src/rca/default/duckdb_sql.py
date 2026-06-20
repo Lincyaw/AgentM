@@ -105,6 +105,58 @@ _ID_COLUMNS = frozenset({
 })
 _ID_KEEP = 12
 
+def _scrub_sql_literals_and_comments(sql: str) -> str:
+    """Return SQL text suitable for keyword guards.
+
+    The read-only guard is intentionally simple, but it must not flag SQL
+    keywords that appear inside string literals or quoted identifiers, such as
+    span-name filters for ``'UPDATE %'``.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < len(sql) else ""
+        if ch == "-" and nxt == "-":
+            out.append(" ")
+            out.append(" ")
+            i += 2
+            while i < len(sql) and sql[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        if ch == "/" and nxt == "*":
+            out.append(" ")
+            out.append(" ")
+            i += 2
+            while i < len(sql):
+                if sql[i] == "*" and i + 1 < len(sql) and sql[i + 1] == "/":
+                    out.append(" ")
+                    out.append(" ")
+                    i += 2
+                    break
+                out.append("\n" if sql[i] == "\n" else " ")
+                i += 1
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            out.append(" ")
+            i += 1
+            while i < len(sql):
+                out.append("\n" if sql[i] == "\n" else " ")
+                if sql[i] == quote:
+                    if i + 1 < len(sql) and sql[i + 1] == quote:
+                        out.append(" ")
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
 def _serialize(obj: Any) -> Any:
     if isinstance(obj, datetime):
         return obj.isoformat()
@@ -323,11 +375,12 @@ def _validate_sql(sql_raw: str) -> tuple[str, str] | ToolResult:
     if not sql_raw:
         return _err("sql is required")
     sql = sql_raw.rstrip(";").strip()
-    if ";" in sql:
+    guard_sql = _scrub_sql_literals_and_comments(sql)
+    if ";" in guard_sql:
         return _err("only one statement per call (no ';' inside SQL)")
-    if _WRITE_KEYWORDS.search(sql):
+    if _WRITE_KEYWORDS.search(guard_sql):
         return _err("only read-only SELECT/WITH/EXPLAIN/DESCRIBE statements are allowed")
-    head = sql.lstrip().split(None, 1)[0].upper() if sql.lstrip() else ""
+    head = guard_sql.lstrip().split(None, 1)[0].upper() if guard_sql.lstrip() else ""
     if head not in {"SELECT", "WITH", "EXPLAIN", "DESCRIBE", "SHOW", "SUMMARIZE"}:
         return _err(
             f"unsupported leading keyword: {head!r}; "
