@@ -721,7 +721,8 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 r
                 for r in re_eval_raw
                 if r.get("service")
-                and r["service"] not in nodes
+                and r.get("via_service")
+                and r["via_service"] in nodes
             ]
             if not re_eval:
                 judge_rounds_log.append(
