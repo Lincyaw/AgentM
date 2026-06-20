@@ -311,7 +311,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             fpg_adj.setdefault(e["src"], set()).add(e["dst"])
 
         unreachable: list[str] = []
-        for seed_svc in sorted(seeds):
+        for seed_svc in sorted(confirmed_seed_ids):
             if seed_svc not in nodes:
                 unreachable.append(seed_svc)
                 continue
@@ -578,7 +578,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                         from_svc,
                         [all_faults[0][0], all_faults[0][1]],
                     )
-                    if to_svc not in infra_set:
+                    if to_svc not in infra_set and to_svc not in entry_services:
                         queue.append(to_svc)
                 edges.append(
                     _edge_dict(
@@ -593,7 +593,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 in_deg[to_svc] = in_deg.get(to_svc, 0) + 1
 
             if not _unreachable_seed_nodes():
-                ctx.log("all seeds reach entry services; stopping propagation")
+                ctx.log("all confirmed seeds reach entry services; stopping propagation")
                 queue = []
                 break
 
@@ -883,11 +883,11 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         else:
             node.pop("combine", None)
 
-    # -- Reachability check: every seed should reach an entry service --
+    # -- Reachability check: every confirmed seed should reach an entry service --
     ctx.phase("validate")
     unreachable = _unreachable_seed_nodes()
     for seed_svc in sorted(seeds):
-        if seed_svc not in nodes:
+        if seed_svc not in confirmed_seed_ids:
             ctx.log(f"⚠ seed {seed_svc}: not confirmed")
             continue
         if seed_svc in unreachable:
@@ -897,7 +897,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             )
 
     if not unreachable:
-        ctx.log("✓ all seeds reach entry services")
+        ctx.log("✓ all confirmed seeds reach entry services")
 
     result_out: PropagationResult = {
         "nodes": [nodes[k] for k in sorted(nodes)],

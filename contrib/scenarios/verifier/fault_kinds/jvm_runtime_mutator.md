@@ -84,10 +84,22 @@ its spans.
 
 If the caller shows explicit errors (4xx/5xx, exceptions from
 validating the corrupted response), confirm with
-`error_rate_elevated`. If the only signal is that the
-fault-related endpoints vanished while others are healthy, mark
-as **inconclusive** — the judge can determine with the full
-graph whether the disappearance traces back to the mutation.
+`error_rate_elevated`.
+
+If the caller is an entrypoint or user-visible business service and
+the endpoint that normally routes through the mutated method
+selectively vanishes, confirm with `flow_interrupted` even when
+HTTP errors are absent. For runtime mutations, a disappeared
+business operation is often the corruption signal: the request path
+stopped completing because the mutated value broke the downstream
+operation. Corroborate by showing the normal parent-span path, the
+abnormal disappearance of that specific endpoint, and sibling or
+aggregate context proving this is not just a proportional
+system-wide traffic drop.
+
+Use **inconclusive** only when the vanished path is internal,
+low-volume, not clearly user-visible, or cannot be tied to the
+mutated method from this single edge.
 
 ### Callees of the target
 Services the target calls may receive fewer or zero requests
