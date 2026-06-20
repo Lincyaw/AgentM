@@ -375,7 +375,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         confirmed_seed_ids = set()
 
         async def _verify_seed(inj: Injection) -> tuple[Injection, SeedResult | None]:
-            target = inj["target"]
+            target = _injection_node_id(inj) if _is_link_injection(inj) else inj["target"]
             fault_kind = inj.get("chaos_type", "unknown")
             prompt = build_seed_prompt(
                 target=target,

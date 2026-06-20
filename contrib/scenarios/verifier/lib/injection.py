@@ -139,6 +139,18 @@ def get_injections(data_dir: Path) -> list[dict[str, str]]:
             for k in ("method", "route", "path", "server_port")
             if point.get(k) not in (None, "")
         }
+    for k in (
+        "direction",
+        "latency",
+        "jitter",
+        "loss",
+        "correlation",
+        "bandwidth",
+        "rate",
+        "limit",
+    ):
+        if display.get(k) not in (None, ""):
+            params[k] = display[k]
     if not target:
         gt = injection.get("ground_truth")
         if isinstance(gt, dict):
