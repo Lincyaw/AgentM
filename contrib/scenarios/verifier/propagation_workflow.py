@@ -600,7 +600,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     # -- Judge + re-evaluation loop --
     judge_result: JudgeReviewResult | None = None
     judge_rounds_log: list[dict[str, Any]] = []
-    if not skip_judge and verdicts:
+    judge_needed = bool(_unreachable_seed_nodes())
+    if not judge_needed:
+        ctx.log("skipping judge: all confirmed seeds already reach entry services")
+    if not skip_judge and verdicts and judge_needed:
         max_judge_rounds = 2
         for judge_round in range(max_judge_rounds):
             ctx.phase("judge" if judge_round == 0 else f"judge-r{judge_round + 1}")
