@@ -13,13 +13,14 @@ You MUST investigate traces, metrics, and logs before submitting a verdict. Do n
 ### 1. Discover available data first
 
 - Call `list_tables` first.
-- Use `DESCRIBE`, `SELECT DISTINCT`, or grouped counts to discover useful trace status columns, HTTP status columns, span names, span-kind values, log levels/templates/messages, metric names, and resource/deployment signals for the target and likely callers.
+- Use `DESCRIBE`, `SELECT DISTINCT`, or grouped counts to discover useful trace status columns, HTTP status columns, span names, span-kind values, log levels/templates/messages, metric names, and resource/deployment signals for the target and likely callers. Discover metric names from every metric-like table returned by `list_tables` (`normal_metrics`, `normal_metrics_sum`, histograms, and their abnormal counterparts), not just one table.
 - If a modality is absent or unusable, show the query that established that and say how it limits the verdict.
 
 ### 2. Target-side checks
 
 - Compare the target across normal and abnormal windows: span count, endpoint breakdown, latency percentiles including p99/max, trace status, HTTP status, and new or vanished span names.
-- Check target resource/deployment/JVM/container metrics that exist in this case: desired vs available replicas, CPU, memory, restarts, GC/JVM, filesystem, network, queue, or other relevant metrics.
+- Check target resource/deployment/JVM/container metrics that exist in this case: desired vs available replicas, CPU, memory, restarts, GC/JVM, filesystem, network, queue, or other relevant metrics. Before using exact metric names, discover available names with grouped counts or pattern searches; do not conclude a metric is absent from a zero-row exact-name query without first broadening the search.
+- For pod/container kill style faults, also check all metric-like tables for restart fingerprints even when explicit restart metrics are absent: monotonic counters reset to lower values (`%cpu%time%`, `jvm.cpu.time`, exporter counters), JVM/application reload spikes (`%class%loaded%`), or memory dropping to a fresh-process baseline (`%memory%usage%`, `%rss%`, `%working_set%`). Use min/max/first/last or time-ordered samples to detect resets; aggregate averages can hide them.
 - Check target logs by level/template/message and inspect error-looking messages.
 
 ### 3. Caller/link checks

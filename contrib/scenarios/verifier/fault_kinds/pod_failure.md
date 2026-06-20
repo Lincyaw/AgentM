@@ -54,6 +54,26 @@ signal then lives on the **caller side** during the kill window:
   concentrated in a narrow time band matching the kill window.
 - k8s deployment-available metrics may stay at their normal value
   if the sampling interval is coarser than the outage.
+- explicit restart counters are often missing. In that case, look for
+  **process-restart fingerprints** in metrics:
+  - monotonic counters such as `container.cpu.time`, `jvm.cpu.time`,
+    `process.runtime.*`, exported span/log counters, or similar values
+    reset to a much lower value at the start of the abnormal window;
+  - JVM/application startup counters jump or reload, e.g.
+    `jvm.class.loaded` spikes after being near zero;
+  - container/JVM memory usage briefly drops to a fresh-process
+    baseline before recovering.
+
+These counter resets are strong seed evidence for `process_killed` even
+when traces look normal over the full abnormal window and
+`k8s.deployment.available` remains 1.
+
+Important: the restart fingerprint is often in cumulative/sum metric
+tables such as `normal_metrics_sum` / `abnormal_metrics_sum`, not in the
+gauge table. Discover metric names across all metric-like tables before
+claiming restart evidence is absent; exact metric names vary, so prefer
+pattern searches such as `%cpu%time%`, `%class%loaded%`, `%memory%usage%`,
+`%rss%`, and `%restart%`.
 
 When the target's own span count and latency look nearly unchanged,
 check the caller side:
