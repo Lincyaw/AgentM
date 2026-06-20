@@ -22,7 +22,11 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 from fpg import Evidence, build_schema, load_profile
-from verifier.lib.finalize_feedback import sql_validation_error_payload
+from verifier.lib.finalize_feedback import (
+    duration_unit_failures,
+    modality_coverage_failures,
+    sql_validation_error_payload,
+)
 
 
 class SeedFinalizeConfig(BaseModel):
@@ -133,8 +137,10 @@ def _validate_sqls(data_dir: Path, verdict: SeedVerdict) -> list[dict[str, str]]
             conn.execute(f"CREATE OR REPLACE MACRO {pct[0]}(x) AS quantile_cont(x, {pct[1]})")
         except duckdb.Error:
             pass
+    view_names: set[str] = set()
     for f in sorted(data_dir.iterdir()):
         if f.is_file() and f.suffix == ".parquet" and f.name != "conclusion.parquet":
+            view_names.add(f.stem)
             path = f.as_posix().replace("'", "''")
             conn.execute(
                 f"CREATE OR REPLACE VIEW {f.stem} AS "
@@ -142,6 +148,7 @@ def _validate_sqls(data_dir: Path, verdict: SeedVerdict) -> list[dict[str, str]]
             )
 
     failures: list[dict[str, str]] = []
+    statements: list[tuple[str, str]] = []
     for i, ev in enumerate(verdict.evidence):
         if ev.query.language != "sql":
             failures.append({
@@ -150,6 +157,7 @@ def _validate_sqls(data_dir: Path, verdict: SeedVerdict) -> list[dict[str, str]]
                 "sql": ev.query.statement,
             })
             continue
+        statements.append((f"evidence[{i}]", ev.query.statement))
         try:
             rows = conn.execute(ev.query.statement).fetchall()
             if not rows:
@@ -164,6 +172,8 @@ def _validate_sqls(data_dir: Path, verdict: SeedVerdict) -> list[dict[str, str]]
                 "sql": ev.query.statement,
             })
 
+    failures.extend(duration_unit_failures(statements))
+    failures.extend(modality_coverage_failures(statements, view_names))
     conn.close()
     return failures
 

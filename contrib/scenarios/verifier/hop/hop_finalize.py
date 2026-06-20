@@ -27,7 +27,11 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 from fpg import Evidence, build_schema, load_profile
-from verifier.lib.finalize_feedback import sql_validation_error_payload
+from verifier.lib.finalize_feedback import (
+    duration_unit_failures,
+    modality_coverage_failures,
+    sql_validation_error_payload,
+)
 
 class HopFinalizeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -143,8 +147,10 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
             conn.execute(f"CREATE OR REPLACE MACRO {pct[0]}(x) AS quantile_cont(x, {pct[1]})")
         except duckdb.Error:
             pass
+    view_names: set[str] = set()
     for f in sorted(data_dir.iterdir()):
         if f.is_file() and f.suffix == ".parquet" and f.name != "conclusion.parquet":
+            view_names.add(f.stem)
             path = f.as_posix().replace("'", "''")
             conn.execute(
                 f"CREATE OR REPLACE VIEW {f.stem} AS "
@@ -158,6 +164,7 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
     if verdict.relationship is not None:
         items.append(("relationship", verdict.relationship))
 
+    statements: list[tuple[str, str]] = []
     for location, ev in items:
         if ev.query.language != "sql":
             failures.append({
@@ -167,6 +174,7 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
                 "sql": ev.query.statement,
             })
             continue
+        statements.append((location, ev.query.statement))
         try:
             rows = conn.execute(ev.query.statement).fetchall()
             if not rows:
@@ -181,6 +189,8 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
                 "sql": ev.query.statement,
             })
 
+    failures.extend(duration_unit_failures(statements))
+    failures.extend(modality_coverage_failures(statements, view_names))
     conn.close()
     return failures
 
