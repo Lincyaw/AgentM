@@ -34,9 +34,12 @@ scratchpad. Add an observation there only when it is a meaningful,
 fault-shaped entry symptom that should be explained by the final graph:
 new or materially worse errors, 5xx, timeout-level or large tail-latency
 spikes, a user-visible/alarm endpoint selectively disappearing, or a
-large entry traffic collapse. Do not list incidental traffic-mix changes
-there: low-volume endpoints with only a handful of normal spans, no
-abnormal latency sample because no request arrived, no 4xx/5xx/trace
+large entry traffic collapse that is selective to a user-visible path or
+corroborated by timeout/error/fail-fast/load-generator blocking evidence.
+Do not list incidental or demand-side traffic changes there: low-volume
+endpoints with only a handful of normal spans, no abnormal latency sample
+because no request arrived, broad proportional ingress drops where the
+surviving requests are all successful with stable latency, no 4xx/5xx/trace
 errors, and no plausible path from any seed. Mention those benign
 observations in `entry_explanation` if useful, but keep
 `unexplained_entry_observations` empty when the remaining entry changes
