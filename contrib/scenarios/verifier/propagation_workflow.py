@@ -1101,8 +1101,11 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             ])
             for inj, seed_verdict in seed_results:
                 seed_id = _injection_node_id(inj)
+                previous_seed_verdict = seed_verdicts.get(seed_id)
                 if seed_verdict:
                     seed_verdicts[seed_id] = seed_verdict
+                    if seed_verdict != previous_seed_verdict:
+                        changed = True
                 verdict = seed_verdict.get("verdict") if seed_verdict else "no-result"
                 rework_log.append({
                     "kind": "seed_recheck",
@@ -1172,7 +1175,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     "verdict": (hop_verdict or "no-result") + "(audit-rework)",
                 })
                 if isinstance(result, dict) and hop_verdict:
+                    previous_hop_verdict = verdicts.get(edge_key)
                     verdicts[edge_key] = result
+                    if result != previous_hop_verdict:
+                        changed = True
                 rework_log.append({
                     "kind": "hop_recheck",
                     "from": from_svc,
