@@ -161,10 +161,8 @@ def _node_from_seed(
     window: dict[str, str],
 ) -> dict[str, Any]:
     """Build an fpg EventNode dict from a confirmed or inconclusive seed verdict."""
-    predicate = (
-        _link_root_predicate(inj)
-        if _is_link_injection(inj)
-        else verdict.get("predicate") or "other"
+    predicate = verdict.get("predicate") or (
+        _link_root_predicate(inj) if _is_link_injection(inj) else "other"
     )
     node: dict[str, Any] = {
         "kind": "event",
