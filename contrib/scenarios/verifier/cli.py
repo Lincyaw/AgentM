@@ -125,12 +125,16 @@ def _write_outputs(
         "rounds": result.get("rounds", 0),
         "verdicts": result.get("verdicts", {}),
     }
-    if result.get("judge_rounds"):
-        run_meta["judge_rounds"] = result["judge_rounds"]
-    if result.get("judge"):
-        run_meta["judge"] = result["judge"]
+    if result.get("gate_log"):
+        run_meta["gate_log"] = result["gate_log"]
+    if result.get("audit_rounds"):
+        run_meta["audit_rounds"] = result["audit_rounds"]
+    if result.get("audit"):
+        run_meta["audit"] = result["audit"]
     if result.get("unreachable_seeds"):
         run_meta["unreachable_seeds"] = result["unreachable_seeds"]
+    if result.get("reachability_warnings"):
+        run_meta["reachability_warnings"] = result["reachability_warnings"]
     if result.get("seed_verdicts"):
         run_meta["seed_verdicts"] = result["seed_verdicts"]
     if result.get("confirmed_seeds") is not None:
@@ -157,12 +161,16 @@ def _write_error_meta(
         run_meta["rounds"] = result.get("rounds", 0)
     if result.get("verdicts"):
         run_meta["verdicts"] = result["verdicts"]
-    if result.get("judge_rounds"):
-        run_meta["judge_rounds"] = result["judge_rounds"]
-    if result.get("judge"):
-        run_meta["judge"] = result["judge"]
+    if result.get("gate_log"):
+        run_meta["gate_log"] = result["gate_log"]
+    if result.get("audit_rounds"):
+        run_meta["audit_rounds"] = result["audit_rounds"]
+    if result.get("audit"):
+        run_meta["audit"] = result["audit"]
     if result.get("unreachable_seeds"):
         run_meta["unreachable_seeds"] = result["unreachable_seeds"]
+    if result.get("reachability_warnings"):
+        run_meta["reachability_warnings"] = result["reachability_warnings"]
     if result.get("seed_verdicts"):
         run_meta["seed_verdicts"] = result["seed_verdicts"]
     if result.get("confirmed_seeds") is not None:
@@ -177,6 +185,7 @@ def _run_one(
     out_dir: Path,
     budget: int = 15,
     judge_model: str | None = None,
+    gate_retries: int = 3,
 ) -> dict:
     data_dir = case_dir.resolve()
     out = out_dir.resolve()
@@ -195,6 +204,7 @@ def _run_one(
         out_dir=str(out),
         budget=budget,
         judge_model=judge_model,
+        gate_retries=gate_retries,
     )
     result = asyncio.run(_run_workflow(workflow_args, out))
 
@@ -283,12 +293,25 @@ def run(
             help="config.toml profile name used only by the judge agent",
         ),
     ] = None,
+    gate_retries: Annotated[
+        int,
+        typer.Option(
+            "--gate-retries",
+            help="retry a seed/hop this many times after its gate rejects it",
+        ),
+    ] = 3,
 ) -> None:
     """Run propagation check on a single case."""
     if model:
         os.environ["AGENTM_MODEL"] = model
     out_dir = out or case_dir.resolve() / ".verify_propagate"
-    summary = _run_one(case_dir, out_dir, budget=budget, judge_model=judge_model)
+    summary = _run_one(
+        case_dir,
+        out_dir,
+        budget=budget,
+        judge_model=judge_model,
+        gate_retries=gate_retries,
+    )
     if "error" in summary:
         raise typer.Exit(1)
 
@@ -338,6 +361,13 @@ def batch(
             help="config.toml profile name used only by the judge agent",
         ),
     ] = None,
+    gate_retries: Annotated[
+        int,
+        typer.Option(
+            "--gate-retries",
+            help="retry each seed/hop this many times after its gate rejects it",
+        ),
+    ] = 3,
     limit: Annotated[int | None, typer.Option(help="max cases")] = None,
     offset: Annotated[int, typer.Option(help="skip first N cases")] = 0,
 ) -> None:
@@ -367,6 +397,7 @@ def batch(
                 case_out,
                 budget=budget,
                 judge_model=judge_model,
+                gate_retries=gate_retries,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[{}] {}", name, exc)

@@ -1,16 +1,18 @@
-"""Build the per-edge user prompt for hop agents.
+"""Context atom and prompt builder for hop agents.
 
-Pure function module — no atom, no event subscription. The workflow
-imports :func:`build_hop_prompt` and passes the result as the user
-message to ``ctx.agent(prompt=...)``.
+The workflow passes structured atom_config into this atom. The atom
+injects the full hop task into the child session, so the workflow can
+treat ``scenario='verifier/hop'`` as a callable map function.
 """
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Any, Final
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.extensions import ExtensionManifest
 from fpg.scenario import EventNode
 
 
@@ -18,6 +20,28 @@ class PriorVerdict(BaseModel):
     model_config = ConfigDict(extra="ignore")
     verdict: str = ""
     rationale: str = ""
+
+
+class HopContextConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    from_service: str
+    to_service: str
+    rel_type: str
+    fault_kind: str
+    all_faults: list[tuple[str, str, str]] = Field(default_factory=list)
+    fault_docs: dict[str, str] = Field(default_factory=dict)
+    is_infra: bool = False
+    upstream_evidence: dict[str, Any] | None = None
+    judge_context: str = ""
+    prior_verdict: PriorVerdict | None = None
+
+
+MANIFEST = ExtensionManifest(
+    name="hop_context",
+    description="Injects structured single-hop verification context.",
+    registers=(f"event:{BeforeAgentStartEvent.CHANNEL}",),
+    config_schema=HopContextConfig,
+)
 
 
 # ---------------------------------------------------------------
@@ -140,9 +164,35 @@ def build_hop_prompt(
         sections.append(
             f"## Re-evaluation (prior verdict: {prior_verdict.verdict})\n"
             f'You previously concluded: "{prior_verdict.rationale}"\n'
-            f"The judge asks you to re-evaluate with the context below."
+            f"The audit layer asks you to re-evaluate with the context below."
         )
     if judge_context:
-        sections.append(f"## Judge's global context\n{judge_context}")
+        sections.append(f"## Audit / global feedback context\n{judge_context}")
 
     return "\n\n".join(sections)
+
+
+def install(api: ExtensionAPI, config: HopContextConfig) -> None:
+    prompt = build_hop_prompt(
+        from_service=config.from_service,
+        to_service=config.to_service,
+        rel_type=config.rel_type,
+        fault_kind=config.fault_kind,
+        all_faults=config.all_faults,
+        fault_docs=config.fault_docs,
+        is_infra=config.is_infra,
+        upstream_evidence=config.upstream_evidence,
+        judge_context=config.judge_context,
+        prior_verdict=config.prior_verdict,
+    )
+
+    def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
+        current = str(event.system or "")
+        injected = f"{current}\n\n{prompt}" if current else prompt
+        event.system = injected
+        return {"system": injected}
+
+    api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
+
+
+__all__: Final = ["MANIFEST", "install", "PriorVerdict", "build_hop_prompt"]

@@ -814,6 +814,8 @@ class _WorkflowRun:
                     "session_id": child.session_id,
                     "scenario": scenario or self.default_scenario,
                     "model": model.strip() if isinstance(model, str) else None,
+                    "trace_label": trace_label,
+                    "workflow_node_id": trace_label,
                     "prompt": prompt[:200],
                 })
                 self.budget_svc.attach(child)

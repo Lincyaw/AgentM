@@ -30,6 +30,8 @@ Once you have sampled every required modality that exists in the case and have e
 
 - Always establish normal call paths with a `normal_traces` self-join on `parent_span_id`. When `trace_id` exists, join on both `parent.span_id = child.parent_span_id` and `parent.trace_id = child.trace_id`; do not rely on `span_id` alone across unrelated traces. This is the primary way to find callers and endpoints. Do NOT reject a link/path fault just because `attr.span_kind = 'CLIENT'` is absent, zero, or encoded differently.
 - For service targets, find which services call the target in the normal window and which caller endpoints own those calls.
+- For service-scoped code-change faults such as JVM runtime mutation, return-value mutation, bad config, semantic corruption, or route/path mutation, caller-side behavior is mandatory evidence. The target service may return ordinary HTTP 200 on its local span while its caller sees wrong data, fast failure, timeout, validation failure, or a selective endpoint latency/error change. Before rejecting one of these faults, identify the caller endpoints that normally invoke the affected target method/path and compare those caller-owned inbound spans in the abnormal window: span count, HTTP status, trace status, p95/p99/max latency, fail-fast latency drops, new error-handler spans, and selective disappearance.
+- Keep caller-side evidence aligned with the injected method, constant, route, or value. A sibling endpoint on the same target service can be anomalous because of another fault; do not confirm this seed from that sibling anomaly unless the trace path shows it depends on the injected method/path/value. Conversely, if the affected caller endpoint is healthy but a different endpoint is slow or failing, say that explicitly and do not use the unrelated endpoint as confirmation.
 - For link targets like `link:A->B`, use the normal window to establish which direction is actually exercised. If the injection direction is `both`, unknown, or the named direction has no normal parent-child calls, check both `A -> B` and `B -> A` and use the direction that exists in normal traces.
 - For link targets, the joined `child` row is usually the peer service's server span. That server span can remain healthy even when the link is degraded. Also query the rule-bearing/source service's own outbound/client spans to the peer (discover them by `service_name`, `span_name`, `attr.span_kind`, RPC/HTTP names, and peer/service attributes). A source client span that slows by the configured magnitude while the peer server span stays flat is strong link-fault evidence, not a contradiction.
 - For datastore/backing-service link targets such as `mysql`, `postgres`, `redis`, or `mongodb`, the peer may not appear as a separate `service_name`. Discover datastore spans under the rule-bearing service by SQL/cache operation span names (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, `CREATE`), repository/DAO names, `attr.span_kind` values, and metric peer attributes. Compare those spans directly in normal vs abnormal windows. When writing pattern predicates, parenthesize `OR` groups so a broad pattern does not accidentally include every service.
@@ -42,6 +44,7 @@ Caller-side evidence can confirm the injection even when the target's surviving 
 ## Interpretation Rules
 
 - Match the verdict to the fault type. Packet loss usually shows tail latency or timeout on callers; CPU/memory/JVM stress should have metric evidence; runtime mutation may show semantic/path disappearance with little structural error; pod failure may show zero target spans plus caller fast-fail/error evidence.
+- For `JVMRuntimeMutator` and similar code mutation faults, treat the target as potentially buggy even when the target process is alive and its own server span has HTTP 200. Check both sides of the bug: target-side evidence that the mutated method/path/value changed downstream behavior, and caller-side evidence that callers of the affected target endpoint observed errors, latency, fail-fast behavior, flow interruption, or wrong-data symptoms. A rejection is only complete when both sides are checked and no fault-aligned caller or target-path signal exists.
 - For network partitions and similar severed-link faults, `abnormal` zero child calls across the link can be the fault signature only if the source side or its callers still attempted the affected operation. Confirm with source-owned inbound/client spans, caller timeout/error/status changes, vanished child spans under still-present parent work, or connection/no-route logs. If the rule-bearing/source service has zero abnormal spans or no affected caller-owned attempts because an upstream flow stopped calling it, the partitioned link was not visibly exercised; do not confirm from zero traffic alone.
 - For non-severing link faults such as bandwidth limits, delay, loss, duplication, or corruption, `abnormal` zero target spans or zero datastore calls is not confirmation by itself. Confirm only when the link's own spans, the rule-bearing service's outbound/client spans, relevant network/throughput metrics, logs, or caller-owned endpoints show the fault-shaped signal: p99/max latency growth, timeout/error/status changes, corrupted/duplicated responses, throughput flattening under load, or selective caller-side interruption tied to the link. If normal link traffic is tiny and abnormal has zero calls with no caller-side latency/error/log/metric evidence, treat the injection as not visibly exercised or inconclusive rather than confirmed.
 - Separate selective path effects from global traffic drift. A target span-count drop alone is not enough if the whole system dropped proportionally.
@@ -57,6 +60,18 @@ Caller-side evidence can confirm the injection even when the target's surviving 
 - **inconclusive**: some anomaly exists but this single seed view cannot prove the injection caused it, or required data is unavailable and the remaining evidence cannot disambiguate.
 
 Submit via `submit_seed_verdict` with re-executable SQL evidence and the required `investigation_coverage` object. The coverage object must summarize schema discovery, target trace checks, caller/link trace checks, metric checks, log checks, and fault-specific reasoning. It is audit metadata and does not replace SQL evidence.
+
+## Submit-tool error recovery
+
+`submit_seed_verdict` validates your payload. If it returns a tool error
+such as `validation_failed` or `sql_validation_failed`, treat that tool
+result as repair feedback. Fix the specific argument or SQL evidence the
+tool named, run `query_sql` when needed, and call `submit_seed_verdict`
+again. Do not stop after a submit-tool error and do not answer in prose.
+
+Avoid fragile SQL aliases that collide with DuckDB keywords. In
+particular, do not alias a column as `window`; use `win`, `phase`, or
+`sample_window` instead.
 
 ## Data units
 

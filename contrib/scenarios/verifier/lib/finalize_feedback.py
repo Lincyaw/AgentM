@@ -25,6 +25,16 @@ def _annotate_sql_failure(failure: dict[str, str]) -> dict[str, str]:
             "Use query.language='sql' and put the DuckDB statement in "
             "query.statement."
         )
+    elif 'near "window"' in error or "near 'window'" in error:
+        annotated["why"] = (
+            "`window` is parsed as a reserved DuckDB keyword in this "
+            "statement, so the evidence SQL cannot be re-executed."
+        )
+        annotated["fix"] = (
+            "Rename the output alias from `window` to a non-reserved name "
+            "such as `win`, `phase`, or `sample_window`, then rerun the SQL "
+            "with query_sql before resubmitting."
+        )
     elif error.startswith("missing required modality:"):
         modality = error.rsplit(":", 1)[-1].strip()
         annotated["why"] = (
@@ -72,6 +82,10 @@ def sql_validation_error_payload(failures: list[dict[str, str]]) -> dict[str, An
         hints.append(
             "At least one evidence item is not executable as written; fix it "
             "with query_sql before resubmitting."
+        )
+    if any("near \"window\"" in failure.get("error", "") for failure in failures):
+        hints.append(
+            "`window` is a poor SQL alias here; use `win` or `phase` instead."
         )
     if any(
         failure.get("error", "").startswith("missing required modality:")

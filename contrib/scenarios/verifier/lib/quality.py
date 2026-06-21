@@ -9,6 +9,9 @@ from typing import Any
 from .injection import get_injections
 
 
+_RESOLVED_NON_ENTRY = {"local_only", "benign_or_no_effect"}
+
+
 def _load_json(path: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text())
@@ -119,6 +122,22 @@ def _judge_unexplained_entry(meta: dict[str, Any] | None) -> list[str]:
         for item in raw
         if isinstance(item, str) and item.strip()
     ]
+
+
+def _audit_seed_coverage(meta: dict[str, Any] | None) -> dict[str, str]:
+    if not meta:
+        return {}
+    audit = meta.get("audit")
+    if not isinstance(audit, dict):
+        return {}
+    raw = audit.get("seed_coverage", {})
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        seed: coverage
+        for seed, coverage in raw.items()
+        if isinstance(seed, str) and isinstance(coverage, str)
+    }
 
 
 def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, Any]:
@@ -243,6 +262,7 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
     scenario_seeds = [i.get("node_id") for i in injections if i.get("node_id")]
     seed_verdicts = _seed_verdict_map(meta)
     judge_unexplained = _judge_unexplained_entry(meta)
+    audit_coverage = _audit_seed_coverage(meta)
     raw_confirmed_seeds = meta.get("confirmed_seeds", []) if meta else []
     confirmed_seed_records = {
         seed for seed in raw_confirmed_seeds if isinstance(seed, str)
@@ -254,6 +274,7 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
         | set(seed_verdicts)
         | set(scenario_seeds)
         | set(workflow_unreachable)
+        | set(audit_coverage)
     )
     node_by_id = {
         node_id: n
@@ -289,6 +310,8 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
             confirmed = graph_confirmed
         reachable = _reachable_from(seed, adj) if seed_node is not None else set()
         reached_entry = sorted(reachable & entry_nodes)
+        coverage = audit_coverage.get(seed)
+        resolved_non_entry = coverage in _RESOLVED_NON_ENTRY
         seed_status.append({
             "seed": seed,
             "confirmed": confirmed,
@@ -303,10 +326,16 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
             "predicate": predicate,
             "reaches_entry": confirmed and bool(reached_entry),
             "reached_entry": reached_entry,
+            "audit_coverage": coverage,
+            "audit_resolved_non_entry": resolved_non_entry,
         })
 
     missing_seeds = [s["seed"] for s in seed_status if not s["confirmed"]]
-    unreachable_seeds = [s["seed"] for s in seed_status if s["confirmed"] and not s["reaches_entry"]]
+    unreachable_seeds = [
+        s["seed"]
+        for s in seed_status
+        if s["confirmed"] and not s["reaches_entry"] and not s["audit_resolved_non_entry"]
+    ]
     reachable_seeds = [s["seed"] for s in seed_status if s["reaches_entry"]]
     actual_unreachable = set(missing_seeds) | set(unreachable_seeds)
     workflow_unreachable_failures = sorted(set(workflow_unreachable) & actual_unreachable)
@@ -347,6 +376,7 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
         "edge_count": len(edges),
         "seed_verdicts": seed_verdicts,
         "confirmed_seeds": sorted(confirmed_seed_records),
+        "audit_seed_coverage": audit_coverage,
         "judge_unexplained_entry_observations": judge_unexplained,
     }
 

@@ -1,7 +1,31 @@
-"""Build the user prompt for seed verification agents."""
+"""Context atom and prompt builder for seed verification agents."""
 from __future__ import annotations
 
+from typing import Final
+
+from pydantic import BaseModel, ConfigDict
+
+from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.extensions import ExtensionManifest
+
 _FAULT_CONTEXT_TEMPLATE = "Injected fault: {fault_kind} on {target}"
+
+
+class SeedContextConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target: str
+    fault_kind: str
+    params: str = ""
+    fault_doc: str = ""
+    judge_context: str = ""
+
+
+MANIFEST = ExtensionManifest(
+    name="seed_context",
+    description="Injects structured seed verification context.",
+    registers=(f"event:{BeforeAgentStartEvent.CHANNEL}",),
+    config_schema=SeedContextConfig,
+)
 
 
 def build_seed_prompt(
@@ -41,10 +65,31 @@ def build_seed_prompt(
 
     if judge_context:
         sections.append(
-            "## Judge's global context\n"
+            "## Audit / global feedback context\n"
             + judge_context
             + "\n\nRe-check the seed against this whole-graph/entry-service context. "
             "Do not change the verdict unless fresh SQL/log/metric evidence supports it."
         )
 
     return "\n\n".join(sections)
+
+
+def install(api: ExtensionAPI, config: SeedContextConfig) -> None:
+    prompt = build_seed_prompt(
+        target=config.target,
+        fault_kind=config.fault_kind,
+        params=config.params,
+        fault_doc=config.fault_doc,
+        judge_context=config.judge_context,
+    )
+
+    def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
+        current = str(event.system or "")
+        injected = f"{current}\n\n{prompt}" if current else prompt
+        event.system = injected
+        return {"system": injected}
+
+    api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
+
+
+__all__: Final = ["MANIFEST", "install", "build_seed_prompt"]

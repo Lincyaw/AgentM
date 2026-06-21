@@ -15,6 +15,7 @@ extensions:
       exclude:
         - conclusion.parquet
       token_limit: 10000
+  - local: hop_context
   - local: hop_finalize
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.tool_index

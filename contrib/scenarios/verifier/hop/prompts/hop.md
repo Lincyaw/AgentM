@@ -55,3 +55,15 @@ Trace signals can include count drop/vanish, latency increase, fail-fast latency
 - **inconclusive**: an anomaly exists but this single edge cannot prove whether the fault caused it. Prefer this over rejected when fault-path endpoints changed, traffic vanished without enough metric/log context, status shifted marginally, or a required modality is unavailable and the remaining data cannot disambiguate.
 
 Submit via `submit_hop_verdict` with re-executable SQL evidence and the required `investigation_coverage` object. The coverage object must summarize schema discovery, trace checks, metric checks, log checks, and fault-specific reasoning. It is audit metadata and does not replace SQL evidence.
+
+## Submit-tool error recovery
+
+`submit_hop_verdict` validates your payload. If it returns a tool error
+such as `validation_failed` or `sql_validation_failed`, treat that tool
+result as repair feedback. Fix the specific argument or SQL evidence the
+tool named, run `query_sql` when needed, and call `submit_hop_verdict`
+again. Do not stop after a submit-tool error and do not answer in prose.
+
+Avoid fragile SQL aliases that collide with DuckDB keywords. In
+particular, do not alias a column as `window`; use `win`, `phase`, or
+`sample_window` instead.

@@ -1,10 +1,12 @@
 """Fault propagation verification workflow (module mode), fpg-native.
 
-BFS over the neighbor graph, parallel hop agents, optional judge phase.
-The internal state IS the fpg graph: nodes are fpg EventNode dicts and
-edges are fpg Edge dicts, built incrementally as hops confirm. The fpg
-structural rules are enforced at construction time, not filtered
-afterwards:
+The workflow treats verifier agents as callable map functions. Seed and
+hop agents maximize discovery recall; gate agents audit each local
+investigation; audit agents reduce the merged evidence ledger into a
+global decision and concrete rework. The internal state is the FPG graph:
+nodes are FPG EventNode dicts and edges are FPG Edge dicts, built
+incrementally as seeds/hops confirm. Structural rules are enforced at
+construction time:
 
   - injection seeds are verified independently, but a seed-to-seed edge may
     still be accepted when a hop agent confirms that one injected fault
@@ -13,8 +15,8 @@ afterwards:
   - EVERY edge goes through a hop agent — including edges between two
     already-confirmed services (topological adjacency alone is not
     causal evidence);
-  - a judge promotion must name the upstream service it cascades
-    through, so promoted nodes are connected, never spurious roots.
+  - global audit may request focused seed/hop rechecks or remove causal
+    paths that fail the evidence audit.
 
 Input via ``ctx.args`` (built by ``prepare.CaseContext.to_workflow_args``):
     data_dir, graph, injections, infra_nodes, fault_docs,
@@ -24,19 +26,19 @@ Input via ``ctx.args`` (built by ``prepare.CaseContext.to_workflow_args``):
     existing_state       -- {nodes, edges, verdicts} for skip_propagate
 
 Output: dict with nodes (list of fpg EventNode dicts), edges (list of
-fpg Edge dicts), verdicts, hop_log, rounds, judge (if run).
+fpg Edge dicts), verdicts, hop_log, rounds, gate_log, audit_rounds, and
+the latest audit result.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
-from typing import Any, Required, TypedDict, cast
+from collections.abc import Awaitable, Sequence
+from typing import Annotated, Any, Literal, Required, TypedDict, cast
 
 from agentm.extensions.builtin.workflow import AgentResult, WorkflowContext
+from pydantic import BaseModel, ConfigDict, Field
 
-from .hop.hop_context import PriorVerdict, build_hop_prompt
-from .judge.judge_context import build_judge_prompt
-from .seed.seed_context import build_seed_prompt
+from .hop.hop_context import PriorVerdict
 
 
 class Injection(TypedDict, total=False):
@@ -64,6 +66,7 @@ class SeedResult(TypedDict, total=False):
     rationale: str
     evidence: list[dict[str, Any]]
     claim: str
+    gate: dict[str, Any]
 
 
 class HopResult(TypedDict, total=False):
@@ -73,34 +76,120 @@ class HopResult(TypedDict, total=False):
     evidence: list[dict[str, Any]]
     relationship: dict[str, Any] | None
     claim: str
+    gate: dict[str, Any]
 
 
-class JudgePromotion(TypedDict, total=False):
-    service: Required[str]
-    via_service: Required[str]
-    predicate: str
-    rationale: str
+class GateDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool = Field(
+        description="True when the seed/hop investigation is complete enough "
+        "for reduction."
+    )
+    retryable: bool = Field(
+        default=False,
+        description="True when rerunning the same seed/hop with focused "
+        "feedback can plausibly repair the missing investigation.",
+    )
+    missing_checks: list[str] = Field(default_factory=list)
+    retry_prompt: str | None = None
+    confidence: Literal["high", "medium", "low"] = "medium"
+    rationale: str = ""
 
 
-class JudgeReEval(TypedDict, total=False):
-    service: Required[str]
-    via_service: Required[str]
-    context: str
+class SeedRecheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["seed_recheck"]
+    seed: str
+    context: str = ""
 
 
-class JudgeSeedReEval(TypedDict, total=False):
-    seed: Required[str]
-    context: str
+class HopRecheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["hop_recheck"]
+    from_service: str
+    to_service: str
+    context: str = ""
 
 
-class JudgeReviewResult(TypedDict, total=False):
-    entry_explanation: str
-    unexplained_entry_observations: list[str]
-    add: list[JudgePromotion]
-    re_evaluate: list[JudgeReEval]
-    re_evaluate_seeds: list[JudgeSeedReEval]
-    suggested_remove: list[str]
-    rationale: str
+ReworkRequest = Annotated[
+    SeedRecheckRequest | HopRecheckRequest,
+    Field(discriminator="kind"),
+]
+
+
+class EdgeDrop(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    src: str
+    dst: str
+    seed: str | None = Field(
+        default=None,
+        description="Seed lineage for the invalid path, when known.",
+    )
+    path_id: str | None = Field(
+        default=None,
+        description="Candidate path id that contains this edge, when known.",
+    )
+    reason: str = ""
+
+
+SeedCoverageStatus = Literal[
+    "explains_entry",
+    "local_only",
+    "benign_or_no_effect",
+    "needs_recheck",
+    "invalid_path",
+]
+
+
+class AnomalyAuditReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope: str
+    meaningful_anomalies: list[str] = Field(default_factory=list)
+    explained: list[str] = Field(default_factory=list)
+    unexplained: list[str] = Field(default_factory=list)
+    rework_requests: list[ReworkRequest] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class CausalAuditReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path_id: str
+    path: list[str] = Field(default_factory=list)
+    verdict: Literal["valid", "invalid", "needs_recheck"] = "needs_recheck"
+    invalid_reason: str | None = None
+    weakest_edge: EdgeDrop | None = None
+    rework_requests: list[ReworkRequest] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class SeedCoverageReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    seed: str
+    coverage: SeedCoverageStatus
+    explained_entry_observations: list[str] = Field(default_factory=list)
+    local_effect_observations: list[str] = Field(default_factory=list)
+    rework_requests: list[ReworkRequest] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class GlobalAudit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool
+    seed_coverage: dict[str, SeedCoverageStatus] = Field(default_factory=dict)
+    unexplained_anomalies: list[str] = Field(default_factory=list)
+    invalid_causal_paths: list[str] = Field(default_factory=list)
+    drop_edges: list[EdgeDrop] = Field(default_factory=list)
+    rework_requests: list[ReworkRequest] = Field(default_factory=list)
+    stop_reason: str | None = None
+    rationale: str = ""
 
 
 class PropagationResult(TypedDict, total=False):
@@ -109,11 +198,13 @@ class PropagationResult(TypedDict, total=False):
     verdicts: Required[dict[str, HopResult]]
     hop_log: Required[list[HopLogEntry]]
     rounds: Required[int]
-    judge: JudgeReviewResult
-    judge_rounds: list[dict[str, Any]]
     unreachable_seeds: list[str]
+    reachability_warnings: list[str]
     seed_verdicts: dict[str, SeedResult]
     confirmed_seeds: list[str]
+    gate_log: list[dict[str, Any]]
+    audit: dict[str, Any]
+    audit_rounds: list[dict[str, Any]]
 
 
 def _reaches(adj: dict[str, list[str]], src: str, dst: str) -> bool:
@@ -266,6 +357,32 @@ def _edge_dict(
     return edge
 
 
+def _dump_model(value: Any) -> dict[str, Any]:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _agent_task_prompt(label: str) -> str:
+    return f"Run verifier task `{label}` using the injected atom_config context."
+
+
+def _structured_task_prompt(label: str) -> str:
+    return f"Run structured verifier task `{label}` using atom_config."
+
+
+def _find_child_session(
+    ctx: WorkflowContext,
+    label: str,
+) -> dict[str, Any] | None:
+    for child in reversed(ctx.child_sessions):
+        if child.get("trace_label") == label or child.get("workflow_node_id") == label:
+            return dict(child)
+    return None
+
+
 async def run(ctx: WorkflowContext) -> PropagationResult:
     args = ctx.args
     skip_propagate: bool = args.get("skip_propagate", False)
@@ -296,9 +413,11 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         else None
     )
     fault_docs: dict[str, str] = args.get("fault_docs", {})
-    judge_result: JudgeReviewResult | None = None
-    judge_rounds_log: list[dict[str, Any]] = []
-    seed_recheck_handler: Any = None
+    audit_result: GlobalAudit | None = None
+    audit_rounds_log: list[dict[str, Any]] = []
+    gate_log: list[dict[str, Any]] = []
+    gate_retries = int(args.get("gate_retries", 3))
+    max_audit_rounds = int(args.get("max_audit_rounds", 3))
 
     def _entry_services_from_graph() -> set[str]:
         callers: set[str] = set()
@@ -352,6 +471,288 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 unreachable.append(seed_svc)
         return unreachable
 
+    propagation_roots: list[str] = []
+
+    async def _gate_result(
+        *,
+        task_kind: str,
+        label: str,
+        task: dict[str, Any],
+        submitted_result: dict[str, Any],
+        child_session: dict[str, Any] | None,
+        attempt: int,
+    ) -> GateDecision | None:
+        gate_label = f"gate-{label}"
+        gate_result: AgentResult = await ctx.agent(
+            _structured_task_prompt(gate_label),
+            scenario="verifier/gate",
+            model=judge_model,
+            schema=GateDecision,
+            atom_config={
+                "duckdb_sql": {"data_dir": data_dir},
+                "gate_context": {
+                    "task_kind": task_kind,
+                    "task": task,
+                    "submitted_result": submitted_result,
+                    "child_session": child_session,
+                    "attempt": attempt,
+                },
+            },
+            retry=1,
+            trace_label=gate_label,
+        )
+        return gate_result if isinstance(gate_result, GateDecision) else None
+
+    async def _verify_seed(
+        inj: Injection,
+        judge_context: str = "",
+    ) -> tuple[Injection, SeedResult | None]:
+        target = _injection_node_id(inj) if _is_link_injection(inj) else inj["target"]
+        fault_kind = inj.get("chaos_type", "unknown")
+        task = {
+            "seed": _injection_node_id(inj),
+            "target": target,
+            "fault_kind": fault_kind,
+            "params": inj.get("params", ""),
+            "subject": _injection_subject(inj),
+        }
+        feedback = judge_context
+        last_result: SeedResult | None = None
+        for attempt in range(gate_retries + 1):
+            label = f"seed-{_injection_node_id(inj)}-a{attempt}"
+            result: AgentResult = await ctx.agent(
+                _agent_task_prompt(label),
+                scenario="verifier/seed",
+                atom_config={
+                    "duckdb_sql": {"data_dir": data_dir},
+                    "seed_context": {
+                        "target": target,
+                        "fault_kind": fault_kind,
+                        "params": inj.get("params", ""),
+                        "fault_doc": fault_docs.get(fault_kind, ""),
+                        "judge_context": feedback,
+                    },
+                    "seed_finalize": {"data_dir": data_dir},
+                },
+                retry=1,
+                trace_label=label,
+            )
+            if not isinstance(result, dict):
+                return inj, last_result
+            if result.get("verdict") not in {
+                "confirmed",
+                "rejected",
+                "inconclusive",
+            }:
+                return inj, last_result
+            last_result = cast(SeedResult, result)
+            child_session = _find_child_session(ctx, label)
+            gate = await _gate_result(
+                task_kind="seed",
+                label=label,
+                task=task,
+                submitted_result=dict(last_result),
+                child_session=child_session,
+                attempt=attempt,
+            )
+            if gate is None:
+                return inj, None
+            gate_payload = gate.model_dump(mode="json")
+            last_result["gate"] = gate_payload
+            gate_log.append({
+                "task": "seed",
+                "label": label,
+                "seed": _injection_node_id(inj),
+                "gate": gate_payload,
+            })
+            if gate.accepted:
+                return inj, last_result
+            if attempt >= gate_retries:
+                return inj, None
+            feedback = (
+                (feedback + "\n\n" if feedback else "")
+                + "Gate retry feedback:\n"
+                + (
+                    gate.retry_prompt
+                    or "\n".join(gate.missing_checks)
+                    or gate.rationale
+                )
+            )
+        return inj, last_result
+
+    def _accept_seed_node(inj: Injection, seed_verdict: SeedResult) -> str:
+        root_id = _injection_node_id(inj)
+        nodes[root_id] = _node_from_seed(inj, seed_verdict, window)
+        if not _is_link_injection(inj):
+            propagation_roots.append(root_id)
+            return root_id
+
+        effect_target = _seed_effect_target(inj, seed_verdict)
+        if effect_target not in nodes:
+            nodes[effect_target] = _node_from_link_effect(
+                inj,
+                seed_verdict,
+                window,
+            )
+        node_fault[effect_target] = _fault_record(inj)
+        if effect_target not in adj.get(root_id, []):
+            edges.append(
+                _edge_dict(
+                    root_id,
+                    effect_target,
+                    "link_to_service",
+                    rel_mechanism,
+                    "link fault manifests on the rule-bearing service side",
+                )
+            )
+            adj.setdefault(root_id, []).append(effect_target)
+            in_deg[effect_target] = in_deg.get(effect_target, 0) + 1
+        propagation_roots.append(effect_target)
+        return root_id
+
+    async def _verify_hop(
+        from_svc: str,
+        to_svc: str,
+        rel_type: str,
+        *,
+        judge_context: str = "",
+        prior_verdict: PriorVerdict | None = None,
+    ) -> HopResult | None:
+        hop_fault = node_fault.get(
+            from_svc,
+            [all_faults[0][0], all_faults[0][1]],
+        )
+        edge_fault_kind = hop_fault[0]
+        edge_fault_docs: dict[str, str] = {}
+        if edge_fault_kind in fault_docs:
+            edge_fault_docs[edge_fault_kind] = fault_docs[edge_fault_kind]
+        task = {
+            "from_service": from_svc,
+            "to_service": to_svc,
+            "rel_type": rel_type,
+            "fault_kind": edge_fault_kind,
+            "is_infra": to_svc in infra_set,
+            "prior_verdict": prior_verdict.model_dump(mode="json")
+            if prior_verdict
+            else {},
+        }
+        feedback = judge_context
+        last_result: HopResult | None = None
+        for attempt in range(gate_retries + 1):
+            label = f"hop-{from_svc}-to-{to_svc}-a{attempt}"
+            result: AgentResult = await ctx.agent(
+                _agent_task_prompt(label),
+                scenario="verifier/hop",
+                atom_config={
+                    "duckdb_sql": {"data_dir": data_dir},
+                    "hop_context": {
+                        "from_service": from_svc,
+                        "to_service": to_svc,
+                        "rel_type": rel_type,
+                        "fault_kind": edge_fault_kind,
+                        "all_faults": [
+                            (f[0], f[1], f[2] if len(f) > 2 else "")
+                            for f in all_faults
+                            if len(f) >= 2
+                        ],
+                        "fault_docs": edge_fault_docs,
+                        "is_infra": to_svc in infra_set,
+                        "upstream_evidence": nodes.get(from_svc),
+                        "judge_context": feedback,
+                        "prior_verdict": prior_verdict.model_dump(mode="json")
+                        if prior_verdict
+                        else None,
+                    },
+                    "hop_finalize": {"data_dir": data_dir},
+                },
+                retry=1,
+                trace_label=label,
+            )
+            if not isinstance(result, dict):
+                return last_result
+            if result.get("verdict") not in {
+                "confirmed",
+                "rejected",
+                "inconclusive",
+            }:
+                return last_result
+            last_result = cast(HopResult, result)
+            child_session = _find_child_session(ctx, label)
+            gate = await _gate_result(
+                task_kind="hop",
+                label=label,
+                task=task,
+                submitted_result=dict(last_result),
+                child_session=child_session,
+                attempt=attempt,
+            )
+            if gate is None:
+                return None
+            gate_payload = gate.model_dump(mode="json")
+            last_result["gate"] = gate_payload
+            gate_log.append({
+                "task": "hop",
+                "label": label,
+                "from": from_svc,
+                "to": to_svc,
+                "gate": gate_payload,
+            })
+            if gate.accepted:
+                return last_result
+            if attempt >= gate_retries:
+                return None
+            feedback = (
+                (feedback + "\n\n" if feedback else "")
+                + "Gate retry feedback:\n"
+                + (
+                    gate.retry_prompt
+                    or "\n".join(gate.missing_checks)
+                    or gate.rationale
+                )
+            )
+        return last_result
+
+    def _accept_hop_result(
+        from_svc: str,
+        to_svc: str,
+        rel_type: str,
+        result: HopResult,
+        *,
+        claim_override: str = "",
+    ) -> bool:
+        if _reaches(adj, to_svc, from_svc):
+            hop_log.append(
+                {
+                    "round": round_n,
+                    "from": from_svc,
+                    "to": to_svc,
+                    "verdict": "dropped_cycle",
+                }
+            )
+            return False
+        changed = False
+        if to_svc not in nodes:
+            nodes[to_svc] = _node_from_verdict(to_svc, result, window)
+            node_fault[to_svc] = node_fault.get(
+                from_svc,
+                [all_faults[0][0], all_faults[0][1]],
+            )
+            changed = True
+        if to_svc not in adj.get(from_svc, []):
+            edges.append(
+                _edge_dict(
+                    from_svc,
+                    to_svc,
+                    rel_type,
+                    rel_mechanism,
+                    claim_override or str(result.get("claim", "")),
+                )
+            )
+            adj.setdefault(from_svc, []).append(to_svc)
+            in_deg[to_svc] = in_deg.get(to_svc, 0) + 1
+            changed = True
+        return changed
+
     if skip_propagate:
         existing = cast(dict[str, Any], args.get("existing_state", {}))
         nodes = {n["id"]: n for n in existing.get("nodes", [])}
@@ -390,115 +791,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         seed_verdicts = {}
         confirmed_seed_ids = set()
 
-        async def _verify_seed(
-            inj: Injection,
-            judge_context: str = "",
-        ) -> tuple[Injection, SeedResult | None]:
-            target = _injection_node_id(inj) if _is_link_injection(inj) else inj["target"]
-            fault_kind = inj.get("chaos_type", "unknown")
-            prompt = build_seed_prompt(
-                target=target,
-                fault_kind=fault_kind,
-                params=inj.get("params", ""),
-                fault_doc=fault_docs.get(fault_kind, ""),
-                judge_context=judge_context,
-            )
-            result: AgentResult = await ctx.agent(
-                prompt,
-                scenario="verifier/seed",
-                atom_config={
-                    "duckdb_sql": {"data_dir": data_dir},
-                    "seed_finalize": {"data_dir": data_dir},
-                },
-            )
-            return inj, cast(SeedResult, result) if isinstance(result, dict) else None
-
         seed_coros: list[Awaitable[tuple[Injection, SeedResult | None]]] = [
             _verify_seed(inj) for inj in injections if inj.get("target")
         ]
         seed_results = await ctx.parallel(seed_coros)
-        propagation_roots: list[str] = []
-
-        def _accept_seed_node(inj: Injection, seed_verdict: SeedResult) -> str:
-            root_id = _injection_node_id(inj)
-            nodes[root_id] = _node_from_seed(inj, seed_verdict, window)
-            if not _is_link_injection(inj):
-                propagation_roots.append(root_id)
-                return root_id
-
-            effect_target = _seed_effect_target(inj, seed_verdict)
-            if effect_target not in nodes:
-                nodes[effect_target] = _node_from_link_effect(
-                    inj,
-                    seed_verdict,
-                    window,
-                )
-            node_fault[effect_target] = _fault_record(inj)
-            edges.append(
-                _edge_dict(
-                    root_id,
-                    effect_target,
-                    "link_to_service",
-                    rel_mechanism,
-                    "link fault manifests on the rule-bearing service side",
-                )
-            )
-            adj.setdefault(root_id, []).append(effect_target)
-            in_deg[effect_target] = in_deg.get(effect_target, 0) + 1
-            propagation_roots.append(effect_target)
-            return root_id
-
-        async def _apply_seed_rechecks(
-            seed_rechecks: list[dict[str, Any]],
-        ) -> tuple[list[dict[str, Any]], bool]:
-            inj_by_seed = {
-                _injection_node_id(inj): inj
-                for inj in injections
-                if inj.get("target")
-            }
-            valid_rechecks = [
-                r for r in seed_rechecks
-                if isinstance(r.get("seed"), str)
-                and r["seed"] in inj_by_seed
-                and r["seed"] not in confirmed_seed_ids
-            ]
-            if not valid_rechecks:
-                return [], False
-
-            ctx.phase("seed-re-evaluate")
-            ctx.log(f"Re-evaluating {len(valid_rechecks)} seeds")
-            seed_coros: list[Awaitable[tuple[Injection, SeedResult | None]]] = [
-                _verify_seed(inj_by_seed[r["seed"]], str(r.get("context", "")))
-                for r in valid_rechecks
-            ]
-            seed_re_results = await ctx.parallel(seed_coros)
-            recheck_log: list[dict[str, Any]] = []
-            new_confirmed = False
-            for inj, seed_verdict in seed_re_results:
-                root_id = _injection_node_id(inj)
-                if seed_verdict:
-                    seed_verdicts[root_id] = seed_verdict
-                verdict = seed_verdict.get("verdict") if seed_verdict else "no result"
-                recheck_log.append(
-                    {
-                        "seed": root_id,
-                        "verdict": verdict,
-                        "rationale": seed_verdict.get("rationale", "")
-                        if seed_verdict
-                        else "",
-                    }
-                )
-                if seed_verdict and verdict == "confirmed":
-                    accepted = _accept_seed_node(inj, seed_verdict)
-                    confirmed_seed_ids.add(accepted)
-                    new_confirmed = True
-                    ctx.log(f"  seed re-eval {accepted}: confirmed")
-                else:
-                    ctx.log(f"  seed re-eval {root_id}: {verdict}")
-            return recheck_log, new_confirmed
-
-        seed_recheck_handler = _apply_seed_rechecks
-
         for inj, seed_verdict in seed_results:
             root_id = _injection_node_id(inj)
             if seed_verdict and seed_verdict.get("verdict") == "confirmed":
@@ -508,7 +804,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     f"seed {root_id}: confirmed ({seed_verdict.get('predicate')})"
                 )
             elif seed_verdict and seed_verdict.get("verdict") == "inconclusive":
-                ctx.log(f"seed {root_id}: inconclusive — keeping for judge review")
+                ctx.log(f"seed {root_id}: inconclusive — keeping for audit review")
             else:
                 v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
                 ctx.log(f"seed {root_id}: {v} — skipping")
@@ -518,86 +814,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 seed_verdicts[_injection_node_id(inj)] = seed_verdict
 
         if not nodes:
-            ctx.log("no seeds confirmed — running judge audit before propagation")
-            if not skip_judge:
-                ctx.phase("judge")
-                judge_prompt = build_judge_prompt(
-                    injections=injections,
-                    confirmed=[],
-                    confirmed_edges=[],
-                    entry_services=sorted(entry_services),
-                    unreachable_seeds=sorted(seeds),
-                    seeds=seeds,
-                    seed_verdicts=seed_verdicts,
-                    verdict_by_target={},
-                    inconclusive_verdicts=[],
-                    rejected_verdicts=[],
-                )
-                pre_judge_text: AgentResult = await ctx.agent(
-                    judge_prompt,
-                    scenario="verifier/judge",
-                    model=judge_model,
-                    atom_config={
-                        "duckdb_sql": {"data_dir": data_dir},
-                    },
-                )
-                if not isinstance(pre_judge_text, dict):
-                    ctx.log("  judge returned no structured review; retrying once")
-                    pre_judge_text = await ctx.agent(
-                        judge_prompt
-                        + "\n\nIMPORTANT: Your previous response was not a structured "
-                        "submit_judge_review tool result. Call submit_judge_review now; "
-                        "do not answer in prose.",
-                        scenario="verifier/judge",
-                        model=judge_model,
-                        atom_config={
-                            "duckdb_sql": {"data_dir": data_dir},
-                        },
-                    )
-                if isinstance(pre_judge_text, dict):
-                    judge_result = cast(JudgeReviewResult, pre_judge_text)
-                    if judge_result.get("entry_explanation"):
-                        ctx.log(
-                            "  judge entry audit: "
-                            + judge_result["entry_explanation"][:500]
-                        )
-                    if judge_result.get("unexplained_entry_observations"):
-                        ctx.log(
-                            "  judge unexplained entry observations: "
-                            + "; ".join(judge_result["unexplained_entry_observations"])
-                        )
-                pre_seed_recheck_log, new_seed_confirmed = await _apply_seed_rechecks(
-                    cast(
-                        list[dict[str, Any]],
-                        (judge_result or {}).get("re_evaluate_seeds", []),
-                    )
-                )
-                judge_rounds_log.append(
-                    {
-                        "round": 1,
-                        "judge_decision": dict(judge_result) if judge_result else {},
-                        "re_eval_results": [],
-                        "seed_re_eval_results": pre_seed_recheck_log,
-                        "new_confirmed": new_seed_confirmed,
-                    }
-                )
-
-            if not nodes:
-                ctx.log("no seeds confirmed after judge audit — aborting propagation")
-                early_result_out: PropagationResult = {
-                    "nodes": [],
-                    "edges": [],
-                    "verdicts": {},
-                    "hop_log": [],
-                    "rounds": 0,
-                    "seed_verdicts": seed_verdicts,
-                    "confirmed_seeds": [],
-                }
-                if judge_result:
-                    early_result_out["judge"] = judge_result
-                if judge_rounds_log:
-                    early_result_out["judge_rounds"] = judge_rounds_log
-                return early_result_out
+            ctx.log("no seeds confirmed after seed map; audit may request rechecks")
 
         # -- Phase 1: propagate -------------------------------------------
         ctx.phase("propagate")
@@ -644,37 +861,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 to_svc: str,
                 rel_type: str,
             ) -> HopResult | None:
-                hop_fault = node_fault.get(
-                    from_svc,
-                    [all_faults[0][0], all_faults[0][1]],
-                )
-                edge_fault_kind = hop_fault[0]
-                edge_fault_docs: dict[str, str] = {}
-                if edge_fault_kind in fault_docs:
-                    edge_fault_docs[edge_fault_kind] = fault_docs[edge_fault_kind]
-                prompt = build_hop_prompt(
-                    from_service=from_svc,
-                    to_service=to_svc,
-                    rel_type=rel_type,
-                    fault_kind=edge_fault_kind,
-                    all_faults=[
-                        (f[0], f[1], f[2] if len(f) > 2 else "")
-                        for f in all_faults
-                        if len(f) >= 2
-                    ],
-                    fault_docs=edge_fault_docs,
-                    is_infra=to_svc in infra_set,
-                    upstream_evidence=nodes.get(from_svc),
-                )
-                result: AgentResult = await ctx.agent(
-                    prompt,
-                    scenario="verifier/hop",
-                    atom_config={
-                        "duckdb_sql": {"data_dir": data_dir},
-                        "hop_finalize": {"data_dir": data_dir},
-                    },
-                )
-                return cast(HopResult, result) if isinstance(result, dict) else None
+                return await _verify_hop(from_svc, to_svc, rel_type)
 
             coros: list[Awaitable[HopResult | None]] = [
                 _make_hop_coro(item[0], item[1], item[2]) for item in pending_hops
@@ -706,382 +893,445 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
 
                 if verdict != "confirmed":
                     continue
-                # Re-check the cycle guard: edges accepted earlier in
-                # this same round may have changed reachability.
-                if _reaches(adj, to_svc, from_svc):
-                    hop_log.append(
-                        {
-                            "round": round_n,
-                            "from": from_svc,
-                            "to": to_svc,
-                            "verdict": "dropped_cycle",
-                        }
-                    )
-                    continue
-
                 assert isinstance(result, dict)
-                if to_svc not in nodes:
-                    nodes[to_svc] = _node_from_verdict(to_svc, result, window)
-                    node_fault[to_svc] = node_fault.get(
-                        from_svc,
-                        [all_faults[0][0], all_faults[0][1]],
-                    )
+                was_new_node = to_svc not in nodes
+                accepted = _accept_hop_result(from_svc, to_svc, rel_type, result)
+                if accepted and was_new_node:
                     if to_svc not in infra_set and to_svc not in entry_services:
                         queue.append(to_svc)
-                edges.append(
-                    _edge_dict(
-                        from_svc,
-                        to_svc,
-                        rel_type,
-                        rel_mechanism,
-                        str(result.get("claim", "")),
-                    )
-                )
-                adj.setdefault(from_svc, []).append(to_svc)
-                in_deg[to_svc] = in_deg.get(to_svc, 0) + 1
 
-            if not _unreachable_seed_nodes():
-                ctx.log("all confirmed seeds reach entry services; stopping propagation")
-                queue = []
-                break
+            if not queue:
+                ctx.log("propagation frontier exhausted for this round")
 
-    # -- Judge + re-evaluation loop --
-    judge_needed = bool(nodes)
-    if not judge_needed:
-        ctx.log("skipping judge: no confirmed or candidate nodes to audit")
-    if not skip_judge and judge_needed:
-        max_judge_rounds = 3
-        for judge_round in range(max_judge_rounds):
-            ctx.phase("judge" if judge_round == 0 else f"judge-r{judge_round + 1}")
+    def _case_summary() -> dict[str, Any]:
+        return {
+            "injections": injections,
+            "entry_services": sorted(entry_services),
+            "all_faults": all_faults,
+        }
 
-            verdict_by_target: dict[str, dict[str, Any]] = {}
-            for key, vd in verdicts.items():
-                from_svc, to_svc = key.split("__", 1)
-                vdict = cast(dict[str, Any], vd)
-                verdict_by_target[to_svc] = {
-                    "from": from_svc,
-                    "to": to_svc,
-                    "verdict": vdict.get("verdict", ""),
-                    "rationale": vdict.get("rationale", ""),
-                    "evidence": vdict.get("evidence", []),
-                }
-            inconclusive_verdicts = [
-                v
-                for v in verdict_by_target.values()
-                if v.get("verdict") == "inconclusive" and v["to"] not in nodes
-            ]
-            rejected_verdicts = [
-                v
-                for v in verdict_by_target.values()
-                if v.get("verdict") == "rejected" and v["to"] not in nodes
-            ]
+    def _graph_snapshot() -> dict[str, Any]:
+        return {
+            "nodes": [nodes[k] for k in sorted(nodes)],
+            "edges": list(edges),
+            "entry_services": sorted(entry_services),
+        }
 
-            judge_prompt = build_judge_prompt(
-                injections=injections,
-                confirmed=sorted(nodes),
-                confirmed_edges=edges,
-                entry_services=sorted(entry_services),
-                unreachable_seeds=_unreachable_seed_nodes(),
-                seeds=seeds,
-                seed_verdicts=seed_verdicts,
-                verdict_by_target=verdict_by_target,
-                inconclusive_verdicts=inconclusive_verdicts,
-                rejected_verdicts=rejected_verdicts,
-            )
-            round_judge_text: AgentResult = await ctx.agent(
-                judge_prompt,
-                scenario="verifier/judge",
-                model=judge_model,
-                atom_config={
-                    "duckdb_sql": {"data_dir": data_dir},
-                },
-            )
-            if not isinstance(round_judge_text, dict):
-                ctx.log("  judge returned no structured review; retrying once")
-                round_judge_text = await ctx.agent(
-                    judge_prompt
-                    + "\n\nIMPORTANT: Your previous response was not a structured "
-                    "submit_judge_review tool result. Call submit_judge_review now; "
-                    "do not answer in prose.",
-                    scenario="verifier/judge",
-                    model=judge_model,
-                    atom_config={
-                        "duckdb_sql": {"data_dir": data_dir},
-                    },
-                )
-            if isinstance(round_judge_text, dict):
-                judge_result = cast(JudgeReviewResult, round_judge_text)
-                if judge_result.get("entry_explanation"):
-                    ctx.log("  judge entry audit: " + judge_result["entry_explanation"][:500])
-                if judge_result.get("unexplained_entry_observations"):
-                    ctx.log(
-                        "  judge unexplained entry observations: "
-                        + "; ".join(judge_result["unexplained_entry_observations"])
-                    )
+    def _ledger_snapshot() -> dict[str, Any]:
+        return {
+            "seed_verdicts": seed_verdicts,
+            "hop_verdicts": verdicts,
+            "hop_log": hop_log,
+            "gate_log": gate_log,
+            "confirmed_seeds": sorted(confirmed_seed_ids),
+        }
 
-            round_seed_recheck_log: list[dict[str, Any]] = []
-            seed_recheck_added = False
-            seed_rechecks = cast(
-                list[dict[str, Any]],
-                (judge_result or {}).get("re_evaluate_seeds", []),
-            )
-            if seed_recheck_handler and seed_rechecks:
-                round_seed_recheck_log, seed_recheck_added = await seed_recheck_handler(
-                    seed_rechecks
-                )
-
-            # Apply direct promotions (judge has enough evidence to decide)
-            direct_promotion_added = seed_recheck_added
-            for promo in (judge_result or {}).get("add", []):
-                svc = promo.get("service", "")
-                via = promo.get("via_service", "")
-                if not svc:
-                    ctx.log("  judge add: skipped (missing service)")
-                    continue
-                if via not in nodes:
-                    ctx.log(
-                        f"  judge add {svc!r}: skipped (via_service {via!r} not confirmed)"
-                    )
-                    continue
-                if _reaches(adj, svc, via):
-                    ctx.log(f"  judge add {svc!r}: skipped (would close a cycle)")
-                    continue
-                prior = verdicts.get(via + "__" + svc)
-                rel_type = next(
-                    (info[1] for info in graph.get(via, []) if info[0] == svc),
-                    "",
-                )
-                edge = _edge_dict(
-                    via,
-                    svc,
-                    rel_type,
-                    rel_mechanism,
-                    "judge cascade promotion: " + promo.get("rationale", ""),
-                )
-                if svc in nodes:
-                    if svc in adj.get(via, []):
-                        ctx.log(f"  judge add {svc!r}: skipped (edge already present)")
-                        continue
-                    edges.append(edge)
-                    adj.setdefault(via, []).append(svc)
-                    in_deg[svc] = in_deg.get(svc, 0) + 1
-                    direct_promotion_added = True
-                    ctx.log(f"  judge add edge: {via} -> {svc}")
-                    continue
-                evidence = list(prior.get("evidence", [])) if prior else []
-                predicate = promo.get("predicate") or "process_killed"
-                node: dict[str, Any] = {
-                    "kind": "event",
-                    "id": svc,
-                    "subject": f"svc:{svc}",
-                    "predicate": predicate,
-                    "time": window,
-                    "grounding": "observed" if evidence else "latent",
-                    "evidence": evidence,
-                    "annotation": "auto",
-                }
-                nodes[svc] = node
-                edges.append(edge)
-                adj.setdefault(via, []).append(svc)
-                in_deg[svc] = in_deg.get(svc, 0) + 1
-                direct_promotion_added = True
-                ctx.log(f"  judge add: {via} -> {svc} ({predicate})")
-
-            # Re-evaluate edges the judge flagged for re-investigation
-            re_eval_raw: list[dict[str, Any]] = cast(
-                list[dict[str, Any]],
-                (judge_result or {}).get("re_evaluate", []),
-            )
-            re_eval = [
-                r
-                for r in re_eval_raw
-                if r.get("service")
-                and r.get("via_service")
-                and r["via_service"] in nodes
-            ]
-            if not re_eval:
-                judge_rounds_log.append(
-                    {
-                        "round": judge_round + 1,
-                        "judge_decision": dict(judge_result) if judge_result else {},
-                        "re_eval_results": [],
-                        "seed_re_eval_results": round_seed_recheck_log,
-                        "new_confirmed": direct_promotion_added,
-                    }
-                )
-                if not direct_promotion_added or not _unreachable_seed_nodes():
-                    break
+    def _paths_from(seed: str, max_depth: int = 10) -> list[list[str]]:
+        if seed not in nodes:
+            return []
+        paths: list[list[str]] = []
+        stack: list[tuple[str, list[str]]] = [(seed, [seed])]
+        while stack:
+            cur, path = stack.pop()
+            if cur in entry_services and len(path) > 1:
+                paths.append(path)
                 continue
+            if len(path) >= max_depth:
+                continue
+            for nxt in adj.get(cur, []):
+                if nxt in path:
+                    continue
+                stack.append((nxt, path + [nxt]))
+        return paths
 
-            ctx.phase(f"re-evaluate-r{judge_round + 1}")
-            ctx.log(f"Re-evaluating {len(re_eval)} edges")
+    def _candidate_paths() -> list[tuple[str, str, list[str]]]:
+        out: list[tuple[str, str, list[str]]] = []
+        for seed in sorted(seeds):
+            for idx, path in enumerate(_paths_from(seed)):
+                out.append((f"{seed}:path:{idx}", seed, path))
+        return out
 
-            async def _make_reeval_coro(
-                re: dict[str, Any],
-            ) -> HopResult | None:
-                svc = re["service"]
-                via = re.get("via_service", "")
-                edge_key = via + "__" + svc
-                prior_v: dict[str, Any] = verdicts.get(edge_key, {})  # type: ignore[assignment]
-                hop_fault = node_fault.get(
-                    via,
-                    [all_faults[0][0], all_faults[0][1]],
+    def _rebuild_graph_indices() -> None:
+        nonlocal adj, in_deg
+        adj, in_deg = _rebuild_adjacency()
+
+    def _prune_unreachable_nodes() -> None:
+        reachable: set[str] = set()
+        stack = [seed for seed in confirmed_seed_ids if seed in nodes]
+        while stack:
+            cur = stack.pop()
+            if cur in reachable:
+                continue
+            reachable.add(cur)
+            stack.extend(adj.get(cur, []))
+        for node_id in list(nodes):
+            if node_id not in reachable:
+                nodes.pop(node_id, None)
+        edges[:] = [
+            e for e in edges
+            if e.get("src") in nodes and e.get("dst") in nodes
+        ]
+        _rebuild_graph_indices()
+
+    def _path_contains_edge(path: Sequence[str], src: str, dst: str) -> bool:
+        return any(
+            path[idx] == src and path[idx + 1] == dst
+            for idx in range(len(path) - 1)
+        )
+
+    def _edge_used_by_other_seed(src: str, dst: str, seed: str | None) -> bool:
+        if not seed:
+            return False
+        for other_seed in confirmed_seed_ids:
+            if other_seed == seed:
+                continue
+            if any(_path_contains_edge(path, src, dst) for path in _paths_from(other_seed)):
+                return True
+        return False
+
+    def _drop_matches_reported_lineage(drop: EdgeDrop) -> bool:
+        if drop.path_id:
+            return any(
+                path_id == drop.path_id
+                and _path_contains_edge(path, drop.src, drop.dst)
+                for path_id, _, path in _candidate_paths()
+            )
+        if drop.seed:
+            return any(
+                _path_contains_edge(path, drop.src, drop.dst)
+                for path in _paths_from(drop.seed)
+            )
+        return True
+
+    def _drop_audit_edges(drop_edges: Sequence[EdgeDrop]) -> bool:
+        if not drop_edges:
+            return False
+        doomed: set[tuple[str, str]] = set()
+        for item in drop_edges:
+            if not item.src or not item.dst:
+                continue
+            if not _drop_matches_reported_lineage(item):
+                ctx.log(
+                    f"  audit drop skipped for {item.src} -> {item.dst}: "
+                    "edge is not on the reported seed/path lineage"
                 )
-                edge_fault_kind = hop_fault[0]
-                edge_fault_doc: dict[str, str] = {}
-                if edge_fault_kind in fault_docs:
-                    edge_fault_doc[edge_fault_kind] = fault_docs[edge_fault_kind]
+                continue
+            if _edge_used_by_other_seed(item.src, item.dst, item.seed):
+                ctx.log(
+                    f"  audit drop skipped for {item.src} -> {item.dst}: "
+                    "edge is still used by another seed-to-entry path"
+                )
+                continue
+            doomed.add((item.src, item.dst))
+        if not doomed:
+            return False
+        before = len(edges)
+        edges[:] = [
+            e for e in edges
+            if (str(e.get("src", "")), str(e.get("dst", ""))) not in doomed
+        ]
+        changed = len(edges) != before
+        if changed:
+            _rebuild_graph_indices()
+            _prune_unreachable_nodes()
+        return changed
 
+    # -- Audit map/reduce + rework loop -----------------------------------
+    async def _audit_agent(
+        *,
+        label: str,
+        role: str,
+        instruction: str,
+        payload: dict[str, Any],
+        schema: type[BaseModel],
+    ) -> BaseModel | None:
+        result: AgentResult = await ctx.agent(
+            _structured_task_prompt(label),
+            scenario="verifier/audit",
+            model=judge_model,
+            schema=schema,
+            atom_config={
+                "duckdb_sql": {"data_dir": data_dir},
+                "audit_context": {
+                    "role": role,
+                    "instruction": instruction,
+                    "payload": payload,
+                },
+            },
+            retry=1,
+            trace_label=label,
+        )
+        return result if isinstance(result, BaseModel) else None
+
+    async def _apply_audit_rework(
+        requests: Sequence[ReworkRequest],
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        if not requests:
+            return False, []
+        rework_log: list[dict[str, Any]] = []
+        changed = False
+        inj_by_seed = {
+            _injection_node_id(inj): inj
+            for inj in injections
+            if inj.get("target")
+        }
+
+        seed_requests = [
+            req for req in requests
+            if isinstance(req, SeedRecheckRequest) and req.seed in inj_by_seed
+        ]
+        if seed_requests:
+            ctx.phase("audit-seed-rework")
+            ctx.log(f"Audit requested {len(seed_requests)} seed rechecks")
+            seed_results = await ctx.parallel([
+                _verify_seed(inj_by_seed[req.seed], req.context)
+                for req in seed_requests
+            ])
+            for inj, seed_verdict in seed_results:
+                seed_id = _injection_node_id(inj)
+                if seed_verdict:
+                    seed_verdicts[seed_id] = seed_verdict
+                verdict = seed_verdict.get("verdict") if seed_verdict else "no-result"
+                rework_log.append({
+                    "kind": "seed_recheck",
+                    "seed": seed_id,
+                    "verdict": verdict,
+                    "rationale": seed_verdict.get("rationale", "")
+                    if seed_verdict
+                    else "",
+                })
+                ctx.log(f"  seed recheck {seed_id}: {verdict}")
+                if seed_verdict and verdict == "confirmed":
+                    accepted_seed = _accept_seed_node(inj, seed_verdict)
+                    confirmed_seed_ids.add(accepted_seed)
+                    changed = True
+
+        hop_requests = [
+            req for req in requests
+            if isinstance(req, HopRecheckRequest)
+            and req.from_service in nodes
+        ]
+        if hop_requests:
+            ctx.phase("audit-hop-rework")
+            ctx.log(f"Audit requested {len(hop_requests)} hop rechecks")
+
+            async def _one_hop_rework(
+                req: HopRecheckRequest,
+            ) -> tuple[HopRecheckRequest, HopResult | None]:
                 rel_type = next(
-                    (info[1] for info in graph.get(via, []) if info[0] == svc),
+                    (
+                        info[1]
+                        for info in graph.get(req.from_service, [])
+                        if info[0] == req.to_service
+                    ),
                     "callee_to_caller",
                 )
-                prompt = build_hop_prompt(
-                    from_service=via,
-                    to_service=svc,
-                    rel_type=rel_type,
-                    fault_kind=edge_fault_kind,
-                    all_faults=[
-                        (f[0], f[1], f[2] if len(f) > 2 else "")
-                        for f in all_faults
-                        if len(f) >= 2
-                    ],
-                    fault_docs=edge_fault_doc,
-                    is_infra=svc in infra_set,
-                    upstream_evidence=nodes.get(via),
-                    judge_context=re.get("context", ""),
+                prior = dict(verdicts.get(
+                    req.from_service + "__" + req.to_service,
+                    {},
+                ))
+                return req, await _verify_hop(
+                    req.from_service,
+                    req.to_service,
+                    rel_type,
+                    judge_context=req.context,
                     prior_verdict=PriorVerdict(
-                        verdict=prior_v.get("verdict", ""),
-                        rationale=prior_v.get("rationale", ""),
+                        verdict=str(prior.get("verdict", "")),
+                        rationale=str(prior.get("rationale", "")),
                     ),
                 )
-                result: AgentResult = await ctx.agent(
-                    prompt,
-                    scenario="verifier/hop",
-                    atom_config={
-                        "duckdb_sql": {"data_dir": data_dir},
-                        "hop_finalize": {"data_dir": data_dir},
-                    },
-                )
-                return cast(HopResult, result) if isinstance(result, dict) else None
 
-            re_coros: list[Awaitable[HopResult | None]] = [
-                _make_reeval_coro(r) for r in re_eval
-            ]
-            re_results = await ctx.parallel(re_coros)
-
-            any_new_confirmed = direct_promotion_added
-            for idx_r in range(len(re_eval)):
-                re_item = re_eval[idx_r]
-                svc = re_item["service"]
-                via = re_item.get("via_service", "")
-                result = re_results[idx_r]
-                verdict = result.get("verdict") if isinstance(result, dict) else None
-                edge_key = via + "__" + svc
-                hop_log.append(
-                    {
-                        "round": round_n + judge_round + 1,
-                        "from": via,
-                        "to": svc,
-                        "verdict": (verdict or "no-result") + "(re-eval)",
-                    }
+            hop_results = await ctx.parallel([
+                _one_hop_rework(req) for req in hop_requests
+            ])
+            for req, result in hop_results:
+                from_svc = req.from_service
+                to_svc = req.to_service
+                hop_verdict: str | None = (
+                    result.get("verdict") if isinstance(result, dict) else None
                 )
-                ctx.log(f"  re-eval {via} -> {svc}: {verdict or 'no-result'}")
-                if isinstance(result, dict) and verdict:
+                edge_key = from_svc + "__" + to_svc
+                hop_log.append({
+                    "round": round_n,
+                    "from": from_svc,
+                    "to": to_svc,
+                    "verdict": (hop_verdict or "no-result") + "(audit-rework)",
+                })
+                if isinstance(result, dict) and hop_verdict:
                     verdicts[edge_key] = result
-
-                # confirmed → accept; inconclusive on re-eval → judge's
-                # cascade determination stands, promote it.
-                should_add = verdict == "confirmed" or (
-                    verdict == "inconclusive" and via in nodes
+                rework_log.append({
+                    "kind": "hop_recheck",
+                    "from": from_svc,
+                    "to": to_svc,
+                    "verdict": hop_verdict or "no-result",
+                    "rationale": result.get("rationale", "")
+                    if isinstance(result, dict)
+                    else "",
+                })
+                ctx.log(
+                    f"  hop recheck {from_svc} -> {to_svc}: "
+                    f"{hop_verdict or 'no-result'}"
                 )
-                if not should_add:
+                if hop_verdict != "confirmed" or not isinstance(result, dict):
                     continue
-                if _reaches(adj, svc, via):
-                    continue
-
-                if svc not in nodes:
-                    if verdict == "confirmed" and isinstance(result, dict):
-                        nodes[svc] = _node_from_verdict(svc, result, window)
-                    else:
-                        # Judge-promoted: inconclusive re-eval, use judge's
-                        # predicate or default to flow_interrupted
-                        evidence = (
-                            list(result.get("evidence", []))
-                            if isinstance(result, dict)
-                            else []
-                        )
-                        nodes[svc] = {
-                            "kind": "event",
-                            "id": svc,
-                            "subject": f"svc:{svc}",
-                            "predicate": "flow_interrupted",
-                            "time": window,
-                            "grounding": "observed" if evidence else "latent",
-                            "evidence": evidence,
-                            "annotation": "auto",
-                        }
-                    node_fault[svc] = node_fault.get(
-                        via,
-                        [all_faults[0][0], all_faults[0][1]],
-                    )
-                    any_new_confirmed = True
                 rel_type = next(
-                    (info[1] for info in graph.get(via, []) if info[0] == svc),
-                    "",
+                    (
+                        info[1]
+                        for info in graph.get(from_svc, [])
+                        if info[0] == to_svc
+                    ),
+                    "callee_to_caller",
                 )
-                if svc not in adj.get(via, []):
-                    edges.append(
-                        _edge_dict(
-                            via,
-                            svc,
-                            rel_type,
-                            rel_mechanism,
-                            re_item.get("context", "")[:200]
-                            if verdict == "inconclusive"
-                            else str(
-                                result.get("claim", "")
-                                if isinstance(result, dict)
-                                else ""
-                            ),
-                        )
-                    )
-                    adj.setdefault(via, []).append(svc)
-                    in_deg[svc] = in_deg.get(svc, 0) + 1
-                    any_new_confirmed = True
+                changed = _accept_hop_result(
+                    from_svc,
+                    to_svc,
+                    rel_type,
+                    result,
+                    claim_override=req.context[:200],
+                ) or changed
+        return changed, rework_log
 
-            # Log this judge round
-            re_eval_log: list[dict[str, Any]] = []
-            for i in range(len(re_eval)):
-                r = re_results[i]
-                re_eval_log.append(
-                    {
-                        "service": re_eval[i]["service"],
-                        "via_service": re_eval[i].get("via_service", ""),
-                        "verdict": r.get("verdict") if isinstance(r, dict) else None,
-                        "rationale": r.get("rationale", "")
-                        if isinstance(r, dict)
-                        else "",
-                    }
+    if skip_judge:
+        ctx.log("audit skipped by request")
+    else:
+        for audit_round in range(max_audit_rounds):
+            ctx.phase("audit" if audit_round == 0 else f"audit-r{audit_round + 1}")
+            graph_view = _graph_snapshot()
+            ledger_view = _ledger_snapshot()
+            case_view = _case_summary()
+
+            anomaly_scopes = sorted(entry_services) or ["<entry-services-not-discovered>"]
+            anomaly_results = await ctx.parallel([
+                _audit_agent(
+                    label=f"audit-anomaly-{scope}-r{audit_round}",
+                    role="anomaly_coverage",
+                    instruction=(
+                        "Inspect this entry/service scope. Identify meaningful "
+                        "abnormal trace, metric, or log symptoms and decide "
+                        "whether the current candidate graph explains each one."
+                    ),
+                    payload={
+                        "scope": scope,
+                        "case": case_view,
+                        "candidate_graph": graph_view,
+                        "evidence_ledger": ledger_view,
+                    },
+                    schema=AnomalyAuditReport,
                 )
-            judge_rounds_log.append(
-                {
-                    "round": judge_round + 1,
-                    "judge_decision": dict(judge_result) if judge_result else {},
-                    "re_eval_results": re_eval_log,
-                    "seed_re_eval_results": round_seed_recheck_log,
-                    "new_confirmed": any_new_confirmed,
-                }
+                for scope in anomaly_scopes
+            ])
+            anomaly_reports = [
+                _dump_model(report) for report in anomaly_results if report is not None
+            ]
+
+            path_items = _candidate_paths()
+            causal_results = await ctx.parallel([
+                _audit_agent(
+                    label=f"audit-causal-{path_id}-r{audit_round}",
+                    role="causal_path",
+                    instruction=(
+                        "Audit whether this single seed-to-entry path is a "
+                        "coherent causal explanation. Reject paths that only "
+                        "borrow another seed's symptoms or are merely "
+                        "topologically reachable."
+                    ),
+                    payload={
+                        "path_id": path_id,
+                        "seed": seed,
+                        "path": path,
+                        "case": case_view,
+                        "candidate_graph": graph_view,
+                        "evidence_ledger": ledger_view,
+                    },
+                    schema=CausalAuditReport,
+                )
+                for path_id, seed, path in path_items
+            ])
+            causal_reports = [
+                _dump_model(report) for report in causal_results if report is not None
+            ]
+
+            seed_audit_results = await ctx.parallel([
+                _audit_agent(
+                    label=f"audit-seed-{seed}-r{audit_round}",
+                    role="seed_coverage",
+                    instruction=(
+                        "Classify this seed as explains_entry, local_only, "
+                        "benign_or_no_effect, needs_recheck, or invalid_path."
+                    ),
+                    payload={
+                        "seed": seed,
+                        "case": case_view,
+                        "candidate_graph": graph_view,
+                        "evidence_ledger": ledger_view,
+                        "paths_from_seed": _paths_from(seed),
+                        "causal_reports": [
+                            report for report in causal_reports
+                            if str(report.get("path_id", "")).startswith(seed + ":")
+                        ],
+                        "anomaly_reports": anomaly_reports,
+                    },
+                    schema=SeedCoverageReport,
+                )
+                for seed in sorted(seeds)
+            ])
+            seed_coverage_reports = [
+                _dump_model(report)
+                for report in seed_audit_results
+                if report is not None
+            ]
+
+            reducer = await _audit_agent(
+                label=f"audit-reducer-r{audit_round}",
+                role="audit_reducer",
+                instruction=(
+                    "Merge the audit reports. Accept only when all meaningful "
+                    "anomalies are explained or resolved and every seed has a "
+                    "resolved coverage status. Otherwise emit concrete rework "
+                    "requests and/or path-specific edge drops."
+                ),
+                payload={
+                    "round": audit_round,
+                    "case": case_view,
+                    "candidate_graph": graph_view,
+                    "evidence_ledger": ledger_view,
+                    "anomaly_reports": anomaly_reports,
+                    "causal_reports": causal_reports,
+                    "seed_coverage_reports": seed_coverage_reports,
+                },
+                schema=GlobalAudit,
+            )
+            audit_result = reducer if isinstance(reducer, GlobalAudit) else None
+            audit_payload = (
+                audit_result.model_dump(mode="json") if audit_result else {}
+            )
+            ctx.log(
+                "  audit reducer: "
+                + ("accepted" if audit_result and audit_result.accepted else "needs rework")
             )
 
-            if not any_new_confirmed:
-                # A re-evaluation can resolve an entry-audit concern by
-                # showing that the suspicious endpoint change is reduced
-                # demand rather than a missing propagation node. Run the
-                # judge once more with the fresh rejected/inconclusive
-                # verdicts so unexplained_entry_observations reflects the
-                # final audit state, not the pre-recheck hypothesis.
-                continue
+            dropped = _drop_audit_edges(audit_result.drop_edges if audit_result else [])
+            rework_changed, rework_log = await _apply_audit_rework(
+                audit_result.rework_requests if audit_result else []
+            )
+            audit_rounds_log.append({
+                "round": audit_round + 1,
+                "anomaly_reports": anomaly_reports,
+                "causal_reports": causal_reports,
+                "seed_coverage_reports": seed_coverage_reports,
+                "audit": audit_payload,
+                "dropped_edges": [
+                    item.model_dump(mode="json")
+                    for item in (audit_result.drop_edges if audit_result else [])
+                ],
+                "rework_results": rework_log,
+            })
+
+            if audit_result and audit_result.accepted:
+                break
+            if not dropped and not rework_changed:
+                ctx.log("audit has no effective rework left; stopping audit loop")
+                break
 
     # fpg rule: in-degree >= 2 requires combine; each confirmed edge is
     # an independently sufficient path, so the combination is OR.
@@ -1091,21 +1341,39 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         else:
             node.pop("combine", None)
 
-    # -- Reachability check: every confirmed seed should reach an entry service --
+    def _audit_seed_coverage(seed: str) -> SeedCoverageStatus | None:
+        if audit_result is None:
+            return None
+        return audit_result.seed_coverage.get(seed)
+
+    # -- Validation: unresolved seeds should either reach entry or be audit-resolved.
     ctx.phase("validate")
-    unreachable = _unreachable_seed_nodes()
+    reachability_warnings = _unreachable_seed_nodes()
+    resolved_non_entry = {"local_only", "benign_or_no_effect"}
+    unreachable = [
+        seed
+        for seed in reachability_warnings
+        if _audit_seed_coverage(seed) not in resolved_non_entry
+    ]
     for seed_svc in sorted(seeds):
         if seed_svc not in confirmed_seed_ids:
             ctx.log(f"⚠ seed {seed_svc}: not confirmed")
             continue
-        if seed_svc in unreachable:
+        if seed_svc in reachability_warnings:
+            coverage = _audit_seed_coverage(seed_svc)
+            if coverage in resolved_non_entry:
+                ctx.log(
+                    f"ⓘ seed {seed_svc}: no entry path, resolved by audit as "
+                    f"{coverage}"
+                )
+                continue
             ctx.log(
                 f"⚠ seed {seed_svc}: no path to entry services "
                 f"{sorted(entry_services)} in fpg"
             )
 
     if not unreachable:
-        ctx.log("✓ all confirmed seeds reach entry services")
+        ctx.log("✓ no unresolved confirmed seeds lack entry-service coverage")
 
     result_out: PropagationResult = {
         "nodes": [nodes[k] for k in sorted(nodes)],
@@ -1115,11 +1383,14 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         "rounds": round_n,
         "seed_verdicts": seed_verdicts,
         "confirmed_seeds": sorted(confirmed_seed_ids),
+        "gate_log": gate_log,
     }
-    if judge_result:
-        result_out["judge"] = judge_result
-    if judge_rounds_log:
-        result_out["judge_rounds"] = judge_rounds_log
+    if audit_result:
+        result_out["audit"] = audit_result.model_dump(mode="json")
+    if audit_rounds_log:
+        result_out["audit_rounds"] = audit_rounds_log
+    if reachability_warnings:
+        result_out["reachability_warnings"] = reachability_warnings
     if unreachable:
         result_out["unreachable_seeds"] = unreachable
     return result_out

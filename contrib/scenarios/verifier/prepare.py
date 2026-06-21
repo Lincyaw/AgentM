@@ -44,6 +44,7 @@ class CaseContext:
         budget: int = 15,
         skip_judge: bool = False,
         judge_model: str | None = None,
+        gate_retries: int = 3,
     ) -> dict[str, Any]:
         """Serialize to the dict the workflow script expects."""
         return {
@@ -57,6 +58,7 @@ class CaseContext:
             "out_dir": out_dir,
             "skip_judge": skip_judge,
             "judge_model": judge_model,
+            "gate_retries": gate_retries,
             "rel_mechanism": self.rel_mechanism,
         }
 
