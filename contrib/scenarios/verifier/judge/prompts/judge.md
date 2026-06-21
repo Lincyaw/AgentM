@@ -29,6 +29,19 @@ Your second responsibility is explanation coverage. The current graph is only cr
 
 Always inspect the listed entry services. Compare normal vs abnormal endpoint-level span counts, p95/p99/max latency, trace status, HTTP status, and logs. Identify the concrete entry symptoms: errors, 4xx/5xx, timeout-level latency, endpoint disappearance, traffic collapse, or no meaningful entry anomaly.
 
+Treat `unexplained_entry_observations` as a hard quality gate, not a
+scratchpad. Add an observation there only when it is a meaningful,
+fault-shaped entry symptom that should be explained by the final graph:
+new or materially worse errors, 5xx, timeout-level or large tail-latency
+spikes, a user-visible/alarm endpoint selectively disappearing, or a
+large entry traffic collapse. Do not list incidental traffic-mix changes
+there: low-volume endpoints with only a handful of normal spans, no
+abnormal latency sample because no request arrived, no 4xx/5xx/trace
+errors, and no plausible path from any seed. Mention those benign
+observations in `entry_explanation` if useful, but keep
+`unexplained_entry_observations` empty when the remaining entry changes
+are not meaningful fault symptoms.
+
 Then ask whether the confirmed causal graph explains those entry symptoms. A confirmed path merely reaching `frontend` is not enough. The path must line up with the affected entry endpoint and symptom shape. If the entry symptom is on `/checkout`, a path that only explains `/recommendations` is incomplete. If the graph explains only reduced demand but the entry shows 5xx or timeout, there is a missing or wrong hop.
 
 If your explanation depends on a confirmed or newly promoted service causing an entry/frontend endpoint symptom, the graph must include the final causal hop into that entry service. Add or re-evaluate that `affected_service -> entry_service` edge explicitly. Do not say the graph explains an entry symptom while leaving every confirmed seed without a path to an entry service.
@@ -99,7 +112,7 @@ re-evaluation solely on that basis.
   reduced demand alone; it is edge evidence, not a final node.
 - `suggested_remove` is audit-only and never applied.
 - Always fill `entry_explanation` with your conclusion about whether the current graph explains the entry observations.
-- Fill `unexplained_entry_observations` for entry symptoms that remain unexplained by the current graph. Empty means the graph explains the entry symptoms or there is no meaningful entry anomaly.
+- Fill `unexplained_entry_observations` only for meaningful, fault-shaped entry symptoms that remain unexplained by the current graph. Empty means the graph explains the meaningful entry symptoms, or every remaining entry change is low-volume/no-error traffic mix rather than a fault symptom.
 
 ## Data units
 - `*_traces.duration`: nanoseconds (ns). Divide by 1e6 for ms.
