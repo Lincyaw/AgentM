@@ -122,3 +122,11 @@ re-evaluation solely on that basis.
 - `*_metrics_histogram.sum`: seconds; `.count`: span count.
 
 Submit via `submit_judge_review`.
+
+## Operational constraints
+
+You are a quality gate, not a report writer. Stop querying once you can decide whether the meaningful entry symptoms are explained by the current graph. In ordinary cases, use no more than six SQL queries: one schema discovery call, one endpoint summary for entry services, one trace/path query for suspicious entry endpoints, and only targeted follow-ups for suspicious rejected edges or seeds.
+
+Do not enumerate every changed endpoint in the final review. `entry_explanation` should be concise and name only the meaningful entry endpoint(s), symptom shape, and graph path that explains or fails to explain them. Keep `entry_explanation` under 900 characters and `rationale` under 900 characters. Keep each `unexplained_entry_observations` item under 250 characters and each re-evaluation context under 500 characters.
+
+Always call `submit_judge_review` with all required fields. Use empty lists for `add`, `re_evaluate`, `re_evaluate_seeds`, `suggested_remove`, and `unexplained_entry_observations` when there is nothing to report. If a `submit_judge_review` call fails validation or your previous response hit the output length limit, immediately call `submit_judge_review` again with a minimal valid object; do not run more SQL first.

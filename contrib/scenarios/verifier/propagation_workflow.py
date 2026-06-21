@@ -826,8 +826,8 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             for promo in (judge_result or {}).get("add", []):
                 svc = promo.get("service", "")
                 via = promo.get("via_service", "")
-                if not svc or svc in nodes:
-                    ctx.log(f"  judge add {svc!r}: skipped (missing/already present)")
+                if not svc:
+                    ctx.log("  judge add: skipped (missing service)")
                     continue
                 if via not in nodes:
                     ctx.log(
@@ -838,6 +838,27 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     ctx.log(f"  judge add {svc!r}: skipped (would close a cycle)")
                     continue
                 prior = verdicts.get(via + "__" + svc)
+                rel_type = next(
+                    (info[1] for info in graph.get(via, []) if info[0] == svc),
+                    "",
+                )
+                edge = _edge_dict(
+                    via,
+                    svc,
+                    rel_type,
+                    rel_mechanism,
+                    "judge cascade promotion: " + promo.get("rationale", ""),
+                )
+                if svc in nodes:
+                    if svc in adj.get(via, []):
+                        ctx.log(f"  judge add {svc!r}: skipped (edge already present)")
+                        continue
+                    edges.append(edge)
+                    adj.setdefault(via, []).append(svc)
+                    in_deg[svc] = in_deg.get(svc, 0) + 1
+                    direct_promotion_added = True
+                    ctx.log(f"  judge add edge: {via} -> {svc}")
+                    continue
                 evidence = list(prior.get("evidence", [])) if prior else []
                 predicate = promo.get("predicate") or "process_killed"
                 node: dict[str, Any] = {
@@ -850,17 +871,6 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     "evidence": evidence,
                     "annotation": "auto",
                 }
-                rel_type = next(
-                    (info[1] for info in graph.get(via, []) if info[0] == svc),
-                    "",
-                )
-                edge = _edge_dict(
-                    via,
-                    svc,
-                    rel_type,
-                    rel_mechanism,
-                    "judge cascade promotion: " + promo.get("rationale", ""),
-                )
                 nodes[svc] = node
                 edges.append(edge)
                 adj.setdefault(via, []).append(svc)
