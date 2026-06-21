@@ -40,7 +40,21 @@ When the target itself shows reduced traffic but no degradation:
    Do not generalize this to unrelated downstream callees that merely
    receive proportionally fewer requests from a blocked caller.
 
-For link-scoped verification, normal traffic establishes whether the link is exercised. After the partition starts, missing child spans across the severed link are expected and must not be used by themselves as evidence that the partition had no effect. If the configured direction is `both`, or if the named direction has no normal parent-child calls, check both directions and follow the one that exists in normal traces.
+For link-scoped verification, normal traffic establishes whether the
+link is exercised. After the partition starts, missing child spans
+across the severed link are expected and must not be used by
+themselves as evidence that the partition had no effect. But missing
+child spans confirm a partition only when something still attempted to
+use the link: the rule-bearing service has inbound/source-owned spans
+for the affected operation, its outbound/client spans fail or vanish
+under that attempted work, callers time out or return errors, or logs
+show connection/no-route failures. If the rule-bearing service is
+itself completely idle in the abnormal window because an upstream path
+stopped calling it, the partitioned link was not visibly exercised;
+do not confirm the link from zero traffic alone. If the configured
+direction is `both`, or if the named direction has no normal
+parent-child calls, check both directions and follow the one that
+exists in normal traces.
 
 ## How the failure tends to propagate
 Link-type fault. The edge `rule-bearing side → peer` is the
