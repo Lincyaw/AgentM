@@ -22,6 +22,7 @@ You MUST investigate traces, metrics, and logs before submitting a verdict. Do n
 
 - Establish the normal call path with a `normal_traces` self-join on `parent_span_id`. When `trace_id` exists, join on both `parent.span_id = child.parent_span_id` and `parent.trace_id = child.trace_id`; do not rely on `span_id` alone across unrelated traces. Identify the target endpoints in the upstream's influence zone.
 - Compare those target endpoints across normal and abnormal windows: span count, latency percentiles, trace status, HTTP status, and appearing/disappearing span names.
+- Before counting errors, run grouped/distinct checks for every status-like trace column in both windows. Do not hard-code one encoding such as `"attr.status_code" = 'ERROR'` until the data proves it; datasets may use `Error`, `ERROR`, `STATUS_CODE_ERROR`, `Ok`, or `Unset`. Prefer case-insensitive predicates such as `lower(CAST("attr.status_code" AS VARCHAR)) IN ('error', 'status_code_error')`, and use `TRY_CAST` for HTTP status columns.
 - Also compare target service totals and sibling endpoints. This tells you whether the anomaly is selective to the fault path, service-wide, graph-wide traffic drift, or reduced demand.
 
 Trace signals can include count drop/vanish, latency increase, fail-fast latency drop, error-rate increase, HTTP 4xx/5xx, or new error-handler spans. Error information may live outside `attr.status_code`, so discover and check all relevant status columns.
