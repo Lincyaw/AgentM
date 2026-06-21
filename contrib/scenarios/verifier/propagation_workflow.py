@@ -59,6 +59,7 @@ HopLogEntry = TypedDict(
 
 class SeedResult(TypedDict, total=False):
     verdict: Required[str]
+    effect_target: str | None
     predicate: str | None
     rationale: str
     evidence: list[dict[str, Any]]
@@ -140,6 +141,14 @@ def _injection_effect_target(inj: Injection) -> str:
     return inj.get("effect_target") or inj["target"]
 
 
+def _seed_effect_target(inj: Injection, verdict: SeedResult) -> str:
+    """Return the observed service-side symptom target for a seed."""
+    reported = verdict.get("effect_target")
+    if isinstance(reported, str) and reported.strip():
+        return reported.strip()
+    return _injection_effect_target(inj)
+
+
 def _is_link_injection(inj: Injection) -> bool:
     return _injection_subject(inj).startswith("link:")
 
@@ -185,7 +194,7 @@ def _node_from_link_effect(
     window: dict[str, str],
 ) -> dict[str, Any]:
     """Build the service-side symptom node for a confirmed link injection."""
-    svc = _injection_effect_target(inj)
+    svc = _seed_effect_target(inj, verdict)
     predicate = verdict.get("predicate") or "flow_interrupted"
     node: dict[str, Any] = {
         "kind": "event",
@@ -417,7 +426,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 propagation_roots.append(root_id)
                 return root_id
 
-            effect_target = _injection_effect_target(inj)
+            effect_target = _seed_effect_target(inj, seed_verdict)
             if effect_target not in nodes:
                 nodes[effect_target] = _node_from_link_effect(
                     inj,
@@ -1066,7 +1075,13 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             )
 
             if not any_new_confirmed:
-                break
+                # A re-evaluation can resolve an entry-audit concern by
+                # showing that the suspicious endpoint change is reduced
+                # demand rather than a missing propagation node. Run the
+                # judge once more with the fresh rejected/inconclusive
+                # verdicts so unexplained_entry_observations reflects the
+                # final audit state, not the pre-recheck hypothesis.
+                continue
 
     # fpg rule: in-degree >= 2 requires combine; each confirmed edge is
     # an independently sufficient path, so the combination is OR.

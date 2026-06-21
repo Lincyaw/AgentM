@@ -52,6 +52,7 @@ Caller-side evidence can confirm the injection even when the target's surviving 
 ## Verdict Policy
 
 - **confirmed**: the target, affected link/path, or its callers show degradation consistent with the injected fault. Include predicate and SQL evidence. Do not claim the target application itself is broken when evidence only supports a link/path-scoped effect.
+- For link/path targets (`link:A->B`), set `effect_target` in `submit_seed_verdict` to the service that actually exhibits the observed symptom. If the exercised direction is `B -> A` and `B` has timeout/error/flow-interruption evidence while `A` is mostly a peer/callee, set `effect_target` to `B`, even when the injection metadata names `A` first. If the rule-bearing service is the observed degraded side, set it to that service. For service-scoped faults, leave `effect_target` null.
 - **rejected**: all available trace, metric, and log dimensions were checked, missing modalities were documented, parent-span call paths were checked, and no injection-consistent signal exists.
 - **inconclusive**: some anomaly exists but this single seed view cannot prove the injection caused it, or required data is unavailable and the remaining evidence cannot disambiguate.
 

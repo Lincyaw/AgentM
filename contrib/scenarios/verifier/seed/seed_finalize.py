@@ -90,6 +90,13 @@ class SeedVerdict(BaseModel):
         "rejected = no degradation found, injection had no observable effect; "
         "inconclusive = ambiguous signal (e.g. zero data in both windows)."
     )
+    effect_target: str | None = Field(
+        default=None,
+        description="For link/path-scoped faults, the service or backing "
+        "component that actually shows the observed degradation. Use the "
+        "caller/source side when caller-owned spans time out while cross-link "
+        "child spans disappear. Leave null for ordinary service-scoped faults.",
+    )
     predicate: NodePredicate | None = Field(  # type: ignore[valid-type]
         default=None,
         description="The failure mode the service exhibits, REQUIRED "
