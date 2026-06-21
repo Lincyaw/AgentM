@@ -220,11 +220,13 @@ judge pruning was strongly net-negative, so only cascade promotion remains.
 cd contrib/scenarios
 
 # Single case
-uv run python -m verifier.cli run <case_dir> [--model doubao] [--out /tmp/out]
+uv run python -m verifier.cli run <case_dir> \
+    --model doubao --judge-model azure-gpt [--out /tmp/out]
 
 # Batch
 uv run python -m verifier.cli batch <dataset_dir> \
-    --run-dir /tmp/verifier-run [--parallel 4] [--limit 10]
+    --run-dir /tmp/verifier-run \
+    --model doubao --judge-model azure-gpt [--parallel 4] [--limit 10]
 ```
 
 ## Output
