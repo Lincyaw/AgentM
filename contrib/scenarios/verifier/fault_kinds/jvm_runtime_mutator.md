@@ -40,26 +40,34 @@ If the mutated method is never exercised during the abnormal
 window AND the service's traffic is otherwise normal (similar span
 count, no flow disappearance), the injection has no visible effect.
 
-### Traffic vanishing IS the mutation's effect
-A common pattern: the target's span count drops from hundreds to
-zero in the abnormal window, yet the service is still running
-(resource metrics present, CPU near-idle). The seed agent must NOT
-conclude "method never invoked, mutation had no effect." Instead:
+### Selective traffic vanishing can be the mutation's effect
+A common pattern: the affected target path drops from substantial
+normal volume to zero or near-zero in the abnormal window, yet the
+service is still running (resource metrics present, CPU near-idle).
+The seed agent must NOT conclude "method never invoked, mutation had
+no effect" solely from that zero-traffic pattern. Instead:
 
 1. Check whether the target service is alive (resource metrics
    present in abnormal window).
-2. If alive but zero spans: the mutation likely took effect on
-   earlier calls, broke the outbound path (mutated URL → 404),
-   and upstream callers stopped sending requests after discovering
-   the flow is broken.
+2. If alive but the affected path has zero or near-zero spans: the
+   mutation may have taken effect on earlier calls, broken the
+   outbound path (mutated URL → 404), and caused upstream callers to
+   stop sending that specific business operation.
 3. Corroborate: does the entire call chain downstream of the
    mutated method also show zero spans? (e.g. if the mutation is
    on a food-service endpoint, do food-related services system-wide
    go to zero?) If yes, the mutation caused a flow-level collapse
    — confirm with predicate `data_corrupted` or `flow_interrupted`.
 
-The zero-traffic pattern is the mutation's SIGNATURE, not evidence
-of a non-effective injection.
+This evidence must be selective to the mutated method/path. Do not
+confirm from a small-count decline, a proportional whole-system
+throughput drop, or healthy successful requests on the affected
+endpoint. If the only signal is that the target moved with the global
+traffic baseline while latency, trace status, HTTP status, logs,
+metrics, callers, and downstream paths stayed healthy, reject or mark
+inconclusive instead of confirming. The zero-traffic pattern is a
+mutation signature only when it is path-specific and corroborated, not
+when it is ordinary reduced demand.
 
 ## How to observe on a neighbour
 The mutation affects a specific call path, so the signal on a
