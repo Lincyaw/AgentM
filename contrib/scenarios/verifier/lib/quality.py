@@ -71,6 +71,27 @@ def _fault_seed_ids(faults: list[dict[str, Any]]) -> list[str]:
     return seeds
 
 
+def _resolve_case_from_meta(
+    meta: dict[str, Any] | None,
+    case_name: str,
+    dataset_dir: Path | None,
+) -> tuple[str, list[dict[str, Any]], list[str]]:
+    faults = _case_faults(dataset_dir, case_name)
+    if not meta:
+        return case_name, faults, _fault_seed_ids(faults)
+
+    meta_case_name = meta.get("scenario_id")
+    if not isinstance(meta_case_name, str) or not meta_case_name:
+        return case_name, faults, _fault_seed_ids(faults)
+    if meta_case_name == case_name:
+        return case_name, faults, _fault_seed_ids(faults)
+
+    meta_faults = _case_faults(dataset_dir, meta_case_name)
+    if not meta_faults:
+        return case_name, faults, _fault_seed_ids(faults)
+    return meta_case_name, meta_faults, _fault_seed_ids(meta_faults)
+
+
 def _seed_verdict_map(meta: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     if not meta:
         return {}
@@ -86,11 +107,14 @@ def _seed_verdict_map(meta: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
 
 def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, Any]:
     case_name = case_dir.name
-    faults = _case_faults(dataset_dir, case_name)
-    dataset_seeds = _fault_seed_ids(faults)
     meta_path = case_dir / "run_meta.json"
     scenario_path = case_dir / "fpg_scenario.json"
     meta = _load_json(meta_path) if meta_path.exists() else None
+    case_name, faults, dataset_seeds = _resolve_case_from_meta(
+        meta,
+        case_name,
+        dataset_dir,
+    )
 
     if not meta_path.exists() and not scenario_path.exists():
         return {

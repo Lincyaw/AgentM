@@ -119,10 +119,44 @@ def _write_outputs(
         json.dumps(scenario, indent=2, ensure_ascii=False) + "\n"
     )
     run_meta: dict[str, Any] = {
+        "scenario_id": meta.get("scenario_id"),
+        "testbed": meta.get("testbed"),
         "hop_log": result.get("hop_log", []),
         "rounds": result.get("rounds", 0),
         "verdicts": result.get("verdicts", {}),
     }
+    if result.get("judge_rounds"):
+        run_meta["judge_rounds"] = result["judge_rounds"]
+    if result.get("judge"):
+        run_meta["judge"] = result["judge"]
+    if result.get("unreachable_seeds"):
+        run_meta["unreachable_seeds"] = result["unreachable_seeds"]
+    if result.get("seed_verdicts"):
+        run_meta["seed_verdicts"] = result["seed_verdicts"]
+    if result.get("confirmed_seeds") is not None:
+        run_meta["confirmed_seeds"] = result.get("confirmed_seeds", [])
+    (out / "run_meta.json").write_text(
+        json.dumps(run_meta, indent=2, ensure_ascii=False, default=str) + "\n"
+    )
+
+
+def _write_error_meta(
+    out: Path,
+    error: str,
+    result: dict[str, Any],
+    meta: dict[str, Any],
+) -> None:
+    run_meta: dict[str, Any] = {"error": error}
+    if meta.get("scenario_id"):
+        run_meta["scenario_id"] = meta["scenario_id"]
+    if meta.get("testbed"):
+        run_meta["testbed"] = meta["testbed"]
+    if result.get("hop_log"):
+        run_meta["hop_log"] = result["hop_log"]
+    if result.get("rounds") is not None:
+        run_meta["rounds"] = result.get("rounds", 0)
+    if result.get("verdicts"):
+        run_meta["verdicts"] = result["verdicts"]
     if result.get("judge_rounds"):
         run_meta["judge_rounds"] = result["judge_rounds"]
     if result.get("judge"):
@@ -164,14 +198,9 @@ def _run_one(
     )
     result = asyncio.run(_run_workflow(workflow_args, out))
 
-    if not result.get("nodes"):
+    if not result.get("confirmed_seeds"):
         logger.warning("No seeds confirmed.")
-        (out / "run_meta.json").write_text(
-            json.dumps({
-                "error": "no seeds confirmed",
-                "seed_verdicts": result.get("seed_verdicts", {}),
-            }, indent=2, ensure_ascii=False, default=str) + "\n"
-        )
+        _write_error_meta(out, "no seeds confirmed", result, ctx.meta)
         return {"case": data_dir.name, "error": "no seeds confirmed"}
 
     _write_outputs(out, ctx.meta, result)
