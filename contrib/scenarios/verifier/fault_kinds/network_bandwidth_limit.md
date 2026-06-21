@@ -18,6 +18,15 @@ attributes that name the source or destination workload. A bandwidth
 cap is visible only if those datastore spans slow, time out, disappear
 selectively, or cause caller-side timeout/error symptoms.
 
+A bandwidth cap requires traffic through the capped path. If the
+rule-bearing service's datastore/client spans simply vanish in the
+abnormal window and there is no caller-side timeout/error, no p99/max
+latency increase on the endpoint that would use the link, and no
+network/throughput metric showing saturation, do not confirm the link
+fault from zero traffic alone. Treat it as not visibly exercised or
+inconclusive, especially when another concurrent fault can explain why
+the path stopped sending requests.
+
 ### When the target looks healthy but traffic dropped
 
 A tight bandwidth cap can cause callers to time out waiting for

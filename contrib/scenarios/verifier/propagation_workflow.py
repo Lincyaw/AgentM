@@ -160,7 +160,7 @@ def _node_from_seed(
     verdict: SeedResult,
     window: dict[str, str],
 ) -> dict[str, Any]:
-    """Build an fpg EventNode dict from a confirmed or inconclusive seed verdict."""
+    """Build an fpg EventNode dict from a confirmed seed verdict."""
     predicate = verdict.get("predicate") or (
         _link_root_predicate(inj) if _is_link_injection(inj) else "other"
     )
@@ -484,9 +484,6 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     confirmed_seed_ids.add(accepted)
                     new_confirmed = True
                     ctx.log(f"  seed re-eval {accepted}: confirmed")
-                elif seed_verdict and verdict == "inconclusive" and root_id not in nodes:
-                    accepted = _accept_seed_node(inj, seed_verdict)
-                    ctx.log(f"  seed re-eval {accepted}: inconclusive")
                 else:
                     ctx.log(f"  seed re-eval {root_id}: {verdict}")
             return recheck_log, new_confirmed
@@ -502,8 +499,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     f"seed {root_id}: confirmed ({seed_verdict.get('predicate')})"
                 )
             elif seed_verdict and seed_verdict.get("verdict") == "inconclusive":
-                root_id = _accept_seed_node(inj, seed_verdict)
-                ctx.log(f"seed {root_id}: inconclusive — including for judge review")
+                ctx.log(f"seed {root_id}: inconclusive — keeping for judge review")
             else:
                 v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
                 ctx.log(f"seed {root_id}: {v} — skipping")

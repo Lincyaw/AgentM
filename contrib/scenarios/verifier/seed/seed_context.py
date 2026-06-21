@@ -35,7 +35,7 @@ def build_seed_prompt(
     if target.startswith("link:") and "->" in target:
         left, right = target.removeprefix("link:").split("->", 1)
         task_lines.append(
-            f"Link endpoints: **{left}** and **{right}**. Establish which direction is actually exercised with normal parent-span joins; if the configured direction is both or unclear, check both `{left} -> {right}` and `{right} -> {left}`. Also compare the rule-bearing/source service's own outbound/client spans to the peer; the peer's server span may stay healthy for link delay/loss/partition faults. In the abnormal window, missing child spans across a partitioned link can be the expected fault signature, so verify caller-owned timeout/error/latency symptoms instead of treating missing calls as no effect."
+            f"Link endpoints: **{left}** and **{right}**. Establish which direction is actually exercised with normal parent-span joins; if the configured direction is both or unclear, check both `{left} -> {right}` and `{right} -> {left}`. Also compare the rule-bearing/source service's own outbound/client spans to the peer; the peer's server span may stay healthy for link delay/loss/partition faults. In the abnormal window, missing child spans across a partitioned link can be the expected fault signature, so verify caller-owned timeout/error/latency symptoms instead of treating missing calls as no effect. For non-severing link faults such as bandwidth, delay, loss, duplicate, or corrupt, zero target spans or zero datastore calls alone is not enough to confirm the injection; require fault-shaped link/client/caller evidence, or mark the seed rejected/inconclusive if the link was not visibly exercised."
         )
     sections.append("## Task\n" + "\n".join(task_lines))
 
