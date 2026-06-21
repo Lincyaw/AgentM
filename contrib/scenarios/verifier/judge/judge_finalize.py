@@ -88,6 +88,22 @@ class JudgeReEval(BaseModel):
     )
 
 
+class JudgeSeedReEval(BaseModel):
+    """Request re-evaluation of an injection seed with global context."""
+
+    model_config = _STRICT
+    seed: str = Field(
+        description="The injection seed id to re-evaluate, exactly as shown "
+        "in the Seed verification results section."
+    )
+    context: str = Field(
+        description="Global entry/whole-graph context to provide the seed "
+        "agent. Explain why the prior seed verdict may be wrong and what "
+        "data shape to verify. Do not request a seed re-check without a "
+        "specific entry symptom or causal clue."
+    )
+
+
 class JudgeReview(BaseModel):
     """Whole-graph review verdict."""
 
@@ -121,6 +137,15 @@ class JudgeReview(BaseModel):
         "when the evidence needs re-examination. Do not request "
         "re-evaluation solely because the callee received proportionally "
         "fewer requests from a slow caller.",
+    )
+    re_evaluate_seeds: list[JudgeSeedReEval] = Field(
+        default_factory=list,
+        description="Rejected or inconclusive injection seeds to send BACK "
+        "to a seed agent for re-investigation with your global context. "
+        "Use this when the current graph is empty or cannot explain a real "
+        "entry/frontend symptom and a prior seed verdict may have missed "
+        "caller-side, resource, log, or endpoint-level evidence. Empty if "
+        "the seed rejection is consistent with the data.",
     )
     suggested_remove: list[str] = Field(
         default_factory=list,
@@ -166,9 +191,11 @@ def install(api: ExtensionAPI, config: JudgeFinalizeConfig) -> None:
                 "Submit your whole-graph review. `add` promotes services "
                 "directly. `re_evaluate` sends edges back to hop agents "
                 "with your global context for re-investigation (preferred "
-                "when evidence needs re-examination). `suggested_remove` "
-                "is audit-only and not applied. Proportional reduced demand "
-                "alone is not enough to add or re-evaluate a node."
+                "when evidence needs re-examination). `re_evaluate_seeds` "
+                "sends rejected or inconclusive injection seeds back to seed "
+                "agents. `suggested_remove` is audit-only and not applied. "
+                "Proportional reduced demand alone is not enough to add or "
+                "re-evaluate a node."
             ),
             parameters=JudgeReview,
             fn=_submit_judge,

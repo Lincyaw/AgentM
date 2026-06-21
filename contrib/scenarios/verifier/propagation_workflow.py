@@ -87,11 +87,17 @@ class JudgeReEval(TypedDict, total=False):
     context: str
 
 
+class JudgeSeedReEval(TypedDict, total=False):
+    seed: Required[str]
+    context: str
+
+
 class JudgeReviewResult(TypedDict, total=False):
     entry_explanation: str
     unexplained_entry_observations: list[str]
     add: list[JudgePromotion]
     re_evaluate: list[JudgeReEval]
+    re_evaluate_seeds: list[JudgeSeedReEval]
     suggested_remove: list[str]
     rationale: str
 
@@ -283,6 +289,9 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         else None
     )
     fault_docs: dict[str, str] = args.get("fault_docs", {})
+    judge_result: JudgeReviewResult | None = None
+    judge_rounds_log: list[dict[str, Any]] = []
+    seed_recheck_handler: Any = None
 
     def _entry_services_from_graph() -> set[str]:
         callers: set[str] = set()
@@ -374,7 +383,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         seed_verdicts = {}
         confirmed_seed_ids = set()
 
-        async def _verify_seed(inj: Injection) -> tuple[Injection, SeedResult | None]:
+        async def _verify_seed(
+            inj: Injection,
+            judge_context: str = "",
+        ) -> tuple[Injection, SeedResult | None]:
             target = _injection_node_id(inj) if _is_link_injection(inj) else inj["target"]
             fault_kind = inj.get("chaos_type", "unknown")
             prompt = build_seed_prompt(
@@ -382,6 +394,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 fault_kind=fault_kind,
                 params=inj.get("params", ""),
                 fault_doc=fault_docs.get(fault_kind, ""),
+                judge_context=judge_context,
             )
             result: AgentResult = await ctx.agent(
                 prompt,
@@ -428,6 +441,60 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             propagation_roots.append(effect_target)
             return root_id
 
+        async def _apply_seed_rechecks(
+            seed_rechecks: list[dict[str, Any]],
+        ) -> tuple[list[dict[str, Any]], bool]:
+            inj_by_seed = {
+                _injection_node_id(inj): inj
+                for inj in injections
+                if inj.get("target")
+            }
+            valid_rechecks = [
+                r for r in seed_rechecks
+                if isinstance(r.get("seed"), str)
+                and r["seed"] in inj_by_seed
+                and r["seed"] not in confirmed_seed_ids
+            ]
+            if not valid_rechecks:
+                return [], False
+
+            ctx.phase("seed-re-evaluate")
+            ctx.log(f"Re-evaluating {len(valid_rechecks)} seeds")
+            seed_coros: list[Awaitable[tuple[Injection, SeedResult | None]]] = [
+                _verify_seed(inj_by_seed[r["seed"]], str(r.get("context", "")))
+                for r in valid_rechecks
+            ]
+            seed_re_results = await ctx.parallel(seed_coros)
+            recheck_log: list[dict[str, Any]] = []
+            new_confirmed = False
+            for inj, seed_verdict in seed_re_results:
+                root_id = _injection_node_id(inj)
+                if seed_verdict:
+                    seed_verdicts[root_id] = seed_verdict
+                verdict = seed_verdict.get("verdict") if seed_verdict else "no result"
+                recheck_log.append(
+                    {
+                        "seed": root_id,
+                        "verdict": verdict,
+                        "rationale": seed_verdict.get("rationale", "")
+                        if seed_verdict
+                        else "",
+                    }
+                )
+                if seed_verdict and verdict == "confirmed":
+                    accepted = _accept_seed_node(inj, seed_verdict)
+                    confirmed_seed_ids.add(accepted)
+                    new_confirmed = True
+                    ctx.log(f"  seed re-eval {accepted}: confirmed")
+                elif seed_verdict and verdict == "inconclusive" and root_id not in nodes:
+                    accepted = _accept_seed_node(inj, seed_verdict)
+                    ctx.log(f"  seed re-eval {accepted}: inconclusive")
+                else:
+                    ctx.log(f"  seed re-eval {root_id}: {verdict}")
+            return recheck_log, new_confirmed
+
+        seed_recheck_handler = _apply_seed_rechecks
+
         for inj, seed_verdict in seed_results:
             root_id = _injection_node_id(inj)
             if seed_verdict and seed_verdict.get("verdict") == "confirmed":
@@ -448,16 +515,86 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 seed_verdicts[_injection_node_id(inj)] = seed_verdict
 
         if not nodes:
-            ctx.log("no seeds confirmed — aborting propagation")
-            return {
-                "nodes": [],
-                "edges": [],
-                "verdicts": {},
-                "hop_log": [],
-                "rounds": 0,
-                "seed_verdicts": seed_verdicts,
-                "confirmed_seeds": [],
-            }
+            ctx.log("no seeds confirmed — running judge audit before propagation")
+            if not skip_judge:
+                ctx.phase("judge")
+                judge_prompt = build_judge_prompt(
+                    injections=injections,
+                    confirmed=[],
+                    confirmed_edges=[],
+                    entry_services=sorted(entry_services),
+                    unreachable_seeds=sorted(seeds),
+                    seeds=seeds,
+                    seed_verdicts=seed_verdicts,
+                    verdict_by_target={},
+                    inconclusive_verdicts=[],
+                    rejected_verdicts=[],
+                )
+                pre_judge_text: AgentResult = await ctx.agent(
+                    judge_prompt,
+                    scenario="verifier/judge",
+                    model=judge_model,
+                    atom_config={
+                        "duckdb_sql": {"data_dir": data_dir},
+                    },
+                )
+                if not isinstance(pre_judge_text, dict):
+                    ctx.log("  judge returned no structured review; retrying once")
+                    pre_judge_text = await ctx.agent(
+                        judge_prompt
+                        + "\n\nIMPORTANT: Your previous response was not a structured "
+                        "submit_judge_review tool result. Call submit_judge_review now; "
+                        "do not answer in prose.",
+                        scenario="verifier/judge",
+                        model=judge_model,
+                        atom_config={
+                            "duckdb_sql": {"data_dir": data_dir},
+                        },
+                    )
+                if isinstance(pre_judge_text, dict):
+                    judge_result = cast(JudgeReviewResult, pre_judge_text)
+                    if judge_result.get("entry_explanation"):
+                        ctx.log(
+                            "  judge entry audit: "
+                            + judge_result["entry_explanation"][:500]
+                        )
+                    if judge_result.get("unexplained_entry_observations"):
+                        ctx.log(
+                            "  judge unexplained entry observations: "
+                            + "; ".join(judge_result["unexplained_entry_observations"])
+                        )
+                pre_seed_recheck_log, new_seed_confirmed = await _apply_seed_rechecks(
+                    cast(
+                        list[dict[str, Any]],
+                        (judge_result or {}).get("re_evaluate_seeds", []),
+                    )
+                )
+                judge_rounds_log.append(
+                    {
+                        "round": 1,
+                        "judge_decision": dict(judge_result) if judge_result else {},
+                        "re_eval_results": [],
+                        "seed_re_eval_results": pre_seed_recheck_log,
+                        "new_confirmed": new_seed_confirmed,
+                    }
+                )
+
+            if not nodes:
+                ctx.log("no seeds confirmed after judge audit — aborting propagation")
+                early_result_out: PropagationResult = {
+                    "nodes": [],
+                    "edges": [],
+                    "verdicts": {},
+                    "hop_log": [],
+                    "rounds": 0,
+                    "seed_verdicts": seed_verdicts,
+                    "confirmed_seeds": [],
+                }
+                if judge_result:
+                    early_result_out["judge"] = judge_result
+                if judge_rounds_log:
+                    early_result_out["judge_rounds"] = judge_rounds_log
+                return early_result_out
 
         # -- Phase 1: propagate -------------------------------------------
         ctx.phase("propagate")
@@ -606,8 +743,6 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 break
 
     # -- Judge + re-evaluation loop --
-    judge_result: JudgeReviewResult | None = None
-    judge_rounds_log: list[dict[str, Any]] = []
     judge_needed = bool(nodes)
     if not judge_needed:
         ctx.log("skipping judge: no confirmed or candidate nodes to audit")
@@ -645,11 +780,12 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 entry_services=sorted(entry_services),
                 unreachable_seeds=_unreachable_seed_nodes(),
                 seeds=seeds,
+                seed_verdicts=seed_verdicts,
                 verdict_by_target=verdict_by_target,
                 inconclusive_verdicts=inconclusive_verdicts,
                 rejected_verdicts=rejected_verdicts,
             )
-            judge_text: AgentResult = await ctx.agent(
+            round_judge_text: AgentResult = await ctx.agent(
                 judge_prompt,
                 scenario="verifier/judge",
                 model=judge_model,
@@ -657,9 +793,9 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     "duckdb_sql": {"data_dir": data_dir},
                 },
             )
-            if not isinstance(judge_text, dict):
+            if not isinstance(round_judge_text, dict):
                 ctx.log("  judge returned no structured review; retrying once")
-                judge_text = await ctx.agent(
+                round_judge_text = await ctx.agent(
                     judge_prompt
                     + "\n\nIMPORTANT: Your previous response was not a structured "
                     "submit_judge_review tool result. Call submit_judge_review now; "
@@ -670,8 +806,8 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                         "duckdb_sql": {"data_dir": data_dir},
                     },
                 )
-            if isinstance(judge_text, dict):
-                judge_result = cast(JudgeReviewResult, judge_text)
+            if isinstance(round_judge_text, dict):
+                judge_result = cast(JudgeReviewResult, round_judge_text)
                 if judge_result.get("entry_explanation"):
                     ctx.log("  judge entry audit: " + judge_result["entry_explanation"][:500])
                 if judge_result.get("unexplained_entry_observations"):
@@ -680,8 +816,19 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                         + "; ".join(judge_result["unexplained_entry_observations"])
                     )
 
+            round_seed_recheck_log: list[dict[str, Any]] = []
+            seed_recheck_added = False
+            seed_rechecks = cast(
+                list[dict[str, Any]],
+                (judge_result or {}).get("re_evaluate_seeds", []),
+            )
+            if seed_recheck_handler and seed_rechecks:
+                round_seed_recheck_log, seed_recheck_added = await seed_recheck_handler(
+                    seed_rechecks
+                )
+
             # Apply direct promotions (judge has enough evidence to decide)
-            direct_promotion_added = False
+            direct_promotion_added = seed_recheck_added
             for promo in (judge_result or {}).get("add", []):
                 svc = promo.get("service", "")
                 via = promo.get("via_service", "")
@@ -745,6 +892,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                         "round": judge_round + 1,
                         "judge_decision": dict(judge_result) if judge_result else {},
                         "re_eval_results": [],
+                        "seed_re_eval_results": round_seed_recheck_log,
                         "new_confirmed": direct_promotion_added,
                     }
                 )
@@ -908,6 +1056,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     "round": judge_round + 1,
                     "judge_decision": dict(judge_result) if judge_result else {},
                     "re_eval_results": re_eval_log,
+                    "seed_re_eval_results": round_seed_recheck_log,
                     "new_confirmed": any_new_confirmed,
                 }
             )

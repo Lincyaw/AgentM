@@ -10,6 +10,7 @@ def build_seed_prompt(
     fault_kind: str,
     params: str,
     fault_doc: str,
+    judge_context: str = "",
 ) -> str:
     """Build the user prompt for verifying an injection target."""
     sections: list[str] = []
@@ -37,5 +38,13 @@ def build_seed_prompt(
             f"Link endpoints: **{left}** and **{right}**. Establish which direction is actually exercised with normal parent-span joins; if the configured direction is both or unclear, check both `{left} -> {right}` and `{right} -> {left}`. Also compare the rule-bearing/source service's own outbound/client spans to the peer; the peer's server span may stay healthy for link delay/loss/partition faults. In the abnormal window, missing child spans across a partitioned link can be the expected fault signature, so verify caller-owned timeout/error/latency symptoms instead of treating missing calls as no effect."
         )
     sections.append("## Task\n" + "\n".join(task_lines))
+
+    if judge_context:
+        sections.append(
+            "## Judge's global context\n"
+            + judge_context
+            + "\n\nRe-check the seed against this whole-graph/entry-service context. "
+            "Do not change the verdict unless fresh SQL/log/metric evidence supports it."
+        )
 
     return "\n\n".join(sections)

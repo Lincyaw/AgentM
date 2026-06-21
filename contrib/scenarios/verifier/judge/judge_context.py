@@ -27,6 +27,7 @@ def build_judge_prompt(
     entry_services: Sequence[str],
     unreachable_seeds: Sequence[str],
     seeds: set[str],
+    seed_verdicts: Mapping[str, Mapping[str, Any]],
     verdict_by_target: Mapping[str, Mapping[str, Any]],
     inconclusive_verdicts: Sequence[Mapping[str, Any]],
     rejected_verdicts: Sequence[Mapping[str, Any]],
@@ -45,6 +46,25 @@ def build_judge_prompt(
         if i.get("target")
     ]
     sections.append("## Fault injection\n" + "\n".join(inj_lines))
+
+    seed_lines: list[str] = []
+    for seed in sorted(seeds):
+        verdict = seed_verdicts.get(seed, {})
+        status = verdict.get("verdict", "missing")
+        predicate = verdict.get("predicate")
+        rationale = verdict.get("rationale", "")
+        suffix = f" ({predicate})" if predicate else ""
+        seed_lines.append(f"- **{seed}**: {status}{suffix}. {rationale}")
+    sections.append(
+        f"## Seed verification results ({len(seed_lines)})\n"
+        + ("\n".join(seed_lines) or "(none)")
+        + "\n\nIf the confirmed graph is empty or an injection seed was rejected, "
+        "still inspect entry/frontend symptoms directly. If those symptoms suggest "
+        "a rejected or inconclusive seed may have been missed, request "
+        "`re_evaluate_seeds` with concrete global context for the seed agent. "
+        "If there is no meaningful entry anomaly or the seed's path was never "
+        "exercised, leave `re_evaluate_seeds` empty and say so."
+    )
 
     # -- Confirmed graph --
     confirmed_nonseed = [s for s in confirmed if s not in seeds]
