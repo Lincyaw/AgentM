@@ -105,6 +105,22 @@ def _seed_verdict_map(meta: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     }
 
 
+def _judge_unexplained_entry(meta: dict[str, Any] | None) -> list[str]:
+    if not meta:
+        return []
+    judge = meta.get("judge")
+    if not isinstance(judge, dict):
+        return []
+    raw = judge.get("unexplained_entry_observations", [])
+    if not isinstance(raw, list):
+        return []
+    return [
+        item.strip()
+        for item in raw
+        if isinstance(item, str) and item.strip()
+    ]
+
+
 def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, Any]:
     case_name = case_dir.name
     meta_path = case_dir / "run_meta.json"
@@ -128,6 +144,7 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
 
     if meta and meta.get("error") == "no seeds confirmed":
         seed_verdicts = _seed_verdict_map(meta)
+        judge_unexplained = _judge_unexplained_entry(meta)
         if any(
             verdict.get("_error")
             for verdict in seed_verdicts.values()
@@ -165,6 +182,8 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
         error_failures = ["seed_not_confirmed"]
         if not seeds:
             error_failures.append("missing_seed_records")
+        if judge_unexplained:
+            error_failures.append("judge_unexplained_entry_observations")
         return {
             "case": case_name,
             "faults": faults,
@@ -184,6 +203,7 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
             "node_count": 0,
             "edge_count": 0,
             "seed_verdicts": seed_verdicts if isinstance(seed_verdicts, dict) else {},
+            "judge_unexplained_entry_observations": judge_unexplained,
         }
 
     if meta and meta.get("error"):
@@ -222,6 +242,7 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
     injections = scenario.get("injections", [])
     scenario_seeds = [i.get("node_id") for i in injections if i.get("node_id")]
     seed_verdicts = _seed_verdict_map(meta)
+    judge_unexplained = _judge_unexplained_entry(meta)
     raw_confirmed_seeds = meta.get("confirmed_seeds", []) if meta else []
     confirmed_seed_records = {
         seed for seed in raw_confirmed_seeds if isinstance(seed, str)
@@ -304,6 +325,8 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
         failures.append("zero_edges")
     if reachable_seeds and (unreachable_seeds or missing_seeds):
         failures.append("partial_seed_coverage")
+    if judge_unexplained:
+        failures.append("judge_unexplained_entry_observations")
 
     return {
         "case": case_name,
@@ -324,6 +347,7 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
         "edge_count": len(edges),
         "seed_verdicts": seed_verdicts,
         "confirmed_seeds": sorted(confirmed_seed_records),
+        "judge_unexplained_entry_observations": judge_unexplained,
     }
 
 
