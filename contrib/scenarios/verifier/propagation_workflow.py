@@ -753,74 +753,15 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             changed = True
         return changed
 
-    if skip_propagate:
-        existing = cast(dict[str, Any], args.get("existing_state", {}))
-        nodes = {n["id"]: n for n in existing.get("nodes", [])}
-        edges = list(existing.get("edges", []))
-        verdicts = cast(dict[str, HopResult], existing.get("verdicts", {}))
-        hop_log = cast(list[HopLogEntry], existing.get("hop_log", []))
-        round_n = int(existing.get("rounds", 0))
-        seed_verdicts = cast(dict[str, SeedResult], existing.get("seed_verdicts", {}))
-        confirmed_seed_ids = set(existing.get("confirmed_seeds", []))
-        if not confirmed_seed_ids and not seed_verdicts:
-            confirmed_seed_ids = {seed for seed in seeds if seed in nodes}
-        adj, in_deg = _rebuild_adjacency()
-        node_fault = {
-            _injection_node_id(inj): _fault_record(inj)
-            for inj in injections
-            if inj.get("target")
-        }
-        for inj in injections:
-            if inj.get("target") and _is_link_injection(inj):
-                node_fault[_injection_effect_target(inj)] = _fault_record(inj)
-    else:
-        # -- Phase 0: verify seeds ----------------------------------------
-        ctx.phase("seed")
-        node_fault = {
-            _injection_node_id(inj): _fault_record(inj)
-            for inj in injections
-            if inj.get("target")
-        }
-        nodes = {}
-        edges = []
-        adj = {}
-        in_deg = {}
-        verdicts = {}
-        hop_log = []
-        round_n = 0
-        seed_verdicts = {}
-        confirmed_seed_ids = set()
+    checked_edges: set[str] = set()
 
-        seed_coros: list[Awaitable[tuple[Injection, SeedResult | None]]] = [
-            _verify_seed(inj) for inj in injections if inj.get("target")
+    async def _propagate_from_roots(roots: Sequence[str]) -> bool:
+        nonlocal round_n
+        queue = [
+            root for root in dict.fromkeys(roots)
+            if root in nodes and root not in infra_set and root not in entry_services
         ]
-        seed_results = await ctx.parallel(seed_coros)
-        for inj, seed_verdict in seed_results:
-            root_id = _injection_node_id(inj)
-            if seed_verdict and seed_verdict.get("verdict") == "confirmed":
-                root_id = _accept_seed_node(inj, seed_verdict)
-                confirmed_seed_ids.add(root_id)
-                ctx.log(
-                    f"seed {root_id}: confirmed ({seed_verdict.get('predicate')})"
-                )
-            elif seed_verdict and seed_verdict.get("verdict") == "inconclusive":
-                ctx.log(f"seed {root_id}: inconclusive — keeping for audit review")
-            else:
-                v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
-                ctx.log(f"seed {root_id}: {v} — skipping")
-
-        for inj, seed_verdict in seed_results:
-            if seed_verdict:
-                seed_verdicts[_injection_node_id(inj)] = seed_verdict
-
-        if not nodes:
-            ctx.log("no seeds confirmed after seed map; audit may request rechecks")
-
-        # -- Phase 1: propagate -------------------------------------------
-        ctx.phase("propagate")
-
-        queue = list(dict.fromkeys(propagation_roots or list(nodes)))
-        checked_edges: set[str] = set()
+        changed_any = False
 
         while queue:
             round_n += 1
@@ -896,12 +837,82 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 assert isinstance(result, dict)
                 was_new_node = to_svc not in nodes
                 accepted = _accept_hop_result(from_svc, to_svc, rel_type, result)
+                changed_any = accepted or changed_any
                 if accepted and was_new_node:
                     if to_svc not in infra_set and to_svc not in entry_services:
                         queue.append(to_svc)
 
             if not queue:
                 ctx.log("propagation frontier exhausted for this round")
+
+        return changed_any
+
+    if skip_propagate:
+        existing = cast(dict[str, Any], args.get("existing_state", {}))
+        nodes = {n["id"]: n for n in existing.get("nodes", [])}
+        edges = list(existing.get("edges", []))
+        verdicts = cast(dict[str, HopResult], existing.get("verdicts", {}))
+        hop_log = cast(list[HopLogEntry], existing.get("hop_log", []))
+        round_n = int(existing.get("rounds", 0))
+        seed_verdicts = cast(dict[str, SeedResult], existing.get("seed_verdicts", {}))
+        confirmed_seed_ids = set(existing.get("confirmed_seeds", []))
+        if not confirmed_seed_ids and not seed_verdicts:
+            confirmed_seed_ids = {seed for seed in seeds if seed in nodes}
+        adj, in_deg = _rebuild_adjacency()
+        node_fault = {
+            _injection_node_id(inj): _fault_record(inj)
+            for inj in injections
+            if inj.get("target")
+        }
+        for inj in injections:
+            if inj.get("target") and _is_link_injection(inj):
+                node_fault[_injection_effect_target(inj)] = _fault_record(inj)
+    else:
+        # -- Phase 0: verify seeds ----------------------------------------
+        ctx.phase("seed")
+        node_fault = {
+            _injection_node_id(inj): _fault_record(inj)
+            for inj in injections
+            if inj.get("target")
+        }
+        nodes = {}
+        edges = []
+        adj = {}
+        in_deg = {}
+        verdicts = {}
+        hop_log = []
+        round_n = 0
+        seed_verdicts = {}
+        confirmed_seed_ids = set()
+
+        seed_coros: list[Awaitable[tuple[Injection, SeedResult | None]]] = [
+            _verify_seed(inj) for inj in injections if inj.get("target")
+        ]
+        seed_results = await ctx.parallel(seed_coros)
+        for inj, seed_verdict in seed_results:
+            root_id = _injection_node_id(inj)
+            if seed_verdict and seed_verdict.get("verdict") == "confirmed":
+                root_id = _accept_seed_node(inj, seed_verdict)
+                confirmed_seed_ids.add(root_id)
+                ctx.log(
+                    f"seed {root_id}: confirmed ({seed_verdict.get('predicate')})"
+                )
+            elif seed_verdict and seed_verdict.get("verdict") == "inconclusive":
+                ctx.log(f"seed {root_id}: inconclusive — keeping for audit review")
+            else:
+                v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
+                ctx.log(f"seed {root_id}: {v} — skipping")
+
+        for inj, seed_verdict in seed_results:
+            if seed_verdict:
+                seed_verdicts[_injection_node_id(inj)] = seed_verdict
+
+        if not nodes:
+            ctx.log("no seeds confirmed after seed map; audit may request rechecks")
+
+        # -- Phase 1: propagate -------------------------------------------
+        ctx.phase("propagate")
+        await _propagate_from_roots(propagation_roots or list(nodes))
 
     def _case_summary() -> dict[str, Any]:
         return {
@@ -1080,6 +1091,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             req for req in requests
             if isinstance(req, SeedRecheckRequest) and req.seed in inj_by_seed
         ]
+        new_roots: list[str] = []
         if seed_requests:
             ctx.phase("audit-seed-rework")
             ctx.log(f"Audit requested {len(seed_requests)} seed rechecks")
@@ -1102,7 +1114,9 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 })
                 ctx.log(f"  seed recheck {seed_id}: {verdict}")
                 if seed_verdict and verdict == "confirmed":
+                    before_roots = len(propagation_roots)
                     accepted_seed = _accept_seed_node(inj, seed_verdict)
+                    new_roots.extend(propagation_roots[before_roots:])
                     confirmed_seed_ids.add(accepted_seed)
                     changed = True
 
@@ -1174,6 +1188,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 )
                 if hop_verdict != "confirmed" or not isinstance(result, dict):
                     continue
+                was_new_node = to_svc not in nodes
                 rel_type = next(
                     (
                         info[1]
@@ -1189,6 +1204,12 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     result,
                     claim_override=req.context[:200],
                 ) or changed
+                if was_new_node and to_svc not in infra_set and to_svc not in entry_services:
+                    new_roots.append(to_svc)
+        if new_roots:
+            ctx.phase("audit-propagate-rework")
+            ctx.log(f"Propagating from {len(set(new_roots))} audit-confirmed roots")
+            changed = await _propagate_from_roots(new_roots) or changed
         return changed, rework_log
 
     if skip_judge:
