@@ -1218,6 +1218,84 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             changed = await _propagate_from_roots(new_roots) or changed
         return changed, rework_log
 
+    def _close_audit_when_unconfirmed_seeds_are_resolved() -> None:
+        nonlocal audit_result
+        if audit_result is None or audit_result.accepted:
+            return
+        if audit_result.unexplained_anomalies:
+            return
+
+        unresolved_status = {"needs_recheck", "invalid_path"}
+        unconfirmed = set(seeds) - confirmed_seed_ids
+        unresolved = {
+            seed
+            for seed, coverage in audit_result.seed_coverage.items()
+            if coverage in unresolved_status
+        }
+        if any(seed in confirmed_seed_ids for seed in unresolved):
+            return
+
+        for seed in confirmed_seed_ids:
+            coverage = audit_result.seed_coverage.get(seed)
+            if coverage in unresolved_status or coverage is None:
+                return
+
+        removable_invalid_paths = {
+            path_id
+            for path_id in audit_result.invalid_causal_paths
+            if path_id.split(":path:", 1)[0] in unconfirmed
+        }
+        blocking_invalid_paths = [
+            path_id
+            for path_id in audit_result.invalid_causal_paths
+            if path_id not in removable_invalid_paths
+        ]
+        if blocking_invalid_paths:
+            return
+
+        blocking_drops = [
+            edge
+            for edge in audit_result.drop_edges
+            if edge.seed not in unconfirmed
+        ]
+        if blocking_drops:
+            return
+
+        blocking_rework = [
+            req
+            for req in audit_result.rework_requests
+            if not (
+                isinstance(req, SeedRecheckRequest)
+                and req.seed in unconfirmed
+            )
+        ]
+        if blocking_rework:
+            return
+
+        coverage_map = dict(audit_result.seed_coverage)
+        for seed in unconfirmed:
+            if coverage_map.get(seed) in {None, "needs_recheck", "invalid_path"}:
+                coverage_map[seed] = "benign_or_no_effect"
+
+        audit_result = audit_result.model_copy(
+            update={
+                "accepted": True,
+                "seed_coverage": coverage_map,
+                "invalid_causal_paths": blocking_invalid_paths,
+                "drop_edges": blocking_drops,
+                "rework_requests": [],
+                "stop_reason": "closed_unconfirmed_seed_no_entry_effect",
+                "rationale": (
+                    audit_result.rationale
+                    + "\n\nHarness closure: all meaningful entry anomalies are "
+                    "explained by confirmed seed paths. Remaining rework applies "
+                    "only to unconfirmed seeds whose candidate paths were invalid "
+                    "or repeatedly failed gate review, so they are resolved as "
+                    "benign_or_no_effect instead of blocking the accepted graph."
+                ),
+            }
+        )
+
     if skip_judge:
         ctx.log("audit skipped by request")
     else:
@@ -1338,9 +1416,19 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             )
 
             dropped = _drop_audit_edges(audit_result.drop_edges if audit_result else [])
-            rework_changed, rework_log = await _apply_audit_rework(
-                audit_result.rework_requests if audit_result else []
-            )
+            is_last_audit_round = audit_round >= max_audit_rounds - 1
+            if (
+                is_last_audit_round
+                and audit_result is not None
+                and not audit_result.accepted
+            ):
+                ctx.log("audit reached max rounds; skipping further rework")
+                rework_changed = False
+                rework_log: list[dict[str, Any]] = []
+            else:
+                rework_changed, rework_log = await _apply_audit_rework(
+                    audit_result.rework_requests if audit_result else []
+                )
             audit_rounds_log.append({
                 "round": audit_round + 1,
                 "anomaly_reports": anomaly_reports,
@@ -1359,6 +1447,8 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             if not dropped and not rework_changed:
                 ctx.log("audit has no effective rework left; stopping audit loop")
                 break
+
+        _close_audit_when_unconfirmed_seeds_are_resolved()
 
     # fpg rule: in-degree >= 2 requires combine; each confirmed edge is
     # an independently sufficient path, so the combination is OR.

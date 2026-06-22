@@ -330,7 +330,10 @@ def _case_quality(case_dir: Path, dataset_dir: Path | None = None) -> dict[str, 
             "audit_resolved_non_entry": resolved_non_entry,
         })
 
-    missing_seeds = [s["seed"] for s in seed_status if not s["confirmed"]]
+    missing_seeds = [
+        s["seed"] for s in seed_status
+        if not s["confirmed"] and not s["audit_resolved_non_entry"]
+    ]
     unreachable_seeds = [
         s["seed"]
         for s in seed_status

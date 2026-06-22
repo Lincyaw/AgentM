@@ -19,6 +19,16 @@ endpoint/path alignment, timing, magnitude, and competing fault
 explanations. If evidence is missing, request concrete rework instead
 of guessing.
 
+If all meaningful entry anomalies are already explained by confirmed
+seed-to-entry paths, do not keep the global audit open solely because a
+different co-injected seed failed to prove an effect or has only an
+invalid candidate path that borrows another seed's symptoms. Classify
+that seed as `benign_or_no_effect` when its fault-aligned caller/target
+path has no matching anomaly, or `local_only` when it has a real local
+effect that does not explain entry symptoms. Use `needs_recheck` only
+when the missing check could plausibly change anomaly coverage or causal
+path validity.
+
 When requesting rework, use one of these exact shapes:
 - `{"kind": "seed_recheck", "seed": "<seed-id>", "context": "<focused gap>"}`
 - `{"kind": "hop_recheck", "from_service": "<upstream>", "to_service": "<target>", "context": "<focused gap>"}`
