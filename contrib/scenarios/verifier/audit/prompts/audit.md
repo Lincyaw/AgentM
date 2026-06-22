@@ -19,6 +19,19 @@ endpoint/path alignment, timing, magnitude, and competing fault
 explanations. If evidence is missing, request concrete rework instead
 of guessing.
 
+Treat an entry anomaly as audit-blocking only when it is meaningful for
+the injected faults: the endpoint was attempted and failed/timed out,
+shows HTTP/trace errors, shows fault-shaped latency or fail-fast changes,
+or is on a normal call path through a confirmed or plausible seed. A
+normal-present/abnormal-absent entry endpoint is not automatically a
+failure. If the same endpoint is absent because the source/loadgenerator
+or workload did not issue it, and there is no error/timeout/latency
+evidence on that endpoint and no causal path from any injected seed,
+classify it as workload/source absence or unrelated background rather
+than an unexplained graph anomaly. Do not keep the global audit open for
+unrelated vanished routes after the candidate graph has explained the
+fault-aligned entry symptom.
+
 If all meaningful entry anomalies are already explained by confirmed
 seed-to-entry paths, do not keep the global audit open solely because a
 different co-injected seed failed to prove an effect or has only an
