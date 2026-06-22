@@ -1280,10 +1280,14 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             )
         return True
 
-    def _drop_audit_edges(drop_edges: Sequence[EdgeDrop]) -> bool:
+    def _drop_key(drop: EdgeDrop) -> tuple[str, str, str | None, str | None]:
+        return (drop.src, drop.dst, drop.seed, drop.path_id)
+
+    def _drop_audit_edges(drop_edges: Sequence[EdgeDrop]) -> list[EdgeDrop]:
         if not drop_edges:
-            return False
+            return []
         doomed: set[tuple[str, str]] = set()
+        applied: list[EdgeDrop] = []
         for item in drop_edges:
             if not item.src or not item.dst:
                 continue
@@ -1300,8 +1304,9 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 )
                 continue
             doomed.add((item.src, item.dst))
+            applied.append(item)
         if not doomed:
-            return False
+            return []
         before = len(edges)
         edges[:] = [
             e for e in edges
@@ -1311,7 +1316,55 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         if changed:
             _rebuild_graph_indices()
             _prune_unreachable_nodes()
-        return changed
+            return applied
+        return []
+
+    def _close_audit_after_applied_pruning(
+        audit: GlobalAudit,
+        applied_drops: Sequence[EdgeDrop],
+    ) -> GlobalAudit:
+        """Remove audit findings that were resolved by applied edge pruning."""
+        if not audit.accepted or not applied_drops:
+            return audit
+        if audit.unexplained_anomalies or audit.rework_requests:
+            return audit
+
+        applied_keys = {_drop_key(edge) for edge in applied_drops}
+        applied_path_ids = {
+            edge.path_id for edge in applied_drops if edge.path_id
+        }
+        invalid_causal_paths = [
+            path_id
+            for path_id in audit.invalid_causal_paths
+            if path_id not in applied_path_ids
+        ]
+        drop_edges = [
+            edge
+            for edge in audit.drop_edges
+            if _drop_key(edge) not in applied_keys
+        ]
+        if (
+            invalid_causal_paths == audit.invalid_causal_paths
+            and len(drop_edges) == len(audit.drop_edges)
+        ):
+            return audit
+
+        rationale_suffix = (
+            "\n\nHarness closure: audit-requested edge pruning was applied to "
+            "remove invalid causal path evidence from the candidate graph. "
+            "The applied drops remain recorded in audit_rounds.dropped_edges; "
+            "only unresolved audit findings are retained in the final audit."
+        )
+        rationale = audit.rationale
+        if rationale_suffix not in rationale:
+            rationale += rationale_suffix
+        return audit.model_copy(
+            update={
+                "invalid_causal_paths": invalid_causal_paths,
+                "drop_edges": drop_edges,
+                "rationale": rationale,
+            }
+        )
 
     # -- Audit map/reduce + rework loop -----------------------------------
     async def _audit_agent(
@@ -1811,7 +1864,9 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 + ("accepted" if audit_result and audit_result.accepted else "needs rework")
             )
 
-            dropped = _drop_audit_edges(audit_result.drop_edges if audit_result else [])
+            applied_drops = _drop_audit_edges(
+                audit_result.drop_edges if audit_result else []
+            )
             is_last_audit_round = audit_round >= max_audit_rounds - 1
             if (
                 is_last_audit_round
@@ -1838,9 +1893,15 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 "rework_results": rework_log,
             })
 
+            if audit_result and applied_drops:
+                audit_result = _close_audit_after_applied_pruning(
+                    audit_result,
+                    applied_drops,
+                )
+
             if audit_result and audit_result.accepted:
                 break
-            if not dropped and not rework_changed:
+            if not applied_drops and not rework_changed:
                 ctx.log("audit has no effective rework left; stopping audit loop")
                 break
 
