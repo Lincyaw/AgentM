@@ -55,6 +55,25 @@ def _annotate_sql_failure(failure: dict[str, str]) -> dict[str, str]:
             "Use duration/1e6 (or duration / 1000000.0) for millisecond "
             "latency evidence, then rerun the SQL before resubmitting."
         )
+    elif error == "multiple SQL statements":
+        annotated["why"] = (
+            "Each evidence item must be one re-executable read-only DuckDB "
+            "statement. Multiple semicolon-separated statements cannot be "
+            "replayed safely as a single evidence query."
+        )
+        annotated["fix"] = (
+            "Rewrite the evidence as one SELECT/WITH statement, for example "
+            "by using UNION ALL or CTEs to compare both windows in one result."
+        )
+    elif error == "non-read-only SQL statement":
+        annotated["why"] = (
+            "Evidence SQL must be read-only. Mutating or DDL statements are "
+            "not valid verifier evidence."
+        )
+        annotated["fix"] = (
+            "Replace it with a SELECT/WITH/EXPLAIN/DESCRIBE/SHOW/SUMMARIZE "
+            "query that returns the same evidence without modifying state."
+        )
     else:
         annotated["why"] = (
             "The SQL could not be re-executed against this case's DuckDB views."
@@ -91,6 +110,11 @@ def sql_validation_error_payload(failures: list[dict[str, str]]) -> dict[str, An
         hints.append(
             "Trace duration is nanoseconds in this dataset; use /1e6 for "
             "milliseconds in final evidence SQL."
+        )
+    if any(failure.get("error") == "multiple SQL statements" for failure in failures):
+        hints.append(
+            "Put each evidence query in a single read-only statement; use "
+            "UNION ALL or CTEs instead of semicolon-separated SELECTs."
         )
     hints.append(
         "Resubmit the same verdict after replacing only the failing evidence "
@@ -135,6 +159,40 @@ def duration_unit_failures(
             }
         )
     return failures
+
+
+def sql_statement_shape_failure(location: str, sql: str) -> dict[str, str] | None:
+    """Reject evidence SQL that is not exactly one read-only statement."""
+    try:
+        import duckdb
+    except ImportError:
+        return None
+
+    try:
+        parsed = duckdb.extract_statements(sql)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "location": location,
+            "error": str(exc).splitlines()[0][:300],
+            "sql": sql,
+        }
+
+    if len(parsed) != 1:
+        return {
+            "location": location,
+            "error": "multiple SQL statements",
+            "sql": sql,
+        }
+
+    statement_type = parsed[0].type
+    if statement_type not in {duckdb.StatementType.SELECT, duckdb.StatementType.EXPLAIN}:
+        return {
+            "location": location,
+            "error": "non-read-only SQL statement",
+            "sql": sql,
+        }
+
+    return None
 
 
 def modality_coverage_failures(

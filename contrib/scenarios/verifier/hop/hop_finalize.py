@@ -29,6 +29,7 @@ from agentm.extensions import ExtensionManifest
 from fpg import Evidence, build_schema, load_profile
 from verifier.lib.finalize_feedback import (
     duration_unit_failures,
+    sql_statement_shape_failure,
     sql_validation_error_payload,
 )
 
@@ -176,6 +177,10 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
             })
             continue
         statements.append((location, ev.query.statement))
+        shape_failure = sql_statement_shape_failure(location, ev.query.statement)
+        if shape_failure:
+            failures.append(shape_failure)
+            continue
         try:
             rows = conn.execute(ev.query.statement).fetchall()
             if not rows:
