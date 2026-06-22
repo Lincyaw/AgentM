@@ -80,6 +80,49 @@ _CONTRACT_RE = re.compile(
 )
 _STOP_ENTITIES = frozenset(
     {
+        "abnormal_logs",
+        "abnormal_metrics",
+        "abnormal_metrics_histogram",
+        "abnormal_metrics_sum",
+        "abnormal_traces",
+        "abnormal-vs-normal",
+        "avg_ms",
+        "call-count",
+        "call-graph",
+        "callee",
+        "caller",
+        "cnt",
+        "count",
+        "duration",
+        "get",
+        "http",
+        "inter-service",
+        "metric",
+        "normal-only",
+        "normal_logs",
+        "normal_metrics",
+        "normal_metrics_histogram",
+        "normal_metrics_sum",
+        "normal_traces",
+        "null",
+        "p50",
+        "p95",
+        "p99",
+        "p99_ms",
+        "parent_span_id",
+        "post",
+        "query_sql",
+        "root-span",
+        "route-path",
+        "select",
+        "service-level",
+        "service_name",
+        "span_id",
+        "span_name",
+        "top-level",
+        "top-span",
+        "trace_id",
+        "value",
         "normal",
         "abnormal",
         "root-cause",
@@ -314,7 +357,7 @@ def build_context_index(
     def add_entity(name: str, turns: Sequence[int], preferred_type: EntityType = "unknown") -> str:
         clean = _clean_entity(name)
         key = clean.casefold()
-        if not clean or key in _STOP_ENTITIES:
+        if not clean or key in _STOP_ENTITIES or _is_low_value_entity(clean):
             return ""
         inferred = _infer_entity_type(clean)
         ent_type: EntityType = preferred_type if preferred_type != "unknown" else inferred
@@ -518,9 +561,22 @@ def _infer_entity_type(name: str) -> EntityType:
         return "tool"
     if low in {"root_cause", "causal_graph", "nodes", "edges"}:
         return "schema_field"
-    if "service" in low or "-" in name:
+    if low.startswith(("ts-", "svc:")) or "service" in low:
         return "service"
     return "unknown"
+
+
+def _is_low_value_entity(name: str) -> bool:
+    low = name.casefold()
+    if low in _STOP_ENTITIES:
+        return True
+    if low.startswith("attr."):
+        return True
+    if re.fullmatch(r"p\d+(?:_ms)?", low):
+        return True
+    if re.fullmatch(r"(?:avg|sum|min|max|count|cnt)(?:_ms|_cnt|_count)?", low):
+        return True
+    return low.endswith(("_id", "_name")) and not low.startswith(("ts-", "/"))
 
 
 def _entity_ids_from_text(
@@ -623,20 +679,36 @@ def _observation_signals(text: str) -> tuple[ObservationSignal, ...]:
         add("latency_delta")
     if any(phrase in low for phrase in ("error", "errors", "http 4", "status_code", "exception")):
         add("error_delta")
-    if any(
+    concrete_resource = any(
         phrase in low
         for phrase in (
             "cpu",
             "memory",
             "filesystem",
-            "resource",
+            "storage",
+            "disk",
             "k8s.",
             "container.",
             "hubble",
             "network.io",
             "page_fault",
         )
-    ):
+    )
+    resource_delta_word = any(
+        phrase in low
+        for phrase in (
+            "abnormal",
+            "delta",
+            "higher",
+            "increase",
+            "ratio",
+            "usage",
+            "spike",
+            "surge",
+            "normal",
+        )
+    )
+    if concrete_resource or ("resource" in low and resource_delta_word):
         add("resource_delta")
     if any(
         phrase in low
@@ -849,12 +921,22 @@ def _attention_hints(
     """
 
     entity_names = {entity.id: entity.name for entity in entities}
+    entity_types = {entity.id: entity.type for entity in entities}
     hints: list[AttentionHint] = []
+
+    def entity_priority(entity_id: str) -> tuple[int, str]:
+        name = entity_names.get(entity_id, "")
+        ent_type = entity_types.get(entity_id, "unknown")
+        if ent_type in {"service", "endpoint", "edge"}:
+            return (0, name)
+        if ent_type in {"metric", "log_pattern", "fault_kind"}:
+            return (1, name)
+        return (2, name)
 
     def names_for(entity_ids: Sequence[str], *, limit: int = 10) -> tuple[str, ...]:
         names: list[str] = []
         seen: set[str] = set()
-        for entity_id in entity_ids:
+        for entity_id in sorted(entity_ids, key=entity_priority):
             name = entity_names.get(entity_id)
             if not name or name in seen:
                 continue
@@ -863,6 +945,22 @@ def _attention_hints(
             if len(names) >= limit:
                 break
         return tuple(names)
+
+    def hintable_root_entity(entity_id: str) -> bool:
+        return entity_types.get(entity_id) in {"service", "endpoint", "edge"}
+
+    def evidence_excerpt(items: Sequence[ObservationRef], *, limit: int = 320) -> str:
+        snippets: list[str] = []
+        for item in items:
+            if not (
+                {"missing_or_normal_only", "volume_or_count_drop", "resource_delta"}
+                & set(item.signals)
+            ):
+                continue
+            snippets.append(_excerpt(item.summary, 120))
+            if len("; ".join(snippets)) >= limit:
+                break
+        return _excerpt("; ".join(snippets), limit)
 
     def collect(obs: Sequence[ObservationRef]) -> tuple[tuple[int, ...], tuple[str, ...], tuple[str, ...], tuple[ObservationSignal, ...]]:
         turns: set[int] = set()
@@ -928,6 +1026,8 @@ def _attention_hints(
         )
 
     for candidate in candidates:
+        if not hintable_root_entity(candidate.entity_id):
+            continue
         tags = set(candidate.evidence_tags)
         if "volume_or_count_increase" not in tags:
             continue
@@ -964,6 +1064,8 @@ def _attention_hints(
             by_entity.setdefault(entity_id, []).append(obs)
     local_hints = 0
     for entity_id, items in by_entity.items():
+        if not hintable_root_entity(entity_id):
+            continue
         local_signal_set: set[ObservationSignal] = {
             signal for obs in items for signal in obs.signals
         }
@@ -977,6 +1079,7 @@ def _attention_hints(
             continue
         selected = top_observations(items, limit=5)
         turns, entity_ids, obs_ids, merged_signals = collect(selected)
+        evidence = evidence_excerpt(selected)
         hints.append(
             AttentionHint(
                 id=f"hint:local-signal-on-disappeared:{entity_id}",
@@ -985,6 +1088,7 @@ def _attention_hints(
                 summary=(
                     f"{name} has both disappeared/normal-only activity evidence "
                     "and local resource evidence; use it in root/effect synthesis."
+                    + (f" Evidence: {evidence}" if evidence else "")
                 ),
                 entities=(entity_id, *tuple(eid for eid in entity_ids if eid != entity_id)),
                 observation_ids=obs_ids,

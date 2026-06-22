@@ -135,6 +135,52 @@ signal, then ask the agent to decide whether that entity is a root candidate
 instead of only a downstream effect. If the agent drifts back to a
 volume-only/weak candidate after already discovering such a local signal, fire.
 
+## Synthesis-forcing in RCA
+
+RCA agents often keep gathering evidence after they already have enough
+material to choose a root/effect classification. Do not treat "still
+evidence-gathering" as a reason to stay silent once the trajectory contains a
+specific local anomaly on an entity or branch that was previously
+normal-only/disappeared.
+
+Fire a synthesis reminder when ALL are true:
+
+1. The agent has already observed a disappeared or normal-only path/service/edge
+   cluster.
+2. It has also observed a local metric/log/resource anomaly on one of those
+   entities or its direct branch, such as a large filesystem/storage delta,
+   resource-pool signal, error/log delta, or other non-volume local signal.
+3. It continues probing broad traffic, route/loadgenerator, or unrelated
+   candidate-specific details without explicitly deciding whether the local
+   anomaly is root, downstream effect, workload-shift artifact, or
+   instrumentation artifact.
+
+This is a hard trigger. If these conditions hold, set `surface_reminder=true`
+even if the agent has not written a final answer yet and even if additional
+checks could still be useful. The reminder should be short and directive:
+"stop expanding the search and perform root/effect synthesis on the
+already-visible candidates." It must not declare the true root. It should name
+the local signal and force comparison against weaker workload/traffic
+explanations.
+
+Treat the following as especially strong evidence for the hard trigger:
+
+- a normal-only or disappeared service/path later has a large local
+  `resource_delta`, filesystem/storage delta, log/error delta, or other
+  non-traffic local anomaly;
+- the agent has already checked that this service/path is live or not simply
+  absent, but keeps investigating route volume, broad workload shift, or
+  loadgenerator;
+- the agent frames loadgenerator, entrypoint mix, traffic amplification, or
+  route volume as a possible root without visible local evidence that the
+  workload generator itself malfunctioned.
+
+In particular, do not let `loadgenerator` or a generic workload/entrypoint
+shift become a root cause unless there is visible local evidence that the
+workload generator itself malfunctioned or an external workload injection is
+part of the task evidence; otherwise treat it as an observation that may explain
+effects, not a service root.
+
 ## Completeness
 
 Completeness is lower priority. Only flag a gap when ALL conditions hold:
