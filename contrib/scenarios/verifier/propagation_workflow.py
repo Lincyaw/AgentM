@@ -662,6 +662,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             "seed": _injection_node_id(inj),
             "target": target,
             "fault_kind": fault_kind,
+            "fault_reference_document": {
+                "kind": fault_kind,
+                "content": fault_docs.get(fault_kind, ""),
+            },
             "params": inj.get("params", ""),
             "subject": _injection_subject(inj),
         }
@@ -811,6 +815,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             "to_service": to_svc,
             "rel_type": rel_type,
             "fault_kind": edge_fault_kind,
+            "fault_reference_document": {
+                "kind": edge_fault_kind,
+                "content": fault_docs.get(edge_fault_kind, ""),
+            },
             "is_infra": to_svc in infra_set,
             "prior_verdict": prior_verdict.model_dump(mode="json")
             if prior_verdict

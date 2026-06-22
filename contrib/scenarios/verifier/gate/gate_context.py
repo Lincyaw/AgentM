@@ -47,6 +47,9 @@ def build_gate_prompt(
     return (
         "## Gate input\n"
         "Review this one discovery result for investigation completeness. "
+        "Use `task.fault_reference_document` as the authoritative fault "
+        "signature when deciding whether the investigation covered the "
+        "right trace, metric, log, caller, and propagation checks. "
         "Return only the structured `submit_result` payload.\n\n"
         "```json\n"
         + json.dumps(payload, indent=2, ensure_ascii=False, default=str)
