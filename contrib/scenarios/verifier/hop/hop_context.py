@@ -167,7 +167,15 @@ def build_hop_prompt(
             f"The audit layer asks you to re-evaluate with the context below."
         )
     if judge_context:
-        sections.append(f"## Audit / global feedback context\n{judge_context}")
+        sections.append(
+            "## Retry / audit feedback context\n"
+            + judge_context
+            + "\n\nUse this context to continue from the previous failed attempt. "
+            "It summarizes prior submitted evidence and the gate/audit objections, "
+            "but it is not a substitute for final evidence. Re-run or repair SQL "
+            "as needed and submit a verdict only when the new evidence answers "
+            "the missing checks."
+        )
 
     return "\n\n".join(sections)
 

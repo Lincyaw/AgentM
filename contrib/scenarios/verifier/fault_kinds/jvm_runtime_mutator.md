@@ -21,11 +21,15 @@ not structural.
 The target may look healthy in aggregate (no errors, similar or
 lower latency). The real signal is on the **call path**:
 
-- **constant (URL) mutation**: outgoing calls from the target to a
-  specific downstream disappear or return fast errors (the mutated
-  URL hits a 404 instead of the real endpoint). The downstream's
-  throughput for the affected endpoint drops because correct
-  requests stop arriving.
+- **constant (URL/path) mutation**: a route/path constant used by
+  the method is changed, often by adding a `mutated_` prefix. The
+  correct downstream/path request no longer reaches the intended
+  route. It may disappear, hit a wrong route, or return a fast
+  application-level failure. Traces often do not record the concrete
+  HTTP target path, and the application may swallow the wrong-path
+  result and still return HTTP 200 with empty or degraded semantic
+  data. Do not require explicit `mutated_` spans or 404s to recognize
+  this fault.
 - **return-value / field mutation**: callers of the target receive
   wrong or empty data. They may fail downstream validation, skip
   processing, or return degraded results.
@@ -40,34 +44,52 @@ If the mutated method is never exercised during the abnormal
 window AND the service's traffic is otherwise normal (similar span
 count, no flow disappearance), the injection has no visible effect.
 
-### Selective traffic vanishing can be the mutation's effect
+### Selective traffic loss can be the mutation's effect
 A common pattern: the affected target path drops from substantial
-normal volume to zero or near-zero in the abnormal window, yet the
+normal volume to much lower, zero, or near-zero volume in the abnormal window, yet the
 service is still running (resource metrics present, CPU near-idle).
 The seed agent must NOT conclude "method never invoked, mutation had
-no effect" solely from that zero-traffic pattern. Instead:
+no effect" solely from that traffic-loss pattern. Instead:
 
 1. Check whether the target service is alive (resource metrics
    present in abnormal window).
-2. If alive but the affected path has zero or near-zero spans: the
-   mutation may have taken effect on earlier calls, broken the
-   outbound path (mutated URL → 404), and caused upstream callers to
-   stop sending that specific business operation.
+2. If alive but the affected path has a large partial drop, zero, or
+   near-zero spans: the mutation may have taken effect, broken the
+   route/path lookup or outbound request, and caused that specific
+   business operation to stop completing.
 3. Corroborate: does the entire call chain downstream of the
-   mutated method also show zero spans? (e.g. if the mutation is
-   on a food-service endpoint, do food-related services system-wide
-   go to zero?) If yes, the mutation caused a flow-level collapse
-   — confirm with predicate `data_corrupted` or `flow_interrupted`.
+   mutated method also drop? Does the same business route drop at
+   the caller or entry layer while total entry/load-generator traffic
+   and unrelated sibling routes stay stable or increase? If yes, the
+   mutation caused a path-level interruption — confirm with predicate
+   `data_corrupted` or `flow_interrupted`.
 
 This evidence must be selective to the mutated method/path. Do not
-confirm from a small-count decline, a proportional whole-system
-throughput drop, or healthy successful requests on the affected
-endpoint. If the only signal is that the target moved with the global
-traffic baseline while latency, trace status, HTTP status, logs,
-metrics, callers, and downstream paths stayed healthy, reject or mark
-inconclusive instead of confirming. The zero-traffic pattern is a
-mutation signature only when it is path-specific and corroborated, not
-when it is ordinary reduced demand.
+confirm from a small-count decline or a proportional whole-system
+throughput drop. Conversely, do not reject solely because surviving
+requests are HTTP 200 or because the same fault-aligned route also
+drops at the load generator or entry service. For path mutations, that
+route-specific entry drop can be the user-visible symptom when the
+operation no longer completes. Use caller/entry/load-generator totals
+and sibling routes as the workload baseline; the target service
+aggregate may be dominated by the affected method/path. If the only
+signal is that the target moved with the global traffic baseline while
+latency, trace status, HTTP status, logs, metrics, callers, and
+downstream paths stayed healthy, reject or mark inconclusive instead
+of confirming.
+
+Evidence for a confirmed URL/path mutation should include:
+
+- normal parent-span or trace-id linkage showing the caller-owned
+  endpoint reaches the injected target method/path;
+- normal vs abnormal counts for the affected route at each visible
+  layer, such as load generator, entry/caller inbound endpoint, target
+  server/internal span, and downstream route when present;
+- caller/entry total traffic and several sibling routes over the same
+  windows, proving the affected route dropped selectively rather than
+  with broad workload absence;
+- log or metric evidence that the target service remained alive, and
+  any fault-aligned request-handling failure messages when available.
 
 ## How to observe on a neighbour
 The mutation affects a specific call path, so the signal on a

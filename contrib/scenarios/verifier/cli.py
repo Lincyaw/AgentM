@@ -31,6 +31,7 @@ WORKFLOW_SCRIPT = Path(__file__).resolve().parent / "propagation_workflow.py"
 
 _WORKFLOW_EXTENSIONS = [
     ("agentm.extensions.builtin.operations", {"backend": "local"}),
+    ("agentm.extensions.builtin.retry_policy", {}),
     ("agentm.extensions.builtin.observability", {}),
     ("agentm.extensions.builtin.artifact_store", {}),
     ("agentm.extensions.builtin.workflow", {}),
@@ -131,6 +132,8 @@ def _write_outputs(
         run_meta["audit_rounds"] = result["audit_rounds"]
     if result.get("audit"):
         run_meta["audit"] = result["audit"]
+    if result.get("execution_errors"):
+        run_meta["execution_errors"] = result["execution_errors"]
     if result.get("unreachable_seeds"):
         run_meta["unreachable_seeds"] = result["unreachable_seeds"]
     if result.get("reachability_warnings"):
@@ -167,6 +170,8 @@ def _write_error_meta(
         run_meta["audit_rounds"] = result["audit_rounds"]
     if result.get("audit"):
         run_meta["audit"] = result["audit"]
+    if result.get("execution_errors"):
+        run_meta["execution_errors"] = result["execution_errors"]
     if result.get("unreachable_seeds"):
         run_meta["unreachable_seeds"] = result["unreachable_seeds"]
     if result.get("reachability_warnings"):
@@ -207,6 +212,11 @@ def _run_one(
         gate_retries=gate_retries,
     )
     result = asyncio.run(_run_workflow(workflow_args, out))
+
+    if result.get("execution_errors"):
+        logger.warning("Verifier execution errors: {}", result["execution_errors"])
+        _write_error_meta(out, "execution errors", result, ctx.meta)
+        return {"case": data_dir.name, "error": "execution errors"}
 
     if not result.get("confirmed_seeds"):
         logger.warning("No seeds confirmed.")

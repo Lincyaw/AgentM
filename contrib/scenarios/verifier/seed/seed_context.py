@@ -65,10 +65,13 @@ def build_seed_prompt(
 
     if judge_context:
         sections.append(
-            "## Audit / global feedback context\n"
+            "## Retry / audit feedback context\n"
             + judge_context
-            + "\n\nRe-check the seed against this whole-graph/entry-service context. "
-            "Do not change the verdict unless fresh SQL/log/metric evidence supports it."
+            + "\n\nUse this context to continue from the previous failed attempt. "
+            "It summarizes prior submitted evidence and the gate/audit objections, "
+            "but it is not a substitute for final evidence. Re-run or repair SQL "
+            "as needed and submit a verdict only when the new evidence answers "
+            "the missing checks."
         )
 
     return "\n\n".join(sections)

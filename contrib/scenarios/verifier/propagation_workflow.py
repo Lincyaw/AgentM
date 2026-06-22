@@ -32,6 +32,7 @@ the latest audit result.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Sequence
 from typing import Annotated, Any, Literal, Required, TypeGuard, TypedDict, cast
 
@@ -67,6 +68,7 @@ class SeedResult(TypedDict, total=False):
     evidence: list[dict[str, Any]]
     claim: str
     gate: dict[str, Any]
+    _error: str
 
 
 class HopResult(TypedDict, total=False):
@@ -77,6 +79,13 @@ class HopResult(TypedDict, total=False):
     relationship: dict[str, Any] | None
     claim: str
     gate: dict[str, Any]
+    _error: str
+
+
+class ExecutionError(TypedDict):
+    stage: str
+    item: str
+    reason: str
 
 
 SeedParallelItem = tuple[Injection, SeedResult | None]
@@ -221,6 +230,98 @@ def _is_hop_rework_parallel_item(
     )
 
 
+def _truncate_text(value: object, limit: int = 1600) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _compact_query(query: object) -> dict[str, str]:
+    if not isinstance(query, dict):
+        return {}
+    statement = ""
+    raw_statement = query.get("statement")
+    if raw_statement is not None:
+        statement = _truncate_text(raw_statement, 1200)
+    language = query.get("language")
+    return {
+        "language": str(language or "sql"),
+        "statement": statement,
+    }
+
+
+def _compact_evidence_item(item: object) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {"value": _truncate_text(item, 400)}
+    compact: dict[str, Any] = {}
+    if item.get("explanation"):
+        compact["explanation"] = _truncate_text(item["explanation"], 500)
+    query = _compact_query(item.get("query"))
+    if query:
+        compact["query"] = query
+    return compact
+
+
+def _compact_agent_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep retry context useful without replaying an entire trajectory."""
+    compact: dict[str, Any] = {}
+    for key in (
+        "verdict",
+        "effect_target",
+        "predicate",
+        "claim",
+        "rationale",
+        "investigation_coverage",
+    ):
+        value = result.get(key)
+        if value:
+            compact[key] = value if isinstance(value, dict) else _truncate_text(value)
+    evidence = result.get("evidence")
+    if isinstance(evidence, list):
+        compact["evidence"] = [
+            _compact_evidence_item(item) for item in evidence[:10]
+        ]
+        if len(evidence) > 10:
+            compact["evidence_truncated"] = len(evidence) - 10
+    relationship = result.get("relationship")
+    if isinstance(relationship, dict):
+        compact["relationship"] = _compact_evidence_item(relationship)
+    return compact
+
+
+def _retry_context(
+    *,
+    base_context: str,
+    label: str,
+    submitted_result: dict[str, Any],
+    gate: GateDecision,
+) -> str:
+    """Build the context passed to the next clean retry session."""
+    payload = {
+        "failed_attempt": label,
+        "previous_submitted_result": _compact_agent_result(submitted_result),
+        "gate_decision": {
+            "accepted": gate.accepted,
+            "confidence": gate.confidence,
+            "missing_checks": gate.missing_checks,
+            "rationale": _truncate_text(gate.rationale),
+            "retry_prompt": _truncate_text(gate.retry_prompt or "", 2400),
+        },
+    }
+    block = (
+        "## Previous attempt context\n"
+        "This is a new child session, but the previous attempt is summarized below. "
+        "Use it as a map of what was already checked and why gate rejected it. "
+        "Do not simply repeat the previous evidence; rerun or repair SQL as needed, "
+        "then fill only the missing checks.\n"
+        "```json\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        + "\n```"
+    )
+    return (base_context + "\n\n" if base_context else "") + block
+
+
 class PropagationResult(TypedDict, total=False):
     nodes: Required[list[dict[str, Any]]]
     edges: Required[list[dict[str, Any]]]
@@ -234,6 +335,7 @@ class PropagationResult(TypedDict, total=False):
     gate_log: list[dict[str, Any]]
     audit: dict[str, Any]
     audit_rounds: list[dict[str, Any]]
+    execution_errors: list[ExecutionError]
 
 
 def _reaches(adj: dict[str, list[str]], src: str, dst: str) -> bool:
@@ -430,6 +532,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     node_fault: dict[str, list[str]]
     seed_verdicts: dict[str, SeedResult]
     confirmed_seed_ids: set[str]
+    execution_errors: dict[str, ExecutionError] = {}
 
     graph: dict[str, list[list[str]]] = args["graph"]
     infra_set = set(args.get("infra_nodes", []))
@@ -446,7 +549,22 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     audit_rounds_log: list[dict[str, Any]] = []
     gate_log: list[dict[str, Any]] = []
     gate_retries = int(args.get("gate_retries", 3))
+    agent_retries = int(args.get("agent_retries", 3))
     max_audit_rounds = int(args.get("max_audit_rounds", 3))
+
+    def _execution_key(stage: str, item: str) -> str:
+        return stage + ":" + item
+
+    def _record_execution_error(stage: str, item: str, reason: str) -> None:
+        execution_errors[_execution_key(stage, item)] = {
+            "stage": stage,
+            "item": item,
+            "reason": reason,
+        }
+        ctx.log(f"⚠ {stage} {item}: {reason}")
+
+    def _clear_execution_error(stage: str, item: str) -> None:
+        execution_errors.pop(_execution_key(stage, item), None)
 
     def _entry_services_from_graph() -> set[str]:
         callers: set[str] = set()
@@ -527,7 +645,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     "attempt": attempt,
                 },
             },
-            retry=1,
+            retry=agent_retries,
             trace_label=gate_label,
         )
         return gate_result if isinstance(gate_result, GateDecision) else None
@@ -563,17 +681,29 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     },
                     "seed_finalize": {"data_dir": data_dir},
                 },
-                retry=1,
+                retry=agent_retries,
                 trace_label=label,
             )
             if not isinstance(result, dict):
-                return inj, last_result
+                reason = "seed agent returned no structured result"
+                _record_execution_error("seed", _injection_node_id(inj), reason)
+                return inj, {
+                    "verdict": "inconclusive",
+                    "_error": reason,
+                    "rationale": reason,
+                }
             if result.get("verdict") not in {
                 "confirmed",
                 "rejected",
                 "inconclusive",
             }:
-                return inj, last_result
+                reason = f"seed agent returned invalid verdict: {result.get('verdict')!r}"
+                _record_execution_error("seed", _injection_node_id(inj), reason)
+                return inj, {
+                    "verdict": "inconclusive",
+                    "_error": reason,
+                    "rationale": reason,
+                }
             last_result = cast(SeedResult, result)
             child_session = _find_child_session(ctx, label)
             gate = await _gate_result(
@@ -585,7 +715,14 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 attempt=attempt,
             )
             if gate is None:
-                return inj, None
+                reason = "seed gate returned no structured decision"
+                _record_execution_error("seed", _injection_node_id(inj), reason)
+                last_result["verdict"] = "inconclusive"
+                last_result["_error"] = reason
+                last_result["rationale"] = (
+                    reason + ": " + str(last_result.get("rationale", ""))
+                )
+                return inj, last_result
             gate_payload = gate.model_dump(mode="json")
             last_result["gate"] = gate_payload
             gate_log.append({
@@ -595,17 +732,22 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 "gate": gate_payload,
             })
             if gate.accepted:
+                _clear_execution_error("seed", _injection_node_id(inj))
                 return inj, last_result
             if attempt >= gate_retries:
-                return inj, None
-            feedback = (
-                (feedback + "\n\n" if feedback else "")
-                + "Gate retry feedback:\n"
-                + (
-                    gate.retry_prompt
-                    or "\n".join(gate.missing_checks)
-                    or gate.rationale
+                reason = "seed gate rejected all retry attempts"
+                _record_execution_error("seed", _injection_node_id(inj), reason)
+                last_result["verdict"] = "inconclusive"
+                last_result["_error"] = reason
+                last_result["rationale"] = (
+                    reason + ": " + str(last_result.get("rationale", ""))
                 )
+                return inj, last_result
+            feedback = _retry_context(
+                base_context=judge_context,
+                label=label,
+                submitted_result=dict(last_result),
+                gate=gate,
             )
         return inj, last_result
 
@@ -694,17 +836,29 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     },
                     "hop_finalize": {"data_dir": data_dir},
                 },
-                retry=1,
+                retry=agent_retries,
                 trace_label=label,
             )
             if not isinstance(result, dict):
-                return last_result
+                reason = "hop agent returned no structured result"
+                _record_execution_error("hop", from_svc + "__" + to_svc, reason)
+                return {
+                    "verdict": "inconclusive",
+                    "_error": reason,
+                    "rationale": reason,
+                }
             if result.get("verdict") not in {
                 "confirmed",
                 "rejected",
                 "inconclusive",
             }:
-                return last_result
+                reason = f"hop agent returned invalid verdict: {result.get('verdict')!r}"
+                _record_execution_error("hop", from_svc + "__" + to_svc, reason)
+                return {
+                    "verdict": "inconclusive",
+                    "_error": reason,
+                    "rationale": reason,
+                }
             last_result = cast(HopResult, result)
             child_session = _find_child_session(ctx, label)
             gate = await _gate_result(
@@ -716,7 +870,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 attempt=attempt,
             )
             if gate is None:
-                return None
+                reason = "hop gate returned no structured decision"
+                _record_execution_error("hop", from_svc + "__" + to_svc, reason)
+                last_result["_error"] = reason
+                return last_result
             gate_payload = gate.model_dump(mode="json")
             last_result["gate"] = gate_payload
             gate_log.append({
@@ -727,17 +884,21 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 "gate": gate_payload,
             })
             if gate.accepted:
+                _clear_execution_error("hop", from_svc + "__" + to_svc)
                 return last_result
             if attempt >= gate_retries:
-                return None
-            feedback = (
-                (feedback + "\n\n" if feedback else "")
-                + "Gate retry feedback:\n"
-                + (
-                    gate.retry_prompt
-                    or "\n".join(gate.missing_checks)
-                    or gate.rationale
+                reason = "hop gate rejected all retry attempts"
+                ctx.log(f"⚠ hop {from_svc}__{to_svc}: {reason}")
+                last_result["verdict"] = "inconclusive"
+                last_result["rationale"] = (
+                    reason + ": " + str(last_result.get("rationale", ""))
                 )
+                return last_result
+            feedback = _retry_context(
+                base_context=judge_context,
+                label=label,
+                submitted_result=dict(last_result),
+                gate=gate,
             )
         return last_result
 
@@ -841,6 +1002,13 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             for idx in range(len(pending_hops)):
                 from_svc, to_svc, rel_type = pending_hops[idx]
                 result = results[idx] if idx < len(results) else None
+                edge_key = from_svc + "__" + to_svc
+                if result is None:
+                    _record_execution_error(
+                        "hop",
+                        edge_key,
+                        "hop verifier task failed before returning a result",
+                    )
                 verdict = result.get("verdict") if isinstance(result, dict) else None
                 hop_log.append(
                     {
@@ -860,7 +1028,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 )
                 hop_result = cast(HopResult, result) if isinstance(result, dict) else None
                 if hop_result and verdict:
-                    verdicts[from_svc + "__" + to_svc] = hop_result
+                    verdicts[edge_key] = hop_result
 
                 if verdict != "confirmed":
                     continue
@@ -891,6 +1059,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         round_n = int(existing.get("rounds", 0))
         seed_verdicts = cast(dict[str, SeedResult], existing.get("seed_verdicts", {}))
         confirmed_seed_ids = set(existing.get("confirmed_seeds", []))
+        for item in cast(list[ExecutionError], existing.get("execution_errors", [])):
+            execution_errors[
+                _execution_key(item["stage"], item["item"])
+            ] = item
         if not confirmed_seed_ids and not seed_verdicts:
             confirmed_seed_ids = {seed for seed in seeds if seed in nodes}
         adj, in_deg = _rebuild_adjacency()
@@ -920,10 +1092,26 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         seed_verdicts = {}
         confirmed_seed_ids = set()
 
+        seed_injections = [inj for inj in injections if inj.get("target")]
         seed_coros: list[Awaitable[tuple[Injection, SeedResult | None]]] = [
-            _verify_seed(inj) for inj in injections if inj.get("target")
+            _verify_seed(inj) for inj in seed_injections
         ]
         seed_result_items = _parallel_items(await ctx.parallel(seed_coros))
+        for idx, item in enumerate(seed_result_items):
+            if _is_seed_parallel_item(item):
+                continue
+            if idx < len(seed_injections):
+                _record_execution_error(
+                    "seed",
+                    _injection_node_id(seed_injections[idx]),
+                    "seed verifier task failed before returning a result",
+                )
+        for inj in seed_injections[len(seed_result_items):]:
+            _record_execution_error(
+                "seed",
+                _injection_node_id(inj),
+                "seed verifier task was missing from parallel results",
+            )
         seed_results = [
             item for item in seed_result_items
             if _is_seed_parallel_item(item)
@@ -938,6 +1126,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             if seed_verdict and seed_verdict.get("verdict") == "confirmed":
                 root_id = _accept_seed_node(inj, seed_verdict)
                 confirmed_seed_ids.add(root_id)
+                _clear_execution_error("seed", root_id)
                 ctx.log(
                     f"seed {root_id}: confirmed ({seed_verdict.get('predicate')})"
                 )
@@ -1113,7 +1302,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     "payload": payload,
                 },
             },
-            retry=1,
+            retry=agent_retries,
             trace_label=label,
         )
         return result if isinstance(result, BaseModel) else None
@@ -1143,6 +1332,21 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 _verify_seed(inj_by_seed[req.seed], req.context)
                 for req in seed_requests
             ]))
+            for idx, item in enumerate(seed_result_items):
+                if _is_seed_parallel_item(item):
+                    continue
+                if idx < len(seed_requests):
+                    _record_execution_error(
+                        "seed",
+                        seed_requests[idx].seed,
+                        "audit seed recheck failed before returning a result",
+                    )
+            for req in seed_requests[len(seed_result_items):]:
+                _record_execution_error(
+                    "seed",
+                    req.seed,
+                    "audit seed recheck was missing from parallel results",
+                )
             seed_results = [
                 item for item in seed_result_items
                 if _is_seed_parallel_item(item)
@@ -1175,6 +1379,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     accepted_seed = _accept_seed_node(inj, seed_verdict)
                     new_roots.extend(propagation_roots[before_roots:])
                     confirmed_seed_ids.add(accepted_seed)
+                    _clear_execution_error("seed", accepted_seed)
                     changed = True
 
         hop_requests = [
@@ -1215,6 +1420,22 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             hop_result_items = _parallel_items(await ctx.parallel([
                 _one_hop_rework(req) for req in hop_requests
             ]))
+            for idx, item in enumerate(hop_result_items):
+                if _is_hop_rework_parallel_item(item):
+                    continue
+                if idx < len(hop_requests):
+                    hop_req = hop_requests[idx]
+                    _record_execution_error(
+                        "hop",
+                        hop_req.from_service + "__" + hop_req.to_service,
+                        "audit hop recheck failed before returning a result",
+                    )
+            for hop_req in hop_requests[len(hop_result_items):]:
+                _record_execution_error(
+                    "hop",
+                    hop_req.from_service + "__" + hop_req.to_service,
+                    "audit hop recheck was missing from parallel results",
+                )
             hop_results = [
                 item for item in hop_result_items
                 if _is_hop_rework_parallel_item(item)
@@ -1225,9 +1446,9 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     f"{missing_hop_results} audit hop recheck task(s) "
                     "returned no usable result"
                 )
-            for req, result in hop_results:
-                from_svc = req.from_service
-                to_svc = req.to_service
+            for hop_req, result in hop_results:
+                from_svc = hop_req.from_service
+                to_svc = hop_req.to_service
                 hop_verdict: str | None = (
                     result.get("verdict") if isinstance(result, dict) else None
                 )
@@ -1272,7 +1493,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     to_svc,
                     rel_type,
                     result,
-                    claim_override=req.context[:200],
+                    claim_override=hop_req.context[:200],
                 ) or changed
                 if was_new_node and to_svc not in infra_set and to_svc not in entry_services:
                     new_roots.append(to_svc)
@@ -1389,6 +1610,21 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 )
                 for scope in anomaly_scopes
             ]))
+            for idx, report in enumerate(anomaly_results):
+                if report is not None:
+                    continue
+                if idx < len(anomaly_scopes):
+                    _record_execution_error(
+                        "audit",
+                        f"anomaly:{anomaly_scopes[idx]}:r{audit_round}",
+                        "anomaly audit task failed before returning a report",
+                    )
+            for scope in anomaly_scopes[len(anomaly_results):]:
+                _record_execution_error(
+                    "audit",
+                    f"anomaly:{scope}:r{audit_round}",
+                    "anomaly audit task was missing from parallel results",
+                )
             anomaly_reports = [
                 _dump_model(report) for report in anomaly_results if report is not None
             ]
@@ -1416,10 +1652,27 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 )
                 for path_id, seed, path in path_items
             ]))
+            for idx, report in enumerate(causal_results):
+                if report is not None:
+                    continue
+                if idx < len(path_items):
+                    path_id, _, _ = path_items[idx]
+                    _record_execution_error(
+                        "audit",
+                        f"causal:{path_id}:r{audit_round}",
+                        "causal audit task failed before returning a report",
+                    )
+            for path_id, _, _ in path_items[len(causal_results):]:
+                _record_execution_error(
+                    "audit",
+                    f"causal:{path_id}:r{audit_round}",
+                    "causal audit task was missing from parallel results",
+                )
             causal_reports = [
                 _dump_model(report) for report in causal_results if report is not None
             ]
 
+            audit_seeds = sorted(seeds)
             seed_audit_results = _parallel_items(await ctx.parallel([
                 _audit_agent(
                     label=f"audit-seed-{seed}-r{audit_round}",
@@ -1442,8 +1695,23 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     },
                     schema=SeedCoverageReport,
                 )
-                for seed in sorted(seeds)
+                for seed in audit_seeds
             ]))
+            for idx, report in enumerate(seed_audit_results):
+                if report is not None:
+                    continue
+                if idx < len(audit_seeds):
+                    _record_execution_error(
+                        "audit",
+                        f"seed:{audit_seeds[idx]}:r{audit_round}",
+                        "seed coverage audit task failed before returning a report",
+                    )
+            for seed in audit_seeds[len(seed_audit_results):]:
+                _record_execution_error(
+                    "audit",
+                    f"seed:{seed}:r{audit_round}",
+                    "seed coverage audit task was missing from parallel results",
+                )
             seed_coverage_reports = [
                 _dump_model(report)
                 for report in seed_audit_results
@@ -1471,6 +1739,12 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 schema=GlobalAudit,
             )
             audit_result = reducer if isinstance(reducer, GlobalAudit) else None
+            if audit_result is None:
+                _record_execution_error(
+                    "audit",
+                    f"reducer:r{audit_round}",
+                    "audit reducer returned no structured decision",
+                )
             audit_payload = (
                 audit_result.model_dump(mode="json") if audit_result else {}
             )
@@ -1570,6 +1844,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         result_out["audit"] = audit_result.model_dump(mode="json")
     if audit_rounds_log:
         result_out["audit_rounds"] = audit_rounds_log
+    if execution_errors:
+        result_out["execution_errors"] = [
+            execution_errors[key] for key in sorted(execution_errors)
+        ]
     if reachability_warnings:
         result_out["reachability_warnings"] = reachability_warnings
     if unreachable:
