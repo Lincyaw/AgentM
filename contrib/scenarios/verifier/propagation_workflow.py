@@ -1256,15 +1256,17 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             for idx in range(len(path) - 1)
         )
 
-    def _edge_used_by_other_seed(src: str, dst: str, seed: str | None) -> bool:
-        if not seed:
-            return False
-        for other_seed in confirmed_seed_ids:
-            if other_seed == seed:
-                continue
-            if any(_path_contains_edge(path, src, dst) for path in _paths_from(other_seed)):
-                return True
-        return False
+    def _path_edges(path: Sequence[str]) -> list[tuple[str, str]]:
+        return [
+            (path[idx], path[idx + 1])
+            for idx in range(len(path) - 1)
+        ]
+
+    def _candidate_path_by_id(path_id: str) -> list[str] | None:
+        for candidate_id, _, path in _candidate_paths():
+            if candidate_id == path_id:
+                return path
+        return None
 
     def _drop_matches_reported_lineage(drop: EdgeDrop) -> bool:
         if drop.path_id:
@@ -1283,11 +1285,53 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     def _drop_key(drop: EdgeDrop) -> tuple[str, str, str | None, str | None]:
         return (drop.src, drop.dst, drop.seed, drop.path_id)
 
-    def _drop_audit_edges(drop_edges: Sequence[EdgeDrop]) -> list[EdgeDrop]:
+    def _valid_path_edges(
+        causal_reports: Sequence[dict[str, Any]],
+    ) -> set[tuple[str, str]]:
+        protected: set[tuple[str, str]] = set()
+        for report in causal_reports:
+            if report.get("verdict") != "valid":
+                continue
+            path = report.get("path")
+            if (
+                not isinstance(path, list)
+                or not all(isinstance(node, str) for node in path)
+            ):
+                continue
+            protected.update(_path_edges(path))
+        return protected
+
+    def _path_specific_cut(
+        drop: EdgeDrop,
+        protected_edges: set[tuple[str, str]],
+    ) -> tuple[str, str] | None:
+        current_edges = {
+            (str(edge.get("src", "")), str(edge.get("dst", "")))
+            for edge in edges
+        }
+        requested = (drop.src, drop.dst)
+        if requested in current_edges and requested not in protected_edges:
+            return requested
+
+        if not drop.path_id:
+            return None
+        path = _candidate_path_by_id(drop.path_id)
+        if not path:
+            return None
+        for candidate in reversed(_path_edges(path)):
+            if candidate in current_edges and candidate not in protected_edges:
+                return candidate
+        return None
+
+    def _drop_audit_edges(
+        drop_edges: Sequence[EdgeDrop],
+        causal_reports: Sequence[dict[str, Any]],
+    ) -> list[EdgeDrop]:
         if not drop_edges:
             return []
         doomed: set[tuple[str, str]] = set()
         applied: list[EdgeDrop] = []
+        protected_edges = _valid_path_edges(causal_reports)
         for item in drop_edges:
             if not item.src or not item.dst:
                 continue
@@ -1297,12 +1341,30 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     "edge is not on the reported seed/path lineage"
                 )
                 continue
-            if _edge_used_by_other_seed(item.src, item.dst, item.seed):
+            cut = _path_specific_cut(item, protected_edges)
+            if cut is None:
                 ctx.log(
                     f"  audit drop skipped for {item.src} -> {item.dst}: "
-                    "edge is still used by another seed-to-entry path"
+                    "no unprotected edge can cut the reported invalid path"
                 )
                 continue
+            if cut != (item.src, item.dst):
+                ctx.log(
+                    f"  audit drop remapped for {item.src} -> {item.dst}: "
+                    f"cutting {cut[0]} -> {cut[1]} to preserve valid paths"
+                )
+                item = item.model_copy(
+                    update={
+                        "src": cut[0],
+                        "dst": cut[1],
+                        "reason": (
+                            item.reason
+                            + "\nHarness closure: requested edge is shared "
+                            "with a valid causal path, so an unprotected edge "
+                            "on the same invalid path was removed instead."
+                        ),
+                    }
+                )
             doomed.add((item.src, item.dst))
             applied.append(item)
         if not doomed:
@@ -1341,7 +1403,10 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         drop_edges = [
             edge
             for edge in audit.drop_edges
-            if _drop_key(edge) not in applied_keys
+            if (
+                _drop_key(edge) not in applied_keys
+                and edge.path_id not in applied_path_ids
+            )
         ]
         if (
             invalid_causal_paths == audit.invalid_causal_paths
@@ -1865,7 +1930,8 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             )
 
             applied_drops = _drop_audit_edges(
-                audit_result.drop_edges if audit_result else []
+                audit_result.drop_edges if audit_result else [],
+                causal_reports,
             )
             is_last_audit_round = audit_round >= max_audit_rounds - 1
             if (
