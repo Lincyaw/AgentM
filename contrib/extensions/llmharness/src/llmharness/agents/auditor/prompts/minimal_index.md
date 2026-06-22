@@ -215,10 +215,58 @@ Do not let the agent pick a concrete vanished service merely because it has the
 largest normal count. The required reasoning operation is directional: use
 already-visible caller-callee edges, endpoint/controller span disappearance,
 normal-only logs, and service-local metric/resource evidence to identify the
-first supported concrete service or link root in the affected branch. If several
-concrete services have distinct service-local endpoint/controller evidence and
-the task allows multiple roots, preserve the multi-root possibility instead of
-compressing them into one entrypoint/workload explanation.
+first supported concrete service or link root in the affected branch. Preserve
+the multi-root possibility only after checking that the candidates are
+independent branches or mechanisms. Do not turn every normal-only service with a
+metric delta into a root when the visible call graph could place it on the same
+request path as an effect of a stronger concrete root.
+
+## FPG path repair after a root hit
+
+Once the agent has escaped a workload/entrypoint pseudo-root and found a
+concrete service root with local evidence, the next common failure is graph
+synthesis: it keeps the right root subject but adds extra roots/effects or
+misses the supported downstream path.
+
+Fire a path-repair reminder when ALL are true:
+
+1. The latest populated `submit_final_report` names at least one concrete
+   non-entrypoint service root supported by local evidence such as
+   disappeared/normal-only flow plus a service-local metric/log/resource signal.
+2. The same final graph also does one of these:
+   - adds another root mainly because that service is normal-only or has a
+     weaker metric delta, without proving an independent mechanism;
+   - uses aggregate branch nodes, route/loadgenerator/entrypoint nodes, or
+     broad "vanished branch" nodes where visible caller-callee evidence could
+     support a narrower downstream path;
+   - omits visible normal-period caller-callee/endpoint-disappearance evidence
+     that links the concrete root to user-facing or upstream effect nodes.
+3. The prefix contains some path evidence the agent can use: a normal call graph,
+   caller/callee rows, parent-child span rows, endpoint disappearance rows, or
+   normal-only logs for services on the path.
+
+In this reminder, do not ask the agent to preserve every normal-only service as
+an additional root. Tell it to keep the supported concrete root if still
+supported, then repair the minimal FPG path using only visible call-edge and
+endpoint evidence. A normal caller -> callee trace edge often means a callee
+interruption propagates back to its caller, so the RCA graph edge may point from
+the concrete callee/root to the caller/effect. Include a service as a non-root
+effect only when an observed normal edge/path or endpoint disappearance supports
+that placement. Exclude services that are merely normal-only, traffic-related,
+or have weaker local metrics unless the report can explain why they are
+independent roots or necessary path nodes.
+
+Be precise about FPG node types during path repair. Do not convert ordinary
+observed caller-callee rows into `link:<caller>-><callee>` anomaly nodes unless
+the agent has visible evidence of a network/link fault on that link. For a
+vanished request path caused by a concrete service interruption, prefer service
+nodes (`svc:<service>`) for the affected root and upstream/downstream effects;
+use the caller-callee rows as evidence for edges between those service nodes.
+Also prevent predicate drift: if the supported root was `flow_interrupted`
+because spans/logs disappeared while deployment/resource samples still show the
+service was present, do not change it to `process_killed` unless there is
+visible process termination, restart, deployment-unavailable, or killed-log
+evidence.
 
 ## Completeness
 
@@ -237,6 +285,11 @@ When a METHODOLOGY section is present, use it as ground truth for what correct r
 - Judge the agent's reasoning against the methodology's framework.
 - A completeness gap is only real if the methodology says that step is required at this stage.
 - If the agent's approach aligns with the methodology, do not fire.
+- Loaded skills, tool schemas, and methodology text are not case evidence. Do
+  not surface a reminder or name concrete services/endpoints based only on
+  `load_skill` outputs or methodology examples. In RCA, concrete service/path
+  facts must come from visible telemetry queries, final-report attempts, user
+  reminders, or scenario instructions in the prefix.
 
 ## Before firing
 

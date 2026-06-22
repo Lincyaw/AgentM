@@ -489,11 +489,7 @@ async def _judge_payload(
             detail = dict(comparison)
             if sql_eval is not None:
                 detail["sql_evidence"] = sql_eval
-            root_f1 = _metric_f1(detail, "root_subjects") or 0.0
-            correct = bool(
-                root_f1 >= 1.0
-                and detail.get("subject_path_reachability_hit") is True
-            )
+            correct = float(detail.get("score") or 0.0) >= 1.0
             detail.update(
                 {
                     "f1": detail.get("score"),

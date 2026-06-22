@@ -420,6 +420,7 @@ async def replay_one(
                             },
                             "auditor_prompt": auditor_prompt,
                             "auditor_context_mode": "index",
+                            "finalize_tool": "submit_final_report",
                         },
                     )
                 )

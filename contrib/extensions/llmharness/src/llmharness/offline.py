@@ -212,6 +212,8 @@ async def offline_audit(
 
             firing_id = cumulative.firing_id_counter
             ops_path = _Path(cwd) / ".agentm" / "audit_ops" / f"offline_{firing_id}.jsonl"
+            with contextlib.suppress(FileNotFoundError):
+                ops_path.unlink()
 
             ctx_config = dict(data)
             ctx_config["prompt_name"] = "default"

@@ -62,6 +62,7 @@ class LLMHarnessConfig(BaseModel):
     auditor_model: str | None = None
     enable_auditor: bool = True
     enable_reminders: bool = True
+    finalize_tool: str | None = None
 
 
 REMINDER_OPEN: Final = "<system-reminder>\n"
@@ -131,11 +132,26 @@ def _resolve_provider(
 
 def _render_message_text(msg: AgentMessage) -> str:
     """Extract all text from a message into one string (for witness validation)."""
+    return _render_message_text_for_index(msg, skip_tool_result_ids=set())
+
+
+def _render_message_text_for_index(
+    msg: AgentMessage,
+    *,
+    skip_tool_result_ids: set[str],
+) -> str:
+    """Extract message text for indexing, optionally omitting bulky tool results."""
     parts: list[str] = []
     content = getattr(msg, "content", None)
     if not isinstance(content, list):
         return ""
     for block in content:
+        tool_call_id = getattr(block, "tool_call_id", None)
+        if (
+            isinstance(tool_call_id, str)
+            and tool_call_id in skip_tool_result_ids
+        ):
+            continue
         text = getattr(block, "text", None)
         if isinstance(text, str) and text:
             parts.append(text)
@@ -151,6 +167,17 @@ def _render_message_text(msg: AgentMessage) -> str:
             with contextlib.suppress(TypeError, ValueError):
                 parts.append(json.dumps(args, ensure_ascii=False, default=str))
     return " ".join(parts)
+
+
+def _tool_call_ids(messages: list[AgentMessage], tool_name: str) -> set[str]:
+    call_ids: set[str] = set()
+    for msg in messages:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in msg.content:
+            if isinstance(block, ToolCallBlock) and block.name == tool_name:
+                call_ids.add(block.id)
+    return call_ids
 
 
 def _serialize_trajectory(
@@ -171,12 +198,7 @@ def _serialize_trajectory(
 
 def _extract_loaded_skills(messages: list[AgentMessage]) -> list[str]:
     """Extract text content from all load_skill tool results in the conversation."""
-    skill_call_ids: set[str] = set()
-    for msg in messages:
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, ToolCallBlock) and block.name == "load_skill":
-                    skill_call_ids.add(block.id)
+    skill_call_ids = _tool_call_ids(messages, "load_skill")
     if not skill_call_ids:
         return []
     skills: list[str] = []
@@ -197,6 +219,34 @@ def _extract_loaded_skills(messages: list[AgentMessage]) -> list[str]:
     return skills
 
 
+def _has_successful_tool_result(
+    messages: list[AgentMessage],
+    tool_name: str | None,
+) -> bool:
+    if not tool_name:
+        return False
+    call_ids: set[str] = set()
+    for msg in messages:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in msg.content:
+            if isinstance(block, ToolCallBlock) and block.name == tool_name:
+                call_ids.add(block.id)
+    if not call_ids:
+        return False
+    for msg in messages:
+        if not isinstance(msg, ToolResultMessage):
+            continue
+        for block in msg.content:  # type: ignore[assignment]
+            if (
+                isinstance(block, ToolResultBlock)
+                and block.tool_call_id in call_ids
+                and not block.is_error
+            ):
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Data preparation
 # ---------------------------------------------------------------------------
@@ -215,11 +265,18 @@ def _prepare_extractor_data(
         return None
     events_cum, edges_cum, _ = cumulative.index_view()
     turn_texts: dict[str, str] = {}
+    skill_call_ids = _tool_call_ids(messages, "load_skill")
     for i, msg in enumerate(window_messages, start=window_lo):
-        turn_texts[str(i)] = _render_message_text(msg)
+        turn_texts[str(i)] = _render_message_text_for_index(
+            msg,
+            skip_tool_result_ids=skill_call_ids,
+        )
     for t in {t for e in events_cum for t in e.source_turns}:
         if str(t) not in turn_texts and 0 <= t < len(messages):
-            turn_texts[str(t)] = _render_message_text(messages[t])
+            turn_texts[str(t)] = _render_message_text_for_index(
+                messages[t],
+                skip_tool_result_ids=skill_call_ids,
+            )
     new_turns = _serialize_trajectory(window_messages, start_index=window_lo)
     return {
         "turn_texts": turn_texts,
@@ -331,6 +388,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     shutdown_timeout = max(0.0, cfg.shutdown_timeout_s)
     enable_auditor = cfg.enable_auditor
     enable_reminders = cfg.enable_reminders
+    finalize_tool = cfg.finalize_tool
     summary_threshold = cfg.audit_summary_threshold
     tool_call_budget = cfg.extractor_tool_call_budget
 
@@ -510,11 +568,13 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         async def _on_turn_end_sync(event: TurnEndEvent) -> None:
             nonlocal turn_count
             turn_count += 1
+            if _has_successful_tool_result(list(event.messages), finalize_tool):
+                return
             await _step(list(event.messages), turn_count)
 
         async def _on_shutdown_sync(_event: SessionShutdownEvent) -> None:
             msgs = list(api.session.get_messages())
-            if msgs:
+            if msgs and not _has_successful_tool_result(msgs, finalize_tool):
                 await _step(msgs, turn_count, force=True)
 
         api.on(TurnEndEvent.CHANNEL, _on_turn_end_sync)
@@ -550,6 +610,8 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     def _on_turn_end(event: TurnEndEvent) -> None:
         nonlocal turn_count
         turn_count += 1
+        if _has_successful_tool_result(list(event.messages), finalize_tool):
+            return
         auditor_due = enable_auditor and (turn_count % auditor_k) == 0
         extractor_due = (turn_count % extractor_k) == 0 or auditor_due
         if not (extractor_due or auditor_due):
@@ -570,7 +632,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             except Exception:
                 logger.exception("audit worker raised on shutdown")
         msgs = list(api.session.get_messages())
-        if msgs:
+        if msgs and not _has_successful_tool_result(msgs, finalize_tool):
             await _step(msgs, turn_count, force=True)
 
     api.on(TurnEndEvent.CHANNEL, _on_turn_end)
