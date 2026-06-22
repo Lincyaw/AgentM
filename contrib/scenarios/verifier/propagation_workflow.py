@@ -33,7 +33,7 @@ the latest audit result.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Sequence
-from typing import Annotated, Any, Literal, Required, TypedDict, cast
+from typing import Annotated, Any, Literal, Required, TypeGuard, TypedDict, cast
 
 from agentm.extensions.builtin.workflow import AgentResult, WorkflowContext
 from pydantic import BaseModel, ConfigDict, Field
@@ -77,6 +77,10 @@ class HopResult(TypedDict, total=False):
     relationship: dict[str, Any] | None
     claim: str
     gate: dict[str, Any]
+
+
+SeedParallelItem = tuple[Injection, SeedResult | None]
+HopReworkParallelItem = tuple["HopRecheckRequest", HopResult | None]
 
 
 class GateDecision(BaseModel):
@@ -190,6 +194,31 @@ class GlobalAudit(BaseModel):
     rework_requests: list[ReworkRequest] = Field(default_factory=list)
     stop_reason: str | None = None
     rationale: str = ""
+
+
+def _parallel_items(raw: object) -> list[Any]:
+    """Normalize workflow parallel output after per-item agent failures."""
+    return raw if isinstance(raw, list) else []
+
+
+def _is_seed_parallel_item(value: object) -> TypeGuard[SeedParallelItem]:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and isinstance(value[0], dict)
+        and (value[1] is None or isinstance(value[1], dict))
+    )
+
+
+def _is_hop_rework_parallel_item(
+    value: object,
+) -> TypeGuard[HopReworkParallelItem]:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and isinstance(value[0], HopRecheckRequest)
+        and (value[1] is None or isinstance(value[1], dict))
+    )
 
 
 class PropagationResult(TypedDict, total=False):
@@ -807,11 +836,11 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             coros: list[Awaitable[HopResult | None]] = [
                 _make_hop_coro(item[0], item[1], item[2]) for item in pending_hops
             ]
-            results = await ctx.parallel(coros)
+            results = _parallel_items(await ctx.parallel(coros))
 
             for idx in range(len(pending_hops)):
                 from_svc, to_svc, rel_type = pending_hops[idx]
-                result = results[idx]
+                result = results[idx] if idx < len(results) else None
                 verdict = result.get("verdict") if isinstance(result, dict) else None
                 hop_log.append(
                     {
@@ -829,14 +858,20 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     + ": "
                     + (verdict if verdict else "no-result")
                 )
-                if isinstance(result, dict) and verdict:
-                    verdicts[from_svc + "__" + to_svc] = result
+                hop_result = cast(HopResult, result) if isinstance(result, dict) else None
+                if hop_result and verdict:
+                    verdicts[from_svc + "__" + to_svc] = hop_result
 
                 if verdict != "confirmed":
                     continue
-                assert isinstance(result, dict)
+                assert hop_result is not None
                 was_new_node = to_svc not in nodes
-                accepted = _accept_hop_result(from_svc, to_svc, rel_type, result)
+                accepted = _accept_hop_result(
+                    from_svc,
+                    to_svc,
+                    rel_type,
+                    hop_result,
+                )
                 changed_any = accepted or changed_any
                 if accepted and was_new_node:
                     if to_svc not in infra_set and to_svc not in entry_services:
@@ -888,7 +923,16 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         seed_coros: list[Awaitable[tuple[Injection, SeedResult | None]]] = [
             _verify_seed(inj) for inj in injections if inj.get("target")
         ]
-        seed_results = await ctx.parallel(seed_coros)
+        seed_result_items = _parallel_items(await ctx.parallel(seed_coros))
+        seed_results = [
+            item for item in seed_result_items
+            if _is_seed_parallel_item(item)
+        ]
+        missing_seed_results = len(seed_coros) - len(seed_results)
+        if missing_seed_results > 0:
+            ctx.log(
+                f"{missing_seed_results} seed verifier task(s) returned no usable result"
+            )
         for inj, seed_verdict in seed_results:
             root_id = _injection_node_id(inj)
             if seed_verdict and seed_verdict.get("verdict") == "confirmed":
@@ -1095,10 +1139,20 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         if seed_requests:
             ctx.phase("audit-seed-rework")
             ctx.log(f"Audit requested {len(seed_requests)} seed rechecks")
-            seed_results = await ctx.parallel([
+            seed_result_items = _parallel_items(await ctx.parallel([
                 _verify_seed(inj_by_seed[req.seed], req.context)
                 for req in seed_requests
-            ])
+            ]))
+            seed_results = [
+                item for item in seed_result_items
+                if _is_seed_parallel_item(item)
+            ]
+            missing_seed_results = len(seed_requests) - len(seed_results)
+            if missing_seed_results > 0:
+                ctx.log(
+                    f"{missing_seed_results} audit seed recheck task(s) "
+                    "returned no usable result"
+                )
             for inj, seed_verdict in seed_results:
                 seed_id = _injection_node_id(inj)
                 previous_seed_verdict = seed_verdicts.get(seed_id)
@@ -1158,9 +1212,19 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     ),
                 )
 
-            hop_results = await ctx.parallel([
+            hop_result_items = _parallel_items(await ctx.parallel([
                 _one_hop_rework(req) for req in hop_requests
-            ])
+            ]))
+            hop_results = [
+                item for item in hop_result_items
+                if _is_hop_rework_parallel_item(item)
+            ]
+            missing_hop_results = len(hop_requests) - len(hop_results)
+            if missing_hop_results > 0:
+                ctx.log(
+                    f"{missing_hop_results} audit hop recheck task(s) "
+                    "returned no usable result"
+                )
             for req, result in hop_results:
                 from_svc = req.from_service
                 to_svc = req.to_service
@@ -1306,7 +1370,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             case_view = _case_summary()
 
             anomaly_scopes = sorted(entry_services) or ["<entry-services-not-discovered>"]
-            anomaly_results = await ctx.parallel([
+            anomaly_results = _parallel_items(await ctx.parallel([
                 _audit_agent(
                     label=f"audit-anomaly-{scope}-r{audit_round}",
                     role="anomaly_coverage",
@@ -1324,13 +1388,13 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     schema=AnomalyAuditReport,
                 )
                 for scope in anomaly_scopes
-            ])
+            ]))
             anomaly_reports = [
                 _dump_model(report) for report in anomaly_results if report is not None
             ]
 
             path_items = _candidate_paths()
-            causal_results = await ctx.parallel([
+            causal_results = _parallel_items(await ctx.parallel([
                 _audit_agent(
                     label=f"audit-causal-{path_id}-r{audit_round}",
                     role="causal_path",
@@ -1351,12 +1415,12 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     schema=CausalAuditReport,
                 )
                 for path_id, seed, path in path_items
-            ])
+            ]))
             causal_reports = [
                 _dump_model(report) for report in causal_results if report is not None
             ]
 
-            seed_audit_results = await ctx.parallel([
+            seed_audit_results = _parallel_items(await ctx.parallel([
                 _audit_agent(
                     label=f"audit-seed-{seed}-r{audit_round}",
                     role="seed_coverage",
@@ -1379,7 +1443,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                     schema=SeedCoverageReport,
                 )
                 for seed in sorted(seeds)
-            ])
+            ]))
             seed_coverage_reports = [
                 _dump_model(report)
                 for report in seed_audit_results
