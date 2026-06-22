@@ -11,7 +11,7 @@ from typing import Any, Final
 from agentm.core.abi import SessionEntry
 
 from . import schema as _et
-from .agents.extractor.graph import GraphOp, fold_graph, parse_op
+from .agents.extractor.index_store import IndexOp, fold_index, parse_op
 from .schema import Edge, Event, Phase
 
 _DEFAULT_RECENT_VERDICTS: Final[int] = _et.RECENT_VERDICTS_FOR_AUDITOR
@@ -25,9 +25,9 @@ def _bool_safe_int(raw: Any) -> int | None:
 
 @dataclass
 class CumulativeAuditState:
-    """Event-sourced graph state + auditor side-channel state across firings."""
+    """Event-sourced context-index state + auditor side-channel state across firings."""
 
-    ops: list[GraphOp] = field(default_factory=list)
+    ops: list[IndexOp] = field(default_factory=list)
     cursor_last_turn_index: int = -1
     recent_verdicts: collections.deque[dict[str, Any]] = field(
         default_factory=lambda: collections.deque(maxlen=_DEFAULT_RECENT_VERDICTS)
@@ -38,19 +38,23 @@ class CumulativeAuditState:
     _cached_view: tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]] | None = None
     _phases: list[Phase] = field(default_factory=list)
 
-    def graph_view(self) -> tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]]:
+    def index_view(self) -> tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]]:
         if self._cached_view is not None and self._cached_len == len(self.ops):
             return self._cached_view
-        folded = fold_graph(self.ops)
-        events = tuple(folded.nodes_list())
-        edges = tuple(folded.edges_list())
+        folded = fold_index(self.ops)
+        events = tuple(folded.records_list())
+        edges = tuple(folded.links_list())
         phases = tuple(self._phases)
         self._cached_view = (events, edges, phases)
         self._cached_len = len(self.ops)
         return self._cached_view
 
+    def graph_view(self) -> tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]]:
+        """Compatibility alias for old replay helpers."""
+        return self.index_view()
+
     def next_event_id(self) -> int:
-        events, _edges, _phases = self.graph_view()
+        events, _edges, _phases = self.index_view()
         return max((e.id for e in events), default=0) + 1
 
     def _invalidate_cache(self) -> None:
@@ -60,7 +64,7 @@ class CumulativeAuditState:
     def absorb_extractor_firing(
         self,
         *,
-        firing_ops: Sequence[GraphOp],
+        firing_ops: Sequence[IndexOp],
         firing_cursor: int,
         firing_id: int,
         firing_phases: Sequence[Phase] = (),
@@ -87,14 +91,14 @@ class CumulativeAuditState:
 
     @classmethod
     def hydrate_from_session_log(cls, branch: list[SessionEntry]) -> CumulativeAuditState:
-        ops: list[GraphOp] = []
+        ops: list[IndexOp] = []
         verdicts_all: list[dict[str, Any]] = []
         cursor_last_turn_index = -1
         for entry in branch:
             payload = entry.payload
             if not isinstance(payload, dict):
                 continue
-            if entry.type == _et.AUDIT_GRAPH_OP:
+            if entry.type in {_et.AUDIT_INDEX_OP, _et.AUDIT_GRAPH_OP}:
                 try:
                     ops.append(parse_op(payload))
                 except (KeyError, ValueError, TypeError):

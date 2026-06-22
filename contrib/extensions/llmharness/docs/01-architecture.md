@@ -28,8 +28,9 @@ tooling that consumes the replay sidecar:
 |---|---|---|
 | **Main atom** | `atom.py` | The orchestrator. Subscribes to `TurnEndEvent`, `DecideTurnActionEvent`, `SessionShutdownEvent` on the main agent's bus. Manages `CumulativeAuditState` (event-sourced from session entries). Spawns extractor/auditor children at configured intervals. Persists results and queues reminders. MANIFEST name: `"llmharness"`. |
 | **Schema** | `schema.py` | All shared data types (`Event`, `Edge`, `Finding`, `Verdict`, `Phase`, `Reminder`, `ExternalRef`) plus session-entry-type constants. The public contract for downstream consumers. |
-| **Extractor child** | `agents/extractor/` | Phase 1. Builds an incremental logic-flow graph from new conversation turns. Uses 6 tools (`upsert_node`, `upsert_edge`, `delete_node`, `delete_edge`, `reset_extraction`, `finalize_extraction`). Witness validation ensures edge citations appear in source text. |
-| **Auditor child** | `agents/auditor/` | Phase 2. Reads the graph snapshot (events + edges + phases + findings + continuation notes) and emits a `Verdict` via `submit_verdict`. 10 prompt variants for different domains. |
+| **Context index** | `context_index.py` | Derived LSP-style view over the visible trajectory: turns, entities, observations, claims, candidates, obligations, contract events, and weak links. This is the auditor's default context surface. |
+| **Extractor child** | `agents/extractor/` | Phase 1. Builds an incremental context index using record/link index ops. Uses 6 tools (`upsert_record`, `upsert_link`, `delete_record`, `delete_link`, `reset_extraction`, `finalize_extraction`). Witness validation ensures link citations appear in source text. |
+| **Auditor child** | `agents/auditor/` | Phase 2. Reads `CONTEXT_INDEX` by default and emits a `Verdict` via `submit_verdict`. Prompt variants can still request legacy graph or combined context for A/B. |
 | **Replay record** | `replay/record.py` | `ReplayRecord` dataclass + read/write helpers. One JSONL line per phase invocation at `<cwd>/.agentm/audit_replay/<session_id>.jsonl`. |
 | **TELBench eval** | `eval/telbench/` | Offline evaluation harness for trajectory-error localization: loads TELBench dataset, runs extractor+auditor per instance, scores span-level P/R/F1/FEA. |
 | **Agent path resolvers** | `agents/__init__.py` | `extractor_scenario()` / `auditor_scenario()` return absolute paths to the child scenario directories. |
@@ -40,7 +41,7 @@ tooling that consumes the replay sidecar:
 |---|---|---|
 | **Replay CLI** | `tools/replay/cli.py` | `llmharness-replay {extractor,auditor,chain,list,agent-from-reminder}`. Rebuilds extension list + payload from a sidecar record and re-runs with different provider/prompt for A/B. |
 | **Replay engine** | `tools/replay/engine.py` | `run_phase_standalone` — constructs a standalone AgentM session for offline child execution. May import `agentm.core.runtime.*`. |
-| **Chain replay** | `tools/replay/chain.py` | Bulk-replay every record in order, threading cumulative graph state across firings. |
+| **Chain replay** | `tools/replay/chain.py` | Bulk-replay every record in order, threading cumulative index state across firings. |
 | **Prefix replay** | `tools/replay/prefix_replay.py` | Branch a session at turn t, resume with reminder seeded. |
 | **Reminder seed** | `tools/replay/reminder_seed.py` | §11 atom mounted on resumed sessions to inject a recorded reminder. |
 | **Distill CLI** | `tools/distill/cli.py` | `llmharness-distill {label,export}`. Drives the oracle + rewriter pipeline. |
@@ -49,7 +50,7 @@ tooling that consumes the replay sidecar:
 | **GT loader** | `tools/distill/gt.py` | Loads ground-truth labels from the dataset. |
 | **SFT exporter** | `tools/distill/export.py` | Labeled rows → `sft/{extractor,auditor,dropped}.jsonl`. |
 | **Distill binding** | `tools/distill/binding.py` | §11 atom mounted on the main agent during distill runs. Writes `<session_id>.meta.json` next to the replay sidecar. |
-| **Aggregate CLI** | `tools/aggregate/cli.py` | `llmharness-aggregate {replay,one}`. Folds sidecar(s) into per-case directories. |
+| **Aggregate CLI** | `src/llmharness/aggregate/cli.py` | `llmharness-aggregate {replay,one,sessions}`. Folds sidecar(s) or ClickHouse sessions into per-case directories. |
 | **Reference checks** | `tools/extensions/check_*.py` | Three §11 atoms: `check_premature_conclusion`, `check_repeated_actions`, `check_open_branches`. Mounted with `--extension`. |
 
 ---
@@ -67,7 +68,7 @@ tooling that consumes the replay sidecar:
                                   ▼
                        ┌───────────────────────────┐
                        │ Extractor child            │
-                       │  upsert_node / upsert_edge │
+                       │  index via node/edge tools │
                        │  finalize_extraction       │
                        └──────────┬────────────────┘
                                   │
@@ -76,7 +77,7 @@ tooling that consumes the replay sidecar:
                 │  quote must appear in src_turns)   │
                 └─────────────────┬──────────────────┘
                                   ▼
-            entries: audit_graph_op, extractor_cursor
+            entries: audit_index_op, extractor_cursor
             sidecar: ReplayRecord(phase="extractor", ...)
 
    (every k turns, after a successful extractor firing)
@@ -84,7 +85,7 @@ tooling that consumes the replay sidecar:
                                   ▼
                        ┌───────────────────────────┐
                        │ atom.py                    │
-                       │  rebuild graph from state  │
+                       │  derive context index      │
                        │  spawn auditor child       │
                        └──────────┬────────────────┘
                                   ▼
@@ -120,11 +121,11 @@ also emits a `DiagnosticEvent` on the observability JSONL.
 Event-sourced in-memory state in `atom.py`. Rebuilt on startup from
 session entries via `hydrate_from_session_log()`. Maintains:
 
-- `ops: list[GraphOp]` — the append-only op log
+- `ops: list[IndexOp]` — the append-only index op log
 - `cursor_last_turn_index` — last turn consumed by extractor
 - `recent_verdicts: deque[dict]` (maxlen 5) — recent auditor verdicts
 - `last_continuation_notes` — carried into the next auditor firing
-- Lazy `graph_view()` via `fold_graph(ops)` → `(events, edges, phases)`
+- Lazy `index_view()` via `fold_index(ops)` → `(events, edges, phases)`
 
 ---
 

@@ -1,6 +1,6 @@
 name: auditor
 description: >
-  Cognitive audit auditor: judges reasoning drift over the event graph.
+  Cognitive audit auditor: judges reasoning drift over the context index.
   Emits a verdict via submit_verdict.
 
 extensions:

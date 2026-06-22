@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
-from typing import Any
+from typing import Any, Literal
 
 from llmharness.agents.auditor.context import build_auditor_system_prompt
 from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
@@ -20,6 +20,7 @@ from llmharness.agents.extractor.tools import (
     FINALIZE_EXTRACTION_TOOL_NAME,
     ExtractionState,
 )
+from llmharness.context_index import build_context_index
 from llmharness.replay.record import ReplayRecord
 from llmharness.schema import Edge, Event, Finding, Phase
 
@@ -28,6 +29,16 @@ from .engine import PhaseResult, run_phase_standalone
 # ---------------------------------------------------------------------------
 # Settings dataclasses (replace old runtime.runner Settings)
 # ---------------------------------------------------------------------------
+
+ContextMode = Literal["graph", "index", "both"]
+
+
+def _coerce_context_mode(raw: Any) -> ContextMode:
+    if raw == "graph":
+        return "graph"
+    if raw == "both":
+        return "both"
+    return "index"
 
 
 class ExtractorSettings:
@@ -78,11 +89,13 @@ class AuditorSettings:
         *,
         base_prompt: str | None = None,
         summary_threshold: int = 30,
+        context_mode: ContextMode = "index",
         tools: tuple[str, ...] | None = None,
         observability_config: dict[str, Any] | None = None,
     ) -> None:
         self.base_prompt = base_prompt
         self.summary_threshold = summary_threshold
+        self.context_mode = context_mode
         self.tools = tools
         self.observability_config = observability_config
 
@@ -97,13 +110,15 @@ class AuditorSettings:
 
         base_prompt = prompt_override
         if base_prompt is None:
-            prompt_name = compose_kwargs.get("prompt_name") or "minimal"
+            prompt_name = compose_kwargs.get("prompt_name") or "minimal_index"
             base_prompt = load_auditor_prompt(prompt_name)
         tools_raw = compose_kwargs.get("tools")
         tools = tuple(tools_raw) if isinstance(tools_raw, (list, tuple)) else None
+        context_mode = _coerce_context_mode(compose_kwargs.get("context_mode"))
         return cls(
             base_prompt=base_prompt,
             summary_threshold=int(compose_kwargs.get("summary_threshold", 30)),
+            context_mode=context_mode,
             tools=tools,
             observability_config=compose_kwargs.get("observability_config"),
         )
@@ -112,7 +127,7 @@ class AuditorSettings:
     def default(cls) -> AuditorSettings:
         from llmharness.agents.auditor.context import load_auditor_prompt
 
-        return cls(base_prompt=load_auditor_prompt("minimal"))
+        return cls(base_prompt=load_auditor_prompt("minimal_index"))
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +143,12 @@ def _coerce_provider(record: ReplayRecord) -> tuple[str, dict[str, Any]] | None:
     if not isinstance(module, str):
         return None
     return module, dict(cfg) if isinstance(cfg, dict) else {}
+
+
+def _coerce_trajectory(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    return [dict(item) for item in raw if isinstance(item, dict)]
 
 
 def _coerce_schema_list(cls: Any, items: Any) -> list[Any]:
@@ -188,15 +209,27 @@ async def replay_extractor_record(
         with contextlib.suppress(TypeError, ValueError):
             state.turn_texts.setdefault(int(k), str(v))
 
-    # Enrich recent_graph entries and populate state.recent_graph.
+    # Enrich recent index records and populate state.
     payload = dict(record.payload or {})
     graph_obj = payload.get("graph")
     graph_raw: dict[str, Any] = graph_obj if isinstance(graph_obj, dict) else {}
-    recent_graph_raw = graph_raw.get("nodes") or payload.get("recent_graph") or []
-    recent_edges_raw = graph_raw.get("edges") or payload.get("recent_edges") or []
+    recent_records_raw = (
+        payload.get("recent_records")
+        or payload.get("records")
+        or graph_raw.get("nodes")
+        or payload.get("recent_graph")
+        or []
+    )
+    recent_links_raw = (
+        payload.get("recent_links")
+        or payload.get("links")
+        or graph_raw.get("edges")
+        or payload.get("recent_edges")
+        or []
+    )
     enriched_recent: list[dict[str, Any]] = []
     recent_events: list[Event] = []
-    for entry in recent_graph_raw:
+    for entry in recent_records_raw:
         if not isinstance(entry, dict):
             continue
         enriched = dict(entry)
@@ -210,24 +243,26 @@ async def replay_extractor_record(
             recent_events.append(Event.from_dict(entry))
         except (KeyError, ValueError, TypeError):
             continue
-    payload["graph"] = {"nodes": enriched_recent, "edges": list(recent_edges_raw)}
-    payload["recent_graph"] = enriched_recent
-    payload["recent_edges"] = list(recent_edges_raw)
+    payload["records"] = enriched_recent
+    payload["links"] = list(recent_links_raw)
+    payload["recent_records"] = enriched_recent
+    payload["recent_links"] = list(recent_links_raw)
     tool_call_budget = settings.compose_kwargs.get("tool_call_budget")
     if isinstance(tool_call_budget, int) and tool_call_budget > 0:
         payload["tool_call_budget"] = tool_call_budget
-    state.recent_graph = tuple(recent_events)
-    state.recent_graph_dict = {e.id: e for e in recent_events}
+    state.recent_records = tuple(recent_events)
+    state.recent_record_dict = {e.id: e for e in recent_events}
 
     recent_edges: list[Edge] = []
-    for entry in recent_edges_raw:
+    for entry in recent_links_raw:
         if not isinstance(entry, dict):
             continue
         try:
             recent_edges.append(Edge.from_dict(entry))
         except (KeyError, ValueError, TypeError):
             continue
-    state.recent_edges_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
+    state.recent_links = tuple(recent_edges)
+    state.recent_link_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
     state._refold()
 
     _EXT_TOOLS = "llmharness.agents.extractor.tools"
@@ -301,6 +336,16 @@ async def replay_auditor_record(
     events_t = tuple(_coerce_schema_list(Event, ck.get("events") or []))
     edges_t = tuple(_coerce_schema_list(Edge, ck.get("edges") or []))
     phases_t = tuple(_coerce_schema_list(Phase, ck.get("phases") or []))
+    raw_context_index = ck.get("context_index")
+    context_index = dict(raw_context_index) if isinstance(raw_context_index, dict) else None
+    if context_index is None:
+        trajectory = _coerce_trajectory(ck.get("trajectory_snapshot"))
+        if trajectory:
+            context_index = build_context_index(
+                trajectory=trajectory,
+                events=events_t,
+                edges=edges_t,
+            ).to_dict()
     prompt_text = build_auditor_system_prompt(
         events=events_t,
         edges=edges_t,
@@ -310,6 +355,8 @@ async def replay_auditor_record(
         continuation_notes=list(ck.get("continuation_notes") or []),
         summary_threshold=settings.summary_threshold,
         base_prompt=settings.base_prompt or None,
+        context_index=context_index,
+        context_mode=settings.context_mode,
     )
     tools_config: dict[str, Any] = {"tools": list(settings.tools or (SUBMIT_VERDICT_TOOL_NAME,))}
     _AUDITOR_TOOLS = "llmharness.agents.auditor.tools"

@@ -21,27 +21,26 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from llmharness.schema import CommitmentStatus, Edge, EdgeKind, EdgeRole, Event, EventKind
 
-from .graph import (
-    EdgeDelete,
-    EdgeUpsert,
-    Graph,
-    GraphOp,
-    NodeDelete,
-    NodeUpsert,
-    fold_graph,
+from .index_store import (
+    Index,
+    IndexOp,
+    LinkDelete,
+    LinkUpsert,
+    RecordDelete,
+    RecordUpsert,
+    fold_index,
     merge_to_phases,
     parse_op,
 )
 
-# Re-export for backward compatibility
 __all__: Final = [
-    "EdgeDelete",
-    "EdgeUpsert",
-    "Graph",
-    "GraphOp",
-    "NodeDelete",
-    "NodeUpsert",
-    "fold_graph",
+    "Index",
+    "IndexOp",
+    "LinkDelete",
+    "LinkUpsert",
+    "RecordDelete",
+    "RecordUpsert",
+    "fold_index",
     "merge_to_phases",
     "parse_op",
 ]
@@ -128,7 +127,7 @@ def format_witness_error(
         f"{symptom}\n"
         "\n"
         f"  what you tried:    {attempt_line}\n"
-        f"  current graph:     {state_line}\n"
+        f"  current index:     {state_line}\n"
         "\n"
         "  next options:\n" + "\n".join(labelled)
     )
@@ -140,17 +139,17 @@ def format_witness_error(
 
 
 def _state_echo(state: ExtractionState) -> str:
-    """One-line summary of the currently-folded graph for this firing."""
+    """One-line summary of the currently-folded index for this firing."""
     if not state.pending_ops:
         return ""
-    nodes = state.pending_graph.nodes
-    edges = state.pending_graph.edges
-    if not nodes:
+    records = state.pending_index.records
+    links = state.pending_index.links
+    if not records:
         return ""
-    last_id = max(nodes)
-    last = nodes[last_id]
+    last_id = max(records)
+    last = records[last_id]
     return (
-        f"{len(nodes)} node(s), {len(edges)} edge(s); "
+        f"{len(records)} record(s), {len(links)} link(s); "
         f"last accepted: id={last.id} kind={last.kind.value}"
     )
 
@@ -174,37 +173,37 @@ def _coerce_int(value: Any) -> int | None:
 
 
 def _validate_event_shape(idx: int, raw: dict[str, Any]) -> tuple[str | None, Event | None]:
-    """Validate one node payload from upsert_node / apply_node_upsert."""
+    """Validate one record payload from upsert_record / apply_record_upsert."""
     eid_raw = raw.get("id")
     kind_raw = raw.get("kind")
     summary_raw = raw.get("summary")
     source_turns_raw = raw.get("source_turns")
 
     if isinstance(eid_raw, bool) or not isinstance(eid_raw, int):
-        return f"upsert_node: events[{idx}].id must be an integer", None
+        return f"upsert_record: events[{idx}].id must be an integer", None
     if eid_raw < 1:
-        return f"upsert_node: events[{idx}].id must be >= 1; got {eid_raw}", None
+        return f"upsert_record: events[{idx}].id must be >= 1; got {eid_raw}", None
     if not isinstance(kind_raw, str):
-        return f"upsert_node: events[{idx}].kind must be a string", None
+        return f"upsert_record: events[{idx}].kind must be a string", None
     try:
         kind = EventKind(kind_raw)
     except ValueError:
         return (
-            f"upsert_node: events[{idx}].kind {kind_raw!r} not in {EVENT_KIND_VALUES}",
+            f"upsert_record: events[{idx}].kind {kind_raw!r} not in {EVENT_KIND_VALUES}",
             None,
         )
     if not isinstance(summary_raw, str) or not summary_raw.strip():
-        return f"upsert_node: events[{idx}].summary must be a non-empty string", None
+        return f"upsert_record: events[{idx}].summary must be a non-empty string", None
     if not isinstance(source_turns_raw, list) or not source_turns_raw:
         return (
-            f"upsert_node: events[{idx}].source_turns must be a non-empty array of integers",
+            f"upsert_record: events[{idx}].source_turns must be a non-empty array of integers",
             None,
         )
     source_turns: list[int] = []
     for t in source_turns_raw:
         if isinstance(t, bool) or not isinstance(t, int):
             return (
-                f"upsert_node: events[{idx}].source_turns contains non-integer entry {t!r}",
+                f"upsert_record: events[{idx}].source_turns contains non-integer entry {t!r}",
                 None,
             )
         source_turns.append(t)
@@ -235,12 +234,12 @@ def _compute_degree_warning(
     return (
         f"Soft warning: {len(chain_links)} chain-link event(s) "
         "(in-degree=1 AND out-degree=1) detected. If two adjacent "
-        "``act`` nodes have nothing branching between them, consider "
+        "``act`` records have nothing branching between them, consider "
         "merging them into one coalesced ``act`` (record every probe "
         "and result in time order in the summary). If a real "
         "``hyp`` / ``dec`` reasoning move was made between them but "
-        "you didn't emit a node for it, add one in a follow-up "
-        "firing. Aim for compact graphs but do NOT fabricate refs "
+        "you didn't emit a record for it, add one in a follow-up "
+        "firing. Aim for compact indexes but do NOT fabricate refs "
         "just to satisfy this heuristic.\n"
         "Chain-link events:\n" + "\n".join(lines)
     )
@@ -253,8 +252,9 @@ class ExtractionState:
     # turn_index -> raw turn text for witness substring checks.
     turn_texts: dict[int, str] = field(default_factory=dict)
 
-    # Recent-graph slice presented to the extractor this firing.
-    recent_graph: tuple[Event, ...] = ()
+    # Recent index slice presented to the extractor this firing.
+    recent_records: tuple[Event, ...] = ()
+    recent_links: tuple[Edge, ...] = ()
 
     # Next available global event id.
     next_event_id: int = 1
@@ -265,21 +265,61 @@ class ExtractionState:
     dropped_edges: tuple[dict[str, Any], ...] = ()
     committed: bool = False
 
-    # Event-sourcing op log.
-    recent_graph_dict: dict[int, Event] = field(default_factory=dict)
-    recent_edges_dict: dict[tuple[int, int, str], Edge] = field(default_factory=dict)
-    pending_ops: list[GraphOp] = field(default_factory=list)
-    pending_graph: Graph = field(default_factory=Graph)
+    # Index edit log.
+    recent_record_dict: dict[int, Event] = field(default_factory=dict)
+    recent_link_dict: dict[tuple[int, int, str], Edge] = field(default_factory=dict)
+    pending_ops: list[IndexOp] = field(default_factory=list)
+    pending_index: Index = field(default_factory=Index)
 
     ops_file: str | None = None
 
     def __post_init__(self) -> None:
-        if self.recent_graph and not self.recent_graph_dict:
-            self.recent_graph_dict = {ev.id: ev for ev in self.recent_graph}
-        if self.recent_graph_dict or self.recent_edges_dict or self.pending_ops:
+        if self.recent_records and not self.recent_record_dict:
+            self.recent_record_dict = {ev.id: ev for ev in self.recent_records}
+        if self.recent_links and not self.recent_link_dict:
+            self.recent_link_dict = {
+                (ed.src, ed.dst, ed.kind.value): ed for ed in self.recent_links
+            }
+        if self.recent_record_dict or self.recent_link_dict or self.pending_ops:
             self._refold()
 
-    def _persist_op(self, op: GraphOp) -> None:
+    @property
+    def recent_graph(self) -> tuple[Event, ...]:
+        """Compatibility alias for old replay code."""
+        return self.recent_records
+
+    @recent_graph.setter
+    def recent_graph(self, value: tuple[Event, ...]) -> None:
+        self.recent_records = value
+
+    @property
+    def recent_graph_dict(self) -> dict[int, Event]:
+        """Compatibility alias for old replay code."""
+        return self.recent_record_dict
+
+    @recent_graph_dict.setter
+    def recent_graph_dict(self, value: dict[int, Event]) -> None:
+        self.recent_record_dict = value
+
+    @property
+    def recent_edges_dict(self) -> dict[tuple[int, int, str], Edge]:
+        """Compatibility alias for old replay code."""
+        return self.recent_link_dict
+
+    @recent_edges_dict.setter
+    def recent_edges_dict(self, value: dict[tuple[int, int, str], Edge]) -> None:
+        self.recent_link_dict = value
+
+    @property
+    def pending_graph(self) -> Index:
+        """Compatibility alias for old replay code."""
+        return self.pending_index
+
+    @pending_graph.setter
+    def pending_graph(self, value: Index) -> None:
+        self.pending_index = value
+
+    def _persist_op(self, op: IndexOp) -> None:
         if self.ops_file is None:
             return
         try:
@@ -297,14 +337,14 @@ class ExtractionState:
         if self.committed:
             return "finalize: firing already finalized"
 
-        firing_node_ids = {op.id for op in self.pending_ops if isinstance(op, NodeUpsert)}
-        firing_node_ids -= {op.id for op in self.pending_ops if isinstance(op, NodeDelete)}
-        nodes, edges_view = self._folded_view()
-        firing_events = [nodes[nid] for nid in sorted(firing_node_ids) if nid in nodes]
+        firing_record_ids = {op.id for op in self.pending_ops if isinstance(op, RecordUpsert)}
+        firing_record_ids -= {op.id for op in self.pending_ops if isinstance(op, RecordDelete)}
+        records, links_view = self._folded_view()
+        firing_events = [records[rid] for rid in sorted(firing_record_ids) if rid in records]
         firing_edges = [
             ed
-            for (src, dst, _kind), ed in edges_view.items()
-            if src in firing_node_ids or dst in firing_node_ids
+            for (src, dst, _kind), ed in links_view.items()
+            if src in firing_record_ids or dst in firing_record_ids
         ]
         self.events = tuple(firing_events)
         self.edges = tuple(firing_edges)
@@ -313,7 +353,7 @@ class ExtractionState:
         return None
 
     def compute_degree_warning(self) -> str | None:
-        """Return chain-link warning for the committed graph, or None."""
+        """Return chain-link warning for the committed index, or None."""
         return _compute_degree_warning(list(self.events), list(self.edges))
 
     def reset_pending(self) -> None:
@@ -329,12 +369,12 @@ class ExtractionState:
     # -- Event-sourcing apply_* surface -------------------------------------
 
     def _refold(self) -> None:
-        """Recompute pending_graph from recent + pending_ops."""
-        prefix: list[GraphOp] = []
-        for nid, ev in self.recent_graph_dict.items():
+        """Recompute pending_index from recent + pending_ops."""
+        prefix: list[IndexOp] = []
+        for rid, ev in self.recent_record_dict.items():
             prefix.append(
-                NodeUpsert(
-                    id=nid,
+                RecordUpsert(
+                    id=rid,
                     kind=ev.kind.value,
                     summary=ev.summary,
                     source_turns=tuple(ev.source_turns),
@@ -342,9 +382,9 @@ class ExtractionState:
                     status=ev.status.value if ev.status else None,
                 )
             )
-        for (src, dst, kind), ed in self.recent_edges_dict.items():
+        for (src, dst, kind), ed in self.recent_link_dict.items():
             prefix.append(
-                EdgeUpsert(
+                LinkUpsert(
                     src=src,
                     dst=dst,
                     kind=kind,
@@ -356,44 +396,44 @@ class ExtractionState:
                     role=ed.role.value if ed.role else None,
                 )
             )
-        self.pending_graph = fold_graph(prefix + self.pending_ops)
+        self.pending_index = fold_index(prefix + self.pending_ops)
 
     def _ops_digest(self, op: str) -> dict[str, Any]:
         return {
             "ok": True,
             "op": op,
             "pending_ops": len(self.pending_ops),
-            "graph_nodes": len(self.pending_graph.nodes),
-            "graph_edges": len(self.pending_graph.edges),
+            "index_records": len(self.pending_index.records),
+            "index_links": len(self.pending_index.links),
         }
 
     def _folded_view(self) -> tuple[dict[int, Event], dict[tuple[int, int, str], Edge]]:
-        """Return (nodes, edges) of the current folded graph."""
-        return self.pending_graph.nodes, self.pending_graph.edges
+        """Return (records, links) of the current folded index."""
+        return self.pending_index.records, self.pending_index.links
 
-    def apply_node_upsert(self, raw: dict[str, Any]) -> dict[str, Any] | str:
-        """Validate + apply one NodeUpsert against the folded view."""
+    def apply_record_upsert(self, raw: dict[str, Any]) -> dict[str, Any] | str:
+        """Validate + apply one RecordUpsert against the folded view."""
         if self.committed:
-            return "apply_node_upsert: firing already finalized"
+            return "apply_record_upsert: firing already finalized"
         err, ev = _validate_event_shape(0, raw)
         if err is not None:
             return err
         assert ev is not None
 
-        nodes, _edges = self._folded_view()
-        deleted_in_firing = {op.id for op in self.pending_ops if isinstance(op, NodeDelete)}
+        records, _links = self._folded_view()
+        deleted_in_firing = {op.id for op in self.pending_ops if isinstance(op, RecordDelete)}
         max_seen = max(
             [0]
-            + list(nodes.keys())
-            + [op.id for op in self.pending_ops if isinstance(op, NodeUpsert)]
+            + list(records.keys())
+            + [op.id for op in self.pending_ops if isinstance(op, RecordUpsert)]
             + list(deleted_in_firing)
             + [self.next_event_id - 1]
         )
-        allowed_ids = set(nodes.keys()) | deleted_in_firing | {max_seen + 1}
+        allowed_ids = set(records.keys()) | deleted_in_firing | {max_seen + 1}
         if ev.id not in allowed_ids:
             return (
-                f"apply_node_upsert: id={ev.id} is neither an existing node "
-                f"in the folded graph (recent + pending), a node deleted in "
+                f"apply_record_upsert: id={ev.id} is neither an existing record "
+                f"in the folded index (recent + pending), a record deleted in "
                 f"this firing, nor the next available id ({max_seen + 1}). "
                 "Pick one: edit an existing id, re-use a just-deleted id, or "
                 "append at the next free slot."
@@ -402,11 +442,11 @@ class ExtractionState:
         status_raw = raw.get("status")
         if status_raw is not None and status_raw not in COMMITMENT_STATUS_VALUES:
             return (
-                f"apply_node_upsert: status {status_raw!r} not in "
+                f"apply_record_upsert: status {status_raw!r} not in "
                 f"{COMMITMENT_STATUS_VALUES}"
             )
 
-        op = NodeUpsert(
+        op = RecordUpsert(
             id=ev.id,
             kind=ev.kind.value,
             summary=ev.summary,
@@ -416,78 +456,78 @@ class ExtractionState:
         self.pending_ops.append(op)
         self._persist_op(op)
         self._refold()
-        return self._ops_digest("node_upsert")
+        return self._ops_digest("record_upsert")
 
-    def apply_node_delete(self, node_id: int) -> dict[str, Any] | str:
-        """Validate + apply one NodeDelete against the folded view."""
+    def apply_record_delete(self, record_id: int) -> dict[str, Any] | str:
+        """Validate + apply one RecordDelete against the folded view."""
         if self.committed:
-            return "apply_node_delete: firing already finalized"
-        nodes, _edges = self._folded_view()
-        if node_id not in nodes:
+            return "apply_record_delete: firing already finalized"
+        records, _links = self._folded_view()
+        if record_id not in records:
             return (
-                f"apply_node_delete: unknown node_id {node_id}. "
-                f"Existing ids in the folded graph: {sorted(nodes.keys())}"
+                f"apply_record_delete: unknown record id {record_id}. "
+                f"Existing ids in the folded index: {sorted(records.keys())}"
             )
-        op = NodeDelete(id=node_id)
+        op = RecordDelete(id=record_id)
         self.pending_ops.append(op)
         self._persist_op(op)
         self._refold()
-        return self._ops_digest("node_delete")
+        return self._ops_digest("record_delete")
 
-    def apply_edge_upsert(self, raw: dict[str, Any]) -> dict[str, Any] | str:
-        """Validate + apply one EdgeUpsert against the folded view."""
+    def apply_link_upsert(self, raw: dict[str, Any]) -> dict[str, Any] | str:
+        """Validate + apply one LinkUpsert against the folded view."""
         if self.committed:
-            return "apply_edge_upsert: firing already finalized"
+            return "apply_link_upsert: firing already finalized"
 
         src = _coerce_int(raw.get("src"))
         dst = _coerce_int(raw.get("dst"))
         kind_raw = raw.get("kind")
         if src is None or dst is None:
-            return "apply_edge_upsert: 'src' and 'dst' must be integers"
+            return "apply_link_upsert: 'src' and 'dst' must be integers"
         try:
             kind = EdgeKind(kind_raw)
         except ValueError:
-            return f"apply_edge_upsert: kind {kind_raw!r} not in {EDGE_KIND_VALUES}"
+            return f"apply_link_upsert: kind {kind_raw!r} not in {EDGE_KIND_VALUES}"
 
-        nodes, _edges = self._folded_view()
-        if src not in nodes or dst not in nodes:
+        records, _links = self._folded_view()
+        if src not in records or dst not in records:
             return (
-                f"apply_edge_upsert: src={src} and dst={dst} must both exist "
-                f"in the folded graph. Existing ids: {sorted(nodes.keys())}"
+                f"apply_link_upsert: src={src} and dst={dst} must both exist "
+                f"in the folded index. Existing ids: {sorted(records.keys())}"
             )
-        src_event = nodes[src]
-        dst_event = nodes[dst]
+        src_event = records[src]
+        dst_event = records[dst]
 
         cited_entities_raw = raw.get("cited_entities", [])
         cited_quote = str(raw.get("cited_quote", "") or "")
         if kind is EdgeKind.DATA:
             if not isinstance(cited_entities_raw, list) or not cited_entities_raw:
-                return "apply_edge_upsert: kind='data' requires non-empty cited_entities"
+                return "apply_link_upsert: kind='data' requires non-empty cited_entities"
             if any(not isinstance(e, str) or not e for e in cited_entities_raw):
-                return "apply_edge_upsert: cited_entities must be non-empty strings"
+                return "apply_link_upsert: cited_entities must be non-empty strings"
             cited_entities = tuple(str(e) for e in cited_entities_raw)
         else:
             if not cited_quote:
-                return "apply_edge_upsert: kind='ref' requires non-empty cited_quote"
+                return "apply_link_upsert: kind='ref' requires non-empty cited_quote"
             src_text = self._concat_turn_texts(src_event.source_turns)
             dst_text = self._concat_turn_texts(dst_event.source_turns)
             werr = witness_ref(cited_quote, src_text, dst_text)
             if werr is not None:
-                return f"apply_edge_upsert: {werr}"
+                return f"apply_link_upsert: {werr}"
             cited_entities = tuple(str(e) for e in (cited_entities_raw or []))
 
         reason = raw.get("reason", "")
         if not isinstance(reason, str):
-            return "apply_edge_upsert: reason must be a string"
+            return "apply_link_upsert: reason must be a string"
 
         role_raw = raw.get("role")
         if role_raw is not None and role_raw not in EDGE_ROLE_VALUES:
             return (
-                f"apply_edge_upsert: role {role_raw!r} not in "
+                f"apply_link_upsert: role {role_raw!r} not in "
                 f"{EDGE_ROLE_VALUES}"
             )
 
-        op = EdgeUpsert(
+        op = LinkUpsert(
             src=src,
             dst=dst,
             kind=kind.value,
@@ -501,35 +541,35 @@ class ExtractionState:
         self.pending_ops.append(op)
         self._persist_op(op)
         self._refold()
-        return self._ops_digest("edge_upsert")
+        return self._ops_digest("link_upsert")
 
-    def apply_edge_delete(self, selector: dict[str, Any]) -> dict[str, Any] | str:
-        """Validate + apply one EdgeDelete against the folded view."""
+    def apply_link_delete(self, selector: dict[str, Any]) -> dict[str, Any] | str:
+        """Validate + apply one LinkDelete against the folded view."""
         if self.committed:
-            return "apply_edge_delete: firing already finalized"
+            return "apply_link_delete: firing already finalized"
 
         src = _coerce_int(selector.get("src"))
         dst = _coerce_int(selector.get("dst"))
         kind_raw = selector.get("kind")
         if src is None or dst is None:
-            return "apply_edge_delete: 'src' and 'dst' must be integers"
+            return "apply_link_delete: 'src' and 'dst' must be integers"
         if not isinstance(kind_raw, str) or not kind_raw:
-            return "apply_edge_delete: 'kind' is required and must be a string"
+            return "apply_link_delete: 'kind' is required and must be a string"
         try:
             EdgeKind(kind_raw)
         except ValueError:
-            return f"apply_edge_delete: kind {kind_raw!r} not in {EDGE_KIND_VALUES}"
+            return f"apply_link_delete: kind {kind_raw!r} not in {EDGE_KIND_VALUES}"
 
-        _nodes, edges = self._folded_view()
-        if (src, dst, kind_raw) not in edges:
+        _records, links = self._folded_view()
+        if (src, dst, kind_raw) not in links:
             return (
-                f"apply_edge_delete: edge ({src}, {dst}, {kind_raw}) not found in the folded graph"
+                f"apply_link_delete: link ({src}, {dst}, {kind_raw}) not found in the folded index"
             )
-        op = EdgeDelete(src=src, dst=dst, kind=kind_raw)
+        op = LinkDelete(src=src, dst=dst, kind=kind_raw)
         self.pending_ops.append(op)
         self._persist_op(op)
         self._refold()
-        return self._ops_digest("edge_delete")
+        return self._ops_digest("link_delete")
 
     def _concat_turn_texts(self, turn_indices: list[int] | tuple[int, ...]) -> str:
         return " ".join(self.turn_texts.get(idx, "") for idx in turn_indices)
@@ -539,10 +579,10 @@ class ExtractionState:
 # Section 9: Tool Pydantic models + builders
 # ---------------------------------------------------------------------------
 
-UPSERT_NODE_TOOL_NAME = "upsert_node"
-UPSERT_EDGE_TOOL_NAME = "upsert_edge"
-DELETE_NODE_TOOL_NAME = "delete_node"
-DELETE_EDGE_TOOL_NAME = "delete_edge"
+UPSERT_RECORD_TOOL_NAME = "upsert_record"
+UPSERT_LINK_TOOL_NAME = "upsert_link"
+DELETE_RECORD_TOOL_NAME = "delete_record"
+DELETE_LINK_TOOL_NAME = "delete_link"
 RESET_EXTRACTION_TOOL_NAME = "reset_extraction"
 FINALIZE_EXTRACTION_TOOL_NAME = "finalize_extraction"
 FINALIZE_EXTRACTION_REASON = "llmharness:finalize_extraction"
@@ -550,18 +590,18 @@ FINALIZE_EXTRACTION_REASON = "llmharness:finalize_extraction"
 _EventKindLiteral = Literal["task", "hyp", "act", "dec", "concl"]
 _EdgeKindLiteral = Literal["data", "ref"]
 
-# -- upsert_node ------------------------------------------------------------
+# -- upsert_record ------------------------------------------------------------
 
 
-class UpsertNodeArgs(BaseModel):
+class UpsertRecordArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: int = Field(
         description=(
-            "Node id. If this id already exists in the current graph "
-            "(this firing or any prior firing), the node is updated "
+            "Record id. If this id already exists in the current index "
+            "(this firing or any prior firing), the record is updated "
             "in place. Otherwise the id must equal the next available "
-            "id (max existing id + 1) or a node id you deleted earlier "
+            "id (max existing id + 1) or a record id you deleted earlier "
             "in this firing (re-use after delete is the merge-duplicate "
             "path). Gaps over still-live ids are rejected."
         ),
@@ -597,7 +637,7 @@ class UpsertNodeArgs(BaseModel):
     status: Literal["exploratory", "tentative", "committed", "finalized"] | None = Field(
         default=None,
         description=(
-            "Commitment status — REQUIRED for hyp/dec/concl nodes. "
+            "Commitment status — REQUIRED for hyp/dec/concl records. "
             "exploratory=mentioned but not pursued, "
             "tentative=under active investigation, "
             "committed=later reasoning depends on this, "
@@ -607,32 +647,32 @@ class UpsertNodeArgs(BaseModel):
     )
 
 
-def _upsert_node_attempt_echo(args: UpsertNodeArgs) -> str:
+def _upsert_record_attempt_echo(args: UpsertRecordArgs) -> str:
     summary_preview = args.summary[:40] + ("..." if len(args.summary) > 40 else "")
     return (
-        f"upsert_node(id={args.id}, kind={args.kind}, "
+        f"upsert_record(id={args.id}, kind={args.kind}, "
         f"source_turns={args.source_turns}, summary={summary_preview!r})"
     )
 
 
-def build_upsert_node_tool(state: ExtractionState) -> FunctionTool:
-    """Build a FunctionTool for upsert_node closing over state."""
+def build_upsert_record_tool(state: ExtractionState) -> FunctionTool:
+    """Build a FunctionTool for upsert_record closing over state."""
 
     async def _handler(args: dict[str, Any]) -> ToolResult:
         try:
-            parsed = UpsertNodeArgs.model_validate(args)
+            parsed = UpsertRecordArgs.model_validate(args)
         except ValidationError as exc:
             return ToolResult(
-                content=[TextContent(type="text", text=f"upsert_node rejected: {exc}")],
+                content=[TextContent(type="text", text=f"upsert_record rejected: {exc}")],
                 is_error=True,
             )
         raw = parsed.model_dump()
-        result = state.apply_node_upsert(raw)
+        result = state.apply_record_upsert(raw)
         if isinstance(result, str):
             options = [
-                "re-call upsert_node with id = max(existing ids) + 1 to append a fresh node",
-                "re-call upsert_node with an id already present in the folded graph to edit in place",
-                "delete_node(<id>) first if you intended to replace and re-use that id",
+                "re-call upsert_record with id = max(existing ids) + 1 to append a fresh record",
+                "re-call upsert_record with an id already present in the folded index to edit in place",
+                "delete_record(<id>) first if you intended to replace and re-use that id",
             ]
             return ToolResult(
                 content=[
@@ -640,7 +680,7 @@ def build_upsert_node_tool(state: ExtractionState) -> FunctionTool:
                         type="text",
                         text=format_witness_error(
                             symptom=result,
-                            attempt=_upsert_node_attempt_echo(parsed),
+                            attempt=_upsert_record_attempt_echo(parsed),
                             state_echo=_state_echo(state),
                             options=options,
                         ),
@@ -653,37 +693,37 @@ def build_upsert_node_tool(state: ExtractionState) -> FunctionTool:
         )
 
     return FunctionTool(
-        name=UPSERT_NODE_TOOL_NAME,
+        name=UPSERT_RECORD_TOOL_NAME,
         description=(
-            "Insert or replace one event node in the current graph. "
-            "Editing a prior-firing node is supported — the id resolves "
+            "Insert or replace one event record in the current index. "
+            "Editing a prior-firing record is supported — the id resolves "
             "against the folded view (this firing + every prior firing). "
-            "Recorded as a NodeUpsert op."
+            "Recorded as a RecordUpsert op."
         ),
-        parameters=UpsertNodeArgs,
+        parameters=UpsertRecordArgs,
         fn=_handler,
     )
 
 
-# -- upsert_edge ------------------------------------------------------------
+# -- upsert_link ------------------------------------------------------------
 
 
-class UpsertEdgeArgs(BaseModel):
+class UpsertLinkArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     src: int = Field(
-        description="Source node id — must exist in the current graph (this firing or any prior firing).",
+        description="Source record id — must exist in the current index (this firing or any prior firing).",
     )
     dst: int = Field(
         description=(
-            "Destination node id — must exist in the current graph "
+            "Destination record id — must exist in the current index "
             "(this firing or any prior firing)."
         ),
     )
     kind: _EdgeKindLiteral = Field(
         description=(
-            "Edge kind. 'ref' for textual-witness edges (cited_quote); "
-            "'data' for entity-witness edges (cited_entities)."
+            "Link kind. 'ref' for textual-witness links (cited_quote); "
+            "'data' for entity-witness links (cited_entities)."
         ),
     )
     reason: str = Field(
@@ -695,13 +735,13 @@ class UpsertEdgeArgs(BaseModel):
             "paths, error codes, etc.) shared by src and dst. "
             "Required non-empty when kind='data'; each entity must "
             "appear (case+whitespace normalized substring) in at "
-            "least one of the src or dst node's source_turns text. "
+            "least one of the src or dst record's source_turns text. "
             "Pass [] when kind='ref'."
         ),
     )
     cited_quote: str = Field(
         description=(
-            "Verbatim substring of at least one endpoint node's "
+            "Verbatim substring of at least one endpoint record's "
             "source_turns text (case+whitespace normalized). "
             "Required when kind='ref'. "
             "Paraphrasing or reformatting is rejected at op-build "
@@ -710,7 +750,7 @@ class UpsertEdgeArgs(BaseModel):
     )
     role: Literal["supports", "weakens", "depends", "narrows"] = Field(
         description=(
-            "Causal role of this edge — REQUIRED. "
+            "Context-link role — REQUIRED. "
             "supports=evidence positively confirms the claim, "
             "weakens=evidence partially contradicts, "
             "depends=logical dependency, "
@@ -719,49 +759,49 @@ class UpsertEdgeArgs(BaseModel):
     )
 
 
-def _upsert_edge_attempt_echo(args: UpsertEdgeArgs) -> str:
+def _upsert_link_attempt_echo(args: UpsertLinkArgs) -> str:
     if args.kind == "data":
         return (
-            f"upsert_edge(src={args.src}, dst={args.dst}, kind=data, "
+            f"upsert_link(src={args.src}, dst={args.dst}, kind=data, "
             f"cited_entities={args.cited_entities!r})"
         )
     quote_preview = args.cited_quote[:60] + ("..." if len(args.cited_quote) > 60 else "")
-    return f"upsert_edge(src={args.src}, dst={args.dst}, kind=ref, cited_quote={quote_preview!r})"
+    return f"upsert_link(src={args.src}, dst={args.dst}, kind=ref, cited_quote={quote_preview!r})"
 
 
-def build_upsert_edge_tool(state: ExtractionState) -> FunctionTool:
-    """Build a FunctionTool for upsert_edge closing over state."""
+def build_upsert_link_tool(state: ExtractionState) -> FunctionTool:
+    """Build a FunctionTool for upsert_link closing over state."""
 
     async def _handler(args: dict[str, Any]) -> ToolResult:
         try:
-            parsed = UpsertEdgeArgs.model_validate(args)
+            parsed = UpsertLinkArgs.model_validate(args)
         except ValidationError as exc:
             return ToolResult(
-                content=[TextContent(type="text", text=f"upsert_edge rejected: {exc}")],
+                content=[TextContent(type="text", text=f"upsert_link rejected: {exc}")],
                 is_error=True,
             )
         raw = parsed.model_dump()
-        result = state.apply_edge_upsert(raw)
+        result = state.apply_link_upsert(raw)
         if isinstance(result, str):
-            nodes, _edges = state._folded_view()
-            existing = sorted(nodes.keys())[:8]
+            records, _links = state._folded_view()
+            existing = sorted(records.keys())[:8]
             if parsed.kind == "ref":
                 options = [
-                    "re-call upsert_edge with a cited_quote that is a verbatim "
+                    "re-call upsert_link with a cited_quote that is a verbatim "
                     "substring of at least one endpoint's source_turns text (after "
                     "case+whitespace normalisation)",
                     "switch to kind='data' if no shared literal quote exists, "
                     "and pass cited_entities=[<shared identifier>, ...]",
-                    f"verify src/dst are existing node ids — folded view contains {existing}",
+                    f"verify src/dst are existing record ids — folded view contains {existing}",
                 ]
             else:
                 options = [
-                    "re-call upsert_edge with non-empty cited_entities — each "
+                    "re-call upsert_link with non-empty cited_entities — each "
                     "entry must be a concrete identifier present in at least one "
                     "endpoint's source_turns text",
                     "switch to kind='ref' with cited_quote if a verbatim shared "
                     "substring exists in at least one endpoint",
-                    f"verify src/dst are existing node ids — folded view contains {existing}",
+                    f"verify src/dst are existing record ids — folded view contains {existing}",
                 ]
             return ToolResult(
                 content=[
@@ -769,7 +809,7 @@ def build_upsert_edge_tool(state: ExtractionState) -> FunctionTool:
                         type="text",
                         text=format_witness_error(
                             symptom=result,
-                            attempt=_upsert_edge_attempt_echo(parsed),
+                            attempt=_upsert_link_attempt_echo(parsed),
                             state_echo=_state_echo(state),
                             options=options,
                         ),
@@ -782,52 +822,52 @@ def build_upsert_edge_tool(state: ExtractionState) -> FunctionTool:
         )
 
     return FunctionTool(
-        name=UPSERT_EDGE_TOOL_NAME,
+        name=UPSERT_LINK_TOOL_NAME,
         description=(
-            "Insert or replace one witness-bearing edge keyed by (src, dst, kind). "
-            "Both endpoint nodes must already exist in the current graph (this firing "
+            "Insert or replace one witness-bearing link keyed by (src, dst, kind). "
+            "Both endpoint records must already exist in the current index (this firing "
             "or any prior firing). kind='data' requires non-empty cited_entities; "
             "kind='ref' requires cited_quote to appear in at least one endpoint "
-            "node's source_turns text."
+            "record's source_turns text."
         ),
-        parameters=UpsertEdgeArgs,
+        parameters=UpsertLinkArgs,
         fn=_handler,
     )
 
 
-# -- delete_node -------------------------------------------------------------
+# -- delete_record -------------------------------------------------------------
 
 
-class DeleteNodeArgs(BaseModel):
+class DeleteRecordArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: int = Field(
         description=(
-            "Event node id to delete. May reference a node from this "
+            "Event record id to delete. May reference a record from this "
             "firing or from any prior firing — the resulting "
-            "NodeDelete cascades to all incident edges at fold time."
+            "RecordDelete cascades to all incident links at fold time."
         ),
     )
 
 
-def build_delete_node_tool(state: ExtractionState) -> FunctionTool:
-    """Build a FunctionTool for delete_node closing over state."""
+def build_delete_record_tool(state: ExtractionState) -> FunctionTool:
+    """Build a FunctionTool for delete_record closing over state."""
 
     async def _handler(args: dict[str, Any]) -> ToolResult:
         try:
-            parsed = DeleteNodeArgs.model_validate(args)
+            parsed = DeleteRecordArgs.model_validate(args)
         except ValidationError as exc:
             return ToolResult(
-                content=[TextContent(type="text", text=f"delete_node rejected: {exc}")],
+                content=[TextContent(type="text", text=f"delete_record rejected: {exc}")],
                 is_error=True,
             )
-        result = state.apply_node_delete(parsed.id)
+        result = state.apply_record_delete(parsed.id)
         if isinstance(result, str):
-            nodes, _edges = state._folded_view()
-            sample_ids = sorted(nodes.keys())[:5]
+            records, _links = state._folded_view()
+            sample_ids = sorted(records.keys())[:5]
             options = [
-                f"re-call delete_node with one of the existing ids: {sample_ids}",
-                "if you meant to skip this delete, just proceed with upsert_node / upsert_edge",
+                f"re-call delete_record with one of the existing ids: {sample_ids}",
+                "if you meant to skip this delete, just proceed with upsert_record / upsert_link",
             ]
             return ToolResult(
                 content=[
@@ -835,7 +875,7 @@ def build_delete_node_tool(state: ExtractionState) -> FunctionTool:
                         type="text",
                         text=format_witness_error(
                             symptom=result,
-                            attempt=f"delete_node(id={parsed.id})",
+                            attempt=f"delete_record(id={parsed.id})",
                             state_echo=_state_echo(state),
                             options=options,
                         ),
@@ -848,56 +888,56 @@ def build_delete_node_tool(state: ExtractionState) -> FunctionTool:
         )
 
     return FunctionTool(
-        name=DELETE_NODE_TOOL_NAME,
+        name=DELETE_RECORD_TOOL_NAME,
         description=(
-            "Delete one event node from the current graph (this firing or any "
-            "prior firing). Every edge incident to that node is removed "
+            "Delete one event record from the current index (this firing or any "
+            "prior firing). Every link incident to that record is removed "
             "automatically at fold time."
         ),
-        parameters=DeleteNodeArgs,
+        parameters=DeleteRecordArgs,
         fn=_handler,
     )
 
 
-# -- delete_edge -------------------------------------------------------------
+# -- delete_link -------------------------------------------------------------
 
 
-class DeleteEdgeArgs(BaseModel):
+class DeleteLinkArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    src: int = Field(description="Source node id of the edge to delete.")
-    dst: int = Field(description="Destination node id of the edge to delete.")
+    src: int = Field(description="Source record id of the link to delete.")
+    dst: int = Field(description="Destination record id of the link to delete.")
     kind: _EdgeKindLiteral = Field(
         description=(
-            "Required: the edge kind to delete. Without this the "
+            "Required: the link kind to delete. Without this the "
             "selector is ambiguous — the same (src, dst) pair may "
-            "carry both a 'data' and a 'ref' edge in the persistent "
+            "carry both a 'data' and a 'ref' link in the persistent "
             "op log."
         ),
     )
 
 
-def build_delete_edge_tool(state: ExtractionState) -> FunctionTool:
-    """Build a FunctionTool for delete_edge closing over state."""
+def build_delete_link_tool(state: ExtractionState) -> FunctionTool:
+    """Build a FunctionTool for delete_link closing over state."""
 
     async def _handler(args: dict[str, Any]) -> ToolResult:
         try:
-            parsed = DeleteEdgeArgs.model_validate(args)
+            parsed = DeleteLinkArgs.model_validate(args)
         except ValidationError as exc:
             return ToolResult(
-                content=[TextContent(type="text", text=f"delete_edge rejected: {exc}")],
+                content=[TextContent(type="text", text=f"delete_link rejected: {exc}")],
                 is_error=True,
             )
         raw = parsed.model_dump()
-        result = state.apply_edge_delete(raw)
+        result = state.apply_link_delete(raw)
         if isinstance(result, str):
-            _nodes, edges = state._folded_view()
-            present = sorted(edges.keys())[:8]
+            _records, links = state._folded_view()
+            present = sorted(links.keys())[:8]
             options = [
-                f"re-call delete_edge with an existing (src, dst, kind) "
+                f"re-call delete_link with an existing (src, dst, kind) "
                 f"triple — folded view contains {present}",
-                "if you wanted to remove a node entirely, call delete_node(<id>) "
-                "instead and let the edge cascade off automatically",
+                "if you wanted to remove a record entirely, call delete_record(<id>) "
+                "instead and let the link cascade off automatically",
             ]
             return ToolResult(
                 content=[
@@ -905,7 +945,7 @@ def build_delete_edge_tool(state: ExtractionState) -> FunctionTool:
                         type="text",
                         text=format_witness_error(
                             symptom=result,
-                            attempt=f"delete_edge(src={parsed.src}, dst={parsed.dst}, kind={parsed.kind})",
+                            attempt=f"delete_link(src={parsed.src}, dst={parsed.dst}, kind={parsed.kind})",
                             state_echo=_state_echo(state),
                             options=options,
                         ),
@@ -918,12 +958,12 @@ def build_delete_edge_tool(state: ExtractionState) -> FunctionTool:
         )
 
     return FunctionTool(
-        name=DELETE_EDGE_TOOL_NAME,
+        name=DELETE_LINK_TOOL_NAME,
         description=(
-            "Delete one edge identified by (src, dst, kind). 'kind' is mandatory "
-            "because the same (src, dst) pair may carry both a 'data' and a 'ref' edge."
+            "Delete one link identified by (src, dst, kind). 'kind' is mandatory "
+            "because the same (src, dst) pair may carry both a 'data' and a 'ref' link."
         ),
-        parameters=DeleteEdgeArgs,
+        parameters=DeleteLinkArgs,
         fn=_handler,
     )
 
@@ -972,9 +1012,9 @@ def build_reset_extraction_tool(state: ExtractionState) -> FunctionTool:
     return FunctionTool(
         name=RESET_EXTRACTION_TOOL_NAME,
         description=(
-            "Rarely needed; use delete_node + upsert_node to repair instead. "
-            "Drops all pending events / edges so you can re-emit the firing's "
-            "graph from scratch. Reserved as a last-resort escape hatch when "
+            "Rarely needed; use delete_record + upsert_record to repair instead. "
+            "Drops all pending records / links so you can re-emit the firing's "
+            "index from scratch. Reserved as a last-resort escape hatch when "
             "the accumulated draft is fundamentally unrecoverable."
         ),
         parameters=ResetExtractionArgs,
@@ -1007,12 +1047,12 @@ def build_finalize_extraction_tool(state: ExtractionState) -> FunctionTool:
                 is_error=True,
             )
         digest = (
-            f'{{"ok": true, "events": {len(state.events)}, '
-            f'"edges": {len(state.edges)}, '
+            f'{{"ok": true, "records": {len(state.events)}, '
+            f'"links": {len(state.edges)}, '
             f'"dropped": {len(state.dropped_edges)}}}'
         )
         warning = state.compute_degree_warning()
-        text = "Graph committed. Note: " + warning + "\n\n" + digest if warning else digest
+        text = "Index committed. Note: " + warning + "\n\n" + digest if warning else digest
         return ToolTerminate(
             result=ToolResult(content=[TextContent(type="text", text=text)]),
             reason=FINALIZE_EXTRACTION_REASON,
@@ -1022,9 +1062,9 @@ def build_finalize_extraction_tool(state: ExtractionState) -> FunctionTool:
         name=FINALIZE_EXTRACTION_TOOL_NAME,
         description=(
             "Terminate the extractor firing. Call this AFTER emitting every "
-            "node/edge with upsert_node / upsert_edge (and any merges via "
-            "delete_node / delete_edge). The handler commits the witness-valid "
-            "graph and ends the firing."
+            "record/link with upsert_record / upsert_link (and any merges via "
+            "delete_record / delete_link). The handler commits the witness-valid "
+            "index and ends the firing."
         ),
         parameters=FinalizeExtractionArgs,
         fn=_handler,
@@ -1045,12 +1085,12 @@ class ExtractorToolsConfig(BaseModel):
 
 MANIFEST = ExtensionManifest(
     name="extractor_tools",
-    description="Register the extractor graph-editing tools.",
+    description="Register the extractor context-index editing tools.",
     registers=(
-        "tool:upsert_node",
-        "tool:upsert_edge",
-        "tool:delete_node",
-        "tool:delete_edge",
+        "tool:upsert_record",
+        "tool:upsert_link",
+        "tool:delete_record",
+        "tool:delete_link",
         "tool:reset_extraction",
         "tool:finalize_extraction",
     ),
@@ -1059,10 +1099,10 @@ MANIFEST = ExtensionManifest(
 )
 
 _BUILDERS: Final = [
-    build_upsert_node_tool,
-    build_upsert_edge_tool,
-    build_delete_node_tool,
-    build_delete_edge_tool,
+    build_upsert_record_tool,
+    build_upsert_link_tool,
+    build_delete_record_tool,
+    build_delete_link_tool,
     build_reset_extraction_tool,
     build_finalize_extraction_tool,
 ]

@@ -62,7 +62,9 @@ def model_output_tool_schema(profile_path: Path) -> dict[str, Any]:
     """
 
     raw = model_output_model(profile_path).model_json_schema()
-    return _inline_local_refs(raw)
+    schema = _inline_local_refs(raw)
+    _allow_empty_no_root_report(schema)
+    return schema
 
 
 def contract_json_schema(profile_path: Path) -> str:
@@ -98,6 +100,25 @@ def _inline_local_refs(schema: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(expanded, dict):
         raise TypeError("expanded JSON schema root is not an object")
     return expanded
+
+
+def _allow_empty_no_root_report(schema: dict[str, Any]) -> None:
+    """Permit explicit no-root RCA reports in the tool-call schema.
+
+    Some verified RCA cases have no confirmed causal graph. The upstream fpg
+    model currently requires at least one node/root, but the runtime finalize
+    atom accepts the exact empty-report shape as a scenario-level extension.
+    Reflect that in the advertised tool schema so models are not discouraged
+    from submitting the only faithful answer for those cases.
+    """
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+    for key in ("nodes", "root_causes"):
+        field_schema = properties.get(key)
+        if isinstance(field_schema, dict):
+            field_schema.pop("minItems", None)
 
 
 __all__ = [

@@ -17,7 +17,7 @@ from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
 from llmharness.agents.extractor.tools import (
     FINALIZE_EXTRACTION_TOOL_NAME,
     ExtractionState,
-    GraphOp,
+    IndexOp,
 )
 from llmharness.schema import Event, Verdict
 
@@ -113,7 +113,8 @@ class StandaloneChildRunner:
         prompt_text: str,
         tools_config: dict[str, Any],
         provider: tuple[str, dict[str, Any]] | None,
-        graph_events: list[Event],
+        records: list[Event],
+        links: list[dict[str, Any]],
         recent_verdicts: list[dict[str, Any]],
         continuation_notes_from_prior_firing: list[str],
     ) -> dict[str, Any]:
@@ -132,7 +133,8 @@ class StandaloneChildRunner:
         ]
 
         payload: dict[str, Any] = {
-            "graph": [e.to_dict() for e in graph_events],
+            "records": [e.to_dict() for e in records],
+            "links": list(links),
             "recent_verdicts": list(recent_verdicts),
             "continuation_notes_from_prior_firing": list(continuation_notes_from_prior_firing),
         }
@@ -189,7 +191,7 @@ class InMemorySink:
     """Captures every entry in local lists — for offline drivers and tests."""
 
     def __init__(self) -> None:
-        self.ops: list[tuple[GraphOp, int, int, list[int]]] = []
+        self.ops: list[tuple[IndexOp, int, int, list[int]]] = []
         self.cursors: list[int] = []
         self.verdicts: list[dict[str, Any]] = []
         self.failures: list[tuple[str, dict[str, Any]]] = []
@@ -197,7 +199,7 @@ class InMemorySink:
 
     def append_op(
         self,
-        op: GraphOp,
+        op: IndexOp,
         *,
         firing_id: int,
         op_index: int,

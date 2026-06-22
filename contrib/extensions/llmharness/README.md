@@ -13,12 +13,12 @@ An agent running an investigation (or any multi-turn task) can drift —
 follow dead leads, forget earlier findings, converge prematurely.
 llmharness watches the agent's turns and periodically:
 
-1. **Extracts** a logic-flow graph from the conversation (nodes =
-   semantic events like hypotheses / actions / decisions; edges =
-   causal or referential links with witness citations).
-2. **Audits** the graph for reasoning faults (drift, blind spots,
-   premature conclusions) and optionally injects a one-line reminder
-   into the main agent's next turn.
+1. **Indexes** the conversation into an LSP-style context surface
+   (turns, entities, observations, claims, candidates, obligations,
+   contract failures, and weak links).
+2. **Audits** the context index for reasoning faults (drift, blind spots,
+   premature conclusions, protocol failures) and optionally injects a
+   one-line reminder into the main agent's next turn.
 
 Both the extractor and auditor run as AgentM child sessions with their
 own prompts, tools, and provider configs — the main agent's tool
@@ -74,12 +74,13 @@ contrib/extensions/llmharness/
 │   ├── __init__.py              #   Public API (re-exports from schema)
 │   ├── schema.py                #   Data types + entry-type constants
 │   ├── atom.py                  #   Main extension atom (the orchestrator)
-│   ├── state.py                 #   CumulativeAuditState (event-sourced graph state)
+│   ├── state.py                 #   CumulativeAuditState (event-sourced index storage)
+│   ├── context_index.py         #   Derived LSP-style auditor context
 │   ├── agents/                  #   Child session scenarios
 │   │   ├── __init__.py          #     Path resolvers (extractor_scenario, auditor_scenario)
-│   │   ├── extractor/           #     Extractor child: graph builder
+│   │   ├── extractor/           #     Extractor child: context-index builder
 │   │   │   ├── manifest.yaml    #       Scenario manifest for extractor child
-│   │   │   ├── graph.py         #       Graph ops model, fold, phase merge
+│   │   │   ├── graph.py         #       Legacy event/edge storage ops, fold, phase merge
 │   │   │   ├── context.py       #       Context injection atom
 │   │   │   ├── prompt.py        #       Prompt templates
 │   │   │   └── tools.py         #       Witness validation, ExtractionState, tool builders
@@ -102,7 +103,7 @@ contrib/extensions/llmharness/
 │   │   ├── cli.py               #     `llmharness-replay` entry point
 │   │   ├── runner.py            #     Replay orchestrator
 │   │   ├── engine.py            #     Standalone session runner
-│   │   ├── chain.py             #     Bulk-replay with cumulative graph state
+│   │   ├── chain.py             #     Bulk-replay with cumulative index state
 │   │   ├── prefix_replay.py     #     Branch + resume from a specific turn
 │   │   ├── fork_tree.py         #     Fork-tree experiment helpers
 │   │   ├── reminder_seed.py     #     Reminder-seeding atom for prefix-replay
@@ -168,7 +169,8 @@ alongside the conversation.
 | `audit_interval_turns` | 3 | Run auditor every N turns (only after successful extraction) |
 | `enable_auditor` | `true` | Set `false` to run extractor-only |
 | `enable_reminders` | `true` | Set `false` for opinions-only (verdicts recorded but not injected) |
-| `extractor_prompt` / `auditor_prompt` | `"default"` / `"minimal"` | Named prompt variant or absolute file path |
+| `extractor_prompt` / `auditor_prompt` | `"default"` / `"minimal_index"` | Named prompt variant or absolute file path |
+| `auditor_context_mode` | `"index"` | Auditor context shape: `"index"`, `"both"`, or legacy `"graph"` |
 | `extractor_provider` / `auditor_provider` | `null` | Override the LLM provider for child sessions |
 | `audit_summary_threshold` | 30 | Degrade witness fields when event count exceeds this |
 
@@ -176,25 +178,24 @@ alongside the conversation.
 
 Runs as an AgentM child session with scenario
 `agents/extractor/manifest.yaml`. The extractor maintains an
-**event-sourced logic-flow graph** via an append-only op log:
+**event-sourced context index** using record/link index ops:
 
-- **Graph ops**: `NodeUpsert`, `NodeDelete`, `EdgeUpsert`, `EdgeDelete`
-- **Event kinds**: `task`, `hyp` (hypothesis), `act` (action), `dec`
-  (decision), `concl` (conclusion)
-- **Edge kinds**: `data` (causal/data dependency), `ref` (referential)
-- **Witness validation**: every edge must cite entities or a verbatim
-  quote that appears in the source turn text. Invalid edges are dropped.
-- **Tools**: `upsert_node`, `upsert_edge`, `delete_node`, `delete_edge`,
+- **Index ops**: `RecordUpsert`, `RecordDelete`, `LinkUpsert`, `LinkDelete`
+- **Event kinds**: `task`, `act` (observation), `hyp` (claim/candidate),
+  `dec` (decision/demotion), `concl` (conclusion/final answer)
+- **Link kinds**: `data` and `ref` weak navigation links
+- **Witness validation**: every link must cite entities or a verbatim
+  quote that appears in the source turn text. Invalid links are dropped.
+- **Tools**: `upsert_record`, `upsert_link`, `delete_record`, `delete_link`,
   `reset_extraction`, `finalize_extraction` (terminal)
 
-The graph is rebuilt deterministically via `fold_graph(ops)` — pure
-fold over the op sequence.
+Stored records/links are folded deterministically via `fold_index(ops)`, then
+`context_index.py` derives the auditor-facing `CONTEXT_INDEX`.
 
 ### Auditor child
 
 Runs as an AgentM child session with scenario
-`agents/auditor/manifest.yaml`. Reads the current graph snapshot
-(events + edges + phases + findings + continuation notes) and emits a
+`agents/auditor/manifest.yaml`. Reads `CONTEXT_INDEX` by default and emits a
 verdict via the `submit_verdict` tool:
 
 ```python
@@ -206,18 +207,18 @@ Verdict(
 )
 ```
 
-10 prompt variants available (selected via `auditor_prompt` config):
-`minimal`, `bench`, `telbench`, `trajectory`, `trajectory_cascade`,
-`trajectory_coverage`, `trajectory_dual`, `trajectory_receipt`,
-`trajectory_reflect`, `trajectory_sniper`.
+Prompt variants are selected via `auditor_prompt`; the default is
+`minimal_index`. Legacy variants such as `minimal`, `bench`, `telbench`, and
+`trajectory` remain available for A/B.
 
 ### Cumulative state
 
-`CumulativeAuditState` (in `atom.py`) is the adapter's in-memory graph
-state. It is **event-sourced** from the session entry tree — on startup,
+`CumulativeAuditState` is the adapter's in-memory index-storage state. It is
+**event-sourced** from the session entry tree — on startup,
 `hydrate_from_session_log(branch)` replays all persisted
-`audit_graph_op` / `verdict` / `extractor_cursor` entries. This means
-the graph survives session restarts and can be rebuilt from the log alone.
+`audit_index_op` / `verdict` / `extractor_cursor` entries. This means
+the stored index records survive session restarts and can be rebuilt from the
+log alone.
 
 ---
 
@@ -256,7 +257,7 @@ Replay I/O (from `replay.record`):
 | Subcommand | What it does |
 |---|---|
 | `llmharness-replay extractor` / `auditor` | Replay one recorded phase with overrides (A/B bisection) |
-| `llmharness-replay chain` | Bulk-replay every record; threads cumulative graph state |
+| `llmharness-replay chain` | Bulk-replay every record; threads cumulative index state |
 | `llmharness-replay list` | Index records by phase / turn / status / latency |
 | `llmharness-replay agent-from-reminder` | Branch a main-agent session at turn t, seed with recorded reminder |
 
@@ -270,13 +271,13 @@ TurnEndEvent
   ├─ extractor_due? ──▶ spawn extractor child
   │                        │
   │                        ▼
-  │                     tools: upsert_node/edge, finalize_extraction
+  │                     tools: upsert_record/link, finalize_extraction
   │                        │
   │                        ▼
-  │                     persist: graph ops → session entries
+  │                     persist: index ops → session entries
   │                              replay record → sidecar JSONL
   │
-  ├─ auditor_due? ──▶ spawn auditor child (graph + findings + notes)
+  ├─ auditor_due? ──▶ spawn auditor child (context index + notes)
   │                        │
   │                        ▼
   │                     tool: submit_verdict
@@ -320,3 +321,4 @@ labels, SFT JSONL).
 | [docs/07-prefix-replay.md](docs/07-prefix-replay.md) | Iterate on auditor/reminder without full re-run |
 | [docs/08-running-modes.md](docs/08-running-modes.md) | Decoupling extractor / auditor / reminder injection |
 | [docs/09-extractor-strategy-iteration.md](docs/09-extractor-strategy-iteration.md) | Extractor prompt/model strategy iteration workflow |
+| [docs/10-context-index-proposal.md](docs/10-context-index-proposal.md) | Proposal: LSP-style context index for reminder policy |

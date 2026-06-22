@@ -46,7 +46,7 @@ class EdgeRole(str, Enum):
 class ExternalRef:
     """Cross-firing reference from this event to a prior-firing event."""
 
-    to_recent_event_id: int  # global event id from a recent_graph[i].id
+    to_recent_event_id: int  # global event id from a recent_records[i].id
     kind: EdgeKind
     reason: str = ""
     cited_entities: tuple[str, ...] = ()
@@ -247,6 +247,7 @@ class Phase:
 # Entry-type constants for session entries
 # ---------------------------------------------------------------------------
 
+AUDIT_INDEX_OP = "llmharness.audit_index_op"
 AUDIT_GRAPH_OP = "llmharness.audit_graph_op"
 VERDICT = "llmharness.verdict"
 EXTRACTOR_CURSOR = "llmharness.extractor_cursor"
@@ -266,6 +267,7 @@ RECENT_VERDICTS_FOR_AUDITOR = 5
 __all__ = [
     "AUDIT_ERROR",
     "AUDIT_GRAPH_OP",
+    "AUDIT_INDEX_OP",
     "AUDIT_NO_CALL",
     "EXTRACTOR_CURSOR",
     "EXTRACTOR_EMPTY",

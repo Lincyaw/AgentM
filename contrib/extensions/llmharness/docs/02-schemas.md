@@ -17,18 +17,17 @@ All dataclasses are `frozen=True` and ship `to_dict` / `from_dict`.
 ```python
 Event(
   id: int,                        # per-firing fresh-numbered (1, 2, ...)
-  kind: EventKind,                # task | hyp | act | dec | concl
+  kind: EventKind,                # task | hyp | act | dec | concl storage class
   summary: str,
   source_turns: list[int],        # turn indices this event was extracted from
 )
 ```
 
-V4 short-form kinds: `task`, `hyp`, `act`, `dec`, `concl` (five).
-V3 also defined `evid` as a separate kind; v4 folds it into `act`
-— every linear investigation block is now a single `act` whose
-`summary` records both the probe AND the result in time order.
-The v2 long forms (`hypothesis`, `evidence`, …) and `REFLECTION`
-are gone.
+The extractor now treats `Event` as a storage record for the context index, not
+as proof of a reasoning DAG. The short-form kinds map to index categories:
+`task` for task/contract instructions, `act` for tool-grounded observations,
+`hyp` for agent-authored hypotheses/candidates, `dec` for decisions/demotions,
+and `concl` for conclusions/final-answer claims.
 
 ### `Edge`
 
@@ -45,15 +44,33 @@ Edge(
 )
 ```
 
-Witness fields (`cited_entities`, `cited_quote`) are validated by
-the extractor's witness layer against the actual turn text before
-the edge is persisted. Invalid edges are dropped and accounted
-for as `extractor_partial`.
+Witness fields (`cited_entities`, `cited_quote`) are validated by the
+extractor's witness layer against the actual turn text before the edge is
+persisted. Invalid edges are dropped and accounted for as `extractor_partial`.
+Edges are weak navigation links for the context index; they should not be read
+as ground-truth causal proof.
 
-The extractor LLM emits these as embedded `refs[]` on events via
-`submit_events`; the witness layer unrolls them into `Edge`
-records. The on-the-wire shape (after unrolling) is what the
-auditor and distill pipelines see.
+### `ContextIndex`
+
+`src/llmharness/context_index.py` derives the auditor's default view from the
+trajectory snapshot plus stored events/edges:
+
+```python
+ContextIndex(
+  turns=[...],
+  entities=[...],
+  observations=[...],
+  claims=[...],
+  candidates=[...],
+  obligations=[...],
+  contract_events=[...],
+  links=[...],
+)
+```
+
+This view is regenerated at auditor time and may also be stored in replay
+records. It is an LSP-style context surface: it helps the auditor locate
+evidence and claims, but it does not decide whether a reminder should fire.
 
 ### `Finding`
 
@@ -81,11 +98,9 @@ Verdict(
 
 ### `Phase`
 
-A merged "basic block" over consecutive raw events. `task` /
-`hyp` / `dec` / `concl` stay singleton; consecutive `act` events
-coalesce into a single block tagged `act_run`. The auditor reads
-the phase view for high-level reasoning and drills back to raw
-events via `get_event_detail` when needed.
+A merged "basic block" over consecutive raw events. This is a legacy
+compatibility view over stored events; the default auditor prompt reads
+`CONTEXT_INDEX` instead.
 
 ```python
 Phase(
@@ -163,9 +178,11 @@ shared by the root and every transitive child.
 
   "payload": {
     "new_turns": [...],             // extractor only
-    "recent_graph": [...],          // extractor only
+    "recent_records": [...],        // extractor only
+    "recent_links": [...],          // extractor only
 
-    "graph": [...],                 // auditor only
+    "records": [...],               // auditor only
+    "links": [...],                 // auditor only
     "recent_verdicts": [...],       // auditor only
     "continuation_notes_from_prior_firing": [...]
   },
@@ -359,7 +376,7 @@ follows the OpenAI-compatible function-call convention
   "turn_index": 12,
   "input": {
     "system": "<AUDITOR_SYSTEM_PROMPT verbatim>",
-    "user":   "<json.dumps(input_payload) verbatim>"   // causal snapshot, no GT
+    "user":   "<json.dumps(input_payload) verbatim>"   // context snapshot, no GT
   },
   "target": {
     "messages": [

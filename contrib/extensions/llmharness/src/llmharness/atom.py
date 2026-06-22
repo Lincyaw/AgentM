@@ -33,7 +33,8 @@ from pydantic import BaseModel
 from . import schema as _et
 from .agents import auditor_scenario, extractor_scenario
 from .agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-from .agents.extractor.graph import GraphOp, parse_op
+from .agents.extractor.index_store import IndexOp, parse_op
+from .context_index import build_context_index
 from .schema import Reminder, Verdict
 from .state import CumulativeAuditState
 
@@ -52,7 +53,8 @@ class LLMHarnessConfig(BaseModel):
     prompt_override_extractor: str | None = None
     prompt_override_auditor: str | None = None
     extractor_prompt: str = "default"
-    auditor_prompt: str = "minimal"
+    auditor_prompt: str = "minimal_index"
+    auditor_context_mode: Literal["graph", "index", "both"] = "index"
     shutdown_timeout_s: float = 600.0
     extractor_provider: ProviderConfig | None = None
     auditor_provider: ProviderConfig | None = None
@@ -80,7 +82,7 @@ _SYSTEM_PROMPT_BLOCK: Final = (
 
 MANIFEST = ExtensionManifest(
     name="llmharness",
-    description="Two-phase cognitive-audit: per-turn extractor + every-k-turns auditor.",
+    description="Context-index audit harness: per-turn indexer + every-k-turns auditor.",
     registers=("event:turn_end", "event:decide_turn_action", "event:session_shutdown",
                "event:before_agent_start"),
     config_schema=LLMHarnessConfig,
@@ -211,7 +213,7 @@ def _prepare_extractor_data(
     window_messages = messages[window_lo:]
     if not window_messages:
         return None
-    events_cum, edges_cum, _ = cumulative.graph_view()
+    events_cum, edges_cum, _ = cumulative.index_view()
     turn_texts: dict[str, str] = {}
     for i, msg in enumerate(window_messages, start=window_lo):
         turn_texts[str(i)] = _render_message_text(msg)
@@ -221,8 +223,8 @@ def _prepare_extractor_data(
     new_turns = _serialize_trajectory(window_messages, start_index=window_lo)
     return {
         "turn_texts": turn_texts,
-        "recent_graph": [e.to_dict() for e in events_cum],
-        "recent_edges": [ed.to_dict() for ed in edges_cum],
+        "recent_records": [e.to_dict() for e in events_cum],
+        "recent_links": [ed.to_dict() for ed in edges_cum],
         "next_event_id": cumulative.next_event_id(),
         "new_turns": new_turns,
         "tool_call_budget": tool_call_budget,
@@ -230,10 +232,10 @@ def _prepare_extractor_data(
     }
 
 
-def _read_ops_file(path: Path) -> list[GraphOp]:
+def _read_ops_file(path: Path) -> list[IndexOp]:
     if not path.exists():
         return []
-    ops: list[GraphOp] = []
+    ops: list[IndexOp] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -405,7 +407,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                     for op in ops:
                         d = op.to_dict()
                         d["firing_id"] = firing_id
-                        api.session.append_entry(_et.AUDIT_GRAPH_OP, d)
+                        api.session.append_entry(_et.AUDIT_INDEX_OP, d)
                     cumulative.absorb_extractor_firing(
                         firing_ops=ops,
                         firing_cursor=data["window_hi"],
@@ -418,8 +420,13 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
 
         # --- Auditor ---
         if auditor_due:
-            events, edges, phases = cumulative.graph_view()
+            events, edges, phases = cumulative.index_view()
             trajectory = _serialize_trajectory(list(messages))
+            context_index = build_context_index(
+                trajectory=trajectory,
+                events=events,
+                edges=edges,
+            ).to_dict()
             loaded_skills = _extract_loaded_skills(messages)
 
             child_msgs = await _run_child(
@@ -427,7 +434,9 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                 scenario=aud_scenario,
                 prompt=json.dumps(
                     {
-                        "graph": [e.to_dict() for e in events],
+                        "records": [e.to_dict() for e in events],
+                        "links": [ed.to_dict() for ed in edges],
+                        "context_index": context_index,
                         "recent_verdicts": list(cumulative.recent_verdicts),
                         "continuation_notes_from_prior_firing": list(
                             cumulative.last_continuation_notes
@@ -446,6 +455,8 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                         "summary_threshold": summary_threshold,
                         "prompt_name": cfg.auditor_prompt,
                         "trajectory_snapshot": trajectory,
+                        "context_index": context_index,
+                        "context_mode": cfg.auditor_context_mode,
                         "methodology": loaded_skills,
                     },
                     "auditor_tools": {},

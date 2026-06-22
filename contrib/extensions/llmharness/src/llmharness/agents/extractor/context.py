@@ -33,6 +33,9 @@ def load_extractor_prompt(name: str = "default") -> str:
 
 class ExtractorContextConfig(BaseModel):
     turn_texts: dict[str, str] = {}
+    recent_records: list[dict[str, Any]] = []
+    recent_links: list[dict[str, Any]] = []
+    # Read-only compatibility for old replay records.
     recent_graph: list[dict[str, Any]] = []
     recent_edges: list[dict[str, Any]] = []
     next_event_id: int = 1
@@ -54,19 +57,19 @@ MANIFEST = ExtensionManifest(
 
 def _build_directive(
     next_event_id: int,
-    recent_graph_count: int,
+    recent_record_count: int,
     tool_call_budget: int | None,
 ) -> str:
     steps: list[str] = [
-        "Build the graph incrementally with upsert_node / "
-        "upsert_edge (and delete_node / delete_edge as needed). Every "
+        "Build the context index incrementally with upsert_record / "
+        "upsert_link (and delete_record / delete_link as needed). Every "
         "edit is validated immediately for witness + id rules. The "
         "validator may flag chain-link events (in=1, out=1) as a "
         "SOFT warning attached to a successful finalize — aim for "
-        "compact graphs but do NOT fabricate refs just to satisfy "
+        "compact indexes but do NOT fabricate refs just to satisfy "
         "the heuristic.\n",
         "Call finalize_extraction (no payload) when you are done. "
-        "Finalize commits the witness-valid graph and ends the "
+        "Finalize commits the witness-valid index and ends the "
         "firing; any chain-link advisory comes back as part of the "
         "success result so the next firing can apply the hint.\n",
     ]
@@ -77,22 +80,22 @@ def _build_directive(
             f"{tool_call_budget} total tool calls, including "
             "finalize_extraction. You MUST reserve the final tool call "
             "for finalize_extraction; do not spend the last call on a "
-            "graph edit. Spend at most "
-            f"{edit_budget} calls on graph edits, then call "
-            "finalize_extraction immediately. If the graph is already "
-            "coherent enough, prefer a smaller truthful graph and call "
+            "context-index edit. Spend at most "
+            f"{edit_budget} calls on index edits, then call "
+            "finalize_extraction immediately. If the index is already "
+            "coherent enough, prefer a smaller truthful index and call "
             "finalize_extraction early instead of adding or revising more "
-            "edges.\n"
+            "links.\n"
         )
     steps.append(
         f"Start event ids at {next_event_id} and increment strictly — "
-        "do NOT restart at 1 and do NOT reuse any id from recent_graph.\n"
+        "do NOT restart at 1 and do NOT reuse any id from recent_records.\n"
     )
     steps.append(
-        f"Cross-firing references: recent_graph has {recent_graph_count} "
+        f"Cross-firing references: recent_records has {recent_record_count} "
         "entries. To link this firing's events to prior firings, emit "
-        "upsert_edge with src/dst spanning the boundary — the folded "
-        "view already contains prior-firing nodes by id. Most act "
+        "upsert_link with src/dst spanning the boundary — the folded "
+        "view already contains prior-firing records by id. Most act "
         "events in this firing answer a hyp/act from earlier firings; "
         "linking them is what turns a single firing into a connected "
         "investigation.\n\n"
@@ -103,14 +106,17 @@ def _build_directive(
 def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:
     turn_texts: dict[int, str] = {int(k): str(v) for k, v in config.turn_texts.items()}
 
-    recent_events = tuple(Event.from_dict(e) for e in config.recent_graph)
-    recent_edges = tuple(Edge.from_dict(e) for e in config.recent_edges)
+    recent_record_data = config.recent_records or config.recent_graph
+    recent_link_data = config.recent_links or config.recent_edges
+    recent_events = tuple(Event.from_dict(e) for e in recent_record_data)
+    recent_edges = tuple(Edge.from_dict(e) for e in recent_link_data)
 
     state = ExtractionState(
         turn_texts=turn_texts,
-        recent_graph=recent_events,
-        recent_graph_dict={e.id: e for e in recent_events},
-        recent_edges_dict={(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges},
+        recent_records=recent_events,
+        recent_links=recent_edges,
+        recent_record_dict={e.id: e for e in recent_events},
+        recent_link_dict={(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges},
         next_event_id=config.next_event_id,
         ops_file=config.ops_file,
     )

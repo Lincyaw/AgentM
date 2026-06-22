@@ -27,7 +27,7 @@ agentm --extension llmharness.atom \
   --extension-config llmharness.atom='{
     "extractor_prompt": "default",
     "auditor_profile":  "minimal",
-    "auditor_prompt":   "minimal"
+    "auditor_prompt":   "minimal_index"
   }' ...
 ```
 
@@ -36,7 +36,8 @@ agentm --extension llmharness.atom \
 | `extractor_prompt` | `"default"` | Named variant (file under `agents/extractor/ (prompt variants in prompt.py): `) or absolute path. |
 | `auditor_profile` | `"minimal"` | Resolves to a tool tuple from `agents/auditor/prompt.py::PROFILES`. |
 | `auditor_tools` | `null` | Explicit list overriding the profile. `submit_verdict` is force-included. |
-| `auditor_prompt` | `"minimal"` | Named variant (file under `agents/auditor/ (prompt variants in prompt.py): `) or absolute path. |
+| `auditor_prompt` | `"minimal_index"` | Named variant (file under `agents/auditor/ (prompt variants in prompt.py): `) or absolute path. |
+| `auditor_context_mode` | `"index"` | Choose auditor context shape: index-only `"index"`, migration/debug mode `"both"`, or legacy `"graph"` for A/B. |
 
 The legacy `prompt_override_extractor` / `prompt_override_auditor`
 keys still work and trump the named lookup — pass raw text when you
@@ -71,14 +72,15 @@ bound for larger teacher models.
 
 | Name | When to use |
 |---|---|
-| `minimal` (default) | Pairs with the `minimal` profile. No drill-down references. Slimmer framing for small models. |
+| `minimal_index` (default) | Pairs with the `minimal` profile. Uses `CONTEXT_INDEX` as the primary view. |
+| `minimal` | Legacy graph-oriented prompt. Use for A/B against pre-index behavior. |
 | `full` | Pairs with `with_drill_down`. Mentions `get_event_detail` / `get_turn`. Original framing with all four lenses. |
 
 Recommended pairings:
 
 | Use case | profile | prompt |
 |---|---|---|
-| Small-model SFT (~4B) | `minimal` | `minimal` |
+| Small-model SFT (~4B) | `minimal` | `minimal_index` |
 | Large teacher / A/B upper bound | `with_drill_down` | `full` |
 | Ablation: longer framing without drill-down | `minimal` | `full` |
 

@@ -12,7 +12,7 @@ A **case** = one main-agent session run on one input. Identified by
 
 ## 1. CLI
 
-Two input layouts via subcommands; every command writes the same
+Three input layouts via subcommands; every command writes the same
 canonical case-directory shape.
 
 ### `replay` — live-run sidecars
@@ -64,6 +64,26 @@ llmharness-aggregate one \
   --sample-id rca-mysql-001 \
   --dataset-name rca-openrca2-lite
 ```
+
+### `sessions` — AgentM sessions from ClickHouse
+
+```bash
+llmharness-aggregate sessions \
+  --session-file /tmp/session_ids.txt \
+  --out ./cases
+```
+
+Fetches ordinary AgentM session trajectories from the ClickHouse trace
+backend and writes the same case-directory layout. This is for runs
+that did not mount `llmharness.atom`, so no `.agentm/audit_replay/`
+sidecar exists. Each line in `--session-file` starts with a session id;
+blank lines and `#` comments are ignored. Repeat `--session-id` to pass
+ids inline.
+
+Because these sessions have no extractor/auditor firings,
+`main_agent.jsonl` is the primary artifact and `trajectory.jsonl`
+contains a flat main-agent message timeline pointing at
+`main_agent.jsonl` lines.
 
 ---
 
@@ -152,7 +172,7 @@ adapter's profile resolution.
 
 ### `event_graph/after_extractor_NNN.json`
 
-Cumulative graph state immediately after that extractor firing
+Cumulative index state immediately after that extractor firing
 succeeded. Non-ok firings (`spawn_error`, `no_call`, etc.) do NOT
 advance the snapshot — mirrors the live adapter's cursor semantics.
 
@@ -170,6 +190,13 @@ the per-firing JSON so a reviewer can grep + open:
 ```jsonl
 {"ts_ns": ..., "source": "extractor", "sequence": 1, "turn_index": 2, "summary": "extractor#1 turn=2 status=ok events=7 edges=4", "ref": "extractor/001_turn_002.json"}
 {"ts_ns": ..., "source": "auditor",   "sequence": 1, "turn_index": 6, "summary": "auditor#1 turn=6 status=ok verdict=silent",       "ref": "auditor/001_turn_006.json"}
+```
+
+For plain ClickHouse sessions aggregated through `sessions`, there are no
+per-firing files, so rows point into `main_agent.jsonl`:
+
+```jsonl
+{"ts_ns": ..., "source": "main_agent", "sequence": 1, "turn_index": null, "summary": "message#1 role=user text=1", "ref": "main_agent.jsonl", "line": 1}
 ```
 
 ### `README.md`

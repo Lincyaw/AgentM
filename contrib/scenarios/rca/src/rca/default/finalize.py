@@ -99,6 +99,19 @@ def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
     instruction = config.continuation_instruction or _DEFAULT_INSTRUCTION
 
     async def _submit(args: dict[str, Any]) -> ToolResult | ToolTerminate:
+        if _is_empty_no_root_report(args):
+            state.submitted = True
+            return ToolTerminate(
+                result=ToolResult(
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=json.dumps(args, ensure_ascii=False),
+                        )
+                    ]
+                ),
+                reason="rca:final-report-submitted",
+            )
         try:
             output = output_model.model_validate(args)
         except Exception as exc:  # pydantic ValidationError + anything weird
@@ -173,5 +186,13 @@ def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
         )
 
     api.on("decide_turn_action", _on_decide_turn_action)
+
+
+def _is_empty_no_root_report(args: dict[str, Any]) -> bool:
+    return (
+        args.get("nodes") == []
+        and args.get("edges") == []
+        and args.get("root_causes") == []
+    )
 
 __all__: Final = ["MANIFEST", "install"]

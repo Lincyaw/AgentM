@@ -2,7 +2,7 @@
 
 Stage A — oracle child (sees GT) — produces a selection over `findings`
 and matched event ids. Stage B — rewriter child (NO GT) — checks
-graph-only justifiability and emits the final `reminder_text`. If
+context-only justifiability and emits the final `reminder_text`. If
 the rewriter rejects the selection, the sample is dropped.
 
 Both children run as **top-level** AgentM sessions via
@@ -25,7 +25,7 @@ from llmharness.schema import Edge, Event, Finding
 from ..replay.engine import run_phase_standalone
 from ._submit_oracle import SUBMIT_ORACLE_TOOL_NAME
 from ._submit_rewriter import SUBMIT_REWRITE_TOOL_NAME
-from .causal import CausalSnapshot, causal_mask
+from .causal import ContextSnapshot, causal_mask
 from .gt import GroundTruth
 
 # Module paths for standard builtin atoms.
@@ -159,8 +159,8 @@ def _findings_from_replay_compose(compose_kwargs: dict[str, Any]) -> list[Findin
     return out
 
 
-def snapshot_from_replay(record: dict[str, Any]) -> CausalSnapshot:
-    """Reconstruct the causal snapshot for one auditor replay record.
+def snapshot_from_replay(record: dict[str, Any]) -> ContextSnapshot:
+    """Reconstruct the visible context snapshot for one auditor replay record.
 
     Replay record schema is defined by
     :class:`llmharness.replay.record.ReplayRecord` — ``compose_kwargs``
@@ -200,7 +200,7 @@ def snapshot_from_replay(record: dict[str, Any]) -> CausalSnapshot:
 async def run_oracle(
     *,
     cwd: str,
-    snapshot: CausalSnapshot,
+    snapshot: ContextSnapshot,
     gt: GroundTruth,
     provider: tuple[str, dict[str, Any]] | None,
 ) -> OracleLabel | None:
@@ -239,7 +239,7 @@ async def run_oracle(
 async def run_rewriter(
     *,
     cwd: str,
-    snapshot: CausalSnapshot,
+    snapshot: ContextSnapshot,
     label: OracleLabel,
     provider: tuple[str, dict[str, Any]] | None,
 ) -> RewriterOutput | None:

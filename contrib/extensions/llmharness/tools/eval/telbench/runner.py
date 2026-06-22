@@ -92,7 +92,7 @@ async def evaluate_instance(
     )
 
     # Collect all events from the cumulative graph.
-    events, _edges, _phases = result.state.graph_view()
+    events, _edges, _phases = result.state.index_view()
     event_by_id: dict[int, Any] = {e.id: e for e in events}
 
     # Collect surfaced verdicts from step results.

@@ -10,6 +10,7 @@ from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
 
+from llmharness.context_index import build_context_index
 from llmharness.schema import Edge, Event, Finding, Phase
 
 # ---------------------------------------------------------------------------
@@ -20,7 +21,7 @@ _PROMPTS_DIR: Final = Path(__file__).parent / "prompts"
 _BUILTIN_NAMES: Final = frozenset(p.stem for p in _PROMPTS_DIR.glob("*.md"))
 
 
-def load_auditor_prompt(name: str = "minimal") -> str:
+def load_auditor_prompt(name: str = "minimal_index") -> str:
     """Load auditor prompt by name or absolute path."""
     md = _PROMPTS_DIR / f"{name}.md"
     if md.is_file():
@@ -74,10 +75,14 @@ def build_auditor_system_prompt(
     summary_threshold: int = 30,
     base_prompt: str | None = None,
     methodology: list[str] | None = None,
+    context_index: dict[str, Any] | None = None,
+    context_mode: Literal["graph", "index", "both"] = "index",
 ) -> str:
     """Assemble the auditor system prompt for one firing."""
-    framing = base_prompt if base_prompt is not None else load_auditor_prompt("minimal")
+    framing = base_prompt if base_prompt is not None else load_auditor_prompt("minimal_index")
     degraded = len(events) > summary_threshold
+    show_index = context_mode in {"index", "both"} and context_index is not None
+    show_graph = context_mode in {"graph", "both"} or not show_index
 
     if degraded:
         events_payload = [_degrade_event(ev.to_dict()) for ev in events]
@@ -102,8 +107,19 @@ def build_auditor_system_prompt(
             sections.append(skill_text.strip())
         sections.append("")
 
-    if phases:
-        sections.append("## PHASES (primary view — merged basic blocks)")
+    if show_index:
+        sections.append("## CONTEXT_INDEX (primary navigation view)")
+        sections.append(
+            "This is an LSP-style index over the visible trajectory prefix. "
+            "Use it to locate entities, observations, claims, candidate lifecycle "
+            "events, obligations, and contract failures. It is not a causal proof."
+        )
+        sections.append(json.dumps(context_index, ensure_ascii=False))
+        sections.append("")
+
+    if phases and show_graph:
+        section_name = "COMPAT_PHASES" if show_index else "PHASES"
+        sections.append(f"## {section_name} (merged basic blocks)")
         sections.append(
             f"phases ({len(phases)} total). Each phase wraps one or more raw "
             "events; ``member_event_ids`` lists them in order. Consecutive "
@@ -115,21 +131,23 @@ def build_auditor_system_prompt(
         sections.append(json.dumps([p.to_dict() for p in phases], ensure_ascii=False))
         sections.append("")
 
-    sections.append("## GRAPH")
-    sections.append(
-        f"events ({len(events_payload)} total"
-        + (
-            f", degraded — threshold={summary_threshold}, witness fields stripped)"
-            if degraded
-            else ")"
+    if show_graph:
+        section_name = "COMPAT_GRAPH" if show_index else "GRAPH"
+        sections.append(f"## {section_name}")
+        sections.append(
+            f"events ({len(events_payload)} total"
+            + (
+                f", degraded — threshold={summary_threshold}, witness fields stripped)"
+                if degraded
+                else ")"
+            )
+            + ":"
         )
-        + ":"
-    )
-    sections.append(json.dumps(events_payload, ensure_ascii=False))
-    sections.append("")
-    sections.append(f"edges ({len(edges_payload)} total):")
-    sections.append(json.dumps(edges_payload, ensure_ascii=False))
-    sections.append("")
+        sections.append(json.dumps(events_payload, ensure_ascii=False))
+        sections.append("")
+        sections.append(f"edges ({len(edges_payload)} total):")
+        sections.append(json.dumps(edges_payload, ensure_ascii=False))
+        sections.append("")
 
     sections.append("## FINDINGS (advisory)")
     sections.append(json.dumps(findings_payload, ensure_ascii=False))
@@ -154,6 +172,8 @@ def build_auditor_trajectory_prompt(
     continuation_notes: list[str],
     base_prompt: str | None = None,
     methodology: list[str] | None = None,
+    context_index: dict[str, Any] | None = None,
+    context_mode: Literal["trajectory", "index", "both"] = "index",
 ) -> str:
     """Assemble the auditor system prompt for a trajectory-mode firing."""
     framing = (
@@ -161,6 +181,8 @@ def build_auditor_trajectory_prompt(
         if base_prompt is not None
         else load_auditor_prompt("trajectory")
     )
+    show_index = context_mode in {"index", "both"} and context_index is not None
+    show_trajectory = context_mode in {"trajectory", "both"} or not show_index
 
     sections: list[str] = [framing.rstrip(), ""]
 
@@ -176,12 +198,19 @@ def build_auditor_trajectory_prompt(
             sections.append(skill_text.strip())
         sections.append("")
 
-    sections.append("## TRAJECTORY")
-    sections.append(
-        f"conversation turns ({len(trajectory)} total):"
-    )
-    sections.append(json.dumps(trajectory, ensure_ascii=False))
-    sections.append("")
+    if show_index:
+        sections.append("## CONTEXT_INDEX (primary navigation view)")
+        sections.append(json.dumps(context_index, ensure_ascii=False))
+        sections.append("")
+
+    if show_trajectory:
+        section_name = "COMPAT_TRAJECTORY" if show_index else "TRAJECTORY"
+        sections.append(f"## {section_name}")
+        sections.append(
+            f"conversation turns ({len(trajectory)} total):"
+        )
+        sections.append(json.dumps(trajectory, ensure_ascii=False))
+        sections.append("")
 
     sections.append("## CONTINUATION_NOTES (from your prior firing)")
     sections.append(json.dumps(list(continuation_notes), ensure_ascii=False))
@@ -203,9 +232,11 @@ class AuditorContextConfig(BaseModel):
     check_errors: dict[str, str] = {}
     continuation_notes: list[str] = []
     summary_threshold: int = 30
-    prompt_name: str = "minimal"
+    prompt_name: str = "minimal_index"
     trajectory_snapshot: list[dict[str, Any]] | None = None
     mode: Literal["graph", "trajectory"] = "graph"
+    context_index: dict[str, Any] | None = None
+    context_mode: Literal["graph", "index", "both"] = "index"
     methodology: list[str] = []
 
 MANIFEST = ExtensionManifest(
@@ -223,13 +254,29 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
 
     base_prompt = load_auditor_prompt(config.prompt_name)
     meth = config.methodology or None
+    context_index = config.context_index
+    if context_index is None and config.trajectory_snapshot is not None:
+        context_index = build_context_index(
+            trajectory=config.trajectory_snapshot,
+            events=events,
+            edges=edges,
+        ).to_dict()
 
     if config.mode == "trajectory" and config.trajectory_snapshot is not None:
+        trajectory_context_mode: Literal["trajectory", "index", "both"]
+        if config.context_mode == "both":
+            trajectory_context_mode = "both"
+        elif config.context_mode == "index":
+            trajectory_context_mode = "index"
+        else:
+            trajectory_context_mode = "trajectory"
         prompt_text = build_auditor_trajectory_prompt(
             trajectory=config.trajectory_snapshot,
             continuation_notes=config.continuation_notes,
             base_prompt=base_prompt,
             methodology=meth,
+            context_index=context_index,
+            context_mode=trajectory_context_mode,
         )
     else:
         prompt_text = build_auditor_system_prompt(
@@ -242,6 +289,8 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
             summary_threshold=config.summary_threshold,
             base_prompt=base_prompt,
             methodology=meth,
+            context_index=context_index,
+            context_mode=config.context_mode,
         )
 
     def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:

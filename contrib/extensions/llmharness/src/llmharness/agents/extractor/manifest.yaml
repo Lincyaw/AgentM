@@ -1,6 +1,6 @@
 name: extractor
 description: >
-  Cognitive audit extractor: incremental event/edge graph builder.
+  Cognitive audit extractor: incremental context-index builder.
 
 extensions:
   - module: agentm.extensions.builtin.observability

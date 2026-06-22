@@ -1,4 +1,4 @@
-"""Causal masking of audit graph state to turn t.
+"""Prefix masking of audit context state to turn t.
 
 This is the load-bearing piece of the labeling pipeline (design D2 in
 README.md). Without it, the oracle uses post-hoc evidence (events whose
@@ -26,8 +26,8 @@ from llmharness.schema import Edge, Event, Finding
 
 
 @dataclass(frozen=True)
-class CausalSnapshot:
-    """The view of the graph that existed at turn ``turn_index``."""
+class ContextSnapshot:
+    """The visible context that existed at turn ``turn_index``."""
 
     turn_index: int
     events: tuple[Event, ...]
@@ -69,7 +69,7 @@ def causal_mask(
     edges: list[Edge] | tuple[Edge, ...],
     findings: list[Finding] | tuple[Finding, ...],
     trajectory: list[dict[str, Any]] | tuple[dict[str, Any], ...],
-) -> CausalSnapshot:
+) -> ContextSnapshot:
     kept_events = tuple(ev for ev in events if _event_max_turn(ev) <= turn_index)
     kept_event_ids = {ev.id for ev in kept_events}
 
@@ -87,7 +87,7 @@ def causal_mask(
 
     kept_trajectory = tuple(t for t in trajectory if int(t.get("index", -1)) <= turn_index)
 
-    return CausalSnapshot(
+    return ContextSnapshot(
         turn_index=turn_index,
         events=kept_events,
         edges=kept_edges,
@@ -96,4 +96,6 @@ def causal_mask(
     )
 
 
-__all__ = ["CausalSnapshot", "causal_mask"]
+CausalSnapshot = ContextSnapshot
+
+__all__ = ["CausalSnapshot", "ContextSnapshot", "causal_mask"]

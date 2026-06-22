@@ -5,7 +5,7 @@ Two outputs:
 * ``extractor.jsonl`` — straight from replay records, no oracle needed.
   Input is the extractor system prompt + the recorded payload; target
   is a **multi-turn** assistant trajectory replayed from the recorded
-  tool-call sequence (``upsert_node`` / ``upsert_edge`` /
+  tool-call sequence (``upsert_record`` / ``upsert_link`` /
   ``delete_*`` -> ``finalize_extraction``). Each
   assistant message carries ``<think>`` wrapping reconstructed from the
   matching block of ``raw_assistant_messages``. The student learns to
@@ -20,7 +20,7 @@ Two outputs:
 
 * ``auditor.jsonl`` — from :class:`~llmharness.distill.oracle.LabeledSample`
   rows that were not dropped. Input is the student-visible payload
-  (causal snapshot, NO GT); target is a single Qwen / GLM style
+  (context snapshot, NO GT); target is a single Qwen / GLM style
   assistant message with empty ``content`` and a single
   ``submit_verdict`` tool call. Auditor thinking persistence is a
   separate follow-up; once it lands, ``content`` here gets the same
@@ -42,20 +42,20 @@ from llmharness.agents.auditor.context import load_auditor_prompt
 from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
 from llmharness.agents.extractor.context import load_extractor_prompt
 from llmharness.agents.extractor.tools import (
-    DELETE_EDGE_TOOL_NAME,
-    DELETE_NODE_TOOL_NAME,
+    DELETE_LINK_TOOL_NAME,
+    DELETE_RECORD_TOOL_NAME,
     FINALIZE_EXTRACTION_TOOL_NAME,
     RESET_EXTRACTION_TOOL_NAME,
-    UPSERT_EDGE_TOOL_NAME,
-    UPSERT_NODE_TOOL_NAME,
+    UPSERT_LINK_TOOL_NAME,
+    UPSERT_RECORD_TOOL_NAME,
 )
 
 # Tool names the extractor can call — used to filter valid steps in SFT export.
 EXTRACTOR_TOOL_NAMES: frozenset[str] = frozenset({
-    UPSERT_NODE_TOOL_NAME,
-    UPSERT_EDGE_TOOL_NAME,
-    DELETE_NODE_TOOL_NAME,
-    DELETE_EDGE_TOOL_NAME,
+    UPSERT_RECORD_TOOL_NAME,
+    UPSERT_LINK_TOOL_NAME,
+    DELETE_RECORD_TOOL_NAME,
+    DELETE_LINK_TOOL_NAME,
     RESET_EXTRACTION_TOOL_NAME,
     FINALIZE_EXTRACTION_TOOL_NAME,
 })
@@ -63,7 +63,7 @@ EXTRACTOR_TOOL_NAMES: frozenset[str] = frozenset({
 # Default prompt names — the new modules don't export DEFAULT_PROMPT_NAME
 # as a constant; use the string directly.
 _EXTRACTOR_DEFAULT_PROMPT_NAME = "default"
-_AUDITOR_DEFAULT_PROMPT_NAME = "minimal"
+_AUDITOR_DEFAULT_PROMPT_NAME = "minimal_index"
 
 Phase = Literal["extractor", "auditor"]
 

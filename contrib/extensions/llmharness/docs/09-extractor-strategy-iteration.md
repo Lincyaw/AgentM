@@ -79,8 +79,8 @@ Expected high-level checks:
 - Later firings should add edges back to prior semantic nodes when new
   evidence reinforces, refutes, or revises an earlier hypothesis.
 - If a prompt change is supposed to encourage repair, inspect the op log
-  for old-id `upsert_node`, `delete_node`, `delete_edge`, or edge
-  repointing. A run with only new `node_upsert` + `edge_upsert` is still
+  for old-id `upsert_record`, `delete_record`, `delete_link`, or link
+  repointing. A run with only new `record_upsert` + `link_upsert` is still
   append-only.
 
 ## 2. Build a replay sidecar from the candidate outputs
@@ -225,4 +225,4 @@ four extractor firings called `finalize_extraction`, the graph was more
 compact, and the last firing linked new evidence back to the earlier
 recommendation/profile hypothesis. It still did not emit delete/repair ops,
 so future strategy changes should be judged by whether they actually
-rewrite old graph state rather than only appending more nodes.
+rewrite old index state rather than only appending more records.

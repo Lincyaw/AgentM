@@ -158,14 +158,17 @@ async def offline_audit(
     provider: tuple[str, dict[str, Any]],
     extractor_interval: int = 5,
     audit_interval: int = 5,
-    auditor_prompt: str = "minimal",
+    auditor_prompt: str = "minimal_index",
+    stop_on_first_surface: bool = False,
 ) -> OfflineAuditResult:
     """Run extractor + auditor offline over *messages*, return audit result.
 
     The result contains surface points (where the auditor would intervene)
-    and per-firing session ids for trace inspection.
+    and per-firing session ids for trace inspection.  Set
+    ``stop_on_first_surface`` for fork-replay flows that only use the first
+    surfaced reminder.
 
-    ``auditor_prompt`` selects the prompt variant (e.g. ``"minimal"``,
+    ``auditor_prompt`` selects the prompt variant (e.g. ``"minimal_index"``,
     ``"trajectory_coverage"``).
     """
     from .agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
@@ -242,7 +245,7 @@ async def offline_audit(
                     total_ext_ops += n_ops
 
                     if n_ops == 0:
-                        logger.warning(f"  extractor turn={turn_number}: 0 ops (LLM did not produce graph edits) sid={ext_sid}")
+                        logger.warning(f"  extractor turn={turn_number}: 0 ops (LLM did not produce index edits) sid={ext_sid}")
                     else:
                         cumulative.absorb_extractor_firing(
                             firing_ops=ops,
@@ -255,11 +258,22 @@ async def offline_audit(
 
         # --- Auditor ---
         if auditor_due:
-            events, edges, phases = cumulative.graph_view()
+            stop_after_auditor = False
+            events, edges, phases = cumulative.index_view()
+            from .atom import _extract_loaded_skills, _serialize_trajectory
+            from .context_index import build_context_index
+
+            trajectory = _serialize_trajectory(prefix)
+            context_index = build_context_index(
+                trajectory=trajectory,
+                events=events,
+                edges=edges,
+            ).to_dict()
+            loaded_skills = _extract_loaded_skills(prefix)
 
             if not events:
                 logger.warning(
-                    f"  auditor turn={turn_number}: graph is EMPTY (all extractors failed or produced 0 ops), "
+                    f"  auditor turn={turn_number}: index is EMPTY (all extractors failed or produced 0 ops), "
                     f"auditor will have nothing to judge. total_ext_ops so far={total_ext_ops}"
                 )
 
@@ -271,6 +285,10 @@ async def offline_audit(
                 "continuation_notes": list(cumulative.last_continuation_notes),
                 "summary_threshold": 30,
                 "prompt_name": auditor_prompt,
+                "trajectory_snapshot": trajectory,
+                "context_index": context_index,
+                "context_mode": "index",
+                "methodology": loaded_skills,
             }
             aud_extensions: list[tuple[str, dict[str, Any]]] = [
                 (_OBS, {}),
@@ -280,7 +298,9 @@ async def offline_audit(
             ]
             aud_payload = json.dumps(
                 {
-                    "graph": [e.to_dict() for e in events],
+                    "records": [e.to_dict() for e in events],
+                    "links": [ed.to_dict() for ed in edges],
+                    "context_index": context_index,
                     "recent_verdicts": list(cumulative.recent_verdicts),
                     "continuation_notes_from_prior_firing": list(
                         cumulative.last_continuation_notes
@@ -325,9 +345,10 @@ async def offline_audit(
                                     reminder_text=verdict.reminder_text,
                                 )
                             )
+                            stop_after_auditor = stop_on_first_surface
 
             fire_mark = " ★ SURFACE" if surfaced else ""
-            logger.info(f"  auditor  turn={turn_number} graph={len(events)} sid={aud_result.session_id}{fire_mark}")
+            logger.info(f"  auditor  turn={turn_number} index_records={len(events)} sid={aud_result.session_id}{fire_mark}")
             firings.append(
                 AuditFiring(
                     turn_number=turn_number,
@@ -336,6 +357,8 @@ async def offline_audit(
                     surfaced=surfaced,
                 )
             )
+            if stop_after_auditor:
+                break
 
-    logger.info(f"offline_audit done: {len(firings)} firings, {len(surfaces)} surfaces, {total_ext_ops} total graph ops")
+    logger.info(f"offline_audit done: {len(firings)} firings, {len(surfaces)} surfaces, {total_ext_ops} total index ops")
     return OfflineAuditResult(surfaces=surfaces, firings=firings)

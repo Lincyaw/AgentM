@@ -239,3 +239,33 @@ One signal is a lead. Three signals for the same service in the same timeframe i
 **Asymmetric errors point to link-level faults.**
 Caller has errors calling callee, but callee shows 0% error rate → fault is in the link.
 See the asymmetric error detection recipe above.
+
+## RCA self-audit guardrails
+
+Use these before finalizing, and use the same checks when a fork/reminder asks you
+to reconsider a failing case. They are reminders about reasoning, not new hidden
+evidence.
+
+- **Root vs effect**: a loud downstream service is not the root if its anomaly starts
+  after an upstream edge fails, its child spans vanish, or its call volume changed
+  because callers stopped reaching it. Explain why the chosen root is upstream of
+  the observed victims.
+- **Service vs link**: if caller errors do not match callee errors, do not force the
+  answer into either service. Consider whether the failing object is the caller→callee
+  path and support it with asymmetric spans, missing children, or Hubble metrics.
+- **Observed absence matters**: zero calls, missing child spans, missing metrics, or
+  normal-only signals are evidence to explain. They are not proof that the entity is
+  healthy until the normal/abnormal delta and topology make sense.
+- **Do not over-name the fault type**: only claim CPU, memory, GC, DB pool, network
+  loss, timeout, or application bug when the specific metric/log/span pattern supports
+  that mechanism. If evidence supports only a service-level or edge-level predicate,
+  state that narrower claim.
+- **Multi-signal beats single-signal**: one strong trace lead can identify where to
+  look, but a final RCA should account for logs and metrics when they exist. If they
+  disagree, say which signal is authoritative for the property being judged.
+- **Recall before precision**: if several services or edges have comparable abnormal
+  deltas, explicitly rule out the alternatives before finalizing. Do not silently keep
+  the first plausible suspect.
+- **Output contract is part of the task**: if a final graph/tool call was rejected,
+  empty, or malformed, resubmit a compact valid answer with the strongest supported
+  root/effect graph instead of treating the analysis as complete.

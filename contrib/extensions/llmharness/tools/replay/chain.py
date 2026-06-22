@@ -53,20 +53,21 @@ def _thread_extractor_record(
 ) -> ReplayRecord:
     """Return a copy of ``record`` whose payload reflects ``cumulative``.
 
-    Overrides ``graph`` (plus legacy ``recent_graph`` / ``recent_edges``)
+    Overrides ``recent_records`` / ``recent_links``
     and ``next_event_id`` so the replayed extractor firing sees the
-    cumulative nodes+edges and produces globally-consistent ids continuing
+    cumulative records+links and produces globally-consistent ids continuing
     the threaded counter. Other payload fields (``new_turns`` in
     particular) are preserved verbatim — the trajectory window is what the
     caller wanted to replay against.
     """
-    events, edges, _phases = cumulative.graph_view()
+    events, edges, _phases = cumulative.index_view()
     new_payload = dict(record.payload)
-    nodes_payload = [e.to_dict() for e in events]
-    edges_payload = [ed.to_dict() for ed in edges]
-    new_payload["graph"] = {"nodes": nodes_payload, "edges": edges_payload}
-    new_payload["recent_graph"] = nodes_payload
-    new_payload["recent_edges"] = edges_payload
+    records_payload = [e.to_dict() for e in events]
+    links_payload = [ed.to_dict() for ed in edges]
+    new_payload["records"] = records_payload
+    new_payload["links"] = links_payload
+    new_payload["recent_records"] = records_payload
+    new_payload["recent_links"] = links_payload
     new_payload["next_event_id"] = cumulative.next_event_id()
     return replace(record, payload=new_payload)
 
@@ -77,12 +78,12 @@ def _thread_auditor_record(record: ReplayRecord, cumulative: CumulativeAuditStat
     :func:`replay_auditor_record` rebuilds the auditor's installed
     extensions from ``compose_kwargs`` (events / edges / phases /
     continuation_notes / findings). If we threaded only the payload,
-    the LLM would see the threaded graph in the user message but the
+    the LLM would see the threaded index in the user message but the
     installed extension context (cards, continuation notes, findings)
     would still be whatever was captured at record time — half state
     is worse than no state.
 
-    So override both layers: ``payload.graph`` /
+    So override both layers: ``payload.records`` /
     ``payload.recent_verdicts`` /
     ``payload.continuation_notes_from_prior_firing`` AND
     ``compose_kwargs.events`` / ``compose_kwargs.edges`` /
@@ -92,13 +93,14 @@ def _thread_auditor_record(record: ReplayRecord, cumulative: CumulativeAuditStat
     so ``compose_kwargs.findings`` and ``compose_kwargs.check_errors``
     are cleared to empty — they are produced live by ``_drain_auditor``
     against a scenario-installed registry that is not available in
-    chain replay. The replayed auditor therefore sees the same graph
+    chain replay. The replayed auditor therefore sees the same index
     the live auditor would have seen at this firing point, modulo
     audit-check findings.
     """
     new_payload = dict(record.payload)
-    events, edges, phases = cumulative.graph_view()
-    new_payload["graph"] = [e.to_dict() for e in events]
+    events, edges, phases = cumulative.index_view()
+    new_payload["records"] = [e.to_dict() for e in events]
+    new_payload["links"] = [ed.to_dict() for ed in edges]
     new_payload["recent_verdicts"] = list(cumulative.recent_verdicts)
     new_payload["continuation_notes_from_prior_firing"] = list(cumulative.last_continuation_notes)
 

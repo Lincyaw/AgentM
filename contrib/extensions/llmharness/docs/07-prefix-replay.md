@@ -77,7 +77,7 @@ agentm \
 
 `enable_reminders: false` + `enable_auditor: true` keeps the live
 auditor *observing* (verdicts still get persisted as evidence and the
-audit graph keeps growing) while preventing a second live reminder from
+context index keeps growing) while preventing a second live reminder from
 masking the experimental seed. If you want a clean dataset-collection
 run with no auditor at all, pass
 ``'llmharness.atom:{"enable_reminders":false,"enable_auditor":false}'``

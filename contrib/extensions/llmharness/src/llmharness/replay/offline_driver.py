@@ -147,23 +147,24 @@ async def replay_pipeline_over_trajectory(
                     with contextlib.suppress(TypeError, ValueError):
                         state.turn_texts[int(k)] = str(v)
 
-                recent_graph_raw = data.get("recent_graph") or []
+                recent_records_raw = data.get("recent_records") or data.get("recent_graph") or []
                 from llmharness.schema import Edge, Event
                 recent_events: list[Event] = []
-                for entry in recent_graph_raw:
+                for entry in recent_records_raw:
                     if isinstance(entry, dict):
                         with contextlib.suppress(KeyError, ValueError, TypeError):
                             recent_events.append(Event.from_dict(entry))
-                state.recent_graph = tuple(recent_events)
-                state.recent_graph_dict = {e.id: e for e in recent_events}
+                state.recent_records = tuple(recent_events)
+                state.recent_record_dict = {e.id: e for e in recent_events}
 
-                recent_edges_raw = data.get("recent_edges") or []
+                recent_links_raw = data.get("recent_links") or data.get("recent_edges") or []
                 recent_edges: list[Edge] = []
-                for entry in recent_edges_raw:
+                for entry in recent_links_raw:
                     if isinstance(entry, dict):
                         with contextlib.suppress(KeyError, ValueError, TypeError):
                             recent_edges.append(Edge.from_dict(entry))
-                state.recent_edges_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
+                state.recent_links = tuple(recent_edges)
+                state.recent_link_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
                 state._refold()
 
                 prompt_text = extractor_settings.base_prompt or load_extractor_prompt("default")
@@ -186,12 +187,22 @@ async def replay_pipeline_over_trajectory(
                         )
                 except Exception as exc:
                     # Extractor firing failed for this turn during replay —
-                    # continue with the graph accumulated so far.
+                    # continue with the index accumulated so far.
                     logger.warning("offline_driver: extractor firing failed at turn replay: {}", exc)
 
         # --- Auditor ---
         if auditor_due:
-            events, edges, phases = cumulative.graph_view()
+            events, edges, phases = cumulative.index_view()
+            from llmharness.atom import _extract_loaded_skills, _serialize_trajectory
+            from llmharness.context_index import build_context_index
+
+            trajectory = _serialize_trajectory(prefix)
+            context_index = build_context_index(
+                trajectory=trajectory,
+                events=events,
+                edges=edges,
+            ).to_dict()
+            loaded_skills = _extract_loaded_skills(prefix)
             prompt_text = auditor_settings.base_prompt or "You are the cognitive-audit auditor."
             aud_prompt = build_auditor_system_prompt(
                 events=events,
@@ -202,6 +213,9 @@ async def replay_pipeline_over_trajectory(
                 continuation_notes=list(cumulative.last_continuation_notes),
                 summary_threshold=auditor_settings.summary_threshold,
                 base_prompt=prompt_text,
+                methodology=loaded_skills,
+                context_index=context_index,
+                context_mode=auditor_settings.context_mode,
             )
             tools_config: dict[str, Any] = {
                 "tools": list(auditor_settings.tools or (SUBMIT_VERDICT_TOOL_NAME,))
@@ -210,7 +224,8 @@ async def replay_pipeline_over_trajectory(
                 prompt_text=aud_prompt,
                 tools_config=tools_config,
                 provider=provider,
-                graph_events=list(events),
+                records=list(events),
+                links=[ed.to_dict() for ed in edges],
                 recent_verdicts=list(cumulative.recent_verdicts),
                 continuation_notes_from_prior_firing=list(cumulative.last_continuation_notes),
             )

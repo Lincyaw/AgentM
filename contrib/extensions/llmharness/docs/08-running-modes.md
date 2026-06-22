@@ -14,7 +14,7 @@ If you only want a quick mental model: read §1 and skim §5.
 
 | Piece | Composer | Where it runs | Inputs | Outputs |
 |---|---|---|---|---|
-| Extractor | `agents/extractor/ (scenario manifest + context + tools)` | child session (live: `spawn_child_session`; offline: `tools/engine.py: run_phase_standalone`) | trajectory window `{new_turns, recent_graph}` | `events[] + edges[]` written into the parent session entry tree + replay sidecar |
+| Extractor | `agents/extractor/ (scenario manifest + context + tools)` | child session (live: `spawn_child_session`; offline: `tools/engine.py: run_phase_standalone`) | trajectory window `{new_turns, recent_records, recent_links}` | record/link ops written into the parent session entry tree + replay sidecar |
 | Auditor | `agents/auditor/ (scenario manifest + context + tools)` | child session, same two execution paths | `{events, edges, phases, findings, continuation_notes}` — **graph only**, trajectory used only by the optional `get_turn` drill-down tool | `Verdict` (incl. `surface_reminder?`) into entry tree + sidecar |
 | Reminder injection | `atom.py:_make_reminder_injector` (live) and `replay/reminder_seed.py` (offline / prefix-replay) | on the **main** agent's bus via `DecideTurnActionEvent` → `Inject([reminder_msg])` | the `surface_reminder` text from a Verdict | one synthetic user message + `REMINDER_DELIVERED` entry |
 
@@ -31,6 +31,7 @@ messages stay byte-identical.
 | `enable_reminders` | `true` | Drain queued reminders into the main agent on the next `DecideTurnAction`. `false` → verdicts are persisted (and the `surface_reminder` field still written to the sidecar) but the main agent never sees them. Ignored when `enable_auditor=false`. |
 | `enable_replay_log` | `true` | Append every phase invocation to `<cwd>/.agentm/audit_replay/<sid>.jsonl`. Required for distill / replay / prefix-replay workflows. |
 | `audit_interval_turns` | `3` | k for "every k turns". |
+| `auditor_context_mode` | `"index"` | Auditor context view: `"index"` sends only `CONTEXT_INDEX`, `"both"` sends `CONTEXT_INDEX` plus `COMPAT_GRAPH`, and `"graph"` keeps the legacy event/edge prompt for A/B. |
 
 There is **no** `enable_extractor` flag — extractor is always-on under
 the adapter because auditor depends on the graph it builds.
@@ -215,7 +216,7 @@ llmharness-replay extractor --record <sidecar> --turn <t> \
 ```
 
 The extractor SFT contract is `{system, user} → ordered stream of
-upsert_node / upsert_edge / delete_node / delete_edge ops terminated
+upsert_record / upsert_link / delete_record / delete_link ops terminated
 by finalize_extraction`. The auditor SFT contract is
 `{system, user} → submit_verdict(...)`. If
 the SFT'd model's tool-call name or schema drifts, the replay record's

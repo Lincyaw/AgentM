@@ -52,7 +52,7 @@ async def evaluate_instance(
 
     from ...agents import auditor_scenario, extractor_scenario
     from ...agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-    from ...agents.extractor.graph import GraphOp, parse_op
+    from ...agents.extractor.index_store import IndexOp, parse_op
     from ...atom import _prepare_extractor_data
     from ...state import CumulativeAuditState
 
@@ -104,7 +104,7 @@ async def evaluate_instance(
                         await session.shutdown()
 
                     # Read ops from the file the extractor wrote.
-                    ops: list[GraphOp] = []
+                    ops: list[IndexOp] = []
                     if ops_path.exists():
                         for line in ops_path.read_text(encoding="utf-8").splitlines():
                             line = line.strip()
@@ -125,7 +125,7 @@ async def evaluate_instance(
 
         # --- Auditor ---
         if auditor_due:
-            events, edges, phases = cumulative.graph_view()
+            events, edges, phases = cumulative.index_view()
             if not events:
                 continue
 
@@ -152,7 +152,8 @@ async def evaluate_instance(
                     child_msgs = await session.prompt(
                         json.dumps(
                             {
-                                "graph": [e.to_dict() for e in events],
+                                "records": [e.to_dict() for e in events],
+                                "links": [ed.to_dict() for ed in edges],
                                 "continuation_notes_from_prior_firing": list(
                                     cumulative.last_continuation_notes
                                 ),
@@ -183,7 +184,7 @@ async def evaluate_instance(
                 logger.warning("telbench: auditor verdict absorption failed: {}", exc)
 
     # --- Score ---
-    events, _edges, _phases = cumulative.graph_view()
+    events, _edges, _phases = cumulative.index_view()
     event_by_id: dict[int, Any] = {e.id: e for e in events}
 
     all_verdicts: list[dict[str, Any]] = []
