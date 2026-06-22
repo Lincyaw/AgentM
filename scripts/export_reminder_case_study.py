@@ -19,6 +19,7 @@ import hashlib
 import json
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
@@ -51,6 +52,7 @@ class CaseStudyConfig:
     case_id: str | None = None
     variant: list[str] | None = None
     data_dir: str | None = None
+    include_baseline_row: bool = False
     insert_turn_index: int | None = None
     insert_position: str = ""
     reminder: list[str] | None = None
@@ -216,7 +218,14 @@ def _message_text(message: dict[str, Any]) -> str:
 def _final_payload(tool_rows: list[dict[str, Any]], *, session_id: str) -> dict[str, Any]:
     if not tool_rows:
         raise RuntimeError(f"session {session_id} has no submit_final_report calls")
-    row = tool_rows[-1]
+    row = next(
+        (
+            candidate
+            for candidate in reversed(tool_rows)
+            if (candidate.get("result") or {}).get("is_error") is False
+        ),
+        tool_rows[-1],
+    )
     args = row.get("args")
     if isinstance(args, dict):
         return args
@@ -238,7 +247,132 @@ def _root_summary(payload: dict[str, Any]) -> str:
     for root in roots:
         if isinstance(root, dict):
             labels.append(f"{root.get('service')}:{root.get('fault_kind')}")
+        elif isinstance(root, str):
+            node = _fpg_node_by_id(payload).get(root)
+            if node is not None:
+                labels.append(
+                    f"{node.get('subject', '')}|{node.get('predicate', '')}"
+                )
+            else:
+                labels.append(root)
     return "; ".join(labels)
+
+
+def _fpg_node_by_id(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return {}
+    by_id: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = node.get("id")
+        if isinstance(node_id, str):
+            by_id[node_id] = node
+    return by_id
+
+
+def _looks_like_fpg_payload(payload: dict[str, Any]) -> bool:
+    roots = payload.get("root_causes")
+    nodes = payload.get("nodes")
+    return isinstance(nodes, list) and isinstance(roots, list) and all(
+        isinstance(root, str) for root in roots
+    )
+
+
+def _is_empty_fpg_payload(payload: dict[str, Any]) -> bool:
+    return (
+        payload.get("nodes") == []
+        and payload.get("edges") == []
+        and payload.get("root_causes") == []
+    )
+
+
+def _verified_graph_is_empty(data_dir: str) -> bool:
+    graph_path = Path(data_dir) / "causal_graph_verified.json"
+    try:
+        raw = json.loads(graph_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    graph = raw.get("graph")
+    if not isinstance(graph, dict):
+        return False
+    return graph.get("nodes") == [] and graph.get("edges") == []
+
+
+def _metric_f1(detail: dict[str, Any], key: str) -> float | None:
+    metric = detail.get(key)
+    if not isinstance(metric, dict):
+        return None
+    value = metric.get("f1")
+    return float(value) if value is not None else None
+
+
+def _metric_field(detail: dict[str, Any], key: str, field: str) -> float | None:
+    metric = detail.get(key)
+    if not isinstance(metric, dict):
+        return None
+    value = metric.get(field)
+    return float(value) if value is not None else None
+
+
+def _fpg_graph_dimensions(detail: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "fpg_score": detail.get("score"),
+        "fpg_root_subject_f1": _metric_f1(detail, "root_subjects"),
+        "fpg_subject_f1": _metric_f1(detail, "subjects"),
+        "fpg_soft_subject_edge_f1": _metric_f1(detail, "soft_subject_edges"),
+        "fpg_root_subject_precision": _metric_field(
+            detail, "root_subjects", "precision"
+        ),
+        "fpg_root_subject_recall": _metric_field(detail, "root_subjects", "recall"),
+        "fpg_subject_path_match_hit": detail.get("subject_path_match_hit"),
+        "fpg_subject_path_reachability_hit": detail.get(
+            "subject_path_reachability_hit"
+        ),
+        "fpg_missing_root_nodes": "; ".join(
+            str(item) for item in detail.get("missing_root_nodes") or []
+        ),
+        "fpg_extra_root_nodes": "; ".join(
+            str(item) for item in detail.get("extra_root_nodes") or []
+        ),
+        "fpg_extra_subjects": "; ".join(
+            str(item) for item in detail.get("extra_subjects") or []
+        ),
+        "fpg_extra_subject_edges": "; ".join(
+            str(item) for item in detail.get("extra_subject_edges") or []
+        ),
+    }
+
+
+def _fpg_sql_dimensions(detail: dict[str, Any]) -> dict[str, Any]:
+    empty = {
+        "fpg_sql_evidence_count": None,
+        "fpg_sql_executable_count": None,
+        "fpg_sql_failed_count": None,
+        "fpg_sql_executable_ratio": None,
+        "fpg_sql_all_executable": None,
+        "fpg_sql_failures": "",
+    }
+    sql = detail.get("sql_evidence")
+    if not isinstance(sql, dict):
+        return empty
+    return {
+        "fpg_sql_evidence_count": sql.get("total"),
+        "fpg_sql_executable_count": sql.get("executable"),
+        "fpg_sql_failed_count": sql.get("failed"),
+        "fpg_sql_executable_ratio": sql.get("ratio"),
+        "fpg_sql_all_executable": sql.get("all_executable"),
+        "fpg_sql_failures": "; ".join(
+            str(item.get("error") or item)
+            for item in (sql.get("failures") or [])[:3]
+            if isinstance(item, dict)
+        ),
+    }
+
+
+def _prefixed(prefix: str, values: dict[str, Any]) -> dict[str, Any]:
+    return {f"{prefix}_{key}": value for key, value in values.items()}
 
 
 def _find_original_final_insert_after(
@@ -293,6 +427,89 @@ async def _judge_payload(
 ) -> JudgeResult:
     if not data_dir:
         return JudgeResult(correct=None, detail={})
+    if _looks_like_fpg_payload(payload):
+        if _is_empty_fpg_payload(payload) and _verified_graph_is_empty(data_dir):
+            perfect_empty_detail = {
+                "score": 1.0,
+                "root_subjects": {
+                    "precision": 1.0,
+                    "recall": 1.0,
+                    "f1": 1.0,
+                    "matched": 0.0,
+                },
+                "subjects": {
+                    "precision": 1.0,
+                    "recall": 1.0,
+                    "f1": 1.0,
+                    "matched": 0.0,
+                },
+                "soft_subject_edges": {
+                    "precision": 1.0,
+                    "recall": 1.0,
+                    "f1": 1.0,
+                    "matched": 0.0,
+                },
+                "subject_path_match_hit": True,
+                "subject_path_reachability_hit": True,
+                "missing_root_nodes": [],
+                "extra_root_nodes": [],
+                "extra_subjects": [],
+                "extra_subject_edges": [],
+                "f1": 1.0,
+                "precision": 1.0,
+                "recall": 1.0,
+                "any_service_hit": False,
+            }
+            return JudgeResult(correct=True, detail=perfect_empty_detail)
+        try:
+            repo_root = Path(__file__).resolve().parents[1]
+            repo_root_str = str(repo_root)
+            if repo_root_str not in sys.path:
+                sys.path.insert(0, repo_root_str)
+
+            from contrib.scenarios.rca.eval import grader
+            from fpg import ModelRCAOutput
+
+            ModelRCAOutput.model_validate(payload)
+            task = {"meta": {"case_dir": data_dir}}
+            verdict = {
+                "fpg_output": payload,
+                "services": [],
+                "fault_kinds": [],
+                "raw": json.dumps(payload, ensure_ascii=False),
+            }
+            comparison = grader._compare_fpg_graph(task, verdict)
+            sql_eval = grader._evaluate_fpg_sql_evidence(task, verdict)
+            if comparison is None:
+                return JudgeResult(
+                    correct=None,
+                    detail={},
+                    error="fpg graph comparison unavailable",
+                )
+            detail = dict(comparison)
+            if sql_eval is not None:
+                detail["sql_evidence"] = sql_eval
+            root_f1 = _metric_f1(detail, "root_subjects") or 0.0
+            correct = bool(
+                root_f1 >= 1.0
+                and detail.get("subject_path_reachability_hit") is True
+            )
+            detail.update(
+                {
+                    "f1": detail.get("score"),
+                    "precision": _metric_field(
+                        detail, "root_subjects", "precision"
+                    ),
+                    "recall": _metric_field(detail, "root_subjects", "recall"),
+                    "any_service_hit": (
+                        (_metric_field(detail, "root_subjects", "matched") or 0.0)
+                        > 0.0
+                    ),
+                }
+            )
+            return JudgeResult(correct=correct, detail=detail)
+        except Exception as exc:  # pragma: no cover - diagnostic exporter path
+            return JudgeResult(correct=None, detail={}, error=f"fpg judge failed: {exc}")
     from rca_eval.replay_fork.judge import RcabenchJudge
 
     outcome = await RcabenchJudge().judge(
@@ -386,11 +603,64 @@ async def _build_rows(config: CaseStudyConfig) -> list[dict[str, Any]]:
         data_dir=data_dir,
         case_id=f"{case_id}-baseline",
     )
+    baseline_fpg_detail = {
+        **_fpg_graph_dimensions(baseline_judge.detail),
+        **_fpg_sql_dimensions(baseline_judge.detail),
+    }
     insert_after_id, insert_after_role = _find_original_final_insert_after(
         baseline_messages
     )
 
     rows: list[dict[str, Any]] = []
+    if config.include_baseline_row:
+        rows.append(
+            {
+                "case_id": case_id,
+                "variant": "baseline",
+                "baseline_session_id": config.baseline_session,
+                "fork_session_id": config.baseline_session,
+                "source": "agentm trace",
+                "insert_turn_index": "",
+                "insert_position": "baseline",
+                "insert_after_source_message_id": "",
+                "insert_after_source_message_role": "",
+                "fork_reminder_message_id": "",
+                "reminder_text_hash": "",
+                "reminder_text": "",
+                "hypothesis": "baseline without reminder",
+                "baseline_output": _root_summary(baseline_final),
+                "fork_output": _root_summary(baseline_final),
+                "baseline_exact_match": baseline_judge.correct,
+                "fork_exact_match": baseline_judge.correct,
+                "baseline_f1": baseline_judge.detail.get("f1"),
+                "fork_f1": baseline_judge.detail.get("f1"),
+                "baseline_precision": baseline_judge.detail.get("precision"),
+                "fork_precision": baseline_judge.detail.get("precision"),
+                "baseline_recall": baseline_judge.detail.get("recall"),
+                "fork_recall": baseline_judge.detail.get("recall"),
+                "baseline_any_service_hit": baseline_judge.detail.get(
+                    "any_service_hit"
+                ),
+                "fork_any_service_hit": baseline_judge.detail.get("any_service_hit"),
+                "baseline_fault_kind_accuracy": baseline_judge.detail.get(
+                    "fault_kind_accuracy"
+                ),
+                "fork_fault_kind_accuracy": baseline_judge.detail.get(
+                    "fault_kind_accuracy"
+                ),
+                **_prefixed("baseline", baseline_fpg_detail),
+                **_prefixed("fork", baseline_fpg_detail),
+                "baseline_judge_error": baseline_judge.error,
+                "fork_judge_error": baseline_judge.error,
+                "effect": "baseline",
+                "change_summary": _root_summary(baseline_final),
+                "baseline_turns": baseline_usage.get("turns"),
+                "fork_delta_turns": 0,
+                "fork_total_tokens": baseline_usage.get("total_tokens"),
+                "fork_lineage_kind": "root",
+                "fork_lineage_source_session_id": "",
+            }
+        )
     for variant in variants:
         fork_messages = _run_trace(agentm_cmd, "messages", variant.session_id)
         fork_usage = _run_trace(agentm_cmd, "usage", variant.session_id)[0]
@@ -409,6 +679,10 @@ async def _build_rows(config: CaseStudyConfig) -> list[dict[str, Any]]:
             data_dir=data_dir,
             case_id=f"{case_id}-{variant.name}",
         )
+        fork_fpg_detail = {
+            **_fpg_graph_dimensions(fork_judge.detail),
+            **_fpg_sql_dimensions(fork_judge.detail),
+        }
         reminder_message_id, reminder_text = _extract_reminder_message(
             fork_messages,
             reminder_overrides.get(variant.name),
@@ -471,6 +745,8 @@ async def _build_rows(config: CaseStudyConfig) -> list[dict[str, Any]]:
                 "fork_fault_kind_accuracy": fork_judge.detail.get(
                     "fault_kind_accuracy"
                 ),
+                **_prefixed("baseline", baseline_fpg_detail),
+                **_prefixed("fork", fork_fpg_detail),
                 "baseline_judge_error": baseline_judge.error,
                 "fork_judge_error": fork_judge.error,
                 "effect": _effect(baseline_judge, fork_judge),
@@ -507,6 +783,13 @@ def _write_outputs(rows: list[dict[str, Any]], out_prefix: Path) -> None:
         "fork_output",
         "baseline_exact_match",
         "fork_exact_match",
+        "baseline_fpg_score",
+        "fork_fpg_score",
+        "baseline_fpg_root_subject_f1",
+        "fork_fpg_root_subject_f1",
+        "fork_fpg_subject_path_reachability_hit",
+        "fork_fpg_sql_executable_count",
+        "fork_fpg_sql_evidence_count",
         "effect",
         "fork_session_id",
     ]
@@ -548,6 +831,13 @@ def main(
         str | None,
         typer.Option("--data-dir", help="RCA case directory for judge."),
     ] = None,
+    include_baseline_row: Annotated[
+        bool,
+        typer.Option(
+            "--include-baseline-row",
+            help="Include a standalone baseline row before fork variants.",
+        ),
+    ] = False,
     insert_turn_index: Annotated[
         int | None,
         typer.Option("--insert-turn-index", help="Source turn index."),
@@ -594,6 +884,7 @@ def main(
         case_id=case_id,
         variant=variant,
         data_dir=data_dir,
+        include_baseline_row=include_baseline_row,
         insert_turn_index=insert_turn_index,
         insert_position=insert_position,
         reminder=reminder,

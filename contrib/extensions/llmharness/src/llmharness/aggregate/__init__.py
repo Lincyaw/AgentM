@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from .case import CaseData, CaseMeta, FiringRecord, GraphSnapshot
 from .collector import collect_case
+from .fork_collector import export_forks
 from .session_collector import collect_session_case
 from .writer import write_case
 
@@ -22,5 +23,6 @@ __all__ = [
     "GraphSnapshot",
     "collect_case",
     "collect_session_case",
+    "export_forks",
     "write_case",
 ]

@@ -181,6 +181,45 @@ workload generator itself malfunctioned or an external workload injection is
 part of the task evidence; otherwise treat it as an observation that may explain
 effects, not a service root.
 
+## Anti-entrypoint escape in RCA
+
+After you challenge `loadgenerator` or a generic workload/entrypoint-mix root,
+do not steer the main agent into an unsupported pseudo-root such as
+`svc:external_workload`, "external workload", or an empty `root_causes` list.
+That is only a valid repair when the scenario instructions, schema, or visible
+telemetry explicitly expose such an entity and the evidence establishes it as a
+fault mechanism.
+
+Fire an escalation reminder when ALL are true:
+
+1. The agent has already rejected or weakened a concrete service candidate by
+   saying the missing branch is "just workload mix", "external", "entrypoint",
+   or "loadgenerator" behavior.
+2. The same visible prefix still contains concrete service/path candidates with
+   material observed signals: normal-only/disappeared spans, normal-only logs,
+   normal caller-callee edges, endpoint disappearance, or a service-local metric
+   signal.
+3. The latest final-report attempt uses `root_causes: []`, a non-observed
+   pseudo-service such as `svc:external_workload`, or `svc:loadgenerator`
+   without local malfunction evidence.
+
+In that reminder, do not propose `external_workload` as the solution. Tell the
+agent to return to the strongest concrete service/path candidates already
+visible in the vanished branch and choose the earliest supported service/link
+root, or explicitly show why each such concrete candidate is only an effect. If
+the final-report tool rejects an empty root list, treat that as a contract
+failure plus a reasoning failure: it must not be repaired by filling the root
+with an unobserved pseudo-entity.
+
+Do not let the agent pick a concrete vanished service merely because it has the
+largest normal count. The required reasoning operation is directional: use
+already-visible caller-callee edges, endpoint/controller span disappearance,
+normal-only logs, and service-local metric/resource evidence to identify the
+first supported concrete service or link root in the affected branch. If several
+concrete services have distinct service-local endpoint/controller evidence and
+the task allows multiple roots, preserve the multi-root possibility instead of
+compressing them into one entrypoint/workload explanation.
+
 ## Completeness
 
 Completeness is lower priority. Only flag a gap when ALL conditions hold:

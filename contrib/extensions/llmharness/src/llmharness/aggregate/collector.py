@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from llmharness.distill.binding import read_sample_meta
-
 from llmharness.replay.fork_tree import read_fork_tree_header
 from llmharness.replay.record import ReplayRecord, iter_records
 

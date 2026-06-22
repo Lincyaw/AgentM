@@ -32,6 +32,7 @@ from typing import Annotated
 import typer
 
 from .collector import collect_case
+from .fork_collector import export_forks
 from .session_collector import collect_session_case, trace_ids_for_sessions
 from .writer import write_case
 
@@ -293,6 +294,56 @@ def sessions(
         )
         case_dir = write_case(case, out)
         _emit_session(sid, case_dir, case.meta, len(case.main_agent_messages))
+
+
+@app.command()
+def forks(
+    run_dir: Annotated[
+        Path,
+        typer.Option(
+            "--run-dir",
+            help="RCA fork-reminder run directory containing score CSVs.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            resolve_path=True,
+        ),
+    ],
+    out: Annotated[
+        Path,
+        typer.Option("--out", help="Output fork-review root.", resolve_path=True),
+    ],
+    forks_tsv: Annotated[
+        Path | None,
+        typer.Option(
+            "--forks-tsv",
+            help="Fork index TSV. Defaults to <run-dir>/forks.tsv.",
+            file_okay=True,
+            dir_okay=False,
+            resolve_path=True,
+        ),
+    ] = None,
+    include_full: Annotated[
+        bool,
+        typer.Option(
+            "--include-full/--no-include-full",
+            help="Also write source_full.jsonl and fork_full.jsonl for each fork.",
+        ),
+    ] = True,
+) -> None:
+    """Export reminder-fork before/after trajectories from ClickHouse."""
+
+    resolved_forks_tsv = forks_tsv or (run_dir / "forks.tsv")
+    if not resolved_forks_tsv.is_file():
+        typer.echo(f"fork TSV not found: {resolved_forks_tsv}", err=True)
+        raise typer.Exit(2)
+    export_forks(
+        run_dir=run_dir,
+        forks_tsv=resolved_forks_tsv,
+        out_dir=out,
+        include_full=include_full,
+    )
+    typer.echo(f"{resolved_forks_tsv} -> {out}/")
 
 
 def main() -> None:

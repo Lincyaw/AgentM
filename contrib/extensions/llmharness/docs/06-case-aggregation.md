@@ -85,6 +85,29 @@ Because these sessions have no extractor/auditor firings,
 contains a flat main-agent message timeline pointing at
 `main_agent.jsonl` lines.
 
+### `forks` — reminder-fork before/after exports
+
+```bash
+llmharness-aggregate forks \
+  --run-dir runs/rca-fork-reminder-allwrong-31 \
+  --out runs/rca-fork-reminder-allwrong-31_fork_export
+```
+
+Reads `<run-dir>/forks.tsv`, joins score CSV rows under
+`<run-dir>/batch-*/*_score.csv` when present, and fetches source/fork
+session trajectories from ClickHouse. The output is organized by fork
+event rather than by session. Each fork directory contains:
+
+- `source_before_fork.jsonl` / `source_after_fork.jsonl`
+- `fork_before_reminder.jsonl` / `fork_after_reminder.jsonl`
+- `source_full.jsonl` / `fork_full.jsonl`
+- `reminder.md`
+- `meta.json`
+
+This is the right shape for reviewing reminder injections: the source
+prefix, the source's original continuation, the injected reminder, and
+the fork continuation are side-by-side.
+
 ---
 
 ## 2. Per-case layout

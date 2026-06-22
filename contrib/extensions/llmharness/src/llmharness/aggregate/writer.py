@@ -67,6 +67,8 @@ def _message_ts_ns(message: dict[str, Any]) -> int:
             raw = payload.get("timestamp")
     if raw in (None, 0):
         return 0
+    if raw is None:
+        return 0
     try:
         value = float(raw)
     except (TypeError, ValueError):
