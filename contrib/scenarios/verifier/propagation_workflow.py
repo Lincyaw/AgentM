@@ -39,7 +39,10 @@ from typing import Annotated, Any, Literal, Required, TypeGuard, TypedDict, cast
 from agentm.extensions.builtin.workflow import AgentResult, WorkflowContext
 from pydantic import BaseModel, ConfigDict, Field
 
-from .hop.hop_context import PriorVerdict
+from .audit.audit_context import build_audit_prompt
+from .gate.gate_context import build_gate_prompt
+from .hop.hop_context import PriorVerdict, build_hop_prompt
+from .seed.seed_context import build_seed_prompt
 
 
 class Injection(TypedDict, total=False):
@@ -496,14 +499,6 @@ def _dump_model(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _agent_task_prompt(label: str) -> str:
-    return f"Run verifier task `{label}` using the injected atom_config context."
-
-
-def _structured_task_prompt(label: str) -> str:
-    return f"Run structured verifier task `{label}` using atom_config."
-
-
 def _find_child_session(
     ctx: WorkflowContext,
     label: str,
@@ -630,8 +625,15 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         attempt: int,
     ) -> GateDecision | None:
         gate_label = f"gate-{label}"
+        prompt = build_gate_prompt(
+            task_kind=task_kind,
+            task=task,
+            submitted_result=submitted_result,
+            child_session=child_session,
+            attempt=attempt,
+        )
         gate_result: AgentResult = await ctx.agent(
-            _structured_task_prompt(gate_label),
+            prompt,
             scenario="verifier/gate",
             model=judge_model,
             schema=GateDecision,
@@ -667,8 +669,15 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         last_result: SeedResult | None = None
         for attempt in range(gate_retries + 1):
             label = f"seed-{_injection_node_id(inj)}-a{attempt}"
+            prompt = build_seed_prompt(
+                target=target,
+                fault_kind=fault_kind,
+                params=inj.get("params", ""),
+                fault_doc=fault_docs.get(fault_kind, ""),
+                judge_context=feedback,
+            )
             result: AgentResult = await ctx.agent(
-                _agent_task_prompt(label),
+                prompt,
                 scenario="verifier/seed",
                 atom_config={
                     "duckdb_sql": {"data_dir": data_dir},
@@ -811,8 +820,24 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         last_result: HopResult | None = None
         for attempt in range(gate_retries + 1):
             label = f"hop-{from_svc}-to-{to_svc}-a{attempt}"
+            prompt = build_hop_prompt(
+                from_service=from_svc,
+                to_service=to_svc,
+                rel_type=rel_type,
+                fault_kind=edge_fault_kind,
+                all_faults=[
+                    (f[0], f[1], f[2] if len(f) > 2 else "")
+                    for f in all_faults
+                    if len(f) >= 2
+                ],
+                fault_docs=edge_fault_docs,
+                is_infra=to_svc in infra_set,
+                upstream_evidence=nodes.get(from_svc),
+                judge_context=feedback,
+                prior_verdict=prior_verdict,
+            )
             result: AgentResult = await ctx.agent(
-                _agent_task_prompt(label),
+                prompt,
                 scenario="verifier/hop",
                 atom_config={
                     "duckdb_sql": {"data_dir": data_dir},
@@ -1289,8 +1314,13 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         payload: dict[str, Any],
         schema: type[BaseModel],
     ) -> BaseModel | None:
+        prompt = build_audit_prompt(
+            role=role,
+            instruction=instruction,
+            payload=payload,
+        )
         result: AgentResult = await ctx.agent(
-            _structured_task_prompt(label),
+            prompt,
             scenario="verifier/audit",
             model=judge_model,
             schema=schema,

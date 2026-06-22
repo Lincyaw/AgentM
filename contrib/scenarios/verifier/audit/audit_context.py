@@ -1,4 +1,4 @@
-"""Context atom and prompt builders for verifier audit agents."""
+"""Prompt builders/config carrier for verifier audit agents."""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 
@@ -20,8 +20,8 @@ class AuditContextConfig(BaseModel):
 
 MANIFEST = ExtensionManifest(
     name="audit_context",
-    description="Injects one bounded verifier audit task.",
-    registers=(f"event:{BeforeAgentStartEvent.CHANNEL}",),
+    description="Builds one bounded verifier audit prompt.",
+    registers=(),
     config_schema=AuditContextConfig,
 )
 
@@ -260,19 +260,7 @@ def build_reducer_context(
 
 
 def install(api: ExtensionAPI, config: AuditContextConfig) -> None:
-    prompt = build_audit_prompt(
-        role=config.role,
-        instruction=config.instruction,
-        payload=config.payload,
-    )
-
-    def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
-        current = str(event.system or "")
-        injected = f"{current}\n\n{prompt}" if current else prompt
-        event.system = injected
-        return {"system": injected}
-
-    api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
+    del api, config
 
 
 __all__: Final = [

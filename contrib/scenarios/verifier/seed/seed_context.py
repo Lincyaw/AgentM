@@ -1,11 +1,11 @@
-"""Context atom and prompt builder for seed verification agents."""
+"""Prompt builder/config carrier for seed verification agents."""
 from __future__ import annotations
 
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 _FAULT_CONTEXT_TEMPLATE = "Injected fault: {fault_kind} on {target}"
@@ -22,8 +22,8 @@ class SeedContextConfig(BaseModel):
 
 MANIFEST = ExtensionManifest(
     name="seed_context",
-    description="Injects structured seed verification context.",
-    registers=(f"event:{BeforeAgentStartEvent.CHANNEL}",),
+    description="Builds structured seed verification prompts.",
+    registers=(),
     config_schema=SeedContextConfig,
 )
 
@@ -78,21 +78,7 @@ def build_seed_prompt(
 
 
 def install(api: ExtensionAPI, config: SeedContextConfig) -> None:
-    prompt = build_seed_prompt(
-        target=config.target,
-        fault_kind=config.fault_kind,
-        params=config.params,
-        fault_doc=config.fault_doc,
-        judge_context=config.judge_context,
-    )
-
-    def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
-        current = str(event.system or "")
-        injected = f"{current}\n\n{prompt}" if current else prompt
-        event.system = injected
-        return {"system": injected}
-
-    api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
+    del api, config
 
 
 __all__: Final = ["MANIFEST", "install", "build_seed_prompt"]

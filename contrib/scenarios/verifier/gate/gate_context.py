@@ -1,4 +1,4 @@
-"""Context atom and prompt builders for verifier discovery gates."""
+"""Prompt builders/config carrier for verifier discovery gates."""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict
 
-from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
 
@@ -22,8 +22,8 @@ class GateContextConfig(BaseModel):
 
 MANIFEST = ExtensionManifest(
     name="gate_context",
-    description="Injects one discovery result for gate review.",
-    registers=(f"event:{BeforeAgentStartEvent.CHANNEL}",),
+    description="Builds one discovery result prompt for gate review.",
+    registers=(),
     config_schema=GateContextConfig,
 )
 
@@ -55,21 +55,7 @@ def build_gate_prompt(
 
 
 def install(api: ExtensionAPI, config: GateContextConfig) -> None:
-    prompt = build_gate_prompt(
-        task_kind=config.task_kind,
-        task=config.task,
-        submitted_result=config.submitted_result,
-        child_session=config.child_session,
-        attempt=config.attempt,
-    )
-
-    def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
-        current = str(event.system or "")
-        injected = f"{current}\n\n{prompt}" if current else prompt
-        event.system = injected
-        return {"system": injected}
-
-    api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
+    del api, config
 
 
 __all__: Final = ["MANIFEST", "install", "build_gate_prompt"]

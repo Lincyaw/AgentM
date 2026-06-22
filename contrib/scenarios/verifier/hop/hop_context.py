@@ -1,8 +1,8 @@
-"""Context atom and prompt builder for hop agents.
+"""Prompt builder/config carrier for hop agents.
 
-The workflow passes structured atom_config into this atom. The atom
-injects the full hop task into the child session, so the workflow can
-treat ``scenario='verifier/hop'`` as a callable map function.
+The workflow passes the built prompt as the child session's user
+message, while atom_config keeps the scenario manifest/config shape
+stable for verifier/hop as a callable map function.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 from fpg.scenario import EventNode
 
@@ -38,8 +38,8 @@ class HopContextConfig(BaseModel):
 
 MANIFEST = ExtensionManifest(
     name="hop_context",
-    description="Injects structured single-hop verification context.",
-    registers=(f"event:{BeforeAgentStartEvent.CHANNEL}",),
+    description="Builds structured single-hop verification prompts.",
+    registers=(),
     config_schema=HopContextConfig,
 )
 
@@ -181,26 +181,7 @@ def build_hop_prompt(
 
 
 def install(api: ExtensionAPI, config: HopContextConfig) -> None:
-    prompt = build_hop_prompt(
-        from_service=config.from_service,
-        to_service=config.to_service,
-        rel_type=config.rel_type,
-        fault_kind=config.fault_kind,
-        all_faults=config.all_faults,
-        fault_docs=config.fault_docs,
-        is_infra=config.is_infra,
-        upstream_evidence=config.upstream_evidence,
-        judge_context=config.judge_context,
-        prior_verdict=config.prior_verdict,
-    )
-
-    def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
-        current = str(event.system or "")
-        injected = f"{current}\n\n{prompt}" if current else prompt
-        event.system = injected
-        return {"system": injected}
-
-    api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
+    del api, config
 
 
 __all__: Final = ["MANIFEST", "install", "PriorVerdict", "build_hop_prompt"]
