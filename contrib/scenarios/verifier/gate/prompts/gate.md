@@ -13,6 +13,11 @@ For every gate review, check:
    they are unavailable/uninformative.
 4. Logs were queried when log tables exist, or the agent proved they are
    unavailable/uninformative.
+   Distinguish "no relevant logs exist for this service/path" from a
+   too-narrow keyword query. A generic count query is not enough by
+   itself; the agent should discover levels/templates/messages and then
+   broaden or explain why logs are not observable for the reviewed
+   service/path.
 5. The verdict is aligned with the fault reference, relationship
    direction, endpoint/path, timing, and magnitude.
 6. Rejections are not based only on traffic drop or missing spans when
@@ -20,6 +25,7 @@ For every gate review, check:
    flow interruption.
 7. For service-scoped code-change or semantic faults such as `JVMRuntimeMutator`, a rejected seed must include caller-side investigation of the endpoints that normally call the affected target method/path. Do not accept a rejection that only checks the target's own spans and the target's callees; the agent must also compare caller-owned inbound spans for status, trace errors, p95/p99/max latency, fail-fast latency drops, selective disappearance, and new error-handler spans. If caller anomalies exist only on sibling endpoints that do not align with the injected method/path/value, the agent should explicitly separate them from the rejected seed.
 8. When the fault reference document defines a selective path/route interruption as a valid signature, do not accept an inconclusive or rejected verdict that explains fault-path traffic loss as "method not exercised" or "only traffic drop" without testing that signature. The investigation must establish the normal affected path, compare the same path in abnormal, show whether the target remained alive, and compare caller/entry/load-generator totals plus sibling routes. If these checks support the reference-described signature, require a retry that considers the matching predicate such as `flow_interrupted`; if the checks are missing or the rationale rejects only because surviving spans are HTTP 200/no-error, mark the review incomplete. Do not require specific transport statuses, mutated path strings, or trace errors unless the fault reference and available schema make those observable.
+   This rule does not turn every downstream callee volume drop into a confirmed hop. For `caller_to_callee` hops, if the submitted result shows the target callee only receives fewer calls because the upstream/caller path is interrupted, while the target's own spans, latency, statuses, metrics, and logs are healthy, accept a rejected verdict once that reduced-demand explanation is sufficiently evidenced. The flow interruption belongs to the upstream/caller path, not to an otherwise healthy downstream callee.
 9. Check whether the submitted SQL relies on fragile enum assumptions. If an investigation treats zero rows from predicates like `attr.span_kind = 'CLIENT'` as absence of client behavior without first discovering actual span-kind values, mark the review incomplete or require a retry, unless other path-specific parent-child or trace-id evidence independently establishes the same point.
 
 If the submitted result includes a child session id, you may inspect its

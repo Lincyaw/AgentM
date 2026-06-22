@@ -29,7 +29,6 @@ from agentm.extensions import ExtensionManifest
 from fpg import Evidence, build_schema, load_profile
 from verifier.lib.finalize_feedback import (
     duration_unit_failures,
-    modality_coverage_failures,
     sql_validation_error_payload,
 )
 
@@ -126,6 +125,8 @@ class HopVerdict(BaseModel):
                 raise ValueError("confirmed verdict requires predicate")
             if self.relationship is None:
                 raise ValueError("confirmed verdict requires relationship evidence")
+        elif self.predicate is not None:
+            raise ValueError("non-confirmed verdict must omit predicate")
         return self
 
 
@@ -190,7 +191,7 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
             })
 
     failures.extend(duration_unit_failures(statements))
-    failures.extend(modality_coverage_failures(statements, view_names))
+    del view_names
     conn.close()
     return failures
 

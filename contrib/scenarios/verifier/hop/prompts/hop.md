@@ -12,6 +12,8 @@ Reduced request volume is not automatically a target failure. If a slow or broke
 
 You MUST investigate traces, metrics, and logs before submitting a verdict. Do not assume column names, metric names, log schemas, or status encodings are stable across cases.
 
+Do not add generic trace/metric/log count queries just to satisfy a format. Final evidence should be fault-relevant, or should prove that a specific modality is unavailable/uninformative for the target edge. Distinguish a real absence of relevant logs/metrics from a query that is too narrow by first discovering levels/templates/messages or metric names, then broadening before concluding absence.
+
 ### 1. Discover available data first
 
 - Call `list_tables` first.
@@ -55,6 +57,8 @@ Trace signals can include count drop/vanish, latency increase, fail-fast latency
 - **inconclusive**: an anomaly exists but this single edge cannot prove whether the fault caused it. Prefer this over rejected when fault-path endpoints changed, traffic vanished without enough metric/log context, status shifted marginally, or a required modality is unavailable and the remaining data cannot disambiguate.
 
 Submit via `submit_hop_verdict` with re-executable SQL evidence and the required `investigation_coverage` object. The coverage object must summarize schema discovery, trace checks, metric checks, log checks, and fault-specific reasoning. It is audit metadata and does not replace SQL evidence.
+
+For non-confirmed verdicts, omit `predicate`; predicates describe confirmed failure modes only.
 
 ## Submit-tool error recovery
 

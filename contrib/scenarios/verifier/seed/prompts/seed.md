@@ -12,6 +12,8 @@ You MUST investigate traces, metrics, and logs before submitting a verdict. Do n
 
 Once you have sampled every required modality that exists in the case and have enough evidence for confirmed, rejected, or inconclusive, stop exploring and call `submit_seed_verdict`. Do not keep expanding to unrelated services or generic resource metrics after the fault-specific trace, metric, and log checks are covered.
 
+Do not add generic trace/metric/log count queries just to satisfy a format. Final evidence should be fault-relevant, or should prove that a specific modality is unavailable/uninformative for the fault path. Distinguish a real absence of relevant logs/metrics from a query that is too narrow by first discovering levels/templates/messages or metric names, then broadening before concluding absence.
+
 ### 1. Discover available data first
 
 - Call `list_tables` first.
@@ -57,10 +59,13 @@ Caller-side evidence can confirm the injection even when the target's surviving 
 
 - **confirmed**: the target, affected link/path, or its callers show degradation consistent with the injected fault. Include predicate and SQL evidence. Do not claim the target application itself is broken when evidence only supports a link/path-scoped effect.
 - For link/path targets (`link:A->B`), set `effect_target` in `submit_seed_verdict` to the service that actually exhibits the observed symptom. If the exercised direction is `B -> A` and `B` has timeout/error/flow-interruption evidence while `A` is mostly a peer/callee, set `effect_target` to `B`, even when the injection metadata names `A` first. If the rule-bearing service is the observed degraded side, set it to that service. For service-scoped faults, leave `effect_target` null.
+  Use JSON null for an absent `effect_target`; do not write the string `"null"` or `"None"`.
 - **rejected**: all available trace, metric, and log dimensions were checked, missing modalities were documented, parent-span call paths were checked, and no injection-consistent signal exists.
 - **inconclusive**: some anomaly exists but this single seed view cannot prove the injection caused it, or required data is unavailable and the remaining evidence cannot disambiguate.
 
 Submit via `submit_seed_verdict` with re-executable SQL evidence and the required `investigation_coverage` object. The coverage object must summarize schema discovery, target trace checks, caller/link trace checks, metric checks, log checks, and fault-specific reasoning. It is audit metadata and does not replace SQL evidence.
+
+For non-confirmed verdicts, omit `predicate`; predicates describe confirmed failure modes only.
 
 ## Submit-tool error recovery
 

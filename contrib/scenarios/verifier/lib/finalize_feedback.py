@@ -87,14 +87,6 @@ def sql_validation_error_payload(failures: list[dict[str, str]]) -> dict[str, An
         hints.append(
             "`window` is a poor SQL alias here; use `win` or `phase` instead."
         )
-    if any(
-        failure.get("error", "").startswith("missing required modality:")
-        for failure in failures
-    ):
-        hints.append(
-            "Final verdict evidence must include traces, metrics, and logs "
-            "when those tables exist; coverage text alone is not enough."
-        )
     if any(failure.get("error") == "duration divided by 1000" for failure in failures):
         hints.append(
             "Trace duration is nanoseconds in this dataset; use /1e6 for "
