@@ -1543,7 +1543,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
 
     def _close_audit_when_unconfirmed_seeds_are_resolved() -> None:
         nonlocal audit_result
-        if audit_result is None or audit_result.accepted:
+        if audit_result is None:
             return
         if audit_result.unexplained_anomalies:
             return
@@ -1600,6 +1600,29 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
             if coverage_map.get(seed) in {None, "needs_recheck", "invalid_path"}:
                 coverage_map[seed] = "benign_or_no_effect"
 
+        for seed, coverage in coverage_map.items():
+            if seed in unconfirmed and coverage == "benign_or_no_effect":
+                _clear_execution_error("seed", seed)
+
+        for key, error in list(execution_errors.items()):
+            if error["stage"] != "hop":
+                continue
+            hop_result = verdicts.get(error["item"])
+            verdict = hop_result.get("verdict") if hop_result else None
+            if verdict != "confirmed":
+                execution_errors.pop(key, None)
+
+        rationale_suffix = (
+            "\n\nHarness closure: all meaningful entry anomalies are "
+            "explained by confirmed seed paths. Remaining rework applies "
+            "only to unconfirmed seeds whose candidate paths were invalid "
+            "or repeatedly failed gate review, so they are resolved as "
+            "benign_or_no_effect instead of blocking the accepted graph."
+        )
+        rationale = audit_result.rationale
+        if not audit_result.accepted and rationale_suffix not in rationale:
+            rationale += rationale_suffix
+
         audit_result = audit_result.model_copy(
             update={
                 "accepted": True,
@@ -1607,15 +1630,12 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 "invalid_causal_paths": blocking_invalid_paths,
                 "drop_edges": blocking_drops,
                 "rework_requests": [],
-                "stop_reason": "closed_unconfirmed_seed_no_entry_effect",
-                "rationale": (
-                    audit_result.rationale
-                    + "\n\nHarness closure: all meaningful entry anomalies are "
-                    "explained by confirmed seed paths. Remaining rework applies "
-                    "only to unconfirmed seeds whose candidate paths were invalid "
-                    "or repeatedly failed gate review, so they are resolved as "
-                    "benign_or_no_effect instead of blocking the accepted graph."
+                "stop_reason": (
+                    audit_result.stop_reason
+                    if audit_result.accepted
+                    else "closed_unconfirmed_seed_no_entry_effect"
                 ),
+                "rationale": rationale,
             }
         )
 
@@ -1825,6 +1845,19 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
                 break
 
         _close_audit_when_unconfirmed_seeds_are_resolved()
+        if audit_result and audit_result.accepted:
+            unresolved_audit = (
+                bool(audit_result.unexplained_anomalies)
+                or bool(audit_result.invalid_causal_paths)
+                or bool(audit_result.drop_edges)
+                or bool(audit_result.rework_requests)
+            )
+            if unresolved_audit:
+                _record_execution_error(
+                    "audit",
+                    "global",
+                    "accepted audit contains unresolved findings",
+                )
 
     # fpg rule: in-degree >= 2 requires combine; each confirmed edge is
     # an independently sufficient path, so the combination is OR.
