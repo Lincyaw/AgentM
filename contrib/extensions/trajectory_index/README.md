@@ -10,8 +10,10 @@ messages and a compact symbol registry, not the full history.
 
 ## Quick start
 
+**All commands must be run from `contrib/extensions/trajectory_index/`** —
+the extraction child session needs `trajectory_index` on the Python path.
+
 ```bash
-# From the repo root
 cd contrib/extensions/trajectory_index
 
 # One-shot extraction on a trace file (all messages in one chunk)

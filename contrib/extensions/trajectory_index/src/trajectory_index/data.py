@@ -315,7 +315,7 @@ async def extract(
 
     scenario = extractor_scenario()
     config = AgentSessionConfig(
-        cwd="/tmp",
+        cwd=str(Path.cwd()),
         provider=provider,
         scenario=scenario,
         purpose="teacher_extraction",
