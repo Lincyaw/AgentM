@@ -58,6 +58,19 @@ MEDIA_INBOX_DIR = ".agentm/weixin/media/inbox"
 # Must be on its own line: ``MEDIA:/abs/path/to/file.png``
 _MEDIA_LINE_RE = re.compile(r"^MEDIA:(.+)$", re.MULTILINE)
 
+# Injected on the first inbound per session so the agent knows how to
+# send media back to WeChat.
+_CHANNEL_HINT = (
+    "\n\n<system-reminder>"
+    "You are chatting via WeChat. To send a file, image, or video to the "
+    "user, put MEDIA:/absolute/path on its own line in your reply. "
+    "Example:\nHere is the chart you asked for.\nMEDIA:/tmp/chart.png\n"
+    "The MEDIA: tag MUST be on its own line with an absolute path. "
+    "When the user sends you media, it is saved to disk and the path is "
+    "shown in the message — use file tools to read it."
+    "</system-reminder>"
+)
+
 
 @dataclass(slots=True)
 class WeixinConfig:
@@ -413,9 +426,11 @@ class WeixinAdapter:
             body["control"] = control
 
         scenario = None
-        if session_key not in self._scenario_sent:
+        first_message = session_key not in self._scenario_sent
+        if first_message:
             scenario = self._config.scenario
             self._scenario_sent.add(session_key)
+            content += _CHANNEL_HINT
 
         env = Envelope(
             v=WIRE_VERSION,
