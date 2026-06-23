@@ -229,6 +229,13 @@ def stable_id(prefix: str, *parts: object, length: int = 16) -> str:
 class TrajectoryIndex:
     """In-memory symbol-reference-relation index over trajectory steps."""
 
+    DEFINITION_PREFERRED_KINDS: frozenset[ReferenceKind] = frozenset({
+        ReferenceKind.DEFINE,
+        ReferenceKind.WRITE,
+        ReferenceKind.OBSERVE,
+        ReferenceKind.TOOL_OUTPUT,
+    })
+
     def __init__(self) -> None:
         self.steps: dict[tuple[str, str], Step] = {}
 
@@ -318,12 +325,11 @@ class TrajectoryIndex:
         self._ref_ids_by_symbol[symbol.id].append(ref_id)
         self._ref_ids_by_step[(step.run_id, step.step_id)].append(ref_id)
 
-        preferred = {ReferenceKind.DEFINE, ReferenceKind.WRITE, ReferenceKind.OBSERVE, ReferenceKind.TOOL_OUTPUT}
         if symbol.definition_ref_id is None:
             symbol.definition_ref_id = ref_id
-        elif kind in preferred:
+        elif kind in self.DEFINITION_PREFERRED_KINDS:
             current = self.references.get(symbol.definition_ref_id)
-            if current and current.kind not in preferred:
+            if current and current.kind not in self.DEFINITION_PREFERRED_KINDS:
                 symbol.definition_ref_id = ref_id
 
         return ref

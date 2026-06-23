@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
@@ -12,6 +13,7 @@ from pydantic import BaseModel
 from .schema import ExtractionResult
 
 _PROMPTS_DIR: Final = Path(__file__).parent / "prompts"
+_VOCABULARY_PATH: Final = Path(__file__).resolve().parent.parent / "vocabulary.yaml"
 
 
 class ExtractorContextConfig(BaseModel):
@@ -26,31 +28,56 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def _build_vocabulary_section() -> str:
-    """Build the vocabulary section from the description dicts in index.py."""
-    from trajectory_index.index import (
-        REFERENCE_KIND_DESCRIPTIONS,
-        RELATION_TYPE_DESCRIPTIONS,
-        SYMBOL_KIND_DESCRIPTIONS,
+def _load_and_validate_vocabulary() -> dict[str, dict[str, str]]:
+    """Load vocabulary.yaml and validate keys match the enum definitions."""
+    import yaml
+
+    from trajectory_index.index import ReferenceKind, RelationType, SymbolKind
+
+    data: dict[str, dict[str, str]] = yaml.safe_load(
+        _VOCABULARY_PATH.read_text(encoding="utf-8"),
     )
 
+    checks: list[tuple[str, type[StrEnum]]] = [
+        ("symbol_kinds", SymbolKind),
+        ("reference_kinds", ReferenceKind),
+        ("relation_types", RelationType),
+    ]
+    for section, enum_cls in checks:
+        enum_values = {e.value for e in enum_cls}
+        yaml_keys = set(data.get(section, {}))
+        missing = enum_values - yaml_keys
+        extra = yaml_keys - enum_values
+        if missing:
+            raise ValueError(
+                f"vocabulary.yaml [{section}] missing keys: {sorted(missing)}"
+            )
+        if extra:
+            raise ValueError(
+                f"vocabulary.yaml [{section}] extra keys: {sorted(extra)}"
+            )
+
+    return data
+
+
+_VOCAB_SECTIONS: tuple[tuple[str, str, bool], ...] = (
+    ("symbol_kinds", "Symbol kinds", True),
+    ("reference_kinds", "Reference kinds", True),
+    ("relation_types", "Relation types", False),
+)
+
+
+def _build_vocabulary_section() -> str:
+    """Build the vocabulary section for the extraction prompt."""
+    vocab = _load_and_validate_vocabulary()
     lines: list[str] = []
-
-    lines.append("## Symbol kinds\n")
-    for key, desc in SYMBOL_KIND_DESCRIPTIONS.items():
-        if key != "unknown":
+    for section_key, heading, skip_unknown in _VOCAB_SECTIONS:
+        lines.append(f"\n## {heading}\n")
+        for key, desc in vocab[section_key].items():
+            if skip_unknown and key == "unknown":
+                continue
             lines.append(f"- `{key}` — {desc}")
-
-    lines.append("\n## Reference kinds\n")
-    for key, desc in REFERENCE_KIND_DESCRIPTIONS.items():
-        if key != "unknown":
-            lines.append(f"- `{key}` — {desc}")
-
-    lines.append("\n## Relation types\n")
-    for key, desc in RELATION_TYPE_DESCRIPTIONS.items():
-        lines.append(f"- `{key}` — {desc}")
-
-    return "\n".join(lines)
+    return "\n".join(lines).lstrip("\n")
 
 
 def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:

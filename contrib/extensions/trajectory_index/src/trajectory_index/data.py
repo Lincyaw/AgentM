@@ -243,27 +243,27 @@ def _remap_turn_ids(result: ExtractionResult, id_map: dict[str, str]) -> None:
 
 
 def _validate_vocabulary(result: ExtractionResult) -> str | None:
-    """Check extraction result against the vocabulary. Returns error or None."""
-    from .index import (
-        REFERENCE_KIND_DESCRIPTIONS,
-        RELATION_TYPE_DESCRIPTIONS,
-        SYMBOL_KIND_DESCRIPTIONS,
-    )
+    """Check extraction result against enum values. Returns error or None."""
+    from .index import ReferenceKind, RelationType, SymbolKind
+
+    _symbol_values = {e.value for e in SymbolKind}
+    _reference_values = {e.value for e in ReferenceKind}
+    _relation_values = {e.value for e in RelationType}
 
     errors: list[str] = []
     for sym in result.symbols:
-        if sym.kind not in SYMBOL_KIND_DESCRIPTIONS:
+        if sym.kind not in _symbol_values:
             errors.append(f"symbol '{sym.name}' has invalid kind '{sym.kind}'")
     for ref in result.references:
-        if ref.kind not in REFERENCE_KIND_DESCRIPTIONS:
+        if ref.kind not in _reference_values:
             errors.append(f"reference '{ref.symbol_name}' has invalid kind '{ref.kind}'")
     for rel in result.relations:
-        if rel.relation_type not in RELATION_TYPE_DESCRIPTIONS:
+        if rel.relation_type not in _relation_values:
             errors.append(f"relation '{rel.from_symbol}'->{rel.to_symbol}' has invalid type '{rel.relation_type}'")
     if errors:
-        valid_kinds = ", ".join(k for k in SYMBOL_KIND_DESCRIPTIONS if k != "unknown")
-        valid_refs = ", ".join(k for k in REFERENCE_KIND_DESCRIPTIONS if k != "unknown")
-        valid_rels = ", ".join(RELATION_TYPE_DESCRIPTIONS)
+        valid_kinds = ", ".join(v for v in _symbol_values if v != "unknown")
+        valid_refs = ", ".join(v for v in _reference_values if v != "unknown")
+        valid_rels = ", ".join(_relation_values)
         return (
             f"Vocabulary errors: {'; '.join(errors)}. "
             f"Valid symbol kinds: {valid_kinds}. "
