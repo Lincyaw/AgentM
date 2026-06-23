@@ -77,46 +77,6 @@ class RelationType(StrEnum):
 
 
 # ---------------------------------------------------------------------------
-# Vocabulary descriptions — loaded from vocabulary.yaml
-# ---------------------------------------------------------------------------
-
-def _load_vocabulary() -> dict[str, dict[str, str]]:
-    """Load vocabulary definitions from vocabulary.yaml and validate against enums."""
-    import yaml
-
-    vocab_path = Path(__file__).parent / "vocabulary.yaml"
-    data: dict[str, dict[str, str]] = yaml.safe_load(vocab_path.read_text(encoding="utf-8"))
-
-    checks: list[tuple[str, type[StrEnum], dict[str, str]]] = [
-        ("symbol_kinds", SymbolKind, data.get("symbol_kinds", {})),
-        ("reference_kinds", ReferenceKind, data.get("reference_kinds", {})),
-        ("relation_types", RelationType, data.get("relation_types", {})),
-    ]
-    for section, enum_cls, entries in checks:
-        enum_values = {e.value for e in enum_cls}
-        yaml_keys = set(entries)
-        missing_in_yaml = enum_values - yaml_keys
-        extra_in_yaml = yaml_keys - enum_values
-        if missing_in_yaml:
-            raise ValueError(
-                f"vocabulary.yaml [{section}] missing keys for enum members: {sorted(missing_in_yaml)}"
-            )
-        if extra_in_yaml:
-            raise ValueError(
-                f"vocabulary.yaml [{section}] has extra keys not in enum: {sorted(extra_in_yaml)}"
-            )
-
-    return data
-
-
-_VOCABULARY = _load_vocabulary()
-
-SYMBOL_KIND_DESCRIPTIONS: dict[str, str] = _VOCABULARY["symbol_kinds"]
-REFERENCE_KIND_DESCRIPTIONS: dict[str, str] = _VOCABULARY["reference_kinds"]
-RELATION_TYPE_DESCRIPTIONS: dict[str, str] = _VOCABULARY["relation_types"]
-
-
-# ---------------------------------------------------------------------------
 # Core data structures
 # ---------------------------------------------------------------------------
 
@@ -358,7 +318,7 @@ class TrajectoryIndex:
         self._ref_ids_by_symbol[symbol.id].append(ref_id)
         self._ref_ids_by_step[(step.run_id, step.step_id)].append(ref_id)
 
-        preferred = {ReferenceKind.DEFINE, ReferenceKind.WRITE, ReferenceKind.TOOL_OUTPUT}
+        preferred = {ReferenceKind.DEFINE, ReferenceKind.WRITE, ReferenceKind.OBSERVE, ReferenceKind.TOOL_OUTPUT}
         if symbol.definition_ref_id is None:
             symbol.definition_ref_id = ref_id
         elif kind in preferred:
@@ -430,10 +390,31 @@ class TrajectoryIndex:
             relation_count=len(self.relations),
         )
 
+    # ---- integrity ----
+
+    def validate(self) -> list[str]:
+        """Check referential integrity. Returns a list of error descriptions."""
+        errors: list[str] = []
+        for ref in self.references.values():
+            if ref.symbol_id not in self.symbols:
+                errors.append(f"reference {ref.id} points to missing symbol {ref.symbol_id}")
+        for rel in self.relations.values():
+            if rel.from_symbol_id not in self.symbols:
+                errors.append(f"relation {rel.id} from_symbol {rel.from_symbol_id} not found")
+            if rel.to_symbol_id not in self.symbols:
+                errors.append(f"relation {rel.id} to_symbol {rel.to_symbol_id} not found")
+        return errors
+
     # ---- persistence ----
 
     def dump(self, path: str | Path) -> None:
-        """Write the full index to a JSON file."""
+        """Write the full index to a JSON file. Validates integrity first."""
+        errors = self.validate()
+        if errors:
+            from loguru import logger
+
+            for e in errors:
+                logger.warning(f"index integrity: {e}")
         symbols = [
             {
                 "id": s.id,
@@ -502,9 +483,13 @@ class TrajectoryIndex:
             )
             symbol.definition_ref_id = s.get("definition_ref_id", s.get("definition_mention_id"))
 
+        from loguru import logger as _log
+
         for r in data.get("references", data.get("mentions", [])):
-            sym = index.symbols.get(r.get("symbol_id", r.get("entity_id", "")))
+            sym_id = r.get("symbol_id", r.get("entity_id", ""))
+            sym = index.symbols.get(sym_id)
             if not sym:
+                _log.warning(f"load: reference {r['id']} -> missing symbol {sym_id}, skipped")
                 continue
             ref_step = index.steps.get(("", r["step_id"]))
             if not ref_step:
@@ -523,6 +508,8 @@ class TrajectoryIndex:
             from_s = index.symbols.get(r["from"])
             to_s = index.symbols.get(r["to"])
             if not from_s or not to_s:
+                missing = [s for s, v in [("from", from_s), ("to", to_s)] if not v]
+                _log.warning(f"load: relation {r['id']} missing {missing} symbol(s), skipped")
                 continue
             rel_step = index.steps.get(("", r["step_id"]))
             if not rel_step:
