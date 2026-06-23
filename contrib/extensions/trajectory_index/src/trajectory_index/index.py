@@ -13,7 +13,8 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from hashlib import sha1
-from typing import Any
+
+type MetadataValue = str | int | float | bool | None
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -90,7 +91,7 @@ class Step:
     content: str
     tool_name: str | None = None
     timestamp: float | None = None
-    metadata: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
 
 @dataclass
@@ -101,7 +102,7 @@ class Entity:
     aliases: set[str] = field(default_factory=set)
     summary: str | None = None
     definition_mention_id: str | None = None
-    metadata: MutableMapping[str, Any] = field(default_factory=dict)
+    metadata: MutableMapping[str, MetadataValue] = field(default_factory=dict)
 
     @property
     def all_names(self) -> set[str]:
@@ -119,7 +120,7 @@ class Mention:
     role: StepRole
     mention_type: MentionType = MentionType.UNKNOWN
     confidence: float = 1.0
-    metadata: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -128,10 +129,11 @@ class Relation:
     from_entity_id: str
     to_entity_id: str
     type: RelationType
+    run_id: str
     step_id: str
     weight: float = 1.0
     confidence: float = 1.0
-    metadata: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +337,7 @@ class TrajectoryIndex:
             from_entity_id=from_entity.id,
             to_entity_id=to_entity.id,
             type=rel_type,
+            run_id=step.run_id,
             step_id=step.step_id,
             weight=weight,
             confidence=confidence,
@@ -507,15 +510,18 @@ class TrajectoryIndex:
         related = tuple(self.get_related(entity_id, limit=max_related))
         timeline = tuple(self.get_timeline(entity_id))
 
+        steps_by_run: dict[str, list[Step]] = defaultdict(list)
+        for (rid, _), s in self.steps.items():
+            steps_by_run[rid].append(s)
+        for v in steps_by_run.values():
+            v.sort(key=lambda s: s.index)
+
         snippets: list[ContextSnippet] = []
         for mention in mentions:
             step = self.steps.get((mention.run_id, mention.step_id))
             if not step:
                 continue
-            same_run = sorted(
-                [s for (rid, _), s in self.steps.items() if rid == mention.run_id],
-                key=lambda s: s.index,
-            )
+            same_run = steps_by_run.get(mention.run_id, [])
             before = tuple(
                 s for s in same_run
                 if step.index - window <= s.index < step.index

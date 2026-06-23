@@ -13,7 +13,7 @@ class ExtractedEntity(BaseModel):
 
 class ExtractedMention(BaseModel):
     entity_name: str = Field(description="Must match an entity name exactly")
-    step_index: int = Field(description="Step index where this mention appears")
+    turn_id: str = Field(description="ID of the message where this mention appears")
     text: str = Field(description="Short phrase (< 50 chars)")
     mention_type: str = Field(
         default="use",
@@ -27,7 +27,7 @@ class ExtractedRelation(BaseModel):
     relation_type: str = Field(
         description="One of: uses, defines, updates, derived_from, input_to, output_of, mentions, explains",
     )
-    step_index: int = Field(description="Step where this relation was observed")
+    turn_id: str = Field(description="ID of the message where this relation was observed")
 
 
 class ReportEntitiesParams(BaseModel):

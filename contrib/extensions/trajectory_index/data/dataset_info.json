@@ -1,0 +1,24 @@
+{
+  "dataset_info": {
+    "description": "SFT training data for trajectory semantic index entity extraction.",
+    "features": {
+      "messages": {
+        "feature": {
+          "role": {
+            "dtype": "string"
+          },
+          "content": {
+            "dtype": "string"
+          }
+        },
+        "_type": "Sequence"
+      }
+    }
+  },
+  "splits": {
+    "train": {
+      "num_examples": 4,
+      "dataset_name": "trajectory_index_sft"
+    }
+  }
+}

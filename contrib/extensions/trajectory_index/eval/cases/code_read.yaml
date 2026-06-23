@@ -2,31 +2,38 @@
 id: code_read
 description: Simple file reading task — agent uses read_file to inspect code
 
-steps:
-  - index: 0
+messages:
+  - id: m0
     role: user
-    content: "Please read the file src/main.py and find the parse_config function."
-    tool_name: null
-  - index: 1
+    content:
+      - type: text
+        text: "Please read the file src/main.py and find the parse_config function."
+  - id: m1
     role: assistant
-    content: "I will use the read_file tool to look at src/main.py."
-    tool_name: null
-  - index: 2
-    role: assistant
-    content: '[tool_call: read_file({"path": "src/main.py"})]'
-    tool_name: read_file
-  - index: 3
+    content:
+      - type: text
+        text: "I will use the read_file tool to look at src/main.py."
+      - type: tool_call
+        id: call_1
+        name: read_file
+        arguments: {"path": "src/main.py"}
+  - id: m2
     role: tool_result
-    content: |
-      def parse_config(path: str) -> Config:
-          with open(path) as f:
-              data = json.load(f)
-          return Config(**data)
-    tool_name: null
-  - index: 4
+    content:
+      - type: tool_result
+        tool_call_id: call_1
+        content:
+          - type: text
+            text: |
+              def parse_config(path: str) -> Config:
+                  with open(path) as f:
+                      data = json.load(f)
+                  return Config(**data)
+  - id: m3
     role: assistant
-    content: "The parse_config function reads a JSON file and returns a Config object. It uses json.load to parse the file contents."
-    tool_name: null
+    content:
+      - type: text
+        text: "The parse_config function reads a JSON file and returns a Config object. It uses json.load to parse the file contents."
 
 expected:
   entities:

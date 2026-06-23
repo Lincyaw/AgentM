@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Final
+from typing import Final
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
@@ -39,7 +39,7 @@ def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:
     )
     full_prompt = f"{base_prompt}\n\n## JSON Schema\n\nYour output must conform to this schema:\n\n```json\n{schema}\n```"
 
-    def _inject_system(event: Any) -> dict[str, Any] | None:
+    def _inject_system(event: BeforeAgentStartEvent) -> dict[str, str] | None:
         return {"system": full_prompt}
 
     api.on(BeforeAgentStartEvent.CHANNEL, _inject_system)

@@ -4,13 +4,13 @@ Registers tools for the main agent to build and query a semantic index
 over its own trajectory. Extraction is delegated to a child agent
 (entity_extractor scenario) that runs on a small/fast model.
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import json
-import re
-from typing import Any, Final
+from typing import Final
 
 from agentm.core.abi import (
     AgentMessage,
@@ -18,9 +18,11 @@ from agentm.core.abi import (
     ExtensionAPI,
     FunctionTool,
     LoopConfig,
+    SessionEntry,
     TextContent,
     ToolCallBlock,
     ToolResult,
+    ToolResultBlock,
 )
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.extensions import ExtensionManifest
@@ -29,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from .agents import extractor_scenario
 from .agents.entity_extractor.schema import ReportEntitiesParams
+from .data import JsonValue, ProviderSpec, extract_json, resolve_provider
 from .index import (
     Entity,
     EntityKind,
@@ -76,66 +79,112 @@ MANIFEST = ExtensionManifest(
 
 
 # ---------------------------------------------------------------------------
-# Provider resolution (same pattern as llmharness)
+# Provider resolution
 # ---------------------------------------------------------------------------
 
 
-def _resolve_provider(model_name: str) -> tuple[str, dict[str, Any]] | None:
-    from agentm.ai import DEFAULT_PROVIDER_DESCRIPTORS
-    from agentm.core.lib import resolve_model_profile
-
-    profile = resolve_model_profile(model_name)
-    if profile is None:
-        logger.warning(f"model profile {model_name!r} not found in config.toml")
+def _resolve_provider_safe(model_name: str) -> ProviderSpec | None:
+    try:
+        return resolve_provider(model_name)
+    except RuntimeError:
+        logger.warning(f"could not resolve model profile {model_name!r}")
         return None
-    for desc in DEFAULT_PROVIDER_DESCRIPTORS:
-        if desc.id == profile.provider and desc.extension_module is not None:
-            return (desc.extension_module, dict(profile.to_build_config()))
-    logger.warning(f"provider {profile.provider!r} has no extension module")
-    return None
 
 
 # ---------------------------------------------------------------------------
-# Message → Step conversion
+# Session branch → clean messages (for extraction) + Steps (for index)
 # ---------------------------------------------------------------------------
 
 
-def _messages_to_steps(
-    messages: list[AgentMessage],
+def _branch_to_clean_messages(branch: list[SessionEntry]) -> list[dict[str, JsonValue]]:
+    """Convert session branch entries to the clean message format for extraction."""
+    from .data import clean_trace_messages
+
+    raw: list[dict[str, JsonValue]] = []
+    for entry in branch:
+        if entry.type == "message":
+            raw.append(
+                {
+                    "id": entry.id,
+                    "payload": _agentmsg_to_payload(entry.payload),
+                }
+            )
+    return clean_trace_messages(raw)
+
+
+def _agentmsg_to_payload(msg: AgentMessage) -> dict[str, JsonValue]:
+    """Serialize an AgentMessage to the trace payload dict shape."""
+    blocks: list[JsonValue] = []
+    for block in msg.content:
+        if isinstance(block, TextContent):
+            blocks.append({"type": "text", "text": block.text})
+        elif isinstance(block, ToolCallBlock):
+            blocks.append(
+                {
+                    "type": "tool_call",
+                    "id": block.id,
+                    "name": block.name,
+                    "arguments": block.arguments,
+                }
+            )
+        elif isinstance(block, ToolResultBlock):
+            sub_blocks: list[JsonValue] = []
+            for sub in block.content:
+                if isinstance(sub, TextContent):
+                    sub_blocks.append({"type": "text", "text": sub.text})
+            blocks.append({"type": "tool_result", "content": sub_blocks})
+    return {"role": msg.role, "content": blocks}
+
+
+def _clean_messages_to_steps(
+    messages: list[dict[str, JsonValue]],
     run_id: str,
 ) -> list[Step]:
+    """Convert clean messages to index Steps (for populating the in-memory index)."""
     steps: list[Step] = []
     for i, msg in enumerate(messages):
-        role = _ROLE_MAP.get(msg.role, StepRole.USER)
+        msg_role = msg.get("role", "")
+        role = _ROLE_MAP.get(str(msg_role), StepRole.USER)
         parts: list[str] = []
         tool_name: str | None = None
 
-        for block in msg.content:
-            if isinstance(block, TextContent):
-                parts.append(block.text)
-            elif isinstance(block, ToolCallBlock):
-                tool_name = block.name
-                parts.append(f"[tool_call: {block.name}({json.dumps(block.arguments, ensure_ascii=False, default=str)[:500]})]")
-            elif hasattr(block, "text"):
-                parts.append(str(block.text))
-            elif hasattr(block, "content"):
-                for sub in block.content:
-                    if hasattr(sub, "text"):
-                        parts.append(str(sub.text))
+        content_blocks = msg.get("content", [])
+        if not isinstance(content_blocks, list):
+            continue
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            btype = str(block.get("type", ""))
+            if btype == "text":
+                text = block.get("text", "")
+                parts.append(str(text))
+            elif btype == "tool_call":
+                name = block.get("name")
+                tool_name = str(name) if name is not None else None
+                parts.append(f"[tool_call: {tool_name}]")
+            elif btype == "tool_result":
+                sub_content = block.get("content", [])
+                if not isinstance(sub_content, list):
+                    continue
+                for sub in sub_content:
+                    if isinstance(sub, dict) and sub.get("type") == "text":
+                        parts.append(str(sub.get("text", "")))
 
         content = "\n".join(parts)
         if not content.strip():
             continue
 
-        steps.append(Step(
-            run_id=run_id,
-            step_id=f"s{i}",
-            index=i,
-            role=role,
-            content=content,
-            tool_name=tool_name,
-            timestamp=msg.timestamp if hasattr(msg, "timestamp") else None,
-        ))
+        msg_id = msg.get("id")
+        steps.append(
+            Step(
+                run_id=run_id,
+                step_id=str(msg_id) if msg_id is not None else f"s{i}",
+                index=i,
+                role=role,
+                content=content,
+                tool_name=tool_name,
+            )
+        )
     return steps
 
 
@@ -147,10 +196,8 @@ def _messages_to_steps(
 _MAX_RETRIES: Final = 3
 _RETRY_DELAY: Final = 5.0
 
-_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*\n(.*?)\n\s*```", re.DOTALL)
 
-
-def _extract_json_from_text(messages: list[AgentMessage]) -> dict[str, Any] | None:
+def _extract_json_from_text(messages: list[AgentMessage]) -> dict[str, JsonValue] | None:
     """Extract a JSON object from the last assistant text response."""
     for msg in reversed(messages):
         if not isinstance(msg, AssistantMessage):
@@ -158,58 +205,18 @@ def _extract_json_from_text(messages: list[AgentMessage]) -> dict[str, Any] | No
         for block in reversed(msg.content):
             if not isinstance(block, TextContent):
                 continue
-            text = block.text.strip()
-            # Try the raw text as JSON first
-            try:
-                obj = json.loads(text)
-                if isinstance(obj, dict):
-                    return obj
-            except json.JSONDecodeError:
-                pass
-            # Try extracting from ```json ... ``` fences
-            m = _JSON_BLOCK_RE.search(text)
-            if m:
-                try:
-                    obj = json.loads(m.group(1))
-                    if isinstance(obj, dict):
-                        return obj
-                except json.JSONDecodeError:
-                    pass
-            # Try finding the first { ... } substring
-            start = text.find("{")
-            if start >= 0:
-                depth = 0
-                for i in range(start, len(text)):
-                    if text[i] == "{":
-                        depth += 1
-                    elif text[i] == "}":
-                        depth -= 1
-                        if depth == 0:
-                            try:
-                                obj = json.loads(text[start : i + 1])
-                                if isinstance(obj, dict):
-                                    return obj
-                            except json.JSONDecodeError:
-                                pass
-                            break
+            obj = extract_json(block.text)
+            if obj is not None:
+                return obj
     return None
 
 
 async def _run_extraction(
     api: ExtensionAPI,
-    steps: list[Step],
-    provider: tuple[str, dict[str, Any]] | None,
+    messages: list[dict[str, JsonValue]],
+    provider: ProviderSpec | None,
 ) -> ReportEntitiesParams | None:
-    steps_payload = [
-        {
-            "index": s.index,
-            "role": s.role.value,
-            "content": s.content[:2000],
-            "tool_name": s.tool_name,
-        }
-        for s in steps
-    ]
-    prompt = json.dumps(steps_payload, ensure_ascii=False, indent=2)
+    prompt = json.dumps(messages, ensure_ascii=False, indent=2)
 
     scenario = extractor_scenario()
     config = AgentSessionConfig(
@@ -239,10 +246,8 @@ async def _run_extraction(
                     await child.shutdown()
         except Exception:
             if attempt < _MAX_RETRIES - 1:
-                logger.warning(
-                    f"extraction child failed, retry {attempt + 1}/{_MAX_RETRIES - 1}"
-                )
-                await asyncio.sleep(_RETRY_DELAY * (2 ** attempt))
+                logger.warning(f"extraction child failed, retry {attempt + 1}/{_MAX_RETRIES - 1}")
+                await asyncio.sleep(_RETRY_DELAY * (2**attempt))
             else:
                 logger.exception("extraction child failed after all retries")
     return None
@@ -279,7 +284,7 @@ def _populate_index(
     result: ReportEntitiesParams,
     steps: list[Step],
 ) -> None:
-    steps_by_index = {s.index: s for s in steps}
+    steps_by_id = {s.step_id: s for s in steps}
 
     entity_map: dict[str, Entity] = {}
     for ext_ent in result.entities:
@@ -295,7 +300,7 @@ def _populate_index(
         ent = entity_map.get(ext_men.entity_name)
         if not ent:
             continue
-        step = steps_by_index.get(ext_men.step_index)
+        step = steps_by_id.get(ext_men.turn_id)
         if not step:
             continue
         start = step.content.find(ext_men.text)
@@ -316,7 +321,7 @@ def _populate_index(
         to_ent = entity_map.get(ext_rel.to_entity)
         if not from_ent or not to_ent:
             continue
-        step = steps_by_index.get(ext_rel.step_index)
+        step = steps_by_id.get(ext_rel.turn_id)
         if not step:
             continue
         index.add_relation(
@@ -334,21 +339,22 @@ def _populate_index(
 
 
 def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> FunctionTool:
-    async def _handle(args: dict[str, Any]) -> ToolResult:
+    async def _handle(args: dict[str, JsonValue]) -> ToolResult:
         index = api.get_service(INDEX_SERVICE_KEY)
         assert isinstance(index, TrajectoryIndex)
-        messages = api.session.get_messages()
         run_id = api.session_id
 
-        steps = _messages_to_steps(messages, run_id)
-        if not steps:
+        branch = api.session.get_branch()
+        clean_msgs = _branch_to_clean_messages(branch)
+        if not clean_msgs:
             return ToolResult(content=[TextContent(type="text", text="No messages to index.")])
 
+        steps = _clean_messages_to_steps(clean_msgs, run_id)
         for step in steps:
             index.add_step(step)
 
-        provider = _resolve_provider(cfg.model)
-        result = await _run_extraction(api, steps, provider)
+        provider = _resolve_provider_safe(cfg.model)
+        result = await _run_extraction(api, clean_msgs, provider)
         if result is None:
             return ToolResult(
                 content=[TextContent(type="text", text="Extraction failed — check logs.")],
@@ -357,15 +363,19 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
 
         _populate_index(index, result, steps)
         stats = index.stats(run_id)
-        return ToolResult(content=[TextContent(
-            type="text",
-            text=(
-                f"Indexed {stats.step_count} steps -> "
-                f"{stats.entity_count} entities, "
-                f"{stats.mention_count} mentions, "
-                f"{stats.relation_count} relations."
-            ),
-        )])
+        return ToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=(
+                        f"Indexed {stats.step_count} steps -> "
+                        f"{stats.entity_count} entities, "
+                        f"{stats.mention_count} mentions, "
+                        f"{stats.relation_count} relations."
+                    ),
+                )
+            ]
+        )
 
     return FunctionTool(
         name="index_trajectory",
@@ -384,7 +394,7 @@ def _build_search_tool(api: ExtensionAPI) -> FunctionTool:
         kinds: list[str] | None = Field(default=None, description="Filter by entity kinds")
         limit: int = Field(default=10, description="Max results")
 
-    async def _handle(args: dict[str, Any]) -> ToolResult:
+    async def _handle(args: dict[str, JsonValue]) -> ToolResult:
         params = SearchParams.model_validate(args)
         index = api.get_service(INDEX_SERVICE_KEY)
         assert isinstance(index, TrajectoryIndex)
@@ -394,8 +404,11 @@ def _build_search_tool(api: ExtensionAPI) -> FunctionTool:
             kind_filter = {_kind_from_str(k) for k in params.kinds}
 
         results = index.search(
-            params.query, kinds=kind_filter, limit=params.limit,
-            include_mentions=True, include_related=True,
+            params.query,
+            kinds=kind_filter,
+            limit=params.limit,
+            include_mentions=True,
+            include_related=True,
         )
         if not results:
             return ToolResult(content=[TextContent(type="text", text="No entities found.")])
@@ -404,15 +417,12 @@ def _build_search_tool(api: ExtensionAPI) -> FunctionTool:
         for r in results:
             ent = r.entity
             lines.append(
-                f"- **{ent.canonical_name}** ({ent.kind.value}, score={r.score:.2f})"
-                f"  id={ent.id}"
+                f"- **{ent.canonical_name}** ({ent.kind.value}, score={r.score:.2f})  id={ent.id}"
             )
             if ent.summary:
                 lines.append(f"  {ent.summary}")
             if r.mentions:
-                refs = ", ".join(
-                    f"step {m.step_id}:{m.mention_type.value}" for m in r.mentions[:3]
-                )
+                refs = ", ".join(f"step {m.step_id}:{m.mention_type.value}" for m in r.mentions[:3])
                 lines.append(f"  mentions: {refs}")
             if r.related:
                 rels = ", ".join(
@@ -434,7 +444,7 @@ def _build_context_tool(api: ExtensionAPI) -> FunctionTool:
     class ContextParams(BaseModel):
         entity_id: str = Field(description="Entity ID to get context for")
 
-    async def _handle(args: dict[str, Any]) -> ToolResult:
+    async def _handle(args: dict[str, JsonValue]) -> ToolResult:
         params = ContextParams.model_validate(args)
         index = api.get_service(INDEX_SERVICE_KEY)
         assert isinstance(index, TrajectoryIndex)
@@ -457,14 +467,14 @@ def _build_context_tool(api: ExtensionAPI) -> FunctionTool:
 
         if ctx.definition:
             d = ctx.definition
-            lines.append(f"\n## Definition\nStep {d.step_id}: \"{d.text}\" ({d.mention_type.value})")
+            lines.append(f'\n## Definition\nStep {d.step_id}: "{d.text}" ({d.mention_type.value})')
 
         if ctx.timeline:
             lines.append("\n## Timeline")
             for item in ctx.timeline[:15]:
                 lines.append(
                     f"- [{item.step.role.value}] step {item.step.step_id}: "
-                    f"\"{item.mention.text}\" ({item.mention.mention_type.value})"
+                    f'"{item.mention.text}" ({item.mention.mention_type.value})'
                 )
 
         if ctx.related:

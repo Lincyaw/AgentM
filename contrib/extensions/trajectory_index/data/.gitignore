@@ -1,0 +1,3 @@
+# Ignore generated training data (large, model-specific)
+*.jsonl
+*.parquet
