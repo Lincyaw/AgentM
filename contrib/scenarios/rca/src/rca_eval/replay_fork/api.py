@@ -345,6 +345,7 @@ async def replay_one(
     first_reminder: str | None = None
     first_audit_firings: list[Any] = []
     final_error: str | None = None
+    min_surface_turn_index = 0
 
     for generation in range(1, max(1, max_forks) + 1):
         if current_correct is True:
@@ -359,6 +360,7 @@ async def replay_one(
                 audit_interval=audit_interval,
                 auditor_prompt=auditor_prompt,
                 stop_on_first_surface=True,
+                min_surface_turn_index=min_surface_turn_index,
             )
             surfaces = audit_result.surfaces
             audit_firings = audit_result.firings
@@ -499,6 +501,7 @@ async def replay_one(
         current_messages = fork_messages
         current_correct = fork_outcome.correct
         current_summary = fork_summary
+        min_surface_turn_index = s.turn_index
 
     return ReplayResult(
         case_id=session_id,

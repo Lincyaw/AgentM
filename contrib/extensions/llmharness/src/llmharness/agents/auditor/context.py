@@ -11,7 +11,7 @@ from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
 
 from llmharness.context_index import build_context_index
-from llmharness.schema import Edge, Event, Finding
+from llmharness.schema import Edge, Event
 
 # ---------------------------------------------------------------------------
 # Prompt loading
@@ -42,7 +42,6 @@ def load_auditor_prompt(name: str = "minimal_index") -> str:
 
 def build_auditor_system_prompt(
     *,
-    findings: list[Finding],
     check_errors: dict[str, str],
     continuation_notes: list[str],
     base_prompt: str | None = None,
@@ -51,7 +50,6 @@ def build_auditor_system_prompt(
 ) -> str:
     """Assemble the auditor system prompt for one firing."""
     framing = base_prompt if base_prompt is not None else load_auditor_prompt("minimal_index")
-    findings_payload = [f.to_dict() for f in findings]
 
     sections: list[str] = [framing.rstrip(), ""]
 
@@ -81,15 +79,12 @@ def build_auditor_system_prompt(
         sections.append("{}")
         sections.append("")
 
-    sections.append("## FINDINGS (advisory)")
-    sections.append(json.dumps(findings_payload, ensure_ascii=False))
     if check_errors:
+        sections.append("## CHECK_ERRORS (non-blocking)")
         sections.append(
-            "checks_failed: "
-            + json.dumps(check_errors, ensure_ascii=False)
-            + " (non-blocking; other checks ran)"
+            json.dumps(check_errors, ensure_ascii=False)
         )
-    sections.append("")
+        sections.append("")
 
     sections.append("## CONTINUATION_NOTES (from your prior firing)")
     sections.append(json.dumps(list(continuation_notes), ensure_ascii=False))
@@ -151,7 +146,6 @@ def build_auditor_trajectory_prompt(
 class AuditorContextConfig(BaseModel):
     events: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
-    findings: list[dict[str, Any]] = []
     check_errors: dict[str, str] = {}
     continuation_notes: list[str] = []
     prompt_name: str = "minimal_index"
@@ -170,7 +164,6 @@ MANIFEST = ExtensionManifest(
 def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
     events = tuple(Event.from_dict(e) for e in config.events)
     edges = tuple(Edge.from_dict(e) for e in config.edges)
-    findings = [Finding.from_dict(f) for f in config.findings]
 
     base_prompt = load_auditor_prompt(config.prompt_name)
     meth = config.methodology or None
@@ -192,7 +185,6 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
         )
     else:
         prompt_text = build_auditor_system_prompt(
-            findings=findings,
             check_errors=config.check_errors,
             continuation_notes=config.continuation_notes,
             base_prompt=base_prompt,

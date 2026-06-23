@@ -20,8 +20,8 @@ from llmharness.agents.extractor.tools import (
     ExtractionState,
 )
 from llmharness.context_index import build_context_index
-from llmharness.replay.record import ReplayRecord
-from llmharness.schema import Edge, Event, Finding
+from llmharness.eval.replay.record import ReplayRecord
+from llmharness.schema import Edge, Event
 
 from .engine import PhaseResult, run_phase_standalone
 
@@ -297,7 +297,7 @@ async def replay_auditor_record(
     """Run auditor on a recorded context-index payload.
 
     Composes auditor extensions from ``record.compose_kwargs`` (events /
-    edges / findings / continuation_notes / tools) and passes
+    edges / continuation_notes / tools) and passes
     ``record.payload`` to the child as the user message verbatim.
     """
     if record.phase != "auditor":
@@ -321,7 +321,6 @@ async def replay_auditor_record(
                 edges=edges_t,
             ).to_dict()
     prompt_text = build_auditor_system_prompt(
-        findings=_coerce_schema_list(Finding, ck.get("findings") or []),
         check_errors=dict(ck.get("check_errors") or {}),
         continuation_notes=list(ck.get("continuation_notes") or []),
         base_prompt=settings.base_prompt or None,

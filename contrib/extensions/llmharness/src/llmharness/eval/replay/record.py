@@ -4,7 +4,7 @@ One JSONL line represents one extractor or auditor phase invocation. The
 online ``llmharness.atom`` path persists audit state through AgentM session
 entries and ``.agentm/audit_ops/``; it does not write these replay records.
 Replay records remain the interchange format for offline fork-tree,
-aggregation, and distillation helpers.
+evaluation, and aggregation helpers.
 
 Identity vocabulary mirrors AgentM core (``agentm.core.abi.extension``):
 ``session_id`` is the per-session id (= the OTel span_id of the
@@ -169,9 +169,8 @@ def audit_session_id(api: ExtensionAPI) -> str:
     unpersisted -- that branch keeps the existing behaviour for embedded
     SDK callers who never write a session file at all.
 
-    This is the canonical helper for auxiliary artifacts such as
-    ``distill.binding`` metadata; it lives in this library module so atoms
-    never import one another (§11).
+    This is the canonical helper for auxiliary eval artifacts; it lives in
+    this library module so atoms never import one another (§11).
     """
     sid: str
     try:
@@ -206,7 +205,7 @@ def iter_records(path: Path) -> Iterator[ReplayRecord]:
     sidecar reads cleanly through this iterator. The ``phase`` check is
     header-key-agnostic on purpose: a missing ``phase`` is the single
     discriminator between a record line and a header line. See
-    :func:`llmharness.replay.fork_tree.read_fork_tree_header` for the
+    :func:`llmharness.eval.replay.fork_tree.read_fork_tree_header` for the
     matching reader of that header.
     """
     with path.open("r", encoding="utf-8") as fh:

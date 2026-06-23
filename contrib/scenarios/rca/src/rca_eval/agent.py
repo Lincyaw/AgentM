@@ -299,11 +299,11 @@ class AgentMAgent(BaseAgent):
         data_dir: str,
         **kwargs: Any,
     ) -> AgentResult:
-        from llmharness.replay.fork_tree import (
+        from llmharness.eval.replay.fork_tree import (
             SessionPayload,
             run_fork_tree_experiment,
         )
-        from llmharness.replay.runner import AuditorSettings, ExtractorSettings
+        from llmharness.eval.replay.runner import AuditorSettings, ExtractorSettings
 
         # The user-facing ``--ak chained_fork=true`` flag now drives the
         # fork-tree engine; the linear chain is the degenerate

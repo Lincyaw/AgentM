@@ -26,7 +26,7 @@ from agentm.core.abi import (
 )
 from agentm.core.runtime import AgentSession, create_agent_session
 
-from llmharness.replay.record import Status
+from llmharness.eval.replay.record import Status
 
 
 @dataclass

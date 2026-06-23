@@ -261,7 +261,7 @@ def _prepare_extractor_data(
     window_messages = messages[window_lo:]
     if not window_messages:
         return None
-    events_cum, edges_cum, _ = cumulative.index_view()
+    events_cum, edges_cum = cumulative.index_view()
     turn_texts: dict[str, str] = {}
     skill_call_ids = _tool_call_ids(messages, "load_skill")
     for i, msg in enumerate(window_messages, start=window_lo):
@@ -475,7 +475,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
 
         # --- Auditor ---
         if auditor_due:
-            events, edges, _phases = cumulative.index_view()
+            events, edges = cumulative.index_view()
             trajectory = _serialize_trajectory(list(messages))
             context_index = build_context_index(
                 trajectory=trajectory,

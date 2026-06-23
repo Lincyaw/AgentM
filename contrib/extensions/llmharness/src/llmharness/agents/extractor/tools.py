@@ -29,7 +29,6 @@ from .index_store import (
     RecordDelete,
     RecordUpsert,
     fold_index,
-    merge_to_phases,
     parse_op,
 )
 
@@ -41,7 +40,6 @@ __all__: Final = [
     "RecordDelete",
     "RecordUpsert",
     "fold_index",
-    "merge_to_phases",
     "parse_op",
 ]
 

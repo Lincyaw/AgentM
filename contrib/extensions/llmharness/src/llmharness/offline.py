@@ -160,13 +160,17 @@ async def offline_audit(
     audit_interval: int = 5,
     auditor_prompt: str = "minimal_index",
     stop_on_first_surface: bool = False,
+    min_surface_turn_index: int = 0,
 ) -> OfflineAuditResult:
     """Run extractor + auditor offline over *messages*, return audit result.
 
     The result contains surface points (where the auditor would intervene)
     and per-firing session ids for trace inspection.  Set
     ``stop_on_first_surface`` for fork-replay flows that only use the first
-    surfaced reminder.
+    surfaced reminder.  ``min_surface_turn_index`` suppresses reminders at or
+    before a message prefix length that has already been forked from; this keeps
+    multi-generation replay moving forward instead of rediscovering an earlier
+    intervention point.
 
     ``auditor_prompt`` selects the prompt variant (e.g. ``"minimal_index"``,
     ``"trajectory_coverage"``).
@@ -261,7 +265,7 @@ async def offline_audit(
         # --- Auditor ---
         if auditor_due:
             stop_after_auditor = False
-            events, edges, _phases = cumulative.index_view()
+            events, edges = cumulative.index_view()
             from .atom import _extract_loaded_skills, _serialize_trajectory
             from .context_index import build_context_index
 
@@ -336,7 +340,12 @@ async def offline_audit(
                         logger.warning(f"  auditor turn={turn_number}: malformed verdict: {exc} (sid={aud_result.session_id})")
                     else:
                         cumulative.absorb_auditor_verdict(verdict.to_dict())
-                        if verdict.surface_reminder and verdict.reminder_text:
+                        surface_allowed = prefix_len > min_surface_turn_index
+                        if (
+                            verdict.surface_reminder
+                            and verdict.reminder_text
+                            and surface_allowed
+                        ):
                             surfaced = True
                             surfaces.append(
                                 SurfacePoint(

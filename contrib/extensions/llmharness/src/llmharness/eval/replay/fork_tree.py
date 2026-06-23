@@ -52,7 +52,7 @@ from agentm.core.abi import (
 )
 from loguru import logger
 
-from llmharness.replay.record import ReplayRecord, write_record
+from llmharness.eval.replay.record import ReplayRecord, write_record
 from llmharness.state import CumulativeAuditState
 
 from .offline import InMemorySink, StandaloneChildRunner
@@ -573,7 +573,7 @@ def write_fork_tree_replay(
 
     1. Optional header line: ``{"__fork_tree_header__": {...}}`` carrying
        the tree topology (see :func:`_build_fork_tree_header`). Skipped by
-       :func:`llmharness.replay.record.iter_records` (it carries no
+       :func:`llmharness.eval.replay.record.iter_records` (it carries no
        ``phase`` key), so existing record consumers ignore it.
     2. One :class:`ReplayRecord` JSONL row per surviving firing, each
        carrying its owning node's id under ``extras['node_id']`` and the

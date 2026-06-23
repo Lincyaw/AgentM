@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 
 class EventKind(str, Enum):
@@ -40,6 +40,248 @@ class EdgeRole(str, Enum):
     WEAKENS = "weakens"
     DEPENDS = "depends"
     NARROWS = "narrows"
+
+
+TurnKind = Literal["user", "assistant", "tool_call", "tool_result", "system", "reminder"]
+EntityType = Literal[
+    "service",
+    "endpoint",
+    "edge",
+    "metric",
+    "log_pattern",
+    "fault_kind",
+    "tool",
+    "schema_field",
+    "unknown",
+]
+ObservationPolarity = Literal["supports", "weakens", "neutral", "unknown"]
+ObservationSignal = Literal[
+    "missing_or_normal_only",
+    "volume_or_count_drop",
+    "volume_or_count_increase",
+    "latency_delta",
+    "error_delta",
+    "resource_delta",
+    "weak_or_no_error",
+    "schema_or_output_failure",
+]
+AttentionKind = Literal[
+    "competing_observation_cluster",
+    "weak_candidate_signal",
+    "local_signal_on_disappeared_entity",
+]
+ClaimKind = Literal["hypothesis", "decision", "demotion", "conclusion", "final_answer"]
+CandidateState = Literal["mentioned", "investigated", "retained", "demoted", "finalized"]
+ObligationSource = Literal["agent_plan", "methodology", "tool_contract"]
+ObligationState = Literal["open", "satisfied", "abandoned", "unknown"]
+ContractStatus = Literal["rejected", "empty", "malformed", "validation_failed", "repaired"]
+LinkKind = Literal["mentions", "cites", "near", "follows", "same_entity", "derives_from"]
+
+
+@dataclass(frozen=True)
+class TurnRef:
+    turn_index: int
+    role: str
+    kind: TurnKind
+    summary: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "turn_index": self.turn_index,
+            "role": self.role,
+            "kind": self.kind,
+            "summary": self.summary,
+        }
+
+
+@dataclass(frozen=True)
+class EntityRef:
+    id: str
+    name: str
+    type: EntityType
+    turns: tuple[int, ...]
+    aliases: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "type": self.type,
+            "turns": list(self.turns),
+            "aliases": list(self.aliases),
+        }
+
+
+@dataclass(frozen=True)
+class ObservationRef:
+    id: str
+    turns: tuple[int, ...]
+    source: str
+    summary: str
+    entities: tuple[str, ...]
+    values: tuple[str, ...] = ()
+    polarity: ObservationPolarity = "unknown"
+    signals: tuple[ObservationSignal, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "turns": list(self.turns),
+            "source": self.source,
+            "summary": self.summary,
+            "entities": list(self.entities),
+            "values": list(self.values),
+            "polarity": self.polarity,
+            "signals": list(self.signals),
+        }
+
+
+@dataclass(frozen=True)
+class ClaimRef:
+    id: str
+    turns: tuple[int, ...]
+    text: str
+    kind: ClaimKind
+    status: str
+    entities: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "turns": list(self.turns),
+            "text": self.text,
+            "kind": self.kind,
+            "status": self.status,
+            "entities": list(self.entities),
+        }
+
+
+@dataclass(frozen=True)
+class CandidateRef:
+    entity_id: str
+    first_seen_turn: int | None
+    last_seen_turn: int | None
+    state: CandidateState
+    state_turn: int | None
+    reason_claim_id: str | None = None
+    evidence_ids: tuple[str, ...] = ()
+    evidence_tags: tuple[ObservationSignal, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "entity_id": self.entity_id,
+            "first_seen_turn": self.first_seen_turn,
+            "last_seen_turn": self.last_seen_turn,
+            "state": self.state,
+            "state_turn": self.state_turn,
+            "reason_claim_id": self.reason_claim_id,
+            "evidence_ids": list(self.evidence_ids),
+            "evidence_tags": list(self.evidence_tags),
+        }
+
+
+@dataclass(frozen=True)
+class ObligationRef:
+    id: str
+    turns: tuple[int, ...]
+    source: ObligationSource
+    text: str
+    entities: tuple[str, ...]
+    state: ObligationState = "open"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "turns": list(self.turns),
+            "source": self.source,
+            "text": self.text,
+            "entities": list(self.entities),
+            "state": self.state,
+        }
+
+
+@dataclass(frozen=True)
+class ContractEventRef:
+    id: str
+    turns: tuple[int, ...]
+    tool: str
+    status: ContractStatus
+    summary: str
+    entities: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "turns": list(self.turns),
+            "tool": self.tool,
+            "status": self.status,
+            "summary": self.summary,
+            "entities": list(self.entities),
+        }
+
+
+@dataclass(frozen=True)
+class IndexLink:
+    src: str
+    dst: str
+    kind: LinkKind
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "src": self.src,
+            "dst": self.dst,
+            "kind": self.kind,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class AttentionHint:
+    id: str
+    kind: AttentionKind
+    turns: tuple[int, ...]
+    summary: str
+    entities: tuple[str, ...]
+    observation_ids: tuple[str, ...]
+    signals: tuple[ObservationSignal, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "turns": list(self.turns),
+            "summary": self.summary,
+            "entities": list(self.entities),
+            "observation_ids": list(self.observation_ids),
+            "signals": list(self.signals),
+        }
+
+
+@dataclass(frozen=True)
+class ContextIndex:
+    turns: tuple[TurnRef, ...]
+    entities: tuple[EntityRef, ...]
+    observations: tuple[ObservationRef, ...]
+    claims: tuple[ClaimRef, ...]
+    candidates: tuple[CandidateRef, ...]
+    obligations: tuple[ObligationRef, ...]
+    contract_events: tuple[ContractEventRef, ...]
+    links: tuple[IndexLink, ...]
+    attention_hints: tuple[AttentionHint, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "turns": [t.to_dict() for t in self.turns],
+            "entities": [e.to_dict() for e in self.entities],
+            "observations": [o.to_dict() for o in self.observations],
+            "claims": [c.to_dict() for c in self.claims],
+            "candidates": [c.to_dict() for c in self.candidates],
+            "obligations": [o.to_dict() for o in self.obligations],
+            "contract_events": [c.to_dict() for c in self.contract_events],
+            "links": [link.to_dict() for link in self.links],
+            "attention_hints": [hint.to_dict() for hint in self.attention_hints],
+        }
 
 
 @dataclass(frozen=True)
@@ -156,30 +398,6 @@ class Edge:
 
 
 @dataclass(frozen=True)
-class Finding:
-    """Advisory finding from a scenario-registered audit check."""
-
-    category: str
-    description: str
-    related_event_ids: tuple[int, ...] = ()
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "category": self.category,
-            "description": self.description,
-            "related_event_ids": list(self.related_event_ids),
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Finding:
-        return cls(
-            category=str(data.get("category", "")),
-            description=str(data.get("description", "")),
-            related_event_ids=tuple(int(i) for i in (data.get("related_event_ids") or [])),
-        )
-
-
-@dataclass(frozen=True)
 class Verdict:
     """Auditor verdict. surface_reminder=True triggers reminder injection."""
 
@@ -213,36 +431,6 @@ class Reminder:
     text: str
 
 
-@dataclass(frozen=True)
-class Phase:
-    """A merged basic block over consecutive raw events."""
-
-    id: int
-    kind: str
-    member_event_ids: tuple[int, ...]
-    source_turns: tuple[int, ...]
-    summary: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "kind": self.kind,
-            "member_event_ids": list(self.member_event_ids),
-            "source_turns": list(self.source_turns),
-            "summary": self.summary,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Phase:
-        return cls(
-            id=int(data["id"]),
-            kind=str(data["kind"]),
-            member_event_ids=tuple(int(i) for i in (data.get("member_event_ids") or [])),
-            source_turns=tuple(int(t) for t in (data.get("source_turns") or [])),
-            summary=str(data.get("summary", "")),
-        )
-
-
 # ---------------------------------------------------------------------------
 # Entry-type constants for session entries
 # ---------------------------------------------------------------------------
@@ -252,38 +440,41 @@ VERDICT = "llmharness.verdict"
 EXTRACTOR_CURSOR = "llmharness.extractor_cursor"
 REMINDER_DELIVERED = "llmharness.reminder_delivered"
 
-EXTRACTOR_NO_CALL = "llmharness.extractor_no_call"
-EXTRACTOR_ERROR = "llmharness.extractor_error"
-EXTRACTOR_EMPTY = "llmharness.extractor_empty"
-EXTRACTOR_PARTIAL = "llmharness.extractor_partial"
-AUDIT_NO_CALL = "llmharness.audit_no_call"
-AUDIT_ERROR = "llmharness.audit_error"
-
-MESSAGE = "message"
-
 RECENT_VERDICTS_FOR_AUDITOR = 5
 
 __all__ = [
-    "AUDIT_ERROR",
     "AUDIT_INDEX_OP",
-    "AUDIT_NO_CALL",
     "EXTRACTOR_CURSOR",
-    "EXTRACTOR_EMPTY",
-    "EXTRACTOR_ERROR",
-    "EXTRACTOR_NO_CALL",
-    "EXTRACTOR_PARTIAL",
-    "MESSAGE",
     "RECENT_VERDICTS_FOR_AUDITOR",
     "VERDICT",
+    "AttentionHint",
+    "AttentionKind",
+    "CandidateRef",
+    "CandidateState",
+    "ClaimKind",
+    "ClaimRef",
     "CommitmentStatus",
+    "ContextIndex",
+    "ContractEventRef",
+    "ContractStatus",
     "Edge",
     "EdgeKind",
     "EdgeRole",
+    "EntityRef",
+    "EntityType",
     "Event",
     "EventKind",
     "ExternalRef",
-    "Finding",
-    "Phase",
+    "IndexLink",
+    "LinkKind",
+    "ObligationRef",
+    "ObligationSource",
+    "ObligationState",
+    "ObservationPolarity",
+    "ObservationRef",
+    "ObservationSignal",
     "Reminder",
+    "TurnKind",
+    "TurnRef",
     "Verdict",
 ]

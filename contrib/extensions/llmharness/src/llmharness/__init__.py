@@ -6,8 +6,6 @@ from .schema import (
     EdgeKind,
     Event,
     EventKind,
-    Finding,
-    Phase,
     Reminder,
     Verdict,
 )
@@ -18,9 +16,7 @@ __all__ = [
     "EdgeKind",
     "Event",
     "EventKind",
-    "Finding",
     "OfflineAuditResult",
-    "Phase",
     "Reminder",
     "SurfacePoint",
     "Verdict",

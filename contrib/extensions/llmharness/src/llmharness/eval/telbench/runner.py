@@ -125,7 +125,7 @@ async def evaluate_instance(
 
         # --- Auditor ---
         if auditor_due:
-            events, edges, _phases = cumulative.index_view()
+            events, edges = cumulative.index_view()
             if not events:
                 continue
 
@@ -182,7 +182,7 @@ async def evaluate_instance(
                 logger.warning("telbench: auditor verdict absorption failed: {}", exc)
 
     # --- Score ---
-    events, _edges, _phases = cumulative.index_view()
+    events, _edges = cumulative.index_view()
     event_by_id: dict[int, Any] = {e.id: e for e in events}
 
     all_verdicts: list[dict[str, Any]] = []

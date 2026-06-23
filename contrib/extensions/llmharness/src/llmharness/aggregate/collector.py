@@ -5,15 +5,42 @@ Pure function. No I/O writes; reads only the two sidecar files.
 
 from __future__ import annotations
 
-from dataclasses import replace
+import json
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from llmharness.distill.binding import read_sample_meta
-from llmharness.replay.fork_tree import read_fork_tree_header
-from llmharness.replay.record import ReplayRecord, iter_records
+from llmharness.eval.replay.fork_tree import read_fork_tree_header
+from llmharness.eval.replay.record import ReplayRecord, iter_records
 
 from .case import CaseData, CaseMeta, FiringRecord, FiringStatus, IndexSnapshot
+
+
+@dataclass(frozen=True)
+class SampleMeta:
+    sample_id: str
+    dataset_name: str
+    dataset_path: str
+    session_id: str
+    trace_id: str
+
+
+def _read_sample_meta(path: Path) -> SampleMeta | None:
+    """Read an optional case metadata sidecar."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    sample_id = raw.get("sample_id")
+    if not isinstance(sample_id, str) or not sample_id:
+        return None
+    return SampleMeta(
+        sample_id=sample_id,
+        dataset_name=str(raw.get("dataset_name") or ""),
+        dataset_path=str(raw.get("dataset_path") or ""),
+        session_id=str(raw.get("session_id") or ""),
+        trace_id=str(raw.get("trace_id") or ""),
+    )
 
 
 def _firing_input_payload(rec: ReplayRecord) -> dict[str, Any]:
@@ -29,7 +56,6 @@ def _firing_input_payload(rec: ReplayRecord) -> dict[str, Any]:
     if rec.phase == "auditor":
         tools = ck.get("tools") or []
         trajectory_snapshot = ck.get("trajectory_snapshot")
-        out["findings"] = ck.get("findings") or []
         out["check_errors"] = ck.get("check_errors") or {}
         out["continuation_notes"] = ck.get("continuation_notes") or []
         out["tools"] = tools
@@ -273,8 +299,8 @@ def collect_case(
 
     Sample-id resolution precedence: explicit ``sample_id_override`` >
     meta sidecar > ``None`` (case_id then derives from ``session_id``).
-    The overrides let the CLI inject case metadata when no distill metadata
-    sidecar exists.
+    The overrides let the CLI inject case metadata when no metadata sidecar
+    exists.
     """
     records = list(iter_records(replay_path))
     fork_tree_header = read_fork_tree_header(replay_path)
@@ -288,7 +314,7 @@ def collect_case(
         extractor_firings=extractor_firings,
     )
 
-    meta_obj = read_sample_meta(meta_path) if meta_path is not None else None
+    meta_obj = _read_sample_meta(meta_path) if meta_path is not None else None
     sample_id = (
         sample_id_override
         if sample_id_override

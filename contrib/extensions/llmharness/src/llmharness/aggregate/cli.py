@@ -7,8 +7,7 @@ Two input layouts, both writing the same canonical case-directory shape:
 
 Each takes ``--out`` for the destination ``cases/`` root, plus optional
 ``--sample-id`` / ``--dataset-name`` / ``--dataset-path`` overrides for
-runs that do not have ``llmharness.distill.binding`` metadata (so no meta
-sidecar is present).
+runs that do not have a meta sidecar.
 
 Examples::
 
@@ -134,7 +133,7 @@ def replay(
             "--sample-id",
             help=(
                 "Override case sample_id (e.g. for RCA eval artifacts without "
-                "distill.binding). Applies to every aggregated session — pair "
+                "metadata sidecars). Applies to every aggregated session — pair "
                 "with --session-id for per-sample runs."
             ),
         ),
@@ -196,7 +195,7 @@ def one(
         Path | None,
         typer.Option(
             "--meta-path",
-            help="Optional .meta.json sidecar (distill.binding shape).",
+            help="Optional .meta.json sidecar.",
         ),
     ] = None,
     sample_id: Annotated[

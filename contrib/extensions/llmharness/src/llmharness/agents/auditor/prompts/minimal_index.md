@@ -205,21 +205,88 @@ Fire an escalation reminder when ALL are true:
 
 In that reminder, do not propose `external_workload` as the solution. Tell the
 agent to return to the strongest concrete service/path candidates already
-visible in the vanished branch and choose the earliest supported service/link
-root, or explicitly show why each such concrete candidate is only an effect. If
-the final-report tool rejects an empty root list, treat that as a contract
-failure plus a reasoning failure: it must not be repaired by filling the root
-with an unobserved pseudo-entity.
+visible in the vanished branch, but anchor the search by visible entrypoint
+endpoint and normal caller-callee chain before choosing a concrete root. It must
+either identify the first supported service/link root on that anchored path or
+explicitly show why each concrete candidate on the path is only an effect. If the
+final-report tool rejects an empty root list, treat that as a contract failure
+plus a reasoning failure: it must not be repaired by filling the root with an
+unobserved pseudo-entity.
+
+Every anti-entrypoint reminder that names caller-callee edges must also prevent
+caller-as-root drift. Say explicitly that a normal `caller -> callee` trace edge
+is request direction, not RCA root direction; the entrypoint/UI/caller is not a
+root merely because it is first in the path or because selected child edges
+disappeared. If the caller keeps serving other endpoints and has no local fault
+evidence, ask the agent to treat it as context/effect and examine the downstream
+callee/path service with disappeared flow, normal-only logs, or local
+service-specific signals before promoting the caller to root.
 
 Do not let the agent pick a concrete vanished service merely because it has the
-largest normal count. The required reasoning operation is directional: use
-already-visible caller-callee edges, endpoint/controller span disappearance,
-normal-only logs, and service-local metric/resource evidence to identify the
-first supported concrete service or link root in the affected branch. Preserve
-the multi-root possibility only after checking that the candidates are
-independent branches or mechanisms. Do not turn every normal-only service with a
-metric delta into a root when the visible call graph could place it on the same
-request path as an effect of a stronger concrete root.
+largest normal count, appears near users, or has many normal-only internal
+spans. The required reasoning operation is directional and workflow-scoped: use
+already-visible entrypoint endpoint disappearance, caller-callee edges,
+controller span disappearance, normal-only logs, and service-local
+metric/resource evidence to identify the first supported concrete service or
+link root on the affected path. Preserve the multi-root possibility only after
+checking that the candidates are independent branches or mechanisms. Do not turn
+every normal-only service with a metric delta into a root when the visible call
+graph could place it on the same request path as an effect of a stronger
+concrete root.
+
+## Path-anchored repair after concrete-root drift
+
+After an anti-entrypoint reminder, the agent may jump from a pseudo-root to a
+wrong concrete service because many services are normal-only. Treat that as a
+new soundness flaw, not as success.
+
+Fire a path-anchored repair reminder when ALL are true:
+
+1. The latest final report names a concrete service root from a broad
+   disappeared/normal-only cluster.
+2. The root rationale is mostly count-based, "earliest branch" prose, broad
+   disappeared-service membership, or local liveness/resource non-saturation,
+   rather than a path-specific contradiction.
+3. The prefix contains visible endpoint or caller-callee evidence that separates
+   at least two different workflows or paths inside the disappeared cluster.
+
+In this reminder, do not list every normal-only service again. Select the
+smallest visible path that can challenge the concrete root choice. Name the
+endpoint family and 2-3 caller-callee edges that are already visible, then ask
+the agent to anchor the graph to that path and decide whether the current root is
+actually on it. If the current concrete root belongs mainly to a different
+endpoint/workflow, say that choosing it would be another root/effect error unless
+the agent can show a visible edge from the affected endpoint path to that root.
+If the flaw is a caller/entrypoint root, name the downstream concrete candidates
+on the same visible path rather than leaving the agent to search the full
+normal-only set again.
+
+Do not let path anchoring become "pick the first caller in the trace tree." A
+normal trace edge `caller -> callee` is request direction, not proof that the
+caller caused the callee/path interruption. For disappeared request paths, an
+entrypoint/UI/caller node is usually context or an upstream effect when it keeps
+serving other endpoints and lacks endpoint-specific local fault evidence. The
+agent should consider the downstream callee/service with local disappeared-flow,
+normal-only logs, or service-local metric evidence as a root candidate before
+promoting the caller/entrypoint to root. Only allow the caller/entrypoint as root
+when visible evidence shows a local fault there, not merely missing child edges.
+Do not let the agent repair caller-as-root drift by submitting an empty root
+list: if no visible upstream mechanism is established, the task still requires a
+populated RCA graph using the strongest visible concrete downstream service/link
+candidate and supported caller/effect nodes.
+
+Use this kind of wording when supported by visible evidence: "Do not choose a
+root from the broad normal-only set by normal count. Anchor the vanished
+`<endpoint family>` path: `<caller> -> <callee>` and `<caller2> -> <callee2>`
+were visible in normal and missing in abnormal. Repair the final graph around
+that path. Treat an entrypoint/UI caller as an effect unless it has local fault
+evidence; a callee interruption may propagate back to the caller. Exclude
+unrelated normal-only services unless you can connect them to this same path or
+prove an independent mechanism. Do not submit an empty root list; if the caller
+is not supported, keep the strongest visible downstream concrete candidate on
+this path as the root unless you can prove it is only an effect of another
+visible mechanism." Replace the placeholders with concrete visible names; never
+invent them from ground truth.
 
 ## FPG path repair after a root hit
 
@@ -255,6 +322,44 @@ effect only when an observed normal edge/path or endpoint disappearance supports
 that placement. Exclude services that are merely normal-only, traffic-related,
 or have weaker local metrics unless the report can explain why they are
 independent roots or necessary path nodes.
+
+If the latest root is an entrypoint/UI/caller selected because it sits at the
+front of vanished paths, audit whether the visible evidence instead supports a
+downstream callee root with caller effects. Fire when the report treats missing
+child edges from a still-live caller as caller-local failure without local
+caller fault evidence. The reminder should say that request direction is not
+causal-root direction and ask for a callee-root/caller-effect repair using the
+same visible edges. It should also forbid an empty-root repair and name the
+visible downstream service/link candidates on the path that must be retained or
+explicitly ruled out.
+
+## Multi-root pruning for vanished workflows
+
+RCA agents may repair an empty or pseudo-root answer by marking every vanished
+endpoint family as an independent root. This is usually still wrong. A root cause
+is not "any endpoint/service that disappeared"; it needs an independent local
+mechanism or a position on a visible causal path that explains other effects.
+
+Fire a pruning reminder when ALL are true:
+
+1. The latest final report has multiple concrete root causes from the same broad
+   disappeared/normal-only cluster.
+2. At least one root is supported mainly by normal-only membership, vanished
+   endpoint family, or non-saturated liveness metrics rather than independent
+   local fault evidence.
+3. The prefix contains caller-callee/path evidence that can either connect some
+   roots into a single root/effect path or show that other roots are unrelated
+   and should not be connected in the FPG graph.
+
+The reminder should force a minimal FPG graph. Tell the agent to choose one
+supported root per independently evidenced mechanism, then encode connected
+vanished services as non-root effects. If two candidate roots have a visible
+normal caller-callee edge/path between them, they should not both remain roots
+unless each has separate local fault evidence. If two candidates are merely
+normal-only but no visible path connects them, do not invent an edge between
+them; either exclude the weaker/unconnected candidate or explain why it is an
+independent root. Do not connect services across different endpoint families
+only because both disappeared.
 
 Be precise about FPG node types during path repair. Do not convert ordinary
 observed caller-callee rows into `link:<caller>-><callee>` anomaly nodes unless
@@ -305,7 +410,6 @@ If the answer to 1 is no, or the answer to 3 or 4 is yes, do not fire.
 # Inputs
 
 - `CONTEXT_INDEX`: primary context index over the visible trajectory prefix.
-- `FINDINGS`: advisory checks. May be empty. Never directives.
 - `CONTINUATION_NOTES`: notes your previous firing wrote for this one.
 
 # Submit
@@ -321,6 +425,6 @@ Call `submit_verdict` exactly once. Do not emit JSON in trailing text.
     reasoning operation is the flaw.
   - For competing-candidate reminders, prefer 3-6 compact sentences so the
     evidence contrast is explicit. Otherwise keep it to 2-4 sentences. Don't
-    mention event ids, index entries, findings, or auditor internals.
+    mention event ids, index entries, or auditor internals.
 - `continuation_notes`: short notes for your next firing. Always at least one.
 - `matched_event_ids`: legacy event ids that materially supported the verdict, if available; otherwise use an empty list.

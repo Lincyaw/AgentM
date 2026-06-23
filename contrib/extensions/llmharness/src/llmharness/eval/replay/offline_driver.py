@@ -192,7 +192,7 @@ async def replay_pipeline_over_trajectory(
 
         # --- Auditor ---
         if auditor_due:
-            events, edges, _phases = cumulative.index_view()
+            events, edges = cumulative.index_view()
             from llmharness.atom import _extract_loaded_skills, _serialize_trajectory
             from llmharness.context_index import build_context_index
 
@@ -205,7 +205,6 @@ async def replay_pipeline_over_trajectory(
             loaded_skills = _extract_loaded_skills(prefix)
             prompt_text = auditor_settings.base_prompt or "You are the cognitive-audit auditor."
             aud_prompt = build_auditor_system_prompt(
-                findings=[],
                 check_errors={},
                 continuation_notes=list(cumulative.last_continuation_notes),
                 base_prompt=prompt_text,

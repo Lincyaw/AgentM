@@ -116,22 +116,23 @@ def _judge_fpg_output(agent_output_json: str | None, data_dir: str) -> JudgeOutc
     if not graph_path.is_file():
         return None
 
-    if _is_empty_fpg_payload(payload) and _verified_graph_is_empty(graph_path):
+    if _is_empty_fpg_payload(payload):
+        empty_correct = _verified_graph_is_empty(graph_path)
         empty_detail: dict[str, Any] = {
-            "exact_match": True,
-            "precision": 1.0,
-            "recall": 1.0,
-            "f1": 1.0,
+            "exact_match": empty_correct,
+            "precision": 1.0 if empty_correct else 0.0,
+            "recall": 1.0 if empty_correct else 0.0,
+            "f1": 1.0 if empty_correct else 0.0,
             "any_root_cause_hit": False,
             "any_service_hit": False,
-            "all_service_hit": True,
+            "all_service_hit": empty_correct,
             "fault_kind_accuracy": None,
-            "parse_error": None,
-            "fpg_score": 1.0,
-            "fpg_root_subject_f1": 1.0,
-            "fpg_subject_path_reachability_hit": True,
+            "parse_error": None if empty_correct else "empty_fpg_output",
+            "fpg_score": 1.0 if empty_correct else 0.0,
+            "fpg_root_subject_f1": 1.0 if empty_correct else 0.0,
+            "fpg_subject_path_reachability_hit": empty_correct,
         }
-        return JudgeOutcome(correct=True, detail=empty_detail)
+        return JudgeOutcome(correct=empty_correct, detail=empty_detail)
 
     try:
         from fpg import ModelRCAOutput, Scenario, compare_model_to_ground_truth

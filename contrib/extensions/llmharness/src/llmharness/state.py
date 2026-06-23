@@ -12,7 +12,7 @@ from agentm.core.abi import SessionEntry
 
 from . import schema as _et
 from .agents.extractor.index_store import IndexOp, fold_index, parse_op
-from .schema import Edge, Event, Phase
+from .schema import Edge, Event
 
 _DEFAULT_RECENT_VERDICTS: Final[int] = _et.RECENT_VERDICTS_FOR_AUDITOR
 
@@ -35,22 +35,20 @@ class CumulativeAuditState:
     last_continuation_notes: list[str] = field(default_factory=list)
     firing_id_counter: int = 0
     _cached_len: int = -1
-    _cached_view: tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]] | None = None
-    _phases: list[Phase] = field(default_factory=list)
+    _cached_view: tuple[tuple[Event, ...], tuple[Edge, ...]] | None = None
 
-    def index_view(self) -> tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]]:
+    def index_view(self) -> tuple[tuple[Event, ...], tuple[Edge, ...]]:
         if self._cached_view is not None and self._cached_len == len(self.ops):
             return self._cached_view
         folded = fold_index(self.ops)
         events = tuple(folded.records_list())
         edges = tuple(folded.links_list())
-        phases = tuple(self._phases)
-        self._cached_view = (events, edges, phases)
+        self._cached_view = (events, edges)
         self._cached_len = len(self.ops)
         return self._cached_view
 
     def next_event_id(self) -> int:
-        events, _edges, _phases = self.index_view()
+        events, _edges = self.index_view()
         return max((e.id for e in events), default=0) + 1
 
     def _invalidate_cache(self) -> None:
@@ -63,11 +61,9 @@ class CumulativeAuditState:
         firing_ops: Sequence[IndexOp],
         firing_cursor: int,
         firing_id: int,
-        firing_phases: Sequence[Phase] = (),
     ) -> None:
         self.ops.extend(firing_ops)
         self.cursor_last_turn_index = firing_cursor
-        self._phases.extend(firing_phases)
         if firing_id >= self.firing_id_counter:
             self.firing_id_counter = firing_id + 1
         self._invalidate_cache()

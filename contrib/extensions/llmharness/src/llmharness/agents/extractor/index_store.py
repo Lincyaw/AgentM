@@ -1,4 +1,4 @@
-"""Context-index op log fold and phase merge.
+"""Context-index op log fold.
 
 The extractor maintains an append-only index edit log. Records are semantic
 items extracted from trajectory turns; links are witness-bearing references
@@ -7,7 +7,7 @@ between records. This module is pure computation and performs no I/O.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -19,7 +19,6 @@ from llmharness.schema import (
     Event,
     EventKind,
     ExternalRef,
-    Phase,
 )
 
 # ---------------------------------------------------------------------------
@@ -229,89 +228,6 @@ def fold_index(ops: Iterable[IndexOp]) -> Index:
     return Index(records=records, links=links)
 
 
-# ---------------------------------------------------------------------------
-# Phase merge
-# ---------------------------------------------------------------------------
-
-_BREAK_KINDS: frozenset[EventKind] = frozenset(
-    {EventKind.TASK, EventKind.HYP, EventKind.DEC, EventKind.CONCL}
-)
-_RUN_KINDS: frozenset[EventKind] = frozenset({EventKind.ACT})
-_MAX_RUN_SUMMARY_CHARS = 1200
-_RUN_SUMMARY_SEPARATOR = " | "
-_RUN_KIND_LABEL = "act_run"
-
-
-def merge_to_phases(events: Sequence[Event]) -> list[Phase]:
-    """Collapse consecutive act runs into phases."""
-    phases: list[Phase] = []
-    next_id = 1
-    run_buffer: list[Event] = []
-
-    def _flush_run() -> None:
-        nonlocal next_id
-        if not run_buffer:
-            return
-        if len(run_buffer) == 1:
-            ev = run_buffer[0]
-            phases.append(
-                Phase(
-                    id=next_id,
-                    kind=ev.kind.value,
-                    member_event_ids=(ev.id,),
-                    source_turns=tuple(sorted(set(ev.source_turns))),
-                    summary=ev.summary,
-                )
-            )
-        else:
-            ids = tuple(e.id for e in run_buffer)
-            turns = tuple(sorted({t for e in run_buffer for t in e.source_turns}))
-            joined = _RUN_SUMMARY_SEPARATOR.join(e.summary for e in run_buffer)
-            if len(joined) > _MAX_RUN_SUMMARY_CHARS:
-                joined = joined[: _MAX_RUN_SUMMARY_CHARS - 3] + "..."
-            phases.append(
-                Phase(
-                    id=next_id,
-                    kind=_RUN_KIND_LABEL,
-                    member_event_ids=ids,
-                    source_turns=turns,
-                    summary=joined,
-                )
-            )
-        next_id += 1
-        run_buffer.clear()
-
-    for ev in events:
-        if ev.kind in _BREAK_KINDS:
-            _flush_run()
-            phases.append(
-                Phase(
-                    id=next_id,
-                    kind=ev.kind.value,
-                    member_event_ids=(ev.id,),
-                    source_turns=tuple(sorted(set(ev.source_turns))),
-                    summary=ev.summary,
-                )
-            )
-            next_id += 1
-        elif ev.kind in _RUN_KINDS:
-            run_buffer.append(ev)
-        else:  # pragma: no cover
-            _flush_run()
-            phases.append(
-                Phase(
-                    id=next_id,
-                    kind=ev.kind.value,
-                    member_event_ids=(ev.id,),
-                    source_turns=tuple(sorted(set(ev.source_turns))),
-                    summary=ev.summary,
-                )
-            )
-            next_id += 1
-    _flush_run()
-    return phases
-
-
 __all__ = [
     "Index",
     "IndexOp",
@@ -320,6 +236,5 @@ __all__ = [
     "RecordDelete",
     "RecordUpsert",
     "fold_index",
-    "merge_to_phases",
     "parse_op",
 ]
