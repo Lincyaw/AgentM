@@ -386,6 +386,8 @@ class TrajectoryIndex:
                 "name": s.canonical_name,
                 "kind": s.kind.value,
             }
+            if s.summary:
+                entry["summary"] = s.summary
             if s.aliases:
                 entry["aliases"] = sorted(s.aliases)
             out.append(entry)
