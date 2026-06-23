@@ -54,3 +54,5 @@ runs/
 
 # local eval/benchmark job outputs (terminal_bench harbor runs, litellm batches)
 jobs/
+
+evolution_runs

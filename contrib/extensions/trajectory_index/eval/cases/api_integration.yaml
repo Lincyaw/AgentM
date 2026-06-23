@@ -1,0 +1,78 @@
+# Case: agent integrates a third-party API
+id: api_integration
+description: Agent researches an API, writes client code, tests it
+
+steps:
+  - index: 0
+    role: user
+    content: "Add a function to fetch weather data from the OpenWeather API and cache it in Redis."
+    tool_name: null
+  - index: 1
+    role: assistant
+    content: "I'll create a weather client in src/services/weather.py that fetches from the OpenWeather API and caches results in Redis with a TTL."
+    tool_name: null
+  - index: 2
+    role: assistant
+    content: '[tool_call: write_file({"path": "src/services/weather.py", "content": "import httpx\nimport redis\nimport json\n\nOPENWEATHER_URL = \"https://api.openweathermap.org/data/2.5/weather\"\nCACHE_TTL = 3600\n\nasync def get_weather(city: str, api_key: str, redis_client: redis.Redis) -> dict:\n    cache_key = f\"weather:{city}\"\n    cached = redis_client.get(cache_key)\n    if cached:\n        return json.loads(cached)\n    async with httpx.AsyncClient() as client:\n        resp = await client.get(OPENWEATHER_URL, params={\"q\": city, \"appid\": api_key})\n        resp.raise_for_status()\n        data = resp.json()\n    redis_client.setex(cache_key, CACHE_TTL, json.dumps(data))\n    return data"})]'
+    tool_name: write_file
+  - index: 3
+    role: tool_result
+    content: "File created: src/services/weather.py"
+    tool_name: null
+  - index: 4
+    role: assistant
+    content: "Now let me write a test for the weather client."
+    tool_name: null
+  - index: 5
+    role: assistant
+    content: '[tool_call: write_file({"path": "tests/test_weather.py", "content": "import pytest\nfrom unittest.mock import AsyncMock, MagicMock\nfrom src.services.weather import get_weather\n\n@pytest.mark.asyncio\nasync def test_get_weather_cached():\n    mock_redis = MagicMock()\n    mock_redis.get.return_value = b\"{\\\"temp\\\": 25}\"\n    result = await get_weather(\"London\", \"test-key\", mock_redis)\n    assert result == {\"temp\": 25}\n    mock_redis.get.assert_called_once_with(\"weather:London\")"})]'
+    tool_name: write_file
+  - index: 6
+    role: tool_result
+    content: "File created: tests/test_weather.py"
+    tool_name: null
+  - index: 7
+    role: assistant
+    content: '[tool_call: bash({"command": "pytest tests/test_weather.py -v"})]'
+    tool_name: bash
+  - index: 8
+    role: tool_result
+    content: "PASSED tests/test_weather.py::test_get_weather_cached"
+    tool_name: null
+  - index: 9
+    role: assistant
+    content: "Done. Created src/services/weather.py with get_weather() that fetches from OpenWeather API and caches in Redis with a 1-hour TTL. Test passes."
+    tool_name: null
+
+expected:
+  entities:
+    - name: get_weather
+      kind: api
+    - name: src/services/weather.py
+      kind: file
+    - name: tests/test_weather.py
+      kind: file
+    - name: OPENWEATHER_URL
+      kind: state_field
+    - name: CACHE_TTL
+      kind: state_field
+    - name: cache_key
+      kind: variable
+    - name: write_file
+      kind: tool
+    - name: bash
+      kind: tool
+    - name: httpx
+      kind: api
+    - name: redis
+      kind: api
+  relations:
+    - from: get_weather
+      to: httpx
+      type: uses
+    - from: get_weather
+      to: redis
+      type: uses
+    - from: src/services/weather.py
+      to: get_weather
+      type: defines

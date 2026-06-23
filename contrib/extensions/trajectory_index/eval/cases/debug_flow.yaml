@@ -1,0 +1,98 @@
+# Case: agent debugs a failing test by reading error, editing code, re-running
+id: debug_flow
+description: Multi-step debugging — read error, diagnose, edit, verify
+
+steps:
+  - index: 0
+    role: user
+    content: "The test test_user_auth is failing. Can you fix it?"
+    tool_name: null
+  - index: 1
+    role: assistant
+    content: "Let me run the test first to see the error."
+    tool_name: null
+  - index: 2
+    role: assistant
+    content: '[tool_call: bash({"command": "pytest tests/test_auth.py::test_user_auth -v"})]'
+    tool_name: bash
+  - index: 3
+    role: tool_result
+    content: |
+      FAILED tests/test_auth.py::test_user_auth - AssertionError: expected status_code 200, got 401
+      auth_token was None because get_token() returns None when REDIS_URL is not set
+    tool_name: null
+  - index: 4
+    role: assistant
+    content: "The test fails because get_token() returns None when REDIS_URL is not configured. I need to check the auth module."
+    tool_name: null
+  - index: 5
+    role: assistant
+    content: '[tool_call: read_file({"path": "src/auth.py"})]'
+    tool_name: read_file
+  - index: 6
+    role: tool_result
+    content: |
+      def get_token(user_id: str) -> str | None:
+          redis_url = os.environ.get("REDIS_URL")
+          if not redis_url:
+              return None
+          client = redis.from_url(redis_url)
+          return client.get(f"token:{user_id}")
+    tool_name: null
+  - index: 7
+    role: assistant
+    content: "The issue is that get_token returns None when REDIS_URL is missing. The test needs a mock or the function needs a fallback. I'll add a fallback to in-memory storage."
+    tool_name: null
+  - index: 8
+    role: assistant
+    content: '[tool_call: edit_file({"path": "src/auth.py", "old": "if not redis_url:\n              return None", "new": "if not redis_url:\n              return _memory_store.get(f\"token:{user_id}\")"})]'
+    tool_name: edit_file
+  - index: 9
+    role: tool_result
+    content: "File edited successfully."
+    tool_name: null
+  - index: 10
+    role: assistant
+    content: '[tool_call: bash({"command": "pytest tests/test_auth.py::test_user_auth -v"})]'
+    tool_name: bash
+  - index: 11
+    role: tool_result
+    content: "PASSED tests/test_auth.py::test_user_auth"
+    tool_name: null
+  - index: 12
+    role: assistant
+    content: "Fixed. The get_token function now falls back to in-memory storage when REDIS_URL is not set."
+    tool_name: null
+
+expected:
+  entities:
+    - name: test_user_auth
+      kind: concept
+    - name: get_token
+      kind: api
+    - name: REDIS_URL
+      kind: state_field
+    - name: src/auth.py
+      kind: file
+    - name: tests/test_auth.py
+      kind: file
+    - name: bash
+      kind: tool
+    - name: read_file
+      kind: tool
+    - name: edit_file
+      kind: tool
+    - name: auth_token
+      kind: variable
+    - name: _memory_store
+      kind: variable
+  relations:
+    - from: get_token
+      to: REDIS_URL
+      type: uses
+    - from: src/auth.py
+      to: get_token
+      type: defines
+    - from: tests/test_auth.py
+      to: test_user_auth
+      type: defines

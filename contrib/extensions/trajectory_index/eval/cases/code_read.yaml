@@ -1,0 +1,46 @@
+# Case: agent reads a file and explains a function
+id: code_read
+description: Simple file reading task — agent uses read_file to inspect code
+
+steps:
+  - index: 0
+    role: user
+    content: "Please read the file src/main.py and find the parse_config function."
+    tool_name: null
+  - index: 1
+    role: assistant
+    content: "I will use the read_file tool to look at src/main.py."
+    tool_name: null
+  - index: 2
+    role: assistant
+    content: '[tool_call: read_file({"path": "src/main.py"})]'
+    tool_name: read_file
+  - index: 3
+    role: tool_result
+    content: |
+      def parse_config(path: str) -> Config:
+          with open(path) as f:
+              data = json.load(f)
+          return Config(**data)
+    tool_name: null
+  - index: 4
+    role: assistant
+    content: "The parse_config function reads a JSON file and returns a Config object. It uses json.load to parse the file contents."
+    tool_name: null
+
+expected:
+  entities:
+    - name: src/main.py
+      kind: file
+    - name: parse_config
+      kind: api
+    - name: read_file
+      kind: tool
+    - name: Config
+      kind: variable
+    - name: json.load
+      kind: api
+  relations:
+    - from: src/main.py
+      to: parse_config
+      type: defines

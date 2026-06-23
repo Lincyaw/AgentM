@@ -84,6 +84,7 @@ build-backend = "uv_build"
 members = [
     "contrib/extensions/llmharness",
     "contrib/extensions/mcp_bridge",
+    "contrib/extensions/trajectory_index",
     "contrib/scenarios/harbor",
     "contrib/scenarios/rca",
     "contrib/gateway-peers/feishu",
@@ -97,6 +98,7 @@ llmharness = { workspace = true }
 agentm-mcp-bridge = { workspace = true }
 agentm-harbor = { workspace = true }
 rca-scenario = { workspace = true }
+trajectory-index = { workspace = true }
 agentm = { workspace = true }
 
 [tool.pytest.ini_options]
