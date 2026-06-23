@@ -22,7 +22,7 @@ mechanism; every policy is a replaceable atom. Boundary contract in
   all chat sessions in memory and serves chat-client peers over the v2
   wire protocol (`.claude/designs/single-process-gateway.md`).
 - Chat-client peer CLIs (separate binaries, vendor-SDK isolation only):
-  `agentm-terminal`, `agentm-feishu`.
+  `agentm-terminal`, `agentm-feishu`, `agentm-weixin`.
 - Shared `AGENTM_*` env namespace; `.env` autoloaded. Long-lived model
   settings can live in `~/.agentm/config.toml` instead of env vars
   (`$AGENTM_HOME/config.toml` overrides the directory). Precedence:
@@ -51,6 +51,14 @@ mechanism; every policy is a replaceable atom. Boundary contract in
   user-set `extra_body` key winning. Run `<cli> --help` for flags.
 - Optional extra: `uv sync --extra agent-env` installs `arl-env` for the
   `operations_agent_env` atom (ARL-sandboxed Operations).
+
+### WeChat (微信) peer
+
+Personal WeChat gateway peer via iLink Bot API
+(`contrib/gateway-peers/weixin/`). Subcommands: `login` (QR scan),
+`run` (connect to existing gateway), `serve` (supervisord: gateway +
+adapter in one command), `list` (show accounts). `serve` uses
+supervisord for auto-restart and log rotation (`~/.agentm/weixin/logs/`).
 
 ### Trace debugging combos
 
@@ -127,7 +135,7 @@ position**:
 | Catalog freeze idempotence | Catalog state untrustworthy |
 | Indexer rebuild idempotence | Evolution evidence drifts |
 | Transactional reload atomicity | Live agent in inconsistent state |
-| §11 extension contract validator | Bad atoms slip into catalog |
+| extension contract validator | Bad atoms slip into catalog |
 
 `pytest` markers: `ui` (Textual TUI) and `slow` (real-LLM E2E,
 minutes-long) — both opt-in.
@@ -152,7 +160,7 @@ For identity-affecting changes (atoms, kernel, catalog): also run an E2E
 prompt against a sandbox repo and inspect the trace.
 
 CI lints/types a broader scope — `src/` (gateway lives at
-`src/agentm/gateway/`), `contrib/gateway-peers/{terminal,feishu}/src`,
+`src/agentm/gateway/`), `contrib/gateway-peers/{terminal,feishu,weixin}/src`,
 `contrib/extensions/llmharness/src`, `contrib/scenarios/rca/src` — and
 runs mypy per workspace from each member's root (per-package overrides).
 For sweeping changes, mirror that scope locally.
@@ -162,23 +170,13 @@ For sweeping changes, mirror that scope locally.
 - `progress.tsv` — dev-loop keep/discard decisions + metric values.
 - `decisions.md` — long-horizon autonomous decisions (L2+).
 
-## Autonomy level: high
-
-(Per `/autoharness:long-horizon`. Decide through L4 autonomously, log in
-`decisions.md`, flag L4 entries with `[flagged]` for post-hoc review.
-Self-merge small / low-risk PRs (docs, single-atom cleanups, polish) once
-CI is green and any boundary review is clean. Escalate to the user only
-for: large/architectural PRs (hand off for review before merge),
-strategic drift (north-star changes, scope creep), access/credentials,
-or genuinely ambiguous requirements that research cannot resolve.)
-
 ## Conventions
 
 - **Language**: code, comments, commits, design docs in English;
   conversation in Chinese.
 - **No SDK / scenario conflation**: scenario-specific logic never inside
   `agentm.core`.
-- **§11 atom contract**: enforced by `extensions.validate`.
+- **atom contract**: enforced by `extensions.validate`.
 - **No preset enums for subjective fields** — free-text + LLM-decided.
 - **Auto-commit awareness**: `agentm` auto-commits during sessions; run
   E2E in a sandbox, never on `main`.
@@ -230,9 +228,3 @@ serving five.
 | `/autoharness:notify` | push iteration reports (not yet configured) |
 | `/autoharness:skill-feedback` | file issues back to the autoharness plugin |
 <!-- auto-harness:end -->
-
-## Related plugins
-
-- **workbuddy** — pipeline monitoring / repo setup / incident handling.
-  Repo carries `.github/workbuddy/`; install with
-  `/plugin install workbuddy@workbuddy-local`.

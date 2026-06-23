@@ -137,6 +137,8 @@ extensions:
   - module: agentm.extensions.builtin.cost_budget
     config:
       limit: 5.0
+      pricing:
+        openai: [0.55, 2.2]
   # Retry the turn when the assistant message is thinking-only (no text/tools).
   - module: agentm.extensions.builtin.thinking_retry
 

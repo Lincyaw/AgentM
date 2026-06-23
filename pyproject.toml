@@ -88,6 +88,7 @@ members = [
     "contrib/scenarios/harbor",
     "contrib/scenarios/rca",
     "contrib/gateway-peers/feishu",
+    "contrib/gateway-peers/weixin",
 ]
 
 # Resolve the agent-env plugin to the in-workspace member (editable) for dev;
