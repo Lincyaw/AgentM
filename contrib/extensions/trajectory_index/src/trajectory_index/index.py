@@ -81,11 +81,31 @@ class RelationType(StrEnum):
 # ---------------------------------------------------------------------------
 
 def _load_vocabulary() -> dict[str, dict[str, str]]:
-    """Load vocabulary definitions from vocabulary.yaml."""
+    """Load vocabulary definitions from vocabulary.yaml and validate against enums."""
     import yaml
 
     vocab_path = Path(__file__).parent / "vocabulary.yaml"
     data: dict[str, dict[str, str]] = yaml.safe_load(vocab_path.read_text(encoding="utf-8"))
+
+    checks: list[tuple[str, type[StrEnum], dict[str, str]]] = [
+        ("symbol_kinds", SymbolKind, data.get("symbol_kinds", {})),
+        ("reference_kinds", ReferenceKind, data.get("reference_kinds", {})),
+        ("relation_types", RelationType, data.get("relation_types", {})),
+    ]
+    for section, enum_cls, entries in checks:
+        enum_values = {e.value for e in enum_cls}
+        yaml_keys = set(entries)
+        missing_in_yaml = enum_values - yaml_keys
+        extra_in_yaml = yaml_keys - enum_values
+        if missing_in_yaml:
+            raise ValueError(
+                f"vocabulary.yaml [{section}] missing keys for enum members: {sorted(missing_in_yaml)}"
+            )
+        if extra_in_yaml:
+            raise ValueError(
+                f"vocabulary.yaml [{section}] has extra keys not in enum: {sorted(extra_in_yaml)}"
+            )
+
     return data
 
 
