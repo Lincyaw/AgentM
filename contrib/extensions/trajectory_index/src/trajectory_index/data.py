@@ -242,6 +242,37 @@ def _remap_turn_ids(result: ExtractionResult, id_map: dict[str, str]) -> None:
         rel.turn_id = id_map.get(rel.turn_id, rel.turn_id)
 
 
+def _validate_vocabulary(result: ExtractionResult) -> str | None:
+    """Check extraction result against the vocabulary. Returns error or None."""
+    from .index import (
+        REFERENCE_KIND_DESCRIPTIONS,
+        RELATION_TYPE_DESCRIPTIONS,
+        SYMBOL_KIND_DESCRIPTIONS,
+    )
+
+    errors: list[str] = []
+    for sym in result.symbols:
+        if sym.kind not in SYMBOL_KIND_DESCRIPTIONS:
+            errors.append(f"symbol '{sym.name}' has invalid kind '{sym.kind}'")
+    for ref in result.references:
+        if ref.kind not in REFERENCE_KIND_DESCRIPTIONS:
+            errors.append(f"reference '{ref.symbol_name}' has invalid kind '{ref.kind}'")
+    for rel in result.relations:
+        if rel.relation_type not in RELATION_TYPE_DESCRIPTIONS:
+            errors.append(f"relation '{rel.from_symbol}'->{rel.to_symbol}' has invalid type '{rel.relation_type}'")
+    if errors:
+        valid_kinds = ", ".join(k for k in SYMBOL_KIND_DESCRIPTIONS if k != "unknown")
+        valid_refs = ", ".join(k for k in REFERENCE_KIND_DESCRIPTIONS if k != "unknown")
+        valid_rels = ", ".join(RELATION_TYPE_DESCRIPTIONS)
+        return (
+            f"Vocabulary errors: {'; '.join(errors)}. "
+            f"Valid symbol kinds: {valid_kinds}. "
+            f"Valid reference kinds: {valid_refs}. "
+            f"Valid relation types: {valid_rels}."
+        )
+    return None
+
+
 def _try_parse_response(messages: list[Any]) -> tuple[ExtractionResult | None, str | None]:
     """Try to parse an ExtractionResult from assistant messages.
 
@@ -259,9 +290,13 @@ def _try_parse_response(messages: list[Any]) -> tuple[ExtractionResult | None, s
             obj = extract_json(block.text)
             if obj:
                 try:
-                    return ExtractionResult.model_validate(obj), None
+                    result = ExtractionResult.model_validate(obj)
                 except Exception as exc:
                     return None, f"JSON keys={list(obj.keys())}; validation error: {exc}"
+                vocab_error = _validate_vocabulary(result)
+                if vocab_error:
+                    return None, vocab_error
+                return result, None
             return None, f"Could not extract JSON from response ({len(block.text)} chars)"
     return None, "No assistant text in response"
 
