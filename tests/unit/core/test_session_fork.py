@@ -180,4 +180,7 @@ class TestFork:
         assert header.config == {"scenario": "rca:baseline", "custom": "data"}
 
         source_reloaded = store.open(source.get_session_id())
-        assert source_reloaded.get_header().config["scenario"] == "rca:baseline"  # type: ignore[index]
+        source_header = source_reloaded.get_header()
+        assert source_header is not None
+        assert source_header.config is not None
+        assert source_header.config["scenario"] == "rca:baseline"

@@ -119,7 +119,10 @@ Concept-change flow: update the design doc → check `index.yaml`
 Quality over quantity. A test exists only to protect a **fail-stop
 position**:
 
-- Do **not** add trivial, ad hoc, or shape-only tests just because a file changed. Before adding any new test case, first confirm with the user that the behavior is load-bearing enough to lock down.
+- Do **not** add any new test case by default. Before writing a new test,
+  first ask the user and receive explicit confirmation that the behavior is
+  load-bearing enough to lock down. Trivial, ad hoc, or shape-only tests are
+  forbidden.
 
 | Position | Why load-bearing |
 |---|---|

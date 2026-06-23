@@ -602,7 +602,7 @@ class SessionManager:
         persist: bool,
         session_dir: Path | None = None,
         copy_config: bool = True,
-    ) -> Self:
+    ) -> SessionManager:
         """Create a new session from this branch up to ``entry_id``.
 
         Unlike the legacy ``SessionStore.fork(up_to=N)`` path, this copies the

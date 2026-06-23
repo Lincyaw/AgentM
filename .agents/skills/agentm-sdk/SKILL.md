@@ -1,22 +1,7 @@
 ---
 name: agentm-sdk
 description: >
-  AgentM SDK development guide — manifest-as-agent-unit philosophy, SDK
-  programmatic invocation, dynamic workflow orchestration, atom contract,
-  Operations abstraction, event system, service communication, CLI
-  conventions, scenario authoring, logging, structured output, and config
-  resolution. Use whenever writing, editing, or reviewing code under
-  src/agentm/ (atoms, core, gateway), contrib/scenarios/ (manifests), or
-  contrib/extensions/ (workspace-member atoms). Also trigger when creating
-  new atoms, modifying MANIFEST declarations, registering tools or events,
-  touching FileOperations / BashOperations / ResourceWriter, writing CLI
-  subcommands, configuring model profiles, spawning child sessions,
-  building multi-agent orchestrators, writing workflow scripts, or when a
-  code change looks like it might bypass the SDK's existing abstractions.
-  If you catch yourself about to write raw os.stat / open() /
-  subprocess.run in an atom, importing openai/anthropic directly instead
-  of going through the provider layer, or shelling out to `agentm -p`
-  instead of using `AgentSession.create()`, stop and read this first.
+  AgentM SDK development guide — manifest-as-agent-unit philosophy, SDK programmatic invocation, dynamic workflow orchestration, atom contract, Operations abstraction, event system, service communication, CLI conventions, scenario authoring, logging, structured output, and config resolution. Use whenever writing, editing, or reviewing code under src/agentm/ (atoms, core, gateway), contrib/scenarios/ (manifests), or contrib/extensions/ (workspace-member atoms). 
 ---
 
 # AgentM SDK Guide

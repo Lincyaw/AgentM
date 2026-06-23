@@ -39,13 +39,6 @@ actually committed an unwarranted action. The 2-pass TEL workflow uses
 `agents/tel/prompts/reason.md` for critic verification and final
 `submit_error_spans`.
 
-The current uncommitted prompt edits are intentionally narrower than the old
-"flag everything suspicious" wording. They emphasize evidence available at the
-time, exact task constraints, commitment strength, and separating the first
-defective support from later carrier spans. The expected effect is better
-TELBench precision without losing the causal-origin recall that matters for
-span-level F1 and first-error accuracy.
-
 Do not rebuild the session/fork/workflow substrate for this work. AgentM already
 has the needed primitives:
 
@@ -69,91 +62,84 @@ For single-agent RCA debugging, use the baseline manifest:
 operations, `rca.default.duckdb_sql`, `rca.default.finalize`, observability,
 the rcabench contract, prompt loader, and tool index.
 
-Local case data can be mounted with `AGENTM_RCA_DATA_DIR`. On this machine,
-`/Users/bytedance/dataset/<case-id>` contains RCA parquet case directories.
-Case `1` has the standard files: abnormal/normal logs, metrics, metric sums,
-histograms, traces, plus `env.json`, `injection.json`, and
-`conclusion.parquet`.
+`rca:baseline` now excludes `conclusion.parquet` through
+`contrib/scenarios/rca/overlays/base-investigator.yaml`, matching the clean
+RCA eval expectation. Local case data is mounted with `AGENTM_RCA_DATA_DIR`;
+the current clean dataset lives at:
 
-Full smoke run recorded on case `1`:
+```text
+/Users/bytedance/workspace/AgentM/datasets/ops-lite-clean/cases/<case-name>
+```
+
+Current baseline/fork smoke test used:
+
+```text
+case: /Users/bytedance/workspace/AgentM/datasets/ops-lite-clean/cases/ts0-ts-seat-service-pod-failure-c87xdg
+cwd:  /tmp/agentm-rca-verify-seat-pod
+```
+
+Baseline command:
 
 ```bash
-AGENTM_RCA_DATA_DIR=/Users/bytedance/dataset/1 \
+AGENTM_RCA_DATA_DIR=/Users/bytedance/workspace/AgentM/datasets/ops-lite-clean/cases/ts0-ts-seat-service-pod-failure-c87xdg \
 AGENTM_DUCKDB_THREADS=1 \
-uv run agentm --cwd /tmp/agentm-rca-case1-full \
+uv run agentm --cwd /tmp/agentm-rca-verify-seat-pod \
   --scenario rca:baseline \
   -p 'Investigate the incident using the RCA telemetry dataset mounted via AGENTM_RCA_DATA_DIR. Identify the root cause service and fault kind from the observability data, then submit the final RCA report via the required tool.'
 ```
 
-The first attempt timed out on the provider after loading skills and calling
-`list_tables`, then resumed successfully with:
+Baseline session `32d9b6203aba4f7d82071070bddd149d` completed naturally:
+24 turns, 32 tool calls, 599,421 input tokens, 10,761 output tokens. It
+submitted `ts-seat-service` with `fault_kind: pod_failure`.
+
+Fork smoke command:
 
 ```bash
-uv run agentm --cwd /tmp/agentm-rca-case1-full \
-  --scenario rca:baseline \
-  --resume 7e176647595544d48e31cdb83fa34163 \
-  -p 'Continue the RCA investigation from the existing trajectory. Use the telemetry tables to identify the root cause service and fault kind, then submit the final report via submit_final_report.'
-```
-
-Final session `7e176647595544d48e31cdb83fa34163` completed naturally:
-20 turns, 33 tool calls, 600,058 input tokens, 9,400 output tokens. Final
-submission named `mysql` with `fault_kind: pod_failure`; evidence included
-`k8s.statefulset.ready_pods` dropping to 0 in the abnormal window, MySQL
-startup/init logs, and downstream `ts-auth-service` / `ts-train-service`
-missing-table errors.
-
-`rca:baseline` now excludes `conclusion.parquet` through
-`contrib/scenarios/rca/overlays/base-investigator.yaml`, matching the clean RCA
-eval expectation. A quick `list_tables` smoke test on case `1` confirmed the
-`conclusion` view is no longer exposed.
-
-Hard case recorded on local case `1188`:
-
-```bash
-AGENTM_RCA_DATA_DIR=/Users/bytedance/dataset/1188 \
+AGENTM_RCA_DATA_DIR=/Users/bytedance/workspace/AgentM/datasets/ops-lite-clean/cases/ts0-ts-seat-service-pod-failure-c87xdg \
 AGENTM_DUCKDB_THREADS=1 \
-uv run agentm --cwd /tmp/agentm-rca-case1188-full \
-  --scenario rca:baseline \
-  -p 'Investigate the incident using the RCA telemetry files. Identify the root cause service and fault kind from the observability data, then submit the final RCA report via the required tool.'
+uv run agentm fork 32d9b6203aba4f7d82071070bddd149d \
+  --cwd /tmp/agentm-rca-verify-seat-pod \
+  --turn-index 22 \
+  --prompt '<system_reminder>Before finalizing, do not mistake route-plan/travel/travel2 UI latency as the root. Re-check whether the direct seat-service pod/container evidence explains the downstream 503 and timeout pattern. If the evidence supports it, submit the final RCA report via submit_final_report.</system_reminder>'
 ```
 
-Final session `aeb6719f76e5496c8114cf49d70d46c8` completed naturally:
-67 turns, 74 tool calls, 2,996,965 input tokens, 32,108 output tokens. The
-injection is an HTTP request-delay on
-`ts-route-plan-service` -> `ts-travel2-service`; the strict RCA judge expects
-`ts-route-plan-service` with `fault_kind: http_slow`. The agent found strong
-edge evidence (`routeplan_to_travel2_GET` abnormal gap >1s on 100% of pairs,
-normal 0%), but submitted `ts-route-plan-service` with `fault_kind:
-network_delay`. This is a useful wrong/hard baseline trajectory for later
-RCA-agent debugging.
+Fork session `34ac1defdca948b0906bc2485a1d530b` continued from ClickHouse by
+session id even though `/tmp/agentm-rca-verify-seat-pod/.agentm` had no local
+session JSONL. It ran 3 new turns, submitted the same
+`ts-seat-service:pod_failure` result, and is discoverable with:
 
-Reminder fork smoke tests on this baseline:
+```bash
+uv run agentm trace index \
+  --children-of 32d9b6203aba4f7d82071070bddd149d \
+  --format ndjson --no-cache
+```
 
-- `9bdb5ae7ac1944e4b705b95ebb6717a2`: forked from turn 65 with a
-  downstream-victim reminder. Output flipped to
-  `ts-travel2-service:network_delay`; exact_match stayed false and secondary
-  service-hit metrics got worse.
-- `a3595aaaea0148bba561793873fc84f7`: forked from turn 65 with a
-  fault-kind-disambiguation reminder. Output flipped to
-  `ts-route-plan-service:http_slow`; exact_match became true.
+`agentm trace info --session 34ac1defdca948b0906bc2485a1d530b --format ndjson`
+shows:
 
-Local case-study tables were exported to
-`runs/replay-fork/case-study-1188-reminder.csv` and
-`runs/replay-fork/case-study-1188-reminder.md` (under ignored `runs/`).
-For current traces, the exporter starts from the baseline/root session and
-discovers fork variants from `agentm trace index --children-of` plus each
-child's lineage metadata:
+```json
+{
+  "parent_session": "32d9b6203aba4f7d82071070bddd149d",
+  "lineage": {
+    "kind": "fork",
+    "source_session_id": "32d9b6203aba4f7d82071070bddd149d",
+    "fork_point": {"turn_index": 22}
+  }
+}
+```
+
+The reminder case-study exporter can start from only the baseline session and
+discover fork children from ClickHouse lineage:
 
 ```bash
 uv run python scripts/export_reminder_case_study.py \
-  --baseline-session aeb6719f76e5496c8114cf49d70d46c8 \
-  --out-prefix runs/replay-fork/case-study-1188-reminder
+  --baseline-session 32d9b6203aba4f7d82071070bddd149d \
+  --out-prefix runs/replay-fork/verify-seat-pod-case-study
 ```
 
-If a historical baseline/fork pair predates the parent/lineage metadata needed
-by `trace index`, rerun that baseline and its forks instead of adding legacy
-query fallback. `--variant`, `--case-id`, `--data-dir`, and `--hypothesis`
-remain manual overrides for historical exports or nicer labels.
+It wrote `runs/replay-fork/verify-seat-pod-case-study.csv` and `.md`
+(ignored `runs/` artifacts). The exported row was `unchanged`: both baseline
+and fork exact-matched `ts-seat-service:pod_failure`.
 
 ## Session lineage metadata for reminder case studies
 
