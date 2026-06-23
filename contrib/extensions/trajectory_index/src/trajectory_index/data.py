@@ -428,12 +428,14 @@ SFT_SYSTEM_PROMPT: Final = (
 
 def load_inference_prompt() -> str:
     """Load the full extraction prompt with JSON schema (for zero-shot inference)."""
+    from .agents.entity_extractor.context import _build_vocabulary_section
     from .agents.entity_extractor.schema import ExtractionResult as Schema
 
     prompts_dir = Path(__file__).parent / "agents" / "entity_extractor" / "prompts"
     base = (prompts_dir / "default.md").read_text(encoding="utf-8")
+    vocabulary = _build_vocabulary_section()
     schema = json.dumps(Schema.model_json_schema(), indent=2, ensure_ascii=False)
-    return f"{base}\n\n## JSON Schema\n\nYour output must conform to this schema:\n\n```json\n{schema}\n```"
+    return f"{base}\n\n{vocabulary}\n\n## JSON Schema\n\nYour output must conform to this schema:\n\n```json\n{schema}\n```"
 
 
 def build_sft_example(
@@ -618,7 +620,7 @@ def _build_index_from_chunks_into(
         try:
             rt = RelationType(rel.relation_type.lower())
         except ValueError:
-            rt = RelationType.CO_MENTIONED
+            rt = RelationType.CORRELATES
         index.add_relation(from_symbol=from_s, to_symbol=to_s, rel_type=rt, step=rel_step)
 
 

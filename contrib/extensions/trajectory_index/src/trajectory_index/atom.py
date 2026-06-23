@@ -298,7 +298,7 @@ def _relation_type_from_str(s: str) -> RelationType:
     try:
         return RelationType(s.lower())
     except ValueError:
-        return RelationType.CO_MENTIONED
+        return RelationType.CORRELATES
 
 
 def _populate_index(

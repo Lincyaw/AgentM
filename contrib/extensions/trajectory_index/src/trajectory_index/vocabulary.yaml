@@ -1,0 +1,41 @@
+symbol_kinds:
+  variable: A named value, parameter, or binding
+  object: A data structure, instance, or named entity
+  service: A running service, process, or deployment unit
+  tool: An agent tool/function that can be invoked
+  file: A file, document, or data source
+  api: An API, RPC method, endpoint, or route
+  metric: A measurable quantity or time-series indicator
+  error: An error condition, exception, or failure symptom
+  config: A configuration value, setting, or flag
+  concept: An abstract idea, hypothesis, or domain term
+  unknown: Cannot be classified into the above
+
+reference_kinds:
+  define: First occurrence or declaration of the symbol
+  use: Generic reference (default when no specific semantic applies)
+  read: Actively reading/inspecting the symbol's value
+  write: Modifying/updating the symbol's value
+  observe: Noticed in data or evidence
+  hypothesize: Proposed as part of a hypothesis
+  confirm: Validated or confirmed
+  reject: Invalidated or ruled out
+  conclude: Stated as a final conclusion
+  tool_input: Passed as input to a tool call
+  tool_output: Appeared in a tool result
+  question: Asked about by the user
+  answer: Explained by the agent in response
+  unknown: Cannot be classified into the above
+
+relation_types:
+  uses: A uses B (functional dependency)
+  defines: A defines or declares B
+  updates: A modifies or changes B
+  causes: A causes B (causal relationship)
+  depends_on: A depends on B (structural dependency)
+  derived_from: A is inferred or derived from B
+  input_to: A is input to B
+  output_of: A is output of B
+  explains: A explains or accounts for B
+  contradicts: A contradicts or conflicts with B
+  correlates: A and B are correlated (observed together, non-causal)

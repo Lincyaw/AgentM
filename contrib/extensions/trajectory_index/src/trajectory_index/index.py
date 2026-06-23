@@ -34,11 +34,14 @@ class StepRole(StrEnum):
 class SymbolKind(StrEnum):
     VARIABLE = "variable"
     OBJECT = "object"
-    CONCEPT = "concept"
+    SERVICE = "service"
     TOOL = "tool"
     FILE = "file"
     API = "api"
-    STATE_FIELD = "state_field"
+    METRIC = "metric"
+    ERROR = "error"
+    CONFIG = "config"
+    CONCEPT = "concept"
     UNKNOWN = "unknown"
 
 
@@ -47,11 +50,15 @@ class ReferenceKind(StrEnum):
     USE = "use"
     READ = "read"
     WRITE = "write"
-    MUTATE = "mutate"
-    QUESTION = "question"
-    ANSWER = "answer"
+    OBSERVE = "observe"
+    HYPOTHESIZE = "hypothesize"
+    CONFIRM = "confirm"
+    REJECT = "reject"
+    CONCLUDE = "conclude"
     TOOL_INPUT = "tool_input"
     TOOL_OUTPUT = "tool_output"
+    QUESTION = "question"
+    ANSWER = "answer"
     UNKNOWN = "unknown"
 
 
@@ -59,13 +66,34 @@ class RelationType(StrEnum):
     USES = "uses"
     DEFINES = "defines"
     UPDATES = "updates"
+    CAUSES = "causes"
+    DEPENDS_ON = "depends_on"
     DERIVED_FROM = "derived_from"
     INPUT_TO = "input_to"
     OUTPUT_OF = "output_of"
-    MENTIONS = "mentions"
     EXPLAINS = "explains"
     CONTRADICTS = "contradicts"
-    CO_MENTIONED = "co_mentioned"
+    CORRELATES = "correlates"
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary descriptions — loaded from vocabulary.yaml
+# ---------------------------------------------------------------------------
+
+def _load_vocabulary() -> dict[str, dict[str, str]]:
+    """Load vocabulary definitions from vocabulary.yaml."""
+    import yaml
+
+    vocab_path = Path(__file__).parent / "vocabulary.yaml"
+    data: dict[str, dict[str, str]] = yaml.safe_load(vocab_path.read_text(encoding="utf-8"))
+    return data
+
+
+_VOCABULARY = _load_vocabulary()
+
+SYMBOL_KIND_DESCRIPTIONS: dict[str, str] = _VOCABULARY["symbol_kinds"]
+REFERENCE_KIND_DESCRIPTIONS: dict[str, str] = _VOCABULARY["reference_kinds"]
+RELATION_TYPE_DESCRIPTIONS: dict[str, str] = _VOCABULARY["relation_types"]
 
 
 # ---------------------------------------------------------------------------

@@ -5,18 +5,6 @@ You extract semantic symbols from agent trajectories. Your input is either:
 
 When `known_symbols` is present, reuse their exact `name` when the new messages reference them. Only declare new symbols for concepts not already known. **Always produce references for every occurrence** — known symbols referenced in new messages still need a reference entry with the correct `turn_id`, even if the symbol itself is not re-declared.
 
-## Symbol kinds
-
-`variable`, `object`, `concept`, `tool`, `file`, `api`, `state_field`
-
-## Reference kinds
-
-`define`, `use`, `read`, `write`, `tool_input`, `tool_output`, `question`, `answer`
-
-## Relation types
-
-`uses`, `defines`, `updates`, `derived_from`, `input_to`, `output_of`
-
 ## Rules
 
 - Every reference `symbol_name` must exactly match a symbol `name` or a `known_symbols` name.
