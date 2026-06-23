@@ -185,6 +185,12 @@ For sweeping changes, mirror that scope locally.
   **forbidden**. Always use recoverable alternatives (`git stash`,
   `git revert`, `git reset --soft`, worktree isolation). Uncommitted
   changes in the working tree may contain the user's in-progress work.
+- **No `path.resolve().parent`** — chaining `.resolve()` before
+  `.parent` obscures intent and silently follows symlinks. For
+  `__file__` (absolute in Python 3.12+), drop `resolve()`:
+  `Path(__file__).parent` / `Path(__file__).parents[N]`. For dynamic
+  paths that genuinely need symlink resolution, split into two steps:
+  `real = p.resolve(); real.parent / …`.
 
 ## Requirements index
 

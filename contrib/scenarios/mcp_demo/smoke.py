@@ -25,7 +25,7 @@ from typing import Any
 
 # Make the repo root importable so ``contrib.extensions.mcp_bridge``
 # resolves when the script is launched directly.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = Path(__file__).parents[3]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from agentm.core.abi import EventBus, Tool  # noqa: E402

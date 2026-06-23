@@ -28,7 +28,7 @@ import typer
 
 from .scoring import AggregateScores
 
-_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "agents" / "tel" / "prompts"
+_PROMPTS_DIR = Path(__file__).parents[2] / "agents" / "tel" / "prompts"
 _PROMPT_FILES = ("notepad.md", "reason.md")
 
 app = typer.Typer(help="Iterative TEL prompt evolution with auto keep/discard.")

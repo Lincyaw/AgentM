@@ -339,7 +339,7 @@ def _agentm_repo_root() -> Path | None:
     pkg_init = getattr(agentm, "__file__", None)
     if not pkg_init:
         return None
-    candidate = Path(pkg_init).resolve().parent.parent.parent
+    candidate = Path(pkg_init).parents[2]
     return candidate if (candidate / "contrib" / "extensions").is_dir() else None
 
 

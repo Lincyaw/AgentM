@@ -21,7 +21,7 @@ from .lib.fpg import (
     load_injection_meta,
 )
 
-FAULT_KINDS_DIR = Path(__file__).resolve().parent / "fault_kinds"
+FAULT_KINDS_DIR = Path(__file__).parent / "fault_kinds"
 
 
 @dataclass

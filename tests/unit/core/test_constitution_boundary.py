@@ -40,7 +40,7 @@ def test_toplevel_file_is_not_protected() -> None:
 
 
 def test_absolute_path_normalization() -> None:
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).parents[3]
     absolute = str(repo_root / "src/agentm/core/abi/tool.py")
     assert is_constitution_path(absolute) is True
 

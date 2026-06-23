@@ -25,7 +25,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 # start; for unit tests that exercise the loader directly (or tests that
 # spin up sessions in tmpdirs and so leave the ContextVar pointing
 # somewhere transient) we re-pin the manifest path before every test.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).parents[1]
 _REPO_MANIFEST = _REPO_ROOT / "core-manifest.yaml"
 
 

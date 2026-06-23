@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from .injection import enrich_injection_entry, fault_parameter_dict
 
-PROFILE_PATH = Path(__file__).resolve().parents[1] / "fpg_profile.toml"
+PROFILE_PATH = Path(__file__).parents[1] / "fpg_profile.toml"
 
 REL_MECHANISM = {
     "callee_to_caller": "sync_call_blocking",

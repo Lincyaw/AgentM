@@ -16,8 +16,8 @@ import typer
 import yaml
 from loguru import logger
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
+sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).parents[3] / "src"))
 
 from trajectory_index.agents.entity_extractor.schema import (
     ExtractedEntity,

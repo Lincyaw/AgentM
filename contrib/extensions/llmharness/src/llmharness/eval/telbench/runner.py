@@ -376,7 +376,7 @@ async def evaluate_instance_tel(
     )
 
 
-_TEL_WORKFLOW_SCRIPT = Path(__file__).resolve().parents[2] / "agents" / "tel" / "workflow.py"
+_TEL_WORKFLOW_SCRIPT = Path(__file__).parents[2] / "agents" / "tel" / "workflow.py"
 
 
 async def _run_tel_2pass(

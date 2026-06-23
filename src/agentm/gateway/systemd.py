@@ -112,7 +112,8 @@ def resolve_feishu_bin(agentm_bin: str) -> str | None:
     found = shutil.which("agentm-feishu")
     if found:
         return found
-    sibling = Path(agentm_bin).resolve().parent / "agentm-feishu"
+    real_bin = Path(agentm_bin).resolve()
+    sibling = real_bin.parent / "agentm-feishu"
     return str(sibling) if sibling.exists() else None
 
 
@@ -186,7 +187,8 @@ def build_systemd_plan() -> SystemdPlan:
         shlex.quote(tok) for tok in [agentm_bin, "gateway", *flags]
     )
 
-    bin_dir = str(Path(agentm_bin).resolve().parent)
+    real_bin = Path(agentm_bin).resolve()
+    bin_dir = str(real_bin.parent)
     path_env = f"{bin_dir}:/usr/local/bin:/usr/bin:/bin"
 
     return SystemdPlan(

@@ -36,12 +36,12 @@ SUPERVISOR = "supervisor"
 
 
 def _find_project_root() -> Path:
-    d = Path(__file__).resolve().parent
+    d = Path(__file__).parent
     while d != d.parent:
         if (d / "pyproject.toml").exists():
             return d
         d = d.parent
-    return Path(__file__).resolve().parent.parent
+    return Path(__file__).parents[1]
 
 
 _PROJECT_ROOT = _find_project_root()

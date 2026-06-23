@@ -238,7 +238,7 @@ def _repo_root() -> Path | None:
     until a parent holds both ``pyproject.toml`` and ``.claude/skills``.
     Returns None for a pip-wheel install where the source tree isn't on disk.
     """
-    for parent in Path(__file__).resolve().parents:
+    for parent in Path(__file__).parents:
         if (parent / "pyproject.toml").is_file() and (
             parent / ".claude" / "skills"
         ).is_dir():

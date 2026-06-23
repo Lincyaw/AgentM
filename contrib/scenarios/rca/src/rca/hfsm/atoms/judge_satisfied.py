@@ -120,7 +120,7 @@ def _format_user_message(ctx: JudgeContext) -> str:
 def _load_prompt(cwd: str) -> str:
     for candidate in (
         Path(cwd) / _PROMPT_RELPATH,
-        Path(__file__).resolve().parents[4]
+        Path(__file__).parents[4]
         / "prompts"
         / "hfsm"
         / "judges"

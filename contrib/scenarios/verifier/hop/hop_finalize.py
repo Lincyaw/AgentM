@@ -45,7 +45,7 @@ MANIFEST = ExtensionManifest(
     config_schema=HopFinalizeConfig,
 )
 
-_PROFILE_PATH = Path(__file__).resolve().parents[1] / "fpg_profile.toml"
+_PROFILE_PATH = Path(__file__).parents[1] / "fpg_profile.toml"
 _SCHEMA = build_schema(load_profile(_PROFILE_PATH))
 NodePredicate = cast(type[Enum], _SCHEMA.NodePredicate)
 

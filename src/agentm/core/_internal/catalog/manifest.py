@@ -153,7 +153,7 @@ def _normalize_to_repo_relative(path: str) -> str:
     if manifest_path is None:
         # No repo root configured — best-effort relative normalization.
         return PurePosixPath(candidate).as_posix()
-    repo_root = manifest_path.resolve().parent
+    repo_root = manifest_path.parent
     if candidate.is_absolute():
         try:
             rel = candidate.resolve().relative_to(repo_root)

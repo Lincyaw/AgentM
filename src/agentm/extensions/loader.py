@@ -83,7 +83,7 @@ def _candidate_roots() -> list[Path]:
     try:
         import agentm  # local import to dodge circular at module load time
 
-        package_dir = Path(agentm.__file__).resolve().parent  # .../src/agentm
+        package_dir = Path(agentm.__file__).parent  # .../src/agentm
         # An editable install puts agentm under <worktree>/src/agentm,
         # so the worktree root is ``parent.parent`` (skip the ``src``).
         # We don't assume the layout — just walk up looking for a
@@ -255,7 +255,7 @@ def load_scenario(
         payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         payload = None
-    meta: dict[str, Any] = {"scenario_dir": str(manifest_path.resolve().parent)}
+    meta: dict[str, Any] = {"scenario_dir": str(manifest_path.parent)}
     if isinstance(payload, dict):
         for key in ("task_class", "promotion"):
             if key in payload:

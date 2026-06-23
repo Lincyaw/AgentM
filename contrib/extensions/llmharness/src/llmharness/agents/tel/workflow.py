@@ -34,7 +34,7 @@ _TEL_CTX = "llmharness.agents.tel.context"
 _TEL_TOOLS = "llmharness.agents.tel.tools"
 
 _SUBMIT_TOOL = "submit_error_spans"
-_TEL_SCENARIO = str(Path(__file__).resolve().parent)
+_TEL_SCENARIO = str(Path(__file__).parent)
 
 
 async def run(ctx: WorkflowContext) -> TelWorkflowResult:

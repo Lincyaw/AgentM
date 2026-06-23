@@ -70,7 +70,7 @@ MANIFEST = ExtensionManifest(
 )
 
 _PROMPTS_DIR: Final[Path] = (
-    Path(__file__).resolve().parent.parent.parent.parent.parent / "prompts" / "hfsm"
+    Path(__file__).parents[4] / "prompts" / "hfsm"
 )
 
 # Per-state visible tool sets. ``None`` in the value means "no filter".

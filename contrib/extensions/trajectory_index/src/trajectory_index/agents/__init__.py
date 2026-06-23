@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Final
 
-_AGENTS_DIR: Final = Path(__file__).resolve().parent
+_AGENTS_DIR: Final = Path(__file__).parent
 
 
 def extractor_scenario() -> str:

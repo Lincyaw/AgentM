@@ -14,7 +14,7 @@ from typing import Annotated, Any
 
 import typer
 
-_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "agents" / "tel" / "prompts"
+_PROMPTS_DIR = Path(__file__).parents[2] / "agents" / "tel" / "prompts"
 
 app = typer.Typer(help="Evolve TEL prompts from reflection reports.")
 

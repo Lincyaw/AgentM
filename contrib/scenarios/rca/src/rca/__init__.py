@@ -8,5 +8,5 @@ from __future__ import annotations
 
 from pathlib import Path
 
-SCENARIO_ROOT: Path = Path(__file__).resolve().parent.parent.parent
+SCENARIO_ROOT: Path = Path(__file__).parents[2]
 """Absolute path to ``contrib/scenarios/rca/``."""

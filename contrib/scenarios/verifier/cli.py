@@ -26,8 +26,8 @@ from .lib.fpg import assemble_scenario
 from .lib.quality import build_quality_report
 from .prepare import prepare_case
 
-REPO = Path(__file__).resolve().parents[3]
-WORKFLOW_SCRIPT = Path(__file__).resolve().parent / "propagation_workflow.py"
+REPO = Path(__file__).parents[3]
+WORKFLOW_SCRIPT = Path(__file__).parent / "propagation_workflow.py"
 
 _WORKFLOW_EXTENSIONS = [
     ("agentm.extensions.builtin.operations", {"backend": "local"}),
