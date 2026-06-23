@@ -121,7 +121,6 @@ def _agentmsg_to_payload(msg: AgentMessage) -> dict[str, JsonValue]:
             blocks.append(
                 {
                     "type": "tool_call",
-                    "id": block.id,
                     "name": block.name,
                     "arguments": block.arguments,
                 }

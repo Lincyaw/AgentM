@@ -55,19 +55,25 @@ _PAYLOAD_DROP_KEYS: Final = frozenset({
 })
 
 
+_BLOCK_DROP_KEYS: Final = frozenset({
+    "id", "tool_call_id", "signature",
+})
+
+
 def _truncate_block(block: dict[str, JsonValue]) -> dict[str, JsonValue]:
-    """Truncate long text content within a single content block."""
-    btype = block.get("type", "")
+    """Truncate long text content and strip IDs that confuse small models."""
+    out = {k: v for k, v in block.items() if k not in _BLOCK_DROP_KEYS}
+    btype = out.get("type", "")
     if btype == "text":
-        text = block.get("text", "")
+        text = out.get("text", "")
         if isinstance(text, str) and len(text) > _MAX_TEXT_CHARS:
-            return {**block, "text": text[:_MAX_TEXT_CHARS] + "..."}
+            return {**out, "text": text[:_MAX_TEXT_CHARS] + "..."}
     elif btype == "tool_result":
-        sub = block.get("content", [])
+        sub = out.get("content", [])
         if isinstance(sub, list):
             truncated: list[JsonValue] = [_truncate_block(s) for s in sub if isinstance(s, dict)]
-            return {**block, "content": truncated}
-    return block
+            return {**out, "content": truncated}
+    return out
 
 
 def clean_trace_messages(entries: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
