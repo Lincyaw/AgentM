@@ -13,6 +13,7 @@ is sent while the agent is working.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -49,6 +50,13 @@ MAX_CONSECUTIVE_FAILURES = 3
 BACKOFF_DELAY = 30.0
 RETRY_DELAY = 2.0
 TYPING_KEEPALIVE = 5.0
+
+# Workspace subdirectory for inbound media files the agent can access.
+MEDIA_INBOX_DIR = ".agentm/weixin/media/inbox"
+
+# Regex to detect MEDIA: directives in outbound text.
+# Must be on its own line: ``MEDIA:/abs/path/to/file.png``
+_MEDIA_LINE_RE = re.compile(r"^MEDIA:(.+)$", re.MULTILINE)
 
 
 @dataclass(slots=True)
@@ -220,6 +228,25 @@ class WeixinAdapter:
 
     # -- inbound (WeChat -> gateway) ----------------------------------
 
+    def _media_inbox(self) -> Path:
+        """Return the workspace-relative media inbox directory, creating it."""
+        d = Path(MEDIA_INBOX_DIR)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _save_to_inbox(self, tmp_path: str) -> str:
+        """Move a temp media file into the workspace inbox. Returns new path."""
+        inbox = self._media_inbox()
+        src = Path(tmp_path)
+        dst = inbox / src.name
+        # Avoid name collisions
+        if dst.exists():
+            stem = src.stem
+            suffix = src.suffix
+            dst = inbox / f"{stem}_{uuid.uuid4().hex[:6]}{suffix}"
+        src.rename(dst)
+        return str(dst.resolve())
+
     async def _process_inbound(self, msg: WeixinMessage) -> None:
         user_id = msg.from_user_id
         if not user_id:
@@ -248,24 +275,47 @@ class WeixinAdapter:
         # Extract text content
         text = self._extract_text(msg)
 
-        # Extract media (download if present)
+        # Extract and save media to workspace
         media_path = await self._download_inbound_media(msg)
+        saved_path: str | None = None
+        if media_path:
+            try:
+                saved_path = self._save_to_inbox(media_path)
+            except OSError:
+                logger.exception("failed to save media to inbox")
+                saved_path = media_path
 
         logger.info(
             f"[weixin] rx from={user_id} text={text[:80]!r} "
-            f"media={'yes' if media_path else 'no'}"
+            f"media={saved_path or 'no'}"
         )
 
-        # Build content with media reference
-        content = text
-        if media_path and not text:
-            content = f"[media: {Path(media_path).name}]"
+        # Build content: combine text + media path so the agent can read
+        content_parts: list[str] = []
+        if text:
+            content_parts.append(text)
+        if saved_path:
+            media_type = self._describe_media_type(saved_path)
+            content_parts.append(
+                f"[用户发送了{media_type}，已保存到 {saved_path}]"
+            )
+        content = "\n".join(content_parts) if content_parts else ""
 
         await self._forward_inbound(
             sender_id=user_id,
             content=content,
-            media_path=media_path,
         )
+
+    @staticmethod
+    def _describe_media_type(path: str) -> str:
+        suffix = Path(path).suffix.lower()
+        if suffix in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"):
+            return "图片"
+        if suffix in (".mp4", ".mov", ".avi", ".mkv"):
+            return "视频"
+        if suffix in (".silk", ".wav", ".mp3", ".ogg", ".amr"):
+            return "语音"
+        return "文件"
 
     def _extract_text(self, msg: WeixinMessage) -> str:
         for item in msg.item_list:
@@ -347,7 +397,6 @@ class WeixinAdapter:
         *,
         sender_id: str,
         content: str,
-        media_path: str | None = None,
         button_value: str | None = None,
         control: str | None = None,
     ) -> None:
@@ -410,7 +459,7 @@ class WeixinAdapter:
             self._active_turns.discard(chat_id)
             text = str(body.get("content") or "")
             if text.strip():
-                await self._send_text(chat_id, text)
+                await self._send_text_with_media(chat_id, text)
             return
 
         if meta_kind == "agent_end":
@@ -457,6 +506,41 @@ class WeixinAdapter:
             logger.info(f"[weixin] sent text to={user_id} len={len(filtered)}")
         except Exception:
             logger.exception(f"[weixin] send_message failed to={user_id}")
+
+    async def _send_text_with_media(self, user_id: str, text: str) -> None:
+        """Send text, extracting and sending any MEDIA: lines as files.
+
+        The agent signals a file send by putting ``MEDIA:/abs/path``
+        on its own line. This method splits the text, sends text chunks
+        as messages, and uploads+sends each media file in order.
+        """
+        media_matches = list(_MEDIA_LINE_RE.finditer(text))
+        if not media_matches:
+            await self._send_text(user_id, text)
+            return
+
+        # Split text around MEDIA: lines and interleave
+        last_end = 0
+        for match in media_matches:
+            # Send text before this MEDIA: line
+            preceding = text[last_end:match.start()].strip()
+            if preceding:
+                await self._send_text(user_id, preceding)
+
+            # Send the media file
+            file_path = match.group(1).strip()
+            if Path(file_path).is_file():
+                await self._send_media(user_id, file_path)
+            else:
+                logger.warning(f"[weixin] MEDIA file not found: {file_path}")
+                await self._send_text(user_id, f"[文件未找到: {file_path}]")
+
+            last_end = match.end()
+
+        # Send any trailing text after the last MEDIA: line
+        trailing = text[last_end:].strip()
+        if trailing:
+            await self._send_text(user_id, trailing)
 
     async def _send_media(self, user_id: str, file_path: str, caption: str = "") -> None:
         ctx_token = self._ctx_tokens.get(self._config.account_id, user_id)
