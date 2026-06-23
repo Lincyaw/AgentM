@@ -12,68 +12,22 @@ import re
 from collections import defaultdict, deque
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
-from enum import StrEnum
 from hashlib import sha1
 from pathlib import Path
 
 type MetadataValue = str | int | float | bool | None
 
 # ---------------------------------------------------------------------------
-# Enums
+# Role enum (structural, not vocabulary-driven)
 # ---------------------------------------------------------------------------
 
 
-class StepRole(StrEnum):
+class StepRole:
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
-
-
-class SymbolKind(StrEnum):
-    VARIABLE = "variable"
-    OBJECT = "object"
-    SERVICE = "service"
-    TOOL = "tool"
-    FILE = "file"
-    API = "api"
-    METRIC = "metric"
-    ERROR = "error"
-    CONFIG = "config"
-    CONCEPT = "concept"
-    UNKNOWN = "unknown"
-
-
-class ReferenceKind(StrEnum):
-    DEFINE = "define"
-    USE = "use"
-    READ = "read"
-    WRITE = "write"
-    OBSERVE = "observe"
-    HYPOTHESIZE = "hypothesize"
-    CONFIRM = "confirm"
-    REJECT = "reject"
-    CONCLUDE = "conclude"
-    TOOL_INPUT = "tool_input"
-    TOOL_OUTPUT = "tool_output"
-    QUESTION = "question"
-    ANSWER = "answer"
-    UNKNOWN = "unknown"
-
-
-class RelationType(StrEnum):
-    USES = "uses"
-    DEFINES = "defines"
-    UPDATES = "updates"
-    CAUSES = "causes"
-    DEPENDS_ON = "depends_on"
-    DERIVED_FROM = "derived_from"
-    INPUT_TO = "input_to"
-    OUTPUT_OF = "output_of"
-    EXPLAINS = "explains"
-    CONTRADICTS = "contradicts"
-    CORRELATES = "correlates"
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +51,7 @@ class Step:
     run_id: str
     step_id: str
     index: int
-    role: StepRole
+    role: str
     content: str
     tool_name: str | None = None
     timestamp: float | None = None
@@ -108,7 +62,7 @@ class Step:
 class Symbol:
     id: str
     canonical_name: str
-    kind: SymbolKind = SymbolKind.UNKNOWN
+    kind: str = "unknown"
     aliases: set[str] = field(default_factory=set)
     summary: str | None = None
     definition_ref_id: str | None = None
@@ -127,8 +81,8 @@ class Reference:
     step_id: str
     location: Location
     text: str
-    role: StepRole
-    kind: ReferenceKind = ReferenceKind.UNKNOWN
+    role: str
+    kind: str = "unknown"
     confidence: float = 1.0
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
@@ -138,7 +92,7 @@ class Relation:
     id: str
     from_symbol_id: str
     to_symbol_id: str
-    type: RelationType
+    type: str
     run_id: str
     step_id: str
     weight: float = 1.0
@@ -229,11 +183,8 @@ def stable_id(prefix: str, *parts: object, length: int = 16) -> str:
 class TrajectoryIndex:
     """In-memory symbol-reference-relation index over trajectory steps."""
 
-    DEFINITION_PREFERRED_KINDS: frozenset[ReferenceKind] = frozenset({
-        ReferenceKind.DEFINE,
-        ReferenceKind.WRITE,
-        ReferenceKind.OBSERVE,
-        ReferenceKind.TOOL_OUTPUT,
+    DEFINITION_PREFERRED_KINDS: frozenset[str] = frozenset({
+        "define", "write", "observe", "tool_output",
     })
 
     def __init__(self) -> None:
@@ -259,7 +210,7 @@ class TrajectoryIndex:
     def upsert_symbol(
         self,
         name: str,
-        kind: SymbolKind = SymbolKind.UNKNOWN,
+        kind: str = "unknown",
         summary: str | None = None,
         aliases: Sequence[str] = (),
     ) -> Symbol:
@@ -268,7 +219,7 @@ class TrajectoryIndex:
         if existing_ids:
             symbol_id = sorted(existing_ids)[0]
             symbol = self.symbols[symbol_id]
-            if kind != SymbolKind.UNKNOWN and symbol.kind == SymbolKind.UNKNOWN:
+            if kind != "unknown" and symbol.kind == "unknown":
                 symbol.kind = kind
             if summary and not symbol.summary:
                 symbol.summary = summary
@@ -296,7 +247,7 @@ class TrajectoryIndex:
         symbol: Symbol,
         step: Step,
         text: str,
-        kind: ReferenceKind = ReferenceKind.UNKNOWN,
+        kind: str = "unknown",
         start: int = 0,
         end: int | None = None,
         confidence: float = 1.0,
@@ -338,13 +289,13 @@ class TrajectoryIndex:
         self,
         from_symbol: Symbol,
         to_symbol: Symbol,
-        rel_type: RelationType,
+        rel_type: str,
         step: Step,
         weight: float = 1.0,
         confidence: float = 1.0,
     ) -> Relation:
         relation_id = stable_id(
-            "rel", from_symbol.id, to_symbol.id, rel_type.value,
+            "rel", from_symbol.id, to_symbol.id, rel_type,
         )
         if relation_id in self.relations:
             return self.relations[relation_id]
@@ -370,7 +321,7 @@ class TrajectoryIndex:
         for s in self.symbols.values():
             entry: dict[str, str | list[str]] = {
                 "name": s.canonical_name,
-                "kind": s.kind.value,
+                "kind": s.kind,
             }
             if s.summary:
                 entry["summary"] = s.summary
@@ -425,7 +376,7 @@ class TrajectoryIndex:
             {
                 "id": s.id,
                 "name": s.canonical_name,
-                "kind": s.kind.value,
+                "kind": s.kind,
                 "aliases": sorted(s.aliases) if s.aliases else [],
                 "summary": s.summary,
                 "definition_ref_id": s.definition_ref_id,
@@ -438,7 +389,7 @@ class TrajectoryIndex:
                 "symbol_id": r.symbol_id,
                 "step_id": r.step_id,
                 "text": r.text,
-                "kind": r.kind.value,
+                "kind": r.kind,
                 "confidence": r.confidence,
             }
             for r in self.references.values()
@@ -448,7 +399,7 @@ class TrajectoryIndex:
                 "id": r.id,
                 "from": r.from_symbol_id,
                 "to": r.to_symbol_id,
-                "type": r.type.value,
+                "type": r.type,
                 "step_id": r.step_id,
                 "confidence": r.confidence,
             }
@@ -483,7 +434,7 @@ class TrajectoryIndex:
         for s in data.get("symbols", data.get("entities", [])):
             symbol = index.upsert_symbol(
                 name=s["name"],
-                kind=SymbolKind(s["kind"]),
+                kind=s["kind"],
                 summary=s.get("summary"),
                 aliases=s.get("aliases", []),
             )
@@ -506,7 +457,7 @@ class TrajectoryIndex:
                 index.add_step(ref_step)
             index.add_reference(
                 symbol=sym, step=ref_step, text=r["text"],
-                kind=ReferenceKind(r.get("kind", r.get("mention_type", "unknown"))),
+                kind=r.get("kind", r.get("mention_type", "unknown")),
                 confidence=r.get("confidence", 1.0),
             )
 
@@ -526,7 +477,7 @@ class TrajectoryIndex:
                 index.add_step(rel_step)
             index.add_relation(
                 from_symbol=from_s, to_symbol=to_s,
-                rel_type=RelationType(r["type"]),
+                rel_type=r["type"],
                 step=rel_step,
                 confidence=r.get("confidence", 1.0),
             )
@@ -539,7 +490,7 @@ class TrajectoryIndex:
         self,
         query: str,
         *,
-        kinds: set[SymbolKind] | None = None,
+        kinds: set[str] | None = None,
         limit: int = 20,
         include_references: bool = True,
         include_related: bool = False,
@@ -617,7 +568,7 @@ class TrajectoryIndex:
         *,
         limit: int = 20,
         max_depth: int = 1,
-        relation_types: set[RelationType] | None = None,
+        relation_types: set[str] | None = None,
     ) -> list[RelatedSymbol]:
         self.get_symbol(symbol_id)
 

@@ -17,8 +17,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
 from collections.abc import Callable
+from importlib.resources import files
 from pathlib import Path
 from typing import Annotated, Any, Final, TypedDict, cast
 
@@ -124,6 +126,49 @@ def load_messages_from_session(session_id: str) -> list[dict[str, JsonValue]]:
     return []
 
 
+def load_messages_batch(session_ids: list[str]) -> dict[str, list[dict[str, JsonValue]]]:
+    """Bulk-load messages for many sessions in one ClickHouse query.
+
+    Returns {session_id: cleaned_messages} for sessions that had data.
+    """
+    from agentm.core.observability.clickhouse import _parse_body, _query, get_url
+
+    if not session_ids:
+        return {}
+    url = get_url()
+    if not url:
+        logger.warning("ClickHouse unavailable, cannot batch-load sessions")
+        return {}
+
+    BATCH = 200
+    result: dict[str, list[dict[str, JsonValue]]] = {}
+    for i in range(0, len(session_ids), BATCH):
+        batch = session_ids[i : i + BATCH]
+        placeholders = ", ".join(f"'{sid}'" for sid in batch)
+        rows = _query(
+            url,
+            "SELECT LogAttributes['agentm.session.id'] AS sid, Body "
+            "FROM otel_logs "
+            "WHERE EventName = 'agentm.message.appended' "
+            f"  AND LogAttributes['agentm.session.id'] IN ({placeholders}) "
+            "ORDER BY LogAttributes['agentm.session.id'], Timestamp",
+            timeout=120,
+        )
+        by_sid: dict[str, list[dict[str, JsonValue]]] = {}
+        for row in rows:
+            sid = row.get("sid", "")
+            body = _parse_body(row.get("Body"))
+            if isinstance(body, dict) and sid:
+                by_sid.setdefault(sid, []).append(body)
+        for sid, entries in by_sid.items():
+            msgs = clean_trace_messages(entries)
+            if msgs:
+                result[sid] = msgs
+        logger.info(f"batch {i // BATCH + 1}: loaded {len(by_sid)}/{len(batch)} sessions")
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Teacher extraction
 # ---------------------------------------------------------------------------
@@ -185,6 +230,7 @@ def resolve_provider(model_name: str) -> ProviderSpec:
 
 
 _stream_debug: bool = False
+_vocabulary: str = "default"
 
 
 def _install_stream_tap(session: Any) -> None:
@@ -219,51 +265,44 @@ def _install_stream_tap(session: Any) -> None:
 
 def _reindex_messages(
     msgs: list[dict[str, JsonValue]],
-) -> tuple[list[dict[str, JsonValue]], dict[str, str]]:
-    """Replace message IDs with sequential integers for the extraction prompt.
-
-    Returns (reindexed_messages, id_map) where id_map maps "0","1",... back
-    to the original IDs.
-    """
-    id_map: dict[str, str] = {}
-    out: list[dict[str, JsonValue]] = []
-    for i, msg in enumerate(msgs):
-        orig = str(msg.get("id", f"s{i}"))
-        id_map[str(i)] = orig
-        out.append({**msg, "id": str(i)})
-    return out, id_map
+) -> list[dict[str, JsonValue]]:
+    """Replace message IDs with sequential integers for the extraction prompt."""
+    return [{**msg, "id": str(i)} for i, msg in enumerate(msgs)]
 
 
-def _remap_turn_ids(result: ExtractionResult, id_map: dict[str, str]) -> None:
-    """Map sequential turn_ids back to original message IDs."""
-    for ref in result.references:
-        ref.turn_id = id_map.get(ref.turn_id, ref.turn_id)
-    for rel in result.relations:
-        rel.turn_id = id_map.get(rel.turn_id, rel.turn_id)
+
+def _load_vocabulary_values(vocab_name: str = "default") -> tuple[set[str], set[str], set[str]]:
+    """Load valid vocabulary values from the selected yaml file."""
+    import yaml
+
+    fname = "vocabulary.yaml" if vocab_name == "default" else f"vocabulary.{vocab_name}.yaml"
+    text = files("trajectory_index").joinpath(fname).read_text(encoding="utf-8")
+    vocab = yaml.safe_load(text)
+    return (
+        set(vocab.get("symbol_kinds", {})),
+        set(vocab.get("reference_kinds", {})),
+        set(vocab.get("relation_types", {})),
+    )
 
 
 def _validate_vocabulary(result: ExtractionResult) -> str | None:
-    """Check extraction result against enum values. Returns error or None."""
-    from .index import ReferenceKind, RelationType, SymbolKind
-
-    _symbol_values = {e.value for e in SymbolKind}
-    _reference_values = {e.value for e in ReferenceKind}
-    _relation_values = {e.value for e in RelationType}
+    """Check extraction result against the selected vocabulary yaml."""
+    symbol_values, reference_values, relation_values = _load_vocabulary_values(_vocabulary)
 
     errors: list[str] = []
     for sym in result.symbols:
-        if sym.kind not in _symbol_values:
+        if sym.kind not in symbol_values:
             errors.append(f"symbol '{sym.name}' has invalid kind '{sym.kind}'")
     for ref in result.references:
-        if ref.kind not in _reference_values:
+        if ref.kind not in reference_values:
             errors.append(f"reference '{ref.symbol_name}' has invalid kind '{ref.kind}'")
     for rel in result.relations:
-        if rel.relation_type not in _relation_values:
+        if rel.relation_type not in relation_values:
             errors.append(f"relation '{rel.from_symbol}'->{rel.to_symbol}' has invalid type '{rel.relation_type}'")
     if errors:
-        valid_kinds = ", ".join(v for v in _symbol_values if v != "unknown")
-        valid_refs = ", ".join(v for v in _reference_values if v != "unknown")
-        valid_rels = ", ".join(_relation_values)
+        valid_kinds = ", ".join(v for v in symbol_values if v != "unknown")
+        valid_refs = ", ".join(v for v in reference_values if v != "unknown")
+        valid_rels = ", ".join(relation_values)
         return (
             f"Vocabulary errors: {'; '.join(errors)}. "
             f"Valid symbol kinds: {valid_kinds}. "
@@ -306,12 +345,15 @@ async def extract(
     provider: ProviderSpec,
     registry: list[dict[str, Any]] | None = None,
 ) -> ExtractionResult | None:
-    """Run the extraction agent with a teacher model and return the result."""
+    """Run the extraction agent with a teacher model and return the result.
+
+    Turn IDs in the result are sequential (0,1,2…) matching the reindexed input.
+    """
     from agentm.core.abi import LoopConfig
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.runtime.session import AgentSession
 
-    reindexed, id_map = _reindex_messages(steps)
+    reindexed = _reindex_messages(steps)
 
     scenario = extractor_scenario()
     config = AgentSessionConfig(
@@ -339,7 +381,6 @@ async def extract(
 
     result, error = _try_parse_response(messages)
     if result:
-        _remap_turn_ids(result, id_map)
         return result
 
     if not error:
@@ -363,30 +404,44 @@ async def extract(
 
     result, retry_error = _try_parse_response(retry_messages)
     if result:
-        _remap_turn_ids(result, id_map)
         return result
 
     logger.warning(f"retry also failed: {retry_error}")
     return None
 
 
+def _parse_chunk_size(value: str) -> tuple[int, int]:
+    """Parse chunk size spec: '20' (fixed) or '5-10' (random range)."""
+    if "-" in value:
+        lo, hi = value.split("-", 1)
+        return int(lo), int(hi)
+    n = int(value)
+    return n, n
+
+
 def _chunk_messages(
     messages: list[dict[str, JsonValue]],
-    chunk_size: int,
+    size_range: tuple[int, int],
 ) -> list[list[dict[str, JsonValue]]]:
-    """Split messages into chunks, keeping tool_call/tool_result pairs intact."""
-    if len(messages) <= chunk_size:
+    """Split messages into chunks, keeping tool_call/tool_result pairs intact.
+
+    ``size_range`` is (min, max); each chunk picks a random size in the range.
+    """
+    import random
+
+    lo, hi = size_range
+    if len(messages) <= lo:
         return [messages]
 
     chunks: list[list[dict[str, JsonValue]]] = []
     start = 0
 
     while start < len(messages):
+        chunk_size = random.randint(lo, hi)
         end = start + chunk_size
         if end >= len(messages):
             chunks.append(messages[start:])
             break
-        # Advance past tool_results so we don't split a pair
         while end < len(messages) and str(messages[end].get("role", "")) == "tool_result":
             end += 1
         chunks.append(messages[start:end])
@@ -401,14 +456,13 @@ type OnChunkCallback = Callable[[dict[str, Any], ExtractionResult, list[dict[str
 async def extract_incremental(
     messages: list[dict[str, JsonValue]],
     provider: ProviderSpec,
-    chunk_size: int = 20,
+    chunk_size: tuple[int, int] = (20, 20),
     on_chunk: OnChunkCallback | None = None,
 ) -> list[tuple[dict[str, Any], ExtractionResult]]:
     """Extract symbols incrementally in chunks with registry accumulation.
 
     Returns (prompt_input, result) per successful chunk.
-    If ``on_chunk`` is provided, it is called after each successful chunk
-    with (prompt_input, result) — useful for live index updates.
+    Turn IDs in results are sequential (0,1,2…) matching the prompt input.
     """
     from .index import normalize_name
 
@@ -429,7 +483,7 @@ async def extract_incremental(
             logger.warning(f"chunk {i+1}/{len(chunks)} ({len(chunk)} msgs) no parseable JSON")
             continue
 
-        reindexed, _ = _reindex_messages(chunk)
+        reindexed = _reindex_messages(chunk)
         if chunk_registry:
             prompt_input: dict[str, Any] = {"known_symbols": chunk_registry, "messages": reindexed}
         else:
@@ -517,6 +571,70 @@ def _find_trace_files(paths: list[Path]) -> list[Path]:
     return files
 
 
+# ---------------------------------------------------------------------------
+# Pluggable trajectory loaders
+# ---------------------------------------------------------------------------
+
+
+class TrajectorySource(TypedDict):
+    label: str
+    messages: list[dict[str, JsonValue]]
+
+
+type LoaderFn = Callable[[list[Path]], list[TrajectorySource]]
+
+
+def _load_agentm_paths(paths: list[Path]) -> list[TrajectorySource]:
+    """Load trajectories from AgentM trace files/directories."""
+    sources: list[TrajectorySource] = []
+    for tf in _find_trace_files(paths):
+        msgs = load_messages_from_trace_file(tf)
+        if msgs:
+            sources.append({"label": tf.name, "messages": msgs})
+    return sources
+
+
+def _telbench_to_messages(entry: dict[str, Any]) -> list[dict[str, JsonValue]]:
+    """Convert a TELBench JSONL entry to extraction-ready messages."""
+    msgs: list[dict[str, JsonValue]] = []
+    question = entry.get("question", "")
+    if question:
+        msgs.append({
+            "id": "q",
+            "role": "user",
+            "content": [{"type": "text", "text": question}],
+        })
+    for span in entry.get("spans", []):
+        msgs.append({
+            "id": span["id"],
+            "role": "assistant",
+            "content": [{"type": "text", "text": span["raw"]}],
+        })
+    return msgs
+
+
+def _load_telbench(paths: list[Path]) -> list[TrajectorySource]:
+    """Load trajectories from TELBench JSONL (one line = one trajectory)."""
+    sources: list[TrajectorySource] = []
+    for p in paths:
+        with p.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                msgs = _telbench_to_messages(entry)
+                if msgs:
+                    sources.append({"label": str(entry.get("id", p.stem)), "messages": msgs})
+    return sources
+
+
+LOADERS: dict[str, LoaderFn] = {
+    "agentm": _load_agentm_paths,
+    "telbench": _load_telbench,
+}
+
+
 @app.command()
 def export_messages(
     trace_file: Annotated[Path, typer.Argument(help="Session JSONL file")],
@@ -535,9 +653,12 @@ def collect(
     output_dir: Annotated[Path, typer.Option("--output", help="HuggingFace dataset output directory")] = Path("data"),
     index_output: Annotated[Path | None, typer.Option("--index-output", help="Write final index JSON to this path")] = None,
     split: Annotated[str, typer.Option(help="Dataset split name")] = "train",
-    chunk_size: Annotated[int, typer.Option(help="Messages per extraction chunk")] = 20,
+    chunk_size: Annotated[str, typer.Option(help="Messages per chunk: '20' (fixed) or '2-5' (random range)")] = "2-5",
     concurrency: Annotated[int, typer.Option(help="Max concurrent traces")] = 2,
     debug: Annotated[bool, typer.Option("--debug", help="Enable debug logging")] = False,
+    fmt: Annotated[str, typer.Option("--format", help=f"Input format: {', '.join(LOADERS)}")] = "agentm",
+    vocabulary: Annotated[str, typer.Option("--vocabulary", help="Vocabulary name (default, research, …)")] = "default",
+    min_messages: Annotated[int, typer.Option("--min-messages", help="Skip trajectories with fewer messages")] = 10,
 ) -> None:
     """Collect SFT training data: export traces, run incremental extraction, write HF dataset.
 
@@ -545,15 +666,17 @@ def collect(
       - positional paths: local JSONL files or directories
       - --session: session IDs loaded from ClickHouse
     """
+    global _stream_debug, _vocabulary
+    _vocabulary = vocabulary
+    os.environ["TRAJ_INDEX_VOCABULARY"] = vocabulary
     if debug:
-        global _stream_debug
         _stream_debug = True
         import sys
         logger.remove()
         logger.add(sys.stderr, level="DEBUG")
     asyncio.run(_collect_async(
         paths or [], session or [], model, output_dir, index_output,
-        split, chunk_size, concurrency,
+        split, _parse_chunk_size(chunk_size), concurrency, fmt, min_messages,
     ))
 
 
@@ -604,14 +727,7 @@ def _build_index_from_chunks_into(
     result: ExtractionResult,
 ) -> None:
     """Populate a TrajectoryIndex with one chunk's extraction result."""
-    from .index import (
-        ReferenceKind,
-        RelationType,
-        Step,
-        StepRole,
-        Symbol,
-        SymbolKind,
-    )
+    from .index import Step, StepRole, Symbol
 
     role_map = {"user": StepRole.USER, "assistant": StepRole.ASSISTANT, "tool_result": StepRole.TOOL_RESULT}
     msgs = prompt_input.get("messages", prompt_input if isinstance(prompt_input, list) else [])
@@ -630,11 +746,7 @@ def _build_index_from_chunks_into(
 
     symbol_map: dict[str, Symbol] = {}
     for ext_sym in result.symbols:
-        try:
-            kind = SymbolKind(ext_sym.kind.lower())
-        except ValueError:
-            kind = SymbolKind.UNKNOWN
-        symbol = index.upsert_symbol(name=ext_sym.name, kind=kind, summary=ext_sym.summary, aliases=ext_sym.aliases)
+        symbol = index.upsert_symbol(name=ext_sym.name, kind=ext_sym.kind.lower(), summary=ext_sym.summary, aliases=ext_sym.aliases)
         symbol_map[ext_sym.name] = symbol
 
     for ref in result.references:
@@ -642,11 +754,7 @@ def _build_index_from_chunks_into(
         ref_step = steps_by_id.get(ref.turn_id)
         if not resolved or not ref_step:
             continue
-        try:
-            rk = ReferenceKind(ref.kind.lower())
-        except ValueError:
-            rk = ReferenceKind.UNKNOWN
-        index.add_reference(symbol=resolved, step=ref_step, text=ref.text, kind=rk)
+        index.add_reference(symbol=resolved, step=ref_step, text=ref.text, kind=ref.kind.lower())
 
     for rel in result.relations:
         from_s = _resolve(rel.from_symbol, symbol_map)
@@ -654,11 +762,7 @@ def _build_index_from_chunks_into(
         rel_step = steps_by_id.get(rel.turn_id)
         if not from_s or not to_s or not rel_step:
             continue
-        try:
-            rt = RelationType(rel.relation_type.lower())
-        except ValueError:
-            rt = RelationType.CORRELATES
-        index.add_relation(from_symbol=from_s, to_symbol=to_s, rel_type=rt, step=rel_step)
+        index.add_relation(from_symbol=from_s, to_symbol=to_s, rel_type=rel.relation_type.lower(), step=rel_step)
 
 
 def _build_index_from_chunks(all_chunks: list[ChunkResults]) -> Any:
@@ -679,52 +783,55 @@ async def _collect_async(
     output_dir: Path,
     index_output: Path | None,
     split: str,
-    chunk_size: int,
+    chunk_size: tuple[int, int],
     concurrency: int,
+    fmt: str = "agentm",
+    min_messages: int = 10,
 ) -> None:
-    work: list[tuple[str, tuple[str, Path | str]]] = []
+    loader = LOADERS.get(fmt)
+    if not loader:
+        logger.error(f"unknown format: {fmt!r}, available: {', '.join(LOADERS)}")
+        raise typer.Exit(1)
 
-    for tf in _find_trace_files(paths):
-        work.append((tf.name, ("file", tf)))
+    sources: list[TrajectorySource] = []
+    if paths:
+        sources.extend(loader(paths))
+    if session_ids:
+        batch = load_messages_batch(session_ids)
+        for sid in session_ids:
+            msgs = batch.get(sid)
+            if msgs:
+                sources.append({"label": sid, "messages": msgs})
 
-    for sid in session_ids:
-        work.append((sid, ("session", sid)))
-
-    if not work:
-        logger.error("no trace files or session IDs provided")
+    if not sources:
+        logger.error("no trajectories found")
         raise typer.Exit(1)
 
     provider = resolve_provider(model)
     sem = asyncio.Semaphore(concurrency)
 
     logger.info(
-        f"model={model} sources={len(work)} chunk_size={chunk_size} "
+        f"model={model} sources={len(sources)} chunk_size={chunk_size} "
         f"output={output_dir} split={split}"
     )
 
-    # Live index: built incrementally, dumped after each chunk
     live_index = _build_index_from_chunks([]) if index_output else None
 
     def _on_chunk(
         prompt_input: dict[str, Any],
         result: ExtractionResult,
-        original_msgs: list[dict[str, JsonValue]],
+        _original_msgs: list[dict[str, JsonValue]],
     ) -> None:
         if live_index is None:
             return
-        original_input: dict[str, Any] = {"messages": original_msgs}
-        _build_index_from_chunks_into(live_index, original_input, result)
+        _build_index_from_chunks_into(live_index, prompt_input, result)
         live_index.dump(index_output)
 
-    async def _process_one(label: str, source: tuple[str, Path | str]) -> ChunkResults:
+    async def _process_one(src: TrajectorySource) -> ChunkResults:
         async with sem:
-            kind, ref = source
-            if kind == "file":
-                msgs = load_messages_from_trace_file(ref)
-            else:
-                msgs = load_messages_from_session(str(ref))
-            if not msgs:
-                logger.warning(f"{label}: 0 messages, skipping")
+            label, msgs = src["label"], src["messages"]
+            if len(msgs) < min_messages:
+                logger.debug(f"{label}: {len(msgs)} msgs < {min_messages}, skipped")
                 return []
             try:
                 chunks = await extract_incremental(msgs, provider, chunk_size, on_chunk=_on_chunk)
@@ -744,13 +851,13 @@ async def _collect_async(
             )
             return chunks
 
-    tasks = [_process_one(label, source) for label, source in work]
+    tasks = [_process_one(src) for src in sources]
     results = await asyncio.gather(*tasks)
 
     all_chunks = [cr for cr in results if cr]
     examples = [build_sft_example(pi, res) for cr in all_chunks for pi, res in cr]
     _write_hf_dataset(examples, output_dir, split)
-    logger.info(f"done: {len(examples)} examples from {len(work)} sources -> {output_dir}/{split}.jsonl")
+    logger.info(f"done: {len(examples)} examples from {len(sources)} sources -> {output_dir}/{split}.jsonl")
 
     if live_index:
         stats = live_index.stats()

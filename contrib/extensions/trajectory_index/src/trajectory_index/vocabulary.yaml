@@ -2,12 +2,15 @@ symbol_kinds:
   variable: A named value, parameter, or binding
   object: A data structure, instance, or named entity
   service: A running service, process, or deployment unit
-  tool: An agent tool/function that can be invoked
+  tool: An agent tool or function that can be invoked
+  skill: An agent skill or capability (e.g. diagnose-sql, traces, logs)
   file: A file, document, or data source
   api: An API, RPC method, endpoint, or route
   metric: A measurable quantity or time-series indicator
   error: An error condition, exception, or failure symptom
   config: A configuration value, setting, or flag
+  query: A SQL query, search expression, or diagnostic query
+  table: A database table, view, or result set
   concept: An abstract idea, hypothesis, or domain term
   unknown: Cannot be classified into the above
 
@@ -39,3 +42,4 @@ relation_types:
   explains: A explains or accounts for B
   contradicts: A contradicts or conflicts with B
   correlates: A and B are correlated (observed together, non-causal)
+  calls: A invokes or sends requests to B (service-to-service)

@@ -32,12 +32,9 @@ from .agents import extractor_scenario
 from .agents.entity_extractor.schema import ExtractionResult
 from .data import JsonValue, ProviderSpec, resolve_provider
 from .index import (
-    ReferenceKind,
-    RelationType,
     Step,
     StepRole,
     Symbol,
-    SymbolKind,
     TrajectoryIndex,
 )
 
@@ -209,9 +206,9 @@ async def _run_extraction(
     provider: ProviderSpec | None,
     registry: list[dict[str, Any]] | None = None,
 ) -> ExtractionResult | None:
-    from .data import _reindex_messages, _remap_turn_ids
+    from .data import _reindex_messages
 
-    reindexed, id_map = _reindex_messages(messages)
+    reindexed = _reindex_messages(messages)
 
     if registry:
         prompt_data: dict[str, Any] = {
@@ -242,7 +239,6 @@ async def _run_extraction(
                 child_msgs: list[AgentMessage] = await child.prompt(prompt)
                 result, error = _try_parse_response(child_msgs)
                 if result:
-                    _remap_turn_ids(result, id_map)
                     return result
                 if error:
                     logger.warning(f"extraction parse failed: {error}")
@@ -257,7 +253,6 @@ async def _run_extraction(
                         retry_msgs = await retry_child.prompt(retry_prompt)
                         result, _ = _try_parse_response(retry_msgs)
                         if result:
-                            _remap_turn_ids(result, id_map)
                             return result
                     finally:
                         with contextlib.suppress(Exception):
@@ -280,27 +275,6 @@ async def _run_extraction(
 # ---------------------------------------------------------------------------
 
 
-def _kind_from_str(s: str) -> SymbolKind:
-    try:
-        return SymbolKind(s.lower())
-    except ValueError:
-        return SymbolKind.UNKNOWN
-
-
-def _ref_kind_from_str(s: str) -> ReferenceKind:
-    try:
-        return ReferenceKind(s.lower())
-    except ValueError:
-        return ReferenceKind.UNKNOWN
-
-
-def _relation_type_from_str(s: str) -> RelationType:
-    try:
-        return RelationType(s.lower())
-    except ValueError:
-        return RelationType.CORRELATES
-
-
 def _populate_index(
     index: TrajectoryIndex,
     result: ExtractionResult,
@@ -312,7 +286,7 @@ def _populate_index(
     for ext_sym in result.symbols:
         symbol = index.upsert_symbol(
             name=ext_sym.name,
-            kind=_kind_from_str(ext_sym.kind),
+            kind=ext_sym.kind.lower(),
             summary=ext_sym.summary,
             aliases=ext_sym.aliases,
         )
@@ -338,7 +312,7 @@ def _populate_index(
             symbol=sym,
             step=step,
             text=ext_ref.text,
-            kind=_ref_kind_from_str(ext_ref.kind),
+            kind=ext_ref.kind.lower(),
             start=start,
             end=start + len(ext_ref.text) if start > 0 else len(ext_ref.text),
             confidence=0.9,
@@ -355,7 +329,7 @@ def _populate_index(
         index.add_relation(
             from_symbol=from_sym,
             to_symbol=to_sym,
-            rel_type=_relation_type_from_str(ext_rel.relation_type),
+            rel_type=ext_rel.relation_type.lower(),
             step=step,
             confidence=0.85,
         )
@@ -445,9 +419,7 @@ def _build_search_tool(api: ExtensionAPI) -> FunctionTool:
         index = api.get_service(INDEX_SERVICE_KEY)
         assert isinstance(index, TrajectoryIndex)
 
-        kind_filter = None
-        if params.kinds:
-            kind_filter = {_kind_from_str(k) for k in params.kinds}
+        kind_filter = set(params.kinds) if params.kinds else None
 
         results = index.search(
             params.query,
@@ -463,12 +435,12 @@ def _build_search_tool(api: ExtensionAPI) -> FunctionTool:
         for r in results:
             sym = r.symbol
             lines.append(
-                f"- **{sym.canonical_name}** ({sym.kind.value}, score={r.score:.2f})  id={sym.id}"
+                f"- **{sym.canonical_name}** ({sym.kind}, score={r.score:.2f})  id={sym.id}"
             )
             if sym.summary:
                 lines.append(f"  {sym.summary}")
             if r.references:
-                refs = ", ".join(f"step {ref.step_id}:{ref.kind.value}" for ref in r.references[:3])
+                refs = ", ".join(f"step {ref.step_id}:{ref.kind}" for ref in r.references[:3])
                 lines.append(f"  references: {refs}")
             if r.related:
                 rels = ", ".join(
@@ -505,7 +477,7 @@ def _build_context_tool(api: ExtensionAPI) -> FunctionTool:
 
         lines: list[str] = []
         sym = ctx.symbol
-        lines.append(f"# {sym.canonical_name} ({sym.kind.value})")
+        lines.append(f"# {sym.canonical_name} ({sym.kind})")
         if sym.summary:
             lines.append(f"\n{sym.summary}")
         if sym.aliases:
@@ -513,22 +485,22 @@ def _build_context_tool(api: ExtensionAPI) -> FunctionTool:
 
         if ctx.definition:
             d = ctx.definition
-            lines.append(f'\n## Definition\nStep {d.step_id}: "{d.text}" ({d.kind.value})')
+            lines.append(f'\n## Definition\nStep {d.step_id}: "{d.text}" ({d.kind})')
 
         if ctx.timeline:
             lines.append("\n## Timeline")
             for item in ctx.timeline[:15]:
                 lines.append(
-                    f"- [{item.step.role.value}] step {item.step.step_id}: "
-                    f'"{item.reference.text}" ({item.reference.kind.value})'
+                    f"- [{item.step.role}] step {item.step.step_id}: "
+                    f'"{item.reference.text}" ({item.reference.kind})'
                 )
 
         if ctx.related:
             lines.append("\n## Related symbols")
             for rel in ctx.related[:10]:
-                rel_types = ", ".join(r.type.value for r in rel.relations[:3])
+                rel_types = ", ".join(r.type for r in rel.relations[:3])
                 lines.append(
-                    f"- {rel.symbol.canonical_name} ({rel.symbol.kind.value}) "
+                    f"- {rel.symbol.canonical_name} ({rel.symbol.kind}) "
                     f"— {rel_types} (score={rel.score:.2f})"
                 )
 
