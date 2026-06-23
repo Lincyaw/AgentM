@@ -18,14 +18,15 @@ import asyncio
 import contextlib
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Final, TypedDict, cast
+from typing import Annotated, Any, Final, TypedDict, cast
 
 import typer
 from loguru import logger
 
 from .agents import extractor_scenario
-from .agents.entity_extractor.schema import ReportEntitiesParams
+from .agents.entity_extractor.schema import ExtractionResult
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -177,14 +178,99 @@ def resolve_provider(model_name: str) -> ProviderSpec:
     raise RuntimeError(f"no extension module for provider {profile.provider!r}")
 
 
+_stream_debug: bool = False
+
+
+def _install_stream_tap(session: Any) -> None:
+    """Hook into a child session's bus to print streaming deltas in real-time."""
+    import sys
+
+    from agentm.core.abi.events import StreamDeltaEvent
+    from agentm.core.abi.stream import TextDelta, ThinkingDelta, ToolCallStart
+
+    prefix = {"thinking": False}
+
+    def _on_delta(event: StreamDeltaEvent) -> None:
+        d = event.delta
+        if isinstance(d, ThinkingDelta):
+            if not prefix["thinking"]:
+                sys.stderr.write("\n[thinking] ")
+                prefix["thinking"] = True
+            sys.stderr.write(d.text)
+            sys.stderr.flush()
+        elif isinstance(d, TextDelta):
+            if prefix["thinking"]:
+                sys.stderr.write("\n[output] ")
+                prefix["thinking"] = False
+            sys.stderr.write(d.text)
+            sys.stderr.flush()
+        elif isinstance(d, ToolCallStart):
+            sys.stderr.write(f"\n[tool_call: {d.name}] ")
+            sys.stderr.flush()
+
+    session.bus.on(StreamDeltaEvent.CHANNEL, _on_delta)
+
+
+def _reindex_messages(
+    msgs: list[dict[str, JsonValue]],
+) -> tuple[list[dict[str, JsonValue]], dict[str, str]]:
+    """Replace message IDs with sequential integers for the extraction prompt.
+
+    Returns (reindexed_messages, id_map) where id_map maps "0","1",... back
+    to the original IDs.
+    """
+    id_map: dict[str, str] = {}
+    out: list[dict[str, JsonValue]] = []
+    for i, msg in enumerate(msgs):
+        orig = str(msg.get("id", f"s{i}"))
+        id_map[str(i)] = orig
+        out.append({**msg, "id": str(i)})
+    return out, id_map
+
+
+def _remap_turn_ids(result: ExtractionResult, id_map: dict[str, str]) -> None:
+    """Map sequential turn_ids back to original message IDs."""
+    for ref in result.references:
+        ref.turn_id = id_map.get(ref.turn_id, ref.turn_id)
+    for rel in result.relations:
+        rel.turn_id = id_map.get(rel.turn_id, rel.turn_id)
+
+
+def _try_parse_response(messages: list[Any]) -> tuple[ExtractionResult | None, str | None]:
+    """Try to parse an ExtractionResult from assistant messages.
+
+    Returns (result, error_text). If parsing succeeds error_text is None;
+    if it fails, error_text describes the failure for retry.
+    """
+    from agentm.core.abi import AssistantMessage, TextContent
+
+    for msg in reversed(messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in reversed(msg.content):
+            if not isinstance(block, TextContent):
+                continue
+            obj = extract_json(block.text)
+            if obj:
+                try:
+                    return ExtractionResult.model_validate(obj), None
+                except Exception as exc:
+                    return None, f"JSON keys={list(obj.keys())}; validation error: {exc}"
+            return None, f"Could not extract JSON from response ({len(block.text)} chars)"
+    return None, "No assistant text in response"
+
+
 async def extract(
     steps: list[dict[str, JsonValue]],
     provider: ProviderSpec,
-) -> ReportEntitiesParams | None:
+    registry: list[dict[str, Any]] | None = None,
+) -> ExtractionResult | None:
     """Run the extraction agent with a teacher model and return the result."""
-    from agentm.core.abi import AssistantMessage, LoopConfig, TextContent
+    from agentm.core.abi import LoopConfig
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.runtime.session import AgentSession
+
+    reindexed, id_map = _reindex_messages(steps)
 
     scenario = extractor_scenario()
     config = AgentSessionConfig(
@@ -195,24 +281,133 @@ async def extract(
         loop_config=LoopConfig(max_turns=1),
         log_trace_command=False,
     )
-    prompt = json.dumps(steps, ensure_ascii=False, indent=2)
+    if registry:
+        prompt_data: dict[str, Any] = {"known_symbols": registry, "messages": reindexed}
+        prompt = json.dumps(prompt_data, ensure_ascii=False, indent=2)
+    else:
+        prompt = json.dumps(reindexed, ensure_ascii=False, indent=2)
 
     session = await AgentSession.create(config)
+    if _stream_debug:
+        _install_stream_tap(session)
     try:
         messages = await session.prompt(prompt)
     finally:
         with contextlib.suppress(Exception):
             await session.shutdown()
 
-    for msg in reversed(messages):
-        if not isinstance(msg, AssistantMessage):
-            continue
-        for block in reversed(msg.content):
-            if isinstance(block, TextContent):
-                obj = extract_json(block.text)
-                if obj:
-                    return ReportEntitiesParams.model_validate(obj)
+    result, error = _try_parse_response(messages)
+    if result:
+        _remap_turn_ids(result, id_map)
+        return result
+
+    if not error:
+        return None
+
+    # Retry: send the error back to a fresh session
+    logger.warning(f"extraction failed, retrying: {error}")
+    retry_prompt = (
+        f"Your previous output failed validation:\n{error}\n\n"
+        f"Here is the input again:\n{prompt}\n\n"
+        "Fix the errors and output valid JSON only."
+    )
+    retry_session = await AgentSession.create(config)
+    if _stream_debug:
+        _install_stream_tap(retry_session)
+    try:
+        retry_messages = await retry_session.prompt(retry_prompt)
+    finally:
+        with contextlib.suppress(Exception):
+            await retry_session.shutdown()
+
+    result, retry_error = _try_parse_response(retry_messages)
+    if result:
+        _remap_turn_ids(result, id_map)
+        return result
+
+    logger.warning(f"retry also failed: {retry_error}")
     return None
+
+
+def _chunk_messages(
+    messages: list[dict[str, JsonValue]],
+    chunk_size: int,
+) -> list[list[dict[str, JsonValue]]]:
+    """Split messages into chunks, keeping tool_call/tool_result pairs intact."""
+    if len(messages) <= chunk_size:
+        return [messages]
+
+    chunks: list[list[dict[str, JsonValue]]] = []
+    start = 0
+
+    while start < len(messages):
+        end = start + chunk_size
+        if end >= len(messages):
+            chunks.append(messages[start:])
+            break
+        # Advance past tool_results so we don't split a pair
+        while end < len(messages) and str(messages[end].get("role", "")) == "tool_result":
+            end += 1
+        chunks.append(messages[start:end])
+        start = end
+
+    return chunks
+
+
+type OnChunkCallback = Callable[[dict[str, Any], ExtractionResult, list[dict[str, JsonValue]]], None]
+
+
+async def extract_incremental(
+    messages: list[dict[str, JsonValue]],
+    provider: ProviderSpec,
+    chunk_size: int = 20,
+    on_chunk: OnChunkCallback | None = None,
+) -> list[tuple[dict[str, Any], ExtractionResult]]:
+    """Extract symbols incrementally in chunks with registry accumulation.
+
+    Returns (prompt_input, result) per successful chunk.
+    If ``on_chunk`` is provided, it is called after each successful chunk
+    with (prompt_input, result) — useful for live index updates.
+    """
+    from .index import normalize_name
+
+    chunks = _chunk_messages(messages, chunk_size)
+    registry: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    results: list[tuple[dict[str, Any], ExtractionResult]] = []
+
+    for i, chunk in enumerate(chunks):
+        chunk_registry = list(registry) if registry else None
+
+        try:
+            result = await extract(chunk, provider, registry=chunk_registry)
+        except Exception:
+            logger.exception(f"chunk {i+1}/{len(chunks)} ({len(chunk)} msgs) extraction failed")
+            continue
+        if result is None:
+            logger.warning(f"chunk {i+1}/{len(chunks)} ({len(chunk)} msgs) no parseable JSON")
+            continue
+
+        reindexed, _ = _reindex_messages(chunk)
+        if chunk_registry:
+            prompt_input: dict[str, Any] = {"known_symbols": chunk_registry, "messages": reindexed}
+        else:
+            prompt_input = {"messages": reindexed}
+        results.append((prompt_input, result))
+
+        if on_chunk:
+            on_chunk(prompt_input, result, chunk)
+
+        for sym in result.symbols:
+            norm = normalize_name(sym.name)
+            if norm not in seen:
+                seen.add(norm)
+                entry: dict[str, Any] = {"name": sym.name, "kind": sym.kind}
+                if sym.aliases:
+                    entry["aliases"] = sym.aliases
+                registry.append(entry)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -221,13 +416,13 @@ async def extract(
 
 
 SFT_SYSTEM_PROMPT: Final = (
-    "Extract entities, mentions, and relations from the trajectory steps. Output JSON only."
+    "Extract symbols, references, and relations from the trajectory steps. Output JSON only."
 )
 
 
 def load_inference_prompt() -> str:
     """Load the full extraction prompt with JSON schema (for zero-shot inference)."""
-    from .agents.entity_extractor.schema import ReportEntitiesParams as Schema
+    from .agents.entity_extractor.schema import ExtractionResult as Schema
 
     prompts_dir = Path(__file__).parent / "agents" / "entity_extractor" / "prompts"
     base = (prompts_dir / "default.md").read_text(encoding="utf-8")
@@ -236,21 +431,21 @@ def load_inference_prompt() -> str:
 
 
 def build_sft_example(
-    steps: list[dict[str, JsonValue]],
-    teacher_output: ReportEntitiesParams,
+    input_data: list[dict[str, JsonValue]] | dict[str, Any],
+    teacher_output: ExtractionResult,
     system_prompt: str | None = None,
 ) -> SftExample:
     """Build one SFT training example in chat-message format.
 
-    Uses a minimal system prompt by default — the model learns the
-    extraction schema from the training data, not from verbose instructions.
+    ``input_data`` can be a plain message list (full mode) or a dict with
+    ``known_symbols`` and ``messages`` keys (incremental mode).
     """
     if system_prompt is None:
         system_prompt = SFT_SYSTEM_PROMPT
 
     return SftExample(messages=[
         ChatMessage(role="system", content=system_prompt),
-        ChatMessage(role="user", content=json.dumps(steps, ensure_ascii=False)),
+        ChatMessage(role="user", content=json.dumps(input_data, ensure_ascii=False)),
         ChatMessage(role="assistant", content=teacher_output.model_dump_json(indent=None)),
     ])
 
@@ -293,16 +488,28 @@ def collect(
     session: Annotated[list[str] | None, typer.Option(help="Session IDs to load from ClickHouse (repeatable)")] = None,
     model: Annotated[str, typer.Option(help="Model profile from config.toml")] = "doubao",
     output_dir: Annotated[Path, typer.Option("--output", help="HuggingFace dataset output directory")] = Path("data"),
+    index_output: Annotated[Path | None, typer.Option("--index-output", help="Write final index JSON to this path")] = None,
     split: Annotated[str, typer.Option(help="Dataset split name")] = "train",
-    concurrency: Annotated[int, typer.Option(help="Max concurrent extraction calls")] = 2,
+    chunk_size: Annotated[int, typer.Option(help="Messages per extraction chunk")] = 20,
+    concurrency: Annotated[int, typer.Option(help="Max concurrent traces")] = 2,
+    debug: Annotated[bool, typer.Option("--debug", help="Enable debug logging")] = False,
 ) -> None:
-    """Collect SFT training data: export traces, run extraction, write HF dataset.
+    """Collect SFT training data: export traces, run incremental extraction, write HF dataset.
 
     Sources (use one or both):
       - positional paths: local JSONL files or directories
       - --session: session IDs loaded from ClickHouse
     """
-    asyncio.run(_collect_async(paths or [], session or [], model, output_dir, split, concurrency))
+    if debug:
+        global _stream_debug
+        _stream_debug = True
+        import sys
+        logger.remove()
+        logger.add(sys.stderr, level="DEBUG")
+    asyncio.run(_collect_async(
+        paths or [], session or [], model, output_dir, index_output,
+        split, chunk_size, concurrency,
+    ))
 
 
 def _write_hf_dataset(
@@ -319,7 +526,7 @@ def _write_hf_dataset(
 
     info = {
         "dataset_info": {
-            "description": "SFT training data for trajectory semantic index entity extraction.",
+            "description": "SFT training data for trajectory semantic index symbol extraction.",
             "features": {
                 "messages": {
                     "feature": {
@@ -343,15 +550,93 @@ def _write_hf_dataset(
     )
 
 
+type ChunkResults = list[tuple[dict[str, Any], ExtractionResult]]
+
+
+def _build_index_from_chunks_into(
+    index: Any,
+    prompt_input: dict[str, Any],
+    result: ExtractionResult,
+) -> None:
+    """Populate a TrajectoryIndex with one chunk's extraction result."""
+    from .index import (
+        ReferenceKind,
+        RelationType,
+        Step,
+        StepRole,
+        Symbol,
+        SymbolKind,
+    )
+
+    role_map = {"user": StepRole.USER, "assistant": StepRole.ASSISTANT, "tool_result": StepRole.TOOL_RESULT}
+    msgs = prompt_input.get("messages", prompt_input if isinstance(prompt_input, list) else [])
+    base_idx = len(index.steps)
+
+    steps_by_id: dict[str, Step] = {}
+    for i, msg in enumerate(msgs):
+        mid = str(msg.get("id", f"s{base_idx + i}"))
+        role = role_map.get(str(msg.get("role", "")), StepRole.USER)
+        step = Step(run_id="", step_id=mid, index=base_idx + i, role=role, content="")
+        index.add_step(step)
+        steps_by_id[mid] = step
+
+    def _resolve(name: str, local: dict[str, Symbol]) -> Symbol | None:
+        return local.get(name) or index.resolve_symbol_by_name(name)
+
+    symbol_map: dict[str, Symbol] = {}
+    for ext_sym in result.symbols:
+        try:
+            kind = SymbolKind(ext_sym.kind.lower())
+        except ValueError:
+            kind = SymbolKind.UNKNOWN
+        symbol = index.upsert_symbol(name=ext_sym.name, kind=kind, summary=ext_sym.summary, aliases=ext_sym.aliases)
+        symbol_map[ext_sym.name] = symbol
+
+    for ref in result.references:
+        resolved = _resolve(ref.symbol_name, symbol_map)
+        ref_step = steps_by_id.get(ref.turn_id)
+        if not resolved or not ref_step:
+            continue
+        try:
+            rk = ReferenceKind(ref.kind.lower())
+        except ValueError:
+            rk = ReferenceKind.UNKNOWN
+        index.add_reference(symbol=resolved, step=ref_step, text=ref.text, kind=rk)
+
+    for rel in result.relations:
+        from_s = _resolve(rel.from_symbol, symbol_map)
+        to_s = _resolve(rel.to_symbol, symbol_map)
+        rel_step = steps_by_id.get(rel.turn_id)
+        if not from_s or not to_s or not rel_step:
+            continue
+        try:
+            rt = RelationType(rel.relation_type.lower())
+        except ValueError:
+            rt = RelationType.CO_MENTIONED
+        index.add_relation(from_symbol=from_s, to_symbol=to_s, rel_type=rt, step=rel_step)
+
+
+def _build_index_from_chunks(all_chunks: list[ChunkResults]) -> Any:
+    """Rebuild a TrajectoryIndex from extraction chunk results."""
+    from .index import TrajectoryIndex
+
+    index = TrajectoryIndex()
+    for chunk_list in all_chunks:
+        for prompt_input, result in chunk_list:
+            _build_index_from_chunks_into(index, prompt_input, result)
+    return index
+
+
 async def _collect_async(
     paths: list[Path],
     session_ids: list[str],
     model: str,
     output_dir: Path,
+    index_output: Path | None,
     split: str,
+    chunk_size: int,
     concurrency: int,
 ) -> None:
-    # Build work items: (label, steps_loader) pairs
     work: list[tuple[str, tuple[str, Path | str]]] = []
 
     for tf in _find_trace_files(paths):
@@ -367,9 +652,26 @@ async def _collect_async(
     provider = resolve_provider(model)
     sem = asyncio.Semaphore(concurrency)
 
-    logger.info(f"model={model} sources={len(work)} output={output_dir} split={split}")
+    logger.info(
+        f"model={model} sources={len(work)} chunk_size={chunk_size} "
+        f"output={output_dir} split={split}"
+    )
 
-    async def _process_one(label: str, source: tuple[str, Path | str]) -> SftExample | None:
+    # Live index: built incrementally, dumped after each chunk
+    live_index = _build_index_from_chunks([]) if index_output else None
+
+    def _on_chunk(
+        prompt_input: dict[str, Any],
+        result: ExtractionResult,
+        original_msgs: list[dict[str, JsonValue]],
+    ) -> None:
+        if live_index is None:
+            return
+        original_input: dict[str, Any] = {"messages": original_msgs}
+        _build_index_from_chunks_into(live_index, original_input, result)
+        live_index.dump(index_output)
+
+    async def _process_one(label: str, source: tuple[str, Path | str]) -> ChunkResults:
         async with sem:
             kind, ref = source
             if kind == "file":
@@ -378,28 +680,39 @@ async def _collect_async(
                 msgs = load_messages_from_session(str(ref))
             if not msgs:
                 logger.warning(f"{label}: 0 messages, skipping")
-                return None
+                return []
             try:
-                result = await extract(msgs, provider)
+                chunks = await extract_incremental(msgs, provider, chunk_size, on_chunk=_on_chunk)
             except Exception:
                 logger.exception(f"{label}: extraction failed")
-                return None
-            if result is None:
-                logger.warning(f"{label}: no parseable JSON in response")
-                return None
-            example = build_sft_example(msgs, result)
+                return []
+            if not chunks:
+                logger.warning(f"{label}: no successful chunks")
+                return []
+
+            total_sym = sum(len(r.symbols) for _, r in chunks)
+            total_ref = sum(len(r.references) for _, r in chunks)
+            total_rel = sum(len(r.relations) for _, r in chunks)
             logger.info(
-                f"{label}: {len(msgs)} msgs -> "
-                f"{len(result.entities)} ent, {len(result.mentions)} men, {len(result.relations)} rel"
+                f"{label}: {len(msgs)} msgs -> {len(chunks)} chunks, "
+                f"{total_sym} sym, {total_ref} ref, {total_rel} rel"
             )
-            return example
+            return chunks
 
     tasks = [_process_one(label, source) for label, source in work]
     results = await asyncio.gather(*tasks)
 
-    examples = [ex for ex in results if ex is not None]
+    all_chunks = [cr for cr in results if cr]
+    examples = [build_sft_example(pi, res) for cr in all_chunks for pi, res in cr]
     _write_hf_dataset(examples, output_dir, split)
-    logger.info(f"done: {len(examples)}/{len(work)} examples -> {output_dir}/{split}.jsonl")
+    logger.info(f"done: {len(examples)} examples from {len(work)} sources -> {output_dir}/{split}.jsonl")
+
+    if live_index:
+        stats = live_index.stats()
+        logger.info(
+            f"index: {stats.symbol_count} symbols, {stats.reference_count} references, "
+            f"{stats.relation_count} relations -> {index_output}"
+        )
 
 
 if __name__ == "__main__":

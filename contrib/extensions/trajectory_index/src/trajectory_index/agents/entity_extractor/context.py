@@ -9,7 +9,7 @@ from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
 
-from .schema import ReportEntitiesParams
+from .schema import ExtractionResult
 
 _PROMPTS_DIR: Final = Path(__file__).parent / "prompts"
 
@@ -20,7 +20,7 @@ class ExtractorContextConfig(BaseModel):
 
 MANIFEST = ExtensionManifest(
     name="trajectory_extractor_context",
-    description="Inject the entity-extraction system prompt with JSON schema.",
+    description="Inject the symbol-extraction system prompt with JSON schema.",
     registers=(f"event:{BeforeAgentStartEvent.CHANNEL}",),
     config_schema=ExtractorContextConfig,
 )
@@ -33,7 +33,7 @@ def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:
     base_prompt = prompt_path.read_text(encoding="utf-8")
 
     schema = json.dumps(
-        ReportEntitiesParams.model_json_schema(),
+        ExtractionResult.model_json_schema(),
         indent=2,
         ensure_ascii=False,
     )

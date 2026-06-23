@@ -10,11 +10,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from typing import Final
+from typing import Any, Final
 
 from agentm.core.abi import (
     AgentMessage,
-    AssistantMessage,
     ExtensionAPI,
     FunctionTool,
     LoopConfig,
@@ -30,15 +29,15 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from .agents import extractor_scenario
-from .agents.entity_extractor.schema import ReportEntitiesParams
-from .data import JsonValue, ProviderSpec, extract_json, resolve_provider
+from .agents.entity_extractor.schema import ExtractionResult
+from .data import JsonValue, ProviderSpec, resolve_provider
 from .index import (
-    Entity,
-    EntityKind,
-    MentionType,
+    ReferenceKind,
     RelationType,
     Step,
     StepRole,
+    Symbol,
+    SymbolKind,
     TrajectoryIndex,
 )
 
@@ -66,13 +65,13 @@ class TrajectoryIndexConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="trajectory_index",
     description=(
-        "Build and query a semantic entity-relation index over the current "
+        "Build and query a semantic symbol-reference index over the current "
         "session trajectory using a small extraction model."
     ),
     registers=(
         "tool:index_trajectory",
-        "tool:search_entities",
-        "tool:get_entity_context",
+        "tool:search_symbols",
+        "tool:get_symbol_context",
     ),
     config_schema=TrajectoryIndexConfig,
 )
@@ -139,10 +138,11 @@ def _agentmsg_to_payload(msg: AgentMessage) -> dict[str, JsonValue]:
 def _clean_messages_to_steps(
     messages: list[dict[str, JsonValue]],
     run_id: str,
+    start_index: int = 0,
 ) -> list[Step]:
     """Convert clean messages to index Steps (for populating the in-memory index)."""
     steps: list[Step] = []
-    for i, msg in enumerate(messages):
+    for i, msg in enumerate(messages, start=start_index):
         msg_role = msg.get("role", "")
         role = _ROLE_MAP.get(str(msg_role), StepRole.USER)
         parts: list[str] = []
@@ -197,33 +197,38 @@ _MAX_RETRIES: Final = 3
 _RETRY_DELAY: Final = 5.0
 
 
-def _extract_json_from_text(messages: list[AgentMessage]) -> dict[str, JsonValue] | None:
-    """Extract a JSON object from the last assistant text response."""
-    for msg in reversed(messages):
-        if not isinstance(msg, AssistantMessage):
-            continue
-        for block in reversed(msg.content):
-            if not isinstance(block, TextContent):
-                continue
-            obj = extract_json(block.text)
-            if obj is not None:
-                return obj
-    return None
+def _try_parse_response(messages: list[AgentMessage]) -> tuple[ExtractionResult | None, str | None]:
+    """Try to parse an ExtractionResult from assistant messages."""
+    from .data import _try_parse_response as _parse
+
+    return _parse(messages)
 
 
 async def _run_extraction(
     api: ExtensionAPI,
     messages: list[dict[str, JsonValue]],
     provider: ProviderSpec | None,
-) -> ReportEntitiesParams | None:
-    prompt = json.dumps(messages, ensure_ascii=False, indent=2)
+    registry: list[dict[str, Any]] | None = None,
+) -> ExtractionResult | None:
+    from .data import _reindex_messages, _remap_turn_ids
+
+    reindexed, id_map = _reindex_messages(messages)
+
+    if registry:
+        prompt_data: dict[str, Any] = {
+            "known_symbols": registry,
+            "messages": reindexed,
+        }
+        prompt = json.dumps(prompt_data, ensure_ascii=False, indent=2)
+    else:
+        prompt = json.dumps(reindexed, ensure_ascii=False, indent=2)
 
     scenario = extractor_scenario()
     config = AgentSessionConfig(
         cwd=api.cwd,
         provider=provider,
         scenario=scenario,
-        purpose="trajectory_entity_extractor",
+        purpose="trajectory_symbol_extractor",
         loop_config=LoopConfig(max_turns=1),
         lineage={
             "kind": "trajectory_index_extraction",
@@ -236,10 +241,28 @@ async def _run_extraction(
             child = await api.spawn_child_session(config)
             try:
                 child_msgs: list[AgentMessage] = await child.prompt(prompt)
-                obj = _extract_json_from_text(child_msgs)
-                if obj:
-                    return ReportEntitiesParams.model_validate(obj)
-                logger.warning("extraction child returned no parseable JSON")
+                result, error = _try_parse_response(child_msgs)
+                if result:
+                    _remap_turn_ids(result, id_map)
+                    return result
+                if error:
+                    logger.warning(f"extraction parse failed: {error}")
+                    # Retry with error feedback in a new child
+                    retry_child = await api.spawn_child_session(config)
+                    try:
+                        retry_prompt = (
+                            f"Your previous output failed validation:\n{error}\n\n"
+                            f"Here is the input again:\n{prompt}\n\n"
+                            "Fix the errors and output valid JSON only."
+                        )
+                        retry_msgs = await retry_child.prompt(retry_prompt)
+                        result, _ = _try_parse_response(retry_msgs)
+                        if result:
+                            _remap_turn_ids(result, id_map)
+                            return result
+                    finally:
+                        with contextlib.suppress(Exception):
+                            await retry_child.shutdown()
                 return None
             finally:
                 with contextlib.suppress(Exception):
@@ -258,18 +281,18 @@ async def _run_extraction(
 # ---------------------------------------------------------------------------
 
 
-def _kind_from_str(s: str) -> EntityKind:
+def _kind_from_str(s: str) -> SymbolKind:
     try:
-        return EntityKind(s.lower())
+        return SymbolKind(s.lower())
     except ValueError:
-        return EntityKind.UNKNOWN
+        return SymbolKind.UNKNOWN
 
 
-def _mention_type_from_str(s: str) -> MentionType:
+def _ref_kind_from_str(s: str) -> ReferenceKind:
     try:
-        return MentionType(s.lower())
+        return ReferenceKind(s.lower())
     except ValueError:
-        return MentionType.UNKNOWN
+        return ReferenceKind.UNKNOWN
 
 
 def _relation_type_from_str(s: str) -> RelationType:
@@ -281,52 +304,58 @@ def _relation_type_from_str(s: str) -> RelationType:
 
 def _populate_index(
     index: TrajectoryIndex,
-    result: ReportEntitiesParams,
+    result: ExtractionResult,
     steps: list[Step],
 ) -> None:
     steps_by_id = {s.step_id: s for s in steps}
 
-    entity_map: dict[str, Entity] = {}
-    for ext_ent in result.entities:
-        entity = index.upsert_entity(
-            name=ext_ent.name,
-            kind=_kind_from_str(ext_ent.kind),
-            summary=ext_ent.summary,
-            aliases=ext_ent.aliases,
+    symbol_map: dict[str, Symbol] = {}
+    for ext_sym in result.symbols:
+        symbol = index.upsert_symbol(
+            name=ext_sym.name,
+            kind=_kind_from_str(ext_sym.kind),
+            summary=ext_sym.summary,
+            aliases=ext_sym.aliases,
         )
-        entity_map[ext_ent.name] = entity
+        symbol_map[ext_sym.name] = symbol
 
-    for ext_men in result.mentions:
-        ent = entity_map.get(ext_men.entity_name)
-        if not ent:
+    def _resolve(name: str) -> Symbol | None:
+        sym = symbol_map.get(name)
+        if sym is not None:
+            return sym
+        return index.resolve_symbol_by_name(name)
+
+    for ext_ref in result.references:
+        sym = _resolve(ext_ref.symbol_name)
+        if not sym:
             continue
-        step = steps_by_id.get(ext_men.turn_id)
+        step = steps_by_id.get(ext_ref.turn_id)
         if not step:
             continue
-        start = step.content.find(ext_men.text)
+        start = step.content.find(ext_ref.text)
         if start < 0:
             start = 0
-        index.add_mention(
-            entity=ent,
+        index.add_reference(
+            symbol=sym,
             step=step,
-            text=ext_men.text,
-            mention_type=_mention_type_from_str(ext_men.mention_type),
+            text=ext_ref.text,
+            kind=_ref_kind_from_str(ext_ref.kind),
             start=start,
-            end=start + len(ext_men.text) if start > 0 else len(ext_men.text),
+            end=start + len(ext_ref.text) if start > 0 else len(ext_ref.text),
             confidence=0.9,
         )
 
     for ext_rel in result.relations:
-        from_ent = entity_map.get(ext_rel.from_entity)
-        to_ent = entity_map.get(ext_rel.to_entity)
-        if not from_ent or not to_ent:
+        from_sym = _resolve(ext_rel.from_symbol)
+        to_sym = _resolve(ext_rel.to_symbol)
+        if not from_sym or not to_sym:
             continue
         step = steps_by_id.get(ext_rel.turn_id)
         if not step:
             continue
         index.add_relation(
-            from_entity=from_ent,
-            to_entity=to_ent,
+            from_symbol=from_sym,
+            to_symbol=to_sym,
             rel_type=_relation_type_from_str(ext_rel.relation_type),
             step=step,
             confidence=0.85,
@@ -349,28 +378,45 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
         if not clean_msgs:
             return ToolResult(content=[TextContent(type="text", text="No messages to index.")])
 
-        steps = _clean_messages_to_steps(clean_msgs, run_id)
-        for step in steps:
+        watermark = index.indexed_message_count
+        new_msgs = clean_msgs[watermark:]
+        if not new_msgs:
+            stats = index.stats(run_id)
+            return ToolResult(content=[TextContent(
+                type="text",
+                text=(
+                    f"No new messages. Index has "
+                    f"{stats.symbol_count} symbols, "
+                    f"{stats.reference_count} references, "
+                    f"{stats.relation_count} relations."
+                ),
+            )])
+
+        new_steps = _clean_messages_to_steps(new_msgs, run_id, start_index=watermark)
+        for step in new_steps:
             index.add_step(step)
 
+        registry = index.registry_snapshot() if watermark > 0 else None
         provider = _resolve_provider_safe(cfg.model)
-        result = await _run_extraction(api, clean_msgs, provider)
+        result = await _run_extraction(api, new_msgs, provider, registry=registry)
         if result is None:
             return ToolResult(
                 content=[TextContent(type="text", text="Extraction failed — check logs.")],
                 is_error=True,
             )
 
-        _populate_index(index, result, steps)
+        _populate_index(index, result, new_steps)
+        index.indexed_message_count = len(clean_msgs)
         stats = index.stats(run_id)
         return ToolResult(
             content=[
                 TextContent(
                     type="text",
                     text=(
-                        f"Indexed {stats.step_count} steps -> "
-                        f"{stats.entity_count} entities, "
-                        f"{stats.mention_count} mentions, "
+                        f"Indexed {len(new_msgs)} new messages "
+                        f"(total {stats.step_count} steps) -> "
+                        f"{stats.symbol_count} symbols, "
+                        f"{stats.reference_count} references, "
                         f"{stats.relation_count} relations."
                     ),
                 )
@@ -380,8 +426,9 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
     return FunctionTool(
         name="index_trajectory",
         description=(
-            "Build a semantic index over the current session's trajectory. "
-            "Extracts entities, mentions, and relations from all messages."
+            "Build or update the semantic index over the current session's "
+            "trajectory. Incrementally extracts symbols, references, and "
+            "relations from new messages since the last indexing."
         ),
         parameters={"type": "object", "properties": {}, "required": []},
         fn=_handle,
@@ -390,8 +437,8 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
 
 def _build_search_tool(api: ExtensionAPI) -> FunctionTool:
     class SearchParams(BaseModel):
-        query: str = Field(description="Search query (entity name, concept, or keyword)")
-        kinds: list[str] | None = Field(default=None, description="Filter by entity kinds")
+        query: str = Field(description="Search query (symbol name, concept, or keyword)")
+        kinds: list[str] | None = Field(default=None, description="Filter by symbol kinds")
         limit: int = Field(default=10, description="Max results")
 
     async def _handle(args: dict[str, JsonValue]) -> ToolResult:
@@ -407,34 +454,34 @@ def _build_search_tool(api: ExtensionAPI) -> FunctionTool:
             params.query,
             kinds=kind_filter,
             limit=params.limit,
-            include_mentions=True,
+            include_references=True,
             include_related=True,
         )
         if not results:
-            return ToolResult(content=[TextContent(type="text", text="No entities found.")])
+            return ToolResult(content=[TextContent(type="text", text="No symbols found.")])
 
         lines: list[str] = []
         for r in results:
-            ent = r.entity
+            sym = r.symbol
             lines.append(
-                f"- **{ent.canonical_name}** ({ent.kind.value}, score={r.score:.2f})  id={ent.id}"
+                f"- **{sym.canonical_name}** ({sym.kind.value}, score={r.score:.2f})  id={sym.id}"
             )
-            if ent.summary:
-                lines.append(f"  {ent.summary}")
-            if r.mentions:
-                refs = ", ".join(f"step {m.step_id}:{m.mention_type.value}" for m in r.mentions[:3])
-                lines.append(f"  mentions: {refs}")
+            if sym.summary:
+                lines.append(f"  {sym.summary}")
+            if r.references:
+                refs = ", ".join(f"step {ref.step_id}:{ref.kind.value}" for ref in r.references[:3])
+                lines.append(f"  references: {refs}")
             if r.related:
                 rels = ", ".join(
-                    f"{rel.entity.canonical_name}({rel.score:.2f})" for rel in r.related[:3]
+                    f"{rel.symbol.canonical_name}({rel.score:.2f})" for rel in r.related[:3]
                 )
                 lines.append(f"  related: {rels}")
 
         return ToolResult(content=[TextContent(type="text", text="\n".join(lines))])
 
     return FunctionTool(
-        name="search_entities",
-        description="Search for entities in the trajectory semantic index.",
+        name="search_symbols",
+        description="Search for symbols in the trajectory semantic index.",
         parameters=SearchParams,
         fn=_handle,
     )
@@ -442,7 +489,7 @@ def _build_search_tool(api: ExtensionAPI) -> FunctionTool:
 
 def _build_context_tool(api: ExtensionAPI) -> FunctionTool:
     class ContextParams(BaseModel):
-        entity_id: str = Field(description="Entity ID to get context for")
+        symbol_id: str = Field(description="Symbol ID to get context for")
 
     async def _handle(args: dict[str, JsonValue]) -> ToolResult:
         params = ContextParams.model_validate(args)
@@ -450,49 +497,49 @@ def _build_context_tool(api: ExtensionAPI) -> FunctionTool:
         assert isinstance(index, TrajectoryIndex)
 
         try:
-            ctx = index.get_context(params.entity_id)
+            ctx = index.get_context(params.symbol_id)
         except KeyError:
             return ToolResult(
-                content=[TextContent(type="text", text=f"Entity not found: {params.entity_id}")],
+                content=[TextContent(type="text", text=f"Symbol not found: {params.symbol_id}")],
                 is_error=True,
             )
 
         lines: list[str] = []
-        ent = ctx.entity
-        lines.append(f"# {ent.canonical_name} ({ent.kind.value})")
-        if ent.summary:
-            lines.append(f"\n{ent.summary}")
-        if ent.aliases:
-            lines.append(f"\nAliases: {', '.join(sorted(ent.aliases))}")
+        sym = ctx.symbol
+        lines.append(f"# {sym.canonical_name} ({sym.kind.value})")
+        if sym.summary:
+            lines.append(f"\n{sym.summary}")
+        if sym.aliases:
+            lines.append(f"\nAliases: {', '.join(sorted(sym.aliases))}")
 
         if ctx.definition:
             d = ctx.definition
-            lines.append(f'\n## Definition\nStep {d.step_id}: "{d.text}" ({d.mention_type.value})')
+            lines.append(f'\n## Definition\nStep {d.step_id}: "{d.text}" ({d.kind.value})')
 
         if ctx.timeline:
             lines.append("\n## Timeline")
             for item in ctx.timeline[:15]:
                 lines.append(
                     f"- [{item.step.role.value}] step {item.step.step_id}: "
-                    f'"{item.mention.text}" ({item.mention.mention_type.value})'
+                    f'"{item.reference.text}" ({item.reference.kind.value})'
                 )
 
         if ctx.related:
-            lines.append("\n## Related entities")
+            lines.append("\n## Related symbols")
             for rel in ctx.related[:10]:
                 rel_types = ", ".join(r.type.value for r in rel.relations[:3])
                 lines.append(
-                    f"- {rel.entity.canonical_name} ({rel.entity.kind.value}) "
+                    f"- {rel.symbol.canonical_name} ({rel.symbol.kind.value}) "
                     f"— {rel_types} (score={rel.score:.2f})"
                 )
 
         return ToolResult(content=[TextContent(type="text", text="\n".join(lines))])
 
     return FunctionTool(
-        name="get_entity_context",
+        name="get_symbol_context",
         description=(
-            "Get full context for a specific entity: definition, timeline, "
-            "related entities, and surrounding trajectory snippets."
+            "Get full context for a specific symbol: definition, timeline, "
+            "related symbols, and surrounding trajectory snippets."
         ),
         parameters=ContextParams,
         fn=_handle,
