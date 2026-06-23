@@ -22,10 +22,8 @@ The root `agentm` package stays free of RCA, observability, and DuckDB concerns.
 
 The default `manifest.yaml` and `manifest.baseline.yaml` do **not** mount
 the llmharness cognitive-audit adapter. To run rca with the
-extractor + auditor pipeline supervising the main agent, pick one of the
-`manifest.harness*.yaml` variants. The variant matrix (mode, cadence,
-auditor / reminder on or off, intended use) lives in
-[`_VARIANTS.md`](_VARIANTS.md) — read that first.
+extractor + auditor pipeline supervising the main agent, use the checked-in
+`rca:harness.sync` variant.
 
 One concrete invocation against a sandbox:
 
@@ -37,102 +35,11 @@ uv run agentm \
 ```
 
 Adapter behaviour (cadence, sync vs async, reminders on or off) is set
-**inside** the manifest's `llmharness.adapters.agentm` config block; the
-caller does not override it. Other variants:
+**inside** the manifest's `llmharness.atom` config block; the caller does
+not override it.
 
-* `rca:harness` — async, production cadence.
-* `rca:harness.sync` — sync, default for dataset collection.
-* `rca:harness.sync.opinions` / `.opinions10` — sync, auditor verdicts
-  recorded but reminders **not** injected (clean trajectory for SFT).
-* `rca:harness.sync.extractor5` — extractor-only variant (no auditor
-  side channel). Kept around as a cheap pipeline-equivalent baseline.
-* `rca:harness.live` — `harness.sync` + `contrib.extensions.live_inspector`
-  WebSocket server. Use for live-watching a single case from the
-  aegis-ui `Live Inspect` sub-app. **Don't** use this for dataset-
-  collection runs (the inspector buffers a per-session backlog).
-
-### Live inspection (single case, watch in browser)
-
-Minimum command — run from the AgentM repo root, no sandbox needed
-(`GitBackedResourceWriter` is lazy and never touches disk for RCA since
-no write tools are mounted). `.env` autoloads from `<cwd>/.env` and the
-workspace root, so provider creds don't need a manual `source`:
-
-```bash
-AGENTM_RCA_DATA_DIR=/home/ddq/AoyangSpace/dataset/rca/<case-id> \
-AGENTM_LIVE_INSPECT_URL_FILE=/tmp/ws.url \
-uv run agentm --scenario rca:harness.live "<your RCA prompt>"
-```
-
-The inspector prints `LIVE INSPECT: ws://127.0.0.1:<port>/inspect?root=<id>`
-on stderr at startup; with `AGENTM_LIVE_INSPECT_URL_FILE` the same URL is
-also written to that sidecar. Paste it into the aegis-ui *Live Inspect*
-Connection page to watch the main agent + every spawned extractor /
-auditor child in real time.
-
-The inspector binds to `127.0.0.1` by default — the browser must be on
-the same machine. For remote viewing, override in the manifest config
-(`bind: 0.0.0.0`) and add your own auth at the network layer, or open an
-SSH tunnel:
-
-```bash
-ssh -L <port>:127.0.0.1:<port> <agentm-host>
-```
-
-Detection is by manifest composition, not by name — the eval driver's
-`_scenario_mounts_harness()` loads the resolved manifest and checks for
-`llmharness.adapters.agentm` in the extension list. Renaming a variant
-or adding a new one does **not** require any string-pattern update.
-
-### Chained-fork intervention (`chained_fork`)
-
-> **Pair with an `opinions` variant, not the default `harness.sync`.**
-> `chained_fork` is an A/B counterfactual experiment: the control segment
-> must be a **clean baseline with no live reminder injection** so the
-> branches (which seed the reminder via `llmharness.replay.reminder_seed`)
-> are the only intervention. The default `rca:harness.sync` has
-> `enable_reminders: true` and therefore injects the auditor's first
-> surface into the control trajectory live — silently invalidating the
-> counterfactual. Use `rca:harness.sync.opinions` (5-turn) or
-> `rca:harness.sync.opinions10` (10-turn) instead; both set
-> `enable_reminders: false` so the auditor only writes opinions and
-> never mutates the control. See [`_VARIANTS.md`](_VARIANTS.md).
-
-When running the eval driver with `--ak chained_fork=true` (optionally
-`--ak max_interventions=N`, defaults to 10), the driver:
-
-1. Runs a **control** segment against the configured `scenario` —
-   no seeded reminder, no initial messages. (See the warning above:
-   the configured `scenario` must have `enable_reminders: false`, else
-   the control is no longer a clean baseline.)
-2. Replays the cognitive-audit pipeline offline over the control
-   trajectory with `stop_on_first_surface=True` to find the first
-   auditor firing that surfaces a reminder.
-3. If a reminder surfaced, forks a **branch** segment from the parent
-   trajectory at that turn with the reminder text seeded into the
-   child session via `llmharness.replay.reminder_seed`. The branch
-   replays under the same scenario.
-4. Repeats step 2-3 for each subsequent branch, threading the prior
-   segment's `CumulativeAuditState` into the next via the offline
-   driver's `seed_cumulative` / `start_turn` knobs. Stops on the first
-   silent auditor or after `max_interventions` branches.
-5. Writes a unified replay sidecar
-   (`<final_branch_session_log_id>.chained.jsonl`) via
-   `write_chained_replay` so the case viewer sees the full N-segment
-   chain.
-
-There is no separate "control scenario" anymore — every segment runs
-the same scenario; only the seeded prefix + reminder text differ.
-
-The returned `AgentResult.metadata` carries an `intervention_mode:
-"chained_fork"` entry plus a `chained_fork.segments` list describing
-each segment (`segment_index`, `session_log_id`, `is_control`,
-`fork_turn_index`, `reminder_text`, `surfaced_reminder_turn`, and the
-segment's full `_SessionRun` metadata).
-
-For the llmharness side of this story (public API, replay sidecar
-schema, profile / prompt knobs, prefix-replay flow), see
-`contrib/extensions/llmharness/README.md` and the docs it links to.
+Detection is by manifest composition, not by scenario name. Add
+`llmharness.atom` to the manifest to enable the audit pipeline.
 
 ## Eval-config environment variables
 

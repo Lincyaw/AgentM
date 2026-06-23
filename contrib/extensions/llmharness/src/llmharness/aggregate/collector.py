@@ -274,8 +274,8 @@ def collect_case(
 
     Sample-id resolution precedence: explicit ``sample_id_override`` >
     meta sidecar > ``None`` (case_id then derives from ``session_id``).
-    The overrides let the CLI inject case metadata when the run did not
-    mount ``llmharness.distill.binding`` (e.g. rca llm-eval runs).
+    The overrides let the CLI inject case metadata when no distill metadata
+    sidecar exists.
     """
     records = list(iter_records(replay_path))
     fork_tree_header = read_fork_tree_header(replay_path)

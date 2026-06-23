@@ -160,8 +160,7 @@ class NoPendingInput(TerminationCause):
     Surfaced by :meth:`AgentSession.tick` as the **default action** of the
     synthetic ``decide_turn_action`` it fires before any LLM call.
     ``final = False`` is load-bearing, not symmetric padding: it is what
-    permits an extension handler on the same channel (e.g.
-    ``llmharness.replay.reminder_seed``) to return :class:`Inject` and
+    permits an extension handler on the same channel to return :class:`Inject` and
     override the default — without that override, the loop never runs and
     the resume produces no new turn. The cause only appears on
     :class:`AgentEndEvent` when no handler injected; in that case the

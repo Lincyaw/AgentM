@@ -1,7 +1,7 @@
 """Offline seams for replay drivers.
 
 * :class:`StandaloneChildRunner` — spawns a top-level audit child via
-  :func:`llmharness.tools.replay.engine.run_phase_standalone` (no
+  :func:`llmharness.replay.engine.run_phase_standalone` (no
   ``api.spawn_child_session``).
 
 * :class:`InMemorySink` — drops every persisted entry into a Python list

@@ -1,22 +1,21 @@
 """``llmharness-aggregate`` CLI: replay sidecar(s) → per-case directories.
 
-Two input layouts, both writing the same canonical case-directory shape
-documented in ``docs/06-case-aggregation.md``:
+Two input layouts, both writing the same canonical case-directory shape:
 
-    replay   — walk ``<cwd>/.agentm/audit_replay/*.jsonl`` (live runs)
+    replay   — walk ``<cwd>/.agentm/audit_replay/*.jsonl`` (offline artifacts)
     one      — aggregate a single replay-format JSONL file
 
 Each takes ``--out`` for the destination ``cases/`` root, plus optional
 ``--sample-id`` / ``--dataset-name`` / ``--dataset-path`` overrides for
-runs that did not mount ``llmharness.distill.binding`` (so no meta
+runs that do not have ``llmharness.distill.binding`` metadata (so no meta
 sidecar is present).
 
 Examples::
 
-    # Live-run layout: every session under <cwd>/.agentm/audit_replay/
+    # Replay-artifact layout: every file under <cwd>/.agentm/audit_replay/
     llmharness-aggregate replay --cwd /run --out ./cases
 
-    # Single session from a live run
+    # Single replay artifact
     llmharness-aggregate replay --cwd /run --session-id abc123 --out ./cases
 
     # Single replay JSONL file (e.g. inspect a hand-edited record set)
@@ -111,7 +110,7 @@ def replay(
         Path,
         typer.Option(
             "--cwd",
-            help="Run directory containing .agentm/audit_replay/",
+            help="Run directory containing .agentm/audit_replay/ artifacts.",
             exists=True,
             file_okay=False,
             dir_okay=True,
@@ -134,7 +133,7 @@ def replay(
         typer.Option(
             "--sample-id",
             help=(
-                "Override case sample_id (e.g. for rca llm-eval runs without "
+                "Override case sample_id (e.g. for RCA eval artifacts without "
                 "distill.binding). Applies to every aggregated session — pair "
                 "with --session-id for per-sample runs."
             ),

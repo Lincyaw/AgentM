@@ -141,7 +141,7 @@ a **fully-qualified dotted module path** — there is no short-name resolution.
 
 ```bash
 uv run agentm --scenario rca \
-              -e contrib.extensions.llmharness.adapters.agentm:'{"mode":"sync"}' \
+              -e llmharness.atom:'{"mode":"sync"}' \
               "..."
 ```
 
@@ -212,7 +212,7 @@ subscriber writing OTel-flavored JSONL to
   variants (`manifest.harness.*.yaml`) compose the same extension set with
   different audit topologies. See its [README](contrib/scenarios/rca/README.md).
 - **`contrib/extensions/llmharness/`** — cognitive-audit pipeline. Mounts
-  via `llmharness.adapters.agentm`; subscribes `TurnEndEvent` to spawn
+  via `llmharness.atom`; subscribes `TurnEndEvent` to spawn
   extractor/auditor children and `DecideTurnActionEvent` to inject
   reminders into the main loop. Loose-coupled — rca scenarios opt in by
   manifest only. See its [README](contrib/extensions/llmharness/README.md).

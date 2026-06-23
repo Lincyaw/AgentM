@@ -1,7 +1,6 @@
 """Single-firing replay: re-run one recorded extractor/auditor firing.
 
-These functions back chain replay, the
-``llmharness-replay {extractor,auditor} --turn N`` CLI, and the RL
+These functions back chain replay, dev-checkout replay tooling, and the RL
 prompts exporter. A replay record already carries a finished
 ``payload`` + ``compose_kwargs``, so a firing needs none of the live
 machinery (cadence, cumulative state, sinks): rebuild the per-firing

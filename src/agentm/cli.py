@@ -752,9 +752,7 @@ def run_cmd(
             "-p",
             help=(
                 "User prompt to send to the agent. Optional when --resume / "
-                "--continue is set — in that case extensions on "
-                "decide_turn_action (e.g. llmharness.replay.reminder_seed) "
-                "supply the first message via Inject. For multi-turn / TUI "
+                "--continue is set and initial messages already exist. For multi-turn / TUI "
                 "use, run the channels gateway + agentm-terminal --format textual."
             ),
         ),
@@ -780,7 +778,7 @@ def run_cmd(
                 "Mount an extra atom on top of --scenario / auto-discovery. "
                 "Repeatable. Form: 'dotted.module.path' or "
                 '\'dotted.module.path:{"key":"value"}\' for inline JSON '
-                "config. Example: -e llmharness.adapters.agentm "
+                "config. Example: -e llmharness.atom "
                 "-e some.atom:'{\"k\":3}'. Use `agentm list-extensions` "
                 "to browse available atoms."
             ),

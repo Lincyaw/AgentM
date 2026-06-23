@@ -62,16 +62,6 @@ _EMPTY_MODEL_RCA_OUTPUT: dict[str, list[Any]] = {
     "root_causes": [],
 }
 
-# Module path of the llmharness cognitive-audit adapter. A scenario that
-# mounts this module is treated as a "harness scenario" by the eval
-# driver — it auto-wires the distill-binding atom so the offline
-# distillation pipeline can join replay records to ground truth.
-# Detection is by manifest composition (see :func:`_scenario_mounts_harness`),
-# not by scenario name — string-sniffing the scenario id silently breaks
-# when new variants are added.
-_HARNESS_ADAPTER_MODULE = "llmharness.atom"
-
-
 def _provider_name_from_base_url(base_url: str) -> str:
     """Derive a stable provider registry slug from a base URL.
 
@@ -199,7 +189,6 @@ class _SessionRun:
     session_id: str
     root_session_id: str
     session_log_id: str
-    audit_replay_path: str
 
 
 class AgentMAgent(BaseAgent):
@@ -416,6 +405,7 @@ class AgentMAgent(BaseAgent):
             LoopConfig,
             TextContent as _TextContent,
             ToolResultEvent,
+            text_message,
         )
         from agentm.core.runtime import AgentSession
         from agentm.core.runtime import create_agent_session
@@ -474,41 +464,11 @@ class AgentMAgent(BaseAgent):
                 self._provider, self._model
             )
 
-        # Auto-write a distill meta sidecar so ``llmharness-distill export``
-        # can pair this rollout's replay sidecar to ground truth without a
-        # hand-fabricated ``meta.json``. ``data_dir`` is the only stable
-        # per-sample identifier rcabench-platform exposes to agents (it does
-        # not forward ``sample.id`` via kwargs), so we use its basename as
-        # ``sample_id``. The binding atom is mounted dynamically per session
-        # rather than statically in the manifest because each sample needs a
-        # distinct id and an env-var fallback would race under ``-n>1``.
-        # Mount conditionally — binding is dead weight without the harness
-        # adapter that produces the replay sidecar in the first place.
-        # Detection: introspect the resolved scenario manifest, not the
-        # scenario name string. See :func:`_scenario_mounts_harness`.
-        extra_extensions: list[tuple[str, dict[str, Any]]] = []
-        if _scenario_mounts_harness(scenario):
-            sample_id = os.path.basename(data_dir.rstrip("/")) or "unknown"
-            extra_extensions.append(
-                (
-                    "llmharness.distill.binding",
-                    {
-                        "sample_id": sample_id,
-                        # No clean dataset_name source exists in this codepath
-                        # (rcabench-platform does not forward sample.dataset
-                        # to agents). Leave blank rather than hardcode a
-                        # single dataset; consumers that need it can read
-                        # ``dataset_path`` instead.
-                        "dataset_name": "",
-                        "dataset_path": data_dir,
-                    },
-                )
-            )
+        session_initial_messages = list(initial_messages or [])
         if seed_reminder_text:
-            extra_extensions.append(
-                (
-                    "llmharness.replay.reminder_seed",
-                    {"text": seed_reminder_text},
+            session_initial_messages.append(
+                text_message(
+                    f"<system-reminder>\n{seed_reminder_text}\n</system-reminder>"
                 )
             )
 
@@ -516,8 +476,8 @@ class AgentMAgent(BaseAgent):
             cwd=os.getcwd(),
             provider=(provider_module, provider_config),
             scenario=scenario,
-            extra_extensions=extra_extensions,
-            initial_messages=list(initial_messages or []),
+            extra_extensions=[],
+            initial_messages=session_initial_messages,
             bus=bus,
             loop_config=LoopConfig(max_turns=max_turns, max_tool_calls_per_turn=20),
         )
@@ -556,9 +516,6 @@ class AgentMAgent(BaseAgent):
         # is kept in metadata for completeness — it identifies the
         # parent's session-root span specifically.
         session_log_id = session.session_manager.get_session_id()
-        audit_replay_path = os.path.join(
-            os.getcwd(), ".agentm", "audit_replay", f"{session_log_id}.jsonl"
-        )
         metadata = {
             "model": self._model,
             "scenario": scenario,
@@ -567,7 +524,6 @@ class AgentMAgent(BaseAgent):
             "submission": submission_dump,
             "session_id": session.session_id,
             "session_log_id": session_log_id,
-            "audit_replay_path": audit_replay_path,
         }
         result = AgentResult(
             response=response,
@@ -585,41 +541,7 @@ class AgentMAgent(BaseAgent):
             session_id=session.session_id,
             root_session_id=session.root_session_id,
             session_log_id=session_log_id,
-            audit_replay_path=audit_replay_path,
         )
-
-
-def _scenario_mounts_harness(scenario: str) -> bool:
-    """True iff ``scenario`` mounts the llmharness cognitive-audit adapter.
-
-    Detected by loading the resolved scenario manifest and looking for
-    ``llmharness.atom`` in its extensions list. Replaces the
-    historical ``"harness" in scenario_name`` string-sniff so new harness
-    variants (or renames) don't silently miss the distill-binding wire-up.
-
-    Error policy: a malformed scenario manifest is a hard error — we let
-    ``ScenarioLoadError`` propagate so the rollout fails loudly rather
-    than silently producing an unjoinable replay sidecar. The only
-    swallowed case is "manifest legitimately not found on disk": the
-    loader wraps the underlying ``FileNotFoundError`` as
-    ``ScenarioLoadError(..., cause=FileNotFoundError(...))``. We
-    recognise this shape via the ``.cause`` attribute (the loader does
-    not chain with ``from exc``, so ``__cause__`` is None — inspect the
-    explicit attribute instead). The not-found case is logged at
-    WARNING so the wire-up failure is observable in stderr.
-    """
-    from agentm.extensions.loader import ScenarioLoadError, load_scenario
-
-    try:
-        extensions, _meta = load_scenario(scenario)
-    except ScenarioLoadError as exc:
-        if isinstance(exc.cause, FileNotFoundError):
-            logger.warning(
-                f"rca eval: scenario {scenario!r} not found; treating as non-harness (distill binding will not be mounted). Check AGENTM_PROJECT_ROOT and contrib/scenarios/ layout. ({exc})"
-            )
-            return False
-        raise
-    return any(module == _HARNESS_ADAPTER_MODULE for module, _ in extensions)
 
 
 def _run_metadata(run: _SessionRun) -> dict[str, Any]:
@@ -630,7 +552,6 @@ def _run_metadata(run: _SessionRun) -> dict[str, Any]:
         "session_id": run.session_id,
         "root_session_id": run.root_session_id,
         "session_log_id": run.session_log_id,
-        "audit_replay_path": run.audit_replay_path,
     }
 
 

@@ -28,7 +28,6 @@ dev = [
 ]
 
 [project.scripts]
-llmharness-replay = "llmharness.replay.cli:main"
 llmharness-distill = "llmharness.distill.cli:main"
 llmharness-aggregate = "llmharness.aggregate.cli:main"
 llmharness-eval = "llmharness.eval.telbench.cli:main"

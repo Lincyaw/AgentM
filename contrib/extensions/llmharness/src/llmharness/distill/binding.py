@@ -1,9 +1,10 @@
-"""atom + helper: sample-id binding for distill data collection.
+"""Optional sample-id metadata helper for distill data collection.
 
-The atom is mounted on the **main agent** session (the one running the
-target scenario, e.g. rca). At install time it reads the sample id from
-config-or-env and writes a small meta sidecar next to the replay log so
-the offline labeler can join records → GT.
+When mounted explicitly, this atom reads the sample id from config-or-env
+and writes a small meta sidecar next to replay artifacts so the offline
+labeler can join records to ground truth. It does not enable the online
+cognitive-audit pipeline; the supported online entrypoint remains
+``llmharness.atom``.
 
 Mount::
 
@@ -41,7 +42,7 @@ class DistillBindingConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="distill_binding",
     description=(
-        "Write a sample-id sidecar next to the replay log so the offline "
+        "Write a sample-id sidecar next to replay artifacts so the offline "
         "distill labeler can join trajectory records to ground truth."
     ),
     registers=(),
@@ -56,11 +57,10 @@ _DATASET_PATH_ENV: Final = "LLMHARNESS_DISTILL_DATASET"
 
 
 def meta_path_for(cwd: str | os.PathLike[str], session_id: str) -> Path:
-    """Canonical sidecar path. Mirrors ``replay.record.replay_log_path``.
+    """Canonical metadata sidecar path.
 
-    Keyed by ``session_id`` so the meta shares a stem with the replay
-    sidecar and the ``.agentm/observability/<session_id>.jsonl`` log;
-    ``aggregate`` / ``distill label`` pair the two by file stem.
+    Keyed by ``session_id`` so the metadata shares a stem with replay
+    artifacts and the ``.agentm/observability/<session_id>.jsonl`` log.
     """
     return Path(cwd) / ".agentm" / "audit_replay" / f"{session_id}.meta.json"
 

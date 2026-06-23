@@ -1,9 +1,10 @@
-"""Replay-record I/O.
+"""Replay-record I/O for offline artifacts.
 
-One JSONL line per phase invocation, written to
-``<cwd>/.agentm/audit_replay/<session_id>.jsonl`` during live runs.
-Each line is self-contained: it carries every input needed to rebuild the
-extension list + payload, plus the recorded output for diffing.
+One JSONL line represents one extractor or auditor phase invocation. The
+online ``llmharness.atom`` path persists audit state through AgentM session
+entries and ``.agentm/audit_ops/``; it does not write these replay records.
+Replay records remain the interchange format for offline fork-tree,
+aggregation, and distillation helpers.
 
 Identity vocabulary mirrors AgentM core (``agentm.core.abi.extension``):
 ``session_id`` is the per-session id (= the OTel span_id of the
@@ -67,8 +68,8 @@ class ReplayRecord:
     raw_assistant_messages: list[dict[str, Any]] = field(default_factory=list)
     """Serialized AssistantMessage content blocks from the child loop, in
     chronological order. Each entry is the JSON-friendly view of one block
-    produced by ``adapters.agentm._serialize_block`` — thinking blocks keep
-    ``{"type": "thinking", "text": "..."}``, tool_call blocks keep
+    produced by the capture path — thinking blocks keep
+    ``{"type": "thinking", "text": "..."}``, tool-call blocks keep
     ``{"type": "tool_call", "name": ..., "arguments": {...}}``.
 
     Empty list when the child made no LLM call (e.g. spawn_error) or when
@@ -148,16 +149,16 @@ class ReplayRecord:
         )
 
 def replay_log_path(cwd: str | os.PathLike[str], session_id: str) -> Path:
-    """Canonical sidecar path for a given session.
+    """Canonical path for an offline replay artifact.
 
     Keyed by ``session_id`` -- the per-session id that also names the
-    ``.agentm/observability/<session_id>.jsonl`` file -- so the sidecar
-    and its meta share a stem with the observability log.
+    ``.agentm/observability/<session_id>.jsonl`` file -- so replay artifacts
+    and optional meta files share a stem with the observability log.
     """
     return Path(cwd) / ".agentm" / "audit_replay" / f"{session_id}.jsonl"
 
 def audit_session_id(api: ExtensionAPI) -> str:
-    """The per-session id used to key sidecars: the persisted session_id,
+    """The per-session id used to key helper artifacts: the persisted session_id,
     falling back to the OTel trace_id for in-memory sessions.
 
     Prefers ``api.session.get_session_id()`` (the persisted
@@ -168,9 +169,9 @@ def audit_session_id(api: ExtensionAPI) -> str:
     unpersisted -- that branch keeps the existing behaviour for embedded
     SDK callers who never write a session file at all.
 
-    This is the canonical helper shared by every atom that keys a
-    sidecar (``adapters.agentm``, ``distill.binding``); it lives in this
-    lib module so atoms never import one another (§11).
+    This is the canonical helper for auxiliary artifacts such as
+    ``distill.binding`` metadata; it lives in this library module so atoms
+    never import one another (§11).
     """
     sid: str
     try:
@@ -183,7 +184,7 @@ def write_record(path: Path, record: ReplayRecord) -> None:
     """Append one record; create the parent dir if missing.
 
     Best-effort: any IOError is logged and swallowed so a replay-log
-    failure never breaks the live agent.
+    failure never breaks the caller.
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

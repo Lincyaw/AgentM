@@ -194,8 +194,8 @@ def forktree_replay_path(cwd: str | Path, root_session_log_id: str) -> Path:
 
     Keyed off the *root/control* backbone's session log id (the node the
     rca eval reports as its primary submission), with a ``.chained.jsonl``
-    suffix so the existing case-viewer discovery (via the root run's
-    ``audit_replay_path`` metadata) keeps finding it.
+    suffix so aggregate tooling can find the tree under
+    ``.agentm/audit_replay/``.
     """
     return Path(cwd) / ".agentm" / "audit_replay" / f"{root_session_log_id}.chained.jsonl"
 
