@@ -16,7 +16,7 @@ A. **Justifiability check.** Decide whether the selection makes sense
    of this context (no GT) agree that the selected findings are the ones
    most worth surfacing? If the selection seems arbitrary, motivated by
    information not in the context, or contradicts what the context
-   actually shows, set `justifiable_from_graph=false` and supply a
+   actually shows, set `justifiable_from_index=false` and supply a
    short `drop_reason`. The sample will then be dropped from training.
 
 B. **Reminder text.** If justifiable, produce a single short

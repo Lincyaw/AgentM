@@ -44,7 +44,7 @@ async def evaluate_instance(
     cwd: str,
     extractor_interval: int = 5,
     audit_interval: int = 5,
-    auditor_prompt: str = "telbench",
+    auditor_prompt: str = "minimal_index",
 ) -> EvalResult:
     """Run the llmharness pipeline on one TELBench instance and score."""
     from agentm.core.abi import AgentSessionConfig, AssistantMessage, ToolCallBlock
@@ -120,12 +120,12 @@ async def evaluate_instance(
                         firing_id=firing_id,
                     )
                 except Exception as exc:
-                    # extractor failure — continue with whatever graph we have
+                    # extractor failure — continue with whatever index we have
                     logger.warning("telbench: extractor firing failed: {}", exc)
 
         # --- Auditor ---
         if auditor_due:
-            events, edges, phases = cumulative.index_view()
+            events, edges, _phases = cumulative.index_view()
             if not events:
                 continue
 
@@ -137,9 +137,7 @@ async def evaluate_instance(
                     "auditor_context": {
                         "events": [e.to_dict() for e in events],
                         "edges": [ed.to_dict() for ed in edges],
-                        "phases": [p.to_dict() for p in phases],
                         "continuation_notes": list(cumulative.last_continuation_notes),
-                        "summary_threshold": 30,
                         "prompt_name": auditor_prompt,
                     },
                     "auditor_tools": {},

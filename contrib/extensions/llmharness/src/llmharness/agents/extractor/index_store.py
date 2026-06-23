@@ -156,11 +156,6 @@ _OP_TABLE: Final[dict[str, type[RecordUpsert | RecordDelete | LinkUpsert | LinkD
     "record_delete": RecordDelete,
     "link_upsert": LinkUpsert,
     "link_delete": LinkDelete,
-    # Historical op names accepted for old session logs and replay sidecars.
-    "node_upsert": RecordUpsert,
-    "node_delete": RecordDelete,
-    "edge_upsert": LinkUpsert,
-    "edge_delete": LinkDelete,
 }
 
 
@@ -187,16 +182,6 @@ class Index:
     records: dict[int, Event] = field(default_factory=dict)
     links: dict[tuple[int, int, str], Edge] = field(default_factory=dict)
 
-    @property
-    def nodes(self) -> dict[int, Event]:
-        """Compatibility view for legacy callers."""
-        return self.records
-
-    @property
-    def edges(self) -> dict[tuple[int, int, str], Edge]:
-        """Compatibility view for legacy callers."""
-        return self.links
-
     def records_list(self) -> list[Event]:
         """Records in insertion order."""
         return list(self.records.values())
@@ -204,14 +189,6 @@ class Index:
     def links_list(self) -> list[Edge]:
         """Links in insertion order."""
         return list(self.links.values())
-
-    def nodes_list(self) -> list[Event]:
-        """Compatibility alias for :meth:`records_list`."""
-        return self.records_list()
-
-    def edges_list(self) -> list[Edge]:
-        """Compatibility alias for :meth:`links_list`."""
-        return self.links_list()
 
 
 def fold_index(ops: Iterable[IndexOp]) -> Index:

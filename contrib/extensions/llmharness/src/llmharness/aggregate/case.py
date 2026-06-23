@@ -63,8 +63,8 @@ class FiringRecord:
 
 
 @dataclass(frozen=True)
-class GraphSnapshot:
-    """Cumulative graph state after one extractor firing."""
+class IndexSnapshot:
+    """Cumulative index state after one extractor firing."""
 
     after_extractor_firing: int  # 1-based
     turn_index: int
@@ -80,7 +80,7 @@ class CaseData:
     main_agent_messages: list[dict[str, Any]]
     extractor_firings: list[FiringRecord] = field(default_factory=list)
     auditor_firings: list[FiringRecord] = field(default_factory=list)
-    graph_snapshots: list[GraphSnapshot] = field(default_factory=list)
+    index_snapshots: list[IndexSnapshot] = field(default_factory=list)
     verdicts: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -107,8 +107,8 @@ class CaseLayout:
         return self.root / "auditor"
 
     @property
-    def graph_dir(self) -> Path:
-        return self.root / "event_graph"
+    def index_dir(self) -> Path:
+        return self.root / "context_index"
 
     @property
     def verdicts_path(self) -> Path:
@@ -128,7 +128,7 @@ class CaseLayout:
         ) / f"{sequence:03d}_turn_{turn_index:03d}.json"
 
     def snapshot_path(self, after_firing: int) -> Path:
-        return self.graph_dir / f"after_extractor_{after_firing:03d}.json"
+        return self.index_dir / f"after_extractor_{after_firing:03d}.json"
 
 
 __all__ = [
@@ -137,6 +137,6 @@ __all__ = [
     "CaseMeta",
     "FiringRecord",
     "FiringStatus",
-    "GraphSnapshot",
+    "IndexSnapshot",
     "Phase",
 ]

@@ -48,13 +48,11 @@ class LLMHarnessConfig(BaseModel):
     mode: Literal["async", "sync"] = "async"
     extractor_interval_turns: int = 1
     audit_interval_turns: int = 3
-    audit_summary_threshold: int = 30
     extractor_tool_call_budget: int | None = None
     prompt_override_extractor: str | None = None
     prompt_override_auditor: str | None = None
     extractor_prompt: str = "default"
     auditor_prompt: str = "minimal_index"
-    auditor_context_mode: Literal["graph", "index", "both"] = "index"
     shutdown_timeout_s: float = 600.0
     extractor_provider: ProviderConfig | None = None
     auditor_provider: ProviderConfig | None = None
@@ -389,7 +387,6 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     enable_auditor = cfg.enable_auditor
     enable_reminders = cfg.enable_reminders
     finalize_tool = cfg.finalize_tool
-    summary_threshold = cfg.audit_summary_threshold
     tool_call_budget = cfg.extractor_tool_call_budget
 
     extractor_provider = _resolve_provider(cfg.extractor_model, cfg.extractor_provider)
@@ -478,7 +475,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
 
         # --- Auditor ---
         if auditor_due:
-            events, edges, phases = cumulative.index_view()
+            events, edges, _phases = cumulative.index_view()
             trajectory = _serialize_trajectory(list(messages))
             context_index = build_context_index(
                 trajectory=trajectory,
@@ -508,13 +505,10 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                     "auditor_context": {
                         "events": [e.to_dict() for e in events],
                         "edges": [ed.to_dict() for ed in edges],
-                        "phases": [p.to_dict() for p in phases],
                         "continuation_notes": list(cumulative.last_continuation_notes),
-                        "summary_threshold": summary_threshold,
                         "prompt_name": cfg.auditor_prompt,
                         "trajectory_snapshot": trajectory,
                         "context_index": context_index,
-                        "context_mode": cfg.auditor_context_mode,
                         "methodology": loaded_skills,
                     },
                     "auditor_tools": {},

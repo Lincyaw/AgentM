@@ -187,7 +187,7 @@ def _build_readme(case: CaseData) -> str:
         "| `main_agent.jsonl` | full main-agent message trajectory (one per line, AgentM-native shape) |",
         "| `extractor/NNN_turn_T.json` | one extractor firing's input + output |",
         "| `auditor/NNN_turn_T.json` | one auditor firing's input + verdict |",
-        "| `event_graph/after_extractor_NNN.json` | accumulated events + edges after that firing |",
+        "| `context_index/after_extractor_NNN.json` | accumulated records + links after that firing |",
         "| `verdicts.jsonl` | verdict timeline (one verdict per line) |",
         "| `trajectory.jsonl` | flat review timeline pointing into the artefacts |",
         "",
@@ -213,7 +213,7 @@ def write_case(case: CaseData, out_dir: Path) -> Path:
     case_dir.mkdir(parents=True, exist_ok=True)
     layout.extractor_dir.mkdir(exist_ok=True)
     layout.auditor_dir.mkdir(exist_ok=True)
-    layout.graph_dir.mkdir(exist_ok=True)
+    layout.index_dir.mkdir(exist_ok=True)
 
     _write_json(layout.meta_path, asdict(case.meta))
     _write_jsonl(layout.main_agent_path, case.main_agent_messages)
@@ -225,7 +225,7 @@ def write_case(case: CaseData, out_dir: Path) -> Path:
     for fr in case.auditor_firings:
         path = layout.firing_path("auditor", fr.sequence, fr.turn_index)
         _write_json(path, _firing_payload(fr))
-    for snap in case.graph_snapshots:
+    for snap in case.index_snapshots:
         _write_json(
             layout.snapshot_path(snap.after_extractor_firing),
             {

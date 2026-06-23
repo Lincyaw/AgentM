@@ -6,7 +6,7 @@ GRPO/PPO/DPO drivers). It is intentionally:
 
 * **Pure** — no I/O, no LLM, no atom-infra imports. Operates only on
   plain ``dict``-shaped ``ToolEvent`` lists so an external trainer can
-  pull it in without dragging the audit-graph machinery along.
+  pull it in without dragging the audit-index machinery along.
 * **Deterministic** — same inputs ⇒ same outputs; safe to call inside
   a training loop's reward function.
 * **Defensive** — empty / malformed input collapses to an all-zero

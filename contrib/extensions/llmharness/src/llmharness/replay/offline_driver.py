@@ -147,7 +147,7 @@ async def replay_pipeline_over_trajectory(
                     with contextlib.suppress(TypeError, ValueError):
                         state.turn_texts[int(k)] = str(v)
 
-                recent_records_raw = data.get("recent_records") or data.get("recent_graph") or []
+                recent_records_raw = data.get("recent_records") or []
                 from llmharness.schema import Edge, Event
                 recent_events: list[Event] = []
                 for entry in recent_records_raw:
@@ -157,7 +157,7 @@ async def replay_pipeline_over_trajectory(
                 state.recent_records = tuple(recent_events)
                 state.recent_record_dict = {e.id: e for e in recent_events}
 
-                recent_links_raw = data.get("recent_links") or data.get("recent_edges") or []
+                recent_links_raw = data.get("recent_links") or []
                 recent_edges: list[Edge] = []
                 for entry in recent_links_raw:
                     if isinstance(entry, dict):
@@ -192,7 +192,7 @@ async def replay_pipeline_over_trajectory(
 
         # --- Auditor ---
         if auditor_due:
-            events, edges, phases = cumulative.index_view()
+            events, edges, _phases = cumulative.index_view()
             from llmharness.atom import _extract_loaded_skills, _serialize_trajectory
             from llmharness.context_index import build_context_index
 
@@ -205,17 +205,12 @@ async def replay_pipeline_over_trajectory(
             loaded_skills = _extract_loaded_skills(prefix)
             prompt_text = auditor_settings.base_prompt or "You are the cognitive-audit auditor."
             aud_prompt = build_auditor_system_prompt(
-                events=events,
-                edges=edges,
-                phases=phases,
                 findings=[],
                 check_errors={},
                 continuation_notes=list(cumulative.last_continuation_notes),
-                summary_threshold=auditor_settings.summary_threshold,
                 base_prompt=prompt_text,
                 methodology=loaded_skills,
                 context_index=context_index,
-                context_mode=auditor_settings.context_mode,
             )
             tools_config: dict[str, Any] = {
                 "tools": list(auditor_settings.tools or (SUBMIT_VERDICT_TOOL_NAME,))

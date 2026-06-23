@@ -35,9 +35,6 @@ class ExtractorContextConfig(BaseModel):
     turn_texts: dict[str, str] = {}
     recent_records: list[dict[str, Any]] = []
     recent_links: list[dict[str, Any]] = []
-    # Read-only compatibility for old replay records.
-    recent_graph: list[dict[str, Any]] = []
-    recent_edges: list[dict[str, Any]] = []
     next_event_id: int = 1
     new_turns: list[dict[str, Any]] = []
     tool_call_budget: int | None = None
@@ -106,10 +103,8 @@ def _build_directive(
 def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:
     turn_texts: dict[int, str] = {int(k): str(v) for k, v in config.turn_texts.items()}
 
-    recent_record_data = config.recent_records or config.recent_graph
-    recent_link_data = config.recent_links or config.recent_edges
-    recent_events = tuple(Event.from_dict(e) for e in recent_record_data)
-    recent_edges = tuple(Edge.from_dict(e) for e in recent_link_data)
+    recent_events = tuple(Event.from_dict(e) for e in config.recent_records)
+    recent_edges = tuple(Edge.from_dict(e) for e in config.recent_links)
 
     state = ExtractionState(
         turn_texts=turn_texts,

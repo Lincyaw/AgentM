@@ -261,7 +261,7 @@ async def offline_audit(
         # --- Auditor ---
         if auditor_due:
             stop_after_auditor = False
-            events, edges, phases = cumulative.index_view()
+            events, edges, _phases = cumulative.index_view()
             from .atom import _extract_loaded_skills, _serialize_trajectory
             from .context_index import build_context_index
 
@@ -283,13 +283,10 @@ async def offline_audit(
             aud_ctx_config: dict[str, Any] = {
                 "events": [e.to_dict() for e in events],
                 "edges": [ed.to_dict() for ed in edges],
-                "phases": [p.to_dict() for p in phases],
                 "continuation_notes": list(cumulative.last_continuation_notes),
-                "summary_threshold": 30,
                 "prompt_name": auditor_prompt,
                 "trajectory_snapshot": trajectory,
                 "context_index": context_index,
-                "context_mode": "index",
                 "methodology": loaded_skills,
             }
             aud_extensions: list[tuple[str, dict[str, Any]]] = [

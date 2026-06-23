@@ -9,7 +9,7 @@ Two outputs:
   ``delete_*`` -> ``finalize_extraction``). Each
   assistant message carries ``<think>`` wrapping reconstructed from the
   matching block of ``raw_assistant_messages``. The student learns to
-  drive an incremental graph build, not to dump one batch — that was
+  drive incremental context-index edits, not to dump one batch — that was
   the v18 single-shot ``submit_events_batch`` shape, which produced bad
   SFT signal because witness retries dominated the trajectory.
 

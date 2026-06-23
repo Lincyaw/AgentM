@@ -349,7 +349,7 @@ def build_context_index(
     events: Sequence[Event] = (),
     edges: Sequence[Edge] = (),
 ) -> ContextIndex:
-    """Build a sparse navigation index from visible trajectory and graph data."""
+    """Build a sparse navigation index from visible trajectory and index records."""
 
     entity_data: dict[str, dict[str, Any]] = {}
     links: list[IndexLink] = []

@@ -13,7 +13,7 @@ from llmharness.distill.binding import read_sample_meta
 from llmharness.replay.fork_tree import read_fork_tree_header
 from llmharness.replay.record import ReplayRecord, iter_records
 
-from .case import CaseData, CaseMeta, FiringRecord, FiringStatus, GraphSnapshot
+from .case import CaseData, CaseMeta, FiringRecord, FiringStatus, IndexSnapshot
 
 
 def _firing_input_payload(rec: ReplayRecord) -> dict[str, Any]:
@@ -25,7 +25,6 @@ def _firing_input_payload(rec: ReplayRecord) -> dict[str, Any]:
     ck = rec.compose_kwargs or {}
     out: dict[str, Any] = {
         "payload": rec.payload,
-        "summary_threshold": ck.get("summary_threshold"),
     }
     if rec.phase == "auditor":
         tools = ck.get("tools") or []
@@ -71,12 +70,12 @@ def _to_firing(rec: ReplayRecord, sequence: int) -> FiringRecord:
     )
 
 
-def _attach_auditor_graph_refs(
+def _attach_auditor_index_refs(
     *,
     auditor_firings: list[FiringRecord],
     extractor_firings: list[FiringRecord],
 ) -> list[FiringRecord]:
-    """Annotate auditor inputs with the graph snapshot they reviewed.
+    """Annotate auditor inputs with the index snapshot they reviewed.
 
     The web case viewer expects every auditor firing to point at the most
     recent extractor snapshot. Older aggregate output omitted this because
@@ -92,16 +91,16 @@ def _attach_auditor_graph_refs(
             and ext.ts_ns <= auditor.ts_ns
             and ext.turn_index <= auditor.turn_index
         ]
-        graph_ref = prior[-1].sequence if prior else 0
+        index_ref = prior[-1].sequence if prior else 0
         input_payload = dict(auditor.input_payload)
-        input_payload["graph_snapshot_ref"] = graph_ref
+        input_payload["index_snapshot_ref"] = index_ref
         out.append(replace(auditor, input_payload=input_payload))
     return out
 
 
-def _accumulate_graph(
+def _accumulate_index(
     extractor_firings: list[FiringRecord],
-) -> list[GraphSnapshot]:
+) -> list[IndexSnapshot]:
     """One snapshot per ok extractor firing, accumulating events + edges.
 
     Event ids are already global — the live adapter hands the extractor
@@ -116,7 +115,7 @@ def _accumulate_graph(
     """
     cum_events: list[dict[str, Any]] = []
     cum_edges: list[dict[str, Any]] = []
-    snapshots: list[GraphSnapshot] = []
+    snapshots: list[IndexSnapshot] = []
     cum_by_id: dict[int, dict[str, Any]] = {}
     for fr in extractor_firings:
         if fr.status != "ok" or fr.output is None:
@@ -167,7 +166,7 @@ def _accumulate_graph(
                 cum_by_id[ev["id"]] = ev
         cum_edges = [*cum_edges, *new_edges, *external_edges]
         snapshots.append(
-            GraphSnapshot(
+            IndexSnapshot(
                 after_extractor_firing=fr.sequence,
                 turn_index=fr.turn_index,
                 events=cum_events,
@@ -284,7 +283,7 @@ def collect_case(
 
     extractor_firings = [_to_firing(r, seq) for seq, r in enumerate(extractor_records, start=1)]
     auditor_firings = [_to_firing(r, seq) for seq, r in enumerate(auditor_records, start=1)]
-    auditor_firings = _attach_auditor_graph_refs(
+    auditor_firings = _attach_auditor_index_refs(
         auditor_firings=auditor_firings,
         extractor_firings=extractor_firings,
     )
@@ -341,7 +340,7 @@ def collect_case(
         main_agent_messages=_main_agent_messages(auditor_records, extractor_records),
         extractor_firings=extractor_firings,
         auditor_firings=auditor_firings,
-        graph_snapshots=_accumulate_graph(extractor_firings),
+        index_snapshots=_accumulate_index(extractor_firings),
         verdicts=verdicts,
     )
 

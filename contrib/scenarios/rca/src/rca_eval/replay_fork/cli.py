@@ -133,7 +133,7 @@ def run(
     ] = "doubao",
     auditor_prompt: Annotated[
         str, typer.Option("--auditor-prompt", help="auditor prompt variant"),
-    ] = "minimal",
+    ] = "minimal_index",
     extractor_interval: Annotated[
         int, typer.Option("--extractor-interval"),
     ] = 5,

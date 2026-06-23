@@ -248,7 +248,6 @@ class Phase:
 # ---------------------------------------------------------------------------
 
 AUDIT_INDEX_OP = "llmharness.audit_index_op"
-AUDIT_GRAPH_OP = "llmharness.audit_graph_op"
 VERDICT = "llmharness.verdict"
 EXTRACTOR_CURSOR = "llmharness.extractor_cursor"
 REMINDER_DELIVERED = "llmharness.reminder_delivered"
@@ -266,7 +265,6 @@ RECENT_VERDICTS_FOR_AUDITOR = 5
 
 __all__ = [
     "AUDIT_ERROR",
-    "AUDIT_GRAPH_OP",
     "AUDIT_INDEX_OP",
     "AUDIT_NO_CALL",
     "EXTRACTOR_CURSOR",

@@ -49,10 +49,6 @@ class CumulativeAuditState:
         self._cached_len = len(self.ops)
         return self._cached_view
 
-    def graph_view(self) -> tuple[tuple[Event, ...], tuple[Edge, ...], tuple[Phase, ...]]:
-        """Compatibility alias for old replay helpers."""
-        return self.index_view()
-
     def next_event_id(self) -> int:
         events, _edges, _phases = self.index_view()
         return max((e.id for e in events), default=0) + 1
@@ -98,7 +94,7 @@ class CumulativeAuditState:
             payload = entry.payload
             if not isinstance(payload, dict):
                 continue
-            if entry.type in {_et.AUDIT_INDEX_OP, _et.AUDIT_GRAPH_OP}:
+            if entry.type == _et.AUDIT_INDEX_OP:
                 try:
                     ops.append(parse_op(payload))
                 except (KeyError, ValueError, TypeError):

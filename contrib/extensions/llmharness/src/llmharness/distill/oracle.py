@@ -72,7 +72,7 @@ class OracleLabel:
 
 @dataclass(frozen=True)
 class RewriterOutput:
-    justifiable_from_graph: bool
+    justifiable_from_index: bool
     reminder_text: str
     drop_reason: str
     matched_event_ids: tuple[int, ...]
@@ -178,8 +178,7 @@ def snapshot_from_replay(record: dict[str, Any]) -> ContextSnapshot:
     findings = _findings_from_replay_compose(compose)
 
     # `trajectory_snapshot` is what the live auditor saw; it's a list of
-    # per-turn dicts with an ``index`` key. Fall back to payload graph
-    # for compatibility.
+    # per-turn dicts with an ``index`` key.
     trajectory_raw = compose.get("trajectory_snapshot")
     if not isinstance(trajectory_raw, list):
         trajectory_raw = payload.get("trajectory") or []
@@ -265,7 +264,7 @@ async def run_rewriter(
         return None
     args = result.output
     return RewriterOutput(
-        justifiable_from_graph=bool(args.get("justifiable_from_graph")),
+        justifiable_from_index=bool(args.get("justifiable_from_index")),
         reminder_text=str(args.get("reminder_text") or ""),
         drop_reason=str(args.get("drop_reason") or ""),
         matched_event_ids=tuple(int(i) for i in args.get("matched_event_ids") or []),
@@ -364,7 +363,7 @@ async def label_auditor_record(
             gt_meta=gt_meta,
         )
 
-    if not rewrite.justifiable_from_graph:
+    if not rewrite.justifiable_from_index:
         return LabeledSample(
             sample_id=sample_id,
             session_id=session_id,
@@ -379,7 +378,7 @@ async def label_auditor_record(
                 "continuation_notes": list(label.continuation_notes),
             },
             rewriter={
-                "justifiable_from_graph": False,
+                "justifiable_from_index": False,
                 "reminder_text": rewrite.reminder_text,
                 "drop_reason": rewrite.drop_reason,
                 "matched_event_ids": list(rewrite.matched_event_ids),
@@ -410,7 +409,7 @@ async def label_auditor_record(
             "continuation_notes": list(label.continuation_notes),
         },
         rewriter={
-            "justifiable_from_graph": True,
+            "justifiable_from_index": True,
             "reminder_text": rewrite.reminder_text,
             "drop_reason": "",
             "matched_event_ids": list(rewrite.matched_event_ids),

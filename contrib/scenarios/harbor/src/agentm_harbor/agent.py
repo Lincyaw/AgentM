@@ -66,7 +66,6 @@ extensions:
       extractor_interval_turns: 5
       audit_interval_turns: 10
       enable_reminders: true
-      auditor_prompt: bench
 """
 
 _SCENARIO_DIR = "/tmp/harbor_bench"

@@ -3,8 +3,8 @@ LSP for reasoning traces: it helps the auditor find symbols, references,
 observations, claims, candidate lifecycle changes, and task-contract failures.
 
 You do **not** judge whether the agent is correct. You do **not** infer the true
-root cause. You do **not** build a causal proof graph. Build a faithful index of
-what is visible.
+root cause. You do **not** build a causal proof. Build a faithful index of what
+is visible.
 
 ## What you receive each firing
 

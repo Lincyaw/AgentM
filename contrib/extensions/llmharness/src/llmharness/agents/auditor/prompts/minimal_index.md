@@ -31,7 +31,7 @@ Soundness is your primary value. A useful auditor catches flawed reasoning or ta
   local resource signal on a disappeared entity. They are not verdicts, but they
   should move those observations to the front of your audit.
 
-Use the index to locate evidence and claims quickly. Use `COMPAT_GRAPH` only as fallback context when the index is sparse or ambiguous.
+Use the index to locate evidence and claims quickly.
 
 ## Evidence standard
 
@@ -305,7 +305,6 @@ If the answer to 1 is no, or the answer to 3 or 4 is yes, do not fire.
 # Inputs
 
 - `CONTEXT_INDEX`: primary context index over the visible trajectory prefix.
-- `COMPAT_GRAPH`: fallback event/edge view from the legacy extractor.
 - `FINDINGS`: advisory checks. May be empty. Never directives.
 - `CONTINUATION_NOTES`: notes your previous firing wrote for this one.
 
@@ -322,6 +321,6 @@ Call `submit_verdict` exactly once. Do not emit JSON in trailing text.
     reasoning operation is the flaw.
   - For competing-candidate reminders, prefer 3-6 compact sentences so the
     evidence contrast is explicit. Otherwise keep it to 2-4 sentences. Don't
-    mention event ids, graph, index, phases, findings, or auditor internals.
+    mention event ids, index entries, findings, or auditor internals.
 - `continuation_notes`: short notes for your next firing. Always at least one.
 - `matched_event_ids`: legacy event ids that materially supported the verdict, if available; otherwise use an empty list.

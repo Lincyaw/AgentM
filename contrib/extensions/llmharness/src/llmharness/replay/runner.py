@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
-from typing import Any, Literal
+from typing import Any
 
 from llmharness.agents.auditor.context import build_auditor_system_prompt
 from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
@@ -21,24 +21,13 @@ from llmharness.agents.extractor.tools import (
 )
 from llmharness.context_index import build_context_index
 from llmharness.replay.record import ReplayRecord
-from llmharness.schema import Edge, Event, Finding, Phase
+from llmharness.schema import Edge, Event, Finding
 
 from .engine import PhaseResult, run_phase_standalone
 
 # ---------------------------------------------------------------------------
 # Settings dataclasses (replace old runtime.runner Settings)
 # ---------------------------------------------------------------------------
-
-ContextMode = Literal["graph", "index", "both"]
-
-
-def _coerce_context_mode(raw: Any) -> ContextMode:
-    if raw == "graph":
-        return "graph"
-    if raw == "both":
-        return "both"
-    return "index"
-
 
 class ExtractorSettings:
     """Minimal config needed to replay an extractor firing."""
@@ -87,14 +76,10 @@ class AuditorSettings:
         self,
         *,
         base_prompt: str | None = None,
-        summary_threshold: int = 30,
-        context_mode: ContextMode = "index",
         tools: tuple[str, ...] | None = None,
         observability_config: dict[str, Any] | None = None,
     ) -> None:
         self.base_prompt = base_prompt
-        self.summary_threshold = summary_threshold
-        self.context_mode = context_mode
         self.tools = tools
         self.observability_config = observability_config
 
@@ -113,11 +98,8 @@ class AuditorSettings:
             base_prompt = load_auditor_prompt(prompt_name)
         tools_raw = compose_kwargs.get("tools")
         tools = tuple(tools_raw) if isinstance(tools_raw, (list, tuple)) else None
-        context_mode = _coerce_context_mode(compose_kwargs.get("context_mode"))
         return cls(
             base_prompt=base_prompt,
-            summary_threshold=int(compose_kwargs.get("summary_threshold", 30)),
-            context_mode=context_mode,
             tools=tools,
             observability_config=compose_kwargs.get("observability_config"),
         )
@@ -210,20 +192,14 @@ async def replay_extractor_record(
 
     # Enrich recent index records and populate state.
     payload = dict(record.payload or {})
-    graph_obj = payload.get("graph")
-    graph_raw: dict[str, Any] = graph_obj if isinstance(graph_obj, dict) else {}
     recent_records_raw = (
         payload.get("recent_records")
         or payload.get("records")
-        or graph_raw.get("nodes")
-        or payload.get("recent_graph")
         or []
     )
     recent_links_raw = (
         payload.get("recent_links")
         or payload.get("links")
-        or graph_raw.get("edges")
-        or payload.get("recent_edges")
         or []
     )
     enriched_recent: list[dict[str, Any]] = []
@@ -318,10 +294,10 @@ async def replay_auditor_record(
     provider_override: tuple[str, dict[str, Any]] | None = None,
     prompt_override: str | None = None,
 ) -> PhaseResult:
-    """Run auditor on a recorded graph + payload.
+    """Run auditor on a recorded context-index payload.
 
     Composes auditor extensions from ``record.compose_kwargs`` (events /
-    edges / phases / findings / continuation_notes / tools) and passes
+    edges / findings / continuation_notes / tools) and passes
     ``record.payload`` to the child as the user message verbatim.
     """
     if record.phase != "auditor":
@@ -334,7 +310,6 @@ async def replay_auditor_record(
     ck = record.compose_kwargs or {}
     events_t = tuple(_coerce_schema_list(Event, ck.get("events") or []))
     edges_t = tuple(_coerce_schema_list(Edge, ck.get("edges") or []))
-    phases_t = tuple(_coerce_schema_list(Phase, ck.get("phases") or []))
     raw_context_index = ck.get("context_index")
     context_index = dict(raw_context_index) if isinstance(raw_context_index, dict) else None
     if context_index is None:
@@ -346,16 +321,11 @@ async def replay_auditor_record(
                 edges=edges_t,
             ).to_dict()
     prompt_text = build_auditor_system_prompt(
-        events=events_t,
-        edges=edges_t,
-        phases=phases_t,
         findings=_coerce_schema_list(Finding, ck.get("findings") or []),
         check_errors=dict(ck.get("check_errors") or {}),
         continuation_notes=list(ck.get("continuation_notes") or []),
-        summary_threshold=settings.summary_threshold,
         base_prompt=settings.base_prompt or None,
         context_index=context_index,
-        context_mode=settings.context_mode,
     )
     tools_config: dict[str, Any] = {"tools": list(settings.tools or (SUBMIT_VERDICT_TOOL_NAME,))}
     _AUDITOR_TOOLS = "llmharness.agents.auditor.tools"

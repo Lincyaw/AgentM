@@ -11,7 +11,7 @@ from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
 
 from llmharness.context_index import build_context_index
-from llmharness.schema import Edge, Event, Finding, Phase
+from llmharness.schema import Edge, Event, Finding
 
 # ---------------------------------------------------------------------------
 # Prompt loading
@@ -40,57 +40,17 @@ def load_auditor_prompt(name: str = "minimal_index") -> str:
 # ---------------------------------------------------------------------------
 
 
-def _degrade_event(ev_dict: dict[str, object]) -> dict[str, object]:
-    d: dict[str, object] = {
-        "id": ev_dict.get("id"),
-        "kind": ev_dict.get("kind"),
-        "summary": ev_dict.get("summary"),
-        "source_turns": ev_dict.get("source_turns", []),
-    }
-    if "status" in ev_dict and ev_dict["status"] is not None:
-        d["status"] = ev_dict["status"]
-    return d
-
-
-def _degrade_edge(ed_dict: dict[str, object]) -> dict[str, object]:
-    d: dict[str, object] = {
-        "src": ed_dict.get("src"),
-        "dst": ed_dict.get("dst"),
-        "kind": ed_dict.get("kind"),
-        "reason": ed_dict.get("reason"),
-    }
-    if "role" in ed_dict and ed_dict["role"] is not None:
-        d["role"] = ed_dict["role"]
-    return d
-
-
 def build_auditor_system_prompt(
     *,
-    events: tuple[Event, ...],
-    edges: tuple[Edge, ...],
-    phases: tuple[Phase, ...] = (),
     findings: list[Finding],
     check_errors: dict[str, str],
     continuation_notes: list[str],
-    summary_threshold: int = 30,
     base_prompt: str | None = None,
     methodology: list[str] | None = None,
     context_index: dict[str, Any] | None = None,
-    context_mode: Literal["graph", "index", "both"] = "index",
 ) -> str:
     """Assemble the auditor system prompt for one firing."""
     framing = base_prompt if base_prompt is not None else load_auditor_prompt("minimal_index")
-    degraded = len(events) > summary_threshold
-    show_index = context_mode in {"index", "both"} and context_index is not None
-    show_graph = context_mode in {"graph", "both"} or not show_index
-
-    if degraded:
-        events_payload = [_degrade_event(ev.to_dict()) for ev in events]
-        edges_payload = [_degrade_edge(ed.to_dict()) for ed in edges]
-    else:
-        events_payload = [ev.to_dict() for ev in events]
-        edges_payload = [ed.to_dict() for ed in edges]
-
     findings_payload = [f.to_dict() for f in findings]
 
     sections: list[str] = [framing.rstrip(), ""]
@@ -107,7 +67,7 @@ def build_auditor_system_prompt(
             sections.append(skill_text.strip())
         sections.append("")
 
-    if show_index:
+    if context_index is not None:
         sections.append("## CONTEXT_INDEX (primary navigation view)")
         sections.append(
             "This is an LSP-style index over the visible trajectory prefix. "
@@ -116,37 +76,9 @@ def build_auditor_system_prompt(
         )
         sections.append(json.dumps(context_index, ensure_ascii=False))
         sections.append("")
-
-    if phases and show_graph:
-        section_name = "COMPAT_PHASES" if show_index else "PHASES"
-        sections.append(f"## {section_name} (merged basic blocks)")
-        sections.append(
-            f"phases ({len(phases)} total). Each phase wraps one or more raw "
-            "events; ``member_event_ids`` lists them in order. Consecutive "
-            "``act`` events are coalesced into ``act_run`` blocks; "
-            "``task`` / ``hyp`` / ``dec`` / ``concl`` always stay singleton. "
-            "Reason at this level by default; consult the raw events block "
-            "below when a specific witness needs verification."
-        )
-        sections.append(json.dumps([p.to_dict() for p in phases], ensure_ascii=False))
-        sections.append("")
-
-    if show_graph:
-        section_name = "COMPAT_GRAPH" if show_index else "GRAPH"
-        sections.append(f"## {section_name}")
-        sections.append(
-            f"events ({len(events_payload)} total"
-            + (
-                f", degraded — threshold={summary_threshold}, witness fields stripped)"
-                if degraded
-                else ")"
-            )
-            + ":"
-        )
-        sections.append(json.dumps(events_payload, ensure_ascii=False))
-        sections.append("")
-        sections.append(f"edges ({len(edges_payload)} total):")
-        sections.append(json.dumps(edges_payload, ensure_ascii=False))
+    else:
+        sections.append("## CONTEXT_INDEX (primary navigation view)")
+        sections.append("{}")
         sections.append("")
 
     sections.append("## FINDINGS (advisory)")
@@ -173,7 +105,6 @@ def build_auditor_trajectory_prompt(
     base_prompt: str | None = None,
     methodology: list[str] | None = None,
     context_index: dict[str, Any] | None = None,
-    context_mode: Literal["trajectory", "index", "both"] = "index",
 ) -> str:
     """Assemble the auditor system prompt for a trajectory-mode firing."""
     framing = (
@@ -181,9 +112,6 @@ def build_auditor_trajectory_prompt(
         if base_prompt is not None
         else load_auditor_prompt("trajectory")
     )
-    show_index = context_mode in {"index", "both"} and context_index is not None
-    show_trajectory = context_mode in {"trajectory", "both"} or not show_index
-
     sections: list[str] = [framing.rstrip(), ""]
 
     if methodology:
@@ -198,19 +126,15 @@ def build_auditor_trajectory_prompt(
             sections.append(skill_text.strip())
         sections.append("")
 
-    if show_index:
+    if context_index is not None:
         sections.append("## CONTEXT_INDEX (primary navigation view)")
         sections.append(json.dumps(context_index, ensure_ascii=False))
         sections.append("")
 
-    if show_trajectory:
-        section_name = "COMPAT_TRAJECTORY" if show_index else "TRAJECTORY"
-        sections.append(f"## {section_name}")
-        sections.append(
-            f"conversation turns ({len(trajectory)} total):"
-        )
-        sections.append(json.dumps(trajectory, ensure_ascii=False))
-        sections.append("")
+    sections.append("## TRAJECTORY")
+    sections.append(f"conversation turns ({len(trajectory)} total):")
+    sections.append(json.dumps(trajectory, ensure_ascii=False))
+    sections.append("")
 
     sections.append("## CONTINUATION_NOTES (from your prior firing)")
     sections.append(json.dumps(list(continuation_notes), ensure_ascii=False))
@@ -227,21 +151,18 @@ def build_auditor_trajectory_prompt(
 class AuditorContextConfig(BaseModel):
     events: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
-    phases: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
     check_errors: dict[str, str] = {}
     continuation_notes: list[str] = []
-    summary_threshold: int = 30
     prompt_name: str = "minimal_index"
     trajectory_snapshot: list[dict[str, Any]] | None = None
-    mode: Literal["graph", "trajectory"] = "graph"
+    mode: Literal["index", "trajectory"] = "index"
     context_index: dict[str, Any] | None = None
-    context_mode: Literal["graph", "index", "both"] = "index"
     methodology: list[str] = []
 
 MANIFEST = ExtensionManifest(
     name="auditor_context",
-    description="Build the auditor system prompt from raw graph data.",
+    description="Build the auditor system prompt from the context index.",
     registers=("event:before_agent_start",),
     config_schema=AuditorContextConfig,
 )
@@ -249,7 +170,6 @@ MANIFEST = ExtensionManifest(
 def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
     events = tuple(Event.from_dict(e) for e in config.events)
     edges = tuple(Edge.from_dict(e) for e in config.edges)
-    phases = tuple(Phase.from_dict(p) for p in config.phases)
     findings = [Finding.from_dict(f) for f in config.findings]
 
     base_prompt = load_auditor_prompt(config.prompt_name)
@@ -263,34 +183,21 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
         ).to_dict()
 
     if config.mode == "trajectory" and config.trajectory_snapshot is not None:
-        trajectory_context_mode: Literal["trajectory", "index", "both"]
-        if config.context_mode == "both":
-            trajectory_context_mode = "both"
-        elif config.context_mode == "index":
-            trajectory_context_mode = "index"
-        else:
-            trajectory_context_mode = "trajectory"
         prompt_text = build_auditor_trajectory_prompt(
             trajectory=config.trajectory_snapshot,
             continuation_notes=config.continuation_notes,
             base_prompt=base_prompt,
             methodology=meth,
             context_index=context_index,
-            context_mode=trajectory_context_mode,
         )
     else:
         prompt_text = build_auditor_system_prompt(
-            events=events,
-            edges=edges,
-            phases=phases,
             findings=findings,
             check_errors=config.check_errors,
             continuation_notes=config.continuation_notes,
-            summary_threshold=config.summary_threshold,
             base_prompt=base_prompt,
             methodology=meth,
             context_index=context_index,
-            context_mode=config.context_mode,
         )
 
     def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:

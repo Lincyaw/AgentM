@@ -39,24 +39,24 @@ SUBMIT_REWRITE_TOOL_NAME = "submit_rewrite"
 SUBMIT_REWRITE_PARAMETERS: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "justifiable_from_graph": {
+        "justifiable_from_index": {
             "type": "boolean",
             "description": (
                 "True iff the upstream selection can be defended using "
-                "ONLY graph-visible information. False = drop the sample."
+                "ONLY context-index-visible information. False = drop the sample."
             ),
         },
         "reminder_text": {
             "type": "string",
             "description": (
                 "Short methodological reminder (≤ 40 words). Empty when "
-                "justifiable_from_graph=false."
+                "justifiable_from_index=false."
             ),
         },
         "drop_reason": {
             "type": "string",
             "description": (
-                "When justifiable_from_graph=false, a one-sentence reason. Empty otherwise."
+                "When justifiable_from_index=false, a one-sentence reason. Empty otherwise."
             ),
         },
         "matched_event_ids": {
@@ -69,7 +69,7 @@ SUBMIT_REWRITE_PARAMETERS: dict[str, Any] = {
         },
     },
     "required": [
-        "justifiable_from_graph",
+        "justifiable_from_index",
         "reminder_text",
         "drop_reason",
         "matched_event_ids",

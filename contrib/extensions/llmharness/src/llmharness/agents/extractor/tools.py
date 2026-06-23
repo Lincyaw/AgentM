@@ -283,42 +283,6 @@ class ExtractionState:
         if self.recent_record_dict or self.recent_link_dict or self.pending_ops:
             self._refold()
 
-    @property
-    def recent_graph(self) -> tuple[Event, ...]:
-        """Compatibility alias for old replay code."""
-        return self.recent_records
-
-    @recent_graph.setter
-    def recent_graph(self, value: tuple[Event, ...]) -> None:
-        self.recent_records = value
-
-    @property
-    def recent_graph_dict(self) -> dict[int, Event]:
-        """Compatibility alias for old replay code."""
-        return self.recent_record_dict
-
-    @recent_graph_dict.setter
-    def recent_graph_dict(self, value: dict[int, Event]) -> None:
-        self.recent_record_dict = value
-
-    @property
-    def recent_edges_dict(self) -> dict[tuple[int, int, str], Edge]:
-        """Compatibility alias for old replay code."""
-        return self.recent_link_dict
-
-    @recent_edges_dict.setter
-    def recent_edges_dict(self, value: dict[tuple[int, int, str], Edge]) -> None:
-        self.recent_link_dict = value
-
-    @property
-    def pending_graph(self) -> Index:
-        """Compatibility alias for old replay code."""
-        return self.pending_index
-
-    @pending_graph.setter
-    def pending_graph(self, value: Index) -> None:
-        self.pending_index = value
-
     def _persist_op(self, op: IndexOp) -> None:
         if self.ops_file is None:
             return
