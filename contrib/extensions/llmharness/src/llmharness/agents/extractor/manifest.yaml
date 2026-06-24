@@ -1,9 +1,0 @@
-name: extractor
-description: >
-  Cognitive audit extractor: incremental context-index builder.
-
-extensions:
-  - module: agentm.extensions.builtin.observability
-  - module: agentm.extensions.builtin.operations
-  - module: llmharness.agents.extractor.context
-  - module: llmharness.agents.extractor.tools

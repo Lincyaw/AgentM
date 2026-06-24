@@ -1,8 +1,8 @@
 """Offline cognitive audit over a recorded trajectory.
 
-Public API for running the extractor + auditor pipeline offline against
-an existing trajectory and returning surface points (where the auditor
-would intervene). Designed to compose with ``SessionStore.fork()``:
+Public API for running the auditor pipeline offline against an existing
+trajectory and returning surface points (where the auditor would
+intervene). Designed to compose with ``SessionStore.fork()``:
 
     surfaces = await offline_audit(messages, cwd=cwd, provider=provider)
     for s in surfaces:
@@ -33,10 +33,9 @@ __all__ = ["SurfacePoint", "offline_audit"]
 
 @dataclass(frozen=True)
 class AuditFiring:
-    """One extractor+auditor firing pair."""
+    """One auditor firing."""
 
     turn_number: int
-    extractor_session_id: str | None
     auditor_session_id: str | None
     surfaced: bool
 
@@ -58,7 +57,7 @@ class OfflineAuditResult:
 
 
 # ---------------------------------------------------------------------------
-# Internal: run a single child session (extractor or auditor)
+# Internal: run a single child session (auditor)
 # ---------------------------------------------------------------------------
 
 
@@ -156,13 +155,12 @@ async def offline_audit(
     *,
     cwd: str,
     provider: tuple[str, dict[str, Any]],
-    extractor_interval: int = 5,
     audit_interval: int = 5,
     auditor_prompt: str = "minimal_index",
     stop_on_first_surface: bool = False,
     min_surface_turn_index: int = 0,
 ) -> OfflineAuditResult:
-    """Run extractor + auditor offline over *messages*, return audit result.
+    """Run auditor offline over *messages*, return audit result.
 
     The result contains surface points (where the auditor would intervene)
     and per-firing session ids for trace inspection.  Set
@@ -176,7 +174,6 @@ async def offline_audit(
     ``"trajectory_coverage"``).
     """
     from .agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-    from .atom import _prepare_extractor_data
 
     assert len(messages) > 0, "offline_audit: empty message list"
 
@@ -184,8 +181,6 @@ async def offline_audit(
     surfaces: list[SurfacePoint] = []
     firings: list[AuditFiring] = []
 
-    _EXT_CTX = "llmharness.agents.extractor.context"
-    _EXT_TOOLS = "llmharness.agents.extractor.tools"
     _AUD_TOOLS = "llmharness.agents.auditor.tools"
     _OBS = "agentm.extensions.builtin.observability"
     _OPS = "agentm.extensions.builtin.operations"
@@ -193,100 +188,29 @@ async def offline_audit(
     turn_bounds = _turn_end_prefix_lengths(messages)
     logger.info(
         f"offline_audit: {len(messages)} messages, {len(turn_bounds)} turns, "
-        f"firing at extractor={extractor_interval} auditor={audit_interval}"
+        f"firing at auditor={audit_interval}"
     )
-
-    total_ext_ops = 0
 
     for turn_number, prefix_len in enumerate(turn_bounds, start=1):
         prefix = messages[:prefix_len]
         auditor_due = (turn_number % audit_interval) == 0
-        extractor_due = (turn_number % extractor_interval) == 0 or auditor_due
-
-        # --- Extractor ---
-        ext_sid: str | None = None
-        if extractor_due:
-            data = _prepare_extractor_data(prefix, cumulative, None)
-            assert data is not None, (
-                f"extractor turn {turn_number}: _prepare_extractor_data returned None "
-                f"(prefix_len={prefix_len}, cursor={cumulative.cursor_last_turn_index})"
-            )
-
-            from pathlib import Path as _Path
-
-            firing_id = cumulative.firing_id_counter
-            ops_path = _Path(cwd) / ".agentm" / "audit_ops" / f"offline_{firing_id}.jsonl"
-            with contextlib.suppress(FileNotFoundError):
-                ops_path.unlink()
-
-            ctx_config = dict(data)
-            ctx_config["prompt_name"] = "default"
-            ctx_config["ops_file"] = str(ops_path)
-
-            extensions: list[tuple[str, dict[str, Any]]] = [
-                (_OBS, {}),
-                (_OPS, {}),
-                (_EXT_CTX, ctx_config),
-                (_EXT_TOOLS, {}),
-            ]
-            payload_json = json.dumps(data, ensure_ascii=False, default=str)
-            try:
-                ext_result = await _run_phase(
-                    cwd=cwd,
-                    extensions=extensions,
-                    provider=provider,
-                    payload=payload_json,
-                    terminal_tool="finalize_extraction",
-                    purpose="cognitive_audit_extractor_offline",
-                )
-                ext_sid = ext_result.session_id
-
-                if ext_result.error:
-                    logger.warning(f"  extractor turn={turn_number} FAILED: {ext_result.error} (sid={ext_sid})")
-                else:
-                    from .atom import _read_ops_file
-
-                    ops = _read_ops_file(ops_path)
-                    n_ops = len(ops) if ops else 0
-                    total_ext_ops += n_ops
-
-                    if n_ops == 0:
-                        logger.warning(f"  extractor turn={turn_number}: 0 ops (LLM did not produce index edits) sid={ext_sid}")
-                    else:
-                        cumulative.absorb_extractor_firing(
-                            firing_ops=ops,
-                            firing_cursor=data["window_hi"],
-                            firing_id=firing_id,
-                        )
-                        logger.info(f"  extractor turn={turn_number} ops={n_ops} sid={ext_sid}")
-            except Exception:
-                logger.exception(f"extractor firing CRASHED at turn {turn_number}")
 
         # --- Auditor ---
         if auditor_due:
             stop_after_auditor = False
-            events, edges = cumulative.index_view()
             from .atom import _extract_loaded_skills, _serialize_trajectory
             from .context_index import build_context_index
 
             trajectory = _serialize_trajectory(prefix)
             context_index = build_context_index(
                 trajectory=trajectory,
-                events=events,
-                edges=edges,
+                symbols=[],
+                references=[],
             ).to_dict()
             loaded_skills = _extract_loaded_skills(prefix)
 
-            if not events:
-                logger.warning(
-                    f"  auditor turn={turn_number}: index is EMPTY (all extractors failed or produced 0 ops), "
-                    f"auditor will have nothing to judge. total_ext_ops so far={total_ext_ops}"
-                )
-
             _AUD_CTX = "llmharness.agents.auditor.context"
             aud_ctx_config: dict[str, Any] = {
-                "events": [e.to_dict() for e in events],
-                "edges": [ed.to_dict() for ed in edges],
                 "continuation_notes": list(cumulative.last_continuation_notes),
                 "prompt_name": auditor_prompt,
                 "trajectory_snapshot": trajectory,
@@ -301,8 +225,6 @@ async def offline_audit(
             ]
             aud_payload = json.dumps(
                 {
-                    "records": [e.to_dict() for e in events],
-                    "links": [ed.to_dict() for ed in edges],
                     "context_index": context_index,
                     "recent_verdicts": list(cumulative.recent_verdicts),
                     "continuation_notes_from_prior_firing": list(
@@ -356,11 +278,10 @@ async def offline_audit(
                             stop_after_auditor = stop_on_first_surface
 
             fire_mark = " ★ SURFACE" if surfaced else ""
-            logger.info(f"  auditor  turn={turn_number} index_records={len(events)} sid={aud_result.session_id}{fire_mark}")
+            logger.info(f"  auditor  turn={turn_number} sid={aud_result.session_id}{fire_mark}")
             firings.append(
                 AuditFiring(
                     turn_number=turn_number,
-                    extractor_session_id=ext_sid if extractor_due else None,
                     auditor_session_id=aud_result.session_id,
                     surfaced=surfaced,
                 )
@@ -368,5 +289,5 @@ async def offline_audit(
             if stop_after_auditor:
                 break
 
-    logger.info(f"offline_audit done: {len(firings)} firings, {len(surfaces)} surfaces, {total_ext_ops} total index ops")
+    logger.info(f"offline_audit done: {len(firings)} firings, {len(surfaces)} surfaces")
     return OfflineAuditResult(surfaces=surfaces, firings=firings)
