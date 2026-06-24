@@ -60,18 +60,27 @@ class StandaloneChildRunner:
         context_index: dict[str, Any] | None = None,
         recent_verdicts: list[dict[str, Any]] | None = None,
         continuation_notes_from_prior_firing: list[str] | None = None,
+        trajectory: list[dict[str, Any]] | None = None,
+        symbols: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Run one auditor firing as a top-level session.
 
         Returns a dict with keys: verdict, raw_blocks, error, latency_ms.
         """
         _AUD_TOOLS = "llmharness.agents.auditor.tools"
+        _IDX_TOOLS = "llmharness.agents.auditor.index_tools"
         _OBS = "agentm.extensions.builtin.observability"
         _OPS = "agentm.extensions.builtin.operations"
         _SYS = "agentm.extensions.builtin.system_prompt"
         extensions: list[tuple[str, dict[str, Any]]] = [
             (_OBS, {}), (_OPS, {}),
             (_AUD_TOOLS, dict(tools_config)),
+            (_IDX_TOOLS, {
+                "trajectory": trajectory or [],
+                "symbols": symbols or [],
+                "references": references or [],
+            }),
             (_SYS, {"prompt": prompt_text}),
         ]
 

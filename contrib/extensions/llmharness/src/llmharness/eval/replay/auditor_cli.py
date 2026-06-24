@@ -73,7 +73,7 @@ def _resolve_provider(model_name: str) -> tuple[str, dict[str, Any]] | None:
         logger.error(f"model profile {model_name!r} not found")
         return None
     for desc in DEFAULT_PROVIDER_DESCRIPTORS:
-        if desc.id == profile.provider:
+        if desc.id == profile.provider and desc.extension_module is not None:
             return (desc.extension_module, dict(profile.to_build_config()))
     logger.error(f"no extension module for provider {profile.provider!r}")
     return None

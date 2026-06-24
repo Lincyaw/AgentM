@@ -144,6 +144,9 @@ async def replay_pipeline_over_trajectory(
                 context_index=context_index,
                 recent_verdicts=list(cumulative.recent_verdicts),
                 continuation_notes_from_prior_firing=list(cumulative.last_continuation_notes),
+                trajectory=trajectory,
+                symbols=resolved_symbols,
+                references=resolved_references,
             )
             verdict = aud_result.get("verdict")
             if verdict is not None:

@@ -365,6 +365,11 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                         "methodology": loaded_skills,
                     },
                     "auditor_tools": {},
+                    "auditor_index_tools": {
+                        "trajectory": trajectory,
+                        "symbols": [],
+                        "references": [],
+                    },
                 },
                 provider=auditor_provider,
             )

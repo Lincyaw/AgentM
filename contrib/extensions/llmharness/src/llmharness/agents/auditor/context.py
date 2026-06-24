@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -39,6 +40,30 @@ def load_auditor_prompt(name: str = "minimal_index") -> str:
 # ---------------------------------------------------------------------------
 
 
+def _build_index_summary(context_index: dict[str, Any]) -> str:
+    """Build a compact summary of the context index for the system prompt."""
+    entities = context_index.get("entities", [])
+    observations = context_index.get("observations", [])
+    candidates = context_index.get("candidates", [])
+    turns = context_index.get("turns", [])
+    if not entities and not turns:
+        return ""
+    lines: list[str] = []
+    lines.append(f"Trajectory: {len(turns)} turns, {len(entities)} entities, {len(observations)} observations")
+    type_counts = Counter(e.get("type", "unknown") for e in entities)
+    if type_counts:
+        lines.append(f"Entity types: {dict(type_counts)}")
+    state_counts = Counter(c.get("state", "?") for c in candidates)
+    if state_counts:
+        lines.append(f"Candidate states: {dict(state_counts)}")
+    attention_hints = context_index.get("attention_hints", [])
+    if attention_hints:
+        lines.append(f"Attention hints: {len(attention_hints)}")
+        for h in attention_hints[:3]:
+            lines.append(f"  - [{h.get('kind', '?')}] {h.get('summary', '')[:200]}")
+    return "\n".join(lines)
+
+
 def build_auditor_system_prompt(
     *,
     check_errors: dict[str, str],
@@ -64,19 +89,23 @@ def build_auditor_system_prompt(
             sections.append(skill_text.strip())
         sections.append("")
 
+    sections.append("## INDEX TOOLS")
+    sections.append(
+        "You have tools to query the trajectory and symbol table:\n"
+        "- `get_turn(turn_index)` — read the actual content of a specific turn\n"
+        "- `search_entities(query, kind?)` — search symbols by name or kind\n"
+        "- `get_entity_timeline(name)` — which turns reference an entity, with what kind\n"
+        "- `get_coverage(kind?)` — coverage summary: queried / in_results / mentioned_only / never_referenced\n\n"
+        "Use these tools to VERIFY your observations before making claims. "
+        "Do not assume what the agent did — read the actual turns."
+    )
     if context_index is not None:
-        sections.append("## CONTEXT_INDEX (primary navigation view)")
-        sections.append(
-            "This is an LSP-style index over the visible trajectory prefix. "
-            "Use it to locate entities, observations, claims, candidate lifecycle "
-            "events, obligations, and contract failures. It is not a causal proof."
-        )
-        sections.append(json.dumps(context_index, ensure_ascii=False))
-        sections.append("")
-    else:
-        sections.append("## CONTEXT_INDEX (primary navigation view)")
-        sections.append("{}")
-        sections.append("")
+        summary = _build_index_summary(context_index)
+        if summary:
+            sections.append("")
+            sections.append("### Index overview")
+            sections.append(summary)
+    sections.append("")
 
     if check_errors:
         sections.append("## CHECK_ERRORS (non-blocking)")
