@@ -11,7 +11,6 @@ from agentm.extensions import ExtensionManifest
 from pydantic import BaseModel
 
 from llmharness.context_index import build_context_index
-from llmharness.schema import Edge, Event
 
 # ---------------------------------------------------------------------------
 # Prompt loading
@@ -144,8 +143,8 @@ def build_auditor_trajectory_prompt(
 
 
 class AuditorContextConfig(BaseModel):
-    events: list[dict[str, Any]] = []
-    edges: list[dict[str, Any]] = []
+    symbols: list[dict[str, Any]] = []
+    references: list[dict[str, Any]] = []
     check_errors: dict[str, str] = {}
     continuation_notes: list[str] = []
     prompt_name: str = "minimal_index"
@@ -162,17 +161,14 @@ MANIFEST = ExtensionManifest(
 )
 
 def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
-    events = tuple(Event.from_dict(e) for e in config.events)
-    edges = tuple(Edge.from_dict(e) for e in config.edges)
-
     base_prompt = load_auditor_prompt(config.prompt_name)
     meth = config.methodology or None
     context_index = config.context_index
     if context_index is None and config.trajectory_snapshot is not None:
         context_index = build_context_index(
             trajectory=config.trajectory_snapshot,
-            events=events,
-            edges=edges,
+            symbols=config.symbols,
+            references=config.references,
         ).to_dict()
 
     if config.mode == "trajectory" and config.trajectory_snapshot is not None:

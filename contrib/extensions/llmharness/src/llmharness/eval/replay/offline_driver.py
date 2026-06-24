@@ -1,33 +1,30 @@
 """Offline driver: replay the audit pipeline over a bare trajectory.
 
 Takes a captured baseline run's ``final_messages`` and re-runs the
-extractor + auditor pipeline against it *offline*, without re-executing
-the parent agent.
+auditor pipeline against it *offline*, without re-executing the parent
+agent.
 
 The driver directly orchestrates AgentSession-based child spawns via
-StandaloneChildRunner, managing cadence/windowing/cumulative-state
-threading internally.
+StandaloneChildRunner, managing cadence/cumulative-state threading
+internally.
 """
 
 from __future__ import annotations
 
-import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import AgentMessage, AssistantMessage
-from loguru import logger
 
 from llmharness.schema import Reminder
 from llmharness.state import CumulativeAuditState
 
 from .offline import InMemorySink, StandaloneChildRunner
-from .runner import AuditorSettings, ExtractorSettings
+from .runner import AuditorSettings
 
 __all__ = [
     "AuditorSettings",
-    "ExtractorSettings",
     "OfflineRunResult",
     "SurfaceFiring",
     "replay_pipeline_over_trajectory",
@@ -68,9 +65,7 @@ async def replay_pipeline_over_trajectory(
     cwd: str,
     session_id: str,
     provider: tuple[str, dict[str, Any]] | None,
-    extractor_settings: ExtractorSettings,
     auditor_settings: AuditorSettings,
-    extractor_interval: int = 5,
     audit_interval: int = 5,
     enable_auditor: bool = True,
     stop_on_first_surface: bool = True,
@@ -79,23 +74,28 @@ async def replay_pipeline_over_trajectory(
     child: StandaloneChildRunner | None = None,
     seed_cumulative: CumulativeAuditState | None = None,
     start_turn: int = 1,
-    skip_extractor: bool = False,
+    symbols: list[dict[str, Any]] | None = None,
+    references: list[dict[str, Any]] | None = None,
     trigger_registry: Any | None = None,
     trace_id: str | None = None,
+    # Deprecated no-ops kept for backward compat
+    extractor_settings: Any | None = None,
+    extractor_interval: int = 5,
+    skip_extractor: bool = False,
 ) -> OfflineRunResult:
     """Replay the cognitive-audit pipeline over a captured trajectory.
 
-    This is a simplified version that drives extractor + auditor children
-    over the trajectory, managing cadence and cumulative state.
-
-    Note: This is a compatibility shim. The full HarnessRunner machinery
-    was removed; this function provides the same external contract with
-    simpler internals. Complex features (trigger_registry, sidecar writing)
-    are reduced to their essential behavior.
+    This drives the auditor over the trajectory, managing cadence and
+    cumulative state. The extractor has been replaced by the
+    trajectory_index symbol table; ``symbols`` and ``references`` can be
+    passed from a pre-built index.
     """
-    _ = trigger_registry  # Not used in simplified version
-    _ = sidecar_path  # Sidecar writing removed from offline path
-    _ = sink  # Sink/sidecar writing removed from offline path
+    _ = trigger_registry
+    _ = sidecar_path
+    _ = sink
+    _ = extractor_settings
+    _ = extractor_interval
+    _ = skip_extractor
 
     resolved_trace_id = trace_id if trace_id is not None else session_id
     cumulative = seed_cumulative if seed_cumulative is not None else CumulativeAuditState.fresh()
@@ -108,11 +108,11 @@ async def replay_pipeline_over_trajectory(
     all_steps: list[dict[str, Any]] = []
     surfaces: list[SurfaceFiring] = []
     reminder: Reminder | None = None
+    resolved_symbols = symbols or []
+    resolved_references = references or []
 
     from llmharness.agents.auditor.context import build_auditor_system_prompt
     from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-    from llmharness.agents.extractor.context import load_extractor_prompt
-    from llmharness.agents.extractor.tools import ExtractionState
 
     for turn_number, prefix_len in enumerate(_turn_end_prefix_lengths(messages), start=1):
         if prefix_len < start_turn:
@@ -124,83 +124,21 @@ async def replay_pipeline_over_trajectory(
             "turn_count": turn_count,
             "prefix_len": prefix_len,
             "surfaced_reminder": None,
-            "extractor_record": None,
             "auditor_record": None,
         }
 
         auditor_due = enable_auditor and (turn_count % audit_interval) == 0
-        extractor_due = (not skip_extractor) and ((turn_count % extractor_interval) == 0 or auditor_due)
-
-        # --- Extractor ---
-        if extractor_due:
-            from llmharness.atom import (
-                _prepare_extractor_data,
-            )
-
-            data = _prepare_extractor_data(prefix, cumulative, None)
-            if data is not None:
-                state = ExtractionState()
-                nxt = data.get("next_event_id")
-                if isinstance(nxt, int) and nxt >= 1:
-                    state.next_event_id = nxt
-                for k, v in (data.get("turn_texts") or {}).items():
-                    with contextlib.suppress(TypeError, ValueError):
-                        state.turn_texts[int(k)] = str(v)
-
-                recent_records_raw = data.get("recent_records") or []
-                from llmharness.schema import Edge, Event
-                recent_events: list[Event] = []
-                for entry in recent_records_raw:
-                    if isinstance(entry, dict):
-                        with contextlib.suppress(KeyError, ValueError, TypeError):
-                            recent_events.append(Event.from_dict(entry))
-                state.recent_records = tuple(recent_events)
-                state.recent_record_dict = {e.id: e for e in recent_events}
-
-                recent_links_raw = data.get("recent_links") or []
-                recent_edges: list[Edge] = []
-                for entry in recent_links_raw:
-                    if isinstance(entry, dict):
-                        with contextlib.suppress(KeyError, ValueError, TypeError):
-                            recent_edges.append(Edge.from_dict(entry))
-                state.recent_links = tuple(recent_edges)
-                state.recent_link_dict = {(ed.src, ed.dst, ed.kind.value): ed for ed in recent_edges}
-                state._refold()
-
-                prompt_text = extractor_settings.base_prompt or load_extractor_prompt("default")
-                try:
-                    _ok, _raw_blocks = await child_used.run_extractor(
-                        state=state,
-                        prompt_text=prompt_text,
-                        provider=provider,
-                        payload=data,
-                        turn_window=list(range(max(cumulative.cursor_last_turn_index + 1, 0), prefix_len)),
-                        tool_call_budget=extractor_settings.tool_call_budget,
-                    )
-                    state.salvage()
-                    if state.pending_ops:
-                        firing_id = cumulative.firing_id_counter
-                        cumulative.absorb_extractor_firing(
-                            firing_ops=state.pending_ops,
-                            firing_cursor=data["window_hi"],
-                            firing_id=firing_id,
-                        )
-                except Exception as exc:
-                    # Extractor firing failed for this turn during replay —
-                    # continue with the index accumulated so far.
-                    logger.warning("offline_driver: extractor firing failed at turn replay: {}", exc)
 
         # --- Auditor ---
         if auditor_due:
-            events, edges = cumulative.index_view()
             from llmharness.atom import _extract_loaded_skills, _serialize_trajectory
             from llmharness.context_index import build_context_index
 
             trajectory = _serialize_trajectory(prefix)
             context_index = build_context_index(
                 trajectory=trajectory,
-                events=events,
-                edges=edges,
+                symbols=resolved_symbols,
+                references=resolved_references,
             ).to_dict()
             loaded_skills = _extract_loaded_skills(prefix)
             prompt_text = auditor_settings.base_prompt or "You are the cognitive-audit auditor."
@@ -218,8 +156,7 @@ async def replay_pipeline_over_trajectory(
                 prompt_text=aud_prompt,
                 tools_config=tools_config,
                 provider=provider,
-                records=list(events),
-                links=[ed.to_dict() for ed in edges],
+                context_index=context_index,
                 recent_verdicts=list(cumulative.recent_verdicts),
                 continuation_notes_from_prior_firing=list(cumulative.last_continuation_notes),
             )

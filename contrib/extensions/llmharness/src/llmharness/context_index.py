@@ -15,17 +15,12 @@ from llmharness.schema import (
     AttentionHint,
     CandidateRef,
     CandidateState,
-    ClaimKind,
     ClaimRef,
-    CommitmentStatus,
     ContextIndex,
     ContractEventRef,
     ContractStatus,
-    Edge,
     EntityRef,
     EntityType,
-    Event,
-    EventKind,
     IndexLink,
     LinkKind,
     ObligationRef,
@@ -126,10 +121,15 @@ _STOP_ENTITIES = frozenset(
 def build_context_index(
     *,
     trajectory: Sequence[Mapping[str, Any]] = (),
-    events: Sequence[Event] = (),
-    edges: Sequence[Edge] = (),
+    symbols: Sequence[Mapping[str, Any]] = (),
+    references: Sequence[Mapping[str, Any]] = (),
 ) -> ContextIndex:
-    """Build a sparse navigation index from visible trajectory and index records."""
+    """Build a sparse navigation index from trajectory and pre-built symbol table.
+
+    ``symbols`` and ``references`` come from the trajectory_index extension.
+    Each symbol has ``{id, name, kind, aliases, summary}``, each reference has
+    ``{id, symbol_id, step_id, text, kind, confidence}``.
+    """
 
     entity_data: dict[str, dict[str, Any]] = {}
     links: list[IndexLink] = []
@@ -159,10 +159,50 @@ def build_context_index(
             existing["type"] = ent_type
         return str(existing["id"])
 
-    for edge in edges:
-        edge_turns = tuple(sorted(set(edge.src_turns + edge.dst_turns)))
-        for name in edge.cited_entities:
-            add_entity(name, edge_turns)
+    # --- Ingest symbols from the trajectory_index symbol table ---
+    symbol_id_to_entity_id: dict[str, str] = {}
+    for sym in symbols:
+        sym_id = str(sym.get("id", ""))
+        sym_name = str(sym.get("name", ""))
+        sym_kind = str(sym.get("kind", ""))
+        if not sym_name:
+            continue
+        preferred_type = _symbol_kind_to_entity_type(sym_kind, sym_name)
+        # Symbols don't carry per-turn data; turns come from references
+        entity_id = add_entity(sym_name, (), preferred_type)
+        if entity_id:
+            symbol_id_to_entity_id[sym_id] = entity_id
+            # Register aliases
+            aliases_raw = sym.get("aliases")
+            if isinstance(aliases_raw, (list, tuple)):
+                key = sym_name.casefold()
+                existing = entity_data.get(key)
+                if existing is not None:
+                    alias_set = existing.get("aliases")
+                    if isinstance(alias_set, set):
+                        for alias in aliases_raw:
+                            if isinstance(alias, str) and alias.strip():
+                                alias_set.add(alias.strip())
+
+    # --- Ingest references: associate symbols with turns ---
+    # Group references by symbol for candidate-state derivation
+    refs_by_symbol: dict[str, list[Mapping[str, Any]]] = {}
+    for ref in references:
+        sym_id = str(ref.get("symbol_id", ""))
+        step_id = ref.get("step_id")
+        entity_id = symbol_id_to_entity_id.get(sym_id, "")
+        if entity_id and isinstance(step_id, int) and step_id >= 0:
+            # Register turn association on the entity
+            key_for_entity = None
+            for k, v in entity_data.items():
+                if v.get("id") == entity_id:
+                    key_for_entity = k
+                    break
+            if key_for_entity is not None:
+                turns_set = entity_data[key_for_entity].get("turns")
+                if isinstance(turns_set, set):
+                    turns_set.add(step_id)
+        refs_by_symbol.setdefault(sym_id, []).append(ref)
 
     turn_refs = tuple(_turn_ref(i, turn) for i, turn in enumerate(trajectory))
 
@@ -170,58 +210,6 @@ def build_context_index(
     claims: list[ClaimRef] = []
     obligations: list[ObligationRef] = []
     contract_events: list[ContractEventRef] = []
-
-    for event in events:
-        event_turns = tuple(int(t) for t in event.source_turns)
-        entity_ids = _entity_ids_from_text(event.summary, event_turns, add_entity)
-        if event.kind == EventKind.ACT:
-            obs = ObservationRef(
-                id=f"obs:event:{event.id}",
-                turns=event_turns,
-                source="graph_event",
-                summary=_excerpt(event.summary),
-                entities=entity_ids,
-                values=_extract_values(event.summary),
-                signals=_observation_signals(event.summary),
-            )
-            observations.append(obs)
-            links.extend(_entity_links(obs.id, entity_ids, "mentions", "observation mentions entity"))
-        elif event.kind in {EventKind.HYP, EventKind.DEC, EventKind.CONCL}:
-            claim = ClaimRef(
-                id=f"claim:event:{event.id}",
-                turns=event_turns,
-                text=_excerpt(event.summary),
-                kind=_claim_kind(event),
-                status=_status_value(event.status),
-                entities=entity_ids,
-            )
-            claims.append(claim)
-            links.extend(_entity_links(claim.id, entity_ids, "mentions", "claim mentions entity"))
-            if _OBLIGATION_RE.search(event.summary):
-                obligation = ObligationRef(
-                    id=f"obl:event:{event.id}",
-                    turns=event_turns,
-                    source="agent_plan",
-                    text=_excerpt(event.summary),
-                    entities=entity_ids,
-                )
-                obligations.append(obligation)
-                links.extend(
-                    _entity_links(obligation.id, entity_ids, "mentions", "obligation mentions entity")
-                )
-
-        status = _contract_status(event.summary)
-        if status is not None:
-            contract = ContractEventRef(
-                id=f"contract:event:{event.id}",
-                turns=event_turns,
-                tool=_contract_tool(event.summary),
-                status=status,
-                summary=_excerpt(event.summary),
-                entities=entity_ids,
-            )
-            contract_events.append(contract)
-            links.extend(_entity_links(contract.id, entity_ids, "mentions", "contract event mentions entity"))
 
     for turn in turn_refs:
         entity_ids = _entity_ids_from_text(turn.summary, (turn.turn_index,), add_entity)
@@ -260,6 +248,8 @@ def build_context_index(
             contract_events.append(contract)
             links.extend(_entity_links(contract.id, entity_ids, "mentions", "contract event mentions entity"))
 
+    # Derive candidate state from reference kinds: tool_input/tool_output → investigated
+    _promote_candidates_from_references(entity_data, refs_by_symbol, symbol_id_to_entity_id)
     candidates = _candidate_refs(entity_data, observations, claims)
     entities = _entity_refs(entity_data)
     attention_hints = _attention_hints(entities, observations, candidates)
@@ -510,22 +500,44 @@ def _observation_signals(text: str) -> tuple[ObservationSignal, ...]:
     return tuple(signals)
 
 
-def _status_value(status: CommitmentStatus | None) -> str:
-    return status.value if status is not None else "unknown"
+def _symbol_kind_to_entity_type(kind: str, name: str) -> EntityType:
+    """Map trajectory_index symbol kind to ContextIndex EntityType."""
+    mapping: dict[str, EntityType] = {
+        "service": "service",
+        "api": "endpoint",
+        "metric": "metric",
+        "error": "log_pattern",
+        "tool": "tool",
+        "skill": "tool",
+    }
+    if kind in mapping:
+        return mapping[kind]
+    if kind == "concept":
+        low = name.casefold()
+        if any(p in low for p in ("cpu_stress", "network_loss", "fault", "mutator", "podfailure")):
+            return "fault_kind"
+    return "unknown"
 
 
-def _claim_kind(event: Event) -> ClaimKind:
-    if _DEMOTION_RE.search(event.summary):
-        return "demotion"
-    if event.kind == EventKind.HYP:
-        return "hypothesis"
-    if event.kind == EventKind.DEC:
-        return "decision"
-    if event.kind == EventKind.CONCL and (
-        event.status == CommitmentStatus.FINALIZED or _FINAL_RE.search(event.summary)
-    ):
-        return "final_answer"
-    return "conclusion"
+def _promote_candidates_from_references(
+    entity_data: dict[str, dict[str, Any]],
+    refs_by_symbol: dict[str, list[Mapping[str, Any]]],
+    symbol_id_to_entity_id: dict[str, str],
+) -> None:
+    """Mark entities as investigated based on reference kinds from trajectory_index."""
+    for sym_id, ref_list in refs_by_symbol.items():
+        entity_id = symbol_id_to_entity_id.get(sym_id)
+        if not entity_id:
+            continue
+        has_tool_ref = any(
+            str(r.get("kind", "")) in ("tool_input", "tool_output")
+            for r in ref_list
+        )
+        if has_tool_ref:
+            for data in entity_data.values():
+                if data.get("id") == entity_id:
+                    data.setdefault("_investigated", True)
+                    break
 
 
 def _contract_status(text: str) -> ContractStatus | None:
@@ -624,7 +636,8 @@ def _candidate_refs(
         entity_id = str(raw.get("id") or "")
         raw_turns = raw.get("turns")
         turns = tuple(sorted(raw_turns)) if isinstance(raw_turns, set) else ()
-        touch(entity_id, turns, "mentioned")
+        initial_state: CandidateState = "investigated" if raw.get("_investigated") else "mentioned"
+        touch(entity_id, turns, initial_state)
     for obs in observations:
         for entity_id in obs.entities:
             touch(

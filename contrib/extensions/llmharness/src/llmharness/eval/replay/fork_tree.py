@@ -57,7 +57,7 @@ from llmharness.state import CumulativeAuditState
 
 from .offline import InMemorySink, StandaloneChildRunner
 from .offline_driver import SurfaceFiring, replay_pipeline_over_trajectory
-from .runner import AuditorSettings, ExtractorSettings
+from .runner import AuditorSettings, ExtractorSettings  # ExtractorSettings kept for backward compat
 
 __all__ = [
     "FORK_TREE_HEADER_KEY",
@@ -269,9 +269,7 @@ async def run_fork_tree_experiment(
     session_factory: SessionFactory,
     cwd: str,
     provider: tuple[str, dict[str, Any]] | None,
-    extractor_settings: ExtractorSettings,
     auditor_settings: AuditorSettings,
-    extractor_interval: int = 5,
     audit_interval: int = 5,
     max_depth: int = 8,
     max_total_nodes: int = 64,
@@ -280,9 +278,12 @@ async def run_fork_tree_experiment(
     out_path: Path | None = None,
     sink: InMemorySink | None = None,
     child: StandaloneChildRunner | None = None,
-    skip_extractor: bool = False,
     trigger_registry: Any | None = None,
     trace_id: str | None = None,
+    # Deprecated no-ops kept for backward compat
+    extractor_settings: ExtractorSettings | None = None,
+    extractor_interval: int = 5,
+    skip_extractor: bool = False,
 ) -> ForkTreeExperiment:
     """Drive a fork-tree counterfactual experiment to completion.
 
@@ -353,9 +354,7 @@ async def run_fork_tree_experiment(
             cwd=cwd,
             session_id=backbone.session_log_id,
             provider=provider,
-            extractor_settings=extractor_settings,
             auditor_settings=auditor_settings,
-            extractor_interval=extractor_interval,
             audit_interval=audit_interval,
             enable_auditor=True,
             stop_on_first_surface=False,
@@ -371,7 +370,6 @@ async def run_fork_tree_experiment(
             # that the non-progressing floor below then discards. The root
             # (no boundary to skip) starts at ``fork_turn`` == 1.
             start_turn=(task.fork_turn if task.parent_id is None else task.fork_turn + 1),
-            skip_extractor=skip_extractor,
             trigger_registry=trigger_registry,
             trace_id=trace_id,
         )
@@ -451,7 +449,6 @@ async def run_fork_tree_experiment(
     header = _build_fork_tree_header(
         nodes=nodes,
         audit_interval=audit_interval,
-        extractor_interval=extractor_interval,
         max_depth=max_depth,
         max_total_nodes=max_total_nodes,
     )
@@ -488,17 +485,15 @@ def _build_fork_tree_header(
     *,
     nodes: list[ForkNode],
     audit_interval: int,
-    extractor_interval: int,
     max_depth: int,
     max_total_nodes: int,
 ) -> dict[str, Any]:
     """Build the tree-topology dict written as the sidecar header.
 
-    Schema (v1):
+    Schema (v2):
 
     * ``schema_version``: int — bumps on breaking field changes.
-    * ``audit_interval`` / ``extractor_interval``: int — cadence the
-      runner was driven at.
+    * ``audit_interval``: int — cadence the runner was driven at.
     * ``max_depth`` / ``max_total_nodes``: int — the guards the experiment
       ran under.
     * ``nodes``: list — one entry per :class:`ForkNode`, per
@@ -510,9 +505,8 @@ def _build_fork_tree_header(
     lives in the remaining lines of the sidecar.
     """
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "audit_interval": audit_interval,
-        "extractor_interval": extractor_interval,
         "max_depth": max_depth,
         "max_total_nodes": max_total_nodes,
         "nodes": [_node_to_header_dict(n) for n in nodes],
@@ -605,7 +599,7 @@ def write_fork_tree_replay(
     for node in nodes:
         turn_lo, turn_hi = _node_window(node)
         for step in node.step_results:
-            for record in (step.get("extractor_record"), step.get("auditor_record")):
+            for record in (step.get("auditor_record"),):
                 if record is None:
                     continue
                 if not isinstance(record, ReplayRecord):

@@ -3,44 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Literal
-
-
-class EventKind(str, Enum):
-    """Action-signature classification of an extracted event."""
-
-    TASK = "task"
-    HYP = "hyp"
-    ACT = "act"
-    DEC = "dec"
-    CONCL = "concl"
-
-
-class CommitmentStatus(str, Enum):
-    """How committed the agent is to a hyp/dec/concl claim."""
-
-    EXPLORATORY = "exploratory"
-    TENTATIVE = "tentative"
-    COMMITTED = "committed"
-    FINALIZED = "finalized"
-
-
-class EdgeKind(str, Enum):
-    """Kind of edge between two events."""
-
-    DATA = "data"
-    REF = "ref"
-
-
-class EdgeRole(str, Enum):
-    """Causal role of an edge between two events."""
-
-    SUPPORTS = "supports"
-    WEAKENS = "weakens"
-    DEPENDS = "depends"
-    NARROWS = "narrows"
-
 
 TurnKind = Literal["user", "assistant", "tool_call", "tool_result", "system", "reminder"]
 EntityType = Literal[
@@ -285,119 +248,6 @@ class ContextIndex:
 
 
 @dataclass(frozen=True)
-class ExternalRef:
-    """Cross-firing reference from this event to a prior-firing event."""
-
-    to_recent_event_id: int  # global event id from a recent_records[i].id
-    kind: EdgeKind
-    reason: str = ""
-    cited_entities: tuple[str, ...] = ()
-    cited_quote: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "to_recent_event_id": self.to_recent_event_id,
-            "kind": self.kind.value,
-            "reason": self.reason,
-            "cited_entities": list(self.cited_entities),
-            "cited_quote": self.cited_quote,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ExternalRef:
-        return cls(
-            to_recent_event_id=int(data["to_recent_event_id"]),
-            kind=EdgeKind(data["kind"]),
-            reason=str(data.get("reason", "")),
-            cited_entities=tuple(str(e) for e in (data.get("cited_entities") or [])),
-            cited_quote=str(data.get("cited_quote", "")),
-        )
-
-
-@dataclass(frozen=True)
-class Event:
-    """A semantic event extracted from one or more turns."""
-
-    id: int
-    kind: EventKind
-    summary: str
-    source_turns: list[int] = field(default_factory=list)
-    external_refs: tuple[ExternalRef, ...] = ()
-    status: CommitmentStatus | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            "id": self.id,
-            "kind": self.kind.value,
-            "summary": self.summary,
-            "source_turns": list(self.source_turns),
-            "external_refs": [r.to_dict() for r in self.external_refs],
-        }
-        if self.status is not None:
-            d["status"] = self.status.value
-        return d
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Event:
-        raw_status = data.get("status")
-        return cls(
-            id=int(data["id"]),
-            kind=EventKind(data["kind"]),
-            summary=data.get("summary", ""),
-            source_turns=list(data.get("source_turns") or []),
-            external_refs=tuple(
-                ExternalRef.from_dict(r) for r in (data.get("external_refs") or [])
-            ),
-            status=CommitmentStatus(raw_status) if raw_status is not None else None,
-        )
-
-
-@dataclass(frozen=True)
-class Edge:
-    """A directed witness-bearing edge between two events."""
-
-    src: int
-    dst: int
-    kind: EdgeKind
-    reason: str
-    src_turns: tuple[int, ...]
-    dst_turns: tuple[int, ...]
-    cited_entities: tuple[str, ...] = ()
-    cited_quote: str = ""
-    role: EdgeRole | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            "src": self.src,
-            "dst": self.dst,
-            "kind": self.kind.value,
-            "reason": self.reason,
-            "src_turns": list(self.src_turns),
-            "dst_turns": list(self.dst_turns),
-            "cited_entities": list(self.cited_entities),
-            "cited_quote": self.cited_quote,
-        }
-        if self.role is not None:
-            d["role"] = self.role.value
-        return d
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Edge:
-        raw_role = data.get("role")
-        return cls(
-            src=int(data["src"]),
-            dst=int(data["dst"]),
-            kind=EdgeKind(data["kind"]),
-            reason=str(data.get("reason", "")),
-            src_turns=tuple(int(t) for t in (data.get("src_turns") or [])),
-            dst_turns=tuple(int(t) for t in (data.get("dst_turns") or [])),
-            cited_entities=tuple(str(e) for e in (data.get("cited_entities") or [])),
-            cited_quote=str(data.get("cited_quote", "")),
-            role=EdgeRole(raw_role) if raw_role is not None else None,
-        )
-
-
-@dataclass(frozen=True)
 class Verdict:
     """Auditor verdict. surface_reminder=True triggers reminder injection."""
 
@@ -435,7 +285,6 @@ class Reminder:
 # Entry-type constants for session entries
 # ---------------------------------------------------------------------------
 
-AUDIT_INDEX_OP = "llmharness.audit_index_op"
 VERDICT = "llmharness.verdict"
 EXTRACTOR_CURSOR = "llmharness.extractor_cursor"
 REMINDER_DELIVERED = "llmharness.reminder_delivered"
@@ -443,7 +292,6 @@ REMINDER_DELIVERED = "llmharness.reminder_delivered"
 RECENT_VERDICTS_FOR_AUDITOR = 5
 
 __all__ = [
-    "AUDIT_INDEX_OP",
     "EXTRACTOR_CURSOR",
     "RECENT_VERDICTS_FOR_AUDITOR",
     "VERDICT",
@@ -453,18 +301,11 @@ __all__ = [
     "CandidateState",
     "ClaimKind",
     "ClaimRef",
-    "CommitmentStatus",
     "ContextIndex",
     "ContractEventRef",
     "ContractStatus",
-    "Edge",
-    "EdgeKind",
-    "EdgeRole",
     "EntityRef",
     "EntityType",
-    "Event",
-    "EventKind",
-    "ExternalRef",
     "IndexLink",
     "LinkKind",
     "ObligationRef",

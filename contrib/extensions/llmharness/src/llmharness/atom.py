@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import json
 import time
-from pathlib import Path
 from typing import Any, Final, Literal
 
 from agentm.core.abi import (
@@ -31,9 +30,8 @@ from loguru import logger
 from pydantic import BaseModel
 
 from . import schema as _et
-from .agents import auditor_scenario, extractor_scenario
+from .agents import auditor_scenario
 from .agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-from .agents.extractor.index_store import IndexOp, parse_op
 from .context_index import build_context_index
 from .schema import Reminder, Verdict
 from .state import CumulativeAuditState
@@ -46,17 +44,11 @@ class ProviderConfig(BaseModel):
 
 class LLMHarnessConfig(BaseModel):
     mode: Literal["async", "sync"] = "async"
-    extractor_interval_turns: int = 1
     audit_interval_turns: int = 3
-    extractor_tool_call_budget: int | None = None
-    prompt_override_extractor: str | None = None
     prompt_override_auditor: str | None = None
-    extractor_prompt: str = "default"
     auditor_prompt: str = "minimal_index"
     shutdown_timeout_s: float = 600.0
-    extractor_provider: ProviderConfig | None = None
     auditor_provider: ProviderConfig | None = None
-    extractor_model: str | None = None
     auditor_model: str | None = None
     enable_auditor: bool = True
     enable_reminders: bool = True
@@ -81,7 +73,7 @@ _SYSTEM_PROMPT_BLOCK: Final = (
 
 MANIFEST = ExtensionManifest(
     name="llmharness",
-    description="Context-index audit harness: per-turn indexer + every-k-turns auditor.",
+    description="Context-index audit harness: trajectory indexer + every-k-turns auditor.",
     registers=("event:turn_end", "event:decide_turn_action", "event:session_shutdown",
                "event:before_agent_start"),
     config_schema=LLMHarnessConfig,
@@ -130,26 +122,11 @@ def _resolve_provider(
 
 def _render_message_text(msg: AgentMessage) -> str:
     """Extract all text from a message into one string (for witness validation)."""
-    return _render_message_text_for_index(msg, skip_tool_result_ids=set())
-
-
-def _render_message_text_for_index(
-    msg: AgentMessage,
-    *,
-    skip_tool_result_ids: set[str],
-) -> str:
-    """Extract message text for indexing, optionally omitting bulky tool results."""
     parts: list[str] = []
     content = getattr(msg, "content", None)
     if not isinstance(content, list):
         return ""
     for block in content:
-        tool_call_id = getattr(block, "tool_call_id", None)
-        if (
-            isinstance(tool_call_id, str)
-            and tool_call_id in skip_tool_result_ids
-        ):
-            continue
         text = getattr(block, "text", None)
         if isinstance(text, str) and text:
             parts.append(text)
@@ -202,7 +179,7 @@ def _extract_loaded_skills(messages: list[AgentMessage]) -> list[str]:
     skills: list[str] = []
     for msg in messages:
         if isinstance(msg, ToolResultMessage):
-            for block in msg.content:  # type: ignore[assignment]
+            for block in msg.content:
                 if not isinstance(block, ToolResultBlock):
                     continue
                 if block.tool_call_id not in skill_call_ids or block.is_error:
@@ -243,63 +220,6 @@ def _has_successful_tool_result(
             ):
                 return True
     return False
-
-
-# ---------------------------------------------------------------------------
-# Data preparation
-# ---------------------------------------------------------------------------
-
-
-def _prepare_extractor_data(
-    messages: list[AgentMessage],
-    cumulative: CumulativeAuditState,
-    tool_call_budget: int | None,
-) -> dict[str, Any] | None:
-    """Prepare raw data for the extractor child. Returns None if window is empty."""
-    window_lo = max(cumulative.cursor_last_turn_index + 1, 0)
-    window_hi = len(messages) - 1
-    window_messages = messages[window_lo:]
-    if not window_messages:
-        return None
-    events_cum, edges_cum = cumulative.index_view()
-    turn_texts: dict[str, str] = {}
-    skill_call_ids = _tool_call_ids(messages, "load_skill")
-    for i, msg in enumerate(window_messages, start=window_lo):
-        turn_texts[str(i)] = _render_message_text_for_index(
-            msg,
-            skip_tool_result_ids=skill_call_ids,
-        )
-    for t in {t for e in events_cum for t in e.source_turns}:
-        if str(t) not in turn_texts and 0 <= t < len(messages):
-            turn_texts[str(t)] = _render_message_text_for_index(
-                messages[t],
-                skip_tool_result_ids=skill_call_ids,
-            )
-    new_turns = _serialize_trajectory(window_messages, start_index=window_lo)
-    return {
-        "turn_texts": turn_texts,
-        "recent_records": [e.to_dict() for e in events_cum],
-        "recent_links": [ed.to_dict() for ed in edges_cum],
-        "next_event_id": cumulative.next_event_id(),
-        "new_turns": new_turns,
-        "tool_call_budget": tool_call_budget,
-        "window_hi": window_hi,
-    }
-
-
-def _read_ops_file(path: Path) -> list[IndexOp]:
-    if not path.exists():
-        return []
-    ops: list[IndexOp] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            ops.append(parse_op(json.loads(line)))
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-            logger.warning(f"skipping malformed op line in {path}")
-    return ops
 
 
 # ---------------------------------------------------------------------------
@@ -381,15 +301,12 @@ def _terminal_tool_args(
 def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     cfg = config
 
-    extractor_k = max(1, cfg.extractor_interval_turns)
     auditor_k = max(1, cfg.audit_interval_turns)
     shutdown_timeout = max(0.0, cfg.shutdown_timeout_s)
     enable_auditor = cfg.enable_auditor
     enable_reminders = cfg.enable_reminders
     finalize_tool = cfg.finalize_tool
-    tool_call_budget = cfg.extractor_tool_call_budget
 
-    extractor_provider = _resolve_provider(cfg.extractor_model, cfg.extractor_provider)
     auditor_provider = _resolve_provider(cfg.auditor_model, cfg.auditor_provider)
 
     # State
@@ -397,7 +314,6 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     pending_reminders: list[Reminder] = []
     turn_count = 0
 
-    ext_scenario = extractor_scenario()
     aud_scenario = auditor_scenario()
 
     # ------------------------------------------------------------------
@@ -413,74 +329,15 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         nonlocal turn_count
         turn_count = tc
 
-        auditor_due = enable_auditor and (tc % auditor_k) == 0
-        extractor_due = (tc % extractor_k) == 0 or auditor_due
-        if force:
-            extractor_due = True
-            auditor_due = enable_auditor
-
-        # --- Extractor ---
-        if extractor_due:
-            data = _prepare_extractor_data(messages, cumulative, tool_call_budget)
-            if data is not None:
-                firing_id = cumulative.firing_id_counter
-                session_prefix = api.session.get_session_id()[:8]
-                ops_path = Path(api.cwd) / ".agentm" / "audit_ops" / f"{session_prefix}_{firing_id}.jsonl"
-
-                extra: list[tuple[str, dict[str, Any]]] = []
-                if tool_call_budget is not None:
-                    extra.extend(
-                        [
-                            (
-                                "agentm.extensions.builtin.loop_budget",
-                                {"max_tool_calls": tool_call_budget},
-                            ),
-                            (
-                                "agentm.extensions.builtin.turn_reminder",
-                                {"warn_within": tool_call_budget},
-                            ),
-                        ]
-                    )
-
-                ctx_config = dict(data)
-                ctx_config["ops_file"] = str(ops_path)
-                ctx_config["prompt_name"] = cfg.extractor_prompt
-                if cfg.prompt_override_extractor is not None:
-                    ctx_config["prompt_text"] = cfg.prompt_override_extractor
-
-                child_msgs = await _run_child(
-                    api,
-                    scenario=ext_scenario,
-                    prompt=json.dumps(data, ensure_ascii=False, default=str),
-                    purpose="cognitive_audit_extractor",
-                    atom_config_overrides={"extractor_context": ctx_config},
-                    extra_extensions=extra,
-                    provider=extractor_provider,
-                )
-                if child_msgs is not None:
-                    ops = _read_ops_file(ops_path)
-                    for op in ops:
-                        d = op.to_dict()
-                        d["firing_id"] = firing_id
-                        api.session.append_entry(_et.AUDIT_INDEX_OP, d)
-                    cumulative.absorb_extractor_firing(
-                        firing_ops=ops,
-                        firing_cursor=data["window_hi"],
-                        firing_id=firing_id,
-                    )
-                    api.session.append_entry(
-                        _et.EXTRACTOR_CURSOR,
-                        {"last_turn_index": data["window_hi"]},
-                    )
+        auditor_due = enable_auditor and ((tc % auditor_k) == 0 or force)
 
         # --- Auditor ---
         if auditor_due:
-            events, edges = cumulative.index_view()
             trajectory = _serialize_trajectory(list(messages))
             context_index = build_context_index(
                 trajectory=trajectory,
-                events=events,
-                edges=edges,
+                symbols=[],
+                references=[],
             ).to_dict()
             loaded_skills = _extract_loaded_skills(messages)
 
@@ -489,8 +346,6 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                 scenario=aud_scenario,
                 prompt=json.dumps(
                     {
-                        "records": [e.to_dict() for e in events],
-                        "links": [ed.to_dict() for ed in edges],
                         "context_index": context_index,
                         "recent_verdicts": list(cumulative.recent_verdicts),
                         "continuation_notes_from_prior_firing": list(
@@ -503,8 +358,6 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                 purpose="cognitive_audit_auditor",
                 atom_config_overrides={
                     "auditor_context": {
-                        "events": [e.to_dict() for e in events],
-                        "edges": [ed.to_dict() for ed in edges],
                         "continuation_notes": list(cumulative.last_continuation_notes),
                         "prompt_name": cfg.auditor_prompt,
                         "trajectory_snapshot": trajectory,
@@ -607,8 +460,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         if _has_successful_tool_result(list(event.messages), finalize_tool):
             return
         auditor_due = enable_auditor and (turn_count % auditor_k) == 0
-        extractor_due = (turn_count % extractor_k) == 0 or auditor_due
-        if not (extractor_due or auditor_due):
+        if not auditor_due:
             return
         _ensure_worker()
         queue.put_nowait((list(event.messages), turn_count))

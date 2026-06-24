@@ -7,11 +7,6 @@ from typing import Final
 _AGENTS_DIR: Final = Path(__file__).parent
 
 
-def extractor_scenario() -> str:
-    """Absolute path to the extractor agent directory (scenario-resolvable)."""
-    return str(_AGENTS_DIR / "extractor")
-
-
 def auditor_scenario() -> str:
     """Absolute path to the auditor agent directory (scenario-resolvable)."""
     return str(_AGENTS_DIR / "auditor")
@@ -22,4 +17,4 @@ def tel_scenario() -> str:
     return str(_AGENTS_DIR / "tel")
 
 
-__all__ = ["auditor_scenario", "extractor_scenario", "tel_scenario"]
+__all__ = ["auditor_scenario", "tel_scenario"]
