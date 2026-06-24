@@ -1,22 +1,25 @@
-"""Data model for rescue-window branching experiments."""
+"""Typed intervention DSL (doc §7.1).
+
+The action vocabulary, fork-point selector, and the ``Intervention`` record
+(action / target / evidence / strength / valid_until) that every treatment and
+critic decision is expressed in.
+"""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 from typing import Any, cast
 
 
 class ActionType(StrEnum):
-    """Typed intervention actions from the Rescue Window memo."""
+    """Typed intervention actions — each isolates one experimental variable."""
 
     CONTINUE = "CONTINUE"
+    GENERIC = "GENERIC"
     VERIFY = "VERIFY"
-    CHECKPOINT = "CHECKPOINT"
-    REVERT_TO_BEST = "REVERT_TO_BEST"
-    REPLAN_SCOPE = "REPLAN_SCOPE"
+    ADVISE = "ADVISE"
+    REPLAN = "REPLAN"
     FINAL_AUDIT = "FINAL_AUDIT"
 
 
@@ -27,6 +30,8 @@ _TARGET_KEYS = {
     "API",
     "test",
     "plan_node",
+    "service",
+    "fault_kind",
 }
 _EVIDENCE_KEYS = {"trajectory_event_ids"}
 _VALID_UNTIL_KEYS = {"state_hash", "step_ttl"}
@@ -126,130 +131,6 @@ class Intervention:
             "valid_until": self.valid_until,
             "metadata": self.metadata,
         }
-
-
-@dataclass(frozen=True)
-class InterventionDecision:
-    """One policy output for a prefix."""
-
-    policy_id: str
-    intervention: Intervention
-    should_intervene: bool = True
-    reason: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "policy_id": self.policy_id,
-            "should_intervene": self.should_intervene,
-            "reason": self.reason,
-            "metadata": self.metadata,
-            "intervention": self.intervention.to_dict(),
-        }
-
-
-@dataclass(frozen=True)
-class BranchSpec:
-    """A single same-prefix branch in an experiment spec."""
-
-    branch_id: str
-    source_session_id: str
-    fork_point: ForkPoint
-    intervention: Intervention
-    policy_id: str = "static"
-    trajectory_id: str | None = None
-    baseline_session_id: str | None = None
-    case_id: str | None = None
-    max_turns: int | None = None
-    max_tool_calls: int | None = None
-    cwd: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_dict(
-        cls,
-        data: dict[str, Any],
-        *,
-        defaults: dict[str, Any],
-    ) -> "BranchSpec":
-        merged = {**defaults, **data}
-        return cls(
-            branch_id=_str_value(merged.get("branch_id"), "branch.branch_id"),
-            source_session_id=_str_value(
-                merged.get("source_session_id"), "branch.source_session_id"
-            ),
-            fork_point=ForkPoint.from_dict(
-                _dict_value(merged.get("fork_point") or {}, "branch.fork_point")
-            ),
-            intervention=Intervention.from_dict(
-                _dict_value(merged.get("intervention") or {}, "branch.intervention")
-            ),
-            policy_id=_optional_str(merged.get("policy_id"), "branch.policy_id")
-            or "static",
-            trajectory_id=_optional_str(
-                merged.get("trajectory_id"), "branch.trajectory_id"
-            ),
-            baseline_session_id=_optional_str(
-                merged.get("baseline_session_id"), "branch.baseline_session_id"
-            ),
-            case_id=_optional_str(merged.get("case_id"), "branch.case_id"),
-            max_turns=_optional_int(merged.get("max_turns"), "branch.max_turns"),
-            max_tool_calls=_optional_int(
-                merged.get("max_tool_calls"), "branch.max_tool_calls"
-            ),
-            cwd=_optional_str(merged.get("cwd"), "branch.cwd"),
-            metadata=_dict_value(merged.get("metadata") or {}, "branch.metadata"),
-        )
-
-
-@dataclass(frozen=True)
-class ExperimentSpec:
-    schema_version: str
-    experiment_id: str
-    branches: list[BranchSpec]
-    description: str = ""
-    defaults: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ExperimentSpec":
-        defaults = _dict_value(data.get("defaults") or {}, "defaults")
-        raw_branches = data.get("branches")
-        if not isinstance(raw_branches, list) or not raw_branches:
-            raise ValueError("experiment spec must define a non-empty branches list")
-        branches = [
-            BranchSpec.from_dict(
-                _dict_value(item, f"branches[{idx}]"),
-                defaults=defaults,
-            )
-            for idx, item in enumerate(raw_branches)
-        ]
-        branch_ids = [branch.branch_id for branch in branches]
-        duplicates = sorted(
-            {branch_id for branch_id in branch_ids if branch_ids.count(branch_id) > 1}
-        )
-        if duplicates:
-            raise ValueError(f"duplicate branch_id values: {', '.join(duplicates)}")
-        return cls(
-            schema_version=_str_value(data.get("schema_version"), "schema_version"),
-            experiment_id=_str_value(data.get("experiment_id"), "experiment_id"),
-            branches=branches,
-            description=_optional_str(data.get("description"), "description") or "",
-            defaults=defaults,
-        )
-
-
-def load_experiment_spec(path: Path) -> ExperimentSpec:
-    suffix = path.suffix.lower()
-    text = path.read_text(encoding="utf-8")
-    if suffix == ".json":
-        data = json.loads(text)
-    elif suffix in {".yaml", ".yml"}:
-        import yaml
-
-        data = yaml.safe_load(text)
-    else:
-        raise ValueError(f"unsupported spec extension {path.suffix!r}")
-    return ExperimentSpec.from_dict(_dict_value(data, "experiment"))
 
 
 def _validate_keys(value: dict[str, Any], allowed: set[str], name: str) -> None:

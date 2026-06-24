@@ -401,6 +401,38 @@ class AgentSession:
                     forwarder.cancel()
             return self._session_manager.get_messages()
 
+    async def resume(
+        self,
+        *,
+        signal: asyncio.Event | None = None,
+    ) -> list[AgentMessage]:
+        """Run one round on the current context with no new input.
+
+        Resumes a parked session — typically one forked mid-trajectory whose cut
+        ends in tool results — by kicking the driver without enqueuing a user
+        message. ``loop.run`` then continues naturally from
+        ``build_session_context`` (model called on the existing context) until it
+        terminates as it otherwise would. This is the no-injection counterpart of
+        :meth:`prompt`: the same single-round, FIFO-serialized contract, minus the
+        user turn. Used to measure a genuine CONTINUE branch (fork + continue)
+        that is apples-to-apples with injected interventions.
+        """
+
+        async with self._prompt_lock:
+            waiter = self._subscribe_end_waiter()
+            forwarder = self._spawn_signal_forwarder(signal)
+            # kick (not push): wake the driver to run one round on the current
+            # context. The kernel ``context`` handler drains the (empty) inbox
+            # and clears the event, so the driver re-parks after this round —
+            # honouring SessionInbox.kick's drain contract.
+            self._inbox.kick()
+            try:
+                await waiter
+            finally:
+                if forwarder is not None:
+                    forwarder.cancel()
+            return self._session_manager.get_messages()
+
     async def idle(self, timeout: float | None = None) -> bool:
         """Block until parked + inbox empty + no tracked background work."""
 

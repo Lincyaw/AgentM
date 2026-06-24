@@ -41,7 +41,7 @@ agent-env = [
     "arl-env>=0.2.0",
 ]
 eval = [
-    "agentm-rescue-window[llmharness,rca]",
+    "agentm-rescue-window",
     "duckdb>=1.5.2",
     # Fault-propagation-graph schema: the verifier natively emits
     # ground-truth Scenario files in this format (fpg_scenario.json).

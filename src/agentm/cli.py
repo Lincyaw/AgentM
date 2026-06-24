@@ -698,13 +698,18 @@ async def run(
 
     session = await AgentSession.create(session_config)
     try:
-        # The prompt/tick return value is intentionally discarded: the final
+        # The prompt/resume return value is intentionally discarded: the final
         # message list is re-fetched AFTER ``idle()`` below so it reflects any
         # late background completion delivered between agent_end and idle.
         if config.prompt:
             await session.prompt(config.prompt)
         else:
-            await session.tick()
+            # No prompt (``--resume`` / ``--fork`` / ``--continue``): continue the
+            # agent on its current context. ``resume()`` runs one more round (the
+            # model is re-invoked on the existing/forked messages) — unlike
+            # ``tick()``, which only advances when a resume-atom injects and so
+            # leaves a plain forked trajectory parked with no new turns.
+            await session.resume()
         # #179: a one-shot CLI owns its event loop only for the duration of
         # this coroutine — once it returns, ``asyncio.run`` tears the loop down.
         # An auto-backgrounded tool / child subagent that finishes AFTER the

@@ -9,10 +9,6 @@ dependencies = [
     "typer>=0.25.1",
 ]
 
-[project.optional-dependencies]
-llmharness = ["llmharness"]
-rca = ["rca-scenario"]
-
 [project.scripts]
 rescue-window = "rescue_window.cli:app"
 
