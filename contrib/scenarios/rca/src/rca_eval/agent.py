@@ -303,7 +303,7 @@ class AgentMAgent(BaseAgent):
             SessionPayload,
             run_fork_tree_experiment,
         )
-        from llmharness.eval.replay.runner import AuditorSettings, ExtractorSettings
+        from llmharness.eval.replay.runner import AuditorSettings
 
         # The user-facing ``--ak chained_fork=true`` flag now drives the
         # fork-tree engine; the linear chain is the degenerate
@@ -336,9 +336,7 @@ class AgentMAgent(BaseAgent):
             session_factory=factory,
             cwd=os.getcwd(),
             provider=_build_provider(self._provider, self._model),
-            extractor_settings=ExtractorSettings.default(),
             auditor_settings=AuditorSettings.default(),
-            extractor_interval=5,
             audit_interval=5,
             # ``max_interventions`` historically capped the linear chain
             # length; map it onto the tree's depth guard so an existing

@@ -12,7 +12,6 @@ internally.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import AgentMessage, AssistantMessage
@@ -20,7 +19,7 @@ from agentm.core.abi import AgentMessage, AssistantMessage
 from llmharness.schema import Reminder
 from llmharness.state import CumulativeAuditState
 
-from .offline import InMemorySink, StandaloneChildRunner
+from .offline import StandaloneChildRunner
 from .runner import AuditorSettings
 
 __all__ = [
@@ -44,7 +43,6 @@ class OfflineRunResult:
 
     reminder: Reminder | None
     state: CumulativeAuditState
-    sidecar_path: Path | None
     all_step_results: list[dict[str, Any]] = field(default_factory=list)
     surfaces: list[SurfaceFiring] = field(default_factory=list)
 
@@ -69,19 +67,12 @@ async def replay_pipeline_over_trajectory(
     audit_interval: int = 5,
     enable_auditor: bool = True,
     stop_on_first_surface: bool = True,
-    sidecar_path: Path | None = None,
-    sink: InMemorySink | None = None,
     child: StandaloneChildRunner | None = None,
     seed_cumulative: CumulativeAuditState | None = None,
     start_turn: int = 1,
     symbols: list[dict[str, Any]] | None = None,
     references: list[dict[str, Any]] | None = None,
-    trigger_registry: Any | None = None,
     trace_id: str | None = None,
-    # Deprecated no-ops kept for backward compat
-    extractor_settings: Any | None = None,
-    extractor_interval: int = 5,
-    skip_extractor: bool = False,
 ) -> OfflineRunResult:
     """Replay the cognitive-audit pipeline over a captured trajectory.
 
@@ -90,12 +81,6 @@ async def replay_pipeline_over_trajectory(
     trajectory_index symbol table; ``symbols`` and ``references`` can be
     passed from a pre-built index.
     """
-    _ = trigger_registry
-    _ = sidecar_path
-    _ = sink
-    _ = extractor_settings
-    _ = extractor_interval
-    _ = skip_extractor
 
     resolved_trace_id = trace_id if trace_id is not None else session_id
     cumulative = seed_cumulative if seed_cumulative is not None else CumulativeAuditState.fresh()
@@ -182,7 +167,6 @@ async def replay_pipeline_over_trajectory(
     return OfflineRunResult(
         reminder=reminder,
         state=cumulative,
-        sidecar_path=sidecar_path,
         all_step_results=all_steps,
         surfaces=surfaces,
     )
