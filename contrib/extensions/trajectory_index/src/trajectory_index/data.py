@@ -38,6 +38,9 @@ from .agents.entity_extractor.schema import ExtractionResult
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type ProviderSpec = tuple[str, dict[str, JsonValue]]
 
+DEFAULT_CHUNK_SIZE_SPEC: Final[str] = "2-5"
+DEFAULT_CHUNK_SIZE: Final[tuple[int, int]] = (2, 5)
+
 
 class ChatMessage(TypedDict):
     role: str
@@ -226,8 +229,34 @@ def resolve_provider(model_name: str) -> ProviderSpec:
     for desc in DEFAULT_PROVIDER_DESCRIPTORS:
         if desc.id == profile.provider and desc.extension_module:
             config = cast(dict[str, JsonValue], dict(profile.to_build_config()))
+            if desc.extension_module == "agentm.extensions.builtin.llm_openai":
+                _inject_response_format(config)
+                config.setdefault("max_output_tokens", 32768)
             return (desc.extension_module, config)
     raise RuntimeError(f"no extension module for provider {profile.provider!r}")
+
+
+def _extraction_response_format() -> dict[str, JsonValue]:
+    """Build an OpenAI Chat Completions json_schema response_format."""
+    from agentm.core.lib.tool_schema import _force_strict, pydantic_to_tool_schema
+
+    schema = cast(dict[str, JsonValue], _force_strict(pydantic_to_tool_schema(ExtractionResult)))
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "trajectory_extraction_result",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+
+
+def _inject_response_format(config: dict[str, JsonValue]) -> None:
+    """Ask OpenAI-compatible providers to enforce extractor JSON output."""
+    raw_extra = config.get("extra_body")
+    extra_body: dict[str, JsonValue] = dict(raw_extra) if isinstance(raw_extra, dict) else {}
+    extra_body.setdefault("response_format", _extraction_response_format())
+    config["extra_body"] = extra_body
 
 
 _stream_debug: bool = False
@@ -266,9 +295,10 @@ def _install_stream_tap(session: Any) -> None:
 
 def _reindex_messages(
     msgs: list[dict[str, JsonValue]],
+    start: int = 0,
 ) -> list[dict[str, JsonValue]]:
-    """Replace message IDs with sequential integers for the extraction prompt."""
-    return [{**msg, "id": str(i)} for i, msg in enumerate(msgs)]
+    """Replace message IDs with absolute sequential integers for extraction."""
+    return [{**msg, "id": str(i)} for i, msg in enumerate(msgs, start=start)]
 
 
 
@@ -322,6 +352,19 @@ class GeneratedRelation:
     turn_id: str
 
 
+def _usable_reference_term(term: str) -> bool:
+    """Drop tiny aliases that create noisy substring matches."""
+    norm = re.sub(r"\W+", "", term, flags=re.UNICODE)
+    return len(norm) >= 2
+
+
+def _symbol_aliases(sym: dict[str, Any]) -> list[str]:
+    aliases = sym.get("aliases", [])
+    if not isinstance(aliases, list):
+        return []
+    return [alias for alias in aliases if isinstance(alias, str)]
+
+
 def _build_references(
     symbols: list[dict[str, Any]],
     messages: list[dict[str, JsonValue]],
@@ -334,11 +377,18 @@ def _build_references(
     - text content → mention
     """
     names: list[tuple[str, str]] = []  # (search_term_lower, canonical_name)
+    seen_terms: set[tuple[str, str]] = set()
     for sym in symbols:
-        canonical = sym["name"]
-        names.append((canonical.lower(), canonical))
-        for alias in sym.get("aliases", []):
-            names.append((alias.lower(), canonical))
+        canonical = str(sym["name"])
+        candidates = [canonical, *_symbol_aliases(sym)]
+        for candidate in candidates:
+            if not isinstance(candidate, str) or not _usable_reference_term(candidate):
+                continue
+            key = (candidate.lower(), canonical)
+            if key in seen_terms:
+                continue
+            seen_terms.add(key)
+            names.append(key)
     # longest-first to avoid partial matches shadowing longer names
     names.sort(key=lambda x: -len(x[0]))
 
@@ -436,16 +486,17 @@ async def extract(
     steps: list[dict[str, JsonValue]],
     provider: ProviderSpec,
     registry: list[dict[str, Any]] | None = None,
+    message_id_start: int = 0,
 ) -> ExtractionResult | None:
     """Run the extraction agent with a teacher model and return the result.
 
-    Turn IDs in the result are sequential (0,1,2…) matching the reindexed input.
+    Turn IDs in the result match the absolute message IDs sent in the prompt.
     """
     from agentm.core.abi import LoopConfig
     from agentm.core.abi.session_config import AgentSessionConfig
     from agentm.core.runtime.session import AgentSession
 
-    reindexed = _reindex_messages(steps)
+    reindexed = _reindex_messages(steps, start=message_id_start)
 
     scenario = extractor_scenario()
     config = AgentSessionConfig(
@@ -511,10 +562,16 @@ def _parse_chunk_size(value: str) -> tuple[int, int]:
     return n, n
 
 
+@dataclass(frozen=True)
+class MessageChunk:
+    start: int
+    messages: list[dict[str, JsonValue]]
+
+
 def _chunk_messages(
     messages: list[dict[str, JsonValue]],
     size_range: tuple[int, int],
-) -> list[list[dict[str, JsonValue]]]:
+) -> list[MessageChunk]:
     """Split messages into chunks, keeping tool_call/tool_result pairs intact.
 
     ``size_range`` is (min, max); each chunk picks a random size in the range.
@@ -523,67 +580,84 @@ def _chunk_messages(
 
     lo, hi = size_range
     if len(messages) <= lo:
-        return [messages]
+        return [MessageChunk(start=0, messages=messages)]
 
-    chunks: list[list[dict[str, JsonValue]]] = []
+    chunks: list[MessageChunk] = []
     start = 0
 
     while start < len(messages):
         chunk_size = random.randint(lo, hi)
         end = start + chunk_size
         if end >= len(messages):
-            chunks.append(messages[start:])
+            chunks.append(MessageChunk(start=start, messages=messages[start:]))
             break
         while end < len(messages) and str(messages[end].get("role", "")) == "tool_result":
             end += 1
-        chunks.append(messages[start:end])
+        chunks.append(MessageChunk(start=start, messages=messages[start:end]))
         start = end
 
     return chunks
 
 
-type OnChunkCallback = Callable[[dict[str, Any], ExtractionResult, list[dict[str, JsonValue]]], None]
+@dataclass(frozen=True)
+class ExtractedChunk:
+    run_id: str
+    prompt_input: dict[str, Any]
+    result: ExtractionResult
+
+
+type OnChunkCallback = Callable[[ExtractedChunk, list[dict[str, JsonValue]]], None]
 
 
 async def extract_incremental(
     messages: list[dict[str, JsonValue]],
     provider: ProviderSpec,
-    chunk_size: tuple[int, int] = (20, 20),
+    chunk_size: tuple[int, int] = DEFAULT_CHUNK_SIZE,
     on_chunk: OnChunkCallback | None = None,
-) -> list[tuple[dict[str, Any], ExtractionResult]]:
+    run_id: str = "",
+) -> list[ExtractedChunk]:
     """Extract symbols incrementally in chunks with registry accumulation.
 
-    Returns (prompt_input, result) per successful chunk.
-    Turn IDs in results are sequential (0,1,2…) matching the prompt input.
+    Returns extracted chunks with absolute message IDs preserved.
     """
     from .index import normalize_name
 
     chunks = _chunk_messages(messages, chunk_size)
     registry: list[dict[str, Any]] = []
     seen: set[str] = set()
-    results: list[tuple[dict[str, Any], ExtractionResult]] = []
+    results: list[ExtractedChunk] = []
 
     for i, chunk in enumerate(chunks):
         chunk_registry = list(registry) if registry else None
 
         try:
-            result = await extract(chunk, provider, registry=chunk_registry)
+            result = await extract(
+                chunk.messages,
+                provider,
+                registry=chunk_registry,
+                message_id_start=chunk.start,
+            )
         except Exception:
-            logger.exception(f"chunk {i+1}/{len(chunks)} ({len(chunk)} msgs) extraction failed")
+            logger.exception(
+                f"chunk {i+1}/{len(chunks)} ({len(chunk.messages)} msgs) extraction failed"
+            )
             continue
         if result is None:
-            logger.warning(f"chunk {i+1}/{len(chunks)} ({len(chunk)} msgs) no parseable JSON")
+            logger.warning(
+                f"chunk {i+1}/{len(chunks)} ({len(chunk.messages)} msgs) no parseable JSON"
+            )
             continue
 
-        reindexed = _reindex_messages(chunk)
+        reindexed = _reindex_messages(chunk.messages, start=chunk.start)
         if chunk_registry:
             prompt_input: dict[str, Any] = {"known_symbols": chunk_registry, "messages": reindexed}
         else:
             prompt_input = {"messages": reindexed}
-        results.append((prompt_input, result))
+        extracted = ExtractedChunk(run_id=run_id, prompt_input=prompt_input, result=result)
+        results.append(extracted)
 
         if on_chunk:
-            on_chunk(prompt_input, result, chunk)
+            on_chunk(extracted, chunk.messages)
 
         for sym in result.symbols:
             norm = normalize_name(sym.name)
@@ -746,7 +820,10 @@ def collect(
     output_dir: Annotated[Path, typer.Option("--output", help="HuggingFace dataset output directory")] = Path("data"),
     index_output: Annotated[Path | None, typer.Option("--index-output", help="Write final index JSON to this path")] = None,
     split: Annotated[str, typer.Option(help="Dataset split name")] = "train",
-    chunk_size: Annotated[str, typer.Option(help="Messages per chunk: '20' (fixed) or '2-5' (random range)")] = "2-5",
+    chunk_size: Annotated[
+        str,
+        typer.Option(help="Messages per chunk: '3' (fixed) or '2-5' (random range)"),
+    ] = DEFAULT_CHUNK_SIZE_SPEC,
     concurrency: Annotated[int, typer.Option(help="Max concurrent traces")] = 2,
     debug: Annotated[bool, typer.Option("--debug", help="Enable debug logging")] = False,
     fmt: Annotated[str, typer.Option("--format", help=f"Input format: {', '.join(LOADERS)}")] = "agentm",
@@ -816,18 +893,65 @@ def _write_hf_dataset(
     )
 
 
-type ChunkResults = list[tuple[dict[str, Any], ExtractionResult]]
+type ChunkResults = list[ExtractedChunk]
+
+
+_SPAN_SYMBOL_RE: Final = re.compile(r"^(?:span\s+)?s\d+$", re.IGNORECASE)
+
+
+def _symbol_namespace(run_id: str, sym: dict[str, Any]) -> str:
+    """Scope trajectory-local span IDs to the source run."""
+    if not run_id or str(sym.get("kind", "")).lower() != "file":
+        return ""
+    names = [str(sym.get("name", "")), *_symbol_aliases(sym)]
+    return run_id if any(_SPAN_SYMBOL_RE.match(str(name).strip()) for name in names) else ""
+
+
+def _message_step_content(msg: dict[str, JsonValue]) -> tuple[str, str | None]:
+    parts: list[str] = []
+    tool_name: str | None = None
+    blocks = msg.get("content", [])
+    if not isinstance(blocks, list):
+        return "", None
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "text":
+            parts.append(str(block.get("text", "")))
+        elif btype == "tool_call":
+            name = block.get("name")
+            tool_name = str(name) if name is not None else None
+            args = block.get("arguments", block.get("input", {}))
+            arg_text = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+            parts.append(f"[tool_call: {tool_name}]\n{arg_text}")
+        elif btype == "tool_result":
+            sub = block.get("content", [])
+            if isinstance(sub, list):
+                parts.extend(str(s.get("text", "")) for s in sub if isinstance(s, dict))
+            else:
+                parts.append(str(sub))
+    return "\n".join(part for part in parts if part), tool_name
+
+
+def _step_index_from_id(step_id: str, fallback: int) -> int:
+    try:
+        return int(step_id)
+    except ValueError:
+        return fallback
 
 
 def _build_index_from_chunks_into(
     index: Any,
-    prompt_input: dict[str, Any],
-    result: ExtractionResult,
+    extracted: ExtractedChunk,
 ) -> None:
     """Populate a TrajectoryIndex: LLM symbols + programmatic references."""
     from .index import Step, StepRole
 
     role_map = {"user": StepRole.USER, "assistant": StepRole.ASSISTANT, "tool_result": StepRole.TOOL_RESULT}
+    prompt_input = extracted.prompt_input
+    result = extracted.result
+    run_id = extracted.run_id
     msgs = prompt_input.get("messages", prompt_input if isinstance(prompt_input, list) else [])
     base_idx = len(index.steps)
 
@@ -835,21 +959,40 @@ def _build_index_from_chunks_into(
     for i, msg in enumerate(msgs):
         mid = str(msg.get("id", f"s{base_idx + i}"))
         role = role_map.get(str(msg.get("role", "")), StepRole.USER)
-        step = Step(run_id="", step_id=mid, index=base_idx + i, role=role, content="")
+        content, tool_name = _message_step_content(msg)
+        step = Step(
+            run_id=run_id,
+            step_id=mid,
+            index=_step_index_from_id(mid, base_idx + i),
+            role=role,
+            content=content,
+            tool_name=tool_name,
+        )
         index.add_step(step)
         steps_by_id[mid] = step
 
     # LLM-extracted symbols
     known = prompt_input.get("known_symbols", [])
     all_syms = list(known) + [{"name": s.name, "kind": s.kind, "summary": s.summary, "aliases": s.aliases} for s in result.symbols]
+    namespaces = {str(sym["name"]): _symbol_namespace(run_id, sym) for sym in all_syms}
 
     for ext_sym in result.symbols:
-        index.upsert_symbol(name=ext_sym.name, kind=ext_sym.kind.lower(), summary=ext_sym.summary, aliases=ext_sym.aliases)
+        sym_data = {"name": ext_sym.name, "kind": ext_sym.kind, "aliases": ext_sym.aliases}
+        index.upsert_symbol(
+            name=ext_sym.name,
+            kind=ext_sym.kind.lower(),
+            summary=ext_sym.summary,
+            aliases=ext_sym.aliases,
+            namespace=_symbol_namespace(run_id, sym_data),
+        )
 
     # Programmatic references
     refs, _rels = _build_references(all_syms, msgs)
     for ref in refs:
-        resolved = index.resolve_symbol_by_name(ref.symbol_name)
+        resolved = index.resolve_symbol_by_name(
+            ref.symbol_name,
+            namespace=namespaces.get(ref.symbol_name, ""),
+        )
         ref_step = steps_by_id.get(ref.turn_id)
         if resolved and ref_step:
             index.add_reference(symbol=resolved, step=ref_step, text=ref.text, kind=ref.kind, start=ref.start)
@@ -861,8 +1004,8 @@ def _build_index_from_chunks(all_chunks: list[ChunkResults]) -> Any:
 
     index = TrajectoryIndex()
     for chunk_list in all_chunks:
-        for prompt_input, result in chunk_list:
-            _build_index_from_chunks_into(index, prompt_input, result)
+        for extracted in chunk_list:
+            _build_index_from_chunks_into(index, extracted)
     return index
 
 
@@ -908,13 +1051,12 @@ async def _collect_async(
     live_index = _build_index_from_chunks([]) if index_output else None
 
     def _on_chunk(
-        prompt_input: dict[str, Any],
-        result: ExtractionResult,
+        extracted: ExtractedChunk,
         _original_msgs: list[dict[str, JsonValue]],
     ) -> None:
         if live_index is None:
             return
-        _build_index_from_chunks_into(live_index, prompt_input, result)
+        _build_index_from_chunks_into(live_index, extracted)
         live_index.dump(index_output)
 
     async def _process_one(src: TrajectorySource) -> ChunkResults:
@@ -924,7 +1066,13 @@ async def _collect_async(
                 logger.debug(f"{label}: {len(msgs)} msgs < {min_messages}, skipped")
                 return []
             try:
-                chunks = await extract_incremental(msgs, provider, chunk_size, on_chunk=_on_chunk)
+                chunks = await extract_incremental(
+                    msgs,
+                    provider,
+                    chunk_size,
+                    on_chunk=_on_chunk,
+                    run_id=label,
+                )
             except Exception:
                 logger.exception(f"{label}: extraction failed")
                 return []
@@ -932,7 +1080,7 @@ async def _collect_async(
                 logger.warning(f"{label}: no successful chunks")
                 return []
 
-            total_sym = sum(len(r.symbols) for _, r in chunks)
+            total_sym = sum(len(chunk.result.symbols) for chunk in chunks)
             logger.info(
                 f"{label}: {len(msgs)} msgs -> {len(chunks)} chunks, "
                 f"{total_sym} sym"
@@ -943,7 +1091,11 @@ async def _collect_async(
     results = await asyncio.gather(*tasks)
 
     all_chunks = [cr for cr in results if cr]
-    examples = [build_sft_example(pi, res) for cr in all_chunks for pi, res in cr]
+    examples = [
+        build_sft_example(chunk.prompt_input, chunk.result)
+        for cr in all_chunks
+        for chunk in cr
+    ]
     _write_hf_dataset(examples, output_dir, split)
     logger.info(f"done: {len(examples)} examples from {len(sources)} sources -> {output_dir}/{split}.jsonl")
 

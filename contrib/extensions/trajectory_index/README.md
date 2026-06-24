@@ -1,9 +1,10 @@
 # Trajectory Semantic Index
 
-LSP-style symbol-reference-relation index over agent trajectories. Extracts
-a semantic graph from conversation history — symbols (services, files,
-metrics, errors, …), their references (where each is mentioned and how),
-and relations between them (causes, depends_on, derived_from, …).
+LSP-style symbol-reference index over agent trajectories. The extraction
+model emits a symbol table (services, files, metrics, errors, …); the indexer
+then builds references from message text and tool calls. Relation storage is
+present in the index, but the current extractor schema does not ask the model
+to emit relations.
 
 Designed for incremental indexing: each extraction call processes only new
 messages and a compact symbol registry, not the full history.
@@ -16,21 +17,13 @@ the extraction child session needs `trajectory_index` on the Python path.
 ```bash
 cd contrib/extensions/trajectory_index
 
-# One-shot extraction on a trace file (all messages in one chunk)
-uv run python -m trajectory_index.data collect \
-  path/to/session.jsonl \
-  --model doubao \
-  --output /tmp/traj_out \
-  --index-output /tmp/traj_out/index.json \
-  --chunk-size 200
-
-# Incremental extraction (recommended: 20 messages per chunk)
+# Incremental extraction (recommended: small random chunks)
 uv run python -m trajectory_index.data collect \
   path/to/session.jsonl \
   --model litellm-dsv4flash-nothink \
   --output /tmp/traj_out \
   --index-output /tmp/traj_out/index.json \
-  --chunk-size 20
+  --chunk-size 2-5
 
 # With real-time streaming of model thinking/output
 uv run python -m trajectory_index.data collect \
@@ -38,7 +31,7 @@ uv run python -m trajectory_index.data collect \
   --model litellm-dsv4flash-nothink \
   --output /tmp/traj_out \
   --index-output /tmp/traj_out/index.json \
-  --chunk-size 20 \
+  --chunk-size 2-5 \
   --debug
 ```
 
@@ -107,7 +100,7 @@ uv run python -m trajectory_index.data collect \
   --output data/ \
   --index-output data/index.json \
   --split train \
-  --chunk-size 20 \
+  --chunk-size 2-5 \
   --concurrency 2
 ```
 
@@ -122,7 +115,7 @@ Each SFT example has the format:
   "messages": [
     {"role": "system", "content": "Extract symbols, references, and relations..."},
     {"role": "user", "content": "{\"known_symbols\": [...], \"messages\": [...]}"},
-    {"role": "assistant", "content": "{\"symbols\": [...], \"references\": [...], \"relations\": [...]}"}
+    {"role": "assistant", "content": "{\"symbols\": [...]}"}
   ]
 }
 ```
@@ -159,7 +152,7 @@ uv run python -m trajectory_index.data export-messages TRACE_FILE
 | `--output` | `data` | HuggingFace dataset output directory |
 | `--index-output` | — | Write live index JSON to this path |
 | `--split` | `train` | Dataset split name |
-| `--chunk-size` | `20` | Messages per extraction chunk |
+| `--chunk-size` | `2-5` | Messages per extraction chunk; random ranges reduce truncation risk |
 | `--concurrency` | `2` | Max concurrent trace sources |
 | `--debug` | off | Stream model thinking/output to stderr |
 | `--session` | — | ClickHouse session ID (repeatable) |
@@ -188,13 +181,14 @@ trajectory — make it a linker.**
 Each extraction call receives:
 1. **`known_symbols`** — compact registry of symbols already extracted
    (name + kind + summary + aliases)
-2. **`messages`** — only the new turns since last indexing (with sequential
-   IDs: 0, 1, 2, …)
+2. **`messages`** — only the new turns since last indexing, with absolute
+   message IDs from the source trajectory
 
 The model's job:
 - Extract new symbols from the current chunk
-- Produce references (occurrences) for both new and known symbols
-- Declare relations between symbols
+
+The indexer's job:
+- Build references for both new and known symbols from the chunk content
 
 This keeps the prompt size bounded by `O(registry) + O(chunk)` instead of
 `O(full_trajectory)`.
@@ -206,16 +200,18 @@ are never split across chunks.
 
 ### Validation and retry
 
-If the model's output fails JSON parsing, Pydantic validation, or
-vocabulary checks, the error is sent back to a fresh session for
-correction (one retry attempt).
+If the model's output fails JSON parsing, Pydantic validation, or vocabulary
+checks, the error is sent back to a fresh session for correction. For
+OpenAI-compatible providers, collection also requests a strict
+`response_format: json_schema` generated from the Pydantic `ExtractionResult`
+schema.
 
 ## Model recommendations
 
 | Model | Speed | Quality | Notes |
 |-------|-------|---------|-------|
 | DeepSeek V4 Flash (no-think) | Fast | Best | 65K output, no truncation. Recommended teacher |
-| doubao-seed-2-0-pro | Moderate | Good | May truncate on large chunks |
+| doubao-seed-2-0-pro | Moderate | Good | Use small chunks; large outputs may truncate |
 | Qwen 3.5 2B (local) | Fastest | Fair (zero-shot) | Needs SFT to follow turn_id format |
 
 For distillation: use DS Flash as teacher, Qwen 2B as student.

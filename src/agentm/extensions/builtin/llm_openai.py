@@ -611,6 +611,9 @@ class OpenAIStreamFn:
         extra = dict(self.extra_body or {})
         if self.reasoning_effort is not None:
             extra.setdefault("reasoning_effort", self.reasoning_effort)
+        response_format = extra.pop("response_format", None)
+        if response_format is not None:
+            body["response_format"] = response_format
         if extra:
             body["extra_body"] = extra
 

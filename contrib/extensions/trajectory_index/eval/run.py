@@ -20,8 +20,8 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).parents[3] / "src"))
 
 from trajectory_index.agents.entity_extractor.schema import (
-    ExtractedEntity,
-    ReportEntitiesParams,
+    ExtractedSymbol,
+    ExtractionResult,
 )
 from trajectory_index.data import JsonValue, ProviderSpec, extract, resolve_provider
 
@@ -96,14 +96,14 @@ def _normalize(name: str) -> str:
     return name.strip().lower().replace("-", "_").replace(" ", "_")
 
 
-def grade(case: EvalCase, result: ReportEntitiesParams) -> GradeResult:
+def grade(case: EvalCase, result: ExtractionResult) -> GradeResult:
     g = GradeResult(case_id=case.id)
-    g.total_extracted_entities = len(result.entities)
-    g.total_extracted_mentions = len(result.mentions)
-    g.total_extracted_relations = len(result.relations)
+    g.total_extracted_entities = len(result.symbols)
+    g.total_extracted_mentions = 0
+    g.total_extracted_relations = 0
 
-    extracted_by_norm: dict[str, ExtractedEntity] = {}
-    for ent in result.entities:
+    extracted_by_norm: dict[str, ExtractedSymbol] = {}
+    for ent in result.symbols:
         extracted_by_norm[_normalize(ent.name)] = ent
         for alias in ent.aliases:
             extracted_by_norm[_normalize(alias)] = ent
@@ -121,14 +121,12 @@ def grade(case: EvalCase, result: ReportEntitiesParams) -> GradeResult:
         else:
             g.missed_entities.append(exp["name"])
 
-    for ent in result.entities:
+    for ent in result.symbols:
         if _normalize(ent.name) not in expected_names:
             g.extra_entity_count += 1
             g.extra_entities.append(f"{ent.name} ({ent.kind})")
 
     extracted_rels: set[tuple[str, str, str]] = set()
-    for rel in result.relations:
-        extracted_rels.add((_normalize(rel.from_entity), _normalize(rel.to_entity), _normalize(rel.relation_type)))
 
     g.expected_relation_count = len(case.expected_relations)
     for exp in case.expected_relations:

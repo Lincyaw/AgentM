@@ -205,10 +205,11 @@ async def _run_extraction(
     messages: list[dict[str, JsonValue]],
     provider: ProviderSpec | None,
     registry: list[dict[str, Any]] | None = None,
+    message_id_start: int = 0,
 ) -> ExtractionResult | None:
     from .data import _reindex_messages
 
-    reindexed = _reindex_messages(messages)
+    reindexed = _reindex_messages(messages, start=message_id_start)
 
     if registry:
         prompt_data: dict[str, Any] = {
@@ -279,59 +280,38 @@ def _populate_index(
     index: TrajectoryIndex,
     result: ExtractionResult,
     steps: list[Step],
+    messages: list[dict[str, JsonValue]],
 ) -> None:
+    from .data import _build_references
+
     steps_by_id = {s.step_id: s for s in steps}
 
-    symbol_map: dict[str, Symbol] = {}
     for ext_sym in result.symbols:
-        symbol = index.upsert_symbol(
+        index.upsert_symbol(
             name=ext_sym.name,
             kind=ext_sym.kind.lower(),
             summary=ext_sym.summary,
             aliases=ext_sym.aliases,
         )
-        symbol_map[ext_sym.name] = symbol
 
     def _resolve(name: str) -> Symbol | None:
-        sym = symbol_map.get(name)
-        if sym is not None:
-            return sym
         return index.resolve_symbol_by_name(name)
 
-    for ext_ref in result.references:
-        sym = _resolve(ext_ref.symbol_name)
+    refs, _rels = _build_references(index.registry_snapshot(), messages)
+    for ref in refs:
+        sym = _resolve(ref.symbol_name)
         if not sym:
             continue
-        step = steps_by_id.get(ext_ref.turn_id)
+        step = steps_by_id.get(ref.turn_id)
         if not step:
             continue
-        start = step.content.find(ext_ref.text)
-        if start < 0:
-            start = 0
         index.add_reference(
             symbol=sym,
             step=step,
-            text=ext_ref.text,
-            kind=ext_ref.kind.lower(),
-            start=start,
-            end=start + len(ext_ref.text) if start > 0 else len(ext_ref.text),
-            confidence=0.9,
-        )
-
-    for ext_rel in result.relations:
-        from_sym = _resolve(ext_rel.from_symbol)
-        to_sym = _resolve(ext_rel.to_symbol)
-        if not from_sym or not to_sym:
-            continue
-        step = steps_by_id.get(ext_rel.turn_id)
-        if not step:
-            continue
-        index.add_relation(
-            from_symbol=from_sym,
-            to_symbol=to_sym,
-            rel_type=ext_rel.relation_type.lower(),
-            step=step,
-            confidence=0.85,
+            text=ref.text,
+            kind=ref.kind,
+            start=ref.start,
+            confidence=0.8,
         )
 
 
@@ -365,20 +345,29 @@ def _build_index_tool(api: ExtensionAPI, cfg: TrajectoryIndexConfig) -> Function
                 ),
             )])
 
-        new_steps = _clean_messages_to_steps(new_msgs, run_id, start_index=watermark)
+        from .data import _reindex_messages
+
+        prompt_msgs = _reindex_messages(new_msgs, start=watermark)
+        new_steps = _clean_messages_to_steps(prompt_msgs, run_id, start_index=watermark)
         for step in new_steps:
             index.add_step(step)
 
         registry = index.registry_snapshot() if watermark > 0 else None
         provider = _resolve_provider_safe(cfg.model)
-        result = await _run_extraction(api, new_msgs, provider, registry=registry)
+        result = await _run_extraction(
+            api,
+            new_msgs,
+            provider,
+            registry=registry,
+            message_id_start=watermark,
+        )
         if result is None:
             return ToolResult(
                 content=[TextContent(type="text", text="Extraction failed — check logs.")],
                 is_error=True,
             )
 
-        _populate_index(index, result, new_steps)
+        _populate_index(index, result, new_steps, prompt_msgs)
         index.indexed_message_count = len(clean_msgs)
         stats = index.stats(run_id)
         return ToolResult(

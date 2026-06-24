@@ -16,6 +16,7 @@ from hashlib import sha1
 from pathlib import Path
 
 type MetadataValue = str | int | float | bool | None
+type NameKey = tuple[str, str]
 
 # ---------------------------------------------------------------------------
 # Role enum (structural, not vocabulary-driven)
@@ -191,7 +192,7 @@ class TrajectoryIndex:
         self.steps: dict[tuple[str, str], Step] = {}
 
         self.symbols: dict[str, Symbol] = {}
-        self._symbol_ids_by_norm: dict[str, set[str]] = defaultdict(set)
+        self._symbol_ids_by_norm: dict[NameKey, set[str]] = defaultdict(set)
 
         self.references: dict[str, Reference] = {}
         self._ref_ids_by_symbol: dict[str, list[str]] = defaultdict(list)
@@ -204,6 +205,13 @@ class TrajectoryIndex:
 
     # ---- write path ----
 
+    @staticmethod
+    def _name_key(name: str, namespace: str = "") -> NameKey:
+        return (namespace, normalize_name(name))
+
+    def _index_symbol_name(self, symbol_id: str, name: str, namespace: str = "") -> None:
+        self._symbol_ids_by_norm[self._name_key(name, namespace)].add(symbol_id)
+
     def add_step(self, step: Step) -> None:
         self.steps[(step.run_id, step.step_id)] = step
 
@@ -213,9 +221,10 @@ class TrajectoryIndex:
         kind: str = "unknown",
         summary: str | None = None,
         aliases: Sequence[str] = (),
+        namespace: str = "",
     ) -> Symbol:
-        norm = normalize_name(name)
-        existing_ids = self._symbol_ids_by_norm.get(norm)
+        norm_key = self._name_key(name, namespace)
+        existing_ids = self._symbol_ids_by_norm.get(norm_key)
         if existing_ids:
             symbol_id = sorted(existing_ids)[0]
             symbol = self.symbols[symbol_id]
@@ -225,21 +234,26 @@ class TrajectoryIndex:
                 symbol.summary = summary
             for alias in aliases:
                 symbol.aliases.add(alias)
-                self._symbol_ids_by_norm[normalize_name(alias)].add(symbol_id)
+                self._index_symbol_name(symbol_id, alias, namespace)
             return symbol
 
-        symbol_id = stable_id("sym", norm)
+        norm = normalize_name(name)
+        symbol_id = stable_id("sym", namespace, norm) if namespace else stable_id("sym", norm)
+        metadata: dict[str, MetadataValue] = {}
+        if namespace:
+            metadata["namespace"] = namespace
         symbol = Symbol(
             id=symbol_id,
             canonical_name=name.strip(),
             kind=kind,
             summary=summary,
             aliases=set(aliases),
+            metadata=metadata,
         )
         self.symbols[symbol_id] = symbol
-        self._symbol_ids_by_norm[norm].add(symbol_id)
+        self._index_symbol_name(symbol_id, name, namespace)
         for alias in aliases:
-            self._symbol_ids_by_norm[normalize_name(alias)].add(symbol_id)
+            self._index_symbol_name(symbol_id, alias, namespace)
         return symbol
 
     def add_reference(
@@ -330,10 +344,13 @@ class TrajectoryIndex:
             out.append(entry)
         return out
 
-    def resolve_symbol_by_name(self, name: str) -> Symbol | None:
+    def resolve_symbol_by_name(self, name: str, namespace: str = "") -> Symbol | None:
         """Look up a symbol by name or alias (normalized match)."""
-        norm = normalize_name(name)
-        ids = self._symbol_ids_by_norm.get(norm)
+        if namespace:
+            ids = self._symbol_ids_by_norm.get(self._name_key(name, namespace))
+            if ids:
+                return self.symbols[sorted(ids)[0]]
+        ids = self._symbol_ids_by_norm.get(self._name_key(name))
         if ids:
             return self.symbols[sorted(ids)[0]]
         return None
@@ -372,6 +389,19 @@ class TrajectoryIndex:
 
             for e in errors:
                 logger.warning(f"index integrity: {e}")
+        steps = [
+            {
+                "run_id": s.run_id,
+                "step_id": s.step_id,
+                "index": s.index,
+                "role": s.role,
+                "content": s.content,
+                "tool_name": s.tool_name,
+                "timestamp": s.timestamp,
+                "metadata": dict(s.metadata) if s.metadata else {},
+            }
+            for s in self.steps.values()
+        ]
         symbols = [
             {
                 "id": s.id,
@@ -380,6 +410,8 @@ class TrajectoryIndex:
                 "aliases": sorted(s.aliases) if s.aliases else [],
                 "summary": s.summary,
                 "definition_ref_id": s.definition_ref_id,
+                "namespace": str(s.metadata.get("namespace", "")),
+                "metadata": dict(s.metadata) if s.metadata else {},
             }
             for s in self.symbols.values()
         ]
@@ -387,10 +419,15 @@ class TrajectoryIndex:
             {
                 "id": r.id,
                 "symbol_id": r.symbol_id,
+                "run_id": r.run_id,
                 "step_id": r.step_id,
+                "start": r.location.start,
+                "end": r.location.end,
                 "text": r.text,
+                "role": r.role,
                 "kind": r.kind,
                 "confidence": r.confidence,
+                "metadata": dict(r.metadata) if r.metadata else {},
             }
             for r in self.references.values()
         ]
@@ -400,8 +437,11 @@ class TrajectoryIndex:
                 "from": r.from_symbol_id,
                 "to": r.to_symbol_id,
                 "type": r.type,
+                "run_id": r.run_id,
                 "step_id": r.step_id,
+                "weight": r.weight,
                 "confidence": r.confidence,
+                "metadata": dict(r.metadata) if r.metadata else {},
             }
             for r in self.relations.values()
         ]
@@ -413,6 +453,7 @@ class TrajectoryIndex:
                 "relations": len(self.relations),
                 "indexed_message_count": self.indexed_message_count,
             },
+            "steps": steps,
             "symbols": symbols,
             "references": refs,
             "relations": relations,
@@ -431,14 +472,44 @@ class TrajectoryIndex:
         index = cls()
         index.indexed_message_count = data.get("stats", {}).get("indexed_message_count", 0)
 
+        for s in data.get("steps", []):
+            step = Step(
+                run_id=str(s.get("run_id", "")),
+                step_id=str(s["step_id"]),
+                index=int(s.get("index", 0)),
+                role=str(s.get("role", StepRole.USER)),
+                content=str(s.get("content", "")),
+                tool_name=s.get("tool_name") if isinstance(s.get("tool_name"), str) else None,
+                timestamp=s.get("timestamp") if isinstance(s.get("timestamp"), int | float) else None,
+                metadata=s.get("metadata", {}) if isinstance(s.get("metadata"), dict) else {},
+            )
+            index.add_step(step)
+
         for s in data.get("symbols", data.get("entities", [])):
-            symbol = index.upsert_symbol(
-                name=s["name"],
-                kind=s["kind"],
-                summary=s.get("summary"),
-                aliases=s.get("aliases", []),
+            metadata = s.get("metadata", {}) if isinstance(s.get("metadata"), dict) else {}
+            namespace = str(s.get("namespace") or metadata.get("namespace") or "")
+            if namespace:
+                metadata = {**metadata, "namespace": namespace}
+            aliases = set(s.get("aliases", []))
+            default_id = (
+                stable_id("sym", namespace, normalize_name(str(s["name"])))
+                if namespace
+                else stable_id("sym", normalize_name(str(s["name"])))
+            )
+            symbol_id = str(s.get("id") or default_id)
+            symbol = Symbol(
+                id=symbol_id,
+                canonical_name=str(s["name"]).strip(),
+                kind=str(s.get("kind", "unknown")),
+                aliases=aliases,
+                summary=s.get("summary") if isinstance(s.get("summary"), str) else None,
+                metadata=metadata,
             )
             symbol.definition_ref_id = s.get("definition_ref_id", s.get("definition_mention_id"))
+            index.symbols[symbol.id] = symbol
+            index._index_symbol_name(symbol.id, symbol.canonical_name, namespace)
+            for alias in symbol.aliases:
+                index._index_symbol_name(symbol.id, alias, namespace)
 
         from loguru import logger as _log
 
@@ -448,39 +519,70 @@ class TrajectoryIndex:
             if not sym:
                 _log.warning(f"load: reference {r['id']} -> missing symbol {sym_id}, skipped")
                 continue
-            ref_step = index.steps.get(("", r["step_id"]))
+            run_id = str(r.get("run_id", ""))
+            step_id = str(r["step_id"])
+            ref_step = index.steps.get((run_id, step_id))
             if not ref_step:
                 ref_step = Step(
-                    run_id="", step_id=r["step_id"], index=0,
+                    run_id=run_id, step_id=step_id, index=0,
                     role=StepRole.USER, content="",
                 )
                 index.add_step(ref_step)
-            index.add_reference(
-                symbol=sym, step=ref_step, text=r["text"],
-                kind=r.get("kind", r.get("mention_type", "unknown")),
-                confidence=r.get("confidence", 1.0),
+            text = str(r.get("text", ""))
+            start = int(r.get("start", r.get("offset", 0)))
+            end = int(r.get("end", start + len(text)))
+            ref_id = str(r.get("id") or stable_id("ref", run_id, step_id, start, end, sym.id))
+            if ref_id in index.references:
+                continue
+            ref = Reference(
+                id=ref_id,
+                symbol_id=sym.id,
+                run_id=run_id,
+                step_id=step_id,
+                location=Location(run_id, step_id, start, end),
+                text=text,
+                role=str(r.get("role", ref_step.role)),
+                kind=str(r.get("kind", r.get("mention_type", "unknown"))),
+                confidence=float(r.get("confidence", 1.0)),
+                metadata=r.get("metadata", {}) if isinstance(r.get("metadata"), dict) else {},
             )
+            index.references[ref.id] = ref
+            index._ref_ids_by_symbol[sym.id].append(ref.id)
+            index._ref_ids_by_step[(run_id, step_id)].append(ref.id)
 
-        for r in data["relations"]:
+        for r in data.get("relations", []):
             from_s = index.symbols.get(r["from"])
             to_s = index.symbols.get(r["to"])
             if not from_s or not to_s:
                 missing = [s for s, v in [("from", from_s), ("to", to_s)] if not v]
                 _log.warning(f"load: relation {r['id']} missing {missing} symbol(s), skipped")
                 continue
-            rel_step = index.steps.get(("", r["step_id"]))
+            run_id = str(r.get("run_id", ""))
+            step_id = str(r["step_id"])
+            rel_step = index.steps.get((run_id, step_id))
             if not rel_step:
                 rel_step = Step(
-                    run_id="", step_id=r["step_id"], index=0,
+                    run_id=run_id, step_id=step_id, index=0,
                     role=StepRole.USER, content="",
                 )
                 index.add_step(rel_step)
-            index.add_relation(
-                from_symbol=from_s, to_symbol=to_s,
-                rel_type=r["type"],
-                step=rel_step,
-                confidence=r.get("confidence", 1.0),
+            rel_id = str(r.get("id") or stable_id("rel", from_s.id, to_s.id, r["type"]))
+            if rel_id in index.relations:
+                continue
+            relation = Relation(
+                id=rel_id,
+                from_symbol_id=from_s.id,
+                to_symbol_id=to_s.id,
+                type=str(r["type"]),
+                run_id=run_id,
+                step_id=step_id,
+                weight=float(r.get("weight", 1.0)),
+                confidence=float(r.get("confidence", 1.0)),
+                metadata=r.get("metadata", {}) if isinstance(r.get("metadata"), dict) else {},
             )
+            index.relations[relation.id] = relation
+            index._relation_ids_by_symbol[from_s.id].append(relation.id)
+            index._relation_ids_by_symbol[to_s.id].append(relation.id)
 
         return index
 
