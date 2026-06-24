@@ -24,10 +24,16 @@ class _IndexState:
         trajectory: list[dict[str, Any]],
         symbols: list[dict[str, Any]],
         references: list[dict[str, Any]],
+        context_index: dict[str, Any] | None = None,
     ) -> None:
         self.trajectory = trajectory
         self.symbols = symbols
         self.references = references
+        self.context_index = context_index or {}
+        self._context_turns_by_index: dict[int, dict[str, Any]] = {}
+        for turn in self.context_index.get("turns", []):
+            if isinstance(turn, dict) and isinstance(turn.get("turn_index"), int):
+                self._context_turns_by_index[turn["turn_index"]] = turn
         self._sym_by_id: dict[str, dict[str, Any]] = {s["id"]: s for s in symbols}
         self._sym_by_name: dict[str, dict[str, Any]] = {}
         for s in symbols:
@@ -145,6 +151,28 @@ def _build_get_entity_timeline_tool(state: _IndexState) -> FunctionTool:
         parsed = Args.model_validate(args)
         sym = state._sym_by_name.get(parsed.name.lower())
         if sym is None:
+            for entity in state.context_index.get("entities", []):
+                if not isinstance(entity, dict):
+                    continue
+                names = [str(entity.get("name", ""))]
+                aliases = entity.get("aliases")
+                if isinstance(aliases, list):
+                    names.extend(str(alias) for alias in aliases)
+                if parsed.name.lower() not in {name.lower() for name in names}:
+                    continue
+                refs: list[dict[str, Any]] = []
+                raw_turns = entity.get("turns")
+                turns = raw_turns if isinstance(raw_turns, list) else []
+                for turn_index in turns:
+                    turn = state._context_turns_by_index.get(turn_index)
+                    refs.append(
+                        {
+                            "turn": turn_index,
+                            "kind": "context_index",
+                            "text": str((turn or {}).get("summary", ""))[:100],
+                        }
+                    )
+                return _text_result(json.dumps({"entity": entity, "references": refs}, ensure_ascii=False, indent=2))
             return _text_result(f"Entity '{parsed.name}' not found in the symbol table.")
         sym_id = sym["id"]
         refs = state._refs_by_sym.get(sym_id, [])
@@ -186,17 +214,33 @@ def _build_list_entities_tool(state: _IndexState) -> FunctionTool:
     async def handler(args: dict[str, Any]) -> ToolResult:
         parsed = Args.model_validate(args)
         entities: list[dict[str, Any]] = []
-        for s in state.symbols:
-            if parsed.kind and s.get("kind") != parsed.kind:
-                continue
-            refs = state._refs_by_sym.get(s["id"], [])
-            ref_kinds = Counter(r.get("kind", "?") for r in refs)
-            entities.append({
-                "name": s["name"],
-                "kind": s.get("kind", "?"),
-                "refs": len(refs),
-                "ref_kinds": dict(ref_kinds),
-            })
+        if state.symbols:
+            for s in state.symbols:
+                if parsed.kind and s.get("kind") != parsed.kind:
+                    continue
+                refs = state._refs_by_sym.get(s["id"], [])
+                ref_kinds = Counter(r.get("kind", "?") for r in refs)
+                entities.append({
+                    "name": s["name"],
+                    "kind": s.get("kind", "?"),
+                    "refs": len(refs),
+                    "ref_kinds": dict(ref_kinds),
+                })
+        else:
+            for entity in state.context_index.get("entities", []):
+                if not isinstance(entity, dict):
+                    continue
+                kind = str(entity.get("type", "?"))
+                if parsed.kind and kind != parsed.kind:
+                    continue
+                turns = entity.get("turns")
+                ref_count = len(turns) if isinstance(turns, list) else 0
+                entities.append({
+                    "name": entity.get("name", ""),
+                    "kind": kind,
+                    "refs": ref_count,
+                    "ref_kinds": {"context_index": ref_count},
+                })
         entities.sort(key=lambda x: (-x["refs"], x["name"]))
         kind_counts = Counter(e["kind"] for e in entities)
         return _text_result(json.dumps({
@@ -211,6 +255,39 @@ def _build_list_entities_tool(state: _IndexState) -> FunctionTool:
             "List all entities in the symbol table with reference counts and kinds. "
             "Optionally filter by entity kind. Use this to see what the index contains "
             "before drilling into specifics with search_entities or get_entity_timeline."
+        ),
+        parameters=Args,
+        fn=handler,
+    )
+
+
+def _build_list_attention_hints_tool(state: _IndexState) -> FunctionTool:
+    class Args(BaseModel):
+        kind: str | None = Field(default=None, description="Optional hint kind filter")
+        limit: int = Field(default=8, description="Maximum number of hints to return")
+
+    async def handler(args: dict[str, Any]) -> ToolResult:
+        parsed = Args.model_validate(args)
+        hints = state.context_index.get("attention_hints", [])
+        selected: list[dict[str, Any]] = []
+        for hint in hints:
+            if not isinstance(hint, dict):
+                continue
+            if parsed.kind and hint.get("kind") != parsed.kind:
+                continue
+            selected.append(hint)
+            if len(selected) >= max(1, parsed.limit):
+                break
+        if not selected:
+            return _text_result("No attention hints available" + (f" for kind={parsed.kind}" if parsed.kind else ""))
+        return _text_result(json.dumps(selected, ensure_ascii=False, indent=2))
+
+    return FunctionTool(
+        name="list_attention_hints",
+        description=(
+            "List context-index attention hints such as competing observations, "
+            "weak candidate signals, and local signals on disappeared entities. "
+            "Use this to choose which concrete evidence to verify with get_turn."
         ),
         parameters=Args,
         fn=handler,
@@ -273,6 +350,7 @@ MANIFEST = ExtensionManifest(
         "tool:search_entities",
         "tool:get_entity_timeline",
         "tool:list_entities",
+        "tool:list_attention_hints",
     ),
 )
 
@@ -281,9 +359,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     trajectory = config.get("trajectory", [])
     symbols = config.get("symbols", [])
     references = config.get("references", [])
-    state = _IndexState(trajectory, symbols, references)
+    context_index = config.get("context_index")
+    state = _IndexState(
+        trajectory,
+        symbols,
+        references,
+        context_index if isinstance(context_index, dict) else None,
+    )
     api.register_tool(_build_list_turns_tool(state))
     api.register_tool(_build_get_turn_tool(state))
     api.register_tool(_build_search_entities_tool(state))
     api.register_tool(_build_get_entity_timeline_tool(state))
     api.register_tool(_build_list_entities_tool(state))
+    api.register_tool(_build_list_attention_hints_tool(state))

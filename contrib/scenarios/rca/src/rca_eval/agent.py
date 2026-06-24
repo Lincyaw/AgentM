@@ -147,24 +147,6 @@ def _coerce_max_turns(value: Any, fallback: int) -> int:
     return result if result > 0 else fallback
 
 
-def _coerce_max_interventions(value: Any, fallback: int) -> int:
-    """Coerce ``--ak max_interventions=...`` to a non-negative int.
-
-    Distinct from :func:`_coerce_max_turns` (which floors at 1) because
-    ``max_interventions=0`` is a legitimate setting — it disables every
-    branch and runs only the control segment, which is useful for
-    A/B-baseline experiments that want chained-fork metadata without
-    paying for branch rollouts.
-    """
-    if value is None:
-        return fallback
-    try:
-        result = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return result if result >= 0 else fallback
-
-
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
@@ -224,7 +206,11 @@ class AgentMAgent(BaseAgent):
         self._exp_id = exp_id
         self._max_turns = _coerce_max_turns(max_turns, _DEFAULT_MAX_TURNS)
         self._chained_fork = _coerce_bool(chained_fork, default=False)
-        self._max_interventions = _coerce_max_interventions(max_interventions, 10)
+        if max_interventions is not None:
+            logger.warning(
+                "AgentMAgent: max_interventions is ignored; rescue-window now owns "
+                "branch experiment scheduling."
+            )
 
         # Stay lenient on unknown kwargs (stale eval YAMLs survive), but
         # surface them at WARNING so a hand-edited config still pointing
@@ -233,7 +219,10 @@ class AgentMAgent(BaseAgent):
         # silently degrade to a vanilla control session.
         if _extra:
             logger.warning(
-                f"AgentMAgent: ignoring unknown kwargs {sorted(_extra.keys())}. Pre-refactor names like intervention_mode / fork_policy / fork_audit / control_scenario / branch_scenario are removed; use chained_fork=true and max_interventions=N instead."
+                f"AgentMAgent: ignoring unknown kwargs {sorted(_extra.keys())}. "
+                "Branch experiment flags such as intervention_mode / fork_policy / "
+                "fork_audit / control_scenario / branch_scenario moved to the "
+                "rescue-window eval package."
             )
 
     @staticmethod
@@ -299,91 +288,11 @@ class AgentMAgent(BaseAgent):
         data_dir: str,
         **kwargs: Any,
     ) -> AgentResult:
-        from llmharness.eval.replay.fork_tree import (
-            SessionPayload,
-            run_fork_tree_experiment,
-        )
-        from llmharness.eval.replay.runner import AuditorSettings
-
-        # The user-facing ``--ak chained_fork=true`` flag now drives the
-        # fork-tree engine; the linear chain is the degenerate
-        # ``max_surfaces_per_node=1`` policy. We run the full tree.
-        #
-        # Side-table keyed by session_log_id so we can recover the full
-        # _SessionRun (and its AgentResult / metadata) for each node after
-        # the experiment finishes. _SessionRun structurally matches
-        # SessionPayload (both have session_log_id + final_messages), so
-        # the factory returns it directly.
-        session_runs: dict[str, _SessionRun] = {}
-
-        async def factory(
-            *,
-            initial_messages: list[Any] | None,
-            seed_reminder_text: str | None,
-        ) -> SessionPayload:
-            run = await self._execute_session(
-                incident=incident if initial_messages is None else None,
-                data_dir=data_dir,
-                scenario=self._scenario,
-                initial_messages=initial_messages,
-                seed_reminder_text=seed_reminder_text,
-                **kwargs,
-            )
-            session_runs[run.session_log_id] = run
-            return run  # type: ignore[return-value]  # structural match on Protocol
-
-        experiment = await run_fork_tree_experiment(
-            session_factory=factory,
-            cwd=os.getcwd(),
-            provider=_build_provider(self._provider, self._model),
-            auditor_settings=AuditorSettings.default(),
-            audit_interval=5,
-            # ``max_interventions`` historically capped the linear chain
-            # length; map it onto the tree's depth guard so an existing
-            # ``--ak max_interventions=N`` keeps bounding how deep
-            # interventions stack.
-            max_depth=self._max_interventions,
-        )
-
-        # The reported response is the ROOT/control node's submission: the
-        # baseline answer (no intervention) is what gets judged, so the
-        # control-vs-intervention comparison stays honest. Every node's
-        # submission + intervention path lives in metadata so a
-        # control-vs-leaf comparison is recoverable downstream.
-        root_run = session_runs[experiment.root.backbone_session_id]
-        metadata = dict(root_run.result.metadata or {})
-        # Tree topology comes straight from the experiment header (matches
-        # the ``<root_sid>.chained.jsonl`` first-line bundle so
-        # rcabench-platform and downstream tools see the same shape).
-        # Augment with presentational fields the sidecar doesn't carry:
-        # ``base_scenario``, ``forktree_replay_path`` (string path), and
-        # per-node ``run`` summaries from the rca eval driver.
-        tree_meta: dict[str, Any] = dict(experiment.header)
-        tree_meta["base_scenario"] = self._scenario
-        tree_meta["forktree_replay_path"] = (
-            str(experiment.forktree_replay_path)
-            if experiment.forktree_replay_path is not None
-            else None
-        )
-        tree_meta["nodes"] = [
-            {
-                **node_header,
-                "run": _run_metadata(session_runs[node_header["backbone_session_id"]]),
-            }
-            for node_header in experiment.header["nodes"]
-        ]
-        metadata["intervention_mode"] = "fork_tree"
-        # The ``chained_fork`` key name is kept for backward compat with
-        # existing dashboards / parsers, but holds a fork-tree shape
-        # (``nodes`` list with parent links + paths), not a linear
-        # ``segments`` list. Downstream consumers should switch on
-        # ``intervention_mode == "fork_tree"`` and read ``nodes``.
-        metadata["chained_fork"] = tree_meta
-        return AgentResult(
-            response=root_run.result.response,
-            trajectory=root_run.result.trajectory,
-            trace_id=root_run.result.trace_id,
-            metadata=metadata,
+        del incident, data_dir, kwargs
+        raise RuntimeError(
+            "AgentMAgent chained_fork was removed. Run the baseline RCA agent "
+            "normally, then use `rescue-window llmharness` for branch experiments "
+            "and `rescue-window export-run --adapter rca` for scoring/export."
         )
 
     async def _execute_session(
@@ -406,7 +315,6 @@ class AgentMAgent(BaseAgent):
             text_message,
         )
         from agentm.core.runtime import AgentSession
-        from agentm.core.runtime import create_agent_session
         from fpg import ModelRCAOutput
 
         ctx: RunContext | None = kwargs.get("ctx")
@@ -480,7 +388,7 @@ class AgentMAgent(BaseAgent):
             loop_config=LoopConfig(max_turns=max_turns, max_tool_calls_per_turn=20),
         )
 
-        session = await create_agent_session(AgentSession, config)
+        session = await AgentSession.create(config)
         try:
             if ctx is not None:
                 ctx.emit({"type": "running", "run_id": session.session_id})

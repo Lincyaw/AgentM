@@ -84,6 +84,7 @@ The currently importable console scripts are:
 | `llmharness-distill` | `llmharness.distill.cli:main` |
 | `llmharness-aggregate` | `llmharness.aggregate.cli:main` |
 
-Historical replay-sidecar docs were removed. The online atom currently persists
-audit state through AgentM session entries and `.agentm/audit_ops/`, not through
-a documented replay sidecar contract.
+The online atom persists audit state through AgentM session entries and
+`.agentm/audit_ops/`. Branching studies live in `agentm-rescue-window`; the
+llmharness package only provides the online atom and the offline audit
+primitive used by policies.

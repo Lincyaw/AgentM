@@ -1,9 +1,4 @@
-"""AgentM ClickHouse session trajectory -> :class:`CaseData`.
-
-This collector handles sessions that do not have an llmharness replay
-sidecar. It preserves the native AgentM message stream and leaves the
-extractor/auditor-specific sections empty.
-"""
+"""AgentM ClickHouse session trajectory -> :class:`CaseData`."""
 
 from __future__ import annotations
 
@@ -53,8 +48,8 @@ def collect_session_case(
 ) -> CaseData:
     """Build a plain-session aggregate case from ClickHouse.
 
-    ``sample_id_override`` follows replay aggregation semantics: when supplied,
-    it becomes both ``sample_id`` and the default ``case_id``. Otherwise the
+    ``sample_id_override`` becomes both ``sample_id`` and the default
+    ``case_id`` when supplied. Otherwise the
     case id falls back to ``case_id`` and then ``session_id``.
     """
 
@@ -91,7 +86,6 @@ def collect_session_case(
         auditor_firings=0,
         surfaced_reminders=0,
         silent_verdicts=0,
-        fork_tree=None,
     )
     return CaseData(meta=meta, main_agent_messages=messages)
 

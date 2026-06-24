@@ -342,6 +342,8 @@ requirements:
     confidence: confirmed
     code:
       - path: scripts/export_reminder_case_study.py
+      - path: contrib/scenarios/rca/src/rca_eval/rescue_window_adapter.py
+      - path: contrib/scenarios/rca/src/rca_eval/rescue_window_judge.py
     tests:
       - path: tests/unit/test_export_reminder_case_study.py
     docs:
@@ -349,6 +351,36 @@ requirements:
     depends_on:
       - REQ-096-cli-provider-session-seams
       - REQ-102-rca-scenario-cleanup
+
+  - id: REQ-104-rescue-window-branch-experiments
+    title: Generic rescue-window branch experiments
+    description: >
+      Same-prefix intervention studies over recorded AgentM sessions must run
+      through a standalone eval package rather than RCA scenario internals or
+      llmharness-specific code. The package validates explicit branch specs,
+      runs SDK-backed `SessionStore.fork` + `AgentSession.create`
+      continuations, supports pluggable intervention policies, exposes
+      llmharness as one optional policy, and dispatches scenario-owned
+      export/scoring through adapters.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/evals/rescue_window/src/rescue_window/schema.py
+      - path: contrib/evals/rescue_window/src/rescue_window/runner.py
+      - path: contrib/evals/rescue_window/src/rescue_window/policy_runner.py
+      - path: contrib/evals/rescue_window/src/rescue_window/policies.py
+      - path: contrib/evals/rescue_window/src/rescue_window/llmharness_policy.py
+      - path: contrib/evals/rescue_window/src/rescue_window/cli.py
+      - path: contrib/evals/rescue_window/src/rescue_window/provider_profiles.py
+      - path: contrib/evals/rescue_window/src/rescue_window/session_inputs.py
+      - path: contrib/extensions/llmharness/src/llmharness/offline.py
+    tests: []
+    docs:
+      - path: CONTEXT.md
+    depends_on:
+      - REQ-096-cli-provider-session-seams
+      - REQ-103-rca-reminder-case-study-export
 
   - id: REQ-089-file-tool-io-seams
     title: File tool atoms use documented read and write seams

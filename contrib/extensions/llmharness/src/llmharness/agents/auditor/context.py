@@ -81,8 +81,10 @@ def build_auditor_system_prompt(
         sections.append("## METHODOLOGY (loaded by main agent)")
         sections.append(
             "The main agent loaded these domain-specific skills during its session. "
-            "Use them to evaluate whether the agent's reasoning follows the methodology — "
-            "not just whether it investigated every entity mentioned."
+            "Use them as background for domain terms, expected evidence shapes, "
+            "and causal reasoning patterns. Do not treat every checklist item in "
+            "these skills as an automatic reminder-worthy gap; concrete facts must "
+            "still come from the trajectory."
         )
         for i, skill_text in enumerate(methodology):
             sections.append(f"### Skill {i + 1}")
@@ -130,8 +132,10 @@ def build_auditor_trajectory_prompt(
         sections.append("## METHODOLOGY (loaded by main agent)")
         sections.append(
             "The main agent loaded these domain-specific skills during its session. "
-            "Use them to evaluate whether the agent's reasoning follows the methodology — "
-            "not just whether it investigated every entity mentioned."
+            "Use them as background for domain terms, expected evidence shapes, "
+            "and causal reasoning patterns. Do not treat every checklist item in "
+            "these skills as an automatic reminder-worthy gap; concrete facts must "
+            "still come from the trajectory."
         )
         for i, skill_text in enumerate(methodology):
             sections.append(f"### Skill {i + 1}")

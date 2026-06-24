@@ -8,7 +8,7 @@ Example:
 
     uv run python scripts/export_reminder_case_study.py \
       --baseline-session aeb6719f76e5496c8114cf49d70d46c8 \
-      --out-prefix runs/replay-fork/case-study-1188-reminder
+      --out-prefix runs/rescue-window/case-study-1188-reminder
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ class CaseStudyConfig:
     reminder: list[str] | None = None
     reminder_file: list[str] | None = None
     hypothesis: list[str] | None = None
-    out_prefix: Path = Path("runs/replay-fork/case-study")
+    out_prefix: Path = Path("runs/rescue-window/case-study")
     agentm_cmd: str = "uv run agentm"
 
 
@@ -506,7 +506,7 @@ async def _judge_payload(
             return JudgeResult(correct=correct, detail=detail)
         except Exception as exc:  # pragma: no cover - diagnostic exporter path
             return JudgeResult(correct=None, detail={}, error=f"fpg judge failed: {exc}")
-    from rca_eval.replay_fork.judge import RcabenchJudge
+    from rca_eval.rescue_window_judge import RcabenchJudge
 
     outcome = await RcabenchJudge().judge(
         agent_output_json=json.dumps(payload, ensure_ascii=False),
@@ -869,7 +869,7 @@ def main(
             "--out-prefix",
             help="Output path without extension. Writes .csv and .md.",
         ),
-    ] = Path("runs/replay-fork/case-study"),
+    ] = Path("runs/rescue-window/case-study"),
     agentm_cmd: Annotated[
         str,
         typer.Option("--agentm-cmd", help="Command prefix used before `trace`."),

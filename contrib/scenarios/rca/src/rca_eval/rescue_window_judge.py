@@ -1,4 +1,4 @@
-"""Judge a leaf submission against ground truth.
+"""Judge RCA branch submissions against ground truth.
 
 The success metric must match the baseline numbers it is compared against.
 rcabench-platform's ``RCABenchProcesser`` writes ``correct =
@@ -28,13 +28,7 @@ __all__ = ["JudgeOutcome", "LeafJudge", "RcabenchJudge"]
 
 @dataclass(frozen=True)
 class JudgeOutcome:
-    """Result of judging one submission against ground truth.
-
-    ``correct`` is the headline success bit (baseline-comparable
-    ``exact_match``). ``detail`` carries the secondary metrics
-    (precision / recall / f1 / service_exact_match / any_*_hit) for
-    downstream analysis without re-judging.
-    """
+    """Result of judging one submission against ground truth."""
 
     correct: bool
     detail: dict[str, Any] = field(default_factory=dict)
@@ -52,13 +46,7 @@ class LeafJudge(Protocol):
 
 
 class RcabenchJudge:
-    """Default judge: wraps rcabench-platform's ``evaluation.evaluate``.
-
-    ``correct = exact_match`` to match the baseline's stored correctness.
-    Reads ``injection.json`` from ``data_dir`` for ground truth and uses
-    ``data_dir`` as the parquet dir for the (correctness-irrelevant) SQL
-    executability check.
-    """
+    """Default judge: wraps rcabench-platform's ``evaluate_v2``."""
 
     async def judge(
         self, *, agent_output_json: str | None, data_dir: str, case_id: str
@@ -67,12 +55,6 @@ class RcabenchJudge:
         if fpg is not None:
             return fpg
 
-        # ``evaluate_v2`` lives in the published rcabench-platform wheel's
-        # ``evaluation.v2`` package -- the same module ``agent.py`` imports
-        # ``AgentRCAOutput`` from, so agent + judge stay on one rcabench. (The
-        # source repo has since flattened ``v2`` into ``evaluation`` and
-        # renamed it ``evaluate``; that tree drops ``v2`` and breaks the agent,
-        # so do not install it editable.)
         from rcabench_platform.v3.sdk.evaluation.v2 import evaluate_v2
 
         injection_path = Path(data_dir) / "injection.json"
@@ -143,7 +125,7 @@ def _judge_fpg_output(agent_output_json: str | None, data_dir: str) -> JudgeOutc
             mode="json"
         )
     except Exception as exc:  # noqa: BLE001 -- scoring should not sink a batch
-        logger.exception("FPG judge failed for replay-fork case")
+        logger.exception("FPG judge failed for rescue-window case")
         error_detail: dict[str, Any] = {
             "exact_match": False,
             "precision": 0.0,

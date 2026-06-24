@@ -41,6 +41,7 @@ agent-env = [
     "arl-env>=0.2.0",
 ]
 eval = [
+    "agentm-rescue-window[llmharness,rca]",
     "duckdb>=1.5.2",
     # Fault-propagation-graph schema: the verifier natively emits
     # ground-truth Scenario files in this format (fpg_scenario.json).
@@ -82,6 +83,7 @@ build-backend = "uv_build"
 # entries are pure manifests with no pyproject.toml and must NOT be picked
 # up as workspace members.
 members = [
+    "contrib/evals/rescue_window",
     "contrib/extensions/llmharness",
     "contrib/extensions/mcp_bridge",
     "contrib/extensions/trajectory_index",
@@ -96,6 +98,7 @@ members = [
 [tool.uv.sources]
 fpg = { git = "https://github.com/Lincyaw/fpg-convention" }
 llmharness = { workspace = true }
+agentm-rescue-window = { workspace = true }
 agentm-mcp-bridge = { workspace = true }
 agentm-harbor = { workspace = true }
 rca-scenario = { workspace = true }
@@ -132,7 +135,7 @@ extend-select = ["S110", "S112"]
 
 [tool.mypy]
 python_version = "3.12"
-mypy_path = ["src", "contrib/scenarios/rca/src", "contrib/extensions/llmharness/src"]
+mypy_path = ["src", "contrib/evals/rescue_window/src", "contrib/scenarios/rca/src", "contrib/extensions/llmharness/src"]
 namespace_packages = true
 explicit_package_bases = true
 ignore_missing_imports = true

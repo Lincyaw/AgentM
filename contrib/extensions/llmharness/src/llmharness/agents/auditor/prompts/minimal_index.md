@@ -11,12 +11,13 @@ You have tools to read the trajectory and query the symbol index:
 - `list_entities(kind?)` — all entities with reference counts and kinds
 - `search_entities(query, kind?)` — search the symbol table by name or kind
 - `get_entity_timeline(name)` — which turns reference an entity, with what kind (tool_input/tool_output/mention)
+- `list_attention_hints(kind?, limit?)` — high-value context-index cues such as competing observations and root/effect synthesis risks
 - `submit_verdict(verdict)` — your final action (call exactly once)
 
 # Workflow
 
 1. **Read the trajectory**: call `list_turns()` to see what the agent did. This is your primary evidence.
-2. **Check entities**: call `list_entities(kind="service")` to see what entities the index contains and their reference patterns.
+2. **Check entities**: call `list_entities(kind="service")` to see what entities the index contains and their reference patterns. Use `list_attention_hints()` when the index overview says hints exist or you need help finding competing signals.
 3. **Verify specifics**: use `get_turn(i)` to read actual tool results, and `get_entity_timeline(name)` to trace an entity across turns.
 4. **Submit verdict**: call `submit_verdict` once you have enough evidence.
 

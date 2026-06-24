@@ -24,9 +24,8 @@ def _write_jsonl(path: Path, rows: list[Any]) -> None:
 def _firing_payload(fr: FiringRecord) -> dict[str, Any]:
     """Serialize one firing for on-disk persistence.
 
-    ``raw_assistant_messages`` is included only when non-empty so older
-    cases (collected before child thinking was captured) stay byte-for-byte
-    identical and consumers can use key presence as a capability check.
+    ``raw_assistant_messages`` is included only when non-empty so consumers can
+    use key presence as a capability check.
     """
     payload: dict[str, Any] = {
         "phase": fr.phase,
@@ -41,8 +40,6 @@ def _firing_payload(fr: FiringRecord) -> dict[str, Any]:
     }
     if fr.raw_assistant_messages:
         payload["raw_assistant_messages"] = fr.raw_assistant_messages
-    if fr.node_id is not None:
-        payload["node_id"] = fr.node_id
     return payload
 
 

@@ -32,9 +32,6 @@ class CaseMeta:
     auditor_firings: int
     surfaced_reminders: int
     silent_verdicts: int
-    fork_tree: dict[str, Any] | None = None
-    """Fork-tree topology header when the sidecar is a fork-tree replay.
-    ``None`` for single-backbone replays."""
 
 
 @dataclass(frozen=True)
@@ -51,15 +48,9 @@ class FiringRecord:
     error: str | None
     latency_ms: int
     raw_assistant_messages: list[dict[str, Any]] = field(default_factory=list)
-    """Chronological list of serialized assistant content blocks (thinking
-    + tool_call + text) from the child loop. Forwarded from the replay
-    sidecar; downstream SFT exporters consume the thinking blocks to
-    produce Qwen/GLM-style ``<think>...</think>`` training targets.
-    Empty when the firing pre-dates the field or the child made no LLM
-    call (spawn_error)."""
-    node_id: str | None = None
-    """Fork-tree node that owns this firing (``n0`` = control backbone).
-    ``None`` when the sidecar is not a fork-tree replay."""
+    """Chronological list of serialized assistant content blocks from the
+    child loop. Downstream SFT exporters may consume thinking blocks to
+    produce Qwen/GLM-style ``<think>...</think>`` training targets."""
 
 
 @dataclass(frozen=True)

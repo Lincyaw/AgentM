@@ -49,10 +49,10 @@ has the needed primitives:
 3. `agentm workflow run` can run a complete case workflow, spawn child agents,
    pass `atom_config`, restrict tools, set `trace_label`, and report child
    session ids.
-4. RCA already has a scenario-local replay-fork reference implementation:
-   baseline session -> offline audit -> surfaced reminder -> fork continuation
-   -> judge. That code is reference material, not something that needs to be
-   folded into the main `agentm` command.
+4. Rescue-window experiments live in the standalone `agentm-rescue-window`
+   eval package: baseline session -> policy decision -> SDK-backed fork
+   continuation -> scenario adapter/export. RCA only owns the scoring/export
+   adapter, not the fork runtime.
 
 ## RCA scenario working context
 
@@ -134,10 +134,10 @@ discover fork children from ClickHouse lineage:
 ```bash
 uv run python scripts/export_reminder_case_study.py \
   --baseline-session 32d9b6203aba4f7d82071070bddd149d \
-  --out-prefix runs/replay-fork/verify-seat-pod-case-study
+  --out-prefix runs/rescue-window/verify-seat-pod-case-study
 ```
 
-It wrote `runs/replay-fork/verify-seat-pod-case-study.csv` and `.md`
+It wrote `runs/rescue-window/verify-seat-pod-case-study.csv` and `.md`
 (ignored `runs/` artifacts). The exported row was `unchanged`: both baseline
 and fork exact-matched `ts-seat-service:pod_failure`.
 
@@ -158,7 +158,7 @@ analysis:
   attribute; `agentm.session.experiment.reminder_text_hash` is emitted instead.
 - Main covered entry points: `agentm -p` root sessions, CLI/gateway forks,
   builtin `sub_agent` children, workflow workers, llmharness child sessions,
-  and the RCA replay-fork reminder continuation path.
+  and rescue-window reminder branch continuations.
 
 This should let a ClickHouse view reconstruct a table like:
 baseline session -> forked reminder session -> insertion point -> child

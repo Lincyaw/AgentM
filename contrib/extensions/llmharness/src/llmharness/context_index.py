@@ -271,13 +271,43 @@ def _turn_ref(index: int, turn: Mapping[str, Any]) -> TurnRef:
     raw_index = turn.get("index")
     turn_index = raw_index if isinstance(raw_index, int) and not isinstance(raw_index, bool) else index
     role = str(turn.get("role") or turn.get("type") or turn.get("kind") or "unknown")
-    summary = _excerpt(_stringify(turn))
+    summary = _excerpt(_turn_summary(turn), compact=False)
     return TurnRef(
         turn_index=turn_index,
         role=role,
         kind=_infer_turn_kind(role, summary),
         summary=summary,
     )
+
+
+def _turn_summary(turn: Mapping[str, Any]) -> str:
+    """Return human text from a serialized trajectory turn.
+
+    The context index relies on plain table text to detect signals such as
+    ``abn_cnt=0`` versus ``nml_cnt>0``. JSON-dumping the whole turn escapes tabs
+    and newlines, hiding those patterns from the lightweight regexes below.
+    """
+    content = turn.get("content")
+    if not isinstance(content, Sequence) or isinstance(content, (str, bytes)):
+        return _stringify(turn)
+    blocks: list[str] = []
+    for block in content:
+        if not isinstance(block, Mapping):
+            continue
+        block_type = str(block.get("type", ""))
+        if block_type == "tool_result":
+            nested = block.get("content")
+            if isinstance(nested, Sequence) and not isinstance(nested, (str, bytes)):
+                for item in nested:
+                    if isinstance(item, Mapping) and isinstance(item.get("text"), str):
+                        blocks.append(str(item["text"]))
+        elif block_type == "tool_call":
+            name = str(block.get("name", "tool_call"))
+            args = _stringify(block.get("arguments", {}))
+            blocks.append(f"{name} {args}")
+        elif isinstance(block.get("text"), str):
+            blocks.append(str(block["text"]))
+    return "\n".join(blocks) if blocks else _stringify(turn)
 
 
 def _stringify(value: Any) -> str:
@@ -289,11 +319,11 @@ def _stringify(value: Any) -> str:
         return str(value)
 
 
-def _excerpt(text: str, limit: int = _MAX_SUMMARY_CHARS) -> str:
-    compact = " ".join(text.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 3] + "..."
+def _excerpt(text: str, limit: int = _MAX_SUMMARY_CHARS, *, compact: bool = True) -> str:
+    excerpt = " ".join(text.split()) if compact else text.strip()
+    if len(excerpt) <= limit:
+        return excerpt
+    return excerpt[: limit - 3] + "..."
 
 
 def _clean_entity(name: str) -> str:
