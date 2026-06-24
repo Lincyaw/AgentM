@@ -194,6 +194,52 @@ _ADAPTERS = {
 
 Then use `--adapter my_scenario` in the CLI.
 
+## Run log
+
+### 2026-06-24: oracle-landscape batch (8 failing RCA baselines)
+
+**Corpus**: 8 cases from `eval-data/v5bad-harness-drift1/`, all baseline
+failures (score < 0.5). Actor = Doubao (`doubao-seed-2-0-pro-260215`),
+overridden via `--actor-model litellm` (original stored endpoint was
+unreachable due to IP rotation).
+
+```
+eval-data/v5bad-harness-drift1/
+├── data_c2d0fb53   (session 869b57cbc3474d5c9fb5535887ba662d)
+├── data_1bd3e155   (session b9025631f672464e8d3e0e1a44d6f2d9)
+├── data_0b806766   (session 5e7af2b223b5473ba967f5488e8e0d08)
+├── data_79199624   (session 399fe99fae0a4dceb79d4a43d0323d81)
+├── data_5cf18749   (session b6dc9622e82b47eaa9d305b119cc7a55)
+├── data_8bc5efda   (session 152745ef0e9541b7859b4db9fa2d66e6)
+├── data_f12354b8   (session 491f4e22c3ca4865aa529f7117716844)
+└── data_a64c6de4   (session 48c63b38f706482f9bdfb7ff240f0963)
+```
+
+**Config**: `--preset oracle-landscape --k 1 --concurrency 50
+--progress 0.2,0.4,0.6,0.8 --min-turn 3 --max-turns 60`
+
+**Scale**: 8 cases × 36 prefixes × 8 conditions × K=1 = 288 rollouts.
+
+**Store**: `batch_oracle_landscape.jsonl` (append-only, resumable).
+
+**Results (288/288 completed, 0 failures)**:
+
+| Metric | Value |
+|---|---|
+| Opportunity prevalence | 94.4% (34/36 prefixes have G\* > 0) |
+| Mean G\* | 0.323 (oracle can lift score ~32pp on average) |
+| Mean gap | 0.054 (TYPE_TARGET nearly saturates; oracle adds little) |
+| Rescue window | 100% exist, mean width 0.456, mean area 0.146 |
+| Harm-sensitive prefixes | 80.6% (some conditions hurt at most prefixes) |
+| Binary rescue rate | 2.0% (low — continuous scores improve but rarely flip binary pass) |
+
+**Action effectiveness** (which action type wins G\* most often):
+- REPLAN and ADVISE:TYPE_TARGET dominate mid-trajectory prefixes
+- FINAL_AUDIT strong at early prefixes (t3–t4)
+- GENERIC sometimes competitive (surprising — bare alarm is enough)
+- ORACLE_DIAG hits 1.0 on select prefixes (actor ceiling confirmed)
+- channel_limited rare (most rescues don't need the oracle answer)
+
 ## Concurrency notes
 
 - `--concurrency N` controls parallel rollouts via `asyncio.Semaphore`
