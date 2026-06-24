@@ -41,7 +41,7 @@ Key clarifications:
 
 The verifier is a **workflow-orchestrated multi-agent system**. The CLI
 (`cli.py`) creates an AgentM `AgentSession`, loads the workflow engine,
-and executes `propagation_workflow.py` — a Python workflow script that
+and executes `workflow.py` — a Python workflow script that
 uses `ctx.agent()` / `ctx.parallel()` / `ctx.phase()` to spawn and
 coordinate child agent sessions. Each child session runs its own
 scenario (seed / hop / gate / audit) with its own manifest, system
@@ -52,7 +52,7 @@ prompt, tools, and finalize atom.
 ```mermaid
 flowchart TB
     CLI["<b>CLI</b> (cli.py)<br/>prepare_case() → CaseContext<br/>AgentSession.create()"]
-    WF["<b>propagation_workflow.py</b><br/>WorkflowContext: agent / parallel / phase"]
+    WF["<b>workflow.py</b><br/>WorkflowContext: agent / parallel / phase"]
     STATE["<b>State</b><br/>graph + evidence ledger<br/>work queue + latest audit"]
 
     CLI --> WF --> STATE
@@ -69,37 +69,29 @@ flowchart TB
     REDUCE_E["reduceEvidence()<br/>merge all local evidence"]
     APPLY["applyDiscovery()<br/>update candidate FPG graph"]
 
-    subgraph audit_map ["Audit map"]
+    subgraph audit_map ["Audit (per round)"]
         direction TB
-        J_DISPATCH["dispatchAudits(graph, ledger)"]
-        AJ["Anomaly Audit<br/>What abnormal symptoms exist?"]
-        CJ["Causal Audit<br/>Does this path explain them?"]
-        SJ["Seed Coverage Audit<br/>per-seed entry/local/no-effect"]
-        J_DISPATCH --> AJ & CJ & SJ
+        P1["Pass 1: reachability<br/>per seed → entry path?"]
+        P2["Pass 2: coverage<br/>per entry alarm → seed?"]
+        EX["Free exploration<br/>survey whole dashboard<br/>for what's missing"]
+        P1 & P2 & EX --> REQS["re-dispatch requests<br/>(seed_recheck / hop_recheck)"]
     end
 
-    REDUCE_A["auditReducer Agent<br/>merge audit reports<br/>produce GlobalAudit"]
+    REDISPATCH["redispatch()<br/>re-run gated verify_seed/verify_hop<br/>verdict drives add/remove edge"]
 
-    DECIDE{"audit.accepted?"}
+    DECIDE{"fixpoint?<br/>no requests &<br/>no unexplained"}
     OUTPUT["<b>Output</b><br/>fpg_scenario.json<br/>run_meta.json"]
 
-    subgraph rework ["Rework dispatch"]
-        direction TB
-        PLAN["planRework(audit)<br/>unexplained anomalies<br/>invalid paths<br/>needs_recheck seeds"]
-        Q["next work_queue<br/>SeedTask / HopTask<br/>InspectScopeTask / DropPathTask"]
-        PLAN --> Q
-    end
-
-    STATE --> discovery --> REDUCE_E --> APPLY --> audit_map --> REDUCE_A --> DECIDE
-    DECIDE -- yes --> OUTPUT
-    DECIDE -- no --> rework --> STATE
+    STATE --> discovery --> REDUCE_E --> APPLY --> audit_map --> REDISPATCH --> DECIDE
+    DECIDE -- yes (accepted) --> OUTPUT
+    DECIDE -- no --> STATE
 
     LEDGER["<b>Evidence Ledger</b><br/>seed effects · hop effects<br/>observations · rejected claims<br/>inconclusive claims"]
     FPG["<b>FPG Graph State</b><br/>nodes · edges · candidate paths<br/><br/>Rules:<br/>• every edge has evidence<br/>• cycles are rejected<br/>• each path keeps seed lineage<br/>• entry credit comes from audit coverage"]
 
     REDUCE_E -. "merged evidence" .-> LEDGER
     APPLY -. "candidate graph" .-> FPG
-    REDUCE_A -. "seed coverage<br/>invalid paths" .-> FPG
+    audit_map -. "seed coverage" .-> FPG
 
     style CLI fill:#e8f4fd,stroke:#2196f3
     style WF fill:#fff3e0,stroke:#ff9800
@@ -107,15 +99,18 @@ flowchart TB
     style FPG fill:#e8f5e9,stroke:#4caf50
     style LEDGER fill:#e8f5e9,stroke:#4caf50
     style OUTPUT fill:#f3e5f5,stroke:#9c27b0
-    style REDUCE_A fill:#f3e5f5,stroke:#9c27b0
+    style REDISPATCH fill:#f3e5f5,stroke:#9c27b0
 ```
 
-The target architecture is a map-reduce control loop, not a single
-linear BFS followed by a single judge. Local discovery remains highly
-parallel; global correctness is recovered by parallel audit agents and
-an audit reducer. If the audit fails, its output is converted into the
-next work queue and the loop continues until the audit accepts or the
-case is exhausted.
+Local discovery (seed/hop) maximises recall and is highly parallel.
+Global correctness is recovered by the audit, which runs each round as
+two targeted passes — Pass 1 (every seed reaches an entry/SLO alarm) and
+Pass 2 (every entry alarm is explained by some seed) — followed by a free
+exploration sweep over the whole dashboard. The audit never edits the
+graph: every gap becomes a re-dispatch request whose gated discovery
+verdict drives the actual add/remove. The round's verified changes feed
+the next round; the loop accepts at a fixpoint (a round that surfaces no
+request and leaves nothing unexplained) or stops at `max_audit_rounds`.
 
 #### Data preparation
 
@@ -183,7 +178,7 @@ and finalize atom:
 | Seed  | `verifier/seed` | `seed/prompts/seed.md` | `submit_seed_verdict` | confirmed / rejected / inconclusive |
 | Hop   | `verifier/hop`  | `hop/prompts/hop.md`   | `submit_hop_verdict`  | confirmed / rejected / inconclusive |
 | Gate  | `verifier/gate` | `gate/prompts/gate.md` | structured output | accepted / retryable / missing_checks |
-| Audit | `verifier/audit`| `audit/prompts/audit.md`| structured output | anomaly / causal / seed coverage / global audit |
+| Audit | `verifier/audit`| `audit/prompts/audit.md`| structured output | reachability / coverage / explore (each gated, emits re-dispatch) |
 
 All agents share:
 - `duckdb_sql` tool for querying case parquet data
@@ -194,23 +189,23 @@ All agents share:
 ### Module dependency map
 
 The code is organized as a **pure core / effectful shell**. The
-orchestration core (`propagation_workflow.py`) is a handful of small
+orchestration core (`workflow.py`) is a handful of small
 functions; all mutable graph state and the operations that need no agent
 call live in a pure, unit-testable `state.py`; the agent-calling lives in
 `discovery.py` and `audit_map.py`.
 
 | Module | Role | Effects |
 |---|---|---|
-| `propagation_workflow.py` | thin core: `run` → `seed_phase` → `propagate` → `audit_loop` (+ `apply_rework`) | orchestration only |
-| `state.py` | `Case` (immutable inputs) + `GraphState` (graph/ledger + all pure ops: accept, reachability, candidate paths, edge-drop surgery, finalize, output) | none (logs via injected callable) |
+| `workflow.py` | thin core: `run` → `seed_phase` → `propagate` → `audit_loop` (fixpoint) + `redispatch` | orchestration only |
+| `state.py` | `Case` (immutable inputs) + `GraphState` (graph/ledger + all pure ops: accept, reachability, candidate paths, verdict-driven `remove_hop_edge`, finalize, output) | none (logs via injected callable) |
 | `discovery.py` | `verify_seed` / `verify_hop` / `gate` — agent adapters with gate retries | `ctx.agent` |
-| `audit_map.py` | `run_audit_round` — anomaly/causal/seed-coverage map + reducer | `ctx.agent` |
-| `lib/{schema,fpg,retry,parallel}.py` | data contracts, fpg serialization, retry-context compaction, parallel normalization | none |
+| `audit_map.py` | `audit_pass_reachability` / `audit_pass_coverage` / `free_explore` — each gated, emits re-dispatch requests | `ctx.agent` |
+| `lib/{schema,fpg,retry,child}.py` | data contracts, fpg serialization, retry-context compaction, child-session lookup | none |
 
 ```mermaid
 graph BT
     CLI["cli.py"] --> PREPARE["prepare.py"]
-    CLI --> WF["propagation_workflow.py<br/>(run / seed_phase / propagate /<br/>audit_loop / apply_rework)"]
+    CLI --> WF["workflow.py<br/>(run / seed_phase / propagate /<br/>audit_loop / redispatch)"]
     PREPARE --> LIB_G["lib/graph.py"]
     PREPARE --> LIB_I["lib/injection.py"]
     PREPARE --> LIB_F["lib/fpg.py"]
@@ -244,283 +239,99 @@ graph BT
     style FPG_PROF fill:#fce4ec,stroke:#e91e63
 ```
 
-Current implementation note: the active reducer is `verifier/audit`.
-The older `verifier/judge` scenario has been removed; earlier validation
-showed that pruning nodes from rationale text alone was net-negative —
-it removed genuinely degraded services because it could not re-query the
-raw evidence behind a hop. The active architecture keeps that lesson:
-audit agents check the merged evidence ledger, anomaly coverage, and
-causal consistency, then emit concrete rework or path-specific
-invalidation.
+There is no audit reducer and no edge-drop command. The older
+`verifier/judge` scenario was removed; earlier validation showed that
+pruning nodes from rationale text alone was net-negative — it removed
+genuinely degraded services because it could not re-query the raw
+evidence behind a hop. The current architecture keeps that lesson by
+inverting control: the audit only *judges and proposes*, and every graph
+change is routed back through a gated discovery agent that can re-query
+the raw evidence.
 
-The audit reducer **owns the accept/closure decision**. The harness
-applies the reducer's `drop_edges` and records its `invalid_causal_paths`,
-but performs no post-hoc force-accept: there is no harness heuristic that
-rewrites `accepted` or reclassifies seed coverage after the reducer runs.
-On the final round the reducer is told to resolve every seed (an
-unprovable seed with no matching unexplained anomaly becomes
-`benign_or_no_effect`) so the audit closes on its own decision rather than
-a harness backstop.
+The accept decision is **deterministic, not an LLM verdict**: the audit
+loop accepts at a fixpoint — a full round in which neither pass nor the
+free exploration surfaces a re-dispatch request, and no entry anomaly is
+left unexplained. Edge *removal* is verdict-driven: to retire an edge the
+audit emits a `hop_recheck` for it, and only a rejecting re-verification
+(via `remove_hop_edge`) actually removes it. The harness never rewrites
+the graph on its own.
 
-### Map-reduce audit control model
+### Audit control model
 
-The verifier should be modeled as a functional map-reduce control loop.
-The seed and hop agents are discovery mappers: they maximize recall by
-checking many local hypotheses independently. The audit layer is also
-parallel: several audit functions inspect different slices of the merged
-evidence, and an audit reducer merges their reports into the next control
-decision.
+The audit is a fixpoint loop, not a reduce-to-a-verdict. Each round runs
+two targeted passes plus a free exploration sweep; none of them edits the
+graph — they only emit re-dispatch requests, and a gated discovery agent's
+verdict performs the actual change.
 
-The audit reducer is still an LLM agent. The harness does not attempt to
-hard-code every possible fault signature. Its job is to control dataflow:
-partition work, preserve all evidence in a ledger, give each judge a
-bounded question, merge audit reports, and dispatch concrete rework until
-the audit accepts.
-
-#### Functional shape
+#### Per-round shape
 
 ```python
-def verify(case: Case) -> FPG:
-    state = State(
-        graph=Graph.empty(),
-        ledger=EvidenceLedger.empty(),
-        work_queue=initial_seed_tasks(case),
-        audit=None,
-        round=0,
-    )
+def audit_round(case, state):
+    # Stage A — targeted passes
+    coverage, reach_reqs = pass_reachability(case, state)   # seed -> entry
+    unexplained, cov_reqs = pass_coverage(case, state)      # entry alarm -> seed
+    redispatch(case, state, reach_reqs + cov_reqs)          # gated verify_* drives graph
 
-    while True:
-        state = step(case, state)
-        if state.audit.accepted:
-            return build_fpg(state.graph, state.ledger, state.audit)
+    # Stage B — free exploration (last step), feeds back into next round
+    explore_reqs = free_explore(case, state)                # survey whole dashboard
+    redispatch(case, state, explore_reqs)
+
+    accepted = not (reach_reqs or cov_reqs or explore_reqs or unexplained)
+    return accepted, coverage, unexplained
 ```
 
-One iteration has four phases:
+`redispatch` re-runs the gated `verify_seed` / `verify_hop` discovery
+agents with the audit's context: a confirmed hop adds the edge, a rejected
+hop calls `remove_hop_edge` (and prunes orphans). This is the only path by
+which the audit changes the graph.
 
-```python
-def step(case: Case, state: State) -> State:
-    discovery_results = dispatch_discovery(
-        case=case,
-        graph=state.graph,
-        tasks=state.work_queue,
-    )
-
-    ledger = reduce_evidence(state.ledger, discovery_results)
-    graph = apply_discovery(state.graph, discovery_results)
-
-    audit_reports = dispatch_audits(case, graph, ledger)
-    audit = reduce_audit(audit_reports)
-
-    if audit.accepted:
-        return replace(state, graph=graph, ledger=ledger, audit=audit)
-
-    return replace(
-        state,
-        graph=graph,
-        ledger=ledger,
-        audit=audit,
-        work_queue=plan_rework(audit),
-        round=state.round + 1,
-    )
-```
-
-`dispatch_discovery` is a parallel map over the current work queue:
-
-```python
-def dispatch_discovery(case: Case, graph: Graph, tasks: list[Task]):
-    return par_map(lambda task: run_task(case, graph, task), tasks)
-
-
-def run_task(case: Case, graph: Graph, task: Task):
-    match task:
-        case SeedTask(seed, context):
-            return seed_agent(case, seed, context)
-        case HopTask(edge, context):
-            return hop_agent(case, graph, edge, context)
-        case InspectScopeTask(scope, context):
-            return anomaly_audit(case, graph, scope, context)
-        case DropPathTask(path_id, reason):
-            return dropped_path_result(path_id, reason)
-```
-
-`dispatch_audits` is also a parallel map, but over global audit
-questions rather than local propagation hypotheses:
-
-```python
-def dispatch_audits(case: Case, graph: Graph, ledger: EvidenceLedger):
-    return [
-        *par_map(lambda s: anomaly_audit(case, graph, ledger, s),
-                 partition_anomaly_scopes(case, ledger)),
-        *par_map(lambda p: causal_audit(case, graph, ledger, p),
-                 candidate_paths(graph, ledger)),
-        *par_map(lambda s: seed_coverage_audit(case, graph, ledger, s),
-                 confirmed_seed_ids(graph, ledger)),
-    ]
-```
-
-The first reduce is mechanical evidence accumulation. The second reduce
-is model-based audit synthesis:
-
-```python
-def reduce_evidence(ledger: EvidenceLedger, results: list[DiscoveryResult]):
-    return reduce(lambda acc, r: acc.merge(extract_evidence(r)), results, ledger)
-
-
-def reduce_audit(reports: list[AuditReport]) -> GlobalAudit:
-    return audit_reducer_agent(reports)
-```
-
-#### Formal objects
+#### Objects
 
 | Object | Meaning |
 |---|---|
-| `EvidenceLedger` | Monoidal evidence store accumulated across rounds: seed effects, hop effects, observations, rejected claims, and inconclusive claims. |
-| `Task` | A unit of work for the next discovery map: `SeedTask`, `HopTask`, `InspectScopeTask`, or `DropPathTask`. |
-| `AuditReport` | One bounded audit output. Examples: anomaly report for an entry scope, causal report for one candidate path, or seed coverage report for one seed. |
-| `GlobalAudit` | Audit reducer output: `accepted`, `unexplained_anomalies`, `invalid_causal_paths`, `seed_coverage`, and `rework_requests`. |
-| `SeedCoverage` | Per-seed status: `explains_entry`, `local_only`, `benign_or_no_effect`, `needs_recheck`, or `invalid_path`. |
+| `ReworkRequest` | The single re-dispatch currency: `SeedRecheckRequest` or `HopRecheckRequest`, each with a focused `context`. Every pass and the exploration emit these. |
+| `SeedReachabilityReport` | Pass 1, per seed: a `SeedCoverageStatus` plus `rework_requests`. |
+| `AnomalyCoverageReport` | Pass 2, per entry scope: `meaningful_anomalies` / `explained` / `unexplained` plus `rework_requests`. |
+| `ExploreReport` | Free exploration: `findings` plus `rework_requests`. |
+| `AuditOutcome` | Harness-computed (not an LLM verdict): `accepted` (the fixpoint), `seed_coverage`, `unexplained_anomalies`, `rounds`. |
+| `SeedCoverageStatus` | `explains_entry`, `local_only`, `benign_or_no_effect`, `needs_recheck`, or `invalid_path`. |
 
-#### Audit responsibilities
+#### Two obligations + a completeness net
 
-The audit layer has multiple parallel functions:
+1. **Reachability (Pass 1).** Every confirmed seed must reach an entry/SLO
+   alarm or be classified as resolved-but-non-entry (`local_only` /
+   `benign_or_no_effect`). An invalid path emits a `hop_recheck` for its
+   weakest edge rather than asserting a drop.
+2. **Coverage (Pass 2).** Every meaningful entry anomaly must be explained
+   by some seed, or converted into a recheck.
+3. **Free exploration.** A target-less agent surveys the whole dashboard
+   for what the targeted passes never investigated (degraded services
+   absent from the graph, anomalies no seed explains) and proposes
+   re-dispatch requests. Each audit agent — including this one — is guarded
+   by the same completeness gate as seed/hop discovery.
 
-| Audit function | Input partition | Question answered |
-|---|---|---|
-| `anomaly_audit` | One entry/service/log/metric scope | What meaningful abnormal symptoms exist here, and are any unexplained? |
-| `causal_audit` | One candidate path or path family | Does this path causally explain the anomaly it claims to explain? |
-| `seed_coverage_audit` | One confirmed seed | Is this seed `explains_entry`, `local_only`, `benign_or_no_effect`, `needs_recheck`, or `invalid_path`? |
-| `audit_reducer_agent` | All audit reports | What is the global audit decision and next work queue? |
+Quality is therefore not `seed_confirmed(seed) and graph_reaches_entry(seed)`
+but `seed_confirmed(seed) and audit.seed_coverage[seed] == "explains_entry"`.
+`local_only` is a resolved outcome: the fault took effect, but the evidence
+does not support a frontend propagation path.
 
-The audit has two global obligations:
+#### Example: a local effect that should not get entry credit
 
-1. **Anomaly coverage.** All meaningful abnormal symptoms must be
-   explained, marked benign/noise, or converted into concrete rework.
-2. **Causal consistency.** Any explanation path credited to a seed must
-   have coherent evidence, endpoint/path alignment, direction, timing,
-   and magnitude. A seed does not get entry credit from graph reachability
-   alone.
-
-#### Rework dispatch
-
-When the audit fails, it is converted into the next discovery work queue:
-
-```python
-def plan_rework(audit: GlobalAudit) -> list[Task]:
-    return [
-        *map(anomaly_to_task, audit.unexplained_anomalies),
-        *map(invalid_path_to_task, audit.invalid_causal_paths),
-        *chain.from_iterable(
-            seed_coverage_to_tasks(seed, coverage)
-            for seed, coverage in audit.seed_coverage.items()
-        ),
-        *map(rework_request_to_task, audit.rework_requests),
-    ]
-```
-
-Examples:
-
-```python
-def anomaly_to_task(anomaly: Anomaly) -> Task:
-    if anomaly.plausible_missed_seed:
-        return SeedTask(anomaly.best_seed, anomaly.context)
-    if anomaly.plausible_missed_edge:
-        return HopTask(anomaly.best_edge, anomaly.context)
-    return InspectScopeTask(anomaly.scope, anomaly.context)
-
-
-def invalid_path_to_task(path: PathAudit) -> Task:
-    if path.reason == "wrong_seed_lineage":
-        return DropPathTask(path.path_id, path.reason)
-    return HopTask(path.weakest_edge, path.context)
-```
-
-Loop termination is based on audit resolution, not raw graph reachability:
-
-```python
-def audit_pass(audit: GlobalAudit) -> bool:
-    return (
-        not audit.unexplained_anomalies
-        and not audit.invalid_causal_paths
-        and all(
-            coverage
-            in {"explains_entry", "local_only", "benign_or_no_effect"}
-            for coverage in audit.seed_coverage.values()
-        )
-    )
-```
-
-Therefore quality should not be:
-
-```python
-seed_confirmed(seed) and graph_reaches_entry(seed)
-```
-
-It should be:
-
-```python
-seed_confirmed(seed) and audit.seed_coverage[seed] == "explains_entry"
-```
-
-`local_only` is a resolved outcome. It means the fault took effect, but
-the evidence does not support a frontend propagation path.
-
-#### Control-flow diagram
-
-```mermaid
-flowchart TB
-    STATE["State<br/>graph + evidence ledger + work_queue + audit"]
-
-    subgraph discovery ["Discovery map"]
-        direction LR
-        SEED["SeedTask → seed_agent"]
-        HOP["HopTask → hop_agent"]
-        INSPECT["InspectScopeTask → anomaly_audit"]
-        DROP["DropPathTask → dropped_path_result"]
-    end
-
-    EVIDENCE["reduceEvidence<br/>append observations and verdict evidence"]
-    GRAPH["applyDiscovery<br/>update candidate graph"]
-
-    subgraph audits ["Audit map"]
-        direction LR
-        ANOM["anomaly_audit<br/>scoped anomaly coverage"]
-        CAUSAL["causal_audit<br/>path consistency"]
-        COVER["seed_coverage_audit<br/>per-seed status"]
-    end
-
-    AUDIT["auditReducer Agent<br/>GlobalAudit"]
-    PASS{"accepted?"}
-    BUILD["buildFPG"]
-    REWORK["planRework<br/>next work_queue"]
-
-    STATE --> discovery --> EVIDENCE --> GRAPH --> audits --> AUDIT --> PASS
-    PASS -- yes --> BUILD
-    PASS -- no --> REWORK --> STATE
-```
-
-#### Example: local effect that should not get entry credit
-
-Suppose two faults run together:
+Two faults run together:
 
 - `link:ts-user-service->mysql` (`NetworkBandwidth`) produces a local
-  datastore signal: `ts-user-service` SQL span p99 increases from about
-  1 ms to about 4 ms.
-- `ts-admin-user-service` (`JVMLatency`) produces a method delay of about
-  1.6 s, and the dashboard endpoint `GET /api/v1/adminuserservice/users`
-  also jumps by about 1.6 s.
+  datastore signal: `ts-user-service` SQL span p99 rises from ~1 ms to
+  ~4 ms.
+- `ts-admin-user-service` (`JVMLatency`) produces a ~1.6 s method delay,
+  and the entry endpoint `GET /api/v1/adminuserservice/users` jumps ~1.6 s.
 
-The candidate graph may contain a topological path:
-
-```text
-link:ts-user-service->mysql -> ts-user-service
-ts-user-service -> ts-admin-user-service
-ts-admin-user-service -> ts-ui-dashboard
-```
-
-The causal audit should reject that path as the bandwidth seed's entry
-explanation: the local SQL slowdown is real, but its magnitude and shape
-do not explain the 1.6 s entry latency, and the entry trace is directly
-explained by the JVMLatency seed. The audit reducer should produce:
+The candidate graph may contain a topological path
+`link:ts-user-service->mysql -> ts-user-service -> ts-admin-user-service
+-> ts-ui-dashboard`. Pass 1 reachability should reject the bandwidth seed's
+entry path — the local SQL slowdown is real but its magnitude/shape do not
+explain the 1.6 s entry latency, which the JVMLatency seed explains
+directly — by emitting a `hop_recheck` for the weak edge. If the
+re-verification rejects it, the edge is removed, and the seeds settle as:
 
 ```python
 seed_coverage = {
@@ -529,8 +340,8 @@ seed_coverage = {
 }
 ```
 
-This preserves the local bandwidth finding while preventing one fault
-from borrowing another fault's propagation path.
+This preserves the local bandwidth finding while preventing one fault from
+borrowing another fault's propagation path.
 
 ## Usage
 

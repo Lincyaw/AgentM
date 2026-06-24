@@ -22,6 +22,7 @@ Input via ``ctx.args`` (built by ``prepare.CaseContext.to_workflow_args``):
 
 Output: a ``PropagationResult`` dict (see ``state.GraphState.to_result``).
 """
+
 from __future__ import annotations
 
 from collections.abc import Awaitable, Sequence
@@ -33,12 +34,13 @@ from . import audit_map, discovery
 from .hop.hop_context import PriorVerdict
 from .lib.fpg import injection_node_id
 from .lib.schema import (
-    GlobalAudit,
+    AuditOutcome,
     HopRecheckRequest,
     HopResult,
     Injection,
     PropagationResult,
     ReworkRequest,
+    SeedCoverageStatus,
     SeedRecheckRequest,
     SeedResult,
 )
@@ -53,7 +55,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     ctx.phase("propagate")
     await propagate(ctx, case, state, state.propagation_roots or list(state.nodes))
 
-    audit_result: GlobalAudit | None = None
+    audit_result: AuditOutcome | None = None
     if case.skip_judge:
         ctx.log("audit skipped by request")
     else:
@@ -88,13 +90,15 @@ async def seed_phase(ctx: WorkflowContext, case: Case, state: GraphState) -> Non
             root_id = state.accept_seed_node(inj, seed_verdict)
             state.confirmed_seed_ids.add(root_id)
             state.clear_error("seed", root_id)
-            ctx.log(
-                f"seed {root_id}: confirmed ({seed_verdict.get('predicate')})"
-            )
+            ctx.log(f"seed {root_id}: confirmed ({seed_verdict.get('predicate')})")
         elif seed_verdict and seed_verdict.get("verdict") == "inconclusive":
             ctx.log(f"seed {root_id}: inconclusive — keeping for audit review")
         else:
-            v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
+            v = (
+                seed_verdict.get("verdict", "no result")
+                if seed_verdict
+                else "no result"
+            )
             ctx.log(f"seed {root_id}: {v} — skipping")
         if seed_verdict:
             state.seed_verdicts[root_id] = seed_verdict
@@ -111,7 +115,8 @@ async def propagate(
 ) -> bool:
     """Phase 1: BFS the neighbor graph, verifying each candidate edge."""
     queue = [
-        root for root in dict.fromkeys(roots)
+        root
+        for root in dict.fromkeys(roots)
         if root in state.nodes
         and root not in case.infra_set
         and root not in case.entry_services
@@ -205,106 +210,114 @@ async def audit_loop(
     ctx: WorkflowContext,
     case: Case,
     state: GraphState,
-) -> GlobalAudit | None:
-    """Phase 2: audit map/reduce + rework until accept or exhaustion."""
-    audit_result: GlobalAudit | None = None
+) -> AuditOutcome:
+    """Phase 2: two targeted passes + a free exploration sweep, looped to a
+    fixpoint.
+
+    The audit never edits the graph. Each round runs Stage A (Pass 1
+    reachability + Pass 2 coverage) and Stage B (free exploration); every
+    gap becomes a re-dispatch request whose gated discovery verdict drives
+    the actual node/edge changes. The round's verified changes feed back
+    into the next round's passes. ``accepted`` is the fixpoint: a full round
+    that surfaces no re-dispatch and no unexplained anomaly.
+    """
+    coverage: dict[str, SeedCoverageStatus] = {}
+    unexplained: list[str] = []
+    accepted = False
+    rounds = 0
     for audit_round in range(case.max_audit_rounds):
-        ctx.phase("audit" if audit_round == 0 else f"audit-r{audit_round + 1}")
-        audit_result, reports = await audit_map.run_audit_round(
+        rounds = audit_round + 1
+        ctx.phase("audit" if audit_round == 0 else f"audit-r{rounds}")
+
+        # Stage A — two targeted passes → re-dispatch
+        coverage, reach_reqs, reach_reports = await audit_map.audit_pass_reachability(
             ctx, case, state, audit_round
         )
-        causal_reports = reports["causal_reports"]
-        audit_payload = (
-            audit_result.model_dump(mode="json") if audit_result else {}
+        unexplained, cov_reqs, cov_reports = await audit_map.audit_pass_coverage(
+            ctx, case, state, audit_round
+        )
+        stage_a_reqs: list[ReworkRequest] = [*reach_reqs, *cov_reqs]
+        a_changed, a_log = await redispatch(ctx, case, state, stage_a_reqs)
+
+        # Stage B — free exploration (last step of the round) → re-dispatch
+        explore_reqs, explore_report = await audit_map.free_explore(
+            ctx, case, state, audit_round
+        )
+        b_changed, b_log = await redispatch(ctx, case, state, explore_reqs)
+
+        state.audit_rounds_log.append(
+            {
+                "round": rounds,
+                "reachability_reports": reach_reports,
+                "coverage_reports": cov_reports,
+                "explore_report": explore_report,
+                "seed_coverage": coverage,
+                "unexplained_anomalies": unexplained,
+                "redispatch_results": [*a_log, *b_log],
+            }
         )
 
-        applied_drops = state.drop_audit_edges(
-            audit_result.drop_edges if audit_result else [],
-            causal_reports,
-        )
-        is_last_audit_round = audit_round >= case.max_audit_rounds - 1
-        if (
-            is_last_audit_round
-            and audit_result is not None
-            and not audit_result.accepted
-        ):
-            ctx.log("audit reached max rounds; skipping further rework")
-            rework_changed = False
-            rework_log: list[dict[str, Any]] = []
-        else:
-            rework_changed, rework_log = await apply_rework(
-                ctx, case, state,
-                audit_result.rework_requests if audit_result else [],
-            )
-        state.audit_rounds_log.append({
-            "round": audit_round + 1,
-            "anomaly_reports": reports["anomaly_reports"],
-            "causal_reports": reports["causal_reports"],
-            "seed_coverage_reports": reports["seed_coverage_reports"],
-            "audit": audit_payload,
-            "dropped_edges": [
-                item.model_dump(mode="json")
-                for item in (audit_result.drop_edges if audit_result else [])
-            ],
-            "rework_results": rework_log,
-        })
-
-        if audit_result and audit_result.accepted:
+        # Fixpoint: a full round surfaced no gaps and left nothing unexplained.
+        if not stage_a_reqs and not explore_reqs and not unexplained:
+            accepted = True
             break
-        if not applied_drops and not rework_changed:
-            ctx.log("audit has no effective rework left; stopping audit loop")
+        # No progress: the passes keep asking but no verdict changed the graph.
+        if not a_changed and not b_changed:
+            ctx.log("audit made no progress this round; stopping")
             break
 
-    # The audit reducer owns the accept decision. Edge drops and the
-    # invalid_causal_paths it lists are resolved-by-action (drops are
-    # applied here, paths are recorded in audit_rounds), so only
-    # genuinely open findings — unexplained anomalies and outstanding
-    # rework requests — count as an unresolved accepted audit.
-    if audit_result and audit_result.accepted:
-        unresolved_audit = (
-            bool(audit_result.unexplained_anomalies)
-            or bool(audit_result.rework_requests)
+    if not accepted and unexplained:
+        state.record_error(
+            "audit",
+            "global",
+            "audit closed with unexplained anomalies",
         )
-        if unresolved_audit:
-            state.record_error(
-                "audit",
-                "global",
-                "accepted audit contains unresolved findings",
-            )
-    return audit_result
+
+    return AuditOutcome(
+        accepted=accepted,
+        rounds=rounds,
+        seed_coverage=coverage,
+        unexplained_anomalies=unexplained,
+    )
 
 
-async def apply_rework(
+async def redispatch(
     ctx: WorkflowContext,
     case: Case,
     state: GraphState,
     requests: Sequence[ReworkRequest],
 ) -> tuple[bool, list[dict[str, Any]]]:
-    """Re-run the seed/hop rechecks an audit round requested."""
+    """Execute the seed/hop rechecks an audit pass requested.
+
+    Re-runs the gated discovery agents with the audit's context; the verdict
+    drives the graph: a confirmed hop adds the edge, a rejected hop removes
+    it. This is the only mechanism by which the audit changes the graph.
+    """
     if not requests:
         return False, []
     rework_log: list[dict[str, Any]] = []
     changed = False
     inj_by_seed = {
-        injection_node_id(inj): inj
-        for inj in case.injections
-        if inj.get("target")
+        injection_node_id(inj): inj for inj in case.injections if inj.get("target")
     }
 
     seed_requests = [
-        req for req in requests
+        req
+        for req in requests
         if isinstance(req, SeedRecheckRequest) and req.seed in inj_by_seed
     ]
     new_roots: list[str] = []
     if seed_requests:
         ctx.phase("audit-seed-rework")
         ctx.log(f"Audit requested {len(seed_requests)} seed rechecks")
-        seed_results = await ctx.parallel([
-            discovery.verify_seed(
-                ctx, case, state, inj_by_seed[req.seed], req.context
-            )
-            for req in seed_requests
-        ])
+        seed_results = await ctx.parallel(
+            [
+                discovery.verify_seed(
+                    ctx, case, state, inj_by_seed[req.seed], req.context
+                )
+                for req in seed_requests
+            ]
+        )
         for req, seed_pair in zip(seed_requests, seed_results):
             if seed_pair is None:
                 state.record_error(
@@ -321,14 +334,16 @@ async def apply_rework(
                 if seed_verdict != previous_seed_verdict:
                     changed = True
             verdict = seed_verdict.get("verdict") if seed_verdict else "no-result"
-            rework_log.append({
-                "kind": "seed_recheck",
-                "seed": seed_id,
-                "verdict": verdict,
-                "rationale": seed_verdict.get("rationale", "")
-                if seed_verdict
-                else "",
-            })
+            rework_log.append(
+                {
+                    "kind": "seed_recheck",
+                    "seed": seed_id,
+                    "verdict": verdict,
+                    "rationale": seed_verdict.get("rationale", "")
+                    if seed_verdict
+                    else "",
+                }
+            )
             ctx.log(f"  seed recheck {seed_id}: {verdict}")
             if seed_verdict and verdict == "confirmed":
                 before_roots = len(state.propagation_roots)
@@ -339,9 +354,9 @@ async def apply_rework(
                 changed = True
 
     hop_requests = [
-        req for req in requests
-        if isinstance(req, HopRecheckRequest)
-        and req.from_service in state.nodes
+        req
+        for req in requests
+        if isinstance(req, HopRecheckRequest) and req.from_service in state.nodes
     ]
     if hop_requests:
         ctx.phase("audit-hop-rework")
@@ -358,10 +373,12 @@ async def apply_rework(
                 ),
                 "callee_to_caller",
             )
-            prior = dict(state.verdicts.get(
-                req.from_service + "__" + req.to_service,
-                {},
-            ))
+            prior = dict(
+                state.verdicts.get(
+                    req.from_service + "__" + req.to_service,
+                    {},
+                )
+            )
             return req, await discovery.verify_hop(
                 ctx,
                 case,
@@ -376,9 +393,7 @@ async def apply_rework(
                 ),
             )
 
-        hop_results = await ctx.parallel(
-            [_one_hop_rework(req) for req in hop_requests]
-        )
+        hop_results = await ctx.parallel([_one_hop_rework(req) for req in hop_requests])
         for hop_req, pair in zip(hop_requests, hop_results):
             if pair is None:
                 state.record_error(
@@ -390,53 +405,61 @@ async def apply_rework(
             result = pair[1]
             from_svc = hop_req.from_service
             to_svc = hop_req.to_service
-            hop_verdict: str | None = (
-                result.get("verdict") if isinstance(result, dict) else None
-            )
+            hop_verdict: str | None = result.get("verdict") if result else None
             edge_key = from_svc + "__" + to_svc
-            state.hop_log.append({
-                "round": state.round_n,
-                "from": from_svc,
-                "to": to_svc,
-                "verdict": (hop_verdict or "no-result") + "(audit-rework)",
-            })
-            if isinstance(result, dict) and hop_verdict:
+            state.hop_log.append(
+                {
+                    "round": state.round_n,
+                    "from": from_svc,
+                    "to": to_svc,
+                    "verdict": (hop_verdict or "no-result") + "(audit-rework)",
+                }
+            )
+            if result and hop_verdict:
                 previous_hop_verdict = state.verdicts.get(edge_key)
                 state.verdicts[edge_key] = result
                 if result != previous_hop_verdict:
                     changed = True
-            rework_log.append({
-                "kind": "hop_recheck",
-                "from": from_svc,
-                "to": to_svc,
-                "verdict": hop_verdict or "no-result",
-                "rationale": result.get("rationale", "")
-                if isinstance(result, dict)
-                else "",
-            })
-            ctx.log(
-                f"  hop recheck {from_svc} -> {to_svc}: "
-                f"{hop_verdict or 'no-result'}"
+            rework_log.append(
+                {
+                    "kind": "hop_recheck",
+                    "from": from_svc,
+                    "to": to_svc,
+                    "verdict": hop_verdict or "no-result",
+                    "rationale": result.get("rationale", "") if result else "",
+                }
             )
-            if hop_verdict != "confirmed" or not isinstance(result, dict):
+            ctx.log(
+                f"  hop recheck {from_svc} -> {to_svc}: {hop_verdict or 'no-result'}"
+            )
+            # Removal is verdict-driven: a re-verification that rejects the
+            # propagation hypothesis removes the edge (and prunes orphans).
+            if result is not None and hop_verdict == "rejected":
+                if state.remove_hop_edge(from_svc, to_svc):
+                    changed = True
+                continue
+            if hop_verdict != "confirmed" or result is None:
                 continue
             was_new_node = to_svc not in state.nodes
             rel_type = next(
-                (
-                    info[1]
-                    for info in case.graph.get(from_svc, [])
-                    if info[0] == to_svc
-                ),
+                (info[1] for info in case.graph.get(from_svc, []) if info[0] == to_svc),
                 "callee_to_caller",
             )
-            changed = state.accept_hop_result(
-                from_svc,
-                to_svc,
-                rel_type,
-                result,
-                claim_override=hop_req.context[:200],
-            ) or changed
-            if was_new_node and to_svc not in case.infra_set and to_svc not in case.entry_services:
+            changed = (
+                state.accept_hop_result(
+                    from_svc,
+                    to_svc,
+                    rel_type,
+                    result,
+                    claim_override=hop_req.context[:200],
+                )
+                or changed
+            )
+            if (
+                was_new_node
+                and to_svc not in case.infra_set
+                and to_svc not in case.entry_services
+            ):
                 new_roots.append(to_svc)
     if new_roots:
         ctx.phase("audit-propagate-rework")

@@ -101,22 +101,6 @@ ReworkRequest = Annotated[
 ]
 
 
-class EdgeDrop(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    src: str
-    dst: str
-    seed: str | None = Field(
-        default=None,
-        description="Seed lineage for the invalid path, when known.",
-    )
-    path_id: str | None = Field(
-        default=None,
-        description="Candidate path id that contains this edge, when known.",
-    )
-    reason: str = ""
-
-
 SeedCoverageStatus = Literal[
     "explains_entry",
     "local_only",
@@ -126,7 +110,29 @@ SeedCoverageStatus = Literal[
 ]
 
 
-class AnomalyAuditReport(BaseModel):
+# -- Pass 1: seed -> entry reachability -----------------------------------
+class SeedReachabilityReport(BaseModel):
+    """One confirmed seed: does it have a valid causal path to entry?
+
+    The reachability pass never drops edges itself — when a path is
+    invalid or unprovable it emits a ``hop_recheck`` for the weakest edge,
+    and the re-dispatched (gated) hop verdict decides whether the edge
+    survives.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    seed: str
+    coverage: SeedCoverageStatus
+    rework_requests: list[ReworkRequest] = Field(default_factory=list)
+    rationale: str = ""
+
+
+# -- Pass 2: entry alarm -> seed coverage ---------------------------------
+class AnomalyCoverageReport(BaseModel):
+    """One entry/SLO scope: are its meaningful anomalies explained by the
+    candidate graph? Gaps become re-dispatch requests, not edge drops."""
+
     model_config = ConfigDict(extra="forbid")
 
     scope: str
@@ -137,39 +143,32 @@ class AnomalyAuditReport(BaseModel):
     rationale: str = ""
 
 
-class CausalAuditReport(BaseModel):
+# -- Free exploration (last step of each audit round) ---------------------
+class ExploreReport(BaseModel):
+    """Free completeness sweep over the whole dashboard. May surface
+    services/anomalies the targeted passes never investigated. Its proposed
+    graph changes are expressed as re-dispatch requests (incl. exploratory
+    edges) so every addition is still verified by a gated discovery agent."""
+
     model_config = ConfigDict(extra="forbid")
 
-    path_id: str
-    path: list[str] = Field(default_factory=list)
-    verdict: Literal["valid", "invalid", "needs_recheck"] = "needs_recheck"
-    invalid_reason: str | None = None
-    weakest_edge: EdgeDrop | None = None
+    findings: list[str] = Field(default_factory=list)
     rework_requests: list[ReworkRequest] = Field(default_factory=list)
     rationale: str = ""
 
 
-class SeedCoverageReport(BaseModel):
+# -- Deterministic audit outcome (no LLM reducer) -------------------------
+class AuditOutcome(BaseModel):
+    """Harness-computed summary of the audit loop. ``accepted`` is the
+    fixpoint decision (a full round produced no re-dispatch and no
+    unexplained anomalies), not an LLM verdict."""
+
     model_config = ConfigDict(extra="forbid")
 
-    seed: str
-    coverage: SeedCoverageStatus
-    explained_entry_observations: list[str] = Field(default_factory=list)
-    local_effect_observations: list[str] = Field(default_factory=list)
-    rework_requests: list[ReworkRequest] = Field(default_factory=list)
-    rationale: str = ""
-
-
-class GlobalAudit(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    accepted: bool
+    accepted: bool = False
+    rounds: int = 0
     seed_coverage: dict[str, SeedCoverageStatus] = Field(default_factory=dict)
     unexplained_anomalies: list[str] = Field(default_factory=list)
-    invalid_causal_paths: list[str] = Field(default_factory=list)
-    drop_edges: list[EdgeDrop] = Field(default_factory=list)
-    rework_requests: list[ReworkRequest] = Field(default_factory=list)
-    stop_reason: str | None = None
     rationale: str = ""
 
 

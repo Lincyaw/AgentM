@@ -9,7 +9,7 @@ workflow context; the only effect is the injected ``log`` callable.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -24,9 +24,8 @@ from .lib.fpg import (
     seed_effect_target,
 )
 from .lib.schema import (
-    EdgeDrop,
+    AuditOutcome,
     ExecutionError,
-    GlobalAudit,
     HopLogEntry,
     HopResult,
     Injection,
@@ -341,151 +340,40 @@ class GraphState:
                 out.append((f"{seed}:path:{idx}", seed, path))
         return out
 
-    def candidate_path_by_id(self, path_id: str) -> list[str] | None:
-        for candidate_id, _, path in self.candidate_paths():
-            if candidate_id == path_id:
-                return path
-        return None
+    # -- Edge removal (verdict-driven) ------------------------------------
+    def remove_hop_edge(self, from_svc: str, to_svc: str) -> bool:
+        """Remove an edge whose re-dispatched hop verdict came back rejected.
 
-    # -- Edge-drop surgery ------------------------------------------------
-    @staticmethod
-    def path_contains_edge(path: Sequence[str], src: str, dst: str) -> bool:
-        return any(
-            path[idx] == src and path[idx + 1] == dst
-            for idx in range(len(path) - 1)
-        )
-
-    @staticmethod
-    def path_edges(path: Sequence[str]) -> list[tuple[str, str]]:
-        return [
-            (path[idx], path[idx + 1])
-            for idx in range(len(path) - 1)
-        ]
-
-    def drop_matches_reported_lineage(self, drop: EdgeDrop) -> bool:
-        if drop.path_id:
-            return any(
-                path_id == drop.path_id
-                and self.path_contains_edge(path, drop.src, drop.dst)
-                for path_id, _, path in self.candidate_paths()
-            )
-        if drop.seed:
-            return any(
-                self.path_contains_edge(path, drop.src, drop.dst)
-                for path in self.paths_from(drop.seed)
-            )
-        return True
-
-    @staticmethod
-    def valid_path_edges(
-        causal_reports: Sequence[dict[str, Any]],
-    ) -> set[tuple[str, str]]:
-        protected: set[tuple[str, str]] = set()
-        for report in causal_reports:
-            if report.get("verdict") != "valid":
-                continue
-            path = report.get("path")
-            if (
-                not isinstance(path, list)
-                or not all(isinstance(node, str) for node in path)
-            ):
-                continue
-            protected.update(GraphState.path_edges(path))
-        return protected
-
-    def path_specific_cut(
-        self,
-        drop: EdgeDrop,
-        protected_edges: set[tuple[str, str]],
-    ) -> tuple[str, str] | None:
-        current_edges = {
-            (str(edge.get("src", "")), str(edge.get("dst", "")))
-            for edge in self.edges
-        }
-        requested = (drop.src, drop.dst)
-        if requested in current_edges and requested not in protected_edges:
-            return requested
-
-        if not drop.path_id:
-            return None
-        path = self.candidate_path_by_id(drop.path_id)
-        if not path:
-            return None
-        for candidate in reversed(self.path_edges(path)):
-            if candidate in current_edges and candidate not in protected_edges:
-                return candidate
-        return None
-
-    def drop_audit_edges(
-        self,
-        drop_edges: Sequence[EdgeDrop],
-        causal_reports: Sequence[dict[str, Any]],
-    ) -> list[EdgeDrop]:
-        if not drop_edges:
-            return []
-        doomed: set[tuple[str, str]] = set()
-        applied: list[EdgeDrop] = []
-        protected_edges = self.valid_path_edges(causal_reports)
-        for item in drop_edges:
-            if not item.src or not item.dst:
-                continue
-            if not self.drop_matches_reported_lineage(item):
-                self.log(
-                    f"  audit drop skipped for {item.src} -> {item.dst}: "
-                    "edge is not on the reported seed/path lineage"
-                )
-                continue
-            cut = self.path_specific_cut(item, protected_edges)
-            if cut is None:
-                self.log(
-                    f"  audit drop skipped for {item.src} -> {item.dst}: "
-                    "no unprotected edge can cut the reported invalid path"
-                )
-                continue
-            if cut != (item.src, item.dst):
-                self.log(
-                    f"  audit drop remapped for {item.src} -> {item.dst}: "
-                    f"cutting {cut[0]} -> {cut[1]} to preserve valid paths"
-                )
-                item = item.model_copy(
-                    update={
-                        "src": cut[0],
-                        "dst": cut[1],
-                        "reason": (
-                            item.reason
-                            + "\nHarness closure: requested edge is shared "
-                            "with a valid causal path, so an unprotected edge "
-                            "on the same invalid path was removed instead."
-                        ),
-                    }
-                )
-            doomed.add((item.src, item.dst))
-            applied.append(item)
-        if not doomed:
-            return []
+        Audit never drops edges directly; removal is always the consequence
+        of a gated re-verification rejecting the propagation hypothesis. The
+        downstream nodes that lose their only support are pruned.
+        """
         before = len(self.edges)
         self.edges[:] = [
-            e for e in self.edges
-            if (str(e.get("src", "")), str(e.get("dst", ""))) not in doomed
+            e
+            for e in self.edges
+            if not (
+                str(e.get("src", "")) == from_svc
+                and str(e.get("dst", "")) == to_svc
+            )
         ]
-        changed = len(self.edges) != before
-        if changed:
-            self.rebuild_graph_indices()
-            self.prune_unreachable_nodes()
-            return applied
-        return []
+        if len(self.edges) == before:
+            return False
+        self.rebuild_graph_indices()
+        self.prune_unreachable_nodes()
+        return True
 
     # -- Finalization + output --------------------------------------------
     def audit_seed_coverage(
         self,
-        audit_result: GlobalAudit | None,
+        audit_result: AuditOutcome | None,
         seed: str,
     ) -> SeedCoverageStatus | None:
         if audit_result is None:
             return None
         return audit_result.seed_coverage.get(seed)
 
-    def finalize(self, audit_result: GlobalAudit | None) -> None:
+    def finalize(self, audit_result: AuditOutcome | None) -> None:
         # fpg rule: in-degree >= 2 requires combine; each confirmed edge is
         # an independently sufficient path, so the combination is OR.
         for svc, node in self.nodes.items():
@@ -523,7 +411,7 @@ class GraphState:
         if not self.unreachable:
             self.log("✓ no unresolved confirmed seeds lack entry-service coverage")
 
-    def to_result(self, audit_result: GlobalAudit | None) -> PropagationResult:
+    def to_result(self, audit_result: AuditOutcome | None) -> PropagationResult:
         result_out: PropagationResult = {
             "nodes": [self.nodes[k] for k in sorted(self.nodes)],
             "edges": self.edges,

@@ -14,6 +14,7 @@ from agentm.extensions.builtin.workflow import AgentResult, WorkflowContext
 
 from .gate.gate_context import build_gate_prompt
 from .hop.hop_context import PriorVerdict, build_hop_prompt
+from .lib.child import find_child_session
 from .lib.fpg import (
     injection_node_id,
     injection_subject,
@@ -23,16 +24,6 @@ from .lib.retry import build_retry_context
 from .lib.schema import GateDecision, HopResult, Injection, SeedResult
 from .seed.seed_context import build_seed_prompt
 from .state import Case, GraphState
-
-
-def _find_child_session(
-    ctx: WorkflowContext,
-    label: str,
-) -> dict[str, Any] | None:
-    for child in reversed(ctx.child_sessions):
-        if child.get("trace_label") == label or child.get("workflow_node_id") == label:
-            return dict(child)
-    return None
 
 
 async def gate(
@@ -144,7 +135,7 @@ async def verify_seed(
                 "rationale": reason,
             }
         last_result = cast(SeedResult, result)
-        child_session = _find_child_session(ctx, label)
+        child_session = find_child_session(ctx, label)
         gate_decision = await gate(
             ctx,
             case,
@@ -295,7 +286,7 @@ async def verify_hop(
                 "rationale": reason,
             }
         last_result = cast(HopResult, result)
-        child_session = _find_child_session(ctx, label)
+        child_session = find_child_session(ctx, label)
         gate_decision = await gate(
             ctx,
             case,

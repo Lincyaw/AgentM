@@ -1,10 +1,22 @@
-"""Audit map/reduce — the precision-and-closure layer.
+"""Audit map — two passes + a free exploration sweep.
 
-One round fans out three bounded audit questions (anomaly coverage,
-causal-path consistency, per-seed coverage) over the merged evidence, then
-an audit reducer merges the reports into a ``GlobalAudit`` decision. The
-reducer owns the accept/closure call; the core applies its drops and
-rework. This module only produces reports and the decision.
+Each audit round runs three bounded agent fan-outs over the merged
+evidence, and every one of them produces *re-dispatch requests* rather than
+mutating the graph:
+
+  - Pass 1 (reachability) — per confirmed seed: does it have a coherent
+    causal path to an entry/SLO service? Invalid/unprovable paths emit a
+    ``hop_recheck`` for the weakest edge; the gated re-verification decides
+    whether the edge survives.
+  - Pass 2 (coverage) — per entry/SLO scope: are its meaningful anomalies
+    explained by the candidate graph? Gaps emit seed/hop rechecks.
+  - Free exploration — one unconstrained agent over the whole dashboard:
+    surface services/anomalies the targeted passes never investigated, and
+    propose re-dispatch requests (incl. exploratory edges) to fill them.
+
+The accept decision is NOT made here — the workflow's audit loop owns it as
+a fixpoint (a round that produces no re-dispatch and no unexplained
+anomalies). This module only produces requests and reports.
 """
 from __future__ import annotations
 
@@ -14,21 +26,17 @@ from agentm.extensions.builtin.workflow import AgentResult, WorkflowContext
 from pydantic import BaseModel
 
 from .audit.audit_context import build_audit_prompt
+from .discovery import gate
+from .lib.child import find_child_session
+from .lib.retry import build_retry_context
 from .lib.schema import (
-    AnomalyAuditReport,
-    CausalAuditReport,
-    GlobalAudit,
-    SeedCoverageReport,
+    AnomalyCoverageReport,
+    ExploreReport,
+    ReworkRequest,
+    SeedCoverageStatus,
+    SeedReachabilityReport,
 )
 from .state import Case, GraphState
-
-
-def _dump_model(value: Any) -> dict[str, Any]:
-    if isinstance(value, BaseModel):
-        return value.model_dump(mode="json")
-    if isinstance(value, dict):
-        return value
-    return {}
 
 
 async def _agent(
@@ -65,96 +73,94 @@ async def _agent(
     return result if isinstance(result, BaseModel) else None
 
 
-async def run_audit_round(
+async def _gated_agent(
+    ctx: WorkflowContext,
+    case: Case,
+    state: GraphState,
+    *,
+    task_kind: str,
+    label_base: str,
+    role: str,
+    instruction: str,
+    payload: dict[str, Any],
+    schema: type[BaseModel],
+    gate_item: dict[str, Any],
+) -> BaseModel | None:
+    """Run one audit agent behind the same completeness gate that guards
+    seed/hop discovery: submit → review its investigation → retry with
+    focused feedback up to ``gate_retries`` times."""
+    feedback = ""
+    last: BaseModel | None = None
+    for attempt in range(case.gate_retries + 1):
+        label = f"{label_base}-a{attempt}"
+        instr = instruction if not feedback else f"{instruction}\n\n{feedback}"
+        result = await _agent(
+            ctx,
+            case,
+            label=label,
+            role=role,
+            instruction=instr,
+            payload=payload,
+            schema=schema,
+        )
+        if result is None:
+            return last
+        last = result
+        submitted = result.model_dump(mode="json")
+        decision = await gate(
+            ctx,
+            case,
+            task_kind=task_kind,
+            label=label,
+            task={"role": role, "instruction": instruction, **gate_item},
+            submitted_result=submitted,
+            child_session=find_child_session(ctx, label),
+            attempt=attempt,
+        )
+        if decision is None:
+            return last
+        state.gate_log.append({
+            "task": task_kind,
+            "label": label,
+            "gate": decision.model_dump(mode="json"),
+        })
+        if decision.accepted or attempt >= case.gate_retries:
+            return last
+        feedback = build_retry_context(
+            base_context="",
+            label=label,
+            submitted_result=submitted,
+            gate=decision,
+        )
+    return last
+
+
+async def audit_pass_reachability(
     ctx: WorkflowContext,
     case: Case,
     state: GraphState,
     audit_round: int,
-) -> tuple[GlobalAudit | None, dict[str, Any]]:
-    """Run one audit map/reduce round; return (decision, report bundle)."""
+) -> tuple[dict[str, SeedCoverageStatus], list[ReworkRequest], list[dict[str, Any]]]:
+    """Pass 1: every confirmed seed must reach an entry/SLO service."""
     graph_view = state.graph_snapshot()
     ledger_view = state.ledger_snapshot()
     case_view = case.case_summary()
+    seeds = sorted(case.seeds)
 
-    anomaly_scopes = sorted(case.entry_services) or ["<entry-services-not-discovered>"]
-    anomaly_results = await ctx.parallel([
-        _agent(
+    results = await ctx.parallel([
+        _gated_agent(
             ctx,
             case,
-            label=f"audit-anomaly-{scope}-r{audit_round}",
-            role="anomaly_coverage",
+            state,
+            task_kind="reachability",
+            label_base=f"audit-reach-{seed}-r{audit_round}",
+            role="reachability",
             instruction=(
-                "Inspect this entry/service scope. Identify meaningful "
-                "abnormal trace, metric, or log symptoms and decide "
-                "whether the current candidate graph explains each one."
-            ),
-            payload={
-                "scope": scope,
-                "case": case_view,
-                "candidate_graph": graph_view,
-                "evidence_ledger": ledger_view,
-            },
-            schema=AnomalyAuditReport,
-        )
-        for scope in anomaly_scopes
-    ])
-    anomaly_reports = []
-    for scope, report in zip(anomaly_scopes, anomaly_results):
-        if report is None:
-            state.record_error(
-                "audit",
-                f"anomaly:{scope}:r{audit_round}",
-                "anomaly audit task failed before returning a report",
-            )
-            continue
-        anomaly_reports.append(_dump_model(report))
-
-    path_items = state.candidate_paths()
-    causal_results = await ctx.parallel([
-        _agent(
-            ctx,
-            case,
-            label=f"audit-causal-{path_id}-r{audit_round}",
-            role="causal_path",
-            instruction=(
-                "Audit whether this single seed-to-entry path is a "
-                "coherent causal explanation. Reject paths that only "
-                "borrow another seed's symptoms or are merely "
-                "topologically reachable."
-            ),
-            payload={
-                "path_id": path_id,
-                "seed": seed,
-                "path": path,
-                "case": case_view,
-                "candidate_graph": graph_view,
-                "evidence_ledger": ledger_view,
-            },
-            schema=CausalAuditReport,
-        )
-        for path_id, seed, path in path_items
-    ])
-    causal_reports = []
-    for (path_id, _, _), report in zip(path_items, causal_results):
-        if report is None:
-            state.record_error(
-                "audit",
-                f"causal:{path_id}:r{audit_round}",
-                "causal audit task failed before returning a report",
-            )
-            continue
-        causal_reports.append(_dump_model(report))
-
-    audit_seeds = sorted(case.seeds)
-    seed_audit_results = await ctx.parallel([
-        _agent(
-            ctx,
-            case,
-            label=f"audit-seed-{seed}-r{audit_round}",
-            role="seed_coverage",
-            instruction=(
-                "Classify this seed as explains_entry, local_only, "
-                "benign_or_no_effect, needs_recheck, or invalid_path."
+                "Audit whether this one seed has a coherent causal path to "
+                "an entry/SLO service. Classify its coverage. When a "
+                "candidate path is invalid or unprovable, do NOT assert a "
+                "removal — emit a hop_recheck for the weakest edge so a "
+                "gated re-verification can decide whether it survives."
             ),
             payload={
                 "seed": seed,
@@ -162,73 +168,130 @@ async def run_audit_round(
                 "candidate_graph": graph_view,
                 "evidence_ledger": ledger_view,
                 "paths_from_seed": state.paths_from(seed),
-                "causal_reports": [
-                    report for report in causal_reports
-                    if str(report.get("path_id", "")).startswith(seed + ":")
-                ],
-                "anomaly_reports": anomaly_reports,
             },
-            schema=SeedCoverageReport,
+            schema=SeedReachabilityReport,
+            gate_item={"seed": seed},
         )
-        for seed in audit_seeds
+        for seed in seeds
     ])
-    seed_coverage_reports = []
-    for seed, report in zip(audit_seeds, seed_audit_results):
-        if report is None:
+
+    coverage: dict[str, SeedCoverageStatus] = {}
+    requests: list[ReworkRequest] = []
+    reports: list[dict[str, Any]] = []
+    for seed, report in zip(seeds, results):
+        if not isinstance(report, SeedReachabilityReport):
             state.record_error(
                 "audit",
-                f"seed:{seed}:r{audit_round}",
-                "seed coverage audit task failed before returning a report",
+                f"reachability:{seed}:r{audit_round}",
+                "reachability audit task failed before returning a report",
             )
             continue
-        seed_coverage_reports.append(_dump_model(report))
+        coverage[report.seed] = report.coverage
+        requests.extend(report.rework_requests)
+        reports.append(report.model_dump(mode="json"))
+    return coverage, requests, reports
 
-    reducer = await _agent(
+
+async def audit_pass_coverage(
+    ctx: WorkflowContext,
+    case: Case,
+    state: GraphState,
+    audit_round: int,
+) -> tuple[list[str], list[ReworkRequest], list[dict[str, Any]]]:
+    """Pass 2: every entry/SLO alarm must be explained by some seed fault."""
+    graph_view = state.graph_snapshot()
+    ledger_view = state.ledger_snapshot()
+    case_view = case.case_summary()
+    scopes = sorted(case.entry_services) or ["<entry-services-not-discovered>"]
+
+    results = await ctx.parallel([
+        _gated_agent(
+            ctx,
+            case,
+            state,
+            task_kind="coverage",
+            label_base=f"audit-coverage-{scope}-r{audit_round}",
+            role="coverage",
+            instruction=(
+                "Inspect this entry/SLO scope. Identify its meaningful "
+                "abnormal trace/metric/log symptoms and decide whether the "
+                "candidate graph explains each one. For every unexplained "
+                "anomaly, emit a seed/hop recheck that would let an existing "
+                "seed's fault reach this scope."
+            ),
+            payload={
+                "scope": scope,
+                "case": case_view,
+                "candidate_graph": graph_view,
+                "evidence_ledger": ledger_view,
+            },
+            schema=AnomalyCoverageReport,
+            gate_item={"scope": scope},
+        )
+        for scope in scopes
+    ])
+
+    unexplained: list[str] = []
+    requests: list[ReworkRequest] = []
+    reports: list[dict[str, Any]] = []
+    for scope, report in zip(scopes, results):
+        if not isinstance(report, AnomalyCoverageReport):
+            state.record_error(
+                "audit",
+                f"coverage:{scope}:r{audit_round}",
+                "coverage audit task failed before returning a report",
+            )
+            continue
+        unexplained.extend(report.unexplained)
+        requests.extend(report.rework_requests)
+        reports.append(report.model_dump(mode="json"))
+    return unexplained, requests, reports
+
+
+async def free_explore(
+    ctx: WorkflowContext,
+    case: Case,
+    state: GraphState,
+    audit_round: int,
+) -> tuple[list[ReworkRequest], dict[str, Any] | None]:
+    """Stage B: one free agent over the whole dashboard.
+
+    Unlike the targeted seed/hop tasks, this agent is handed no single
+    target — it surveys the full system dashboard for what the candidate
+    graph fails to capture and proposes re-dispatch requests so each gap is
+    verified by a gated discovery agent.
+    """
+    report = await _gated_agent(
         ctx,
         case,
-        label=f"audit-reducer-r{audit_round}",
-        role="audit_reducer",
+        state,
+        task_kind="explore",
+        label_base=f"audit-explore-r{audit_round}",
+        role="explore",
         instruction=(
-            "Merge the audit reports and OWN the closure decision: the "
-            "harness applies your drop_edges and records your "
-            "invalid_causal_paths, but performs no post-hoc force-accept. "
-            "Accept only when all meaningful anomalies are explained or "
-            "resolved and every seed has a resolved coverage status "
-            "(explains_entry / local_only / benign_or_no_effect). "
-            "Otherwise emit concrete rework requests and/or "
-            "path-specific edge drops. When this is the final round, do "
-            "not leave a seed at needs_recheck: classify a seed whose "
-            "candidate paths are invalid or unprovable, and whose "
-            "fault-aligned path has no matching unexplained anomaly, as "
-            "benign_or_no_effect so the audit can close."
+            "You are NOT given a specific target. Survey the whole system "
+            "dashboard for what the current graph fails to capture: services "
+            "with clear degradation that are absent from the graph, entry "
+            "anomalies no seed explains, propagation links resting on thin "
+            "evidence. You may propose any seed/hop recheck (including edges "
+            "not yet in the graph). You never edit the graph directly — every "
+            "proposal is verified by a gated discovery agent. Be exhaustive "
+            "about coverage; surface what has NOT been investigated."
         ),
         payload={
-            "round": audit_round,
-            "final_round": audit_round >= case.max_audit_rounds - 1,
-            "case": case_view,
-            "candidate_graph": graph_view,
-            "evidence_ledger": ledger_view,
-            "anomaly_reports": anomaly_reports,
-            "causal_reports": causal_reports,
-            "seed_coverage_reports": seed_coverage_reports,
+            "case": case.case_summary(),
+            "candidate_graph": state.graph_snapshot(),
+            "evidence_ledger": state.ledger_snapshot(),
+            "entry_services": sorted(case.entry_services),
         },
-        schema=GlobalAudit,
+        schema=ExploreReport,
+        gate_item={},
     )
-    audit_result = reducer if isinstance(reducer, GlobalAudit) else None
-    if audit_result is None:
+    if not isinstance(report, ExploreReport):
         state.record_error(
             "audit",
-            f"reducer:r{audit_round}",
-            "audit reducer returned no structured decision",
+            f"explore:r{audit_round}",
+            "free-exploration audit task failed before returning a report",
         )
-    ctx.log(
-        "  audit reducer: "
-        + ("accepted" if audit_result and audit_result.accepted else "needs rework")
-    )
-
-    reports = {
-        "anomaly_reports": anomaly_reports,
-        "causal_reports": causal_reports,
-        "seed_coverage_reports": seed_coverage_reports,
-    }
-    return audit_result, reports
+        return [], None
+    return list(report.rework_requests), report.model_dump(mode="json")

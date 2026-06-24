@@ -1,8 +1,9 @@
 name: audit
 description: >
-  Parallel audit agents for verifier map-reduce control. Roles include
-  anomaly coverage, causal path consistency, seed coverage, and global
-  audit reduction.
+  Parallel audit agents for verifier two-pass + exploration control.
+  Roles: reachability (seed -> entry), coverage (entry alarm -> seed),
+  and free exploration. Each produces re-dispatch requests, never graph
+  edits.
 
 extensions:
   - module: agentm.extensions.builtin.operations
