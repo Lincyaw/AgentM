@@ -193,37 +193,74 @@ All agents share:
 
 ### Module dependency map
 
+The code is organized as a **pure core / effectful shell**. The
+orchestration core (`propagation_workflow.py`) is a handful of small
+functions; all mutable graph state and the operations that need no agent
+call live in a pure, unit-testable `state.py`; the agent-calling lives in
+`discovery.py` and `audit_map.py`.
+
+| Module | Role | Effects |
+|---|---|---|
+| `propagation_workflow.py` | thin core: `run` → `seed_phase` → `propagate` → `audit_loop` (+ `apply_rework`) | orchestration only |
+| `state.py` | `Case` (immutable inputs) + `GraphState` (graph/ledger + all pure ops: accept, reachability, candidate paths, edge-drop surgery, finalize, output) | none (logs via injected callable) |
+| `discovery.py` | `verify_seed` / `verify_hop` / `gate` — agent adapters with gate retries | `ctx.agent` |
+| `audit_map.py` | `run_audit_round` — anomaly/causal/seed-coverage map + reducer | `ctx.agent` |
+| `lib/{schema,fpg,retry,parallel}.py` | data contracts, fpg serialization, retry-context compaction, parallel normalization | none |
+
 ```mermaid
 graph BT
     CLI["cli.py"] --> PREPARE["prepare.py"]
-    CLI --> WF["propagation_workflow.py"]
+    CLI --> WF["propagation_workflow.py<br/>(run / seed_phase / propagate /<br/>audit_loop / apply_rework)"]
     PREPARE --> LIB_G["lib/graph.py"]
     PREPARE --> LIB_I["lib/injection.py"]
     PREPARE --> LIB_F["lib/fpg.py"]
     LIB_G --> LIB_INIT["lib/__init__.py<br/>(duckdb_conn)"]
-    WF --> SEED_CTX["seed/seed_context.py"]
-    WF --> HOP_CTX["hop/hop_context.py"]
-    WF --> GATE_CTX["gate/gate_context.py"]
-    WF --> AUDIT_CTX["audit/audit_context.py"]
+
+    WF --> DISC["discovery.py"]
+    WF --> AUD["audit_map.py"]
+    WF --> STATE["state.py<br/>(Case + GraphState, pure)"]
+    WF --> PAR["lib/parallel.py"]
+
+    DISC --> SEED_CTX["seed/seed_context.py"]
+    DISC --> HOP_CTX["hop/hop_context.py"]
+    DISC --> GATE_CTX["gate/gate_context.py"]
+    DISC --> RETRY["lib/retry.py"]
+    DISC --> STATE
+    AUD --> AUDIT_CTX["audit/audit_context.py"]
+    AUD --> PAR
+    AUD --> STATE
+    DISC --> SCHEMA["lib/schema.py"]
+    AUD --> SCHEMA
+    STATE --> SCHEMA
+    STATE --> LIB_F
+
     SEED_FIN["seed/seed_finalize.py"] -.->|"atom"| FPG_PROF["fpg_profile.toml"]
     HOP_FIN["hop/hop_finalize.py"] -.->|"atom"| FPG_PROF
     LIB_F --> FPG_PROF
 
     style CLI fill:#e8f4fd,stroke:#2196f3
     style WF fill:#fff3e0,stroke:#ff9800
+    style STATE fill:#e8f5e9,stroke:#4caf50
     style FPG_PROF fill:#fce4ec,stroke:#e91e63
 ```
 
 Current implementation note: the active reducer is `verifier/audit`.
-The older `verifier/judge` scenario remains in the tree for historical
-compatibility, but the workflow no longer uses its `add` /
-`re_evaluate` / `suggested_remove` contract. Earlier validation showed
-that pruning nodes from rationale text alone was net-negative: it
-removed genuinely degraded services because it could not re-query the
+The older `verifier/judge` scenario has been removed; earlier validation
+showed that pruning nodes from rationale text alone was net-negative —
+it removed genuinely degraded services because it could not re-query the
 raw evidence behind a hop. The active architecture keeps that lesson:
 audit agents check the merged evidence ledger, anomaly coverage, and
 causal consistency, then emit concrete rework or path-specific
 invalidation.
+
+The audit reducer **owns the accept/closure decision**. The harness
+applies the reducer's `drop_edges` and records its `invalid_causal_paths`,
+but performs no post-hoc force-accept: there is no harness heuristic that
+rewrites `accepted` or reclassifies seed coverage after the reducer runs.
+On the final round the reducer is told to resolve every seed (an
+unprovable seed with no matching unexplained anomaly becomes
+`benign_or_no_effect`) so the audit closes on its own decision rather than
+a harness backstop.
 
 ### Map-reduce audit control model
 

@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .injection import enrich_injection_entry, fault_parameter_dict
+from .schema import HopResult, Injection, SeedResult
 
 PROFILE_PATH = Path(__file__).parents[1] / "fpg_profile.toml"
 
@@ -207,3 +208,142 @@ def assemble_scenario(
         "injections": validated_injections,
         "graph": graph,
     }
+
+
+# -- Injection identity ----------------------------------------------------
+def injection_node_id(inj: Injection) -> str:
+    return inj.get("node_id") or inj["target"]
+
+
+def injection_subject(inj: Injection) -> str:
+    return inj.get("subject") or inj.get("target_entity") or f"svc:{inj['target']}"
+
+
+def injection_effect_target(inj: Injection) -> str:
+    return inj.get("effect_target") or inj["target"]
+
+
+def seed_effect_target(inj: Injection, verdict: SeedResult) -> str:
+    """Return the observed service-side symptom target for a seed."""
+    reported = verdict.get("effect_target")
+    if isinstance(reported, str) and reported.strip():
+        return reported.strip()
+    return injection_effect_target(inj)
+
+
+def is_link_injection(inj: Injection) -> bool:
+    return injection_subject(inj).startswith("link:")
+
+
+def fault_record(inj: Injection) -> list[str]:
+    return [inj["chaos_type"], injection_node_id(inj), inj.get("params", "")]
+
+
+def link_root_predicate(inj: Injection) -> str:
+    chaos_type = inj.get("chaos_type", "").lower()
+    if "partition" in chaos_type:
+        return "network_partitioned"
+    return "network_degraded"
+
+
+# -- fpg EventNode / Edge construction ------------------------------------
+def node_from_seed(
+    inj: Injection,
+    verdict: SeedResult,
+    window: dict[str, str],
+) -> dict[str, Any]:
+    """Build an fpg EventNode dict from a confirmed seed verdict."""
+    predicate = verdict.get("predicate") or (
+        link_root_predicate(inj) if is_link_injection(inj) else "other"
+    )
+    node: dict[str, Any] = {
+        "kind": "event",
+        "id": injection_node_id(inj),
+        "subject": injection_subject(inj),
+        "predicate": predicate,
+        "time": window,
+        "grounding": "observed",
+        "evidence": list(verdict.get("evidence", [])),
+        "annotation": "auto",
+    }
+    if predicate == "other":
+        node["description"] = verdict.get("rationale", verdict.get("claim", "inconclusive"))
+    return node
+
+
+def node_from_link_effect(
+    inj: Injection,
+    verdict: SeedResult,
+    window: dict[str, str],
+) -> dict[str, Any]:
+    """Build the service-side symptom node for a confirmed link injection."""
+    svc = seed_effect_target(inj, verdict)
+    predicate = verdict.get("predicate") or "flow_interrupted"
+    node: dict[str, Any] = {
+        "kind": "event",
+        "id": svc,
+        "subject": f"svc:{svc}",
+        "predicate": predicate,
+        "time": window,
+        "grounding": "observed",
+        "evidence": list(verdict.get("evidence", [])),
+        "annotation": "auto",
+    }
+    if predicate == "other":
+        node["description"] = verdict.get("rationale", verdict.get("claim", "inconclusive"))
+    return node
+
+
+def node_from_verdict(
+    svc: str,
+    verdict: HopResult,
+    window: dict[str, str],
+) -> dict[str, Any]:
+    """Build an fpg EventNode dict from a confirmed hop verdict."""
+    evidence = list(verdict.get("evidence", []))
+    relationship = verdict.get("relationship")
+    if relationship:
+        evidence.append(
+            {
+                "query": relationship["query"],
+                "explanation": "call relationship with the confirmed upstream: "
+                + relationship.get("explanation", "see query"),
+            }
+        )
+    predicate = verdict.get("predicate") or "other"
+    node: dict[str, Any] = {
+        "kind": "event",
+        "id": svc,
+        "subject": f"svc:{svc}",
+        "predicate": predicate,
+        "time": window,
+        "grounding": "observed" if evidence else "latent",
+        "evidence": evidence,
+        "annotation": "auto",
+    }
+    if predicate == "other":
+        node["description"] = verdict.get("claim") or verdict.get("rationale", "")
+    return node
+
+
+def edge_dict(
+    src: str,
+    dst: str,
+    rel_type: str,
+    rel_mechanism: dict[str, str],
+    claim: str,
+) -> dict[str, Any]:
+    mechanism = rel_mechanism.get(rel_type, "other")
+    edge: dict[str, Any] = {
+        "src": src,
+        "dst": dst,
+        "mechanism": mechanism,
+        "verification": "consistency-checked",
+    }
+    if mechanism == "other":
+        edge["description"] = (
+            claim or f"relationship type {rel_type!r} outside the vocabulary"
+        )
+    elif claim:
+        edge["description"] = claim
+    return edge
