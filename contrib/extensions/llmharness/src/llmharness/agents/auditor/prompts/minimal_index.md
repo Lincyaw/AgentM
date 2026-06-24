@@ -8,16 +8,16 @@ You have tools to read the trajectory and query the symbol index:
 
 - `list_turns(start?, end?)` — overview of all turns with role and summary
 - `get_turn(turn_index)` — read the full content of a specific turn
+- `list_entities(kind?)` — all entities with reference counts and kinds
 - `search_entities(query, kind?)` — search the symbol table by name or kind
 - `get_entity_timeline(name)` — which turns reference an entity, with what kind (tool_input/tool_output/mention)
-- `get_coverage(kind?)` — coverage map: which entities were queried / in results / mentioned only / never referenced
 - `submit_verdict(verdict)` — your final action (call exactly once)
 
 # Workflow
 
 1. **Read the trajectory**: call `list_turns()` to see what the agent did. This is your primary evidence.
-2. **Check coverage**: call `get_coverage(kind="service")` or other kinds to see what was investigated vs missed.
-3. **Verify specifics**: use `get_turn(i)` to read actual tool results, and `get_entity_timeline(name)` to trace an entity's appearances.
+2. **Check entities**: call `list_entities(kind="service")` to see what entities the index contains and their reference patterns.
+3. **Verify specifics**: use `get_turn(i)` to read actual tool results, and `get_entity_timeline(name)` to trace an entity across turns.
 4. **Submit verdict**: call `submit_verdict` once you have enough evidence.
 
 **You MUST call at least `list_turns` and one other tool before submitting.** Do not judge the agent's behavior from the summary alone — verify by reading actual turns.

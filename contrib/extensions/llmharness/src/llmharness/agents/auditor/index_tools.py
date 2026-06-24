@@ -179,46 +179,38 @@ def _build_get_entity_timeline_tool(state: _IndexState) -> FunctionTool:
     )
 
 
-def _build_get_coverage_tool(state: _IndexState) -> FunctionTool:
+def _build_list_entities_tool(state: _IndexState) -> FunctionTool:
     class Args(BaseModel):
-        kind: str | None = Field(default=None, description="Filter by entity kind (e.g. 'service')")
+        kind: str | None = Field(default=None, description="Filter by entity kind (e.g. 'service', 'metric', 'tool')")
 
     async def handler(args: dict[str, Any]) -> ToolResult:
         parsed = Args.model_validate(args)
-        coverage: list[dict[str, Any]] = []
+        entities: list[dict[str, Any]] = []
         for s in state.symbols:
             if parsed.kind and s.get("kind") != parsed.kind:
                 continue
             refs = state._refs_by_sym.get(s["id"], [])
-            ref_kinds = {r.get("kind", "?") for r in refs}
-            if "tool_input" in ref_kinds:
-                status = "queried"
-            elif "tool_output" in ref_kinds:
-                status = "in_results"
-            elif "mention" in ref_kinds:
-                status = "mentioned_only"
-            else:
-                status = "never_referenced"
-            coverage.append({
+            ref_kinds = Counter(r.get("kind", "?") for r in refs)
+            entities.append({
                 "name": s["name"],
                 "kind": s.get("kind", "?"),
-                "status": status,
-                "ref_count": len(refs),
+                "refs": len(refs),
+                "ref_kinds": dict(ref_kinds),
             })
-        coverage.sort(key=lambda x: (-x["ref_count"], x["name"]))
-        summary = Counter(c["status"] for c in coverage)
+        entities.sort(key=lambda x: (-x["refs"], x["name"]))
+        kind_counts = Counter(e["kind"] for e in entities)
         return _text_result(json.dumps({
-            "summary": dict(summary),
-            "total_entities": len(coverage),
-            "entities": coverage,
+            "total": len(entities),
+            "by_kind": dict(kind_counts),
+            "entities": entities,
         }, ensure_ascii=False, indent=2))
 
     return FunctionTool(
-        name="get_coverage",
+        name="list_entities",
         description=(
-            "Get coverage summary: which entities were queried (appeared in tool inputs), "
-            "which only appeared in results, which were only mentioned, and which were never referenced. "
-            "Optionally filter by entity kind."
+            "List all entities in the symbol table with reference counts and kinds. "
+            "Optionally filter by entity kind. Use this to see what the index contains "
+            "before drilling into specifics with search_entities or get_entity_timeline."
         ),
         parameters=Args,
         fn=handler,
@@ -280,7 +272,7 @@ MANIFEST = ExtensionManifest(
         "tool:get_turn",
         "tool:search_entities",
         "tool:get_entity_timeline",
-        "tool:get_coverage",
+        "tool:list_entities",
     ),
 )
 
@@ -294,4 +286,4 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     api.register_tool(_build_get_turn_tool(state))
     api.register_tool(_build_search_entities_tool(state))
     api.register_tool(_build_get_entity_timeline_tool(state))
-    api.register_tool(_build_get_coverage_tool(state))
+    api.register_tool(_build_list_entities_tool(state))
