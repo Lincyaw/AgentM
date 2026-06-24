@@ -225,10 +225,58 @@ def _build_get_coverage_tool(state: _IndexState) -> FunctionTool:
     )
 
 
+def _build_list_turns_tool(state: _IndexState) -> FunctionTool:
+    class Args(BaseModel):
+        start: int = Field(default=0, description="Start turn index (inclusive)")
+        end: int | None = Field(default=None, description="End turn index (exclusive); omit for all remaining")
+
+    async def handler(args: dict[str, Any]) -> ToolResult:
+        parsed = Args.model_validate(args)
+        lo = max(0, parsed.start)
+        hi = parsed.end if parsed.end is not None else len(state.trajectory)
+        hi = min(hi, len(state.trajectory))
+        lines: list[str] = [f"Trajectory: {len(state.trajectory)} turns total (showing {lo}-{hi-1})"]
+        for i in range(lo, hi):
+            turn = state.trajectory[i]
+            role = turn.get("role", "?")
+            content = turn.get("content", [])
+            summary = ""
+            tool_name = ""
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict):
+                        if b.get("type") == "tool_call" or b.get("name"):
+                            tool_name = b.get("name", "")
+                        elif b.get("type") == "tool_result":
+                            sub = b.get("content", [])
+                            if isinstance(sub, list):
+                                for s in sub:
+                                    if isinstance(s, dict) and s.get("text"):
+                                        summary = s["text"][:80]
+                                        break
+                        elif b.get("text") and not summary:
+                            summary = b["text"][:80]
+            tag = f" → {tool_name}" if tool_name else ""
+            lines.append(f"  [{i}] {role}{tag}: {summary}")
+        return _text_result("\n".join(lines))
+
+    return FunctionTool(
+        name="list_turns",
+        description=(
+            "List trajectory turns with a compact summary of each. "
+            "Use this first to get an overview of what the agent did, "
+            "then drill into specific turns with get_turn."
+        ),
+        parameters=Args,
+        fn=handler,
+    )
+
+
 MANIFEST = ExtensionManifest(
     name="auditor_index_tools",
-    description="Register trajectory index query tools for the auditor.",
+    description="Register trajectory and index query tools for the auditor.",
     registers=(
+        "tool:list_turns",
         "tool:get_turn",
         "tool:search_entities",
         "tool:get_entity_timeline",
@@ -242,6 +290,7 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     symbols = config.get("symbols", [])
     references = config.get("references", [])
     state = _IndexState(trajectory, symbols, references)
+    api.register_tool(_build_list_turns_tool(state))
     api.register_tool(_build_get_turn_tool(state))
     api.register_tool(_build_search_entities_tool(state))
     api.register_tool(_build_get_entity_timeline_tool(state))

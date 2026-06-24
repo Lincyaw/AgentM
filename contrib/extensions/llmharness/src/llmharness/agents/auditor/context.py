@@ -89,23 +89,12 @@ def build_auditor_system_prompt(
             sections.append(skill_text.strip())
         sections.append("")
 
-    sections.append("## INDEX TOOLS")
-    sections.append(
-        "You have tools to query the trajectory and symbol table:\n"
-        "- `get_turn(turn_index)` — read the actual content of a specific turn\n"
-        "- `search_entities(query, kind?)` — search symbols by name or kind\n"
-        "- `get_entity_timeline(name)` — which turns reference an entity, with what kind\n"
-        "- `get_coverage(kind?)` — coverage summary: queried / in_results / mentioned_only / never_referenced\n\n"
-        "Use these tools to VERIFY your observations before making claims. "
-        "Do not assume what the agent did — read the actual turns."
-    )
     if context_index is not None:
         summary = _build_index_summary(context_index)
         if summary:
-            sections.append("")
-            sections.append("### Index overview")
+            sections.append("## INDEX OVERVIEW")
             sections.append(summary)
-    sections.append("")
+            sections.append("")
 
     if check_errors:
         sections.append("## CHECK_ERRORS (non-blocking)")
