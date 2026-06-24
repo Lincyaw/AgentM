@@ -20,6 +20,7 @@ import json
 import os
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Annotated, Any, Final, TypedDict, cast
@@ -286,30 +287,121 @@ def _load_vocabulary_values(vocab_name: str = "default") -> tuple[set[str], set[
 
 
 def _validate_vocabulary(result: ExtractionResult) -> str | None:
-    """Check extraction result against the selected vocabulary yaml."""
-    symbol_values, reference_values, relation_values = _load_vocabulary_values(_vocabulary)
+    """Check extraction result symbol kinds against the selected vocabulary yaml."""
+    symbol_values, _reference_values, _relation_values = _load_vocabulary_values(_vocabulary)
 
     errors: list[str] = []
     for sym in result.symbols:
         if sym.kind not in symbol_values:
             errors.append(f"symbol '{sym.name}' has invalid kind '{sym.kind}'")
-    for ref in result.references:
-        if ref.kind not in reference_values:
-            errors.append(f"reference '{ref.symbol_name}' has invalid kind '{ref.kind}'")
-    for rel in result.relations:
-        if rel.relation_type not in relation_values:
-            errors.append(f"relation '{rel.from_symbol}'->{rel.to_symbol}' has invalid type '{rel.relation_type}'")
     if errors:
         valid_kinds = ", ".join(v for v in symbol_values if v != "unknown")
-        valid_refs = ", ".join(v for v in reference_values if v != "unknown")
-        valid_rels = ", ".join(relation_values)
-        return (
-            f"Vocabulary errors: {'; '.join(errors)}. "
-            f"Valid symbol kinds: {valid_kinds}. "
-            f"Valid reference kinds: {valid_refs}. "
-            f"Valid relation types: {valid_rels}."
-        )
+        return f"Vocabulary errors: {'; '.join(errors)}. Valid symbol kinds: {valid_kinds}."
     return None
+
+
+# ---------------------------------------------------------------------------
+# Programmatic reference generation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GeneratedReference:
+    symbol_name: str
+    turn_id: str
+    text: str
+    kind: str  # tool_input | tool_output | mention
+    start: int
+
+
+@dataclass
+class GeneratedRelation:
+    from_symbol: str
+    to_symbol: str
+    relation_type: str
+    turn_id: str
+
+
+def _build_references(
+    symbols: list[dict[str, Any]],
+    messages: list[dict[str, JsonValue]],
+) -> tuple[list[GeneratedReference], list[GeneratedRelation]]:
+    """Grep symbol names + aliases in messages to produce references.
+
+    Classifies by message structure:
+    - tool_call content → tool_input
+    - tool_result content → tool_output
+    - text content → mention
+    """
+    names: list[tuple[str, str]] = []  # (search_term_lower, canonical_name)
+    for sym in symbols:
+        canonical = sym["name"]
+        names.append((canonical.lower(), canonical))
+        for alias in sym.get("aliases", []):
+            names.append((alias.lower(), canonical))
+    # longest-first to avoid partial matches shadowing longer names
+    names.sort(key=lambda x: -len(x[0]))
+
+    refs: list[GeneratedReference] = []
+    seen: set[tuple[str, str, str]] = set()  # (canonical, turn_id, kind) dedup
+
+    for msg in messages:
+        mid = str(msg.get("id", ""))
+        blocks = msg.get("content", [])
+        if not isinstance(blocks, list):
+            continue
+
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+
+            # Determine reference kind and extract searchable text
+            if btype == "tool_call":
+                kind = "tool_input"
+                args = block.get("arguments", block.get("input", {}))
+                text = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+            elif btype == "tool_result":
+                kind = "tool_output"
+                sub = block.get("content", [])
+                text = " ".join(
+                    str(s.get("text", "")) for s in sub if isinstance(s, dict)
+                ) if isinstance(sub, list) else str(sub)
+            elif btype == "text":
+                kind = "mention"
+                text = str(block.get("text", ""))
+            else:
+                continue
+
+            if not text:
+                continue
+            text_lower = text.lower()
+
+            for search_term, canonical in names:
+                pos = text_lower.find(search_term)
+                if pos < 0:
+                    continue
+                dedup_key = (canonical, mid, kind)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
+                # Extract verbatim snippet around the match
+                snippet_start = max(0, pos)
+                snippet_end = min(len(text), pos + len(search_term))
+                snippet = text[snippet_start:snippet_end]
+                if len(snippet) > 50:
+                    snippet = snippet[:50]
+
+                refs.append(GeneratedReference(
+                    symbol_name=canonical,
+                    turn_id=mid,
+                    text=snippet,
+                    kind=kind,
+                    start=pos,
+                ))
+
+    return refs, []
 
 
 def _try_parse_response(messages: list[Any]) -> tuple[ExtractionResult | None, str | None]:
@@ -513,7 +605,7 @@ async def extract_incremental(
 
 
 SFT_SYSTEM_PROMPT: Final = (
-    "Extract symbols, references, and relations from the trajectory steps. Output JSON only."
+    "Extract a symbol table from the trajectory messages. Output JSON only."
 )
 
 
@@ -649,6 +741,7 @@ def export_messages(
 def collect(
     paths: Annotated[list[Path] | None, typer.Argument(help="Trace files or directories (omit if using --session)")] = None,
     session: Annotated[list[str] | None, typer.Option(help="Session IDs to load from ClickHouse (repeatable)")] = None,
+    session_file: Annotated[Path | None, typer.Option("--session-file", help="File with one session ID per line")] = None,
     model: Annotated[str, typer.Option(help="Model profile from config.toml")] = "doubao",
     output_dir: Annotated[Path, typer.Option("--output", help="HuggingFace dataset output directory")] = Path("data"),
     index_output: Annotated[Path | None, typer.Option("--index-output", help="Write final index JSON to this path")] = None,
@@ -674,8 +767,13 @@ def collect(
         import sys
         logger.remove()
         logger.add(sys.stderr, level="DEBUG")
+    all_sessions = list(session or [])
+    if session_file:
+        all_sessions.extend(
+            line.strip() for line in session_file.read_text().splitlines() if line.strip()
+        )
     asyncio.run(_collect_async(
-        paths or [], session or [], model, output_dir, index_output,
+        paths or [], all_sessions, model, output_dir, index_output,
         split, _parse_chunk_size(chunk_size), concurrency, fmt, min_messages,
     ))
 
@@ -726,8 +824,8 @@ def _build_index_from_chunks_into(
     prompt_input: dict[str, Any],
     result: ExtractionResult,
 ) -> None:
-    """Populate a TrajectoryIndex with one chunk's extraction result."""
-    from .index import Step, StepRole, Symbol
+    """Populate a TrajectoryIndex: LLM symbols + programmatic references."""
+    from .index import Step, StepRole
 
     role_map = {"user": StepRole.USER, "assistant": StepRole.ASSISTANT, "tool_result": StepRole.TOOL_RESULT}
     msgs = prompt_input.get("messages", prompt_input if isinstance(prompt_input, list) else [])
@@ -741,28 +839,20 @@ def _build_index_from_chunks_into(
         index.add_step(step)
         steps_by_id[mid] = step
 
-    def _resolve(name: str, local: dict[str, Symbol]) -> Symbol | None:
-        return local.get(name) or index.resolve_symbol_by_name(name)
+    # LLM-extracted symbols
+    known = prompt_input.get("known_symbols", [])
+    all_syms = list(known) + [{"name": s.name, "kind": s.kind, "summary": s.summary, "aliases": s.aliases} for s in result.symbols]
 
-    symbol_map: dict[str, Symbol] = {}
     for ext_sym in result.symbols:
-        symbol = index.upsert_symbol(name=ext_sym.name, kind=ext_sym.kind.lower(), summary=ext_sym.summary, aliases=ext_sym.aliases)
-        symbol_map[ext_sym.name] = symbol
+        index.upsert_symbol(name=ext_sym.name, kind=ext_sym.kind.lower(), summary=ext_sym.summary, aliases=ext_sym.aliases)
 
-    for ref in result.references:
-        resolved = _resolve(ref.symbol_name, symbol_map)
+    # Programmatic references
+    refs, _rels = _build_references(all_syms, msgs)
+    for ref in refs:
+        resolved = index.resolve_symbol_by_name(ref.symbol_name)
         ref_step = steps_by_id.get(ref.turn_id)
-        if not resolved or not ref_step:
-            continue
-        index.add_reference(symbol=resolved, step=ref_step, text=ref.text, kind=ref.kind.lower())
-
-    for rel in result.relations:
-        from_s = _resolve(rel.from_symbol, symbol_map)
-        to_s = _resolve(rel.to_symbol, symbol_map)
-        rel_step = steps_by_id.get(rel.turn_id)
-        if not from_s or not to_s or not rel_step:
-            continue
-        index.add_relation(from_symbol=from_s, to_symbol=to_s, rel_type=rel.relation_type.lower(), step=rel_step)
+        if resolved and ref_step:
+            index.add_reference(symbol=resolved, step=ref_step, text=ref.text, kind=ref.kind, start=ref.start)
 
 
 def _build_index_from_chunks(all_chunks: list[ChunkResults]) -> Any:
@@ -843,11 +933,9 @@ async def _collect_async(
                 return []
 
             total_sym = sum(len(r.symbols) for _, r in chunks)
-            total_ref = sum(len(r.references) for _, r in chunks)
-            total_rel = sum(len(r.relations) for _, r in chunks)
             logger.info(
                 f"{label}: {len(msgs)} msgs -> {len(chunks)} chunks, "
-                f"{total_sym} sym, {total_ref} ref, {total_rel} rel"
+                f"{total_sym} sym"
             )
             return chunks
 

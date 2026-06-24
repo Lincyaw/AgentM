@@ -1,6 +1,6 @@
 {
   "dataset_info": {
-    "description": "SFT training data for trajectory semantic index entity extraction.",
+    "description": "SFT training data for trajectory semantic index (TELBench).",
     "features": {
       "messages": {
         "feature": {
@@ -17,7 +17,11 @@
   },
   "splits": {
     "train": {
-      "num_examples": 4,
+      "num_examples": 3038,
+      "dataset_name": "trajectory_index_sft"
+    },
+    "test": {
+      "num_examples": 760,
       "dataset_name": "trajectory_index_sft"
     }
   }

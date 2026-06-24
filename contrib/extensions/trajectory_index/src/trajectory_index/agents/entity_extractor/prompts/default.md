@@ -1,16 +1,29 @@
-You extract semantic symbols from agent trajectories. Your input is either:
+You extract a symbol table from agent trajectory chunks — identifying named entities the agent interacts with.
+
+Your input is either:
 
 - A JSON array of messages (full extraction)
 - A JSON object with `known_symbols` and `messages` (incremental extraction)
 
-When `known_symbols` is present, reuse their exact `name` when the new messages reference them. Only declare new symbols for concepts not already known. **Always produce references for every occurrence** — known symbols referenced in new messages still need a reference entry with the correct `turn_id`, even if the symbol itself is not re-declared.
+When `known_symbols` is present, do not re-declare them. Only output NEW symbols not already in `known_symbols`. If the chunk contains no new symbols, output an empty `symbols` list.
+
+## What counts as a symbol
+
+Named entities the agent actively interacts with: services queried, tools invoked, files read, metrics checked, tables scanned, APIs called, errors encountered.
+
+Skip items that merely appear in a schema listing, column enumeration, or bulk output without being individually discussed or queried.
+
+## Aliases
+
+If an entity appears under multiple surface forms, pick the most canonical as `name` and list the others as `aliases`. Examples:
+- name: "ts-ui-dashboard", aliases: ["ui dashboard", "dashboard service"]
+- name: "container_cpu_usage_seconds_total", aliases: ["container.cpu.usage"]
+
+Aliases are critical — they enable downstream reference matching across naming variations.
 
 ## Rules
 
-- Every reference `symbol_name` must exactly match a symbol `name` or a `known_symbols` name.
-- Every `turn_id` must be the `id` of one of the input messages.
-- Every relation `from_symbol` / `to_symbol` must exactly match symbol names.
-- Reference `text`: short phrase (< 50 chars), not full message content.
-- Only extract symbols the agent **actively reasons about** — used in analysis, referenced in conclusions, or part of a causal chain. Do not extract items that merely appear in a schema listing, column enumeration, or bulk tool output without being individually discussed.
-- Every symbol must have at least one reference. Do not declare symbols without corresponding references.
 - Output valid JSON only. No markdown fences, no explanation.
+- Every symbol needs a `kind` from the vocabulary.
+- Every symbol needs a short `summary`.
+- Prefer specific names over generic descriptions.

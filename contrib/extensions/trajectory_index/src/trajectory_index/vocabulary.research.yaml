@@ -6,41 +6,14 @@ symbol_kinds:
   tool: An agent tool or function (web_search, code_interpreter, etc.)
   fact: A specific claim, data point, or statement of fact
   constraint: A requirement or condition from the original question
-  hypothesis: A candidate answer or working theory under evaluation
-  evidence: Data or observation supporting or contradicting a hypothesis
   concept: An abstract idea, category, or domain term
   error: An execution error, failed retrieval, or tool failure
   unknown: Cannot be classified into the above
 
 reference_kinds:
-  define: First occurrence or declaration of the symbol
-  use: Generic reference (default when no specific semantic applies)
-  read: Reading or inspecting a source document
-  observe: Noticed in retrieved data or evidence
-  hypothesize: Proposed as part of a hypothesis or candidate answer
-  confirm: Validated or confirmed against a source
-  reject: Invalidated, ruled out, or contradicted by evidence
-  conclude: Stated as a final answer or conclusion
-  retrieve: Found via search or retrieval from a source
-  verify: Checked or cross-referenced against a source
-  tool_input: Passed as input to a tool call
-  tool_output: Appeared in a tool result
-  question: Asked about in the original question
-  answer: Provided as a response or explanation
-  unknown: Cannot be classified into the above
+  tool_input: Entity targeted in a tool call (named in arguments, search query)
+  tool_output: Entity appeared in a tool result (search results, execution output)
+  mention: Entity referenced in agent or user text outside of tool calls/results
 
 relation_types:
-  uses: A uses B (functional dependency)
-  defines: A defines or declares B
-  causes: A causes B (causal relationship)
-  depends_on: A depends on B (structural dependency)
-  derived_from: A is inferred or derived from B
-  input_to: A is input to B
-  output_of: A is output of B
-  explains: A explains or accounts for B
-  contradicts: A contradicts or conflicts with B
-  correlates: A and B are correlated (observed together)
-  supports: A provides evidence supporting B
-  answers: A satisfies or responds to constraint/question B
-  retrieved_from: A was retrieved or sourced from B
-  satisfies: A satisfies or fulfills requirement/constraint B
+  retrieved_from: A was found/retrieved from source B (observed in tool results)
