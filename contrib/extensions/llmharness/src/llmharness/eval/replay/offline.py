@@ -1,11 +1,8 @@
 """Offline seams for replay drivers.
 
-* :class:`StandaloneChildRunner` — spawns a top-level audit child via
-  :func:`llmharness.eval.replay.engine.run_phase_standalone` (no
-  ``api.spawn_child_session``).
-
-* :class:`InMemorySink` — drops every persisted entry into a Python list
-  instead of the AgentM session log.
+:class:`StandaloneChildRunner` — spawns a top-level audit child via
+:func:`llmharness.eval.replay.engine.run_phase_standalone` (no
+``api.spawn_child_session``).
 """
 
 from __future__ import annotations
@@ -63,16 +60,11 @@ class StandaloneChildRunner:
         context_index: dict[str, Any] | None = None,
         recent_verdicts: list[dict[str, Any]] | None = None,
         continuation_notes_from_prior_firing: list[str] | None = None,
-        # Deprecated kwargs kept for backward compat
-        records: list[Any] | None = None,
-        links: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Run one auditor firing as a top-level session.
 
         Returns a dict with keys: verdict, raw_blocks, error, latency_ms.
         """
-        _ = records
-        _ = links
         _AUD_TOOLS = "llmharness.agents.auditor.tools"
         _OBS = "agentm.extensions.builtin.observability"
         _OPS = "agentm.extensions.builtin.operations"
@@ -135,27 +127,4 @@ class StandaloneChildRunner:
             "latency_ms": latency_ms,
         }
 
-# --- op sink ----------------------------------------------------------------
-
-class InMemorySink:
-    """Captures every entry in local lists — for offline drivers and tests."""
-
-    def __init__(self) -> None:
-        self.cursors: list[int] = []
-        self.verdicts: list[dict[str, Any]] = []
-        self.failures: list[tuple[str, dict[str, Any]]] = []
-        self.partials: list[dict[str, Any]] = []
-
-    def append_cursor(self, *, last_turn_index: int) -> None:
-        self.cursors.append(last_turn_index)
-
-    def append_verdict(self, verdict: dict[str, Any]) -> None:
-        self.verdicts.append(dict(verdict))
-
-    def append_failure(self, entry_type: str, payload: dict[str, Any]) -> None:
-        self.failures.append((entry_type, dict(payload)))
-
-    def append_partial(self, payload: dict[str, Any]) -> None:
-        self.partials.append(dict(payload))
-
-__all__ = ["InMemorySink", "StandaloneChildRunner"]
+__all__ = ["StandaloneChildRunner"]

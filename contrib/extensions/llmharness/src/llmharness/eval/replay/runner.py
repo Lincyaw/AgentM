@@ -22,29 +22,6 @@ from .engine import PhaseResult, run_phase_standalone
 # Settings dataclasses
 # ---------------------------------------------------------------------------
 
-class ExtractorSettings:
-    """Deprecated stub — kept for backward compatibility with callers that
-    pass ``extractor_settings`` to :func:`replay_pipeline_over_trajectory`.
-
-    The extractor has been replaced by the trajectory_index symbol table.
-    """
-
-    def __init__(
-        self,
-        *,
-        base_prompt: str | None = None,
-        tool_call_budget: int | None = None,
-        compose_kwargs: dict[str, Any] | None = None,
-    ) -> None:
-        self.base_prompt = base_prompt
-        self.tool_call_budget = tool_call_budget
-        self.compose_kwargs = compose_kwargs or {}
-
-    @classmethod
-    def default(cls) -> ExtractorSettings:
-        return cls()
-
-
 class AuditorSettings:
     """Minimal config needed to replay an auditor firing."""
 

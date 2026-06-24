@@ -134,9 +134,6 @@ def run(
     auditor_prompt: Annotated[
         str, typer.Option("--auditor-prompt", help="auditor prompt variant"),
     ] = "minimal_index",
-    extractor_interval: Annotated[
-        int, typer.Option("--extractor-interval"),
-    ] = 5,
     audit_interval: Annotated[
         int, typer.Option("--audit-interval"),
     ] = 5,
@@ -295,7 +292,6 @@ def run(
                 sessions,
                 store=store,
                 harness_provider=harness_prov,
-                extractor_interval=extractor_interval,
                 audit_interval=audit_interval,
                 auditor_prompt=auditor_prompt,
                 max_turns=max_turns,

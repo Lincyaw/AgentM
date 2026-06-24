@@ -55,9 +55,9 @@ from loguru import logger
 from llmharness.eval.replay.record import ReplayRecord, write_record
 from llmharness.state import CumulativeAuditState
 
-from .offline import InMemorySink, StandaloneChildRunner
+from .offline import StandaloneChildRunner
 from .offline_driver import SurfaceFiring, replay_pipeline_over_trajectory
-from .runner import AuditorSettings, ExtractorSettings  # ExtractorSettings kept for backward compat
+from .runner import AuditorSettings
 
 __all__ = [
     "FORK_TREE_HEADER_KEY",
@@ -276,14 +276,8 @@ async def run_fork_tree_experiment(
     max_surfaces_per_node: int | None = None,
     max_workers: int = 1,
     out_path: Path | None = None,
-    sink: InMemorySink | None = None,
     child: StandaloneChildRunner | None = None,
-    trigger_registry: Any | None = None,
     trace_id: str | None = None,
-    # Deprecated no-ops kept for backward compat
-    extractor_settings: ExtractorSettings | None = None,
-    extractor_interval: int = 5,
-    skip_extractor: bool = False,
 ) -> ForkTreeExperiment:
     """Drive a fork-tree counterfactual experiment to completion.
 
@@ -358,8 +352,6 @@ async def run_fork_tree_experiment(
             audit_interval=audit_interval,
             enable_auditor=True,
             stop_on_first_surface=False,
-            sidecar_path=None,
-            sink=sink,
             child=child,
             seed_cumulative=task.seed_cumulative,
             # Resume the child's auditing ONE turn past the fork boundary.
@@ -370,7 +362,6 @@ async def run_fork_tree_experiment(
             # that the non-progressing floor below then discards. The root
             # (no boundary to skip) starts at ``fork_turn`` == 1.
             start_turn=(task.fork_turn if task.parent_id is None else task.fork_turn + 1),
-            trigger_registry=trigger_registry,
             trace_id=trace_id,
         )
         surfaces = _collect_surfaces(run.surfaces)

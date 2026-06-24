@@ -264,7 +264,6 @@ async def replay_one(
     session_id: str,
     store: Any,
     harness_provider: tuple[str, dict[str, Any]],
-    extractor_interval: int = 5,
     audit_interval: int = 5,
     auditor_prompt: str = "minimal_index",
     max_turns: int = 60,
@@ -356,14 +355,13 @@ async def replay_one(
                 current_messages,
                 cwd=cwd,
                 provider=harness_provider,
-                extractor_interval=extractor_interval,
                 audit_interval=audit_interval,
                 auditor_prompt=auditor_prompt,
                 stop_on_first_surface=True,
                 min_surface_turn_index=min_surface_turn_index,
             )
             surfaces = audit_result.surfaces
-            audit_firings = audit_result.firings
+            audit_firings: list[Any] = []
         except Exception as exc:
             logger.exception(f"offline_audit failed for {current_session_id}")
             final_error = f"fork {generation} audit failed: {exc}"
@@ -409,13 +407,8 @@ async def replay_one(
                         "llmharness.atom",
                         {
                             "mode": "sync",
-                            "extractor_interval_turns": extractor_interval,
                             "audit_interval_turns": audit_interval,
                             "enable_reminders": True,
-                            "extractor_provider": {
-                                "module": provider_module,
-                                "config": dict(provider_config),
-                            },
                             "auditor_provider": {
                                 "module": provider_module,
                                 "config": dict(provider_config),
@@ -536,7 +529,6 @@ async def replay_batch(
     *,
     store: Any,
     harness_provider: tuple[str, dict[str, Any]],
-    extractor_interval: int = 5,
     audit_interval: int = 5,
     auditor_prompt: str = "minimal_index",
     max_turns: int = 60,
@@ -566,7 +558,6 @@ async def replay_batch(
                 session_id=sid,
                 store=store,
                 harness_provider=harness_provider,
-                extractor_interval=extractor_interval,
                 audit_interval=audit_interval,
                 auditor_prompt=auditor_prompt,
                 max_turns=max_turns,
