@@ -14,7 +14,6 @@ from agentm.extensions.builtin.workflow import AgentResult, WorkflowContext
 from pydantic import BaseModel
 
 from .audit.audit_context import build_audit_prompt
-from .lib.parallel import normalize_parallel
 from .lib.schema import (
     AnomalyAuditReport,
     CausalAuditReport,
@@ -78,7 +77,7 @@ async def run_audit_round(
     case_view = case.case_summary()
 
     anomaly_scopes = sorted(case.entry_services) or ["<entry-services-not-discovered>"]
-    anomaly_results = normalize_parallel(await ctx.parallel([
+    anomaly_results = await ctx.parallel([
         _agent(
             ctx,
             case,
@@ -98,28 +97,20 @@ async def run_audit_round(
             schema=AnomalyAuditReport,
         )
         for scope in anomaly_scopes
-    ]))
-    for idx, report in enumerate(anomaly_results):
-        if report is not None:
-            continue
-        if idx < len(anomaly_scopes):
+    ])
+    anomaly_reports = []
+    for scope, report in zip(anomaly_scopes, anomaly_results):
+        if report is None:
             state.record_error(
                 "audit",
-                f"anomaly:{anomaly_scopes[idx]}:r{audit_round}",
+                f"anomaly:{scope}:r{audit_round}",
                 "anomaly audit task failed before returning a report",
             )
-    for scope in anomaly_scopes[len(anomaly_results):]:
-        state.record_error(
-            "audit",
-            f"anomaly:{scope}:r{audit_round}",
-            "anomaly audit task was missing from parallel results",
-        )
-    anomaly_reports = [
-        _dump_model(report) for report in anomaly_results if report is not None
-    ]
+            continue
+        anomaly_reports.append(_dump_model(report))
 
     path_items = state.candidate_paths()
-    causal_results = normalize_parallel(await ctx.parallel([
+    causal_results = await ctx.parallel([
         _agent(
             ctx,
             case,
@@ -142,29 +133,20 @@ async def run_audit_round(
             schema=CausalAuditReport,
         )
         for path_id, seed, path in path_items
-    ]))
-    for idx, report in enumerate(causal_results):
-        if report is not None:
-            continue
-        if idx < len(path_items):
-            path_id, _, _ = path_items[idx]
+    ])
+    causal_reports = []
+    for (path_id, _, _), report in zip(path_items, causal_results):
+        if report is None:
             state.record_error(
                 "audit",
                 f"causal:{path_id}:r{audit_round}",
                 "causal audit task failed before returning a report",
             )
-    for path_id, _, _ in path_items[len(causal_results):]:
-        state.record_error(
-            "audit",
-            f"causal:{path_id}:r{audit_round}",
-            "causal audit task was missing from parallel results",
-        )
-    causal_reports = [
-        _dump_model(report) for report in causal_results if report is not None
-    ]
+            continue
+        causal_reports.append(_dump_model(report))
 
     audit_seeds = sorted(case.seeds)
-    seed_audit_results = normalize_parallel(await ctx.parallel([
+    seed_audit_results = await ctx.parallel([
         _agent(
             ctx,
             case,
@@ -189,27 +171,17 @@ async def run_audit_round(
             schema=SeedCoverageReport,
         )
         for seed in audit_seeds
-    ]))
-    for idx, report in enumerate(seed_audit_results):
-        if report is not None:
-            continue
-        if idx < len(audit_seeds):
+    ])
+    seed_coverage_reports = []
+    for seed, report in zip(audit_seeds, seed_audit_results):
+        if report is None:
             state.record_error(
                 "audit",
-                f"seed:{audit_seeds[idx]}:r{audit_round}",
+                f"seed:{seed}:r{audit_round}",
                 "seed coverage audit task failed before returning a report",
             )
-    for seed in audit_seeds[len(seed_audit_results):]:
-        state.record_error(
-            "audit",
-            f"seed:{seed}:r{audit_round}",
-            "seed coverage audit task was missing from parallel results",
-        )
-    seed_coverage_reports = [
-        _dump_model(report)
-        for report in seed_audit_results
-        if report is not None
-    ]
+            continue
+        seed_coverage_reports.append(_dump_model(report))
 
     reducer = await _agent(
         ctx,

@@ -18,21 +18,20 @@ the accept decision — there is no harness force-accept.
 Input via ``ctx.args`` (built by ``prepare.CaseContext.to_workflow_args``):
     data_dir, graph, injections, infra_nodes, fault_docs,
     gate_retries, agent_retries, max_audit_rounds, judge_model,
-    skip_propagate, skip_judge, window, rel_mechanism, existing_state.
+    skip_judge, window, rel_mechanism.
 
 Output: a ``PropagationResult`` dict (see ``state.GraphState.to_result``).
 """
 from __future__ import annotations
 
 from collections.abc import Awaitable, Sequence
-from typing import Any, cast
+from typing import Any
 
 from agentm.extensions.builtin.workflow import WorkflowContext
 
 from . import audit_map, discovery
 from .hop.hop_context import PriorVerdict
 from .lib.fpg import injection_node_id
-from .lib.parallel import normalize_parallel
 from .lib.schema import (
     GlobalAudit,
     HopRecheckRequest,
@@ -42,8 +41,6 @@ from .lib.schema import (
     ReworkRequest,
     SeedRecheckRequest,
     SeedResult,
-    is_hop_rework_parallel_item,
-    is_seed_parallel_item,
 )
 from .state import Case, GraphState, _reaches
 
@@ -52,12 +49,9 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     case = Case.from_args(ctx.args)
     state = GraphState(case, ctx.log)
 
-    if case.skip_propagate:
-        state.load_existing()
-    else:
-        await seed_phase(ctx, case, state)
-        ctx.phase("propagate")
-        await propagate(ctx, case, state, state.propagation_roots or list(state.nodes))
+    await seed_phase(ctx, case, state)
+    ctx.phase("propagate")
+    await propagate(ctx, case, state, state.propagation_roots or list(state.nodes))
 
     audit_result: GlobalAudit | None = None
     if case.skip_judge:
@@ -79,32 +73,16 @@ async def seed_phase(ctx: WorkflowContext, case: Case, state: GraphState) -> Non
     seed_coros: list[Awaitable[tuple[Injection, SeedResult | None]]] = [
         discovery.verify_seed(ctx, case, state, inj) for inj in seed_injections
     ]
-    seed_result_items = normalize_parallel(await ctx.parallel(seed_coros))
-    for idx, item in enumerate(seed_result_items):
-        if is_seed_parallel_item(item):
-            continue
-        if idx < len(seed_injections):
+    seed_results = await ctx.parallel(seed_coros)
+    for inj, result in zip(seed_injections, seed_results):
+        if result is None:
             state.record_error(
                 "seed",
-                injection_node_id(seed_injections[idx]),
+                injection_node_id(inj),
                 "seed verifier task failed before returning a result",
             )
-    for inj in seed_injections[len(seed_result_items):]:
-        state.record_error(
-            "seed",
-            injection_node_id(inj),
-            "seed verifier task was missing from parallel results",
-        )
-    seed_results = [
-        item for item in seed_result_items
-        if is_seed_parallel_item(item)
-    ]
-    missing_seed_results = len(seed_coros) - len(seed_results)
-    if missing_seed_results > 0:
-        ctx.log(
-            f"{missing_seed_results} seed verifier task(s) returned no usable result"
-        )
-    for inj, seed_verdict in seed_results:
+            continue
+        seed_verdict = result[1]
         root_id = injection_node_id(inj)
         if seed_verdict and seed_verdict.get("verdict") == "confirmed":
             root_id = state.accept_seed_node(inj, seed_verdict)
@@ -118,10 +96,8 @@ async def seed_phase(ctx: WorkflowContext, case: Case, state: GraphState) -> Non
         else:
             v = seed_verdict.get("verdict", "no result") if seed_verdict else "no result"
             ctx.log(f"seed {root_id}: {v} — skipping")
-
-    for inj, seed_verdict in seed_results:
         if seed_verdict:
-            state.seed_verdicts[injection_node_id(inj)] = seed_verdict
+            state.seed_verdicts[root_id] = seed_verdict
 
     if not state.nodes:
         ctx.log("no seeds confirmed after seed map; audit may request rechecks")
@@ -174,17 +150,15 @@ async def propagate(
         if not pending_hops:
             continue
 
-        ctx.log("Round " + str(state.round_n) + ": " + str(len(pending_hops)) + " hops")
+        ctx.log(f"Round {state.round_n}: {len(pending_hops)} hops")
 
         coros: list[Awaitable[HopResult | None]] = [
             discovery.verify_hop(ctx, case, state, item[0], item[1], item[2])
             for item in pending_hops
         ]
-        results = normalize_parallel(await ctx.parallel(coros))
+        results = await ctx.parallel(coros)
 
-        for idx in range(len(pending_hops)):
-            from_svc, to_svc, rel_type = pending_hops[idx]
-            result = results[idx] if idx < len(results) else None
+        for (from_svc, to_svc, rel_type), result in zip(pending_hops, results):
             edge_key = from_svc + "__" + to_svc
             if result is None:
                 state.record_error(
@@ -192,36 +166,29 @@ async def propagate(
                     edge_key,
                     "hop verifier task failed before returning a result",
                 )
-            verdict = result.get("verdict") if isinstance(result, dict) else None
+            verdict = result.get("verdict") if result else None
+            verdict_label = verdict or "no-result"
             state.hop_log.append(
                 {
                     "round": state.round_n,
                     "from": from_svc,
                     "to": to_svc,
-                    "verdict": verdict if verdict else "no-result",
+                    "verdict": verdict_label,
                 }
             )
-            ctx.log(
-                "  "
-                + from_svc
-                + " -> "
-                + to_svc
-                + ": "
-                + (verdict if verdict else "no-result")
-            )
-            hop_result = cast(HopResult, result) if isinstance(result, dict) else None
-            if hop_result and verdict:
-                state.verdicts[edge_key] = hop_result
+            ctx.log(f"  {from_svc} -> {to_svc}: {verdict_label}")
+            if result and verdict:
+                state.verdicts[edge_key] = result
 
             if verdict != "confirmed":
                 continue
-            assert hop_result is not None
+            assert result is not None
             was_new_node = to_svc not in state.nodes
             accepted = state.accept_hop_result(
                 from_svc,
                 to_svc,
                 rel_type,
-                hop_result,
+                result,
             )
             changed_any = accepted or changed_any
             if accepted and was_new_node:
@@ -332,36 +299,21 @@ async def apply_rework(
     if seed_requests:
         ctx.phase("audit-seed-rework")
         ctx.log(f"Audit requested {len(seed_requests)} seed rechecks")
-        seed_result_items = normalize_parallel(await ctx.parallel([
-            discovery.verify_seed(ctx, case, state, inj_by_seed[req.seed], req.context)
+        seed_results = await ctx.parallel([
+            discovery.verify_seed(
+                ctx, case, state, inj_by_seed[req.seed], req.context
+            )
             for req in seed_requests
-        ]))
-        for idx, item in enumerate(seed_result_items):
-            if is_seed_parallel_item(item):
-                continue
-            if idx < len(seed_requests):
+        ])
+        for req, seed_pair in zip(seed_requests, seed_results):
+            if seed_pair is None:
                 state.record_error(
                     "seed",
-                    seed_requests[idx].seed,
+                    req.seed,
                     "audit seed recheck failed before returning a result",
                 )
-        for req in seed_requests[len(seed_result_items):]:
-            state.record_error(
-                "seed",
-                req.seed,
-                "audit seed recheck was missing from parallel results",
-            )
-        seed_results = [
-            item for item in seed_result_items
-            if is_seed_parallel_item(item)
-        ]
-        missing_seed_results = len(seed_requests) - len(seed_results)
-        if missing_seed_results > 0:
-            ctx.log(
-                f"{missing_seed_results} audit seed recheck task(s) "
-                "returned no usable result"
-            )
-        for inj, seed_verdict in seed_results:
+                continue
+            inj, seed_verdict = seed_pair
             seed_id = injection_node_id(inj)
             previous_seed_verdict = state.seed_verdicts.get(seed_id)
             if seed_verdict:
@@ -424,36 +376,18 @@ async def apply_rework(
                 ),
             )
 
-        hop_result_items = normalize_parallel(await ctx.parallel([
-            _one_hop_rework(req) for req in hop_requests
-        ]))
-        for idx, item in enumerate(hop_result_items):
-            if is_hop_rework_parallel_item(item):
-                continue
-            if idx < len(hop_requests):
-                hop_req = hop_requests[idx]
+        hop_results = await ctx.parallel(
+            [_one_hop_rework(req) for req in hop_requests]
+        )
+        for hop_req, pair in zip(hop_requests, hop_results):
+            if pair is None:
                 state.record_error(
                     "hop",
                     hop_req.from_service + "__" + hop_req.to_service,
                     "audit hop recheck failed before returning a result",
                 )
-        for hop_req in hop_requests[len(hop_result_items):]:
-            state.record_error(
-                "hop",
-                hop_req.from_service + "__" + hop_req.to_service,
-                "audit hop recheck was missing from parallel results",
-            )
-        hop_results = [
-            item for item in hop_result_items
-            if is_hop_rework_parallel_item(item)
-        ]
-        missing_hop_results = len(hop_requests) - len(hop_results)
-        if missing_hop_results > 0:
-            ctx.log(
-                f"{missing_hop_results} audit hop recheck task(s) "
-                "returned no usable result"
-            )
-        for hop_req, result in hop_results:
+                continue
+            result = pair[1]
             from_svc = hop_req.from_service
             to_svc = hop_req.to_service
             hop_verdict: str | None = (

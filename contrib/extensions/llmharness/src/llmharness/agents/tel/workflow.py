@@ -3,7 +3,7 @@
 Pass 1 (note): read spans sequentially, record observations with ⚑ flags.
 Pass 2 (reason): receive notes, trace each ⚑ to its origin culprit, submit.
 
-Follows the verifier's propagation_workflow pattern — ``async def run(ctx)``
+Follows the verifier's workflow pattern — ``async def run(ctx)``
 over ``WorkflowContext``.
 """
 
@@ -55,11 +55,14 @@ async def run(ctx: WorkflowContext) -> TelWorkflowResult:
     ctx.log(f"[{instance_id}] pass 1: note-taking")
 
     await ctx.agent(
-        json.dumps({
-            "task": "Read the trajectory and take notes on each span.",
-            "question": question,
-            "n_spans": n_spans,
-        }, ensure_ascii=False),
+        json.dumps(
+            {
+                "task": "Read the trajectory and take notes on each span.",
+                "question": question,
+                "n_spans": n_spans,
+            },
+            ensure_ascii=False,
+        ),
         scenario=_TEL_SCENARIO,
         trace_label=f"tel_2pass_{instance_id}_note",
         atom_config={
@@ -91,7 +94,8 @@ async def run(ctx: WorkflowContext) -> TelWorkflowResult:
     if not notes:
         ctx.log(f"[{instance_id}] pass 1 produced no notes — aborting")
         return {
-            "predicted_span_ids": [], "reasoning": "no notes from pass 1",
+            "predicted_span_ids": [],
+            "reasoning": "no notes from pass 1",
             "note_session_id": note_session_id,
         }
 
@@ -102,12 +106,15 @@ async def run(ctx: WorkflowContext) -> TelWorkflowResult:
     ctx.log(f"[{instance_id}] pass 2: reasoning + submit")
 
     reason_result: AgentResult = await ctx.agent(
-        json.dumps({
-            "task": "Review the notes, trace each flagged issue to its origin, "
-                    "and submit the culprit spans.",
-            "question": question,
-            "n_spans": n_spans,
-        }, ensure_ascii=False),
+        json.dumps(
+            {
+                "task": "Review the notes, trace each flagged issue to its origin, "
+                "and submit the culprit spans.",
+                "question": question,
+                "n_spans": n_spans,
+            },
+            ensure_ascii=False,
+        ),
         scenario=_TEL_SCENARIO,
         trace_label=f"tel_2pass_{instance_id}_reason",
         atom_config={

@@ -65,7 +65,17 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, Final, Literal, Protocol, TypedDict, TypeVar, overload
+from typing import (
+    Any,
+    ClassVar,
+    Final,
+    Literal,
+    Protocol,
+    TypedDict,
+    TypeVar,
+    cast,
+    overload,
+)
 
 from pydantic import BaseModel, ValidationError
 
@@ -186,6 +196,23 @@ class RunSummary(TypedDict):
     agents_retried: int
     budget: BudgetSnapshot
     wall_clock_s: float
+
+
+def _empty_budget_snapshot() -> BudgetSnapshot:
+    return BudgetSnapshot(
+        spent=0, input_tokens=0, output_tokens=0, total=None, remaining=None
+    )
+
+
+def _empty_run_summary() -> RunSummary:
+    return RunSummary(
+        agents_spawned=0,
+        agents_succeeded=0,
+        agents_failed=0,
+        agents_retried=0,
+        budget=_empty_budget_snapshot(),
+        wall_clock_s=0.0,
+    )
 
 
 class WorkflowConfig(BaseModel):
@@ -399,6 +426,27 @@ class _Journal:
 
     store: _ArtifactStore | None
     _cache: dict[str, str] = field(default_factory=dict)
+    _store_has_entries: bool = True
+
+    async def prime(self) -> None:
+        """Probe the store once before the run starts.
+
+        A fresh (non-resume) run can never hit the store — its keys don't
+        exist yet, and intra-run repeats of the same ``agent()`` call are
+        served from the in-memory ``_cache`` that ``record`` populates. So if
+        the store holds no ``workflow_journal`` artifacts, disable per-agent
+        store lookups for the whole run: one probe replaces an
+        ``list_artifacts`` + ``read`` round-trip per unique agent."""
+        if self.store is None:
+            self._store_has_entries = False
+            return
+        listing = await self.store.list_artifacts(
+            {"kind": "workflow_journal", "limit": 1}
+        )
+        artifacts = (
+            (listing.extras or {}).get("artifacts", []) if listing.extras else []
+        )
+        self._store_has_entries = bool(artifacts)
 
     @staticmethod
     def key(prompt: str, opts: dict[str, Any]) -> str:
@@ -412,7 +460,7 @@ class _Journal:
     async def lookup(self, key: str) -> str | None:
         if key in self._cache:
             return self._cache[key]
-        if self.store is None:
+        if self.store is None or not self._store_has_entries:
             return None
         listing = await self.store.list_artifacts(
             {"kind": "workflow_journal", "tags": [key], "limit": 1}
@@ -647,11 +695,15 @@ class _WorkflowRun:
         assert last_error is not None
         raise last_error
 
-    async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
-        """Barrier fan-out: await every awaitable, return results in order.
+    async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T | None]:
+        """Barrier fan-out: await every awaitable and return one result slot
+        per input, in input order. An awaitable that raised resolves to
+        ``None`` in its slot — the call itself never rejects, and the result
+        length always equals ``len(aws)``. Pair the results with the inputs
+        via ``zip(items, results)`` and treat ``None`` as that item's failure;
+        no positional-alignment bookkeeping is needed on the caller's side.
         Each ``agent`` self-limits via the shared Semaphore, so this is a thin
-        ``gather``. An awaitable that raises resolves to ``None`` in the
-        result list — the call itself never rejects."""
+        ``gather``."""
 
         results = await asyncio.gather(*aws, return_exceptions=True)
         for r in results:
@@ -660,7 +712,7 @@ class _WorkflowRun:
                     f"workflow parallel: item failed: "
                     f"{type(r).__name__}: {r}"
                 )
-        return [None if isinstance(r, BaseException) else r for r in results]  # type: ignore[misc]
+        return [None if isinstance(r, BaseException) else r for r in results]
 
     async def pipeline(
         self,
@@ -957,8 +1009,10 @@ class WorkflowContext:
             trace_label=trace_label,
         )
 
-    async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T]:
-        """Barrier fan-out: await every awaitable, return results in order."""
+    async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T | None]:
+        """Barrier fan-out: one result slot per input awaitable in order;
+        ``None`` marks an awaitable that raised. Pair with the inputs via
+        ``zip(items, results)`` and treat ``None`` as that item's failure."""
         return await self._run.parallel(aws)
 
     async def pipeline(
@@ -988,18 +1042,32 @@ class WorkflowContext:
 # ---------------------------------------------------------------------------
 
 
+def _last_tool_result_text(
+    messages: list[AgentMessage], *, want_error: bool
+) -> str | None:
+    """Scan messages backward for the last tool-result text block.
+
+    ``want_error`` selects error blocks (failure diagnostics) or non-error
+    blocks (the authoritative finalize-tool output)."""
+    for msg in reversed(messages):
+        if not isinstance(msg, ToolResultMessage):
+            continue
+        for result_block in reversed(msg.content):
+            if result_block.is_error != want_error:
+                continue
+            for inner in reversed(result_block.content):
+                text = getattr(inner, "text", None)
+                if isinstance(text, str) and text:
+                    return text
+    return None
+
+
 def _build_agent_error_info(messages: list[AgentMessage]) -> dict[str, Any]:
     """Build a structured error dict when a child agent produces no output."""
     info: dict[str, Any] = {"_error": "no_output", "turns": len(messages)}
-    for msg in reversed(messages):
-        if isinstance(msg, ToolResultMessage):
-            for result_block in reversed(msg.content):
-                if result_block.is_error:
-                    for inner in reversed(result_block.content):
-                        text = getattr(inner, "text", None)
-                        if isinstance(text, str) and text:
-                            info["last_tool_error"] = text[:500]
-                            return info
+    last_error = _last_tool_result_text(messages, want_error=True)
+    if last_error is not None:
+        info["last_tool_error"] = last_error[:500]
     return info
 
 
@@ -1039,15 +1107,9 @@ def _final_session_output(messages: list[AgentMessage]) -> str:
 
     # Finalize-tool results are authoritative even if the model emits a
     # trailing assistant acknowledgement after the tool call.
-    for msg in reversed(messages):
-        if isinstance(msg, ToolResultMessage):
-            for result_block in reversed(msg.content):
-                if result_block.is_error:
-                    continue
-                for inner in reversed(result_block.content):
-                    text = getattr(inner, "text", None)
-                    if isinstance(text, str) and text:
-                        return text
+    tool_text = _last_tool_result_text(messages, want_error=False)
+    if tool_text is not None:
+        return tool_text
 
     for msg in reversed(messages):
         if isinstance(msg, AssistantMessage):
@@ -1086,22 +1148,6 @@ def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
 # ---------------------------------------------------------------------------
 # Pre-execution validation
 # ---------------------------------------------------------------------------
-
-# Names available in the exec-mode curated namespace.
-_SDK_NAMES: Final[frozenset[str]] = frozenset(
-    {
-        "agent",
-        "parallel",
-        "pipeline",
-        "budget",
-        "args",
-        "json",
-        "log",
-        "phase",
-    }
-)
-_EXEC_KNOWN_NAMES: Final[frozenset[str]] = frozenset(_SAFE_BUILTIN_NAMES) | _SDK_NAMES
-
 
 @dataclass(frozen=True, slots=True)
 class ScriptIssue:
@@ -1286,6 +1332,20 @@ async def _run_user_script(script: str, ns: dict[str, Any]) -> object:
 # ---------------------------------------------------------------------------
 
 
+async def _call_module_run(module: Any, ctx: WorkflowContext) -> object:
+    """Invoke a loaded module's ``run(ctx)`` entry point.
+
+    Shared by both module-load branches (package import vs standalone file)
+    so the entry-point contract is checked in one place."""
+    run_fn = getattr(module, "run", None)
+    if run_fn is None or not callable(run_fn):
+        raise RuntimeError(
+            "module-mode script must define `async def run(ctx: WorkflowContext)`"
+        )
+    run_callable = cast("Callable[[WorkflowContext], Awaitable[object]]", run_fn)
+    return await run_callable(ctx)
+
+
 async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
     """Import a file script as a Python module and call ``run(ctx)``.
 
@@ -1331,14 +1391,8 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
                 except ValueError as exc:
                     # Another importer already removed our temporary entry.
                     logger.debug("workflow: sys.path entry already removed: {}", exc)
-        run_fn = getattr(module, "run", None)
-        if run_fn is None or not callable(run_fn):
-            raise RuntimeError(
-                "module-mode script must define "
-                "`async def run(ctx: WorkflowContext)`"
-            )
         try:
-            return await run_fn(ctx)
+            return await _call_module_run(module, ctx)
         finally:
             stale = [
                 k for k in sys.modules
@@ -1359,13 +1413,7 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
         sys.modules[module_name] = module
         try:
             spec.loader.exec_module(module)
-            run_fn = getattr(module, "run", None)
-            if run_fn is None or not callable(run_fn):
-                raise RuntimeError(
-                    "module-mode script must define "
-                    "`async def run(ctx: WorkflowContext)`"
-                )
-            return await run_fn(ctx)
+            return await _call_module_run(module, ctx)
         finally:
             sys.modules.pop(module_name, None)
 
@@ -1467,13 +1515,7 @@ class WorkflowRunner:
     @property
     def last_budget_snapshot(self) -> BudgetSnapshot:
         if self._last_run is None:
-            return BudgetSnapshot(
-                spent=0,
-                input_tokens=0,
-                output_tokens=0,
-                total=None,
-                remaining=None,
-            )
+            return _empty_budget_snapshot()
         return self._last_run.budget_svc.snapshot()
 
     @property
@@ -1483,20 +1525,7 @@ class WorkflowRunner:
     @property
     def last_run_summary(self) -> RunSummary:
         if self._last_run is None:
-            return RunSummary(
-                agents_spawned=0,
-                agents_succeeded=0,
-                agents_failed=0,
-                agents_retried=0,
-                budget=BudgetSnapshot(
-                    spent=0,
-                    input_tokens=0,
-                    output_tokens=0,
-                    total=None,
-                    remaining=None,
-                ),
-                wall_clock_s=0.0,
-            )
+            return _empty_run_summary()
         return RunSummary(
             agents_spawned=self._last_run.agents_spawned,
             agents_succeeded=self._last_run.agents_succeeded,
@@ -1641,6 +1670,10 @@ class WorkflowRunner:
             provider_override=provider,
             model_resolver=self._model_resolver,
         )
+
+        # One store probe up front: a fresh run then skips all per-agent
+        # journal lookups (the common, non-resume path).
+        await run.journal.prime()
 
         try:
             bracket = self._api.track_background()

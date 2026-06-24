@@ -16,7 +16,6 @@ from typing import Any, cast
 from .lib.fpg import (
     edge_dict,
     fault_record,
-    injection_effect_target,
     injection_node_id,
     is_link_injection,
     node_from_link_effect,
@@ -75,13 +74,11 @@ class Case:
     infra_set: set[str]
     data_dir: str
     fault_docs: dict[str, str]
-    skip_propagate: bool
     skip_judge: bool
     judge_model: str | None
     gate_retries: int
     agent_retries: int
     max_audit_rounds: int
-    existing_state: dict[str, Any]
     seeds: set[str]
     entry_services: set[str]
     all_faults: list[list[str]]
@@ -110,13 +107,11 @@ class Case:
             infra_set=set(args.get("infra_nodes", [])),
             data_dir=cast(str, args["data_dir"]),
             fault_docs=args.get("fault_docs", {}),
-            skip_propagate=args.get("skip_propagate", False),
             skip_judge=args.get("skip_judge", False),
             judge_model=judge_model,
             gate_retries=int(args.get("gate_retries", 3)),
             agent_retries=int(args.get("agent_retries", 3)),
             max_audit_rounds=int(args.get("max_audit_rounds", 3)),
-            existing_state=cast(dict[str, Any], args.get("existing_state", {})),
             seeds=seeds,
             entry_services=_entry_services_from_graph(graph),
             all_faults=all_faults,
@@ -176,35 +171,6 @@ class GraphState:
             for inj in self.case.injections
             if inj.get("target")
         }
-
-    def load_existing(self) -> None:
-        existing = self.case.existing_state
-        self.nodes = {n["id"]: n for n in existing.get("nodes", [])}
-        self.edges = list(existing.get("edges", []))
-        self.verdicts = cast(dict[str, HopResult], existing.get("verdicts", {}))
-        self.hop_log = cast(list[HopLogEntry], existing.get("hop_log", []))
-        self.round_n = int(existing.get("rounds", 0))
-        self.seed_verdicts = cast(
-            dict[str, SeedResult], existing.get("seed_verdicts", {})
-        )
-        self.confirmed_seed_ids = set(existing.get("confirmed_seeds", []))
-        for item in cast(list[ExecutionError], existing.get("execution_errors", [])):
-            self.execution_errors[
-                self.execution_key(item["stage"], item["item"])
-            ] = item
-        if not self.confirmed_seed_ids and not self.seed_verdicts:
-            self.confirmed_seed_ids = {
-                seed for seed in self.case.seeds if seed in self.nodes
-            }
-        self.adj, self.in_deg = self.rebuild_adjacency()
-        self.node_fault = {
-            injection_node_id(inj): fault_record(inj)
-            for inj in self.case.injections
-            if inj.get("target")
-        }
-        for inj in self.case.injections:
-            if inj.get("target") and is_link_injection(inj):
-                self.node_fault[injection_effect_target(inj)] = fault_record(inj)
 
     # -- Graph indices ----------------------------------------------------
     def rebuild_adjacency(self) -> tuple[dict[str, list[str]], dict[str, int]]:

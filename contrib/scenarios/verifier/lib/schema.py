@@ -6,7 +6,7 @@ orchestration logic only.
 """
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Required, TypedDict, TypeGuard
+from typing import Annotated, Any, Literal, Required, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -188,28 +188,3 @@ class PropagationResult(TypedDict, total=False):
     audit: dict[str, Any]
     audit_rounds: list[dict[str, Any]]
     execution_errors: list[ExecutionError]
-
-
-# -- Parallel-result type guards ------------------------------------------
-SeedParallelItem = tuple[Injection, SeedResult | None]
-HopReworkParallelItem = tuple[HopRecheckRequest, HopResult | None]
-
-
-def is_seed_parallel_item(value: object) -> TypeGuard[SeedParallelItem]:
-    return (
-        isinstance(value, tuple)
-        and len(value) == 2
-        and isinstance(value[0], dict)
-        and (value[1] is None or isinstance(value[1], dict))
-    )
-
-
-def is_hop_rework_parallel_item(
-    value: object,
-) -> TypeGuard[HopReworkParallelItem]:
-    return (
-        isinstance(value, tuple)
-        and len(value) == 2
-        and isinstance(value[0], HopRecheckRequest)
-        and (value[1] is None or isinstance(value[1], dict))
-    )
