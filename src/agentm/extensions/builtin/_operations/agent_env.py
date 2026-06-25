@@ -676,6 +676,107 @@ def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> 
     if count:
         logger.info("[agent_env_sync] uploaded {count} skill(s) to {target_base}/", count=count, target_base=target_base)
 
+def _replay_fork_environment(api: ExtensionAPI, session: Any, work_dir: str) -> None:
+    """If this session is a fork, replay the source session's side-effect
+    tool calls up to the fork turn to restore the sandbox environment.
+
+    Reads ``api.lineage`` for ``kind: "fork"`` + ``source_session_id`` +
+    ``fork_point.turn_index``. No-op if lineage is absent or not a fork.
+    """
+    lineage = api.lineage
+    if not isinstance(lineage, dict) or lineage.get("kind") != "fork":
+        return
+    source_id = lineage.get("source_session_id")
+    fork_point = lineage.get("fork_point") or {}
+    turn_index = fork_point.get("turn_index") or fork_point.get("up_to")
+    if not source_id:
+        return
+
+    logger.info(
+        "agent_env: fork detected, replaying source {} to turn {}",
+        source_id, turn_index,
+    )
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["agentm", "trace", "tools", "--session", source_id, "--format", "ndjson"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            logger.warning("agent_env: failed to load source tools: {}", result.stderr[:200])
+            return
+        tools = [
+            json.loads(line) for line in result.stdout.strip().split("\n")
+            if line.strip()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("agent_env: source tool extraction failed: {}", exc)
+        return
+
+    max_turn = int(turn_index) if turn_index is not None else len(tools)
+    replayed = errors = 0
+    for tool_record in tools:
+        tool = tool_record.get("tool")
+        args = tool_record.get("args") or {}
+        if replayed > 0 and turn_index is not None and replayed >= max_turn * 10:
+            break
+
+        try:
+            if tool == "edit":
+                path = args.get("path", "")
+                old_str, new_str = args.get("old_string", ""), args.get("new_string", "")
+                if path and old_str:
+                    rel = path.lstrip("/")
+                    if rel.startswith("app/"):
+                        rel = rel[4:]
+                    resp = session.execute([{
+                        "name": "read", "command": ["bash", "-c", f"base64 -w0 {shlex.quote(os.path.join(work_dir, rel))}"],
+                        "work_dir": work_dir,
+                    }])
+                    encoded = resp.results[0].output.stdout.strip()
+                    if encoded:
+                        current = base64.b64decode(encoded).decode("utf-8", errors="replace")
+                        updated = current.replace(old_str, new_str, 1)
+                        if updated != current:
+                            session._client.upload_file(
+                                session._session_id, rel,
+                                base64.b64encode(updated.encode()).decode(),
+                                encoding="base64",
+                            )
+                            replayed += 1
+            elif tool == "write":
+                path = args.get("path", "")
+                content = args.get("content", "")
+                if path:
+                    rel = path.lstrip("/")
+                    if rel.startswith("app/"):
+                        rel = rel[4:]
+                    session._client.upload_file(
+                        session._session_id, rel,
+                        base64.b64encode(content.encode()).decode(),
+                        encoding="base64",
+                    )
+                    replayed += 1
+            elif tool == "bash":
+                cmd = args.get("cmd", "")
+                skip_kw = ["make grade", "make qemu", "qemu-system", "timeout",
+                           "python3 ok", "make test", "ctest"]
+                if cmd and not any(kw in cmd for kw in skip_kw):
+                    session.execute([{
+                        "name": "replay", "command": ["bash", "-lc", cmd],
+                        "work_dir": work_dir,
+                    }])
+                    replayed += 1
+        except Exception:  # noqa: BLE001
+            errors += 1
+
+    logger.info(
+        "agent_env: fork replay complete — {} actions replayed, {} errors",
+        replayed, errors,
+    )
+
+
 def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     # Deferred import keeps the SDK truly optional — atoms that never run
     # under agent-env shouldn't fail to load just because ``arl`` is absent.
@@ -745,6 +846,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         _inject_gh_token(session, work_dir)
         _clone_repo_into_sandbox(session, work_dir)
         _upload_skills_to_sandbox(session, gateway_url, work_dir)
+        _replay_fork_environment(api, session, work_dir)
 
     api.register_operations(
         file=_AgentEnvFileOperations(session, default_work_dir=work_dir),

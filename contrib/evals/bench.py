@@ -94,16 +94,29 @@ def _upload_file_to_sandbox(session, path: str, content: bytes) -> None:
     )
 
 
-def _replay_trajectory(session, session_id: str) -> int:
-    """Replay side-effect tool calls from a recorded trajectory. Returns count."""
+def _load_trace_tools(session_id: str) -> list[dict]:
     result = subprocess.run(
         ["agentm", "trace", "tools", "--session", session_id, "--format", "ndjson"],
         capture_output=True, text=True,
     )
-    tools = [json.loads(l) for l in result.stdout.strip().split("\n") if l.strip()]
+    return [json.loads(line) for line in result.stdout.strip().split("\n") if line.strip()]
+
+
+def _replay_tools_to_sandbox(session, tools: list[dict], *, up_to_turn: int | None = None) -> int:
+    """Replay side-effect tool calls in a sandbox. Returns count replayed."""
     replayed = 0
+    assistant_index = -1
     for t in tools:
         tool, args = t.get("tool"), t.get("args", {})
+
+        # Track turn index (assistant messages carry tool calls)
+        if tool in ("edit", "write", "bash", "read", "glob", "grep"):
+            if assistant_index < 0:
+                assistant_index = 0
+
+        if up_to_turn is not None and assistant_index > up_to_turn:
+            break
+
         try:
             if tool == "edit":
                 path = args.get("path", "")
@@ -136,9 +149,14 @@ def _replay_trajectory(session, session_id: str) -> int:
                         "work_dir": "/app",
                     }])
                     replayed += 1
-        except Exception:
+        except Exception:  # noqa: S110
             pass
     return replayed
+
+
+def _replay_trajectory(session, session_id: str) -> int:
+    tools = _load_trace_tools(session_id)
+    return _replay_tools_to_sandbox(session, tools)
 
 
 def _upload_tests(session, task_dir: Path) -> None:
@@ -217,7 +235,7 @@ def _run_eval(session, task_dir: Path, timeout: int = 300) -> dict:
     try:
         data = session._client.download_file(session._session_id, "test_output/f2p_score.json")
         f2p = json.loads(data)
-    except Exception:
+    except Exception:  # noqa: S110
         pass
     if f2p is None:
         # Fallback: parse Score: X/Y from output or f2p_output.txt
@@ -238,7 +256,7 @@ def _run_eval(session, task_dir: Path, timeout: int = 300) -> dict:
                 got, total = int(m.group(1)), int(m.group(2))
                 f2p = {"is_pass": 1 if got == total else 0,
                        "step_score": got / total if total else 0}
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
     # Read p2p score
@@ -250,7 +268,7 @@ def _run_eval(session, task_dir: Path, timeout: int = 300) -> dict:
         failed = len(re.findall(r"FAILED", text))
         if passed + failed > 0:
             p2p = {"passed": passed, "total": passed + failed}
-    except Exception:
+    except Exception:  # noqa: S110
         pass
 
     return {"f2p": f2p, "p2p": p2p}
@@ -326,7 +344,7 @@ def _run_and_eval_one(
     session.create_sandbox()
 
     try:
-        replayed = _replay_trajectory(session, session_id)
+        _replay_trajectory(session, session_id)
         _upload_tests(session, task_dir)
         scores = _run_eval(session, task_dir, timeout=eval_timeout)
     finally:
