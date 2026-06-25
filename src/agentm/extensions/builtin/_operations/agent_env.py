@@ -696,80 +696,79 @@ def _replay_fork_environment(api: ExtensionAPI, session: Any, work_dir: str) -> 
         "agent_env: fork detected, replaying source {} to turn {}",
         source_id, turn_index,
     )
-    try:
-        import subprocess
 
-        result = subprocess.run(
-            ["agentm", "trace", "tools", "--session", source_id, "--format", "ndjson"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if result.returncode != 0:
-            logger.warning("agent_env: failed to load source tools: {}", result.stderr[:200])
-            return
-        tools = [
-            json.loads(line) for line in result.stdout.strip().split("\n")
-            if line.strip()
-        ]
+    from agentm.core.abi.messages import AssistantMessage, ToolCallBlock
+    from agentm.core.runtime.session_bootstrap import make_default_session_store
+
+    try:
+        store = make_default_session_store(os.getcwd())
+        source = store.open(source_id)
+        messages = list(source.build_session_context().messages)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("agent_env: source tool extraction failed: {}", exc)
+        logger.warning("agent_env: could not load source session {}: {}", source_id, exc)
         return
 
-    max_turn = int(turn_index) if turn_index is not None else len(tools)
+    max_turn = int(turn_index) if turn_index is not None else 999999
+    assistant_idx = -1
     replayed = errors = 0
-    for tool_record in tools:
-        tool = tool_record.get("tool")
-        args = tool_record.get("args") or {}
-        if replayed > 0 and turn_index is not None and replayed >= max_turn * 10:
-            break
 
-        try:
-            if tool == "edit":
-                path = args.get("path", "")
-                old_str, new_str = args.get("old_string", ""), args.get("new_string", "")
-                if path and old_str:
-                    rel = path.lstrip("/")
-                    if rel.startswith("app/"):
-                        rel = rel[4:]
-                    resp = session.execute([{
-                        "name": "read", "command": ["bash", "-c", f"base64 -w0 {shlex.quote(os.path.join(work_dir, rel))}"],
-                        "work_dir": work_dir,
-                    }])
-                    encoded = resp.results[0].output.stdout.strip()
-                    if encoded:
-                        current = base64.b64decode(encoded).decode("utf-8", errors="replace")
-                        updated = current.replace(old_str, new_str, 1)
-                        if updated != current:
+    for msg in messages:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        assistant_idx += 1
+        if assistant_idx > max_turn:
+            break
+        for block in msg.content:
+            if not isinstance(block, ToolCallBlock):
+                continue
+            tool = block.name
+            args = block.arguments
+            try:
+                if tool in ("edit", "edit_file"):
+                    path = args.get("path") or args.get("file_path") or ""
+                    old_str = args.get("old_string", "")
+                    new_str = args.get("new_string", "")
+                    if path and old_str:
+                        rel = path.lstrip("/")
+                        if rel.startswith("app/"):
+                            rel = rel[4:]
+                        content = session._client.download_file(
+                            session._session_id, rel
+                        ).decode("utf-8", errors="replace")
+                        updated = content.replace(old_str, new_str, 1)
+                        if updated != content:
                             session._client.upload_file(
                                 session._session_id, rel,
                                 base64.b64encode(updated.encode()).decode(),
                                 encoding="base64",
                             )
                             replayed += 1
-            elif tool == "write":
-                path = args.get("path", "")
-                content = args.get("content", "")
-                if path:
-                    rel = path.lstrip("/")
-                    if rel.startswith("app/"):
-                        rel = rel[4:]
-                    session._client.upload_file(
-                        session._session_id, rel,
-                        base64.b64encode(content.encode()).decode(),
-                        encoding="base64",
-                    )
-                    replayed += 1
-            elif tool == "bash":
-                cmd = args.get("cmd", "")
-                skip_kw = ["make grade", "make qemu", "qemu-system", "timeout",
-                           "python3 ok", "make test", "ctest"]
-                if cmd and not any(kw in cmd for kw in skip_kw):
-                    session.execute([{
-                        "name": "replay", "command": ["bash", "-lc", cmd],
-                        "work_dir": work_dir,
-                    }])
-                    replayed += 1
-        except Exception:  # noqa: BLE001
-            errors += 1
+                elif tool in ("write", "write_file"):
+                    path = args.get("path") or args.get("file_path") or ""
+                    file_content = args.get("content", "")
+                    if path and file_content:
+                        rel = path.lstrip("/")
+                        if rel.startswith("app/"):
+                            rel = rel[4:]
+                        session._client.upload_file(
+                            session._session_id, rel,
+                            base64.b64encode(file_content.encode()).decode(),
+                            encoding="base64",
+                        )
+                        replayed += 1
+                elif tool in ("bash", "tool_bash"):
+                    cmd = args.get("cmd") or args.get("command") or ""
+                    skip_kw = ["make grade", "make qemu", "qemu-system",
+                               "timeout", "python3 ok", "make test", "ctest"]
+                    if cmd and not any(kw in cmd for kw in skip_kw):
+                        session.execute([{
+                            "name": "replay",
+                            "command": ["bash", "-lc", cmd],
+                            "work_dir": work_dir,
+                        }])
+                        replayed += 1
+            except Exception:  # noqa: BLE001
+                errors += 1
 
     logger.info(
         "agent_env: fork replay complete — {} actions replayed, {} errors",
