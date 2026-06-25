@@ -240,6 +240,72 @@ eval-data/v5bad-harness-drift1/
 - ORACLE_DIAG hits 1.0 on select prefixes (actor ceiling confirmed)
 - channel_limited rare (most rescues don't need the oracle answer)
 
+### 2026-06-24: oracle-landscape batch (30 hard RCA cases — ops-lite-allwrong-31)
+
+**Corpus**: 30 cases from `ops-lite-allwrong-31` fixture (31 ALL_WRONG cases
+from Doubao baseline; 1 excluded for missing testbed in GT). Fresh baselines
+run with `session.prompt()` and OTEL export.
+
+**Config**: `--preset oracle-landscape --actor-model litellm --k 1
+--concurrency 30 --progress 0.2,0.4,0.6,0.8 --min-turn 3 --max-turns 60`
+
+**Scale**: 30 cases × ~5 prefixes × 8 conditions × K=1 ≈ 1200 rollouts.
+
+**Store**: `results/oracle_landscape_31hard.jsonl` (append-only, resumable).
+
+**Results (30/30 cases completed, 1176 rollouts, 7 failures)**:
+
+| Metric | Value |
+|---|---|
+| Opportunity prevalence | 90.5% (G\* > 0 at 90% of prefixes; 29/30 cases) |
+| Mean G\* | 0.391 (oracle lifts score ~39pp on average) |
+| Mean gap | 0.153 (bounded conditions capture ~61% of oracle) |
+| Rescue window | 100% exist, mean width 0.559, mean area 0.241 |
+| Harm-sensitive prefixes | 44.2% |
+| Binary rescue rate | 0.2% (ALL_WRONG cases — continuous Δ > 0 but rarely flips binary) |
+
+**Action hierarchy** (Δ over CONTINUE, N≈146 each):
+- ORACLE_DIAG: +34.1pp (actor ceiling, 99.3% beat rate)
+- REPLAN: +11.6pp (best low-bandwidth, net rescue +29.2%)
+- GENERIC: +9.5pp (bare alarm surprisingly strong)
+- ADVISE: +8.7pp
+- FINAL_AUDIT: +8.7pp
+- VERIFY: +8.2pp
+- PLACEBO: +0.3pp (disruption tax ≈ 0)
+
+Full analysis with findings, temporal structure, per-case G\*/gap, and
+hypothesis validation in `doc.md` Appendix A.
+
+### 2026-06-25: content-ladder batch (30 hard RCA cases)
+
+Same corpus as above. Fixes action to VERIFY, sweeps information level.
+
+**Config**: `--preset content-ladder --actor-model litellm --k 1
+--concurrency 30 --max-turns 60`
+
+**Scale**: 30 cases × 147 prefixes × 7 conditions × K=1 = 1029 rollouts.
+
+**Store**: `results/content_ladder_31hard.jsonl`
+
+**Results (1029/1029 completed, 0 failures)**:
+
+Content information ladder (marginal value of each information step):
+
+| Level | Mean Score | Δ(CONTINUE) | Marginal Δ |
+|---|---|---|---|
+| CONTINUE | 0.183 | baseline | — |
+| PLACEBO | 0.198 | +0.015 | +0.015 (≈0) |
+| GENERIC | 0.190 | +0.008 | -0.007 (≈0) |
+| +TYPE | 0.180 | -0.003 | -0.010 (≈0) |
+| **+TARGET** | **0.230** | **+0.048** | **+0.050** (jump!) |
+| +EVIDENCE | 0.254 | +0.071 | +0.023 |
+| ORACLE_DIAG | 0.502 | +0.319 | +0.248 (massive) |
+
+Key finding: **target selection is the critical information dimension**.
+Below TYPE_TARGET, interventions are ineffective. Action type (VERIFY vs
+REPLAN vs ADVISE) matters far less than knowing *which service to check*.
+Full analysis in `doc.md` Appendix A.5.
+
 ## Concurrency notes
 
 - `--concurrency N` controls parallel rollouts via `asyncio.Semaphore`

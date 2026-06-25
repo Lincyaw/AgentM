@@ -1,7 +1,5 @@
 **THE RESCUE WINDOW**
 
-**救援窗口：受限监督下长时程智能体的运行时可救回性**
-
 *Problem Definition, Measurement Protocol, and Research Plan*
 
 <table style="width:99%;">
@@ -18,15 +16,8 @@
 </tbody>
 </table>
 
-**Research Memo v0.2**
-
-更新日期：2026 年 6 月 24 日
 
 **定位：Problem Definition + Benchmark/Study + Open-source Harness**
-
-# **0. 执行摘要**
-
-本版本在 Runtime Recoverability v0.1 的基础上进行了实质性重构。保留 same-prefix branching、outcome-based labels、Rescue/Harm/Net Rescue 等可操作设计，但不再把“intervention advantage”或“prefix branching”本身作为主要 novelty。到 2026 年 6 月，相关工作已经分别覆盖 online failure auditing、干预的 disruption–recovery trade-off、action-conditioned intervention advantage，以及小 critic 对 coding agent 的轨迹内指导。因此，新论文必须回答一个更严格的问题：在监督者显著弱于 actor 的条件下，理论上存在的救援机会有多少能够被实际实现，以及这些机会随轨迹时间如何产生、收缩和消失。
 
 <table style="width:99%;">
 <colgroup>
@@ -669,3 +660,9 @@ K 很小时，1/5 与 4/5 的成功率估计仍具有很宽的不确定区间。
 \[6\] Aryan Gulati. *ContinuityBench: A Framework and Taxonomy for Evaluating Agent Recovery from Interrupted State*. CTB @ ICML 2026 / OpenReview, 2026 [<u>链接</u>](https://openreview.net/forum?id=3N3BzvoLbG)
 
 \[7\] Shraddha Barke, Arnav Goyal, Alind Khare, et al.. *AgentRx: Diagnosing AI Agent Failures from Execution Trajectories*. arXiv:2602.02475, 2026 [<u>链接</u>](https://arxiv.org/abs/2602.02475)
+
+
+---
+
+**Domain-specific experiment results**: see `domains/<domain>/analysis.md`.
+Currently available: [`domains/rca/analysis.md`](domains/rca/analysis.md) (RCA domain, 30 cases, 4767 rollouts).
