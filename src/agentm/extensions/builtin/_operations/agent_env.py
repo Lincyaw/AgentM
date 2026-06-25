@@ -676,9 +676,12 @@ def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> 
     if count:
         logger.info("[agent_env_sync] uploaded {count} skill(s) to {target_base}/", count=count, target_base=target_base)
 
-def _replay_fork_environment(api: ExtensionAPI, session: Any, work_dir: str) -> None:
+def _replay_fork_environment(api: ExtensionAPI, arl_session: Any) -> None:
     """If this session is a fork, replay the source session's side-effect
     tool calls up to the fork turn to restore the sandbox environment.
+
+    ``arl_session`` must be an ``arl.ManagedSession`` or ``arl.SandboxSession``
+    (has ``_client`` and ``_session_id``).
 
     Reads ``api.lineage`` for ``kind: "fork"`` + ``source_session_id`` +
     ``fork_point.turn_index``. No-op if lineage is absent or not a fork.
@@ -696,7 +699,7 @@ def _replay_fork_environment(api: ExtensionAPI, session: Any, work_dir: str) -> 
     # agent_env uses the agentm session_id as the ARL experiment_id, so
     # the source's ARL session is the one with experiment_id == source_id.
     try:
-        arl_sessions = session._client.list_experiment_sessions(source_id)
+        arl_sessions = arl_session._client.list_experiment_sessions(source_id)
         if not arl_sessions:
             logger.warning(
                 "agent_env: no ARL session found for experiment {} — "
@@ -710,13 +713,13 @@ def _replay_fork_environment(api: ExtensionAPI, session: Any, work_dir: str) -> 
 
     logger.info(
         "agent_env: replaying ARL session {} to turn {} into {}",
-        source_arl_session, turn_index, session._session_id,
+        source_arl_session, turn_index, arl_session._session_id,
     )
 
     try:
         up_to = int(turn_index) if turn_index is not None else None
-        result = session._client.replay_from(
-            session._session_id,
+        result = arl_session._client.replay_from(
+            arl_session._session_id,
             source_session_id=source_arl_session,
             up_to_step=up_to,
         )
@@ -812,7 +815,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     api.register_resource_writer(writer)
 
     if owned:
-        _replay_fork_environment(api, bash_ops, writer)
+        _replay_fork_environment(api, session)
 
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
         if not owned:
