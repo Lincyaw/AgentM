@@ -796,6 +796,105 @@ def _print_summary_table(results: dict[str, dict], bench: str) -> None:
         typer.echo(f"  {name:<25} {str(f2p_pass):<10} {str(f2p_step):<12} {p2p_str:<12}")
 
 
+def _print_pass_at_k(
+    all_attempts: list[dict[str, dict]],
+    tasks: list[TaskSpec],
+    out: Path,
+) -> None:
+    """Compute and print pass@k metrics across multiple attempts."""
+    k = len(all_attempts)
+    task_names = [t.name for t in tasks]
+
+    per_task: dict[str, list[dict]] = {name: [] for name in task_names}
+    for attempt_results in all_attempts:
+        for name in task_names:
+            per_task[name].append(attempt_results.get(name, {}))
+
+    typer.echo(f"\n{'=' * 75}")
+    typer.echo(f"  pass@{k} Summary ({k} attempts)")
+    typer.echo(f"  {'-' * 70}")
+    typer.echo(
+        f"  {'Task':<25} {'Best F2P':<10} {'Any pass':<10} "
+        f"{'Avg F2P step':<14} {'Avg P2P step'}"
+    )
+    typer.echo(f"  {'-' * 70}")
+
+    any_pass_count = 0
+    f2p_steps_all: list[float] = []
+    p2p_steps_all: list[float] = []
+
+    summary_rows = []
+    for name in task_names:
+        runs = per_task[name]
+        f2p_steps: list[float] = []
+        p2p_steps: list[float] = []
+        any_all_pass = False
+
+        for r in runs:
+            f2p = r.get("f2p")
+            p2p = r.get("p2p")
+            f2p_s = f2p.get("step_score") if isinstance(f2p, dict) else None
+            if isinstance(f2p_s, (int, float)):
+                f2p_steps.append(f2p_s)
+            p2p_total = p2p.get("total", 0) if isinstance(p2p, dict) else 0
+            p2p_passed = p2p.get("passed", 0) if isinstance(p2p, dict) else 0
+            if p2p_total > 0:
+                p2p_steps.append(p2p_passed / p2p_total)
+
+            f2p_pass = isinstance(f2p_s, (int, float)) and f2p_s >= 1.0
+            p2p_pass = p2p_total > 0 and p2p_passed == p2p_total
+            if f2p_pass and p2p_pass:
+                any_all_pass = True
+
+        best_f2p = max(f2p_steps) if f2p_steps else None
+        avg_f2p = sum(f2p_steps) / len(f2p_steps) if f2p_steps else None
+        avg_p2p = sum(p2p_steps) / len(p2p_steps) if p2p_steps else None
+
+        if any_all_pass:
+            any_pass_count += 1
+        if avg_f2p is not None:
+            f2p_steps_all.append(avg_f2p)
+        if avg_p2p is not None:
+            p2p_steps_all.append(avg_p2p)
+
+        best_str = f"{best_f2p:.1%}" if best_f2p is not None else "-"
+        pass_str = "YES" if any_all_pass else "no"
+        avg_f2p_str = f"{avg_f2p:.1%}" if avg_f2p is not None else "-"
+        avg_p2p_str = f"{avg_p2p:.1%}" if avg_p2p is not None else "-"
+
+        typer.echo(f"  {name:<25} {best_str:<10} {pass_str:<10} {avg_f2p_str:<14} {avg_p2p_str}")
+        summary_rows.append({
+            "task": name,
+            "best_f2p_step": best_f2p,
+            "any_all_pass": any_all_pass,
+            "avg_f2p_step": avg_f2p,
+            "avg_p2p_step": avg_p2p,
+            "attempts": [{
+                "f2p": r.get("f2p"),
+                "p2p": r.get("p2p"),
+                "tools": r.get("tools"),
+                "status": r.get("status"),
+            } for r in runs],
+        })
+
+    n_tasks = len(task_names)
+    typer.echo(f"\n  Overall pass@{k}:     {any_pass_count}/{n_tasks} = {any_pass_count / n_tasks:.1%}")
+    if f2p_steps_all:
+        typer.echo(f"  Avg F2P Step Score:  {sum(f2p_steps_all) / len(f2p_steps_all):.1%}")
+    if p2p_steps_all:
+        typer.echo(f"  Avg P2P Step Score:  {sum(p2p_steps_all) / len(p2p_steps_all):.1%}")
+
+    summary_file = out / "summary.json"
+    summary_file.write_text(json.dumps({
+        "k": k,
+        "pass_at_k": any_pass_count / n_tasks if n_tasks else 0,
+        "avg_f2p_step": sum(f2p_steps_all) / len(f2p_steps_all) if f2p_steps_all else None,
+        "avg_p2p_step": sum(p2p_steps_all) / len(p2p_steps_all) if p2p_steps_all else None,
+        "tasks": summary_rows,
+    }, ensure_ascii=False, indent=2))
+    typer.echo(f"\n  Summary written to: {summary_file}")
+
+
 def _write_swebench_predictions(
     results: dict[str, dict], out: Path, model: str
 ) -> None:
@@ -970,8 +1069,12 @@ def batch(
     eval_timeout: Annotated[int, typer.Option("--eval-timeout")] = 300,
     task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
     api_key: Annotated[str, typer.Option("--api-key", envvar="AGENTM_AGENT_ENV_API_KEY")] = "",
+    attempts: Annotated[int, typer.Option("--attempts", "-n")] = 1,
 ) -> None:
     """Run all tasks in parallel, then evaluate. Results include scores.
+
+    With --attempts N, runs N independent attempts per task and computes
+    pass@k metrics. Results are stored in attempt_0/ .. attempt_{N-1}/.
 
     Ctrl-C stops submitting new tasks and waits for in-flight ones to finish.
     """
@@ -987,12 +1090,8 @@ def batch(
         typer.echo("No tasks found.", err=True)
         raise typer.Exit(1)
 
-    out = results_dir / f"{bench}-{model}"
-    out.mkdir(parents=True, exist_ok=True)
-
-    typer.echo(f"Batch: {len(tasks)} tasks | bench={bench} | model={model} | concurrency={concurrency}")
-    typer.echo(f"Results: {out}")
-    typer.echo("")
+    base_out = results_dir / f"{bench}-{model}"
+    base_out.mkdir(parents=True, exist_ok=True)
 
     interrupted = False
 
@@ -1010,14 +1109,14 @@ def batch(
             except subprocess.TimeoutExpired:
                 p.kill()
 
-    def _cleanup_arl_sessions() -> None:
+    def _cleanup_arl_sessions(attempt_tasks: list[TaskSpec], attempt_idx: int) -> None:
         try:
             import arl
             client = arl.GatewayClient(base_url=gateway, api_key=api_key or None)
-            for t in tasks:
+            for t in attempt_tasks:
                 for exp_id in [
-                    f"{prefix}-{model}-{t.name}",
-                    f"eval-{model}-{t.name}",
+                    f"{prefix}-{model}-a{attempt_idx}-{t.name}",
+                    f"eval-{model}-a{attempt_idx}-{t.name}",
                 ]:
                     try:
                         client.delete_experiment(exp_id)
@@ -1035,47 +1134,66 @@ def batch(
         interrupted = True
         typer.echo("\nCtrl-C — terminating child processes...")
         _kill_children()
-        typer.echo("Cleaning up ARL sessions...")
-        _cleanup_arl_sessions()
-        typer.echo("Done. Collecting partial results...")
 
     prev_handler = signal.signal(signal.SIGINT, _on_sigint)
 
-    results: dict[str, dict] = {}
+    all_attempt_results: list[dict[str, dict]] = []
+
     try:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            pending: dict[object, str] = {}
-            for t in tasks:
-                if interrupted:
-                    break
-                f = pool.submit(
-                    _run_and_eval_one, t,
-                    adapter=adapter, source=resolved_source,
-                    model=model, gateway=gateway,
-                    registry=registry, prefix=prefix, tag=tag,
-                    out=out, eval_timeout=eval_timeout,
-                    api_key=api_key,
-                )
-                pending[f] = t.name
-            for future in as_completed(pending):
-                name = pending[future]
-                try:
-                    r = future.result()
-                    results[name] = r
-                    typer.echo(_format_score_line(r, bench))
-                except Exception as e:
-                    typer.echo(f"  [ERROR] {name}: {e}")
+        for attempt_idx in range(attempts):
+            if interrupted:
+                break
+
+            out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
+            out.mkdir(parents=True, exist_ok=True)
+
+            typer.echo(f"{'=' * 60}")
+            if attempts > 1:
+                typer.echo(f"Attempt {attempt_idx + 1}/{attempts}")
+            typer.echo(
+                f"Batch: {len(tasks)} tasks | bench={bench} | "
+                f"model={model} | concurrency={concurrency}"
+            )
+            typer.echo(f"Results: {out}")
+            typer.echo("")
+
+            results: dict[str, dict] = {}
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                pending: dict[object, str] = {}
+                for t in tasks:
+                    if interrupted:
+                        break
+                    f = pool.submit(
+                        _run_and_eval_one, t,
+                        adapter=adapter, source=resolved_source,
+                        model=model, gateway=gateway,
+                        registry=registry, prefix=prefix, tag=tag,
+                        out=out, eval_timeout=eval_timeout,
+                        api_key=api_key,
+                    )
+                    pending[f] = t.name
+                for future in as_completed(pending):
+                    name = pending[future]
+                    try:
+                        r = future.result()
+                        results[name] = r
+                        typer.echo(_format_score_line(r, bench))
+                    except Exception as e:
+                        typer.echo(f"  [ERROR] {name}: {e}")
+
+            all_attempt_results.append(results)
+            _print_summary_table(results, bench)
+
+            done = sum(1 for r in results.values() if r.get("status") == "done")
+            typer.echo(f"\n{done}/{len(tasks)} completed")
+
+            if bench.startswith("swebench"):
+                _write_swebench_predictions(results, out, model)
     finally:
         signal.signal(signal.SIGINT, prev_handler)
 
-    _print_summary_table(results, bench)
-
-    done = sum(1 for r in results.values() if r.get("status") == "done")
-    typer.echo(f"\n{done}/{len(tasks)} completed")
-
-    # Write predictions JSONL for SWE-bench
-    if bench.startswith("swebench"):
-        _write_swebench_predictions(results, out, model)
+    if attempts > 1 and all_attempt_results:
+        _print_pass_at_k(all_attempt_results, tasks, base_out)
 
 
 # ---------------------------------------------------------------------------
