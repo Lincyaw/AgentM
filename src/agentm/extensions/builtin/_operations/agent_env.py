@@ -692,106 +692,40 @@ def _replay_fork_environment(api: ExtensionAPI, session: Any, work_dir: str) -> 
     if not source_id:
         return
 
-    logger.info(
-        "agent_env: fork detected, replaying source {} to turn {}",
-        source_id, turn_index,
-    )
-
-    from agentm.core.abi.messages import AssistantMessage, ToolCallBlock
-    from agentm.core.runtime.session_bootstrap import make_default_session_store
-
+    # Find the source session's ARL sandbox by experiment_id convention:
+    # agent_env uses the agentm session_id as the ARL experiment_id, so
+    # the source's ARL session is the one with experiment_id == source_id.
     try:
-        store = make_default_session_store(os.getcwd())
-        source = store.open(source_id)
-        messages = list(source.build_session_context().messages)
+        arl_sessions = session._client.list_experiment_sessions(source_id)
+        if not arl_sessions:
+            logger.warning(
+                "agent_env: no ARL session found for experiment {} — "
+                "cannot replay (was the source run with agent_env?)", source_id,
+            )
+            return
+        source_arl_session = arl_sessions[0].id
     except Exception as exc:  # noqa: BLE001
-        logger.warning("agent_env: could not load source session {}: {}", source_id, exc)
+        logger.warning("agent_env: could not query ARL for source {}: {}", source_id, exc)
         return
 
-    max_turn = int(turn_index) if turn_index is not None else 999999
-    assistant_idx = -1
-    replayed = errors = 0
-
-    # Collect all tool calls up to the fork turn, paired with their results
-    from agentm.core.abi.messages import ToolResultMessage, ToolResultBlock
-
-    tool_calls: list[tuple[ToolCallBlock, ToolResultBlock | None]] = []
-    pending: dict[str, ToolCallBlock] = {}
-
-    for msg in messages:
-        if isinstance(msg, AssistantMessage):
-            assistant_idx += 1
-            if assistant_idx > max_turn:
-                break
-            for block in msg.content:
-                if isinstance(block, ToolCallBlock):
-                    pending[block.id] = block
-        elif isinstance(msg, ToolResultMessage):
-            for block in msg.content:
-                if isinstance(block, ToolResultBlock):
-                    tc = pending.pop(block.tool_call_id, None)
-                    if tc is not None:
-                        tool_calls.append((tc, block))
-    # Any tool calls without results
-    for tc in pending.values():
-        tool_calls.append((tc, None))
-
-    # Replay every tool call by re-executing its arguments in the sandbox.
-    # Read-only tools (read, grep, glob, ls) produce no side effects and
-    # are harmless to replay; the sandbox simply discards their output.
-    for tc, result in tool_calls:
-        args = tc.arguments
-        try:
-            session.execute([{
-                "name": f"replay:{tc.name}",
-                "command": _tool_call_to_command(tc.name, args, work_dir),
-                "work_dir": work_dir,
-            }])
-            replayed += 1
-        except Exception:  # noqa: BLE001
-            errors += 1
-
     logger.info(
-        "agent_env: fork replay complete — {} actions replayed, {} errors",
-        replayed, errors,
+        "agent_env: replaying ARL session {} to turn {} into {}",
+        source_arl_session, turn_index, session._session_id,
     )
 
-
-def _tool_call_to_command(name: str, args: dict[str, Any], work_dir: str) -> list[str]:
-    """Convert a tool call into a shell command for sandbox replay."""
-    cmd = args.get("cmd") or args.get("command") or ""
-    path = args.get("path") or args.get("file_path") or ""
-    content = args.get("content") or ""
-    old_string = args.get("old_string") or ""
-    new_string = args.get("new_string") or ""
-
-    if cmd:
-        return ["bash", "-lc", cmd]
-
-    if content and path:
-        abs_path = path if path.startswith("/") else os.path.join(work_dir, path)
-        escaped_content = base64.b64encode(content.encode()).decode()
-        return ["bash", "-c",
-                f"mkdir -p $(dirname {shlex.quote(abs_path)}) && "
-                f"echo {shlex.quote(escaped_content)} | base64 -d > {shlex.quote(abs_path)}"]
-
-    if old_string and new_string and path:
-        abs_path = path if path.startswith("/") else os.path.join(work_dir, path)
-        py_script = (
-            "import sys; "
-            f"p={abs_path!r}; "
-            "d=open(p).read(); "
-            f"o={old_string!r}; n={new_string!r}; "
-            "r=d.replace(o,n,1); "
-            "open(p,'w').write(r) if r!=d else None"
+    try:
+        up_to = int(turn_index) if turn_index is not None else None
+        result = session._client.replay_from(
+            session._session_id,
+            source_session_id=source_arl_session,
+            up_to_step=up_to,
         )
-        return ["python3", "-c", py_script]
-
-    if path:
-        abs_path = path if path.startswith("/") else os.path.join(work_dir, path)
-        return ["cat", abs_path]
-
-    return ["true"]
+        logger.info(
+            "agent_env: replay complete — {} steps replayed, {} errors",
+            result.get("stepsReplayed", 0), result.get("errors", 0),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("agent_env: ARL replay failed: {}", exc)
 
 
 def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
@@ -829,11 +763,13 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         owned = False
         logger.info("agent_env: attached to existing sandbox {}", attach_session)
     elif image:
+        # Default experiment_id to agentm session_id so fork can look up
+        # the source ARL session by experiment_id == source agentm session_id.
         experiment_id = _resolve_str(
             config.experiment_id,
             "AGENTM_AGENT_ENV_EXPERIMENT_ID",
-            "agentm-default",
-        ) or "agentm-default"
+            None,
+        ) or api.session_id
         session = arl.ManagedSession(
             image=image,
             experiment_id=experiment_id,
@@ -863,19 +799,20 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         _inject_gh_token(session, work_dir)
         _clone_repo_into_sandbox(session, work_dir)
         _upload_skills_to_sandbox(session, gateway_url, work_dir)
-        _replay_fork_environment(api, session, work_dir)
 
-    api.register_operations(
-        file=_AgentEnvFileOperations(session, default_work_dir=work_dir),
-        bash=_AgentEnvBashOperations(
-            session,
-            default_work_dir=work_dir,
-            default_timeout=timeout_value,
-        ),
+    file_ops = _AgentEnvFileOperations(session, default_work_dir=work_dir)
+    bash_ops = _AgentEnvBashOperations(
+        session,
+        default_work_dir=work_dir,
+        default_timeout=timeout_value,
     )
-    api.register_resource_writer(
-        _AgentEnvResourceWriter(session, work_dir=work_dir, gateway_url=gateway_url)
-    )
+    writer = _AgentEnvResourceWriter(session, work_dir=work_dir, gateway_url=gateway_url)
+
+    api.register_operations(file=file_ops, bash=bash_ops)
+    api.register_resource_writer(writer)
+
+    if owned:
+        _replay_fork_environment(api, bash_ops, writer)
 
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
         if not owned:
