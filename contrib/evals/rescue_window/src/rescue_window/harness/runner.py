@@ -79,8 +79,18 @@ async def run_intervention_rollout(
         cwd = config.cwd or header.cwd or os.getcwd()
         forked = store.fork(ref.trajectory_id, **prefix.fork_point.to_dict())
         env = _stored_agentm_env(stored)
-        # Hold the env lock only during session creation (env var mutation);
-        # the actual rollout (prompt/resume/idle) runs concurrently.
+
+        # Let the adapter prepare the execution environment (e.g. ARL
+        # sandbox + replay for stateful benchmarks). No-op for read-only
+        # data planes like RCA.
+        source_messages = _source_messages_for_env(store, ref)
+        env_handle = await adapter.setup_environment(
+            ref, prefix.turn_index, source_messages,
+        )
+        atom_overrides: dict[str, dict[str, Any]] = {}
+        if env_handle is not None:
+            atom_overrides = env_handle.atom_config_overrides()
+
         async with env_session_scope():
             with _temporary_env(env):
                 session = await AgentSession.create(
@@ -89,6 +99,7 @@ async def run_intervention_rollout(
                         session_manager=cast(Any, forked),
                         scenario=scenario,
                         provider=provider,
+                        atom_config_overrides=atom_overrides or None,
                         loop_config=LoopConfig(
                             max_turns=config.max_turns,
                             max_tool_calls=config.max_tool_calls,
@@ -113,6 +124,8 @@ async def run_intervention_rollout(
             messages = session.session_manager.get_messages()
         finally:
             await session.shutdown()
+            if env_handle is not None:
+                await env_handle.teardown()
         outcome = await adapter.judge(messages, ref)
         fork_id = forked.get_session_id()
         return _apply_outcome(
@@ -132,6 +145,14 @@ async def continue_outcome(
 
 
 # --- helpers ---------------------------------------------------------------
+
+
+def _source_messages_for_env(store: SessionStore, ref: TrajectoryRef) -> list[AgentMessage]:
+    """Load source messages for environment setup (best-effort)."""
+    try:
+        return load_trajectory_messages(ref, store=store)
+    except Exception:
+        return []
 
 
 def _base_unit(

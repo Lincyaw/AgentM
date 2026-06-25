@@ -47,6 +47,28 @@ class GroundTruth:
         return self.targets[0] if self.targets else None
 
 
+class EnvironmentHandle:
+    """Opaque handle returned by ``setup_environment``.
+
+    Carries whatever the adapter needs to wire the forked session to the
+    prepared environment (e.g. an ARL sandbox session ID) and to tear it
+    down after evaluation.
+    """
+
+    def session_config_overrides(self) -> dict[str, Any]:
+        """Extra kwargs merged into ``AgentSessionConfig`` for the fork."""
+        return {}
+
+    def atom_config_overrides(self) -> dict[str, dict[str, Any]]:
+        """Per-atom config overrides (e.g. ``{"operations": {"attach_session": ...}}``).
+        Merged into ``AgentSessionConfig.atom_config_overrides``.
+        """
+        return {}
+
+    async def teardown(self) -> None:
+        """Clean up the environment after evaluation."""
+
+
 @runtime_checkable
 class ScenarioAdapter(Protocol):
     """What a benchmark must provide for the rescue-window harness to score it."""
@@ -61,6 +83,24 @@ class ScenarioAdapter(Protocol):
 
     def ground_truth(self, ref: TrajectoryRef) -> GroundTruth:
         ...
+
+    async def setup_environment(
+        self,
+        ref: TrajectoryRef,
+        prefix_turn: int,
+        messages: list[AgentMessage],
+    ) -> EnvironmentHandle | None:
+        """Prepare the execution environment for a forked rollout.
+
+        Called before the forked ``AgentSession`` is created. For
+        read-only data planes (RCA) this is a no-op (return ``None``).
+        For stateful environments (terminal-bench) this creates a
+        sandbox and replays the baseline's side-effect tool calls up to
+        ``prefix_turn``, returning a handle whose
+        ``atom_config_overrides`` wires the forked session to the
+        pre-populated sandbox.
+        """
+        return None
 
 
 # name -> "module:class"; resolved lazily so the harness never imports a scenario.

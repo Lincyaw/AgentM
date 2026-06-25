@@ -10,6 +10,7 @@ of its own (DESIGN §1).
 """
 
 from .adapter import (
+    EnvironmentHandle,
     GroundTruth,
     ScenarioAdapter,
     ScoredOutcome,
@@ -44,6 +45,7 @@ from .treatments import (
 
 __all__ = [
     "DockerReplayTarget",
+    "EnvironmentHandle",
     "ReplayAction",
     "ReplayTarget",
     "CONTENT_LADDER",
