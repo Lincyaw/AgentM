@@ -1,10 +1,12 @@
 """Policy-gate atom for the §7 ``extensions.builtin.tool_result_budget`` row.
 
 Truncates oversized text payloads on ``tool_result`` while preserving any
-image content blocks untouched. Tool results flagged ``is_error=True`` are
-guaranteed at least ``_ERROR_FLOOR`` characters of payload so block-reason
-messages (e.g. permission/dedup denials) survive aggressive ``max_chars``
-budgets and the model can still see why the call was rejected.
+image content blocks untouched.  Uses **middle-out** truncation: the first
+half and last half of the text budget are preserved so the model sees both
+the initial context (headers, imports) and the trailing state (errors,
+final output).  Tool results flagged ``is_error=True`` are guaranteed at
+least ``_ERROR_FLOOR`` characters of payload so block-reason messages
+survive aggressive ``max_chars`` budgets.
 """
 
 from __future__ import annotations
@@ -21,9 +23,6 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 
-# Minimum text payload preserved for ``is_error=True`` tool results, so that
-# the kernel-synthesized "Tool call blocked: <reason>" strings are not chopped
-# below readability by aggressive ``max_chars`` settings.
 _ERROR_FLOOR = 256
 
 class ToolResultBudgetConfig(BaseModel):
@@ -35,7 +34,7 @@ class ToolResultBudgetConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="tool_result_budget",
     description=(
-        "Truncate oversized text tool results while preserving images; "
+        "Middle-out truncation of oversized text tool results; "
         f"error tool results retain at least {_ERROR_FLOOR} chars so block "
         "reasons survive."
     ),
@@ -43,6 +42,21 @@ MANIFEST = ExtensionManifest(
     config_schema=ToolResultBudgetConfig,
     requires=(),  # Leaf atom: post-processes tool results only.
 )
+
+
+def _truncate_middle(text: str, budget: int) -> str:
+    """Keep the first *half* and last *half* of *budget*, eliding the middle."""
+    if len(text) <= budget:
+        return text
+    removed = len(text) - budget
+    half = budget // 2
+    tail_start = len(text) - (budget - half)
+    return (
+        text[:half]
+        + f"\n\n…[{removed} chars truncated]…\n\n"
+        + text[tail_start:]
+    )
+
 
 def install(api: ExtensionAPI, config: ToolResultBudgetConfig) -> None:
     max_chars = max(0, config.max_chars)
@@ -57,7 +71,6 @@ def install(api: ExtensionAPI, config: ToolResultBudgetConfig) -> None:
         if text_total <= max_chars:
             return None
 
-        # Error tool results carry block reasons that must remain legible.
         effective_max = max_chars
         if event.result.is_error:
             effective_max = max(max_chars, min(error_floor, text_total))
@@ -66,24 +79,29 @@ def install(api: ExtensionAPI, config: ToolResultBudgetConfig) -> None:
 
         remaining = effective_max
         new_content: list[TextContent | ImageContent] = []
-        truncated_chars = text_total - effective_max
         for block in event.result.content:
             if isinstance(block, ImageContent):
                 new_content.append(block)
                 continue
             if remaining <= 0:
                 continue
-            kept_text = block.text[:remaining]
-            if kept_text:
-                new_content.append(TextContent(type="text", text=kept_text))
-                remaining -= len(kept_text)
+            kept = _truncate_middle(block.text, remaining)
+            new_content.append(TextContent(type="text", text=kept))
+            remaining -= min(len(block.text), remaining)
 
+        truncated_chars = text_total - effective_max
+        total_lines = sum(
+            block.text.count("\n") + 1
+            for block in event.result.content
+            if isinstance(block, TextContent)
+        )
         new_content.append(
             TextContent(
                 type="text",
                 text=(
-                    "\n\n[tool_result_budget truncated "
-                    f"{truncated_chars} chars from {event.tool_name}]"
+                    f"\n[tool_result_budget: truncated {truncated_chars} chars; "
+                    f"original {text_total} chars / {total_lines} lines "
+                    f"from {event.tool_name}]"
                 ),
             )
         )

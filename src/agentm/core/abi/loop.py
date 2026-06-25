@@ -683,15 +683,21 @@ class AgentLoop:
                     _last_key(call_returns, "reason")
                     or "blocked by extension"
                 )
+                block_kind = _last_key(call_returns, "kind") or "blocked"
+                if block_kind not in ("blocked", "user_rejected"):
+                    block_kind = "blocked"
                 outcome = ToolContinue(
                     result=await self._make_error_result(
-                        kind="blocked",
+                        kind=block_kind,
                         tool_name=tc.name,
                         reason=str(reason),
                         exception=None,
                     )
                 )
             else:
+                rewrite = _last_key(call_returns, "rewrite")
+                if isinstance(rewrite, dict):
+                    tc_event.args.update(rewrite)
                 tool = tool_index.get(tc.name)
                 if tool is None:
                     outcome = ToolContinue(

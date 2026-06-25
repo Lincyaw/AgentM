@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import time
 from typing import Any, Final
 
 from pydantic import BaseModel
@@ -57,19 +57,35 @@ def install(api: ExtensionAPI, config: ToolBashConfig) -> None:
     async def _execute(args: dict[str, Any]) -> ToolResult:
         cmd = str(args["cmd"])
         timeout = float(args.get("timeout", default_timeout))
+        t0 = time.monotonic()
         try:
             result = await bash_ops.exec(cmd, cwd=api.cwd, timeout=timeout)
         except Exception as exc:
             return _error(f"Failed to run command {cmd!r}: {exc}")
+        wall_time = round(time.monotonic() - t0, 1)
 
-        payload = {
-            "exit_code": result.exit_code,
-            "stdout": result.stdout.decode("utf-8", errors="replace"),
-            "stderr": result.stderr.decode("utf-8", errors="replace"),
-            "timed_out": result.timed_out,
-        }
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        stderr = result.stderr.decode("utf-8", errors="replace")
         is_error = result.exit_code != 0 or result.timed_out
-        text = json.dumps(payload, default=str, indent=2, sort_keys=True)
+
+        sections: list[str] = []
+        sections.append(f"Exit code: {result.exit_code}")
+        sections.append(f"Wall time: {wall_time}s")
+        if result.timed_out:
+            sections.append(f"TIMED OUT after {timeout}s")
+
+        stdout_lines = stdout.count("\n") + (1 if stdout else 0)
+        stderr_lines = stderr.count("\n") + (1 if stderr else 0)
+        sections.append(f"Stdout lines: {stdout_lines}")
+        if stderr_lines:
+            sections.append(f"Stderr lines: {stderr_lines}")
+
+        if stdout:
+            sections.append(f"Stdout:\n{stdout}")
+        if stderr:
+            sections.append(f"Stderr:\n{stderr}")
+
+        text = "\n".join(sections)
         return ToolResult(
             content=[TextContent(type="text", text=text)],
             is_error=is_error,

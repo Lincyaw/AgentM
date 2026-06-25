@@ -360,16 +360,20 @@ class ToolErrorEvent(Event):
     because the *kind* / *tool_name* / *reason* are facts the kernel has
     already decided; they describe the cause, not a recommendation.
 
-    ``kind`` discriminates the three kernel-imposed error paths:
+    ``kind`` discriminates the kernel-imposed error paths:
     - ``"execution_failed"`` — ``tool.execute`` raised an exception.
     - ``"unknown_tool"``     — the assistant called a name not in the
                                  tool index.
     - ``"blocked"``          — a ``tool_call`` handler returned
                                  ``{"block": True, "reason": ...}``.
+    - ``"user_rejected"``    — a ``tool_call`` handler returned
+                                 ``{"block": True, "kind": "user_rejected", ...}``.
+                                 Signals the model should try a different
+                                 approach rather than retry.
     """
 
     CHANNEL: ClassVar[Literal["tool_error"]] = "tool_error"
-    kind: Literal["execution_failed", "unknown_tool", "blocked"]
+    kind: Literal["execution_failed", "unknown_tool", "blocked", "user_rejected"]
     tool_name: str
     reason: str
     result: ToolResult

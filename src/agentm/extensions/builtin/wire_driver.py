@@ -76,6 +76,11 @@ from agentm.core.abi import (
     TurnEndEvent,
     TurnStartEvent,
 )
+from agentm.core.abi import (
+    APPROVAL_MANAGER_SERVICE,
+    WIRE_CHILD_FORWARDER_SERVICE,
+    WIRE_OUTBOUND_SERVICE,
+)
 from agentm.core.lib import to_jsonable
 from agentm.extensions import ExtensionManifest
 
@@ -87,10 +92,6 @@ Projector = Callable[[Any], ProjectorResult]
 
 _PREVIEW_LIMIT = 4000
 
-# Service name under which ``install`` registers the child-trajectory
-# forwarder. Child-spawning atoms reach it via ``api.get_service`` (§11: no
-# atom-to-atom import) and call it with a freshly spawned child session.
-WIRE_CHILD_FORWARDER_SERVICE = "child_wire_forwarder"
 
 class WireDriverConfig(BaseModel):
     model_config = {"extra": "allow"}
@@ -487,7 +488,7 @@ def attach_child_wire_forwarder(
 
 
 def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG001
-    outbound_sink = api.get_service("wire_outbound")
+    outbound_sink = api.get_service(WIRE_OUTBOUND_SERVICE)
     session_key = api.get_service("session_key")
     if outbound_sink is None or session_key is None:
         # Mounting wire_driver outside the gateway has no effect; fail at
@@ -498,7 +499,7 @@ def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG00
             "this atom only works inside the agentm gateway process."
         )
     turn_context: dict[str, Any] | None = api.get_service("turn_context")
-    approval_mgr = api.get_service("approval_manager")
+    approval_mgr = api.get_service(APPROVAL_MANAGER_SERVICE)
     # Holds scheduled control-frame tasks so the loop does not GC them mid-flight.
     bg_tasks: set[asyncio.Task[Any]] = set()
 
@@ -547,8 +548,9 @@ def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG00
         if not ok:
             return {
                 "block": True,
+                "kind": "user_rejected",
                 "reason": (
-                    f"tool '{ev.tool_name}' was denied via the chat approval gate"
+                    f"tool '{ev.tool_name}' was denied by the user"
                 ),
             }
         return None

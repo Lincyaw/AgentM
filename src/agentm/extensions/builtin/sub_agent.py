@@ -46,6 +46,7 @@ from agentm.core.abi import (
     UserMessage,
 )
 from agentm.core.lib import (
+    forward_child_to_wire as _forward_child_to_wire,
     BackgroundTask,
     BackgroundTaskRegistry,
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
@@ -198,32 +199,12 @@ def _extract_return_response_text(messages: list[Any]) -> str | None:
                     return text
     return None
 
-# Service registered by the ``wire_driver`` atom inside the gateway. Reached by
-# name (not import) so this atom keeps the §11 contract: no atom-to-atom import.
-_WIRE_CHILD_FORWARDER_SERVICE = "child_wire_forwarder"
-
 # Service the single-process gateway seeds so a spawned child can be registered
 # as interactively addressable by its session id (the human can chat with it).
 # Reached by name, never imported (§11) — its presence also signals interactive
 # mode: when set, children are kept alive after their task instead of being
 # torn down on finalize. See ``.claude/designs/interactive-subagent.md``.
 _CHILD_SESSION_REGISTRY_SERVICE = "child_session_registry"
-
-
-def _forward_child_to_wire(api: ExtensionAPI, child: Any) -> None:
-    """Hand a freshly spawned child to the wire forwarder if one is installed.
-
-    Returns silently when running outside the gateway (no wire_driver, so no
-    ``child_wire_forwarder`` service) — the child still runs, its trajectory
-    just isn't streamed to a chat peer."""
-    forwarder = api.get_service(_WIRE_CHILD_FORWARDER_SERVICE)
-    if forwarder is None:
-        return
-    try:
-        forwarder(child)
-    except Exception as exc:  # noqa: BLE001
-        # Forwarding is observability, never load-bearing for the child's run.
-        logger.debug("sub_agent: child wire forwarding failed: {}", exc)
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:

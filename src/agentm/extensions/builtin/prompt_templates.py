@@ -242,7 +242,8 @@ async def install(api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
         str(p) for p in api.get_project_layout().prompts_dirs()
     )
     registry: PromptRegistry = _PromptRegistry(project_prompt_dirs=project_dirs)
-    api.set_service("prompt_templates", registry)
+    from agentm.core.abi import PROMPT_TEMPLATES_SERVICE
+    api.set_service(PROMPT_TEMPLATES_SERVICE, registry)
 
     cache: list[PromptTemplateRecord] = []
 

@@ -107,7 +107,8 @@ def install(api: ExtensionAPI, config: CostBudgetConfig) -> None:
             )
             return CostBreakdown(amount=amount, currency=currency)
 
-    api.set_service("cost_query", _CostQueryService())
+    from agentm.core.abi import COST_QUERY_SERVICE
+    api.set_service(COST_QUERY_SERVICE, _CostQueryService())
 
     async def _pricing_for(provider: str) -> tuple[float, float]:
         configured = pricing.get(provider)

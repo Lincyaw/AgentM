@@ -324,7 +324,8 @@ def install(api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
         PROMPT_BRANCH_SUMMARY_PREAMBLE: config.branch_summary_preamble
         or _BRANCH_SUMMARY_PREAMBLE,
     }
-    registry = api.get_service("prompt_templates")
+    from agentm.core.abi import PROMPT_TEMPLATES_SERVICE
+    registry = api.get_service(PROMPT_TEMPLATES_SERVICE)
     if registry is None:
         raise RuntimeError(
             "compaction_prompts atom requires the prompt_templates service "

@@ -98,17 +98,50 @@ resolves a ``config.toml`` profile name to a provider tuple suitable for
 ``workflow`` for its ``model=`` parameter) use this service instead of
 importing presenter-layer modules directly."""
 
+PROMPT_TEMPLATES_SERVICE: Final = "prompt_templates"
+"""In-memory :class:`PromptRegistry` published by ``prompt_templates`` atom."""
+
+RETRY_POLICY_SERVICE: Final = "retry_policy"
+"""Retry policy callable published by ``retry_policy`` atom."""
+
+ARTIFACT_STORE_SERVICE: Final = "artifact_store"
+"""Artifact store published by ``artifact_store`` atom."""
+
+COST_QUERY_SERVICE: Final = "cost_query"
+"""Cost query service published by ``cost_budget`` atom."""
+
+WIRE_CHILD_FORWARDER_SERVICE: Final = "child_wire_forwarder"
+"""Callable published by ``wire_driver`` for forwarding child session
+trajectories onto the parent wire. No-op when running outside the gateway."""
+
+WIRE_OUTBOUND_SERVICE: Final = "wire_outbound"
+"""Outbound sink callable published by the gateway session manager."""
+
+APPROVAL_MANAGER_SERVICE: Final = "approval_manager"
+"""``ApprovalManager`` published by the gateway session manager."""
+
+CHANGESPEC_VALIDATORS_SERVICE: Final = "changespec_validators"
+"""Registry of changespec validator callables."""
+
 
 __all__ = [
+    "APPROVAL_MANAGER_SERVICE",
+    "ARTIFACT_STORE_SERVICE",
+    "CHANGESPEC_VALIDATORS_SERVICE",
     "COMMAND_PARSER",
     "COMPACTION_PROMPTS",
+    "COST_QUERY_SERVICE",
     "LOOP_BUDGET_SERVICE",
     "MODEL_RESOLVER_SERVICE",
     "PARENT_PROVIDER_CONFIG_KEY",
     "PROMPT_REGISTRY",
+    "PROMPT_TEMPLATES_SERVICE",
     "PROVIDER_INHERITOR",
+    "RETRY_POLICY_SERVICE",
     "SESSION_STORE_SERVICE",
     "SLASH_COMMAND_DISPATCHER_SERVICE",
     "SUB_AGENT_RUNTIME",
     "SYSTEM_PROMPT_PROVIDER",
+    "WIRE_CHILD_FORWARDER_SERVICE",
+    "WIRE_OUTBOUND_SERVICE",
 ]

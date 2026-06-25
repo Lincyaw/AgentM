@@ -1169,7 +1169,8 @@ def _load_validator(api: ExtensionAPI, kind: str) -> Any:
     safe_kind = kind.strip().lower()
     if not safe_kind.replace("_", "").isalnum():
         return None
-    registry = api.get_service("changespec_validators")
+    from agentm.core.abi import CHANGESPEC_VALIDATORS_SERVICE
+    registry = api.get_service(CHANGESPEC_VALIDATORS_SERVICE)
     if not isinstance(registry, dict):
         return None
     fn = registry.get(safe_kind)

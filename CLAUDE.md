@@ -85,6 +85,38 @@ root + N spawned children. Composition pattern:
 - `CONTEXT.md` — project glossary; check here when an unfamiliar term appears.
 - `core-manifest.yaml` — constitution layer (kernel-singleton declarations); read-only.
 
+### Finding existing capabilities
+
+Before building something new, check what already exists. Read the
+docstring at the top of each atom file — it describes what the atom does
+and what tools/events it registers.
+
+- **Tools**: `grep -rn "register_tool" src/agentm/extensions/builtin/` —
+  every tool registration with its name.
+- **Events**: `grep "CHANNEL.*=" src/agentm/core/abi/events.py` — all
+  kernel event channels.
+- **Key builtin atoms by capability area**:
+  - Orchestration: `workflow.py` (Python script orchestration over child
+    sessions — `agent()`, `parallel()`, `pipeline()`), `sub_agent.py`
+    (spawn/check/wait/abort workers).
+  - File ops: `file_tools.py` (`read`/`write`/`edit`/`glob`/`grep`).
+  - Execution: `tool_bash.py`, `background_exec.py`
+    (background process management).
+  - Monitoring: `monitor.py` (wakeup scheduling, monitors).
+  - Knowledge: `skill_loader.py` (SKILL.md discovery + `load_skill`
+    tool), `memory.py` (persistent key-value memory).
+  - Data: `query_tools.py` (DuckDB queries), `artifact_store.py`.
+  - Self-modification: `atom_management.py` (`install_atom` /
+    `reload_atom`), `structured_output.py` (`submit_result`).
+  - Safety: `tool_bash_guard.py`, `tool_filter.py`, `tool_result_budget.py`,
+    `tool_error_messages.py`, `permission.py`, `dedup.py`.
+  - LLM: `llm_openai.py`, `llm_anthropic.py`, `llm_compaction.py`,
+    `thinking_retry.py`, `retry_policy.py`.
+  - Observability: `observability.py`, `otlp_export.py`, `cost_budget.py`,
+    `loop_budget.py`.
+  - UI: `wire_driver.py` (gateway wire protocol), `tui_snapshot.py`,
+    `slash_commands.py`.
+
 ## Architecture
 
 ```

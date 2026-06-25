@@ -67,6 +67,7 @@ from pydantic import BaseModel, ConfigDict
 
 from agentm.extensions import ExtensionManifest
 
+from agentm.core.abi import RETRY_POLICY_SERVICE
 from agentm.core.lib import StreamAccumulator, ToolSpecAdapter, encode_tool_args
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
@@ -651,7 +652,7 @@ def install(api: Any, config: LlmAnthropicConfig) -> None:
         thinking_budgets=config.thinking_budgets,
         reasoning_effort=extra.get("reasoning_effort"),
         extra_body=extra.get("extra_body"),
-        retry_policy=api.get_service("retry_policy"),
+        retry_policy=api.get_service(RETRY_POLICY_SERVICE),
     )
     # Optional model-spec overrides; defaults handled in ``_build_model``.
     model_kwargs: dict[str, int] = {}

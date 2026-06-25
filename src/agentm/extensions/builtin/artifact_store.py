@@ -325,11 +325,12 @@ class ArtifactStore:
         return scan_artifact_metadata(self._ctx.artifacts_dir)
 
 def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
+    from agentm.core.abi import ARTIFACT_STORE_SERVICE
     store = ArtifactStore(api, config)
-    api.set_service("artifact_store", store)
+    api.set_service(ARTIFACT_STORE_SERVICE, store)
 
     def _store() -> ArtifactStore:
-        registered = api.get_service("artifact_store")
+        registered = api.get_service(ARTIFACT_STORE_SERVICE)
         if not isinstance(registered, ArtifactStore):
             raise RuntimeError("artifact_store service is not registered")
         return registered

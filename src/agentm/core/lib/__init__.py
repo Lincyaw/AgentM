@@ -35,6 +35,7 @@ from agentm.core.lib.render import final_summary
 from agentm.core.lib.serialization import to_jsonable
 from agentm.core.lib.shutdown import DEFAULT_SHUTDOWN_GRACE_SECONDS
 from agentm.core.lib.stream import StreamAccumulator, ToolSpecAdapter, encode_tool_args
+from agentm.core.lib.child_wire import forward_child_to_wire
 from agentm.core.lib.tool_result import with_model_note
 from agentm.core.lib.tool_schema import pydantic_to_openai_tool_schema, pydantic_to_tool_schema
 from agentm.core.lib.turns import Turn, enumerate_turns
@@ -72,6 +73,7 @@ __all__ = [
     "resolve_model_profile",
     "resolve_observability_dir",
     "scan_artifact_metadata",
+    "forward_child_to_wire",
     "to_jsonable",
     "with_model_note",
 ]

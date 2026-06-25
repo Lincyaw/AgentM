@@ -93,6 +93,8 @@ from agentm.core.abi import (
     ToolResultMessage,
     TurnEndEvent,
 )
+from agentm.core.abi import ARTIFACT_STORE_SERVICE
+from agentm.core.lib import forward_child_to_wire as _forward_child_to_wire
 from agentm.extensions import ExtensionManifest
 
 _T = TypeVar("_T")
@@ -143,23 +145,6 @@ class _ChildSession(Protocol):
     async def prompt(self, message: str) -> list[AgentMessage]: ...
     async def shutdown(self) -> None: ...
 
-
-# Service registered by the ``wire_driver`` atom inside the gateway. Reached by
-# name (not import) so this atom keeps the §11 contract: no atom-to-atom import.
-_WIRE_CHILD_FORWARDER_SERVICE = "child_wire_forwarder"
-
-
-def _forward_child_to_wire(api: ExtensionAPI, child: Any) -> None:
-    """Fan a spawned child's trajectory onto the parent wire when the gateway's
-    ``child_wire_forwarder`` service is installed; a no-op otherwise."""
-    forwarder = api.get_service(_WIRE_CHILD_FORWARDER_SERVICE)
-    if forwarder is None:
-        return
-    try:
-        forwarder(child)
-    except Exception as exc:  # noqa: BLE001
-        # Wire forwarding is observability, never load-bearing for the child.
-        logger.debug("workflow: child wire forwarding failed: {}", exc)
 
 
 class _ArtifactStore(Protocol):
@@ -244,7 +229,6 @@ MANIFEST = ExtensionManifest(
 )
 
 # Name of the service that backs the workflow-local resume journal.
-_ARTIFACT_STORE_SERVICE: Final[str] = "artifact_store"
 
 # ``purpose`` stamped on every worker child session. Doubles as the
 # anti-recursion marker: a session with this purpose does not register the
@@ -1547,7 +1531,7 @@ class WorkflowRunner:
 
         Best-effort: failures are logged, never raised."""
         store: _ArtifactStore | None = self._api.get_service(
-            _ARTIFACT_STORE_SERVICE,
+            ARTIFACT_STORE_SERVICE,
         )
         if store is None:
             return
@@ -1656,7 +1640,7 @@ class WorkflowRunner:
         self._last_run = run = _WorkflowRun(
             api=self._api,
             journal=_Journal(
-                store=self._api.get_service(_ARTIFACT_STORE_SERVICE),
+                store=self._api.get_service(ARTIFACT_STORE_SERVICE),
             ),
             budget_svc=_BudgetService(
                 total_budget_tokens=self._budget_tokens,

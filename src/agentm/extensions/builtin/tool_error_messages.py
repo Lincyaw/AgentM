@@ -7,13 +7,13 @@ constructs an empty :class:`ToolResult` (``is_error=True``); writing the
 human-readable English text into ``result.content`` is policy, so it lives
 in this atom.
 
+Error messages are **model-facing diagnostic text**, not developer-facing
+tracebacks. Each message is phrased so the model can decide its next
+action: retry with corrected args, try a different approach, or stop.
+
 Replacing this atom (or stacking another handler ahead of it on the
 ``tool_error`` channel) is the supported way to localize, re-format, or
-suppress those strings without patching the kernel. Today's exact
-strings — ``"Tool execution error: {exc}"``, ``"Unknown tool: {name}"``,
-``"Tool call blocked: {reason}"`` — ship as the default so users who run
-with the default scenario see no behavior change from the pre-extraction
-implementation.
+suppress those strings without patching the kernel.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from agentm.extensions import ExtensionManifest
 MANIFEST = ExtensionManifest(
     name="tool_error_messages",
     description=(
-        "Default English user-visible text for kernel-emitted "
+        "Model-facing diagnostic text for kernel-emitted "
         "ToolErrorEvent (execution_failed / unknown_tool / blocked)."
     ),
     registers=("event:tool_error",),
@@ -34,21 +34,47 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Leaf atom: formats tool_error events only.
 )
 
+
+def _extract_exception_summary(reason: str) -> str:
+    """Extract the final exception line from a traceback string.
+
+    A full traceback is noise for the model; the last line
+    (e.g. ``FileNotFoundError: No such file: 'x.py'``) carries the
+    actionable signal.
+    """
+    stripped = reason.strip()
+    if "\n" not in stripped:
+        return stripped
+    last_line = stripped.rsplit("\n", 1)[-1].strip()
+    return last_line if last_line else stripped
+
+
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     def _on_tool_error(event: ToolErrorEvent) -> None:
-        # Only synthesize text if no earlier handler already populated the
-        # result. This makes stacking ergonomic: a localization atom that
-        # runs at PRE priority can fill ``result.content`` and we silently
-        # step aside.
         if event.result.content:
             return
         if event.kind == "execution_failed":
-            text = f"Tool execution error: {event.reason}"
+            summary = _extract_exception_summary(event.reason)
+            text = (
+                f"Tool '{event.tool_name}' raised an error: {summary}\n"
+                f"Adjust your arguments or try a different approach."
+            )
         elif event.kind == "unknown_tool":
-            text = f"Unknown tool: {event.tool_name}"
+            text = (
+                f"No tool named '{event.tool_name}' is registered. "
+                f"Check the tool name and try again."
+            )
+        elif event.kind == "user_rejected":
+            text = (
+                f"Tool '{event.tool_name}' was denied by the user. "
+                f"Try a different approach instead of retrying the same call."
+            )
         elif event.kind == "blocked":
-            text = f"Tool call blocked: {event.reason}"
-        else:  # pragma: no cover — defensive: Literal narrows to the three above
+            text = (
+                f"Tool '{event.tool_name}' was blocked: {event.reason}\n"
+                f"This call is not allowed under the current policy."
+            )
+        else:  # pragma: no cover
             text = f"tool_error: {event.kind} ({event.tool_name})"
         event.result.content.append(TextContent(type="text", text=text))
 

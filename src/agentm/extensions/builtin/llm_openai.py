@@ -808,7 +808,8 @@ def install(api: Any, config: LlmOpenaiConfig) -> None:
             "be a non-empty string (e.g. 'gpt-4o' or 'Kimi-K2')."
         )
 
-    retry_policy = api.get_service("retry_policy")
+    from agentm.core.abi import RETRY_POLICY_SERVICE
+    retry_policy = api.get_service(RETRY_POLICY_SERVICE)
     verify_ssl = config.verify_ssl if config.verify_ssl is not None else True
     if not verify_ssl:
         api.events.emit_sync(

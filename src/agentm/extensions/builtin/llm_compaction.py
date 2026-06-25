@@ -660,7 +660,8 @@ async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
     degrades quality but avoids a hard crash.
     """
 
-    registry = api.get_service("prompt_templates")
+    from agentm.core.abi import PROMPT_TEMPLATES_SERVICE
+    registry = api.get_service(PROMPT_TEMPLATES_SERVICE)
     if registry is None:
         system = summarization = update = None
     else:
