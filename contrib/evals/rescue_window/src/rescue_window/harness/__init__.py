@@ -26,6 +26,13 @@ from .runner import (
     run_intervention_rollout,
 )
 from .sampler import PrefixSampler, SamplingPolicy
+from .replay import (
+    DockerReplayTarget,
+    ReplayAction,
+    ReplayTarget,
+    extract_replay_actions,
+    replay_actions,
+)
 from .treatments import (
     CONTENT_LADDER,
     ORACLE_LANDSCAPE,
@@ -36,6 +43,9 @@ from .treatments import (
 )
 
 __all__ = [
+    "DockerReplayTarget",
+    "ReplayAction",
+    "ReplayTarget",
     "CONTENT_LADDER",
     "ORACLE_LANDSCAPE",
     "PRESETS",
@@ -52,10 +62,12 @@ __all__ = [
     "build_profile_provider",
     "continue_outcome",
     "default_store",
+    "extract_replay_actions",
     "extract_tool_args",
     "load_adapter",
     "load_corpus",
     "load_trajectory_messages",
     "run_intervention_rollout",
+    "replay_actions",
     "run_landscape",
 ]

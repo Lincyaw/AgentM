@@ -71,6 +71,7 @@ class AgentEnvConfig(BaseModel):
     experiment_id: str | None = None
     pool_ref: str | None = None
     gateway_url: str | None = None
+    api_key: str | None = None
     namespace: str | None = None
     work_dir: str | None = None
     timeout: float | None = None
@@ -703,6 +704,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     work_dir = config.work_dir or "/workspace"
     timeout_value: float | None = config.timeout
     idle_value: int | None = config.idle_timeout_seconds
+    api_key = _resolve_str(config.api_key, "AGENTM_AGENT_ENV_API_KEY", None)
     session: Any
     if image:
         experiment_id = _resolve_str(
@@ -716,6 +718,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             namespace=namespace,
             gateway_url=gateway_url,
             workspace_dir=work_dir,
+            api_key=api_key,
         )
     else:
         assert pool_ref is not None
@@ -725,6 +728,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             gateway_url=gateway_url,
             keep_alive=False,
             idle_timeout_seconds=idle_value,
+            api_key=api_key,
         )
     session.create_sandbox()
 

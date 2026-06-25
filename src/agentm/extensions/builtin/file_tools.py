@@ -936,6 +936,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
 
             return result
         except Exception as exc:
+            logger.opt(exception=True).warning("edit tool failed for {}: {}", path, exc)
             return _error(f"Failed to edit {path!r}: {exc}")
 
     if "edit" in enabled_tools:

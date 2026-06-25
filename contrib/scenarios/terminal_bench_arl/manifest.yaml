@@ -1,0 +1,22 @@
+name: terminal_bench_arl
+description: |
+  Terminal-bench tasks via ARL sandbox. Agent runs on host,
+  bash/file tools execute in a remote ARL sandbox container.
+  Trajectory stored on host (ClickHouse). Supports snapshot/restore
+  for rescue-window fork.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      work_dir: /app
+  - module: agentm.extensions.builtin.tool_result_cap
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
+  - module: agentm.extensions.builtin.runtime_context
+  - module: agentm.extensions.builtin.llm_compaction
+  - module: agentm.extensions.builtin.read_history
