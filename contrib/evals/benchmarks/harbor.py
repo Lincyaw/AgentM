@@ -45,9 +45,10 @@ class HarborAdapter:
         return tasks
 
     def get_image(self, task: TaskSpec, registry: str, prefix: str, tag: str) -> str:
-        if task.image:
-            return task.image
         return image_name(task.name, registry, prefix, tag)
+
+    def get_source_image(self, task: TaskSpec) -> str | None:
+        return task.image or None
 
     def supports_build(self) -> bool:
         return True
@@ -109,6 +110,10 @@ class HarborAdapter:
             "eval_output": eval_out or "",
         }
 
+    def is_pass(self, result: dict) -> bool:
+        reward = result.get("reward")
+        return isinstance(reward, (int, float)) and reward >= 1.0
+
     def format_score_line(self, r: dict) -> str:
         name = r.get("task", "?")
         tools = r.get("tools", "?")
@@ -137,3 +142,33 @@ class HarborAdapter:
             avg = sum(scored) / len(scored)
             return f"\nAvg reward: {avg:.3f} ({len(scored)}/{len(results)} scored)"
         return ""
+
+    def pass_at_k_header(self) -> str:
+        return (
+            f"  {'Task':<30} {'Best':<8} {'Pass':<8} {'Avg reward'}\n"
+            f"  {'-' * 60}"
+        )
+
+    def pass_at_k_row(self, name: str, runs: list[dict]) -> tuple[str, dict]:
+        rewards = [
+            float(r["reward"]) for r in runs
+            if isinstance(r.get("reward"), (int, float))
+        ]
+        best = max(rewards) if rewards else None
+        avg = sum(rewards) / len(rewards) if rewards else None
+        any_pass = any(self.is_pass(r) for r in runs)
+
+        best_str = f"{best:.2f}" if best is not None else "-"
+        pass_str = "YES" if any_pass else "no"
+        avg_str = f"{avg:.3f}" if avg is not None else "-"
+        line = f"  {name:<30} {best_str:<8} {pass_str:<8} {avg_str}"
+        stats = {"any_pass": any_pass, "avg_reward": avg, "best_reward": best}
+        return line, stats
+
+    def pass_at_k_footer(self, all_stats: list[dict], n_tasks: int) -> str:
+        pass_count = sum(1 for s in all_stats if s.get("any_pass"))
+        avg_rewards = [s["avg_reward"] for s in all_stats if s.get("avg_reward") is not None]
+        lines = [f"\n  Overall pass@k: {pass_count}/{n_tasks} = {pass_count / n_tasks:.1%}"]
+        if avg_rewards:
+            lines.append(f"  Avg reward:     {sum(avg_rewards) / len(avg_rewards):.3f}")
+        return "\n".join(lines)

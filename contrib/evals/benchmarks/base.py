@@ -42,7 +42,11 @@ class BenchAdapter(Protocol):
         ...
 
     def get_image(self, task: TaskSpec, registry: str, prefix: str, tag: str) -> str:
-        """Return the Docker image name/tag for this task."""
+        """Return the runtime Docker image (convention-named in our registry)."""
+        ...
+
+    def get_source_image(self, task: TaskSpec) -> str | None:
+        """Return the upstream image URL for mirroring, or None if self-built."""
         ...
 
     def supports_build(self) -> bool:
@@ -53,6 +57,10 @@ class BenchAdapter(Protocol):
         self, session: object, task: TaskSpec, *, timeout: int = 300
     ) -> dict:
         """Run evaluation in the sandbox and return score dict."""
+        ...
+
+    def is_pass(self, result: dict) -> bool:
+        """Whether this single-attempt result counts as a pass."""
         ...
 
     def format_score_line(self, r: dict) -> str:
@@ -69,6 +77,18 @@ class BenchAdapter(Protocol):
 
     def summary_footer(self, results: dict[str, dict]) -> str:
         """Return the footer/totals line for the summary table."""
+        ...
+
+    def pass_at_k_header(self) -> str:
+        """Column header for the pass@k table."""
+        ...
+
+    def pass_at_k_row(self, name: str, runs: list[dict]) -> tuple[str, dict]:
+        """One row of the pass@k table. Returns (formatted_line, row_stats)."""
+        ...
+
+    def pass_at_k_footer(self, all_stats: list[dict], n_tasks: int) -> str:
+        """Footer/totals for the pass@k table."""
         ...
 
 

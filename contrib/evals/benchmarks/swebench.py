@@ -58,6 +58,9 @@ class SWEBenchAdapter:
     def get_image(self, task: TaskSpec, registry: str, prefix: str, tag: str) -> str:
         return task.image
 
+    def get_source_image(self, task: TaskSpec) -> str | None:
+        return task.image or None
+
     def supports_build(self) -> bool:
         return False
 
@@ -80,6 +83,9 @@ class SWEBenchAdapter:
             "has_patch": bool(model_patch.strip()),
         }
 
+    def is_pass(self, result: dict) -> bool:
+        return bool(result.get("has_patch"))
+
     def format_score_line(self, r: dict) -> str:
         name = r.get("task", "?")
         tools = r.get("tools", "?")
@@ -100,6 +106,22 @@ class SWEBenchAdapter:
     def summary_footer(self, results: dict[str, dict]) -> str:
         patched = sum(1 for r in results.values() if r.get("has_patch"))
         return f"\n{patched}/{len(results)} produced patches"
+
+    def pass_at_k_header(self) -> str:
+        return (
+            f"  {'Task':<50} {'Any patch'}\n"
+            f"  {'-' * 60}"
+        )
+
+    def pass_at_k_row(self, name: str, runs: list[dict]) -> tuple[str, dict]:
+        any_pass = any(self.is_pass(r) for r in runs)
+        pass_str = "YES" if any_pass else "no"
+        line = f"  {name:<50} {pass_str}"
+        return line, {"any_pass": any_pass}
+
+    def pass_at_k_footer(self, all_stats: list[dict], n_tasks: int) -> str:
+        pass_count = sum(1 for s in all_stats if s.get("any_pass"))
+        return f"\n  Overall pass@k: {pass_count}/{n_tasks} = {pass_count / n_tasks:.1%}"
 
 
 def write_predictions(

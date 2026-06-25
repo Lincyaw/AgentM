@@ -6,7 +6,8 @@ Usage:
     uv run python contrib/evals/bench.py list --repo ~/longcli-bench/tasks_long_cli
     uv run python contrib/evals/bench.py batch --repo ~/longcli-bench/tasks_long_cli --model litellm -j 20
     uv run python contrib/evals/bench.py list --bench swebench-verified --source princeton-nlp/SWE-bench_Verified
-    uv run python contrib/evals/bench.py batch --bench harbor --repo ~/harbor-bench/tasks -j 10
+    uv run python contrib/evals/bench.py mirror --bench harbor --repo ~/harbor-datasets/terminal-bench --registry opspai --prefix tb2 -j 8
+    uv run python contrib/evals/bench.py batch --bench harbor --repo ~/harbor-datasets/terminal-bench --registry opspai --prefix tb2 -j 10
 """
 
 from __future__ import annotations
@@ -125,6 +126,7 @@ def _run_and_eval_one(
             "AGENTM_AGENT_ENV_IMAGE": image,
             "AGENTM_AGENT_ENV_GATEWAY_URL": gateway,
             "AGENTM_AGENT_ENV_EXPERIMENT_ID": f"{prefix}-{model}-{name}",
+            **({"AGENTM_AGENT_ENV_API_KEY": api_key} if api_key else {}),
         }
         cmd = [
             "uv", "run", "agentm",
@@ -199,6 +201,7 @@ def _print_pass_at_k(
     all_attempts: list[dict[str, dict]],
     tasks: list[TaskSpec],
     out: Path,
+    adapter: object,
 ) -> None:
     """Compute and print pass@k metrics across multiple attempts."""
     k = len(all_attempts)
@@ -211,84 +214,26 @@ def _print_pass_at_k(
 
     typer.echo(f"\n{'=' * 75}")
     typer.echo(f"  pass@{k} Summary ({k} attempts)")
-    typer.echo(f"  {'-' * 70}")
-    typer.echo(
-        f"  {'Task':<25} {'Best F2P':<10} {'Any pass':<10} "
-        f"{'Avg F2P step':<14} {'Avg P2P step'}"
-    )
-    typer.echo(f"  {'-' * 70}")
+    typer.echo(adapter.pass_at_k_header())  # type: ignore[union-attr]
 
-    any_pass_count = 0
-    f2p_steps_all: list[float] = []
-    p2p_steps_all: list[float] = []
-
+    all_stats: list[dict] = []
     summary_rows = []
     for name in task_names:
         runs = per_task[name]
-        f2p_steps: list[float] = []
-        p2p_steps: list[float] = []
-        any_all_pass = False
+        line, stats = adapter.pass_at_k_row(name, runs)  # type: ignore[union-attr]
+        typer.echo(line)
+        all_stats.append(stats)
+        summary_rows.append({"task": name, **stats, "attempts": [
+            {k: v for k, v in r.items() if k != "eval_output"} for r in runs
+        ]})
 
-        for r in runs:
-            f2p = r.get("f2p")
-            p2p = r.get("p2p")
-            f2p_s = f2p.get("step_score") if isinstance(f2p, dict) else None
-            if isinstance(f2p_s, (int, float)):
-                f2p_steps.append(f2p_s)
-            p2p_total = p2p.get("total", 0) if isinstance(p2p, dict) else 0
-            p2p_passed = p2p.get("passed", 0) if isinstance(p2p, dict) else 0
-            if p2p_total > 0:
-                p2p_steps.append(p2p_passed / p2p_total)
-
-            f2p_pass = isinstance(f2p_s, (int, float)) and f2p_s >= 1.0
-            p2p_pass = p2p_total > 0 and p2p_passed == p2p_total
-            if f2p_pass and p2p_pass:
-                any_all_pass = True
-
-        best_f2p = max(f2p_steps) if f2p_steps else None
-        avg_f2p = sum(f2p_steps) / len(f2p_steps) if f2p_steps else None
-        avg_p2p = sum(p2p_steps) / len(p2p_steps) if p2p_steps else None
-
-        if any_all_pass:
-            any_pass_count += 1
-        if avg_f2p is not None:
-            f2p_steps_all.append(avg_f2p)
-        if avg_p2p is not None:
-            p2p_steps_all.append(avg_p2p)
-
-        best_str = f"{best_f2p:.1%}" if best_f2p is not None else "-"
-        pass_str = "YES" if any_all_pass else "no"
-        avg_f2p_str = f"{avg_f2p:.1%}" if avg_f2p is not None else "-"
-        avg_p2p_str = f"{avg_p2p:.1%}" if avg_p2p is not None else "-"
-
-        typer.echo(f"  {name:<25} {best_str:<10} {pass_str:<10} {avg_f2p_str:<14} {avg_p2p_str}")
-        summary_rows.append({
-            "task": name,
-            "best_f2p_step": best_f2p,
-            "any_all_pass": any_all_pass,
-            "avg_f2p_step": avg_f2p,
-            "avg_p2p_step": avg_p2p,
-            "attempts": [{
-                "f2p": r.get("f2p"),
-                "p2p": r.get("p2p"),
-                "tools": r.get("tools"),
-                "status": r.get("status"),
-            } for r in runs],
-        })
-
-    n_tasks = len(task_names)
-    typer.echo(f"\n  Overall pass@{k}:     {any_pass_count}/{n_tasks} = {any_pass_count / n_tasks:.1%}")
-    if f2p_steps_all:
-        typer.echo(f"  Avg F2P Step Score:  {sum(f2p_steps_all) / len(f2p_steps_all):.1%}")
-    if p2p_steps_all:
-        typer.echo(f"  Avg P2P Step Score:  {sum(p2p_steps_all) / len(p2p_steps_all):.1%}")
+    typer.echo(adapter.pass_at_k_footer(all_stats, len(task_names)))  # type: ignore[union-attr]
 
     summary_file = out / "summary.json"
+    pass_count = sum(1 for s in all_stats if s.get("any_pass"))
     summary_file.write_text(json.dumps({
         "k": k,
-        "pass_at_k": any_pass_count / n_tasks if n_tasks else 0,
-        "avg_f2p_step": sum(f2p_steps_all) / len(f2p_steps_all) if f2p_steps_all else None,
-        "avg_p2p_step": sum(p2p_steps_all) / len(p2p_steps_all) if p2p_steps_all else None,
+        "pass_at_k": pass_count / len(task_names) if task_names else 0,
         "tasks": summary_rows,
     }, ensure_ascii=False, indent=2))
     typer.echo(f"\n  Summary written to: {summary_file}")
@@ -368,6 +313,69 @@ def build(
     finally:
         os.unlink(skaffold_path)
     typer.echo(f"Built {len(tasks)} images ({registry}/{prefix}-*:{tag})")
+
+
+@app.command()
+def mirror(
+    repo: Annotated[Path | None, typer.Option("--repo")] = None,
+    source: Annotated[str | None, typer.Option("--source")] = None,
+    bench: Annotated[str, typer.Option("--bench")] = "harbor",
+    registry: Annotated[str, typer.Option()] = "opspai",
+    prefix: Annotated[str, typer.Option()] = "tb2",
+    tag: Annotated[str, typer.Option()] = "v0",
+    concurrency: Annotated[int, typer.Option("-j")] = 4,
+    task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Pull upstream images, retag, and push to our registry.
+
+    For benchmarks with pre-built images (Harbor, SWE-bench), mirrors
+    source images to {registry}/{prefix}-{task}:{tag}.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    resolved_source = _resolve_source(repo, source, bench)
+    adapter = get_adapter(bench)
+    tasks = adapter.discover_tasks(resolved_source)
+    if task:
+        tasks = [t for t in tasks if t.name in task]
+
+    mirrorable = [(t, adapter.get_source_image(t)) for t in tasks]
+    mirrorable = [(t, src) for t, src in mirrorable if src]
+    if not mirrorable:
+        typer.echo("No images to mirror (adapter has no source images).", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Mirror: {len(mirrorable)} images | {bench} → {registry}/{prefix}-*:{tag}")
+
+    def _mirror_one(t: TaskSpec, src: str) -> tuple[str, bool, str]:
+        dst = adapter.get_image(t, registry, prefix, tag)
+        if dry_run:
+            return t.name, True, f"{src} → {dst}"
+        try:
+            subprocess.run(
+                ["crane", "copy", src, dst],
+                check=True, capture_output=True,
+            )
+            return t.name, True, f"{src} → {dst}"
+        except subprocess.CalledProcessError as e:
+            return t.name, False, e.stderr.decode(errors="replace").strip()
+
+    ok, fail = 0, 0
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {pool.submit(_mirror_one, t, src): t.name for t, src in mirrorable}
+        for future in as_completed(futures):
+            name, success, msg = future.result()
+            status = "OK" if success else "FAIL"
+            typer.echo(f"  [{status}] {name}: {msg}")
+            if success:
+                ok += 1
+            else:
+                fail += 1
+
+    typer.echo(f"\n{ok} mirrored, {fail} failed")
+    if fail:
+        raise typer.Exit(1)
 
 
 @app.command("list")
@@ -609,7 +617,7 @@ def batch(
             write_predictions(results, out, model)
 
     if attempts > 1:
-        _print_pass_at_k(all_attempt_results, tasks, base_out)
+        _print_pass_at_k(all_attempt_results, tasks, base_out, adapter)
 
 
 if __name__ == "__main__":
