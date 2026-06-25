@@ -70,6 +70,7 @@ class AgentEnvConfig(BaseModel):
     image: str | None = None
     experiment_id: str | None = None
     pool_ref: str | None = None
+    attach_session: str | None = None
     gateway_url: str | None = None
     api_key: str | None = None
     namespace: str | None = None
@@ -688,13 +689,9 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
 
     image = _resolve_str(config.image, "AGENTM_AGENT_ENV_IMAGE", None)
     pool_ref = _resolve_str(config.pool_ref, "AGENTM_AGENT_ENV_POOL_REF", None)
-    if not image and not pool_ref:
-        raise RuntimeError(
-            "operations backend 'agent_env': one of 'image' (managed pool, default) or "
-            "'pool_ref' (legacy pre-created WarmPool) is required. Set the "
-            "atom config field, or use AGENTM_AGENT_ENV_IMAGE / "
-            "AGENTM_AGENT_ENV_POOL_REF."
-        )
+    attach_session = _resolve_str(
+        config.attach_session, "AGENTM_AGENT_ENV_ATTACH_SESSION", None
+    )
     gateway_url = _resolve_str(
         config.gateway_url, "AGENTM_AGENT_ENV_GATEWAY_URL", "http://localhost:8080"
     ) or "http://localhost:8080"
@@ -705,8 +702,15 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     timeout_value: float | None = config.timeout
     idle_value: int | None = config.idle_timeout_seconds
     api_key = _resolve_str(config.api_key, "AGENTM_AGENT_ENV_API_KEY", None)
+    owned = True
     session: Any
-    if image:
+    if attach_session:
+        session = arl.SandboxSession.attach(
+            attach_session, gateway_url=gateway_url, api_key=api_key,
+        )
+        owned = False
+        logger.info("agent_env: attached to existing sandbox {}", attach_session)
+    elif image:
         experiment_id = _resolve_str(
             config.experiment_id,
             "AGENTM_AGENT_ENV_EXPERIMENT_ID",
@@ -720,8 +724,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             workspace_dir=work_dir,
             api_key=api_key,
         )
-    else:
-        assert pool_ref is not None
+    elif pool_ref:
         session = arl.SandboxSession(
             pool_ref=pool_ref,
             namespace=namespace,
@@ -730,11 +733,18 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             idle_timeout_seconds=idle_value,
             api_key=api_key,
         )
-    session.create_sandbox()
-
-    _inject_gh_token(session, work_dir)
-    _clone_repo_into_sandbox(session, work_dir)
-    _upload_skills_to_sandbox(session, gateway_url, work_dir)
+    else:
+        raise RuntimeError(
+            "operations backend 'agent_env': one of 'attach_session', 'image', "
+            "or 'pool_ref' is required. Set the atom config field or use "
+            "AGENTM_AGENT_ENV_ATTACH_SESSION / AGENTM_AGENT_ENV_IMAGE / "
+            "AGENTM_AGENT_ENV_POOL_REF."
+        )
+    if owned:
+        session.create_sandbox()
+        _inject_gh_token(session, work_dir)
+        _clone_repo_into_sandbox(session, work_dir)
+        _upload_skills_to_sandbox(session, gateway_url, work_dir)
 
     api.register_operations(
         file=_AgentEnvFileOperations(session, default_work_dir=work_dir),
@@ -749,11 +759,11 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     )
 
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
+        if not owned:
+            return
         try:
             session.delete_sandbox()
         except Exception as exc:  # noqa: BLE001
-            # A failed sandbox deletion can orphan a remote (k8s) sandbox —
-            # surface it so the leak is diagnosable.
             logger.warning("agent_env: sandbox deletion failed on shutdown: {}", exc)
         try:
             session.close()
