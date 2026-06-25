@@ -543,62 +543,72 @@ def batch(
 
     prev_handler = signal.signal(signal.SIGINT, _on_sigint)
 
-    all_attempt_results: list[dict[str, dict]] = []
+    # Build flat job list: (attempt_idx, task) for all attempts
+    jobs: list[tuple[int, TaskSpec]] = []
+    for attempt_idx in range(attempts):
+        out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
+        out.mkdir(parents=True, exist_ok=True)
+        for t in tasks:
+            jobs.append((attempt_idx, t))
+
+    total_jobs = len(jobs)
+    typer.echo(
+        f"Batch: {len(tasks)} tasks × {attempts} attempt(s) = {total_jobs} jobs | "
+        f"bench={bench} | model={model} | concurrency={concurrency}"
+    )
+    typer.echo(f"Results: {base_out}")
+    typer.echo("")
+
+    # Collect results per attempt
+    all_attempt_results: list[dict[str, dict]] = [{} for _ in range(attempts)]
+    completed = 0
 
     try:
-        for attempt_idx in range(attempts):
-            if interrupted:
-                break
-
-            out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
-            out.mkdir(parents=True, exist_ok=True)
-
-            typer.echo(f"{'=' * 60}")
-            if attempts > 1:
-                typer.echo(f"Attempt {attempt_idx + 1}/{attempts}")
-            typer.echo(
-                f"Batch: {len(tasks)} tasks | bench={bench} | "
-                f"model={model} | concurrency={concurrency}"
-            )
-            typer.echo(f"Results: {out}")
-            typer.echo("")
-
-            results: dict[str, dict] = {}
-            with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                pending: dict[object, str] = {}
-                for t in tasks:
-                    if interrupted:
-                        break
-                    f = pool.submit(
-                        _run_and_eval_one, t,
-                        adapter=adapter, source=resolved_source,
-                        model=model, gateway=gateway,
-                        registry=registry, prefix=prefix, tag=tag,
-                        out=out, eval_timeout=eval_timeout,
-                        api_key=api_key,
-                    )
-                    pending[f] = t.name
-                for future in as_completed(pending):
-                    name = pending[future]
-                    try:
-                        r = future.result()
-                        results[name] = r
-                        typer.echo(adapter.format_score_line(r))
-                    except Exception as e:
-                        typer.echo(f"  [ERROR] {name}: {e}")
-
-            all_attempt_results.append(results)
-            _print_summary_table(results, adapter)
-
-            done = sum(1 for r in results.values() if r.get("status") == "done")
-            typer.echo(f"\n{done}/{len(tasks)} completed")
-
-            if bench.startswith("swebench"):
-                write_predictions(results, out, model)
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            pending: dict[object, tuple[int, str]] = {}
+            for attempt_idx, t in jobs:
+                if interrupted:
+                    break
+                out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
+                f = pool.submit(
+                    _run_and_eval_one, t,
+                    adapter=adapter, source=resolved_source,
+                    model=model, gateway=gateway,
+                    registry=registry, prefix=prefix, tag=tag,
+                    out=out, eval_timeout=eval_timeout,
+                    api_key=api_key,
+                )
+                pending[f] = (attempt_idx, t.name)
+            for future in as_completed(pending):
+                attempt_idx, name = pending[future]
+                completed += 1
+                attempt_label = f"[a{attempt_idx}] " if attempts > 1 else ""
+                try:
+                    r = future.result()
+                    all_attempt_results[attempt_idx][name] = r
+                    line = adapter.format_score_line(r)
+                    typer.echo(f"  {attempt_label}{line.strip()} ({completed}/{total_jobs})")
+                except Exception as e:
+                    typer.echo(f"  {attempt_label}[ERROR] {name}: {e} ({completed}/{total_jobs})")
     finally:
         signal.signal(signal.SIGINT, prev_handler)
 
-    if attempts > 1 and all_attempt_results:
+    # Per-attempt summaries
+    for attempt_idx in range(attempts):
+        results = all_attempt_results[attempt_idx]
+        if not results:
+            continue
+        if attempts > 1:
+            typer.echo(f"\n{'=' * 60}")
+            typer.echo(f"Attempt {attempt_idx}")
+        _print_summary_table(results, adapter)
+        done = sum(1 for r in results.values() if r.get("status") == "done")
+        typer.echo(f"\n{done}/{len(tasks)} completed")
+        if bench.startswith("swebench"):
+            out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
+            write_predictions(results, out, model)
+
+    if attempts > 1:
         _print_pass_at_k(all_attempt_results, tasks, base_out)
 
 
