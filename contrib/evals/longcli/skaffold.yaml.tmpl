@@ -1,0 +1,60 @@
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: terminal-bench-images
+
+# Auto-generated from skaffold.yaml.tmpl — do not edit directly.
+# Usage: bash contrib/evals/longcli/build.sh [--push]
+
+build:
+  tagPolicy:
+    envTemplate:
+      template: "{{.IMAGE_NAME}}:${TAG:-v0}"
+  local:
+    concurrency: 4
+    useBuildkit: true
+    push: false
+  artifacts:
+    # --- xv6 kernel tasks (MIT 6.1810) ---
+    - image: ${REGISTRY}/longcli-61810-cow
+      context: ${LONGCLI_DIR}/tasks_long_cli/61810_cow
+    - image: ${REGISTRY}/longcli-61810-fs
+      context: ${LONGCLI_DIR}/tasks_long_cli/61810_fs
+    - image: ${REGISTRY}/longcli-61810-lock
+      context: ${LONGCLI_DIR}/tasks_long_cli/61810_lock
+    - image: ${REGISTRY}/longcli-61810-mmap
+      context: ${LONGCLI_DIR}/tasks_long_cli/61810_mmap
+    - image: ${REGISTRY}/longcli-61810-net
+      context: ${LONGCLI_DIR}/tasks_long_cli/61810_net
+    - image: ${REGISTRY}/longcli-61810-pgtbl
+      context: ${LONGCLI_DIR}/tasks_long_cli/61810_pgtbl
+    - image: ${REGISTRY}/longcli-61810-syscall
+      context: ${LONGCLI_DIR}/tasks_long_cli/61810_syscall
+    - image: ${REGISTRY}/longcli-61810-thread
+      context: ${LONGCLI_DIR}/tasks_long_cli/61810_thread
+    - image: ${REGISTRY}/longcli-61810-traps
+      context: ${LONGCLI_DIR}/tasks_long_cli/61810_traps
+    - image: ${REGISTRY}/longcli-61810-util
+      context: ${LONGCLI_DIR}/tasks_long_cli/61810_util
+    # --- C++ tasks ---
+    - image: ${REGISTRY}/longcli-ap1400-2-hw26
+      context: ${LONGCLI_DIR}/tasks_long_cli/ap1400_2_hw26
+    - image: ${REGISTRY}/longcli-ap1400-2-hw35
+      context: ${LONGCLI_DIR}/tasks_long_cli/ap1400_2_hw35
+    - image: ${REGISTRY}/longcli-cmu15-445-p0
+      context: ${LONGCLI_DIR}/tasks_long_cli/cmu15_445_p0
+    - image: ${REGISTRY}/longcli-cmu15-445-p1
+      context: ${LONGCLI_DIR}/tasks_long_cli/cmu15_445_p1
+    - image: ${REGISTRY}/longcli-cmu15-445-p2
+      context: ${LONGCLI_DIR}/tasks_long_cli/cmu15_445_p2
+    # --- Python (CS61A) tasks ---
+    - image: ${REGISTRY}/longcli-cs61-fa24-ants
+      context: ${LONGCLI_DIR}/tasks_long_cli/cs61_fa24_ants
+    - image: ${REGISTRY}/longcli-cs61-fa24-cats
+      context: ${LONGCLI_DIR}/tasks_long_cli/cs61_fa24_cats
+    - image: ${REGISTRY}/longcli-cs61-fa24-hog
+      context: ${LONGCLI_DIR}/tasks_long_cli/cs61_fa24_hog
+    - image: ${REGISTRY}/longcli-cs61-fa24-hw08
+      context: ${LONGCLI_DIR}/tasks_long_cli/cs61_fa24_hw08
+    - image: ${REGISTRY}/longcli-cs61-fa24-scheme
+      context: ${LONGCLI_DIR}/tasks_long_cli/cs61_fa24_scheme
