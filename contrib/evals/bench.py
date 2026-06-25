@@ -287,5 +287,110 @@ def run(
     raise typer.Exit(result.returncode)
 
 
+@app.command()
+def batch(
+    repo: Annotated[
+        Path,
+        typer.Option("--repo", help="Directory containing task subdirectories."),
+    ],
+    model: Annotated[str, typer.Option(help="AgentM model profile.")] = "glm47",
+    gateway: Annotated[str, typer.Option(help="ARL gateway URL.")] = "http://localhost:28080",
+    registry: Annotated[str, typer.Option(help="Registry prefix.")] = "opspai",
+    prefix: Annotated[str, typer.Option(help="Image name prefix.")] = "longcli",
+    tag: Annotated[str, typer.Option(help="Image tag.")] = "v0",
+    concurrency: Annotated[int, typer.Option("-j", help="Parallel tasks.")] = 5,
+    results_dir: Annotated[
+        Path,
+        typer.Option("--results", help="Results directory."),
+    ] = Path("/tmp/longcli-results"),
+    task: Annotated[
+        list[str] | None,
+        typer.Option("--task", "-t", help="Only run these tasks (repeatable)."),
+    ] = None,
+) -> None:
+    """Run all tasks in parallel via ARL sandbox."""
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    repo = repo.expanduser().resolve()
+    tasks = _discover_tasks(repo)
+    if task:
+        tasks = [t for t in tasks if t["name"] in task]
+    if not tasks:
+        typer.echo("No tasks found.", err=True)
+        raise typer.Exit(1)
+
+    out = results_dir / model
+    out.mkdir(parents=True, exist_ok=True)
+
+    def _run_one(t: dict) -> dict:
+        name = t["name"]
+        log = out / f"{name}.log"
+        if log.is_file() and "session_id=" in log.read_text():
+            return {"task": name, "status": "skip"}
+
+        image = _image_name(name, registry, prefix, tag)
+        instruction = t.get("instruction", "")
+        if not instruction:
+            return {"task": name, "status": "no_instruction"}
+
+        env = {
+            **os.environ,
+            "AGENTM_AGENT_ENV_IMAGE": image,
+            "AGENTM_AGENT_ENV_GATEWAY_URL": gateway,
+            "AGENTM_AGENT_ENV_EXPERIMENT_ID": f"{prefix}-{model}-{name}",
+        }
+        cmd = [
+            "uv", "run", "agentm",
+            "--scenario", "terminal_bench_arl",
+            "--model", model,
+            "-p", instruction,
+        ]
+        with open(log, "w") as f:
+            result = subprocess.run(cmd, env=env, stdout=f, stderr=subprocess.STDOUT)
+
+        text = log.read_text()
+        if "session_id=" in text:
+            import re
+
+            tools = ""
+            m = re.search(r"tool_calls=(\d+)", text)
+            if m:
+                tools = m.group(1)
+            return {"task": name, "status": "done", "tools": tools}
+        return {"task": name, "status": "fail", "rc": result.returncode}
+
+    typer.echo(
+        f"Batch: {len(tasks)} tasks | model={model} | concurrency={concurrency}"
+    )
+    typer.echo(f"Results: {out}")
+    typer.echo("")
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {pool.submit(_run_one, t): t["name"] for t in tasks}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                r = future.result()
+                status = r["status"]
+                extra = f" tools={r['tools']}" if r.get("tools") else ""
+                typer.echo(f"  [{status.upper()}] {name}{extra}")
+            except Exception as e:
+                typer.echo(f"  [ERROR] {name}: {e}")
+
+    typer.echo("")
+    typer.echo("Summary:")
+    done = skip = fail = 0
+    for t in sorted(tasks, key=lambda x: x["name"]):
+        log = out / f"{t['name']}.log"
+        if log.is_file() and "session_id=" in log.read_text():
+            done += 1
+            typer.echo(f"  ✅ {t['name']}")
+        else:
+            fail += 1
+            typer.echo(f"  ❌ {t['name']}")
+    typer.echo(f"\n{done} done, {fail} failed")
+
+
 if __name__ == "__main__":
     app()
