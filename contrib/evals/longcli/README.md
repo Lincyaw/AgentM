@@ -17,20 +17,19 @@ stored in host ClickHouse for rescue-window fork/replay.
 ## Prerequisites
 
 ```bash
-# 1. kind cluster with ARL deployed
+# 1. Clone longcli-bench (if not already)
+git clone https://github.com/finyorko/longcli-bench.git ~/AoyangSpace/longcli-bench
+
+# 2. Build base images (one-time)
+cd ~/AoyangSpace/longcli-bench/longcli_dockerImage
+docker build -f Dockerfile.make-pytest-base -t tb/make-pytest:v0 .
+docker build -f Dockerfile.c-env-base -t tb/c-env:v0 .
+
+# 3. Build all task images + load into kind (one-time)
+bash contrib/evals/longcli/setup_images.sh
+
+# 4. Verify ARL is running
 kubectl --context kind-arl-agentm get pods -n arl
-
-# 2. Build task Docker images
-cd ~/AoyangSpace/longcli-bench
-for task in tasks_long_cli/*/; do
-  name=$(basename "$task")
-  docker build -t "tb/$name:v0" "$task" -q
-done
-
-# 3. Load into kind
-kind load docker-image tb/*:v0 --name arl-agentm
-
-# 4. Ensure NodePort 28080 maps to gateway
 curl -s http://localhost:28080/healthz
 ```
 
