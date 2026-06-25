@@ -20,31 +20,60 @@ Task images are built from the longcli-bench repo and pushed to a
 container registry. ARL pulls them on demand — no manual loading needed.
 
 ```bash
-# Build + push all 20 task images to docker.io
-bash contrib/evals/longcli/setup_images.sh --push
+# Prerequisites
+git clone https://github.com/finyorko/longcli-bench.git ~/AoyangSpace/longcli-bench
+
+# List all discovered tasks
+uv run python contrib/evals/bench.py list \
+  --repo ~/AoyangSpace/longcli-bench/tasks_long_cli
+
+# Build + push all 20 task images (skaffold, concurrency=4)
+uv run python contrib/evals/bench.py build \
+  --repo ~/AoyangSpace/longcli-bench/tasks_long_cli \
+  --base-dir ~/AoyangSpace/longcli-bench/longcli_dockerImage \
+  --push
+
+# Only build specific tasks
+uv run python contrib/evals/bench.py build \
+  --repo ~/AoyangSpace/longcli-bench/tasks_long_cli \
+  -t cs61_fa24_hog -t 61810_cow \
+  --push
 
 # Custom registry
-bash contrib/evals/longcli/setup_images.sh --registry ghcr.io/myorg --push
-
-# Local only (no push, for kind dev clusters)
-bash contrib/evals/longcli/setup_images.sh --load-kind arl-agentm
+uv run python contrib/evals/bench.py build \
+  --repo ~/AoyangSpace/longcli-bench/tasks_long_cli \
+  --registry ghcr.io/myorg \
+  --push
 ```
 
-Prerequisites for building:
-```bash
-git clone https://github.com/finyorko/longcli-bench.git ~/AoyangSpace/longcli-bench
-```
+Pre-built images are available at `docker.io/opspai/longcli-*:v0`.
 
-The script builds base images (`tb/make-pytest:v0`, `tb/c-env:v0`) from
-`longcli_dockerImage/`, then builds each task image and tags as
-`<registry>/longcli-<task>:<tag>`.
+The `bench.py` CLI works with any terminal-bench-format benchmark — any
+directory containing task subdirectories with `Dockerfile` + `INSTRUCTION.md`.
 
 ## Run
 
-### Single task
+### Single task (via bench CLI)
 
 ```bash
-AGENTM_AGENT_ENV_IMAGE="opspai/longcli-cs61_fa24_hog:v0" \
+# Auto-reads instruction from task.yaml
+uv run python contrib/evals/bench.py run \
+  --task cs61_fa24_hog \
+  --repo ~/AoyangSpace/longcli-bench/tasks_long_cli \
+  --model glm47 \
+  --gateway http://<arl-gateway>:8080
+
+# Or pass instruction directly
+uv run python contrib/evals/bench.py run \
+  --task cs61_fa24_hog \
+  -p "Implement the CS61A Hog project tasks in folder cs61-hog." \
+  --model glm47
+```
+
+### Single task (via env vars)
+
+```bash
+AGENTM_AGENT_ENV_IMAGE="opspai/longcli-cs61-fa24-hog:v0" \
 AGENTM_AGENT_ENV_GATEWAY_URL="http://<arl-gateway>:8080" \
 AGENTM_AGENT_ENV_EXPERIMENT_ID="longcli-hog" \
 uv run agentm --scenario terminal_bench_arl --model glm47 \
@@ -63,8 +92,8 @@ bash contrib/evals/longcli/run_batch.sh \
 bash contrib/evals/longcli/run_batch.sh --task cs61_fa24_hog --task 61810_cow
 ```
 
-Results go to `/tmp/longcli-results/<task>.log`. The script auto-skips
-completed tasks (resumable).
+Results go to `/tmp/longcli-results/<task>.log`. Auto-skips completed
+tasks (resumable).
 
 ### Evaluate results
 
