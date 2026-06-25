@@ -712,68 +712,86 @@ def _replay_fork_environment(api: ExtensionAPI, session: Any, work_dir: str) -> 
     assistant_idx = -1
     replayed = errors = 0
 
+    # Collect all tool calls up to the fork turn, paired with their results
+    from agentm.core.abi.messages import ToolResultMessage, ToolResultBlock
+
+    tool_calls: list[tuple[ToolCallBlock, ToolResultBlock | None]] = []
+    pending: dict[str, ToolCallBlock] = {}
+
     for msg in messages:
-        if not isinstance(msg, AssistantMessage):
-            continue
-        assistant_idx += 1
-        if assistant_idx > max_turn:
-            break
-        for block in msg.content:
-            if not isinstance(block, ToolCallBlock):
-                continue
-            tool = block.name
-            args = block.arguments
-            try:
-                if tool in ("edit", "edit_file"):
-                    path = args.get("path") or args.get("file_path") or ""
-                    old_str = args.get("old_string", "")
-                    new_str = args.get("new_string", "")
-                    if path and old_str:
-                        rel = path.lstrip("/")
-                        if rel.startswith("app/"):
-                            rel = rel[4:]
-                        content = session._client.download_file(
-                            session._session_id, rel
-                        ).decode("utf-8", errors="replace")
-                        updated = content.replace(old_str, new_str, 1)
-                        if updated != content:
-                            session._client.upload_file(
-                                session._session_id, rel,
-                                base64.b64encode(updated.encode()).decode(),
-                                encoding="base64",
-                            )
-                            replayed += 1
-                elif tool in ("write", "write_file"):
-                    path = args.get("path") or args.get("file_path") or ""
-                    file_content = args.get("content", "")
-                    if path and file_content:
-                        rel = path.lstrip("/")
-                        if rel.startswith("app/"):
-                            rel = rel[4:]
-                        session._client.upload_file(
-                            session._session_id, rel,
-                            base64.b64encode(file_content.encode()).decode(),
-                            encoding="base64",
-                        )
-                        replayed += 1
-                elif tool in ("bash", "tool_bash"):
-                    cmd = args.get("cmd") or args.get("command") or ""
-                    skip_kw = ["make grade", "make qemu", "qemu-system",
-                               "timeout", "python3 ok", "make test", "ctest"]
-                    if cmd and not any(kw in cmd for kw in skip_kw):
-                        session.execute([{
-                            "name": "replay",
-                            "command": ["bash", "-lc", cmd],
-                            "work_dir": work_dir,
-                        }])
-                        replayed += 1
-            except Exception:  # noqa: BLE001
-                errors += 1
+        if isinstance(msg, AssistantMessage):
+            assistant_idx += 1
+            if assistant_idx > max_turn:
+                break
+            for block in msg.content:
+                if isinstance(block, ToolCallBlock):
+                    pending[block.id] = block
+        elif isinstance(msg, ToolResultMessage):
+            for block in msg.content:
+                if isinstance(block, ToolResultBlock):
+                    tc = pending.pop(block.tool_call_id, None)
+                    if tc is not None:
+                        tool_calls.append((tc, block))
+    # Any tool calls without results
+    for tc in pending.values():
+        tool_calls.append((tc, None))
+
+    # Replay every tool call by re-executing its arguments in the sandbox.
+    # Read-only tools (read, grep, glob, ls) produce no side effects and
+    # are harmless to replay; the sandbox simply discards their output.
+    for tc, result in tool_calls:
+        args = tc.arguments
+        try:
+            session.execute([{
+                "name": f"replay:{tc.name}",
+                "command": _tool_call_to_command(tc.name, args, work_dir),
+                "work_dir": work_dir,
+            }])
+            replayed += 1
+        except Exception:  # noqa: BLE001
+            errors += 1
 
     logger.info(
         "agent_env: fork replay complete — {} actions replayed, {} errors",
         replayed, errors,
     )
+
+
+def _tool_call_to_command(name: str, args: dict[str, Any], work_dir: str) -> list[str]:
+    """Convert a tool call into a shell command for sandbox replay."""
+    cmd = args.get("cmd") or args.get("command") or ""
+    path = args.get("path") or args.get("file_path") or ""
+    content = args.get("content") or ""
+    old_string = args.get("old_string") or ""
+    new_string = args.get("new_string") or ""
+
+    if cmd:
+        return ["bash", "-lc", cmd]
+
+    if content and path:
+        abs_path = path if path.startswith("/") else os.path.join(work_dir, path)
+        escaped_content = base64.b64encode(content.encode()).decode()
+        return ["bash", "-c",
+                f"mkdir -p $(dirname {shlex.quote(abs_path)}) && "
+                f"echo {shlex.quote(escaped_content)} | base64 -d > {shlex.quote(abs_path)}"]
+
+    if old_string and new_string and path:
+        abs_path = path if path.startswith("/") else os.path.join(work_dir, path)
+        py_script = (
+            "import sys; "
+            f"p={abs_path!r}; "
+            "d=open(p).read(); "
+            f"o={old_string!r}; n={new_string!r}; "
+            "r=d.replace(o,n,1); "
+            "open(p,'w').write(r) if r!=d else None"
+        )
+        return ["python3", "-c", py_script]
+
+    if path:
+        abs_path = path if path.startswith("/") else os.path.join(work_dir, path)
+        return ["cat", abs_path]
+
+    return ["true"]
 
 
 def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
