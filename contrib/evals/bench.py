@@ -335,12 +335,18 @@ def _parse_tb1_scores(session: object, eval_out: str) -> dict:
         try:
             f2p_out = session._client.download_file(  # type: ignore[attr-defined]
                 session._session_id, "test_output/f2p_output.txt"  # type: ignore[attr-defined]
-            ).decode()
+            ).decode("utf-8", errors="replace")
             m = re.search(r"Score:\s*(\d+)\s*/\s*(\d+)", f2p_out)
             if m:
                 got, total = int(m.group(1)), int(m.group(2))
                 f2p = {"is_pass": 1 if got == total else 0,
                        "step_score": got / total if total else 0}
+            else:
+                passed = len(re.findall(r"PASSED", f2p_out))
+                failed = len(re.findall(r"FAILED", f2p_out))
+                if passed + failed > 0:
+                    f2p = {"is_pass": 1 if failed == 0 else 0,
+                           "step_score": passed / (passed + failed)}
         except Exception:  # noqa: S110
             pass
 
@@ -349,7 +355,7 @@ def _parse_tb1_scores(session: object, eval_out: str) -> dict:
         data = session._client.download_file(  # type: ignore[attr-defined]
             session._session_id, "test_output/p2p_output.txt"  # type: ignore[attr-defined]
         )
-        text = data.decode()
+        text = data.decode("utf-8", errors="replace")
         passed = len(re.findall(r"PASSED", text))
         failed = len(re.findall(r"FAILED", text))
         if passed + failed > 0:
@@ -644,10 +650,10 @@ def _run_and_eval_one(
     # --- Agent phase ---
     session_id = None
     if log.is_file():
-        text = log.read_text()
-        m = re.search(r"session_id=(\S+)", text)
+        raw = log.read_bytes()
+        m = re.search(rb"session_id=(\S+)", raw)
         if m:
-            session_id = m.group(1)
+            session_id = m.group(1).decode()
 
     if session_id is None:
         prompt = task.prompt
@@ -676,16 +682,16 @@ def _run_and_eval_one(
                 with _active_procs_lock:
                     _active_procs.discard(proc)
 
-        text = log.read_text()
-        m = re.search(r"session_id=(\S+)", text)
+        raw = log.read_bytes()
+        m = re.search(rb"session_id=(\S+)", raw)
         if m:
-            session_id = m.group(1)
+            session_id = m.group(1).decode()
 
     if session_id is None:
         return {"task": name, "status": "agent_failed"}
 
-    tools_m = re.search(r"tool_calls=(\d+)", log.read_text())
-    tools_count = tools_m.group(1) if tools_m else "?"
+    tools_m = re.search(rb"tool_calls=(\d+)", log.read_bytes())
+    tools_count = tools_m.group(1).decode() if tools_m else "?"
 
     # --- Eval phase ---
     if score_file.is_file():
