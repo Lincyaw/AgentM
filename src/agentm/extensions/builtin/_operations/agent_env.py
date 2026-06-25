@@ -77,6 +77,11 @@ class AgentEnvConfig(BaseModel):
     work_dir: str | None = None
     timeout: float | None = None
     idle_timeout_seconds: int | None = None
+    create_timeout: float | None = None
+    cpu_request: str | None = None
+    cpu_limit: str | None = None
+    memory_request: str | None = None
+    memory_limit: str | None = None
 
 def _resolve_str(value: str | None, env_var: str, default: str | None) -> str | None:
     if isinstance(value, str) and value:
@@ -757,6 +762,29 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     timeout_value: float | None = config.timeout
     idle_value: int | None = config.idle_timeout_seconds
     api_key = _resolve_str(config.api_key, "AGENTM_AGENT_ENV_API_KEY", None)
+    create_timeout = float(
+        _resolve_str(None, "AGENTM_AGENT_ENV_CREATE_TIMEOUT", None) or "0"
+    ) or config.create_timeout or 600.0
+
+    cpu_req = _resolve_str(config.cpu_request, "AGENTM_AGENT_ENV_CPU_REQUEST", None)
+    cpu_lim = _resolve_str(config.cpu_limit, "AGENTM_AGENT_ENV_CPU_LIMIT", None)
+    mem_req = _resolve_str(config.memory_request, "AGENTM_AGENT_ENV_MEMORY_REQUEST", None)
+    mem_lim = _resolve_str(config.memory_limit, "AGENTM_AGENT_ENV_MEMORY_LIMIT", None)
+    resources = None
+    if any((cpu_req, cpu_lim, mem_req, mem_lim)):
+        from arl.session import ResourceRequirements  # type: ignore[import-not-found]
+        req: dict[str, str] = {}
+        lim: dict[str, str] = {}
+        if cpu_req:
+            req["cpu"] = cpu_req
+        if mem_req:
+            req["memory"] = mem_req
+        if cpu_lim:
+            lim["cpu"] = cpu_lim
+        if mem_lim:
+            lim["memory"] = mem_lim
+        resources = ResourceRequirements(requests=req, limits=lim)
+
     owned = True
     session: Any
     if attach_session:
@@ -780,6 +808,8 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             gateway_url=gateway_url,
             workspace_dir=work_dir,
             api_key=api_key,
+            timeout=create_timeout,
+            resources=resources,
         )
     elif pool_ref:
         session = arl.SandboxSession(

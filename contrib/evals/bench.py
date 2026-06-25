@@ -93,13 +93,8 @@ class BenchAdapter(Protocol):
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _safe_image_slug(name: str) -> str:
-    return name.replace("_", "-")
-
-
 def _tb1_image_name(task_name: str, registry: str, prefix: str, tag: str) -> str:
-    safe = _safe_image_slug(task_name)
-    return f"{registry}/{prefix}-{safe}:{tag}"
+    return f"{registry}/{prefix}-{task_name}:{tag}"
 
 
 def _upload_file_to_sandbox(session: object, path: str, content: bytes) -> None:
@@ -114,9 +109,10 @@ def _upload_file_to_sandbox(session: object, path: str, content: bytes) -> None:
 def _load_trace_tools(session_id: str) -> list[dict]:
     result = subprocess.run(
         ["agentm", "trace", "tools", "--session", session_id, "--format", "ndjson"],
-        capture_output=True, text=True,
+        capture_output=True,
     )
-    return [json.loads(line) for line in result.stdout.strip().split("\n") if line.strip()]
+    text = result.stdout.decode("utf-8", errors="replace")
+    return [json.loads(line) for line in text.strip().split("\n") if line.strip()]
 
 
 def _replay_tools_to_sandbox(
@@ -256,7 +252,9 @@ class TerminalBench1Adapter:
         }])
         eval_out = r.results[0].output.stdout
 
-        return _parse_tb1_scores(session, eval_out)
+        scores = _parse_tb1_scores(session, eval_out)
+        scores["eval_output"] = eval_out or ""
+        return scores
 
 
 def _detect_project_folder_tb1(task_dir: Path) -> str:
@@ -471,7 +469,7 @@ class TerminalBench2Adapter:
 
         return {
             "reward": reward,
-            "eval_output": eval_out[:2000] if eval_out else "",
+            "eval_output": eval_out or "",
         }
 
 
@@ -621,6 +619,10 @@ def _generate_skaffold(tasks: list[TaskSpec], registry: str, prefix: str, tag: s
 # Core run+eval logic
 # ---------------------------------------------------------------------------
 
+_active_procs: set[subprocess.Popen] = set()  # type: ignore[type-arg]
+_active_procs_lock = __import__("threading").Lock()
+
+
 def _run_and_eval_one(
     task: TaskSpec, *,
     adapter: BenchAdapter,
@@ -628,6 +630,7 @@ def _run_and_eval_one(
     model: str, gateway: str,
     registry: str, prefix: str, tag: str,
     out: Path, eval_timeout: int,
+    api_key: str = "",
 ) -> dict:
     """Run agent + evaluate one task. Returns result dict."""
     import arl
@@ -664,7 +667,14 @@ def _run_and_eval_one(
             "-p", prompt,
         ]
         with open(log, "w") as f:
-            subprocess.run(cmd, env=env, stdout=f, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen(cmd, env=env, stdout=f, stderr=subprocess.STDOUT)
+            with _active_procs_lock:
+                _active_procs.add(proc)
+            try:
+                proc.wait()
+            finally:
+                with _active_procs_lock:
+                    _active_procs.discard(proc)
 
         text = log.read_text()
         m = re.search(r"session_id=(\S+)", text)
@@ -682,11 +692,18 @@ def _run_and_eval_one(
         scores = json.loads(score_file.read_text())
         return {"task": name, "status": "done", "tools": tools_count, **scores}
 
+    from arl.session import ResourceRequirements  # type: ignore[import-not-found]
     session = arl.ManagedSession(
         image=image,
         experiment_id=f"eval-{model}-{name}",
         gateway_url=gateway,
         workspace_dir="/app",
+        api_key=api_key or None,
+        timeout=max(600.0, eval_timeout * 2.0),
+        resources=ResourceRequirements(
+            requests={"cpu": "4", "memory": "8Gi"},
+            limits={"cpu": "8", "memory": "16Gi"},
+        ),
     )
     session.create_sandbox()
 
@@ -946,8 +963,13 @@ def batch(
     results_dir: Annotated[Path, typer.Option("--results")] = Path("/tmp/bench-results"),
     eval_timeout: Annotated[int, typer.Option("--eval-timeout")] = 300,
     task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
+    api_key: Annotated[str, typer.Option("--api-key", envvar="AGENTM_AGENT_ENV_API_KEY")] = "",
 ) -> None:
-    """Run all tasks in parallel, then evaluate. Results include scores."""
+    """Run all tasks in parallel, then evaluate. Results include scores.
+
+    Ctrl-C stops submitting new tasks and waits for in-flight ones to finish.
+    """
+    import signal
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     resolved_source = _resolve_source(repo, source, bench)
@@ -966,26 +988,79 @@ def batch(
     typer.echo(f"Results: {out}")
     typer.echo("")
 
-    results: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = {
-            pool.submit(
-                _run_and_eval_one, t,
-                adapter=adapter, source=resolved_source,
-                model=model, gateway=gateway,
-                registry=registry, prefix=prefix, tag=tag,
-                out=out, eval_timeout=eval_timeout,
-            ): t.name
-            for t in tasks
-        }
-        for future in as_completed(futures):
-            name = futures[future]
+    interrupted = False
+
+    def _kill_children() -> None:
+        with _active_procs_lock:
+            procs = list(_active_procs)
+        for p in procs:
             try:
-                r = future.result()
-                results[name] = r
-                typer.echo(_format_score_line(r, bench))
-            except Exception as e:
-                typer.echo(f"  [ERROR] {name}: {e}")
+                p.terminate()
+            except OSError:
+                pass
+        for p in procs:
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+
+    def _cleanup_arl_sessions() -> None:
+        try:
+            import arl
+            client = arl.GatewayClient(base_url=gateway, api_key=api_key or None)
+            for t in tasks:
+                for exp_id in [
+                    f"{prefix}-{model}-{t.name}",
+                    f"eval-{model}-{t.name}",
+                ]:
+                    try:
+                        client.delete_experiment(exp_id)
+                    except Exception:  # noqa: S110, BLE001
+                        pass
+            client.close()
+        except Exception:  # noqa: S110, BLE001
+            pass
+
+    def _on_sigint(_sig: int, _frame: object) -> None:
+        nonlocal interrupted
+        if interrupted:
+            typer.echo("\nForce quit.")
+            raise SystemExit(1)
+        interrupted = True
+        typer.echo("\nCtrl-C — terminating child processes...")
+        _kill_children()
+        typer.echo("Cleaning up ARL sessions...")
+        _cleanup_arl_sessions()
+        typer.echo("Done. Collecting partial results...")
+
+    prev_handler = signal.signal(signal.SIGINT, _on_sigint)
+
+    results: dict[str, dict] = {}
+    try:
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            pending: dict[object, str] = {}
+            for t in tasks:
+                if interrupted:
+                    break
+                f = pool.submit(
+                    _run_and_eval_one, t,
+                    adapter=adapter, source=resolved_source,
+                    model=model, gateway=gateway,
+                    registry=registry, prefix=prefix, tag=tag,
+                    out=out, eval_timeout=eval_timeout,
+                    api_key=api_key,
+                )
+                pending[f] = t.name
+            for future in as_completed(pending):
+                name = pending[future]
+                try:
+                    r = future.result()
+                    results[name] = r
+                    typer.echo(_format_score_line(r, bench))
+                except Exception as e:
+                    typer.echo(f"  [ERROR] {name}: {e}")
+    finally:
+        signal.signal(signal.SIGINT, prev_handler)
 
     _print_summary_table(results, bench)
 
