@@ -31,7 +31,7 @@ from agentm.core.lib.read_state import (
 )
 from agentm.core.observability.redact import redact_headers, redact_messages
 from agentm.core.lib.ref import Ref
-from agentm.core.lib.render import final_summary
+from agentm.core.lib.render import assistant_text, final_summary
 from agentm.core.lib.serialization import to_jsonable
 from agentm.core.lib.shutdown import DEFAULT_SHUTDOWN_GRACE_SECONDS
 from agentm.core.lib.stream import StreamAccumulator, ToolSpecAdapter, encode_tool_args

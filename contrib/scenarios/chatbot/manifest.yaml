@@ -128,6 +128,12 @@ extensions:
   # === project-local persistent memory ======================================
   - module: agentm.extensions.builtin.memory
 
+  # === session-scoped task tracking ==========================================
+  - module: agentm.extensions.builtin.task_tracking
+
+  # === condition-driven session continuation =================================
+  - module: agentm.extensions.builtin.goal
+
   # === budgets / runway =====================================================
   # Loop turn / tool-call budget for the session.
   - module: agentm.extensions.builtin.loop_budget

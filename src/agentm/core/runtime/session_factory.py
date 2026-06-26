@@ -200,6 +200,7 @@ async def _spawn_child_session(
             f"got {type(child_config).__name__}"
         )
     spec = AgentSessionConfig(**{**child_config.__dict__})
+    spec.bus = None  # force fresh EventBus — never inherit the parent's
     spec.parent_bus = bus
     spec.parent_session_id = session_id
     spec.root_session_id = root_session_id

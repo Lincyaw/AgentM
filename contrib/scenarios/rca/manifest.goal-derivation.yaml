@@ -1,0 +1,22 @@
+name: rca:goal-derivation
+description: RCA investigator tools without finalize — for goal condition derivation.
+
+includes:
+  - overlays/runtime-context.yaml
+  - overlays/skills.yaml
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: rca.default.duckdb_sql
+    config:
+      exclude:
+        - conclusion.parquet
+  - module: agentm.extensions.builtin.observability
+  - module: rca.default.fpg_contract
+  - module: rca.default.prompt_loader
+    config:
+      prompt: default/default.md
+      personas: false
+  - module: agentm.extensions.builtin.tool_index
