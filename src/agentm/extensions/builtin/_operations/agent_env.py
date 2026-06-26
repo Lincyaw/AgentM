@@ -48,10 +48,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import os
 import shlex
-import urllib.request
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
@@ -324,9 +322,8 @@ class _AgentEnvResourceWriter:
     fail-safe by construction: the agent literally cannot mutate its own
     code from a sandbox session.
 
-    Read and write use the ARL gateway HTTP file API (``/v1/sessions/{id}/files``)
-    to bypass the ~8KB stdout limit on ``session.execute``. Mtime tokens and
-    directory operations still use execute (small outputs).
+    Read and write use the ARL SDK file API to bypass the ~8KB stdout limit
+    on ``session.execute``.
     """
 
     def __init__(
@@ -334,13 +331,9 @@ class _AgentEnvResourceWriter:
         session: Any,
         *,
         work_dir: str,
-        gateway_url: str,
-        api_key: str | None = None,
     ) -> None:
         self._session = session
         self._work_dir = work_dir.rstrip("/") or "/"
-        self._gateway_url = gateway_url.rstrip("/")
-        self._api_key = api_key
 
     # --- path classification ---------------------------------------------
 
@@ -395,26 +388,14 @@ class _AgentEnvResourceWriter:
         )
 
     async def _write_bytes(self, abs_path: str, content: bytes) -> tuple[bool, str]:
-        # Use the HTTP file API to bypass the execute stdout/command size limit.
-        session_id = getattr(self._session, "session_id", None)
-        if not session_id:
-            return False, "no session id"
-        # Ensure parent directory exists.
         await self._run(["bash", "-lc", f"mkdir -p \"$(dirname -- {_sh_quote(abs_path)})\""])
-        # Compute the relative path from work_dir for the upload API.
         rel_path = abs_path
         if rel_path.startswith(self._work_dir + "/"):
             rel_path = rel_path[len(self._work_dir) + 1:]
         elif rel_path.startswith(self._work_dir):
             rel_path = rel_path[len(self._work_dir):]
         try:
-            _upload_to_pod(
-                self._gateway_url,
-                session_id,
-                rel_path,
-                content,
-                api_key=self._api_key,
-            )
+            self._session.upload_file(rel_path, content)
             return True, ""
         except Exception as exc:
             return False, str(exc)
@@ -640,28 +621,6 @@ def _pod_exec(session: Any, cmd: str, work_dir: str) -> tuple[str, str, int]:
     out = resp.results[0].output
     return out.stdout, out.stderr, out.exit_code
 
-def _upload_to_pod(
-    gateway_url: str,
-    session_id: str,
-    rel_path: str,
-    payload: bytes,
-    *,
-    api_key: str | None = None,
-) -> None:
-    """Upload bytes to ``rel_path`` (relative to work_dir) via the gateway."""
-    body = json.dumps(
-        {"path": rel_path, "content": base64.b64encode(payload).decode("ascii"), "encoding": "base64"}
-    ).encode("utf-8")
-    url = gateway_url.rstrip("/") + f"/v1/sessions/{session_id}/files"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        authorization = api_key if api_key.startswith("Bearer ") else f"Bearer {api_key}"
-        headers["Authorization"] = authorization
-    req = urllib.request.Request(  # noqa: S310
-        url, data=body, method="POST", headers=headers
-    )
-    with urllib.request.urlopen(req, timeout=300) as resp:  # noqa: S310
-        resp.read()
 
 def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
     """Clone the target repo into the sandbox and checkout the issue branch."""
@@ -711,19 +670,10 @@ def _inject_gh_token(session: Any, work_dir: str) -> None:
     _pod_exec(session, setup_cmd, work_dir)
     logger.info("[agent_env_sync] injected GH_TOKEN into sandbox")
 
-def _upload_skills_to_sandbox(
-    session: Any,
-    gateway_url: str,
-    work_dir: str,
-    *,
-    api_key: str | None = None,
-) -> None:
+def _upload_skills_to_sandbox(session: Any, work_dir: str) -> None:
     """Upload SKILL.md files from ``AGENTM_SKILLS_DIR`` into the sandbox."""
     skills_dir = os.environ.get("AGENTM_SKILLS_DIR")
     if not skills_dir or not os.path.isdir(skills_dir):
-        return
-    session_id = getattr(session, "session_id", None)
-    if not session_id:
         return
     target_base = ".agentm/skills"
     _pod_exec(session, f"mkdir -p {work_dir}/{target_base}", work_dir)
@@ -737,26 +687,14 @@ def _upload_skills_to_sandbox(
                 _pod_exec(session, f"mkdir -p {work_dir}/{target_base}/{entry}", work_dir)
                 try:
                     with open(skill_file, "rb") as fh:
-                        _upload_to_pod(
-                            gateway_url,
-                            session_id,
-                            target,
-                            fh.read(),
-                            api_key=api_key,
-                        )
+                        session.upload_file(target, fh.read())
                     count += 1
                 except Exception as exc:
                     logger.warning("[agent_env_sync] skill upload failed for {entry}: {exc}", entry=entry, exc=exc)
         elif entry.endswith(".md") and os.path.isfile(entry_path):
             try:
                 with open(entry_path, "rb") as fh:
-                    _upload_to_pod(
-                        gateway_url,
-                        session_id,
-                        f"{target_base}/{entry}",
-                        fh.read(),
-                        api_key=api_key,
-                    )
+                    session.upload_file(f"{target_base}/{entry}", fh.read())
                 count += 1
             except Exception as exc:
                 logger.warning("[agent_env_sync] skill upload failed for {entry}: {exc}", entry=entry, exc=exc)
@@ -843,7 +781,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     work_dir = config.work_dir or "/workspace"
     timeout_value: float | None = config.timeout
     idle_value: int | None = config.idle_timeout_seconds
-    api_key = _resolve_str(config.api_key, "AGENTM_AGENT_ENV_API_KEY", None) or os.environ.get("ARL_API_KEY")
+    api_key = _resolve_str(config.api_key, "AGENTM_AGENT_ENV_API_KEY", None)
     delete_on_shutdown = _resolve_bool(
         config.delete_on_shutdown,
         "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN",
@@ -921,7 +859,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         session.create_sandbox()
         _inject_gh_token(session, work_dir)
         _clone_repo_into_sandbox(session, work_dir)
-        _upload_skills_to_sandbox(session, gateway_url, work_dir, api_key=api_key)
+        _upload_skills_to_sandbox(session, work_dir)
 
     file_ops = _AgentEnvFileOperations(session, default_work_dir=work_dir)
     bash_ops = _AgentEnvBashOperations(
@@ -932,8 +870,6 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     writer = _AgentEnvResourceWriter(
         session,
         work_dir=work_dir,
-        gateway_url=gateway_url,
-        api_key=api_key,
     )
 
     api.register_operations(file=file_ops, bash=bash_ops)
