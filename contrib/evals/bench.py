@@ -23,7 +23,7 @@ from typing import Annotated
 import typer
 
 from benchmarks import get_adapter
-from benchmarks.base import TaskSpec, image_name, replay_trajectory
+from benchmarks.base import BenchAdapter, TaskSpec, image_name, replay_trajectory
 
 try:
     import yaml as _yaml
@@ -88,18 +88,50 @@ def _generate_skaffold(tasks: list[TaskSpec], registry: str, prefix: str, tag: s
 
 _active_procs: set[subprocess.Popen] = set()  # type: ignore[type-arg]
 _active_procs_lock = __import__("threading").Lock()
-_active_eval_sessions: set[object] = set()
-_active_eval_lock = __import__("threading").Lock()
+
+_AGENT_ENV_RESOURCE_DEFAULTS = {
+    "AGENTM_AGENT_ENV_CPU_REQUEST": "4",
+    "AGENTM_AGENT_ENV_MEMORY_REQUEST": "8Gi",
+    "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
+    "AGENTM_AGENT_ENV_MEMORY_LIMIT": "16Gi",
+}
+
+
+def _delete_experiment(gateway: str, api_key: str, experiment_id: str) -> None:
+    import arl
+
+    client = arl.GatewayClient(base_url=gateway, api_key=api_key or None)
+    try:
+        client.delete_experiment(experiment_id)
+    finally:
+        client.close()
+
+
+def _find_experiment_session(gateway: str, api_key: str, experiment_id: str) -> str | None:
+    import arl
+
+    client = arl.GatewayClient(base_url=gateway, api_key=api_key or None)
+    try:
+        sessions = client.list_experiment_sessions(experiment_id)
+    finally:
+        client.close()
+    if not sessions:
+        return None
+    sessions = sorted(sessions, key=lambda s: str(getattr(s, "created_at", "") or ""))
+    return sessions[-1].id
 
 
 def _run_and_eval_one(
     task: TaskSpec, *,
-    adapter: object,
+    adapter: BenchAdapter,
     source: str,
     model: str, gateway: str,
     registry: str, prefix: str, tag: str,
     out: Path, eval_timeout: int,
+    agent_timeout: int | None = None,
+    attempt_idx: int | None = None,
     api_key: str = "",
+    eval_mode: str = "same-session",
 ) -> dict:
     """Run agent + evaluate one task. Returns result dict."""
     import arl
@@ -108,13 +140,23 @@ def _run_and_eval_one(
     log = out / f"{name}.log"
     score_file = out / f"{name}.score.json"
 
-    image = adapter.get_image(task, registry, prefix, tag)  # type: ignore[union-attr]
+    image = adapter.get_image(task, registry, prefix, tag)
+    run_id = f"{model}-a{attempt_idx}-{name}" if attempt_idx is not None else f"{model}-{name}"
+    agent_experiment_id = f"{prefix}-{run_id}"
+    eval_experiment_id = f"eval-{run_id}"
+
+    raw_log = log.read_bytes() if log.is_file() else b""
+    tools_m = re.search(rb"tool_calls=(\d+)", raw_log)
+    tools_count = tools_m.group(1).decode() if tools_m else "?"
+
+    if score_file.is_file():
+        scores = json.loads(score_file.read_text())
+        return {"task": name, "status": scores.get("status", "done"), "tools": tools_count, **scores}
 
     # --- Agent phase ---
     session_id = None
-    if log.is_file():
-        raw = log.read_bytes()
-        m = re.search(rb"session_id=(\S+)", raw)
+    if raw_log:
+        m = re.search(rb"session_id=(\S+)", raw_log)
         if m:
             session_id = m.group(1).decode()
 
@@ -127,9 +169,13 @@ def _run_and_eval_one(
             **os.environ,
             "AGENTM_AGENT_ENV_IMAGE": image,
             "AGENTM_AGENT_ENV_GATEWAY_URL": gateway,
-            "AGENTM_AGENT_ENV_EXPERIMENT_ID": f"{prefix}-{model}-{name}",
+            "AGENTM_AGENT_ENV_EXPERIMENT_ID": agent_experiment_id,
             **({"AGENTM_AGENT_ENV_API_KEY": api_key} if api_key else {}),
         }
+        if eval_mode == "same-session":
+            env["AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN"] = "0"
+            for key, value in _AGENT_ENV_RESOURCE_DEFAULTS.items():
+                env.setdefault(key, value)
         cmd = [
             "uv", "run", "agentm",
             "--scenario", "terminal_bench_arl",
@@ -141,7 +187,28 @@ def _run_and_eval_one(
             with _active_procs_lock:
                 _active_procs.add(proc)
             try:
-                proc.wait()
+                try:
+                    proc.wait(timeout=agent_timeout if agent_timeout and agent_timeout > 0 else None)
+                except subprocess.TimeoutExpired:
+                    f.write(f"\n[bench] agent timed out after {agent_timeout}s; terminating\n")
+                    f.flush()
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        f.write("[bench] agent did not exit after TERM; killing\n")
+                        f.flush()
+                        proc.kill()
+                        proc.wait()
+                    result = {
+                        "task": name,
+                        "status": "agent_timeout",
+                        "error": f"agent exceeded timeout {agent_timeout}s",
+                    }
+                    if eval_mode == "same-session":
+                        _delete_experiment(gateway, api_key, agent_experiment_id)
+                    score_file.write_text(json.dumps(result, ensure_ascii=False))
+                    return result
             finally:
                 with _active_procs_lock:
                     _active_procs.discard(proc)
@@ -152,26 +219,54 @@ def _run_and_eval_one(
             session_id = m.group(1).decode()
 
     if session_id is None:
+        if eval_mode == "same-session":
+            _delete_experiment(gateway, api_key, agent_experiment_id)
         return {"task": name, "status": "agent_failed"}
 
     tools_m = re.search(rb"tool_calls=(\d+)", log.read_bytes())
     tools_count = tools_m.group(1).decode() if tools_m else "?"
 
-    # --- Eval phase ---
-    if score_file.is_file():
-        scores = json.loads(score_file.read_text())
-        return {"task": name, "status": "done", "tools": tools_count, **scores}
+    if eval_mode == "same-session":
+        arl_session_id = _find_experiment_session(gateway, api_key, agent_experiment_id)
+        if arl_session_id is None:
+            result = {
+                "task": name,
+                "status": "agent_sandbox_missing",
+                "error": f"no ARL session found for experiment {agent_experiment_id}",
+            }
+            score_file.write_text(json.dumps(result, ensure_ascii=False))
+            return result
+        session = arl.SandboxSession.attach(
+            arl_session_id,
+            gateway_url=gateway,
+            timeout=max(600.0, eval_timeout * 2.0),
+            keep_alive=True,
+            api_key=api_key or None,
+        )
+        try:
+            try:
+                scores = adapter.evaluate(session, task, timeout=eval_timeout)
+            except Exception as exc:  # noqa: BLE001
+                scores = {"status": "eval_failed", "error": str(exc)}
+            score_file.write_text(json.dumps({"task": name, **scores}, ensure_ascii=False))
+            status = scores.get("status", "done")
+            return {"task": name, "status": status, "tools": tools_count, **scores}
+        finally:
+            try:
+                session.delete_sandbox()
+            finally:
+                session.close()
 
     from arl.session import ResourceRequirements  # type: ignore[import-not-found]
     session = arl.ManagedSession(
         image=image,
-        experiment_id=f"eval-{model}-{name}",
+        experiment_id=eval_experiment_id,
         gateway_url=gateway,
         workspace_dir="/app",
         api_key=api_key or None,
         timeout=max(600.0, eval_timeout * 2.0),
         resources=ResourceRequirements(
-            requests={"cpu": "1", "memory": "2Gi"},
+            requests={"cpu": "4", "memory": "8Gi"},
             limits={"cpu": "8", "memory": "16Gi"},
         ),
     )
@@ -180,40 +275,33 @@ def _run_and_eval_one(
     except Exception as e:
         return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": str(e)}
 
-    with _active_eval_lock:
-        _active_eval_sessions.add(session)
     try:
         replay_trajectory(session, session_id)
-        scores = adapter.evaluate(session, task, timeout=eval_timeout)  # type: ignore[union-attr]
+        scores = adapter.evaluate(session, task, timeout=eval_timeout)
     except Exception as e:
-        scores = {"reward": 0.0, "eval_output": "", "error": str(e)}
-        typer.echo(f"  [WARN] eval {name}: {e}", err=True)
+        return {"task": name, "status": "eval_failed", "tools": tools_count, "error": str(e)}
     finally:
-        with _active_eval_lock:
-            _active_eval_sessions.discard(session)
-        eval_exp = f"eval-{model}-{name}"
         try:
-            arl.GatewayClient(
-                base_url=gateway, api_key=api_key or None,
-            ).delete_experiment(eval_exp)
-        except Exception as e:  # noqa: BLE001
-            typer.echo(f"  [WARN] cleanup {eval_exp}: {e}", err=True)
-
-    if scores.get("reward") is None:
-        scores["reward"] = 0.0
+            session.delete_sandbox()
+        except Exception:  # noqa: S110
+            pass
+        try:
+            session.close()
+        except Exception:  # noqa: S110
+            pass
 
     score_file.write_text(json.dumps({"task": name, **scores}, ensure_ascii=False))
 
     return {"task": name, "status": "done", "tools": tools_count, **scores}
 
 
-def _print_summary_table(results: dict[str, dict], adapter: object) -> None:
+def _print_summary_table(results: dict[str, dict], adapter: BenchAdapter) -> None:
     """Print final summary table using adapter methods."""
     typer.echo(f"\n{'=' * 75}")
-    typer.echo(adapter.summary_header())  # type: ignore[union-attr]
+    typer.echo(adapter.summary_header())
     for name in sorted(results):
-        typer.echo(adapter.summary_row(name, results[name]))  # type: ignore[union-attr]
-    footer = adapter.summary_footer(results)  # type: ignore[union-attr]
+        typer.echo(adapter.summary_row(name, results[name]))
+    footer = adapter.summary_footer(results)
     if footer:
         typer.echo(footer)
 
@@ -222,7 +310,7 @@ def _print_pass_at_k(
     all_attempts: list[dict[str, dict]],
     tasks: list[TaskSpec],
     out: Path,
-    adapter: object,
+    adapter: BenchAdapter,
 ) -> None:
     """Compute and print pass@k metrics across multiple attempts."""
     k = len(all_attempts)
@@ -235,20 +323,20 @@ def _print_pass_at_k(
 
     typer.echo(f"\n{'=' * 75}")
     typer.echo(f"  pass@{k} Summary ({k} attempts)")
-    typer.echo(adapter.pass_at_k_header())  # type: ignore[union-attr]
+    typer.echo(adapter.pass_at_k_header())
 
     all_stats: list[dict] = []
     summary_rows = []
     for name in task_names:
         runs = per_task[name]
-        line, stats = adapter.pass_at_k_row(name, runs)  # type: ignore[union-attr]
+        line, stats = adapter.pass_at_k_row(name, runs)
         typer.echo(line)
         all_stats.append(stats)
         summary_rows.append({"task": name, **stats, "attempts": [
             {k: v for k, v in r.items() if k != "eval_output"} for r in runs
         ]})
 
-    typer.echo(adapter.pass_at_k_footer(all_stats, len(task_names)))  # type: ignore[union-attr]
+    typer.echo(adapter.pass_at_k_footer(all_stats, len(task_names)))
 
     summary_file = out / "summary.json"
     pass_count = sum(1 for s in all_stats if s.get("any_pass"))
@@ -500,6 +588,8 @@ def batch(
     concurrency: Annotated[int, typer.Option("-j")] = 5,
     results_dir: Annotated[Path, typer.Option("--results")] = Path("/tmp/bench-results"),
     eval_timeout: Annotated[int, typer.Option("--eval-timeout")] = 300,
+    agent_timeout: Annotated[int, typer.Option("--agent-timeout")] = 0,
+    eval_mode: Annotated[str, typer.Option("--eval-mode")] = "same-session",
     task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
     api_key: Annotated[str, typer.Option("--api-key", envvar="AGENTM_AGENT_ENV_API_KEY")] = "",
     attempts: Annotated[int, typer.Option("--attempts", "-n")] = 1,
@@ -512,11 +602,15 @@ def batch(
     Ctrl-C stops submitting new tasks and waits for in-flight ones to finish.
     """
     import signal
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
     from benchmarks.swebench import write_predictions
 
     resolved_source = _resolve_source(repo, source, bench)
+    if eval_mode not in {"same-session", "replay"}:
+        typer.echo("Error: --eval-mode must be 'same-session' or 'replay'.", err=True)
+        raise typer.Exit(1)
+
     adapter = get_adapter(bench)
     tasks = adapter.discover_tasks(resolved_source)
     if task:
@@ -544,39 +638,22 @@ def batch(
             except subprocess.TimeoutExpired:
                 p.kill()
 
-    def _cleanup_experiments(
-        gw: str, key: str, pfx: str, mdl: str,
-        task_list: list[TaskSpec], n_attempts: int,
-    ) -> None:
+    def _cleanup_arl_sessions(attempt_tasks: list[TaskSpec], attempt_idx: int) -> None:
         try:
             import arl
-            client = arl.GatewayClient(base_url=gw, api_key=key or None)
-            cleaned = 0
-            for t in task_list:
-                for attempt_idx in range(n_attempts):
-                    suffix = f"-a{attempt_idx}-{t.name}" if n_attempts > 1 else f"-{t.name}"
-                    for exp_id in [f"{pfx}-{mdl}{suffix}", f"eval-{mdl}{suffix}"]:
-                        try:
-                            client.delete_experiment(exp_id)
-                            cleaned += 1
-                        except Exception as e:  # noqa: BLE001
-                            typer.echo(f"  [WARN] cleanup {exp_id}: {e}", err=True)
+            client = arl.GatewayClient(base_url=gateway, api_key=api_key or None)
+            for t in attempt_tasks:
+                for exp_id in [
+                    f"{prefix}-{model}-a{attempt_idx}-{t.name}",
+                    f"eval-{model}-a{attempt_idx}-{t.name}",
+                ]:
+                    try:
+                        client.delete_experiment(exp_id)
+                    except Exception:  # noqa: S110, BLE001
+                        pass
             client.close()
-            if cleaned:
-                typer.echo(f"  Cleaned up {cleaned} ARL experiment(s)")
-        except Exception as e:  # noqa: BLE001
-            typer.echo(f"  [WARN] experiment cleanup failed: {e}", err=True)
-
-    def _cleanup_eval_sessions() -> None:
-        with _active_eval_lock:
-            sessions = list(_active_eval_sessions)
-        if sessions:
-            typer.echo(f"  Cleaning up {len(sessions)} eval sandbox(es)...")
-        for s in sessions:
-            try:
-                s.delete_sandbox()  # type: ignore[union-attr]
-            except Exception as e:  # noqa: BLE001
-                typer.echo(f"  [WARN] eval sandbox cleanup: {e}", err=True)
+        except Exception:  # noqa: S110, BLE001
+            pass
 
     def _on_sigint(_sig: int, _frame: object) -> None:
         nonlocal interrupted
@@ -584,9 +661,11 @@ def batch(
             typer.echo("\nForce quit.")
             raise SystemExit(1)
         interrupted = True
-        typer.echo("\nCtrl-C — terminating child processes & eval sandboxes...")
+        typer.echo("\nCtrl-C — terminating child processes...")
         _kill_children()
-        _cleanup_eval_sessions()
+        typer.echo("Cleaning ARL sessions for submitted attempts...")
+        for attempt_idx in range(attempts):
+            _cleanup_arl_sessions(tasks, attempt_idx)
 
     prev_handler = signal.signal(signal.SIGINT, _on_sigint)
 
@@ -601,7 +680,7 @@ def batch(
     total_jobs = len(jobs)
     typer.echo(
         f"Batch: {len(tasks)} tasks × {attempts} attempt(s) = {total_jobs} jobs | "
-        f"bench={bench} | model={model} | concurrency={concurrency}"
+        f"bench={bench} | model={model} | concurrency={concurrency} | eval_mode={eval_mode}"
     )
     typer.echo(f"Results: {base_out}")
     typer.echo("")
@@ -612,7 +691,7 @@ def batch(
 
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            pending: dict[object, tuple[int, str]] = {}
+            pending: dict[Future[dict], tuple[int, str]] = {}
             for attempt_idx, t in jobs:
                 if interrupted:
                     break
@@ -623,7 +702,10 @@ def batch(
                     model=model, gateway=gateway,
                     registry=registry, prefix=prefix, tag=tag,
                     out=out, eval_timeout=eval_timeout,
+                    agent_timeout=agent_timeout,
+                    attempt_idx=attempt_idx if attempts > 1 else None,
                     api_key=api_key,
+                    eval_mode=eval_mode,
                 )
                 pending[f] = (attempt_idx, t.name)
             for future in as_completed(pending):
@@ -639,8 +721,6 @@ def batch(
                     typer.echo(f"  {attempt_label}[ERROR] {name}: {e} ({completed}/{total_jobs})")
     finally:
         signal.signal(signal.SIGINT, prev_handler)
-        _cleanup_eval_sessions()
-        _cleanup_experiments(gateway, api_key, prefix, model, tasks, attempts)
 
     # Per-attempt summaries
     for attempt_idx in range(attempts):
