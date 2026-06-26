@@ -24,6 +24,7 @@ class PeerSession:
 
     peer_id: str
     transport_writer: asyncio.StreamWriter
+    cwd: str | None = None
     last_seen: float = 0.0
     pending_count_hint: int = 0
     # Set when the sender trips the slow-consumer high-water mark on the

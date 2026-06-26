@@ -100,7 +100,8 @@ class SessionManager:
     # -- public -------------------------------------------------------
 
     async def get_or_create(
-        self, session_key: str, scenario: str | None, inbound: InboundBody
+        self, session_key: str, scenario: str | None, inbound: InboundBody,
+        *, cwd: str | None = None,
     ) -> Any:
         async with self._lock:
             sess = self._sessions.get(session_key)
@@ -150,8 +151,9 @@ class SessionManager:
             if self._child_registry is not None:
                 wire_services[CHILD_SESSION_REGISTRY_SERVICE] = self._child_registry
 
+            effective_cwd = cwd or self._cwd
             sess = await self._factory(
-                self._cwd, session_key, scenario, prior_session_id, wire_services
+                effective_cwd, session_key, scenario, prior_session_id, wire_services
             )
             new_id = _extract_session_id(sess)
             if new_id and new_id != prior_session_id:

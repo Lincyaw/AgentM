@@ -237,9 +237,12 @@ class WireServer:
                 )
                 return
 
+            peer_cwd_raw = body.get("cwd")
+            peer_cwd = str(peer_cwd_raw) if isinstance(peer_cwd_raw, str) and peer_cwd_raw.strip() else None
             session = PeerSession(
                 peer_id=peer_id,
                 transport_writer=writer,
+                cwd=peer_cwd,
                 last_seen=time.time(),
                 capabilities=dict(body.get("capabilities") or {}),
             )

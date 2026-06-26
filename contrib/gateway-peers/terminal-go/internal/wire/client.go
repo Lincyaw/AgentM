@@ -25,6 +25,7 @@ type WireClient struct {
 	transport Transport
 	peerName  string
 	token     string
+	cwd       string // working directory stamped on hello
 
 	conn      io.ReadWriteCloser
 	mu        sync.Mutex // protects writes + conn swap
@@ -64,8 +65,8 @@ func (c *WireClient) Capabilities() map[string]any {
 }
 
 // NewWireClient creates a new client (does not connect yet).
-func NewWireClient(transport Transport, peerName string, token string) *WireClient {
-	return &WireClient{
+func NewWireClient(transport Transport, peerName string, token string, opts ...ClientOption) *WireClient {
+	c := &WireClient{
 		transport:     transport,
 		peerName:      peerName,
 		token:         token,
@@ -75,6 +76,18 @@ func NewWireClient(transport Transport, peerName string, token string) *WireClie
 		reconnected:   make(chan struct{}),
 		stopReconnect: make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+// ClientOption configures a WireClient at construction time.
+type ClientOption func(*WireClient)
+
+// WithCwd stamps the peer's working directory on the hello frame.
+func WithCwd(cwd string) ClientOption {
+	return func(c *WireClient) { c.cwd = cwd }
 }
 
 // Connect establishes the connection and performs the hello/welcome handshake.
@@ -85,16 +98,20 @@ func (c *WireClient) Connect(ctx context.Context) error {
 	}
 	c.conn = conn
 
+	helloBody := map[string]any{
+		"peer_name":    c.peerName,
+		"peer_version": "0.1.0",
+		"capabilities": map[string]any{},
+	}
+	if c.cwd != "" {
+		helloBody["cwd"] = c.cwd
+	}
 	hello := &Envelope{
 		V:    2,
 		ID:   NewID(),
 		Kind: KindHello,
 		TS:   Now(),
-		Body: map[string]any{
-			"peer_name":    c.peerName,
-			"peer_version": "0.1.0",
-			"capabilities": map[string]any{},
-		},
+		Body: helloBody,
 	}
 	if c.token != "" {
 		hello.Body["auth"] = map[string]any{"token": c.token}
@@ -211,16 +228,20 @@ func (c *WireClient) reconnect() bool {
 		}
 
 		// Send hello.
+		reconnectBody := map[string]any{
+			"peer_name":    c.peerName,
+			"peer_version": "0.1.0",
+			"capabilities": map[string]any{},
+		}
+		if c.cwd != "" {
+			reconnectBody["cwd"] = c.cwd
+		}
 		hello := &Envelope{
 			V:    2,
 			ID:   NewID(),
 			Kind: KindHello,
 			TS:   Now(),
-			Body: map[string]any{
-				"peer_name":    c.peerName,
-				"peer_version": "0.1.0",
-				"capabilities": map[string]any{},
-			},
+			Body: reconnectBody,
 		}
 		if c.token != "" {
 			hello.Body["auth"] = map[string]any{"token": c.token}

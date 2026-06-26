@@ -150,6 +150,7 @@ class GatewayRuntime:
         self._server: WireServer | None = None
         self._inflight: set[asyncio.Task[Any]] = set()
         self._peer_channels: dict[str, str] = {}
+        self._peer_cwds: dict[str, str] = {}
         self._session_commands: dict[str, set[str]] = {}
         self._session_routes: dict[str, tuple[str, str, str | None]] = {}
         self._snapshots: dict[str, _SessionSnapshot] = {}
@@ -548,6 +549,8 @@ class GatewayRuntime:
         body = decision.body
         if body.channel:
             self._peer_channels[peer.peer_id] = body.channel
+        if peer.cwd is not None and session_key not in self._peer_cwds:
+            self._peer_cwds[session_key] = peer.cwd
 
         if (
             body.request_id is not None
@@ -738,13 +741,18 @@ class GatewayRuntime:
             )
         )
 
+    def _resolve_peer_cwd(self, session_key: str) -> str | None:
+        """Resolve the cwd from the peer's hello for this session."""
+        return self._peer_cwds.get(session_key)
+
     async def _submit_session_input(
         self, session_key: str, scenario: str | None, body: InboundBody
     ) -> None:
         if body.policy is not None and body.policy.lower() == "interrupt_first":
             self._interrupt_session(session_key)
+        peer_cwd = self._resolve_peer_cwd(session_key)
         sess = await self._sessions.get_or_create(
-            session_key, scenario or self._scenario, body
+            session_key, scenario or self._scenario, body, cwd=peer_cwd
         )
         self._sessions.set_turn_context(session_key, body)
         self._turn_counts[session_key] = self._turn_counts.get(session_key, 0) + 1

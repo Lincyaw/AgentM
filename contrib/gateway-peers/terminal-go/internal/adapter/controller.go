@@ -245,8 +245,9 @@ func (c *Controller) Resume(req runtime.ResumeRequest) {
 	switch req.Type {
 	case runtime.ResumeTypeReject:
 		decision = "deny"
+	case runtime.ResumeTypeApproveSession:
+		decision = "approve_session"
 	case runtime.ResumeTypeApprove,
-		runtime.ResumeTypeApproveSession,
 		runtime.ResumeTypeApproveTool:
 		decision = "approve"
 	}

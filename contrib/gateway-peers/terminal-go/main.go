@@ -49,12 +49,16 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Resolve the gateway URL from the env when not given and not mocking.
+	// Resolve the gateway URL: explicit flag > env > default socket.
 	if !*mockMode && *connectURL == "" {
 		if envURL := os.Getenv("AGENTM_SOCKET"); envURL != "" {
 			*connectURL = envURL
+		} else {
+			*connectURL = wire.DefaultSocketURL()
 		}
 	}
+
+	wd, _ := os.Getwd()
 
 	var initialApp *app.App
 	var initialSession *session.Session
@@ -62,7 +66,7 @@ func main() {
 	var liveAdapter *adapter.Adapter
 
 	switch {
-	case *mockMode || *connectURL == "":
+	case *mockMode:
 		// No gateway: render the TUI against an empty session with no backend.
 		// Methods are inert (the App has no Controller), so the UI is visible
 		// but does not talk to anything. Useful for layout/theme inspection.
@@ -76,7 +80,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		client := wire.NewWireClient(transport, "terminal-go", *token)
+		client := wire.NewWireClient(transport, "terminal-go", *token, wire.WithCwd(wd))
 
 		// The timeout covers only the dial + handshake, not the long-lived
 		// connection.
@@ -122,7 +126,6 @@ func main() {
 		return msg
 	}
 
-	wd, _ := os.Getwd()
 	model := tui.New(ctx, spawner, initialApp, wd, func() {})
 
 	p := tea.NewProgram(model, tea.WithContext(ctx), tea.WithFilter(filter))

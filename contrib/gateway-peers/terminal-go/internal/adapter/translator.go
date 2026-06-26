@@ -280,6 +280,11 @@ func (t *Translator) handleOutbound(body map[string]any) {
 	case "api_send_user_message":
 		t.emit(t.apiUserMessageNote(meta, content))
 
+	case "session_snapshot":
+		// Acknowledged but no visual surface yet — the cagent session model
+		// does not carry a Phase field. The snapshot is still useful for
+		// debugging (logged at debug level by the default path otherwise).
+
 	default:
 		// Truly unmapped kinds (ping/ack-adjacent noise, future additions):
 		// log and drop. Reaching here is now the exception, not the rule.

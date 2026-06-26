@@ -2,11 +2,21 @@ package wire
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
-// DefaultSocketURL is the default Unix socket path for the gateway.
-const DefaultSocketURL = "unix:///tmp/agentm-gateway.sock"
+// DefaultSocketURL mirrors the Python gateway's default_socket_url():
+// $XDG_RUNTIME_DIR/agentm-gw.sock when set, else /tmp/agentm-gw-<uid>.sock.
+func DefaultSocketURL() string {
+	if runtime := os.Getenv("XDG_RUNTIME_DIR"); runtime != "" {
+		if info, err := os.Stat(runtime); err == nil && info.IsDir() {
+			return "unix://" + filepath.Join(runtime, "agentm-gw.sock")
+		}
+	}
+	return fmt.Sprintf("unix:///tmp/agentm-gw-%d.sock", os.Getuid())
+}
 
 // ResolveTransport parses a URL string into a Transport.
 // Supported schemes: unix://, ws://, wss://.
