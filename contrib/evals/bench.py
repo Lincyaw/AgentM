@@ -128,11 +128,12 @@ def _run_and_eval_one(
             "AGENTM_AGENT_ENV_IMAGE": image,
             "AGENTM_AGENT_ENV_GATEWAY_URL": gateway,
             "AGENTM_AGENT_ENV_EXPERIMENT_ID": f"{prefix}-{model}-{name}",
-            "AGENTM_AGENT_ENV_NAMESPACE": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "default"),
+            "AGENTM_AGENT_ENV_NAMESPACE": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
             "AGENTM_AGENT_ENV_CPU_REQUEST": "1",
             "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
             "AGENTM_AGENT_ENV_MEMORY_REQUEST": "2Gi",
             "AGENTM_AGENT_ENV_MEMORY_LIMIT": "16Gi",
+            "AGENTM_AGENT_ENV_MAX_REPLICAS": "1",
             **({"AGENTM_AGENT_ENV_API_KEY": api_key} if api_key else {}),
         }
         cmd = [
@@ -171,11 +172,12 @@ def _run_and_eval_one(
     session = arl.ManagedSession(
         image=image,
         experiment_id=f"eval-{model}-{name}",
-        namespace=os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "default"),
+        namespace=os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
         gateway_url=gateway,
         workspace_dir="/app",
         api_key=api_key or None,
         timeout=max(600.0, eval_timeout * 2.0),
+        max_replicas=1,
         resources=ResourceRequirements(
             requests={"cpu": "1", "memory": "2Gi"},
             limits={"cpu": "8", "memory": "16Gi"},
@@ -485,7 +487,7 @@ def run(
         "AGENTM_AGENT_ENV_IMAGE": image,
         "AGENTM_AGENT_ENV_GATEWAY_URL": gateway,
         "AGENTM_AGENT_ENV_EXPERIMENT_ID": f"{prefix}-{task}",
-        "AGENTM_AGENT_ENV_NAMESPACE": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "default"),
+        "AGENTM_AGENT_ENV_NAMESPACE": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
         "AGENTM_AGENT_ENV_CPU_REQUEST": "1",
         "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
         "AGENTM_AGENT_ENV_MEMORY_REQUEST": "2Gi",
