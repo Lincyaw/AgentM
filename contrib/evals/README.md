@@ -44,6 +44,46 @@ done
 docker push opspai/tb2-*:v1  # Volcengine mirrors automatically
 ```
 
+## Running TB2 end-to-end
+
+```bash
+# 1. Download dataset from Harbor registry
+harbor dataset download "terminal-bench@2.0" -o ~/AoyangSpace/harbor-datasets/
+
+# 2. Mirror upstream images to Docker Hub (crane does registry-to-registry, no local pull)
+#    Install crane: go install github.com/google/go-containerregistry/cmd/crane@latest
+uv run python contrib/evals/bench.py mirror --bench harbor \
+    --repo ~/AoyangSpace/harbor-datasets/terminal-bench \
+    --registry opspai --prefix tb2 --tag v0 -j 8
+
+# 3. Build overlay images (pre-install uv + python for offline sandbox)
+for task in $(ls ~/AoyangSpace/harbor-datasets/terminal-bench/); do
+  docker build --quiet --build-arg BASE_IMAGE=opspai/tb2-${task}:v0 \
+    -f contrib/evals/benchmarks/Dockerfile.tb2-overlay \
+    -t opspai/tb2-${task}:v1 contrib/evals/benchmarks/
+done
+
+# 4. Push overlay images (Volcengine mirrors docker.io/opspai/ automatically)
+for task in $(ls ~/AoyangSpace/harbor-datasets/terminal-bench/); do
+  docker push opspai/tb2-${task}:v1
+done
+
+# 5. Run evaluation (use Volcengine registry prefix for ARL cluster)
+uv run python contrib/evals/bench.py batch --bench harbor \
+    --repo ~/AoyangSpace/harbor-datasets/terminal-bench \
+    --registry pair-cn-shanghai.cr.volces.com/opspai --prefix tb2 --tag v1 \
+    --model litellm --gateway http://<arl-gateway> --api-key <key> \
+    -j 5 --eval-timeout 900 --results /tmp/tb2-results
+```
+
+**Notes:**
+- Keep concurrency <= 5 for first run; Volcengine registry has pull QPS limits
+  on cold images. After images are cached on nodes, concurrency can go higher.
+- Re-running with existing logs skips completed tasks automatically.
+- The `--registry` must be the full Volcengine prefix
+  (`pair-cn-shanghai.cr.volces.com/opspai`), not bare `opspai`, because the
+  K8s cluster cannot reach docker.io directly.
+
 ## Results: Doubao (doubao-seed-2-0-pro) on Terminal Bench 1.0
 
 **Dataset**: 21 tasks from longcli-bench (xv6 OS, CS61A, CMU 15-445 DB, AP1400)
@@ -94,3 +134,18 @@ Passed tasks: `cs61_fa24_hw08`, `cs61_fa24_hog`, `ap1400_2_hw26`, `61810_syscall
 
 4. **Improvement vectors**: larger k (brute force), harness-guided retries
    (rescue window / fork replay), or stronger base model.
+
+## Results: Doubao on Terminal Bench 2.0
+
+**Dataset**: 89 tasks from Harbor terminal-bench@2.0
+
+### pass@1 (partial — 61/89 scored)
+
+| Metric | Value |
+|---|---|
+| Scored | 61/89 (28 infra failures) |
+| reward > 0 | 0/61 |
+| Avg reward | 0.000 |
+
+All 61 scored tasks got reward=0. TB2 tasks are significantly harder than TB1
+(compiler builds, QEMU VMs, cryptanalysis, ML pipelines, etc.).

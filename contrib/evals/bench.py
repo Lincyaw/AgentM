@@ -173,13 +173,21 @@ def _run_and_eval_one(
             limits={"cpu": "8", "memory": "16Gi"},
         ),
     )
-    session.create_sandbox()
+    try:
+        session.create_sandbox()
+    except Exception as e:
+        return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": str(e)}
 
     try:
         replay_trajectory(session, session_id)
         scores = adapter.evaluate(session, task, timeout=eval_timeout)  # type: ignore[union-attr]
+    except Exception as e:
+        return {"task": name, "status": "eval_failed", "tools": tools_count, "error": str(e)}
     finally:
-        session.delete_sandbox()
+        try:
+            session.delete_sandbox()
+        except Exception:  # noqa: S110
+            pass
 
     score_file.write_text(json.dumps({"task": name, **scores}, ensure_ascii=False))
 

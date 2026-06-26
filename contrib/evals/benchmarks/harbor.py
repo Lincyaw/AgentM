@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
 from .base import TaskSpec, image_name, upload_file_to_sandbox
+
+
+def _patch_test_sh(content: bytes) -> bytes:
+    """Strip network-dependent installs from test.sh when uv is pre-installed."""
+    text = content.decode("utf-8", errors="replace")
+    text = re.sub(r"^.*curl\s.*astral\.sh/uv.*\n?", "# (uv pre-installed)\n", text, flags=re.MULTILINE)
+    text = re.sub(r"^.*apt-get\s+update.*\n?", "# (apt-get update skipped)\n", text, flags=re.MULTILINE)
+    text = re.sub(r"^.*apt-get\s+install.*curl.*\n?", "# (curl pre-installed)\n", text, flags=re.MULTILINE)
+    return text.encode("utf-8")
 
 
 class HarborAdapter:
@@ -58,26 +68,44 @@ class HarborAdapter:
     ) -> dict:
         task_dir = Path(task.path)
 
-        test_sh = task_dir / "tests" / "test.sh"
-        if test_sh.is_file():
+        tests_dir = task_dir / "tests"
+        if tests_dir.is_dir():
             session.execute([{  # type: ignore[attr-defined]
                 "name": "prep",
-                "command": ["bash", "-lc", "mkdir -p /tests /logs/verifier"],
+                "command": ["bash", "-lc", "mkdir -p /tests /logs/verifier /app/_eval_staging"],
                 "work_dir": "/app",
             }])
-            upload_file_to_sandbox(session, "_eval_staging_test.sh", test_sh.read_bytes())
+            for f in tests_dir.rglob("*"):
+                if not f.is_file():
+                    continue
+                content = f.read_bytes()
+                if f.name == "test.sh":
+                    content = _patch_test_sh(content)
+                rel = str(f.relative_to(tests_dir))
+                upload_file_to_sandbox(session, f"_eval_staging/{rel}", content)
             session.execute([{  # type: ignore[attr-defined]
-                "name": "mv-test",
+                "name": "mv-tests",
                 "command": ["bash", "-lc",
-                    "mv /app/_eval_staging_test.sh /tests/test.sh && "
-                    "chmod +x /tests/test.sh"],
+                    'cd /app/_eval_staging && find . -type f | while read f; do '
+                    'mkdir -p "/tests/$(dirname "$f")" && '
+                    'mv "$f" "/tests/$f" && chmod +x "/tests/$f"; done && '
+                    'rm -rf /app/_eval_staging'],
                 "work_dir": "/app",
             }])
+
+        session.execute([{  # type: ignore[attr-defined]
+            "name": "ensure-uv",
+            "command": ["bash", "-lc",
+                "mkdir -p /root/.local/bin /logs/verifier && "
+                "test -f /root/.local/bin/env || "
+                "echo 'export PATH=\"/root/.local/bin:$PATH\"' > /root/.local/bin/env"],
+            "work_dir": "/app",
+        }])
 
         r = session.execute([{  # type: ignore[attr-defined]
             "name": "eval",
             "command": ["bash", "-lc",
-                f"mkdir -p /logs/verifier && "
+                f"export PATH=/root/.local/bin:$PATH && "
                 f"timeout {timeout} bash /tests/test.sh 2>&1"],
             "work_dir": "/app",
         }])
