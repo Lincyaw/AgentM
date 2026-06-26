@@ -139,13 +139,29 @@ Passed tasks: `cs61_fa24_hw08`, `cs61_fa24_hog`, `ap1400_2_hw26`, `61810_syscall
 
 **Dataset**: 89 tasks from Harbor terminal-bench@2.0
 
-### pass@1 (partial — 61/89 scored)
+### pass@1
 
 | Metric | Value |
 |---|---|
-| Scored | 61/89 (28 infra failures) |
-| reward > 0 | 0/61 |
-| Avg reward | 0.000 |
+| **pass@1** | **16.9% (15/89)** |
+| reward=0 | 74 |
 
-All 61 scored tasks got reward=0. TB2 tasks are significantly harder than TB1
-(compiler builds, QEMU VMs, cryptanalysis, ML pipelines, etc.).
+Passed tasks: `cobol-modernization`, `code-from-image`, `constraints-scheduling`,
+`crack-7z-hash`, `git-leak-recovery`, `git-multibranch`, `kv-store-grpc`,
+`large-scale-text-editing`, `mailman`, `merge-diff-arc-agi-task`, `polyglot-rust-c`,
+`prove-plus-comm`, `regex-log`, `sqlite-with-gcov`, `vulnerable-secret`.
+
+#### Key observations
+
+1. **16.9% pass@1** — comparable to TB1's 19% pass@8, suggesting TB2's difficulty
+   is roughly similar when measured against the same model.
+
+2. **Diverse capabilities**: passes span code generation (cobol, polyglot-rust-c),
+   git operations (leak-recovery, multibranch), system admin (mailman, kv-store-grpc),
+   security (crack-7z-hash, vulnerable-secret), math proofs (prove-plus-comm),
+   and data processing (regex-log, merge-diff-arc-agi-task).
+
+3. **Infra note**: ~15 tasks consistently hit gRPC executor timeout during eval
+   (ephemeral-storage eviction on nodes → pod killed → connection refused).
+   These get reward=0.0 as fallback. True pass rate may be slightly higher
+   with a healthier cluster.

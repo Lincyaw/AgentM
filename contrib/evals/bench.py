@@ -88,6 +88,8 @@ def _generate_skaffold(tasks: list[TaskSpec], registry: str, prefix: str, tag: s
 
 _active_procs: set[subprocess.Popen] = set()  # type: ignore[type-arg]
 _active_procs_lock = __import__("threading").Lock()
+_active_eval_sessions: set[object] = set()
+_active_eval_lock = __import__("threading").Lock()
 
 
 def _run_and_eval_one(
@@ -169,7 +171,7 @@ def _run_and_eval_one(
         api_key=api_key or None,
         timeout=max(600.0, eval_timeout * 2.0),
         resources=ResourceRequirements(
-            requests={"cpu": "4", "memory": "8Gi"},
+            requests={"cpu": "1", "memory": "2Gi"},
             limits={"cpu": "8", "memory": "16Gi"},
         ),
     )
@@ -178,16 +180,27 @@ def _run_and_eval_one(
     except Exception as e:
         return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": str(e)}
 
+    with _active_eval_lock:
+        _active_eval_sessions.add(session)
     try:
         replay_trajectory(session, session_id)
         scores = adapter.evaluate(session, task, timeout=eval_timeout)  # type: ignore[union-attr]
     except Exception as e:
-        return {"task": name, "status": "eval_failed", "tools": tools_count, "error": str(e)}
+        scores = {"reward": 0.0, "eval_output": "", "error": str(e)}
+        typer.echo(f"  [WARN] eval {name}: {e}", err=True)
     finally:
+        with _active_eval_lock:
+            _active_eval_sessions.discard(session)
+        eval_exp = f"eval-{model}-{name}"
         try:
-            session.delete_sandbox()
-        except Exception:  # noqa: S110
-            pass
+            arl.GatewayClient(
+                base_url=gateway, api_key=api_key or None,
+            ).delete_experiment(eval_exp)
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"  [WARN] cleanup {eval_exp}: {e}", err=True)
+
+    if scores.get("reward") is None:
+        scores["reward"] = 0.0
 
     score_file.write_text(json.dumps({"task": name, **scores}, ensure_ascii=False))
 
@@ -531,22 +544,39 @@ def batch(
             except subprocess.TimeoutExpired:
                 p.kill()
 
-    def _cleanup_arl_sessions(attempt_tasks: list[TaskSpec], attempt_idx: int) -> None:
+    def _cleanup_experiments(
+        gw: str, key: str, pfx: str, mdl: str,
+        task_list: list[TaskSpec], n_attempts: int,
+    ) -> None:
         try:
             import arl
-            client = arl.GatewayClient(base_url=gateway, api_key=api_key or None)
-            for t in attempt_tasks:
-                for exp_id in [
-                    f"{prefix}-{model}-a{attempt_idx}-{t.name}",
-                    f"eval-{model}-a{attempt_idx}-{t.name}",
-                ]:
-                    try:
-                        client.delete_experiment(exp_id)
-                    except Exception:  # noqa: S110, BLE001
-                        pass
+            client = arl.GatewayClient(base_url=gw, api_key=key or None)
+            cleaned = 0
+            for t in task_list:
+                for attempt_idx in range(n_attempts):
+                    suffix = f"-a{attempt_idx}-{t.name}" if n_attempts > 1 else f"-{t.name}"
+                    for exp_id in [f"{pfx}-{mdl}{suffix}", f"eval-{mdl}{suffix}"]:
+                        try:
+                            client.delete_experiment(exp_id)
+                            cleaned += 1
+                        except Exception as e:  # noqa: BLE001
+                            typer.echo(f"  [WARN] cleanup {exp_id}: {e}", err=True)
             client.close()
-        except Exception:  # noqa: S110, BLE001
-            pass
+            if cleaned:
+                typer.echo(f"  Cleaned up {cleaned} ARL experiment(s)")
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"  [WARN] experiment cleanup failed: {e}", err=True)
+
+    def _cleanup_eval_sessions() -> None:
+        with _active_eval_lock:
+            sessions = list(_active_eval_sessions)
+        if sessions:
+            typer.echo(f"  Cleaning up {len(sessions)} eval sandbox(es)...")
+        for s in sessions:
+            try:
+                s.delete_sandbox()  # type: ignore[union-attr]
+            except Exception as e:  # noqa: BLE001
+                typer.echo(f"  [WARN] eval sandbox cleanup: {e}", err=True)
 
     def _on_sigint(_sig: int, _frame: object) -> None:
         nonlocal interrupted
@@ -554,8 +584,9 @@ def batch(
             typer.echo("\nForce quit.")
             raise SystemExit(1)
         interrupted = True
-        typer.echo("\nCtrl-C — terminating child processes...")
+        typer.echo("\nCtrl-C — terminating child processes & eval sandboxes...")
         _kill_children()
+        _cleanup_eval_sessions()
 
     prev_handler = signal.signal(signal.SIGINT, _on_sigint)
 
@@ -608,6 +639,8 @@ def batch(
                     typer.echo(f"  {attempt_label}[ERROR] {name}: {e} ({completed}/{total_jobs})")
     finally:
         signal.signal(signal.SIGINT, prev_handler)
+        _cleanup_eval_sessions()
+        _cleanup_experiments(gateway, api_key, prefix, model, tasks, attempts)
 
     # Per-attempt summaries
     for attempt_idx in range(attempts):
