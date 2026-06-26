@@ -173,7 +173,7 @@ class AuditorContextConfig(BaseModel):
     trajectory_snapshot: list[dict[str, Any]] | None = None
     mode: Literal["index", "trajectory"] = "index"
     context_index: dict[str, Any] | None = None
-    methodology: list[str] = []
+    methodology: list[str] = []  # kept for backward compat
 
 MANIFEST = ExtensionManifest(
     name="auditor_context",

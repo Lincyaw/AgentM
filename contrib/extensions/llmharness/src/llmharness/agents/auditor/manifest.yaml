@@ -8,4 +8,4 @@ extensions:
   - module: agentm.extensions.builtin.operations
   - module: llmharness.agents.auditor.context
   - module: llmharness.agents.auditor.tools
-  - module: llmharness.agents.auditor.index_tools
+  - module: agentm.extensions.builtin.trace_query

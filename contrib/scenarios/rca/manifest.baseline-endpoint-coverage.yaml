@@ -1,0 +1,103 @@
+name: rca:baseline-endpoint-coverage
+description: >
+  RCA baseline with endpoint-coverage goal: agent must explain all
+  anomalous user-facing endpoints. Checker independently queries
+  which endpoints have SLO violations and verifies the submission
+  covers each one.
+task_class: rca_baseline
+
+includes:
+  - overlays/base-investigator.yaml
+  - overlays/runtime-context.yaml
+  - overlays/skills.yaml
+  - overlays/turn-reminder.yaml
+
+extensions:
+  - module: agentm.extensions.builtin.goal
+    config:
+      condition: >
+        All user-facing endpoints with significant anomalies
+        (latency increase or error rate elevation compared to normal
+        baseline) must be explained by the submitted causal graph.
+        Every anomalous endpoint must be reachable from at least one
+        root cause node via the edges in the graph.
+      checker_scenario: "rca:goal-checker"
+      checker_max_turns: 15
+      checker_prompt: |
+        You are an independent goal-completion checker for an RCA investigation.
+
+        ## Condition
+        {condition}
+
+        ## Verification procedure
+
+        You have SQL query tools (`query_sql`) and trajectory query tools
+        (`list_turns`, `read_turn`, `get_tool_calls`).
+
+        Step 1: Identify ALL anomalous user-facing endpoints.
+        Query root spans and compare abnormal vs normal:
+
+        ```sql
+        WITH abn AS (
+          SELECT span_name, count(*) AS total,
+            avg(duration)/1e6 AS avg_ms,
+            count(*) FILTER (WHERE "attr.status_code" IN ('Error','STATUS_CODE_ERROR')
+              OR "attr.http.response.status_code" >= 400) AS errors
+          FROM abnormal_traces
+          WHERE parent_span_id IS NULL OR parent_span_id = ''
+          GROUP BY span_name
+        ), nml AS (
+          SELECT span_name, count(*) AS total,
+            avg(duration)/1e6 AS avg_ms,
+            count(*) FILTER (WHERE "attr.status_code" IN ('Error','STATUS_CODE_ERROR')
+              OR "attr.http.response.status_code" >= 400) AS errors
+          FROM normal_traces
+          WHERE parent_span_id IS NULL OR parent_span_id = ''
+          GROUP BY span_name
+        )
+        SELECT coalesce(a.span_name, n.span_name) AS endpoint,
+          a.avg_ms AS abn_ms, n.avg_ms AS nml_ms,
+          round(a.avg_ms / nullif(n.avg_ms, 0), 1) AS latency_ratio,
+          round(100.0 * a.errors / nullif(a.total, 0), 1) AS abn_err_pct,
+          round(100.0 * n.errors / nullif(n.total, 0), 1) AS nml_err_pct
+        FROM abn a FULL OUTER JOIN nml n USING (span_name)
+        ORDER BY latency_ratio DESC NULLS FIRST
+        ```
+
+        Step 2: For EACH anomalous endpoint, discover its downstream
+        call chain from the NORMAL period (the baseline topology):
+
+        ```sql
+        SELECT child.service_name, child.span_name, count(*) AS cnt
+        FROM normal_traces root
+        JOIN normal_traces child
+          ON child.trace_id = root.trace_id
+          AND child.parent_span_id = root.span_id
+        WHERE root.span_name = '<ENDPOINT>'
+          AND (root.parent_span_id IS NULL OR root.parent_span_id = '')
+        GROUP BY child.service_name, child.span_name
+        ORDER BY cnt DESC
+        ```
+
+        This tells you which downstream services each endpoint actually
+        depends on. Different endpoints may have completely independent
+        dependency chains — do NOT assume they share the same path.
+
+        Step 3: Read the agent's submitted causal graph via
+        `get_tool_calls` with tool_name=submit_final_report.
+
+        Step 4: For each anomalous endpoint, verify that its SPECIFIC
+        dependency chain (from Step 2) is explained by the causal graph.
+        The graph must contain a root cause that actually affects the
+        services this endpoint depends on — not just any path that
+        reaches the frontend service generically.
+
+        If endpoint A depends on service X and endpoint B depends on
+        service Y, the graph must explain BOTH X and Y independently.
+        A root cause that only explains X does not cover endpoint B.
+
+        Step 5: Call `submit_verdict` with your structured verdict.
+        Set met=true if every anomalous endpoint's specific dependency
+        chain is covered. Set met=false with unexplained listing the
+        endpoints whose dependency chains are not covered by the graph.
+        Do NOT output your verdict as text — you MUST call the tool.

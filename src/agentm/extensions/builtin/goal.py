@@ -5,19 +5,9 @@ checks whether the condition holds. If not, the evaluator's reason is
 injected as a user message and the loop continues. When the condition
 is met the goal clears and the session terminates normally.
 
-Two evaluator modes:
-
-1. **Inline** (default): a single LLM call using the session's own
-   provider. Fast, no tools — judges only from conversation evidence.
-2. **Checker scenario**: spawn a child agent session with its own
-   scenario (tools, extensions). The checker can run tests, read files,
-   inspect state — anything the scenario equips it with.
-
-   Configure via the atom's ``checker_scenario`` config key::
-
-       - module: agentm.extensions.builtin.goal
-         config:
-           checker_scenario: goal_checker
+Evaluator: a child agent session with ``trace_query`` tools that can
+inspect the parent session's trajectory via ClickHouse. The checker
+decides what to query, judges the evidence, and outputs a verdict.
 
 Hard stops (``MaxTurnsExhausted``, ``BudgetExhausted``, ``SignalAborted``)
 are ``final=True`` and cannot be overridden — they are the safety net.
@@ -35,9 +25,8 @@ imports; ``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Final
 
 from loguru import logger
@@ -45,6 +34,7 @@ from pydantic import BaseModel
 
 from agentm.core.abi import (
     AgentMessage,
+    AgentSessionConfig,
     AssistantMessage,
     BeforeAgentStartEvent,
     CommandSpec,
@@ -52,10 +42,7 @@ from agentm.core.abi import (
     ExtensionAPI,
     Inject,
     LoopConfig,
-    MessageEnd,
-    Model,
     ModelEndTurn,
-    ProviderConfig,
     Stop,
     TextContent,
     ToolCallBlock,
@@ -70,28 +57,19 @@ _CLEAR_ALIASES: Final[frozenset[str]] = frozenset({
     "clear", "stop", "off", "reset", "none", "cancel",
 })
 
-_EVAL_SYSTEM: Final[str] = (
-    "You are a goal-completion evaluator. You will receive a goal condition "
-    "and recent conversation context. Determine whether the condition is met.\n\n"
-    "Respond with EXACTLY one of these two formats:\n"
-    "MET: <one-line reason>\n"
-    "NOT_MET: <one-line reason explaining what remains>\n\n"
-    "Be strict: the condition must be clearly satisfied by evidence in the "
-    "conversation. If uncertain, respond NOT_MET."
-)
-
 _CHECKER_PROMPT_TEMPLATE: Final[str] = (
     "You are an independent goal-completion checker. Your job is to verify "
-    "whether a specific condition has been met.\n\n"
+    "whether the parent agent's work satisfies a specific condition.\n\n"
     "## Condition to verify\n{condition}\n\n"
-    "## Context from the working agent\n{context}\n\n"
-    "Use your tools to independently verify the condition. When done, state "
-    "your verdict on the FIRST line of your final response in one of these "
-    "two formats:\n"
-    "MET: <reason>\n"
-    "NOT_MET: <reason explaining what remains>"
+    "You have tools to query the parent session's trajectory:\n"
+    "- `list_turns` — overview of all turns (tools called, token counts)\n"
+    "- `read_turn` — read actual messages (filter by role, paginate)\n"
+    "- `get_tool_calls` — query specific tool calls with args and results\n\n"
+    "Investigate the trajectory to determine whether the condition is met. "
+    "Focus on the agent's actual output and deliverables, not procedural steps.\n\n"
+    "When done, call `submit_verdict` with your structured verdict. "
+    "Do NOT output your verdict as text — you MUST call the tool."
 )
-
 
 _AUTO_INIT_PROMPT: Final[str] = (
     "You are a goal-condition formulator. Your job is to derive a completion "
@@ -122,10 +100,16 @@ _AUTO_INIT_PROMPT: Final[str] = (
     "CONDITION: <the completion condition>"
 )
 
+_TRACE_QUERY_EXT: Final[tuple[str, dict[str, Any]]] = (
+    "agentm.extensions.builtin.trace_query", {},
+)
+
 
 class GoalConfig(BaseModel):
-    checker_scenario: str | None = None
+    condition: str | None = None
+    checker_scenario: str = "local"
     checker_max_turns: int = 10
+    checker_prompt: str | None = None
     auto_init: bool = False
     auto_init_scenario: str | None = None
     auto_init_max_turns: int = 10
@@ -144,10 +128,9 @@ MANIFEST = ExtensionManifest(
     name="goal",
     description=(
         "Condition-driven session continuation: set a completion condition "
-        "via /goal; an independent evaluator checks it after every turn and "
-        "keeps the session running until the condition is met. Evaluator "
-        "can be an inline LLM call (default) or a full checker agent "
-        "session with its own scenario and tools."
+        "via /goal; an independent checker agent inspects the parent "
+        "session's trajectory after every turn and keeps the session "
+        "running until the condition is met."
     ),
     registers=(
         "event:decide_turn_action",
@@ -160,81 +143,38 @@ MANIFEST = ExtensionManifest(
 
 
 # ---------------------------------------------------------------------------
-# Evaluator — inline LLM call (default, no tools)
+# Child-session helpers
 # ---------------------------------------------------------------------------
 
-async def _evaluate_inline(
-    provider: ProviderConfig,
-    model: Model,
-    condition: str,
-    conversation_summary: str,
-) -> tuple[bool, str]:
-    prompt = (
-        f"## Goal condition\n{condition}\n\n"
-        f"## Recent conversation\n{conversation_summary}\n\n"
-        "Is the goal condition met? Respond MET or NOT_MET with a reason."
-    )
-    eval_model = replace(model, max_output_tokens=min(512, model.max_output_tokens))
-    messages: list[AgentMessage] = [
-        UserMessage(
-            role="user",
-            content=[TextContent(type="text", text=prompt)],
-            timestamp=0.0,
-        ),
-    ]
-    final: AssistantMessage | None = None
-    try:
-        async for event in provider.stream_fn(
-            messages=messages,
-            model=eval_model,
-            tools=[],
-            system=_EVAL_SYSTEM,
-            signal=None,
-            thinking="off",
-        ):
-            if isinstance(event, MessageEnd):
-                final = event.message
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("goal: inline evaluator failed: {}", exc)
-        return False, f"evaluator error: {exc}"
-
-    if final is None:
-        return False, "evaluator returned no response"
-
-    return _parse_verdict(final)
-
-
-# ---------------------------------------------------------------------------
-# Shared child-session lifecycle
-# ---------------------------------------------------------------------------
-
-async def _prompt_child_session(
+async def _prompt_child_session_messages(
     api: ExtensionAPI,
     scenario: str,
     max_turns: int,
     prompt: str,
     purpose: str,
-) -> AssistantMessage | None:
+    extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
+) -> list[AgentMessage] | None:
+    config = AgentSessionConfig(
+        cwd=api.cwd,
+        scenario=scenario,
+        extra_extensions=extra_extensions or [],
+        purpose=purpose,
+        lineage={
+            "kind": purpose,
+            "parent_session_id": api.session_id,
+            "root_session_id": api.root_session_id,
+            "purpose": purpose,
+        },
+        loop_config=LoopConfig(max_turns=max_turns),
+    )
     try:
-        child = await api.spawn_child_session(
-            cwd=api.cwd,
-            scenario=scenario,
-            provider=None,
-            loop_config=LoopConfig(max_turns=max_turns),
-            purpose=purpose,
-            lineage={
-                "kind": purpose,
-                "parent_session_id": api.session_id,
-                "root_session_id": api.root_session_id,
-                "purpose": purpose,
-            },
-        )
+        child = await api.spawn_child_session(config)
     except Exception as exc:  # noqa: BLE001
         logger.warning("goal: {} spawn failed: {}", purpose, exc)
         return None
 
     try:
-        final_messages = await child.prompt(prompt)
+        return await child.prompt(prompt)
     except Exception as exc:  # noqa: BLE001
         logger.warning("goal: {} failed: {}", purpose, exc)
         return None
@@ -244,16 +184,9 @@ async def _prompt_child_session(
         except Exception as exc:  # noqa: BLE001
             logger.debug("goal: {} shutdown (ignored): {}", purpose, exc)
 
-    if not final_messages:
-        return None
-    for msg in reversed(final_messages):
-        if isinstance(msg, AssistantMessage):
-            return msg
-    return None
-
 
 # ---------------------------------------------------------------------------
-# Evaluator — checker agent session (configurable scenario)
+# Checker evaluation (child agent with trace_query tools)
 # ---------------------------------------------------------------------------
 
 async def _evaluate_checker(
@@ -261,33 +194,41 @@ async def _evaluate_checker(
     scenario: str,
     max_turns: int,
     condition: str,
-    conversation_summary: str,
+    checker_prompt_override: str | None = None,
 ) -> tuple[bool, str]:
-    prompt = _CHECKER_PROMPT_TEMPLATE.format(
-        condition=condition,
-        context=conversation_summary,
+    if checker_prompt_override:
+        prompt = checker_prompt_override.format(condition=condition)
+    else:
+        prompt = _CHECKER_PROMPT_TEMPLATE.format(condition=condition)
+    messages = await _prompt_child_session_messages(
+        api, scenario, max_turns, prompt, "goal_checker",
+        extra_extensions=[_TRACE_QUERY_EXT],
     )
-    msg = await _prompt_child_session(api, scenario, max_turns, prompt, "goal_checker")
-    if msg is None:
+    if messages is None:
         return False, "checker produced no response"
-    return _parse_verdict(msg)
+    return _parse_verdict_from_tool_call(messages)
 
 
 # ---------------------------------------------------------------------------
-# Shared verdict parsing
+# Verdict parsing — structured tool call
 # ---------------------------------------------------------------------------
 
-def _parse_verdict(msg: AssistantMessage) -> tuple[bool, str]:
-    text = assistant_text(msg).strip()
-
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.upper().startswith("MET:"):
-            return True, stripped[4:].strip()
-        if stripped.upper().startswith("NOT_MET:"):
-            return False, stripped[8:].strip()
-
-    return False, text if text else "evaluator gave ambiguous response"
+def _parse_verdict_from_tool_call(
+    messages: list[AgentMessage],
+) -> tuple[bool, str]:
+    for msg in reversed(messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in msg.content:
+            if isinstance(block, ToolCallBlock) and block.name == "submit_verdict":
+                args = block.arguments
+                met = bool(args.get("met", False))
+                reason = str(args.get("reason", ""))
+                unexplained = args.get("unexplained", [])
+                if not met and unexplained:
+                    reason = f"{reason} (unexplained: {', '.join(unexplained)})"
+                return met, reason
+    return False, "checker did not call submit_verdict"
 
 
 def _parse_condition(msg: AssistantMessage) -> str | None:
@@ -300,24 +241,6 @@ def _parse_condition(msg: AssistantMessage) -> str | None:
     return None
 
 
-def _summarize_recent_turns(
-    observation: DecideTurnActionEvent,
-) -> str:
-    msg = observation.observation.assistant_message
-    if msg is None:
-        return "(no assistant output this turn)"
-    parts: list[str] = []
-    for block in msg.content:
-        if isinstance(block, TextContent):
-            parts.append(block.text)
-        elif isinstance(block, ToolCallBlock):
-            parts.append(
-                f"[tool_call: {block.name}("
-                f"{json.dumps(block.arguments, ensure_ascii=False)})]"
-            )
-    return "\n".join(parts) or "(no text output)"
-
-
 # ---------------------------------------------------------------------------
 # install
 # ---------------------------------------------------------------------------
@@ -325,22 +248,12 @@ def _summarize_recent_turns(
 def install(api: ExtensionAPI, config: GoalConfig) -> None:
     checker_scenario = config.checker_scenario
     checker_max_turns = config.checker_max_turns
+    checker_prompt_override = config.checker_prompt
     state: _GoalState | None = None
 
-    async def _run_evaluation(conversation_text: str, condition: str) -> tuple[bool, str]:
-        if checker_scenario is not None:
-            return await _evaluate_checker(
-                api, checker_scenario, checker_max_turns,
-                condition, conversation_text,
-            )
-        provider = api.provider
-        model = api.model
-        if provider is None or model is None:
-            logger.warning("goal: no provider/model for inline evaluation")
-            return False, "no provider available"
-        return await _evaluate_inline(
-            provider, model, condition, conversation_text,
-        )
+    if config.condition:
+        state = _GoalState(condition=config.condition)
+        logger.info("goal: static condition — {}", config.condition)
 
     # -- slash command: /goal -----------------------------------------------
 
@@ -365,8 +278,7 @@ def install(api: ExtensionAPI, config: GoalConfig) -> None:
                 )
                 if state.last_reason:
                     msg += f"\nLast evaluation: {state.last_reason}"
-                mode = f"checker={checker_scenario}" if checker_scenario else "inline"
-                msg += f"\nEvaluator: {mode}"
+                msg += f"\nChecker: scenario={checker_scenario}"
                 cmd_api.send_user_message(msg)
             return
 
@@ -379,8 +291,9 @@ def install(api: ExtensionAPI, config: GoalConfig) -> None:
             return
 
         state = _GoalState(condition=stripped)
-        mode = f"checker={checker_scenario}" if checker_scenario else "inline"
-        cmd_api.send_user_message(f"Goal set ({mode}): {stripped}")
+        cmd_api.send_user_message(
+            f"Goal set (checker scenario={checker_scenario}): {stripped}"
+        )
 
     api.register_command(
         "goal",
@@ -410,8 +323,10 @@ def install(api: ExtensionAPI, config: GoalConfig) -> None:
         if not isinstance(cause, (ModelEndTurn, ToolTerminated)):
             return None
 
-        conversation_text = _summarize_recent_turns(event)
-        is_met, reason = await _run_evaluation(conversation_text, state.condition)
+        is_met, reason = await _evaluate_checker(
+            api, checker_scenario, checker_max_turns, state.condition,
+            checker_prompt_override,
+        )
         state.turns_evaluated += 1
         state.last_reason = reason
 
@@ -443,14 +358,19 @@ def install(api: ExtensionAPI, config: GoalConfig) -> None:
             async def _derive_goal(system: str, user_text: str) -> None:
                 nonlocal state
                 prompt = _AUTO_INIT_PROMPT.format(system=system, user_text=user_text)
-                reply = await _prompt_child_session(
+                messages = await _prompt_child_session_messages(
                     api, init_scenario, init_max_turns, prompt, "goal_derivation",
                 )
+                reply: AssistantMessage | None = None
+                if messages:
+                    for msg in reversed(messages):
+                        if isinstance(msg, AssistantMessage):
+                            reply = msg
+                            break
                 condition = _parse_condition(reply) if reply else None
                 if condition:
                     state = _GoalState(condition=condition)
-                    mode = f"checker={checker_scenario}" if checker_scenario else "inline"
-                    logger.info("goal: auto-initialized ({}) — {}", mode, condition)
+                    logger.info("goal: auto-initialized — {}", condition)
 
             def _on_before_start(event: BeforeAgentStartEvent) -> None:
                 if state is not None:

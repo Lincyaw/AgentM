@@ -13,3 +13,4 @@ extensions:
     config:
       auto_init: true
       auto_init_scenario: "rca:goal-derivation"
+      checker_scenario: "rca:goal-checker"

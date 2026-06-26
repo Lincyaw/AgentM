@@ -32,7 +32,6 @@ from pydantic import BaseModel
 from . import schema as _et
 from .agents import auditor_scenario
 from .agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
-from .context_index import build_context_index
 from .schema import Reminder, Verdict
 from .state import CumulativeAuditState
 
@@ -333,20 +332,11 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
 
         # --- Auditor ---
         if auditor_due:
-            trajectory = _serialize_trajectory(list(messages))
-            context_index = build_context_index(
-                trajectory=trajectory,
-                symbols=[],
-                references=[],
-            ).to_dict()
-            loaded_skills = _extract_loaded_skills(messages)
-
             child_msgs = await _run_child(
                 api,
                 scenario=aud_scenario,
                 prompt=json.dumps(
                     {
-                        "context_index": context_index,
                         "recent_verdicts": list(cumulative.recent_verdicts),
                         "continuation_notes_from_prior_firing": list(
                             cumulative.last_continuation_notes
@@ -356,20 +346,15 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                     default=str,
                 ),
                 purpose="cognitive_audit_auditor",
+                extra_extensions=[
+                    ("agentm.extensions.builtin.trace_query", {}),
+                ],
                 atom_config_overrides={
                     "auditor_context": {
                         "continuation_notes": list(cumulative.last_continuation_notes),
                         "prompt_name": cfg.auditor_prompt,
-                        "trajectory_snapshot": trajectory,
-                        "context_index": context_index,
-                        "methodology": loaded_skills,
                     },
                     "auditor_tools": {},
-                    "auditor_index_tools": {
-                        "trajectory": trajectory,
-                        "symbols": [],
-                        "references": [],
-                    },
                 },
                 provider=auditor_provider,
             )
