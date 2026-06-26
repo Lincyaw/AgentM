@@ -66,8 +66,8 @@ def _restore_terminal() -> None:
     try:
         import subprocess
         subprocess.run(["stty", "sane"], stdin=sys.stdin, check=False)  # noqa: S603, S607
-    except Exception:  # noqa: BLE001, S110
-        pass  # best-effort; failure is harmless
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("stty sane failed (harmless): {}", exc)
 
 
 class _InterceptHandler(_stdlib_logging.Handler):
