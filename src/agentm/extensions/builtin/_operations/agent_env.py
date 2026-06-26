@@ -37,6 +37,11 @@ required; if both are set, ``image`` wins (managed pool path):
 - ``timeout``       — Per-step timeout seconds; ``None`` means no timeout
 - ``idle_timeout_seconds`` — Sandbox idle TTL on the gateway (legacy path only;
                       ManagedSession handles idle policy server-side).
+- ``delete_on_shutdown`` — Delete an owned sandbox when AgentM shuts down
+                      (env: ``AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN``, default
+                      ``true``). Benchmark harnesses can set this to ``false``
+                      to run evaluation in the same sandbox, then delete it
+                      themselves.
 """
 
 from __future__ import annotations
@@ -82,6 +87,7 @@ class AgentEnvConfig(BaseModel):
     cpu_limit: str | None = None
     memory_request: str | None = None
     memory_limit: str | None = None
+    delete_on_shutdown: bool | None = None
 
 def _resolve_str(value: str | None, env_var: str, default: str | None) -> str | None:
     if isinstance(value, str) and value:
@@ -90,6 +96,14 @@ def _resolve_str(value: str | None, env_var: str, default: str | None) -> str | 
     if env_value:
         return env_value
     return default
+
+def _resolve_bool(value: bool | None, env_var: str, default: bool) -> bool:
+    if value is not None:
+        return value
+    env_value = os.environ.get(env_var)
+    if env_value is None:
+        return default
+    return env_value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 # Versioning-token script. Emits ``<mtime_ns>-<sha16>`` for files up to
 # ``_MTIME_TOKEN_SIZE_CAP`` bytes, ``<mtime_ns>-size<size>`` for larger
@@ -146,22 +160,45 @@ class _AgentEnvBashOperations:
     ) -> ExecResult:
         effective_timeout = timeout if timeout is not None else self._default_timeout
         work_dir = cwd or self._default_work_dir
+        timeout_seconds = (
+            max(1, int(effective_timeout))
+            if effective_timeout is not None
+            else None
+        )
+        command = ["bash", "-lc", cmd]
+        if timeout_seconds is not None:
+            quoted_cmd = shlex.quote(cmd)
+            command = [
+                "bash",
+                "-lc",
+                (
+                    "if command -v timeout >/dev/null 2>&1; then "
+                    f"exec timeout -k 5s {timeout_seconds}s bash -lc {quoted_cmd}; "
+                    "else "
+                    f"exec bash -lc {quoted_cmd}; "
+                    "fi"
+                ),
+            ]
         step: dict[str, Any] = {
             "name": "agentm_bash",
-            "command": ["bash", "-lc", cmd],
+            "command": command,
             "work_dir": work_dir,
         }
         if env:
             step["env"] = dict(env)
-        if effective_timeout is not None:
-            step["timeout"] = max(1, int(effective_timeout))
+        if timeout_seconds is not None:
+            # Give the in-container `timeout` wrapper a short grace window to
+            # return its 124 status instead of letting the gateway sever the
+            # stream first.
+            step["timeout"] = timeout_seconds + 15
 
         timed_out = False
         try:
             response = await asyncio.to_thread(self._session.execute, [step])
         except Exception as exc:  # noqa: BLE001
             stderr = f"agent-env execute failed: {exc}".encode()
-            return ExecResult(stdout=b"", stderr=stderr, exit_code=124, timed_out=False)
+            timed_out = effective_timeout is not None and "timeout" in str(exc).lower()
+            return ExecResult(stdout=b"", stderr=stderr, exit_code=124, timed_out=timed_out)
 
         if not response.results:
             return ExecResult(stdout=b"", stderr=b"agent-env returned no results", exit_code=1, timed_out=False)
@@ -171,6 +208,8 @@ class _AgentEnvBashOperations:
         stderr_bytes = result.output.stderr.encode("utf-8")
         if on_data is not None and stdout_bytes:
             on_data(stdout_bytes)
+        if timeout_seconds is not None and result.output.exit_code in {124, 137}:
+            timed_out = True
         if signal is not None and signal.is_set():
             timed_out = True
         return ExecResult(
@@ -805,6 +844,11 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     timeout_value: float | None = config.timeout
     idle_value: int | None = config.idle_timeout_seconds
     api_key = _resolve_str(config.api_key, "AGENTM_AGENT_ENV_API_KEY", None)
+    delete_on_shutdown = _resolve_bool(
+        config.delete_on_shutdown,
+        "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN",
+        True,
+    )
     create_timeout = float(
         _resolve_str(None, "AGENTM_AGENT_ENV_CREATE_TIMEOUT", None) or "0"
     ) or config.create_timeout or 600.0
@@ -898,10 +942,16 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     def _on_shutdown(_event: SessionShutdownEvent) -> None:
         if not owned:
             return
-        try:
-            session.delete_sandbox()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("agent_env: sandbox deletion failed on shutdown: {}", exc)
+        if delete_on_shutdown:
+            try:
+                session.delete_sandbox()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("agent_env: sandbox deletion failed on shutdown: {}", exc)
+        else:
+            logger.info(
+                "agent_env: keeping sandbox {} for external cleanup",
+                getattr(session, "session_id", None),
+            )
         try:
             session.close()
         except Exception as exc:  # noqa: BLE001
