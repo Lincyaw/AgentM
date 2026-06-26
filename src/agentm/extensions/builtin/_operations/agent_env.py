@@ -290,10 +290,18 @@ class _AgentEnvResourceWriter:
     directory operations still use execute (small outputs).
     """
 
-    def __init__(self, session: Any, *, work_dir: str, gateway_url: str) -> None:
+    def __init__(
+        self,
+        session: Any,
+        *,
+        work_dir: str,
+        gateway_url: str,
+        api_key: str | None = None,
+    ) -> None:
         self._session = session
         self._work_dir = work_dir.rstrip("/") or "/"
         self._gateway_url = gateway_url.rstrip("/")
+        self._api_key = api_key
 
     # --- path classification ---------------------------------------------
 
@@ -361,7 +369,13 @@ class _AgentEnvResourceWriter:
         elif rel_path.startswith(self._work_dir):
             rel_path = rel_path[len(self._work_dir):]
         try:
-            _upload_to_pod(self._gateway_url, session_id, rel_path, content)
+            _upload_to_pod(
+                self._gateway_url,
+                session_id,
+                rel_path,
+                content,
+                api_key=self._api_key,
+            )
             return True, ""
         except Exception as exc:
             return False, str(exc)
@@ -587,14 +601,25 @@ def _pod_exec(session: Any, cmd: str, work_dir: str) -> tuple[str, str, int]:
     out = resp.results[0].output
     return out.stdout, out.stderr, out.exit_code
 
-def _upload_to_pod(gateway_url: str, session_id: str, rel_path: str, payload: bytes) -> None:
+def _upload_to_pod(
+    gateway_url: str,
+    session_id: str,
+    rel_path: str,
+    payload: bytes,
+    *,
+    api_key: str | None = None,
+) -> None:
     """Upload bytes to ``rel_path`` (relative to work_dir) via the gateway."""
     body = json.dumps(
         {"path": rel_path, "content": base64.b64encode(payload).decode("ascii"), "encoding": "base64"}
     ).encode("utf-8")
     url = gateway_url.rstrip("/") + f"/v1/sessions/{session_id}/files"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        authorization = api_key if api_key.startswith("Bearer ") else f"Bearer {api_key}"
+        headers["Authorization"] = authorization
     req = urllib.request.Request(  # noqa: S310
-        url, data=body, method="POST", headers={"Content-Type": "application/json"}
+        url, data=body, method="POST", headers=headers
     )
     with urllib.request.urlopen(req, timeout=300) as resp:  # noqa: S310
         resp.read()
@@ -647,7 +672,13 @@ def _inject_gh_token(session: Any, work_dir: str) -> None:
     _pod_exec(session, setup_cmd, work_dir)
     logger.info("[agent_env_sync] injected GH_TOKEN into sandbox")
 
-def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> None:
+def _upload_skills_to_sandbox(
+    session: Any,
+    gateway_url: str,
+    work_dir: str,
+    *,
+    api_key: str | None = None,
+) -> None:
     """Upload SKILL.md files from ``AGENTM_SKILLS_DIR`` into the sandbox."""
     skills_dir = os.environ.get("AGENTM_SKILLS_DIR")
     if not skills_dir or not os.path.isdir(skills_dir):
@@ -667,14 +698,26 @@ def _upload_skills_to_sandbox(session: Any, gateway_url: str, work_dir: str) -> 
                 _pod_exec(session, f"mkdir -p {work_dir}/{target_base}/{entry}", work_dir)
                 try:
                     with open(skill_file, "rb") as fh:
-                        _upload_to_pod(gateway_url, session_id, target, fh.read())
+                        _upload_to_pod(
+                            gateway_url,
+                            session_id,
+                            target,
+                            fh.read(),
+                            api_key=api_key,
+                        )
                     count += 1
                 except Exception as exc:
                     logger.warning("[agent_env_sync] skill upload failed for {entry}: {exc}", entry=entry, exc=exc)
         elif entry.endswith(".md") and os.path.isfile(entry_path):
             try:
                 with open(entry_path, "rb") as fh:
-                    _upload_to_pod(gateway_url, session_id, f"{target_base}/{entry}", fh.read())
+                    _upload_to_pod(
+                        gateway_url,
+                        session_id,
+                        f"{target_base}/{entry}",
+                        fh.read(),
+                        api_key=api_key,
+                    )
                 count += 1
             except Exception as exc:
                 logger.warning("[agent_env_sync] skill upload failed for {entry}: {exc}", entry=entry, exc=exc)
@@ -831,7 +874,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         session.create_sandbox()
         _inject_gh_token(session, work_dir)
         _clone_repo_into_sandbox(session, work_dir)
-        _upload_skills_to_sandbox(session, gateway_url, work_dir)
+        _upload_skills_to_sandbox(session, gateway_url, work_dir, api_key=api_key)
 
     file_ops = _AgentEnvFileOperations(session, default_work_dir=work_dir)
     bash_ops = _AgentEnvBashOperations(
@@ -839,7 +882,12 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         default_work_dir=work_dir,
         default_timeout=timeout_value,
     )
-    writer = _AgentEnvResourceWriter(session, work_dir=work_dir, gateway_url=gateway_url)
+    writer = _AgentEnvResourceWriter(
+        session,
+        work_dir=work_dir,
+        gateway_url=gateway_url,
+        api_key=api_key,
+    )
 
     api.register_operations(file=file_ops, bash=bash_ops)
     api.register_resource_writer(writer)
