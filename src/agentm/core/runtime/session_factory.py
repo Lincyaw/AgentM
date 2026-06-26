@@ -654,6 +654,8 @@ async def _resolve_extensions(
     prompt_registry_module = _role_module(PROMPT_REGISTRY)
     system_prompt_module = _role_module(SYSTEM_PROMPT_PROVIDER)
     sub_agent_runtime_entry = roles.get(SUB_AGENT_RUNTIME)
+    retry_policy_module = "agentm.extensions.builtin.retry_policy"
+
     if config.no_extensions:
         to_load: list[tuple[str, dict[str, Any]]] = []
     elif config.extensions:
@@ -661,6 +663,7 @@ async def _resolve_extensions(
         ensure_floor_atom(to_load, prompt_registry_module)
         ensure_floor_atom(to_load, compaction_prompts_module)
         ensure_floor_atom(to_load, command_parser_module)
+        ensure_floor_atom(to_load, retry_policy_module)
     elif config.scenario is not None:
         from agentm.extensions.loader import ScenarioLoadError, load_scenario
 
@@ -680,6 +683,7 @@ async def _resolve_extensions(
         ensure_floor_atom(to_load, prompt_registry_module)
         ensure_floor_atom(to_load, compaction_prompts_module)
         ensure_floor_atom(to_load, command_parser_module)
+        ensure_floor_atom(to_load, retry_policy_module)
         # Layer ``<cwd>/.agentm/atoms/`` agent-installed atoms on top of the
         # scenario. Without this merge, ``api.install_atom`` calls would only
         # take effect for the lifetime of one session — the next process

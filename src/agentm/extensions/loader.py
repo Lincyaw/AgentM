@@ -444,7 +444,8 @@ def _parse_extensions(
 # injects the floor atoms, so a required floor atom would otherwise read as
 # "not loaded". Names match the role fulfillers' ``MANIFEST.name``.
 _FLOOR_ATOM_NAMES: frozenset[str] = frozenset(
-    {"prompt_templates", "compaction_prompts", "slash_commands", "system_prompt"}
+    {"prompt_templates", "compaction_prompts", "slash_commands", "system_prompt",
+     "retry_policy"}
 )
 
 def sort_extensions_by_requires(

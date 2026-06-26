@@ -133,7 +133,7 @@ def _run_and_eval_one(
             "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
             "AGENTM_AGENT_ENV_MEMORY_REQUEST": "2Gi",
             "AGENTM_AGENT_ENV_MEMORY_LIMIT": "16Gi",
-            "AGENTM_AGENT_ENV_MAX_REPLICAS": "1",
+            "AGENTM_AGENT_ENV_MAX_REPLICAS": "8",
             **({"AGENTM_AGENT_ENV_API_KEY": api_key} if api_key else {}),
         }
         cmd = [
@@ -603,12 +603,16 @@ def batch(
 
     prev_handler = signal.signal(signal.SIGINT, _on_sigint)
 
-    # Build flat job list: (attempt_idx, task) for all attempts
+    # Build flat job list: task-first so same-image jobs run together (warm pool)
     jobs: list[tuple[int, TaskSpec]] = []
     for attempt_idx in range(attempts):
         out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
         out.mkdir(parents=True, exist_ok=True)
-        for t in tasks:
+    for t in tasks:
+        for attempt_idx in range(attempts):
+            out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
+            if (out / f"{t.name}.score.json").is_file():
+                continue
             jobs.append((attempt_idx, t))
 
     total_jobs = len(jobs)
