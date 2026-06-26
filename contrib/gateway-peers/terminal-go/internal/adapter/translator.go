@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"time"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/wire"
 )
 
@@ -280,6 +282,10 @@ func (t *Translator) handleOutbound(body map[string]any) {
 	case "api_send_user_message":
 		t.emit(t.apiUserMessageNote(meta, content))
 
+	case "session_list":
+		t.handleSessionList(meta, content)
+		t.settleIdle()
+
 	case "session_snapshot":
 		// Acknowledged but no visual surface yet — the cagent session model
 		// does not carry a Phase field. The snapshot is still useful for
@@ -400,6 +406,57 @@ func (t *Translator) handleSessionReady(meta map[string]any) {
 	}
 	t.emit(runtime.AgentInfo(t.agentName, model, desc, ""))
 	t.emit(runtime.ToolsetInfo(len(toolNames), false, t.agentName))
+}
+
+// handleSessionList projects a session_list outbound (from bare /resume) onto the
+// TUI's session browser. The metadata carries a "sessions" array of
+// {session_id, title, created_at, scenario} maps.
+func (t *Translator) handleSessionList(meta map[string]any, textFallback string) {
+	entries, ok := meta["sessions"].([]any)
+	if !ok || len(entries) == 0 {
+		t.emit(runtime.SystemNote(textFallback, t.sessionID(), ""))
+		return
+	}
+	summaries := make([]session.Summary, 0, len(entries))
+	for _, e := range entries {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		sid, _ := m["session_id"].(string)
+		if sid == "" {
+			continue
+		}
+		title, _ := m["title"].(string)
+		if title == "" {
+			if len(sid) > 12 {
+				title = sid[:12] + "…"
+			} else {
+				title = sid
+			}
+		}
+		var createdAt time.Time
+		switch v := m["created_at"].(type) {
+		case float64:
+			createdAt = time.Unix(int64(v), 0)
+		case string:
+			if parsed, err := time.Parse(time.RFC3339, v); err == nil {
+				createdAt = parsed
+			}
+		}
+		summaries = append(summaries, session.Summary{
+			ID:        sid,
+			Title:     title,
+			CreatedAt: createdAt,
+		})
+	}
+	if len(summaries) == 0 {
+		t.emit(runtime.SystemNote(textFallback, t.sessionID(), ""))
+		return
+	}
+	if t.app != nil {
+		t.app.EmitEvent(messages.OpenSessionBrowserWithDataMsg{Sessions: summaries})
+	}
 }
 
 // extensionInstallEvent renders an extension_install frame. A non-empty error is

@@ -201,6 +201,69 @@ def most_recent_session_id(url: str, cwd: str | None = None) -> str | None:
     return rows[0]["sid"] if rows else None
 
 
+def recent_sessions(
+    url: str,
+    *,
+    cwd: str | None = None,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    """Return the most recent root sessions, newest first.
+
+    Each dict: ``{session_id, scenario, created_at}`` where ``created_at``
+    is an ISO-8601 timestamp string.
+    """
+    where = [
+        "EventName = 'agentm.session.start'",
+        "LogAttributes['agentm.session.parent_id'] = ''",
+    ]
+    params: dict[str, str] = {"lim": str(limit)}
+    if cwd:
+        where.append("LogAttributes['agentm.session.cwd'] = {cwd:String}")
+        params["cwd"] = cwd
+    rows = _query(
+        url,
+        "SELECT "
+        "  LogAttributes['agentm.session.id']       AS session_id, "
+        "  LogAttributes['agentm.session.scenario']  AS scenario, "
+        "  Timestamp                                  AS ts "
+        "FROM otel_logs "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY Timestamp DESC "
+        "LIMIT {lim:UInt32}",
+        params=params,
+    )
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        sid = r.get("session_id") or ""
+        if not sid:
+            continue
+        result.append({
+            "session_id": sid,
+            "scenario": r.get("scenario") or "",
+            "created_at": r.get("ts") or "",
+        })
+    return result
+
+
+def first_user_message(url: str, sid: str) -> str:
+    """Best-effort first user message from a session (for title display)."""
+    rows = _query(
+        url,
+        "SELECT Body FROM otel_logs "
+        "WHERE EventName = 'agentm.message.appended' "
+        "  AND LogAttributes['agentm.session.id'] = {sid:String} "
+        "ORDER BY Timestamp LIMIT 5",
+        params={"sid": sid},
+    )
+    for r in rows:
+        body = _parse_body(r.get("Body"))
+        if isinstance(body, dict) and body.get("role") == "user":
+            content = body.get("content", "")
+            if isinstance(content, str):
+                return content[:120]
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # messages
 # ---------------------------------------------------------------------------

@@ -902,6 +902,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.OpenSessionBrowserMsg:
 		return m.handleOpenSessionBrowser()
 
+	case messages.OpenSessionBrowserWithDataMsg:
+		return m.handleOpenSessionBrowserWithData(msg.Sessions)
+
 	case messages.LoadSessionMsg:
 		return m.handleLoadSession(msg.SessionID)
 
@@ -1144,7 +1147,10 @@ func (m *appModel) handleWorkingStateChanged(msg messages.WorkingStateChangedMsg
 func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
 	store := m.application.SessionStore()
 	if store == nil {
-		return m, notification.InfoCmd("No session store configured")
+		// Gateway mode: send bare /resume to fetch the session list from the
+		// gateway. The gateway returns a session_list outbound that the
+		// translator converts into OpenSessionBrowserWithDataMsg.
+		return m, core.CmdHandler(messages.SendMsg{Content: "/resume", BypassQueue: true})
 	}
 
 	sessions, err := store.GetSessionSummaries(context.Background())
@@ -1160,11 +1166,26 @@ func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
 	})
 }
 
+// handleOpenSessionBrowserWithData opens the session browser with pre-fetched
+// session data from the gateway (no local store needed).
+func (m *appModel) handleOpenSessionBrowserWithData(sessions []session.Summary) (tea.Model, tea.Cmd) {
+	if len(sessions) == 0 {
+		return m, notification.InfoCmd("No previous sessions found")
+	}
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
+		Model: dialog.NewSessionBrowserDialog(sessions),
+	})
+}
+
 // handleLoadSession loads a saved session into the current tab (if empty) or a new tab.
 func (m *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
 	store := m.application.SessionStore()
 	if store == nil {
-		return m, notification.ErrorCmd("No session store configured")
+		// Gateway mode: send /resume <id> to switch sessions server-side.
+		return m, core.CmdHandler(messages.SendMsg{
+			Content:     "/resume " + sessionID,
+			BypassQueue: true,
+		})
 	}
 
 	sess, err := store.GetSession(context.Background(), sessionID)

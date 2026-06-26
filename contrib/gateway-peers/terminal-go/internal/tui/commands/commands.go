@@ -171,6 +171,20 @@ func builtInSessionCommands() []Item {
 			},
 		},
 		{
+			ID:           "session.resume",
+			Label:        "Resume",
+			SlashCommand: "/resume",
+			Description:  "Resume a previous session",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(arg string) tea.Cmd {
+				if name := strings.TrimSpace(arg); name != "" {
+					return core.CmdHandler(messages.SendMsg{Content: "/resume " + name, BypassQueue: true})
+				}
+				return core.CmdHandler(messages.OpenSessionBrowserMsg{})
+			},
+		},
+		{
 			ID:           "session.shell",
 			Label:        "Shell",
 			SlashCommand: "/shell",

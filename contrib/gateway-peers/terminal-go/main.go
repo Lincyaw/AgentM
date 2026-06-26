@@ -6,8 +6,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -19,20 +23,34 @@ import (
 	tuiinput "github.com/AoyangSpace/agentm-terminal/internal/tui/input"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
 	"github.com/AoyangSpace/agentm-terminal/internal/wire"
-
-	"flag"
 )
 
 func main() {
 	connectURL := flag.String("connect", "", "Gateway URL (unix:///path or ws://host:port)")
 	token := flag.String("token", "", "Bearer token for ws/wss")
-	chatID := flag.String("chat-id", "terminal", "Chat/session ID")
+	chatID := flag.String("chat-id", "", "Chat/session ID (default: working directory basename)")
 	senderID := flag.String("sender-id", "local", "Sender ID")
 	scenario := flag.String("scenario", "", "Scenario name (first message only)")
 	themeName := flag.String("theme", "dark", "Theme: dark or light")
 	mockMode := flag.Bool("mock", false, "Run with mock data (no gateway)")
 	logFile := flag.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
 	flag.Parse()
+
+	// Default chat-id to "<basename>-<sha1(abspath)[:12]>" so different directories
+	// produce different session keys even when they share the same basename,
+	// while the same directory always gets the same key (conversation continuity).
+	if *chatID == "" {
+		wd, _ := os.Getwd()
+		if wd != "" {
+			parts := strings.Split(strings.TrimRight(wd, "/"), "/")
+			base := parts[len(parts)-1]
+			h := sha1.Sum([]byte(wd))
+			suffix := hex.EncodeToString(h[:])[:12]
+			*chatID = base + "-" + suffix
+		} else {
+			*chatID = "terminal"
+		}
+	}
 
 	// File logging: bubbletea owns stdout and stderr is unreliable in alt-screen.
 	logPath := *logFile

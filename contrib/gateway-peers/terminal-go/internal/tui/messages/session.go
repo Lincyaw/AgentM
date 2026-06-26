@@ -102,3 +102,11 @@ type (
 	// SendAttachmentMsg is a message for the first message with an attachment.
 	SendAttachmentMsg struct{ Content *session.Message }
 )
+
+// OpenSessionBrowserWithDataMsg opens the session browser with pre-fetched data
+// from the gateway (no local store needed). Satisfies the runtime.Event
+// interface so it can travel through the app's event fan-out.
+type OpenSessionBrowserWithDataMsg struct{ Sessions []session.Summary }
+
+// GetAgentName satisfies runtime.Event.
+func (OpenSessionBrowserWithDataMsg) GetAgentName() string { return "" }
