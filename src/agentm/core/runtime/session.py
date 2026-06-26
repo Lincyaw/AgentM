@@ -563,6 +563,27 @@ class AgentSession:
 
     # --- interrupt --------------------------------------------------------
 
+    def status(self) -> dict[str, Any]:
+        """Snapshot of session state for gateway/client consumption."""
+        phase: str
+        if self._closed:
+            phase = "closed"
+        elif self._in_run:
+            phase = "running"
+        elif not self._inbox.is_empty():
+            phase = "draining"
+        else:
+            phase = "idle"
+        return {
+            "phase": phase,
+            "session_id": self._session_id,
+            "tool_names": [t.name for t in self._tools],
+        }
+
+    def send_user_message(self, text: str) -> None:
+        """Push a user message into the inbox (mid-turn safe)."""
+        self._inbox.push(InboxItem(source="user", payload=text))
+
     def interrupt(self) -> None:
         """No-op when idle; sets the abort signal when a round is in flight."""
 

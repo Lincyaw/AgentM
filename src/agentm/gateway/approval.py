@@ -27,8 +27,9 @@ from typing import Any
 from loguru import logger
 
 _APPROVE = "approve"
+_APPROVE_SESSION = "approve_session"
 _DENY = "deny"
-_VALUE_SEP = ":"  # "<approval_id>:<approve|deny>" — internal encoding.
+_VALUE_SEP = ":"  # "<approval_id>:<approve|deny|approve_session>" — internal encoding.
 
 APPROVAL_TIMEOUT_S: float = 300.0
 
@@ -51,8 +52,10 @@ class ApprovalManager:
         self._require = require_approval
         self._block = always_block
         self._timeout = timeout_seconds
-        # approval_id -> (future, requester_sender_id, session_key)
-        self._pending: dict[str, tuple[asyncio.Future[bool], str, str]] = {}
+        # approval_id -> (future, requester_sender_id, session_key, tool_name)
+        self._pending: dict[str, tuple[asyncio.Future[bool], str, str, str]] = {}
+        # Tools auto-approved for the rest of this session.
+        self._session_approved: set[str] = set()
 
     # -- policy -------------------------------------------------------
 
@@ -62,8 +65,10 @@ class ApprovalManager:
         ``always_block`` tools also "require" approval — but
         :meth:`request` short-circuits them to a denial without a card.
         ``"*"`` in ``require_approval`` means every tool not allowed
-        elsewhere needs approval.
+        elsewhere needs approval. Session-approved tools skip.
         """
+        if tool_name in self._session_approved:
+            return False
         if tool_name in self._block:
             return True
         return tool_name in self._require or "*" in self._require
@@ -90,7 +95,7 @@ class ApprovalManager:
             return False
         approval_id = f"appr-{uuid.uuid4().hex[:12]}"
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        self._pending[approval_id] = (future, sender_id, session_key)
+        self._pending[approval_id] = (future, sender_id, session_key, tool_name)
         await self._sink(
             self._render_card(
                 approval_id=approval_id,
@@ -131,18 +136,21 @@ class ApprovalManager:
         if _VALUE_SEP not in button_value:
             return False
         approval_id, _, decision = button_value.partition(_VALUE_SEP)
-        if decision not in (_APPROVE, _DENY):
+        if decision not in (_APPROVE, _APPROVE_SESSION, _DENY):
             return False
         entry = self._pending.get(approval_id)
         if entry is None:
             return False  # stale, already resolved or timed out
-        future, requester_sender_id, _ = entry
+        future, requester_sender_id, _, tool_name = entry
         if clicker_sender_id != requester_sender_id:
             logger.info(f"approval {approval_id} click by {clicker_sender_id} ignored (expected {requester_sender_id})")
             return False  # identity mismatch, silently drop
         self._pending.pop(approval_id, None)
+        approved = decision in (_APPROVE, _APPROVE_SESSION)
+        if approved and decision == _APPROVE_SESSION:
+            self._session_approved.add(tool_name)
         if not future.done():
-            future.set_result(decision == _APPROVE)
+            future.set_result(approved)
         return True
 
     @property
@@ -158,7 +166,7 @@ class ApprovalManager:
         """
         return [
             approval_id
-            for approval_id, (_, _, sid) in self._pending.items()
+            for approval_id, (_, _, sid, _tool) in self._pending.items()
             if sid == session_key
         ]
 

@@ -34,6 +34,7 @@ class RouterAction(Enum):
     """What the gateway should do with an inbound."""
 
     SUBMIT = "submit"
+    STEER = "steer"
     INTERACTION_RESPONSE = "interaction_response"
     INTERRUPT = "interrupt"
     RESOLVE_APPROVAL = "resolve_approval"
@@ -76,6 +77,8 @@ def dispatch(env: Envelope) -> RouterDecision:
             return RouterDecision(RouterAction.RUN_COMMAND, body)
         if body.action == "interaction_response":
             return RouterDecision(RouterAction.INTERACTION_RESPONSE, body)
+        if body.action == "steer":
+            return RouterDecision(RouterAction.STEER, body)
         if body.action == "interrupt":
             return RouterDecision(RouterAction.INTERRUPT, body)
         if body.action == "resolve_approval":

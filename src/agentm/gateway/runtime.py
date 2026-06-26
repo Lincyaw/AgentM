@@ -584,6 +584,9 @@ class GatewayRuntime:
         if decision.action is RouterAction.INTERRUPT:
             self._interrupt_session(session_key)
             return
+        if decision.action is RouterAction.STEER:
+            self._steer_session(session_key, body)
+            return
         task = asyncio.create_task(
             self._dispatch_command_or_prompt(session_key, env.scenario, decision.action, body),
             name=f"gw-inbound-{session_key}",
@@ -621,6 +624,16 @@ class GatewayRuntime:
             snapshot.active_turn_id = None
             if not snapshot.pending_interactions:
                 self._schedule_session_snapshot(session_key)
+
+    def _steer_session(self, session_key: str, body: InboundBody) -> None:
+        """Inject a user message mid-turn without waiting for turn end."""
+        sess = self._sessions.get(session_key)
+        if sess is None:
+            return
+        content = body.content or ""
+        if not content.strip():
+            return
+        sess.send_user_message(content)
 
     def _interrupt_child(self, child_id: str) -> None:
         child = self._child_registry.get(child_id)
