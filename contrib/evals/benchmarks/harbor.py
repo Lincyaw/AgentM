@@ -97,8 +97,9 @@ class HarborAdapter:
             "name": "ensure-uv",
             "command": ["bash", "-lc",
                 "mkdir -p /root/.local/bin /logs/verifier && "
-                "test -f /root/.local/bin/env || "
-                "echo 'export PATH=\"/root/.local/bin:$PATH\"' > /root/.local/bin/env"],
+                "if ! command -v uv >/dev/null 2>&1; then "
+                "curl -LsSf https://astral.sh/uv/install.sh | sh; "
+                "fi"],
             "work_dir": "/app",
         }])
 
