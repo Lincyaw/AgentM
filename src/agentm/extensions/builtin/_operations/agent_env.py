@@ -843,7 +843,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     work_dir = config.work_dir or "/workspace"
     timeout_value: float | None = config.timeout
     idle_value: int | None = config.idle_timeout_seconds
-    api_key = _resolve_str(config.api_key, "AGENTM_AGENT_ENV_API_KEY", None)
+    api_key = _resolve_str(config.api_key, "AGENTM_AGENT_ENV_API_KEY", None) or os.environ.get("ARL_API_KEY")
     delete_on_shutdown = _resolve_bool(
         config.delete_on_shutdown,
         "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN",
@@ -857,6 +857,8 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     cpu_lim = _resolve_str(config.cpu_limit, "AGENTM_AGENT_ENV_CPU_LIMIT", None)
     mem_req = _resolve_str(config.memory_request, "AGENTM_AGENT_ENV_MEMORY_REQUEST", None)
     mem_lim = _resolve_str(config.memory_limit, "AGENTM_AGENT_ENV_MEMORY_LIMIT", None)
+    max_replicas_str = _resolve_str(None, "AGENTM_AGENT_ENV_MAX_REPLICAS", None)
+    max_replicas = int(max_replicas_str) if max_replicas_str else None
     resources = None
     if any((cpu_req, cpu_lim, mem_req, mem_lim)):
         from arl.session import ResourceRequirements  # type: ignore[import-not-found]
@@ -897,6 +899,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             api_key=api_key,
             timeout=create_timeout,
             resources=resources,
+            max_replicas=max_replicas,
         )
     elif pool_ref:
         session = arl.SandboxSession(
