@@ -113,25 +113,16 @@ class HarborAdapter:
 
         reward = None
         try:
-            reward_data = session._client.download_file(  # type: ignore[attr-defined]
-                session._session_id, "../logs/verifier/reward.txt"  # type: ignore[attr-defined]
-            )
-            reward = float(reward_data.decode().strip())
+            r2 = session.execute([{  # type: ignore[attr-defined]
+                "name": "read-reward",
+                "command": ["bash", "-lc", "cat /logs/verifier/reward.txt 2>/dev/null"],
+                "work_dir": "/app",
+            }])
+            txt = r2.results[0].output.stdout.strip()
+            if txt:
+                reward = float(txt)
         except Exception:  # noqa: S110
             pass
-
-        if reward is None:
-            try:
-                r2 = session.execute([{  # type: ignore[attr-defined]
-                    "name": "read-reward",
-                    "command": ["bash", "-lc", "cat /logs/verifier/reward.txt 2>/dev/null"],
-                    "work_dir": "/app",
-                }])
-                txt = r2.results[0].output.stdout.strip()
-                if txt:
-                    reward = float(txt)
-            except Exception:  # noqa: S110
-                pass
 
         return {
             "reward": reward,
