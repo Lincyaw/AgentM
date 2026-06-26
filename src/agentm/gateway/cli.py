@@ -58,6 +58,18 @@ EXIT_CONFIG_ERROR = 2
 EXIT_SIGINT = 130
 
 
+def _restore_terminal() -> None:
+    """Best-effort ``stty sane`` so Ctrl-C works even if a prior program
+    (e.g. a crashed TUI) left the PTY in raw mode."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        import subprocess
+        subprocess.run(["stty", "sane"], stdin=sys.stdin, check=False)  # noqa: S603, S607
+    except Exception:  # noqa: BLE001, S110
+        pass  # best-effort; failure is harmless
+
+
 class _InterceptHandler(_stdlib_logging.Handler):
     def emit(self, record: _stdlib_logging.LogRecord) -> None:
         level: str | int
@@ -423,6 +435,10 @@ def cli(
     from agentm.core.observability.otel_export import attach_loguru_otel_sink
     attach_loguru_otel_sink(level=log_level)
     _stdlib_logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+    # Ensure the terminal is in cooked mode so Ctrl-C generates SIGINT.
+    # A prior process (e.g. a TUI that crashed) may have left the PTY in
+    # raw mode where intr is disabled; without this, Ctrl-C is swallowed.
+    _restore_terminal()
     resolved_cwd = cwd or str(Path.cwd())
     try:
         rc = asyncio.run(
