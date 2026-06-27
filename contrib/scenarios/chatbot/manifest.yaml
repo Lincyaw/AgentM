@@ -44,7 +44,6 @@ extensions:
     config:
       max_tokens: 50000
       preview_tokens: 50000
-      spill_read_limit: 200
   # Default English text for kernel-emitted ToolErrorEvent.
   - module: agentm.extensions.builtin.tool_error_messages
 
@@ -205,7 +204,6 @@ extensions:
           config:
             max_tokens: 50000
             preview_tokens: 50000
-            spill_read_limit: 200
         observability:
           module: agentm.extensions.builtin.observability
         skill_loader:

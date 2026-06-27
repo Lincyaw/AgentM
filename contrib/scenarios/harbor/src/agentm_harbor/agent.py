@@ -32,7 +32,6 @@ extensions:
     config:
       max_tokens: 50000
       preview_tokens: 50000
-      spill_read_limit: 200
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability
@@ -63,7 +62,6 @@ extensions:
     config:
       max_tokens: 50000
       preview_tokens: 50000
-      spill_read_limit: 200
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability

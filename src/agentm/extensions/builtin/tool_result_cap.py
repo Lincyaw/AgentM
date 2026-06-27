@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,13 +26,14 @@ from agentm.core.abi import (
 from agentm.core.lib import count_text_tokens, truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 
+_SPILL_READ_EXAMPLE_LIMIT: Final[int] = 200
+
 
 class ToolResultCapConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_tokens: int = Field(gt=0)
     preview_tokens: int = Field(ge=0)
-    spill_read_limit: int = Field(gt=0)
 
 MANIFEST = ExtensionManifest(
     name="tool_result_cap",
@@ -47,7 +49,6 @@ MANIFEST = ExtensionManifest(
 def install(api: ExtensionAPI, config: ToolResultCapConfig) -> None:
     max_tokens = config.max_tokens
     preview_tokens = config.preview_tokens
-    spill_read_limit = config.spill_read_limit
     output_dir = Path(api.cwd) / ".agentm" / "tool_outputs"
 
     def _on_tool_result(event: ToolResultEvent) -> ToolResult | None:
@@ -87,7 +88,7 @@ def install(api: ExtensionAPI, config: ToolResultCapConfig) -> None:
             f"\n\n[Output truncated: {total_tokens} tokens total. "
             f"Full output saved to {spill_path}. "
             "Inspect it with paged reads, for example: "
-            f'read(path="{spill_path}", offset=1, limit={spill_read_limit}).]'
+            f'read(path="{spill_path}", offset=1, limit={_SPILL_READ_EXAMPLE_LIMIT}).]'
         )
 
         new_content: list[TextContent | ImageContent] = []
