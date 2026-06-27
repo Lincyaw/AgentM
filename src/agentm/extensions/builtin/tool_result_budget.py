@@ -48,6 +48,9 @@ def install(api: ExtensionAPI, config: ToolResultBudgetConfig) -> None:
     error_floor_tokens = config.error_floor_tokens
 
     def _on_tool_result(event: ToolResultEvent) -> ToolResult | None:
+        if event.tool_name == "read":
+            return None
+
         model_name = api.model.id if api.model is not None else None
         text_total_tokens = sum(
             count_text_tokens(block.text, model=model_name)

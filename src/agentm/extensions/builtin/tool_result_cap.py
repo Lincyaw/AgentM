@@ -31,6 +31,7 @@ class ToolResultCapConfig(BaseModel):
 
     max_tokens: int = Field(gt=0)
     preview_tokens: int = Field(ge=0)
+    spill_read_limit: int = Field(gt=0)
 
 MANIFEST = ExtensionManifest(
     name="tool_result_cap",
@@ -46,9 +47,13 @@ MANIFEST = ExtensionManifest(
 def install(api: ExtensionAPI, config: ToolResultCapConfig) -> None:
     max_tokens = config.max_tokens
     preview_tokens = config.preview_tokens
+    spill_read_limit = config.spill_read_limit
     output_dir = Path(api.cwd) / ".agentm" / "tool_outputs"
 
     def _on_tool_result(event: ToolResultEvent) -> ToolResult | None:
+        if event.tool_name == "read":
+            return None
+
         text_blocks: list[str] = []
         for block in event.result.content:
             if isinstance(block, TextContent):
@@ -81,7 +86,8 @@ def install(api: ExtensionAPI, config: ToolResultCapConfig) -> None:
         notice = (
             f"\n\n[Output truncated: {total_tokens} tokens total. "
             f"Full output saved to {spill_path}. "
-            f"Use the read tool to inspect it.]"
+            "Inspect it with paged reads, for example: "
+            f'read(path="{spill_path}", offset=1, limit={spill_read_limit}).]'
         )
 
         new_content: list[TextContent | ImageContent] = []
