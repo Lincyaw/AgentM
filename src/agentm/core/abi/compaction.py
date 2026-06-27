@@ -12,12 +12,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class CompactionSettings:
-    enabled: bool = True
-    reserve_tokens: int = 16_384
-    tool_result_max_chars: int = 8_000
+    tool_result_max_tokens: int
     """Per-tool-result truncation cap used when rendering tool outputs into
     the summary prompt. Larger values preserve more verbatim tool detail at
-    the cost of summary tokens."""
+    the cost of longer summary prompts."""
+
+    enabled: bool = True
+    reserve_tokens: int = 16_384
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,14 +35,22 @@ class CompactionResult:
     starts from ``covered_through_turn + 1`` so already-summarized turns are
     not re-summarized (incremental chaining)."""
     tokens_before: int
+    """Provider usage plus tiktoken-estimated trailing tokens before compaction."""
+
+    measured_tokens_before: int
+    """Provider-reported tokens from the latest measured assistant turn."""
+
+    estimated_trailing_tokens_before: int
+    """Tiktoken-estimated tokens in messages after the latest provider usage."""
+
     details: CompactionDetails
 
 
 @dataclass(frozen=True, slots=True)
-class ContextUsageEstimate:
+class ContextUsageSnapshot:
     tokens: int
-    usage_tokens: int
-    trailing_tokens: int
+    measured_tokens: int
+    estimated_trailing_tokens: int
     last_usage_index: int | None
 
 
@@ -64,5 +73,5 @@ __all__ = [
     "CompactionPrompts",
     "CompactionResult",
     "CompactionSettings",
-    "ContextUsageEstimate",
+    "ContextUsageSnapshot",
 ]

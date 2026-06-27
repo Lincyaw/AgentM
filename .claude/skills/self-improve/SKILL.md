@@ -108,7 +108,7 @@ guidelines; consider a stronger model for this scenario.
 - Large tool results dominate the context budget (check
   `tools --format ndjson | jq '.result | length'`)
 
-**Actions:** tune `tool_result_budget` max_chars; adjust
+**Actions:** tune `tool_result_budget` max_tokens; adjust
 `llm_compaction` audit_interval_turns; add `tool_result_cap` limits for
 specific tools; restructure long tool outputs into summaries.
 

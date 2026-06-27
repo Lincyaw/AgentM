@@ -62,9 +62,13 @@ from agentm.core.abi import (
     ToolResult,
     Unsubscribe,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.core.lib import DEFAULT_SHUTDOWN_GRACE_SECONDS, to_jsonable
+from agentm.core.lib import (
+    DEFAULT_SHUTDOWN_GRACE_SECONDS,
+    to_jsonable,
+    truncate_text_tokens,
+)
 from agentm.extensions import ExtensionManifest
 
 _PENDING: Literal["pending"] = "pending"
@@ -77,11 +81,6 @@ _KIND_WAKEUP: Literal["wakeup"] = "wakeup"
 _KIND_CHANNEL: Literal["channel"] = "channel"
 _KIND_CONDITION: Literal["condition"] = "condition"
 _Kind = Literal["wakeup", "channel", "condition"]
-
-# Default for the silenced channel-fire event summary cap. The atom exposes a
-# ``event_summary_max_chars`` config knob so a scenario can widen it without
-# touching the atom.
-_DEFAULT_EVENT_SUMMARY_MAX = 200
 
 # Default seconds between condition-poll fires (#178). A scenario can widen the
 # floor via ``condition_poll_min_seconds``; the per-call ``poll_interval`` is
@@ -144,8 +143,10 @@ _KERNEL_CONTROL_CHANNELS: frozenset[str] = frozenset(
 )
 
 class MonitorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
-    event_summary_max_chars: int = _DEFAULT_EVENT_SUMMARY_MAX
+    event_summary_max_tokens: int = Field(gt=0)
     condition_poll_min_seconds: float = _DEFAULT_CONDITION_POLL_MIN
 
 MANIFEST = ExtensionManifest(
@@ -195,19 +196,25 @@ def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResu
         extras=payload,
     )
 
-def _event_summary(event: Any, *, max_chars: int) -> str:
+def _event_summary(
+    event: Any,
+    *,
+    max_tokens: int,
+    model_name: str | None,
+) -> str:
     """Short, bounded repr of a bus event for the inbox payload.
 
     Kept tiny on purpose — the inbox item is a poke ("channel X fired"), not a
     transport for the event itself. The agent inspects the live state through
-    other tools if it needs detail. ``max_chars`` is set per-manager from the
-    atom config (``event_summary_max_chars``).
+    other tools if it needs detail. ``max_tokens`` is set per-manager from the
+    atom config (``event_summary_max_tokens``).
     """
 
     text = repr(event)
-    if len(text) > max_chars:
-        text = text[: max(0, max_chars - 3)] + "..."
-    return text
+    truncated = truncate_text_tokens(text, max_tokens, model=model_name)
+    if not truncated.was_truncated:
+        return text
+    return truncated.text + "..."
 
 def _monitor_view(state: _Monitor) -> dict[str, Any]:
     view: dict[str, Any] = {
@@ -241,13 +248,13 @@ class _MonitorManager:
         *,
         api: ExtensionAPI,
         shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
-        event_summary_max_chars: int = _DEFAULT_EVENT_SUMMARY_MAX,
+        event_summary_max_tokens: int,
         condition_poll_min_seconds: float = _DEFAULT_CONDITION_POLL_MIN,
     ) -> None:
         self._api = api
         self._monitors: dict[str, _Monitor] = {}
         self._shutdown_grace_seconds = shutdown_grace_seconds
-        self._event_summary_max_chars = event_summary_max_chars
+        self._event_summary_max_tokens = event_summary_max_tokens
         self._condition_poll_min_seconds = condition_poll_min_seconds
         # Set in on_session_shutdown so any in-flight wakeup that wakes mid-
         # shutdown sees it and exits without trying to register / push.
@@ -520,7 +527,11 @@ class _MonitorManager:
                 "channel": watch,
                 "note": state.note,
                 "event_summary": _event_summary(
-                    event, max_chars=self._event_summary_max_chars
+                    event,
+                    max_tokens=self._event_summary_max_tokens,
+                    model_name=(
+                        self._api.model.id if self._api.model is not None else None
+                    ),
                 ),
             }
             try:
@@ -633,7 +644,7 @@ def install(api: ExtensionAPI, config: MonitorConfig) -> None:
     manager = _MonitorManager(
         api=api,
         shutdown_grace_seconds=config.shutdown_grace_seconds,
-        event_summary_max_chars=config.event_summary_max_chars,
+        event_summary_max_tokens=config.event_summary_max_tokens,
         condition_poll_min_seconds=config.condition_poll_min_seconds,
     )
     api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)

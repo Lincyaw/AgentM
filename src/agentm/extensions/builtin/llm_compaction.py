@@ -1,9 +1,9 @@
 """Builtin LLM-driven compaction extension.
 
 Model: **full compress**. When the durable session branch crosses the
-token threshold, every turn since the previous compaction is summarized into
-a single ``user`` message that replaces the whole prior context — there is no
-verbatim recent tail. Compression is **incremental / chained**: each pass
+provider-reported token threshold, every turn since the previous compaction is
+summarized into a single ``user`` message that replaces the whole prior
+context — there is no verbatim recent tail. Compression is **incremental / chained**: each pass
 folds the new turns into the previous summary (an ``update`` rewrite, not a
 raw append) so the running checkpoint stays bounded and internally
 consistent.
@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     Aborted,
@@ -39,7 +39,7 @@ from agentm.core.abi import (
     CompactionPrompts,
     CompactionResult,
     CompactionSettings,
-    ContextUsageEstimate,
+    ContextUsageSnapshot,
     DiagnosticEvent,
     ENTRY_TYPE_COMPACTION,
     ExtensionAPI,
@@ -59,7 +59,12 @@ from agentm.core.abi import (
     Usage,
     UserMessage,
 )
-from agentm.core.lib import Turn, enumerate_turns
+from agentm.core.lib import (
+    Turn,
+    count_text_tokens,
+    enumerate_turns,
+    truncate_text_tokens,
+)
 from agentm.extensions import ExtensionManifest
 
 # Prompt registry keys. Kept in sync with ``compaction_prompts.py``;
@@ -71,9 +76,11 @@ _PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
 
 
 class LlmCompactionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_result_max_tokens: int = Field(gt=0)
     enabled: bool = True
-    reserve_tokens: int = 16_384
-    tool_result_max_chars: int = 8_000
+    reserve_tokens: int = Field(default=16_384, gt=0)
     custom_instructions: str | None = None
 
 
@@ -95,9 +102,6 @@ MANIFEST = ExtensionManifest(
 #
 # Per issue #76 the engine keeps **zero** literal English prompt text: prompts
 # are passed in as parameters by the caller (resolved via the prompt registry).
-
-# Lower than read_history's 20k: summarization prompts have a fixed token budget.
-DEFAULT_TOOL_RESULT_MAX_CHARS = 8_000
 
 # A flexible tool-registry shape for ``extract_file_ops_from_message``:
 # either a name->tool mapping, or any iterable of tools (we'll index by
@@ -181,17 +185,26 @@ def format_file_operations(read_files: list[str], modified_files: list[str]) -> 
     return "\n\n" + "\n\n".join(sections)
 
 
-def _truncate_for_summary(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
+def _truncate_for_summary(
+    text: str,
+    max_tokens: int,
+    *,
+    model_name: str | None,
+) -> str:
+    truncated = truncate_text_tokens(text, max_tokens, model=model_name)
+    if not truncated.was_truncated:
         return text
-    truncated_chars = len(text) - max_chars
-    return f"{text[:max_chars]}\n\n[... {truncated_chars} more characters truncated]"
+    return (
+        truncated.text
+        + f"\n\n[... {truncated.truncated_tokens} more tokens truncated]"
+    )
 
 
 def serialize_messages(
     messages: list[AgentMessage],
     *,
-    tool_result_max_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
+    tool_result_max_tokens: int,
+    model_name: str | None = None,
 ) -> str:
     parts: list[str] = []
 
@@ -238,7 +251,11 @@ def serialize_messages(
             if content:
                 parts.append(
                     "[Tool result]: "
-                    + _truncate_for_summary(content, tool_result_max_chars)
+                    + _truncate_for_summary(
+                        content,
+                        tool_result_max_tokens,
+                        model_name=model_name,
+                    )
                 )
 
     return "\n\n".join(parts)
@@ -247,22 +264,23 @@ def serialize_messages(
 def serialize_turns(
     turns: list[Turn],
     *,
-    tool_result_max_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
+    tool_result_max_tokens: int,
+    model_name: str | None = None,
 ) -> str:
     """Render turns with ``[Turn N]`` headers so the summarizer can cite them."""
 
     blocks: list[str] = []
     for turn in turns:
         body = serialize_messages(
-            turn.messages, tool_result_max_chars=tool_result_max_chars
+            turn.messages,
+            tool_result_max_tokens=tool_result_max_tokens,
+            model_name=model_name,
         )
         blocks.append(f"[Turn {turn.index}]\n{body}")
     return "\n\n".join(blocks)
 
 
 Summarizer = Callable[[str, str, int], Awaitable[str]]
-
-DEFAULT_COMPACTION_SETTINGS = CompactionSettings()
 
 # A neutral fallback used by tests and by the graceful-degradation path when
 # no prompts atom is installed. Empty strings mean "no extra instructions";
@@ -278,9 +296,11 @@ class CompactionPreparation:
     turns_to_summarize: list[Turn]
     covered_through_turn: int
     tokens_before: int
+    measured_tokens_before: int
+    estimated_trailing_tokens_before: int
     previous_summary: str | None
+    settings: CompactionSettings
     file_ops: _FileOpTracker = field(default_factory=create_file_ops)
-    settings: CompactionSettings = field(default_factory=CompactionSettings)
 
 
 def calculate_context_tokens(usage: Usage) -> int:
@@ -302,41 +322,45 @@ def _get_assistant_usage(message: AgentMessage) -> Usage | None:
     return None
 
 
-def estimate_tokens(message: AgentMessage) -> int:
-    chars = 0
+def count_message_tokens(message: AgentMessage, *, model_name: str | None) -> int:
+    text_parts: list[str] = []
     if isinstance(message, UserMessage):
         for user_block in message.content:
             if isinstance(user_block, TextContent):
-                chars += len(user_block.text)
+                text_parts.append(user_block.text)
             else:
-                chars += 4_800
-        return max(1, (chars + 3) // 4)
+                text_parts.append(repr(user_block))
+        return count_text_tokens("\n".join(text_parts), model=model_name)
 
     if isinstance(message, AssistantMessage):
         for assistant_block in message.content:
             if isinstance(assistant_block, TextContent):
-                chars += len(assistant_block.text)
+                text_parts.append(assistant_block.text)
             elif isinstance(assistant_block, ToolCallBlock):
-                chars += len(assistant_block.name) + len(
-                    repr(assistant_block.arguments)
+                text_parts.append(
+                    f"{assistant_block.name}({repr(assistant_block.arguments)})"
                 )
             else:
-                chars += len(getattr(assistant_block, "text", ""))
-        return max(1, (chars + 3) // 4)
+                text_parts.append(str(getattr(assistant_block, "text", "")))
+        return count_text_tokens("\n".join(text_parts), model=model_name)
 
     if isinstance(message, ToolResultMessage):
         for result_block in message.content:
             for result_part in result_block.content:
                 if isinstance(result_part, TextContent):
-                    chars += len(result_part.text)
+                    text_parts.append(result_part.text)
                 else:
-                    chars += 4_800
-        return max(1, (chars + 3) // 4)
+                    text_parts.append(repr(result_part))
+        return count_text_tokens("\n".join(text_parts), model=model_name)
 
     return 0
 
 
-def estimate_context_tokens(messages: list[AgentMessage]) -> ContextUsageEstimate:
+def capture_context_usage(
+    messages: list[AgentMessage],
+    *,
+    model_name: str | None,
+) -> ContextUsageSnapshot:
     last_usage: Usage | None = None
     last_usage_index: int | None = None
     for index in range(len(messages) - 1, -1, -1):
@@ -347,29 +371,33 @@ def estimate_context_tokens(messages: list[AgentMessage]) -> ContextUsageEstimat
             break
 
     if last_usage is None:
-        estimated = sum(estimate_tokens(message) for message in messages)
-        return ContextUsageEstimate(
+        estimated = sum(
+            count_message_tokens(message, model_name=model_name)
+            for message in messages
+        )
+        return ContextUsageSnapshot(
             tokens=estimated,
-            usage_tokens=0,
-            trailing_tokens=estimated,
+            measured_tokens=0,
+            estimated_trailing_tokens=estimated,
             last_usage_index=None,
         )
 
     assert last_usage_index is not None
-    usage_tokens = calculate_context_tokens(last_usage)
-    trailing = sum(
-        estimate_tokens(message) for message in messages[last_usage_index + 1 :]
+    measured_tokens = calculate_context_tokens(last_usage)
+    estimated_trailing_tokens = sum(
+        count_message_tokens(message, model_name=model_name)
+        for message in messages[last_usage_index + 1 :]
     )
-    return ContextUsageEstimate(
-        tokens=usage_tokens + trailing,
-        usage_tokens=usage_tokens,
-        trailing_tokens=trailing,
+    return ContextUsageSnapshot(
+        tokens=measured_tokens + estimated_trailing_tokens,
+        measured_tokens=measured_tokens,
+        estimated_trailing_tokens=estimated_trailing_tokens,
         last_usage_index=last_usage_index,
     )
 
 
 def should_compact(
-    context_tokens: int,
+    tokens: int,
     context_window: int,
     settings: CompactionSettings,
 ) -> bool:
@@ -383,7 +411,7 @@ def should_compact(
         # disable auto-compaction rather than thrash. Lower ``reserve_tokens``
         # to compact on small-window models.
         return False
-    return context_tokens > threshold
+    return tokens > threshold
 
 
 def _find_previous_compaction(branch: list[SessionEntry]) -> SessionEntry | None:
@@ -398,6 +426,7 @@ def prepare_compaction(
     settings: CompactionSettings,
     current_messages: list[AgentMessage] | None = None,
     tools: ToolRegistry | None = None,
+    model_name: str | None = None,
 ) -> CompactionPreparation | None:
     """Collect the turns to fold into the running summary.
 
@@ -436,10 +465,16 @@ def prepare_compaction(
         for message in turn.messages:
             extract_file_ops_from_message(message, file_ops, tools)
 
+    usage_snapshot = capture_context_usage(
+        current_messages or [],
+        model_name=model_name,
+    )
     return CompactionPreparation(
         turns_to_summarize=new_turns,
         covered_through_turn=all_turns[-1].index,
-        tokens_before=estimate_context_tokens(current_messages or []).tokens,
+        tokens_before=usage_snapshot.tokens,
+        measured_tokens_before=usage_snapshot.measured_tokens,
+        estimated_trailing_tokens_before=usage_snapshot.estimated_trailing_tokens,
         previous_summary=previous_summary,
         file_ops=file_ops,
         settings=settings,
@@ -455,7 +490,8 @@ async def generate_summary(
     custom_instructions: str | None = None,
     previous_summary: str | None = None,
     *,
-    tool_result_max_chars: int = DEFAULT_TOOL_RESULT_MAX_CHARS,
+    tool_result_max_tokens: int,
+    model_name: str | None = None,
 ) -> str:
     base_prompt = (
         prompts.update_summarization if previous_summary else summarization_prompt
@@ -464,7 +500,9 @@ async def generate_summary(
         base_prompt = f"{base_prompt}\n\nAdditional focus: {custom_instructions}"
 
     conversation_text = serialize_turns(
-        turns, tool_result_max_chars=tool_result_max_chars
+        turns,
+        tool_result_max_tokens=tool_result_max_tokens,
+        model_name=model_name,
     )
     prompt_text = f"<conversation>\n{conversation_text}\n</conversation>\n\n"
     if previous_summary:
@@ -501,7 +539,8 @@ async def compact(
         resolved_prompts,
         custom_instructions,
         preparation.previous_summary,
-        tool_result_max_chars=preparation.settings.tool_result_max_chars,
+        tool_result_max_tokens=preparation.settings.tool_result_max_tokens,
+        model_name=getattr(summarizer, "model_name", None),
     )
 
     read_files, modified_files = compute_file_lists(preparation.file_ops)
@@ -510,6 +549,10 @@ async def compact(
         summary=summary,
         covered_through_turn=preparation.covered_through_turn,
         tokens_before=preparation.tokens_before,
+        measured_tokens_before=preparation.measured_tokens_before,
+        estimated_trailing_tokens_before=(
+            preparation.estimated_trailing_tokens_before
+        ),
         details=CompactionDetails(
             read_files=read_files,
             modified_files=modified_files,
@@ -524,12 +567,14 @@ def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
     settings = CompactionSettings(
         enabled=config.enabled,
         reserve_tokens=config.reserve_tokens,
-        tool_result_max_chars=config.tool_result_max_chars,
+        tool_result_max_tokens=config.tool_result_max_tokens,
     )
     custom_instructions = config.custom_instructions
 
     async def _run_compaction(
-        reason: str, session_messages: list[AgentMessage], est_tokens: int
+        reason: str,
+        session_messages: list[AgentMessage],
+        usage_snapshot: ContextUsageSnapshot,
     ) -> list[AgentMessage] | None:
         """Compact ``session_messages`` and append the compaction entry.
 
@@ -544,7 +589,11 @@ def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
 
         branch = api.session.get_branch()
         preparation = prepare_compaction(
-            branch, settings, current_messages=session_messages, tools=list(api.tools)
+            branch,
+            settings,
+            current_messages=session_messages,
+            tools=list(api.tools),
+            model_name=model.id,
         )
         if preparation is None:
             return None
@@ -581,7 +630,11 @@ def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
             "reason": reason,
             "reserve_tokens": settings.reserve_tokens,
             "covered_through_turn": result.covered_through_turn,
-            "estimated_tokens_before": est_tokens,
+            "tokens_before": result.tokens_before,
+            "measured_tokens_before": result.measured_tokens_before,
+            "estimated_trailing_tokens_before": (
+                result.estimated_trailing_tokens_before
+            ),
             "summary": final_summary,
             "read_files": result.details.read_files,
             "modified_files": result.details.modified_files,
@@ -608,11 +661,14 @@ def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
         if model is None:
             return
         session_messages = api.session.get_messages()
-        usage_estimate = estimate_context_tokens(session_messages)
-        if not should_compact(usage_estimate.tokens, model.context_window, settings):
+        usage_snapshot = capture_context_usage(
+            session_messages,
+            model_name=model.id,
+        )
+        if not should_compact(usage_snapshot.tokens, model.context_window, settings):
             return
         rebuilt = await _run_compaction(
-            "llm_auto_overflow", session_messages, usage_estimate.tokens
+            "llm_auto_overflow", session_messages, usage_snapshot
         )
         if rebuilt is not None:
             event.messages[:] = rebuilt
@@ -622,10 +678,12 @@ def install(api: ExtensionAPI, config: LlmCompactionConfig) -> None:
         # but still no-ops when there is nothing summarisable. Feedback reaches
         # the user via the AfterCompactEvent the shared path emits.
         session_messages = api.session.get_messages()
-        usage_estimate = estimate_context_tokens(session_messages)
-        rebuilt = await _run_compaction(
-            "manual", session_messages, usage_estimate.tokens
+        model_name = api.model.id if api.model is not None else None
+        usage_snapshot = capture_context_usage(
+            session_messages,
+            model_name=model_name,
         )
+        rebuilt = await _run_compaction("manual", session_messages, usage_snapshot)
         if rebuilt is None:
             await api.events.emit(
                 DiagnosticEvent.CHANNEL,
@@ -706,6 +764,7 @@ class _ProviderSummarizer:
     def __init__(self, provider: ProviderConfig, model: Model) -> None:
         self._provider = provider
         self._model = model
+        self.model_name = model.id
 
     async def __call__(
         self, system_prompt: str, prompt_text: str, max_tokens: int

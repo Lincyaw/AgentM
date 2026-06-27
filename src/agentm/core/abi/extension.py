@@ -185,7 +185,7 @@ class ExtensionLoadError(Exception):
     def __init__(self, module_path: str, cause: BaseException | None = None) -> None:
         msg = f"Failed to load extension {module_path!r}"
         if cause is not None:
-            msg += f": {cause!r}"
+            msg += f": {cause}"
         super().__init__(msg)
         self.module_path = module_path
         self.cause = cause

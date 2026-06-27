@@ -1,22 +1,20 @@
 """Policy-gate atom for the §7 ``extensions.builtin.cost_budget`` row.
 
-Uses a coarse ``len(json.dumps(messages)) // 4`` heuristic for input tokens on
-``before_send_to_llm`` because the v2 kernel intentionally has no tokenizer.
-When accumulated spend crosses the configured limit, this extension emits the
-custom ``cost_budget_exceeded`` event instead of throwing across handlers.
+Uses provider-reported usage tokens only; it does not infer tokens from
+character counts. When accumulated spend crosses the configured limit, this
+extension emits the custom ``cost_budget_exceeded`` event instead of throwing
+across handlers.
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     BeforeAgentStartEvent,
-    BeforeSendToLlmEvent,
     BudgetExhausted,
     CostBudgetExceededEvent,
     DiagnosticEvent,
@@ -43,16 +41,18 @@ class CostQueryService(Protocol):
 class CostBudgetConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    limit: float
+    limit: float = Field(gt=0)
     currency: str = "usd"
-    pricing: dict[str, Any] | None = None
+    pricing: dict[str, tuple[float, float]] | None = None
 
 MANIFEST = ExtensionManifest(
     name="cost_budget",
-    description="Track estimated LLM spend and emit cost_budget_exceeded on overflow.",
+    description=(
+        "Track LLM spend from provider usage tokens and emit "
+        "cost_budget_exceeded on overflow."
+    ),
     registers=(
         "event:before_agent_start",
-        "event:before_send_to_llm",
         "event:turn_end",
         "event:cost_budget_exceeded",
     ),
@@ -61,36 +61,10 @@ MANIFEST = ExtensionManifest(
     tier=2,
 )
 
-def _serialize(value: Any) -> Any:
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            field.name: _serialize(getattr(value, field.name))
-            for field in fields(value)
-        }
-    if isinstance(value, dict):
-        return {str(key): _serialize(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_serialize(item) for item in value]
-    return value
-
-def _estimate_input_tokens(messages: list[Any]) -> int:
-    encoded = json.dumps(_serialize(messages), default=str, sort_keys=True)
-    return len(encoded) // 4
-
-def _coerce_pricing(raw: Any) -> dict[str, tuple[float, float]]:
-    if not isinstance(raw, dict):
-        return {}
-    pricing: dict[str, tuple[float, float]] = {}
-    for provider, pair in raw.items():
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-            continue
-        pricing[str(provider)] = (float(pair[0]), float(pair[1]))
-    return pricing
-
 def install(api: ExtensionAPI, config: CostBudgetConfig) -> None:
     limit = config.limit
     currency = config.currency
-    pricing = _coerce_pricing(config.pricing)
+    pricing = dict(config.pricing or {})
     warned_unpriced: set[str] = set()
     state = {
         "used": 0.0,
@@ -147,21 +121,17 @@ def install(api: ExtensionAPI, config: CostBudgetConfig) -> None:
             return None
         return {"block": True, "cause": BudgetExhausted(detail="cost")}
 
-    async def _before_send(event: BeforeSendToLlmEvent) -> None:
-        provider_pricing = await _pricing_for(event.model.provider)
-        estimated_input_tokens = _estimate_input_tokens(event.messages)
-        state["used"] += (estimated_input_tokens / 1_000_000.0) * provider_pricing[0]
-        await _emit_if_needed()
-
     async def _on_turn_end(event: TurnEndEvent) -> None:
         usage = event.message.usage
         if usage is None:
             return
         provider = api.model.provider if api.model is not None else ""
         provider_pricing = await _pricing_for(provider)
-        state["used"] += (usage.output_tokens / 1_000_000.0) * provider_pricing[1]
+        state["used"] += (
+            (usage.input_tokens / 1_000_000.0) * provider_pricing[0]
+            + (usage.output_tokens / 1_000_000.0) * provider_pricing[1]
+        )
         await _emit_if_needed()
 
     api.on(BeforeAgentStartEvent.CHANNEL, _before_agent_start)
-    api.on(BeforeSendToLlmEvent.CHANNEL, _before_send)
     api.on(TurnEndEvent.CHANNEL, _on_turn_end)

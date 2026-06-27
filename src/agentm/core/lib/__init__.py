@@ -38,6 +38,12 @@ from agentm.core.lib.stream import StreamAccumulator, ToolSpecAdapter, encode_to
 from agentm.core.lib.child_wire import forward_child_to_wire
 from agentm.core.lib.tool_result import with_model_note
 from agentm.core.lib.tool_schema import pydantic_to_openai_tool_schema, pydantic_to_tool_schema
+from agentm.core.lib.tokens import (
+    TokenTruncation,
+    count_text_tokens,
+    truncate_text_tokens,
+    truncate_text_tokens_middle,
+)
 from agentm.core.lib.turns import Turn, enumerate_turns
 from agentm.core.lib.user_config import agentm_home_dir, resolve_model_profile
 
@@ -51,11 +57,14 @@ __all__ = [
     "bind_read_state_session",
     "StreamAccumulator",
     "ToolSpecAdapter",
+    "TokenTruncation",
     "Turn",
     "agentm_home_dir",
+    "assistant_text",
     "artifacts_dir_for",
     "clear_read_state",
     "content_hash_for",
+    "count_text_tokens",
     "encode_tool_args",
     "enumerate_turns",
     "file_export_requested",
@@ -75,5 +84,7 @@ __all__ = [
     "scan_artifact_metadata",
     "forward_child_to_wire",
     "to_jsonable",
+    "truncate_text_tokens",
+    "truncate_text_tokens_middle",
     "with_model_note",
 ]

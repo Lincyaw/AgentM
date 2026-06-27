@@ -727,9 +727,16 @@ def load_extension(
         schema_cls = getattr(manifest, "config_schema", None)
         if schema_cls is not None:
             from pydantic import BaseModel as _PydanticBase
+            from pydantic import ValidationError as _PydanticValidationError
 
             if isinstance(schema_cls, type) and issubclass(schema_cls, _PydanticBase):
-                resolved_config = schema_cls.model_validate(config)
+                try:
+                    resolved_config = schema_cls.model_validate(config)
+                except _PydanticValidationError as exc:
+                    raise ExtensionLoadError(
+                        module_path,
+                        ValueError(_format_config_validation_error(schema_cls, exc)),
+                    ) from exc
 
     token = _INSTALLING_EXTENSION.set(module_path)
     try:
@@ -753,6 +760,26 @@ def load_extension(
             _INSTALLING_EXTENSION.reset(inner_token)
 
     return _await_install()
+
+
+def _format_config_validation_error(schema_cls: type[Any], exc: BaseException) -> str:
+    errors = exc.errors() if hasattr(exc, "errors") else []
+    missing: list[str] = []
+    if isinstance(errors, list):
+        for error in errors:
+            if not isinstance(error, dict) or error.get("type") != "missing":
+                continue
+            loc = error.get("loc")
+            if isinstance(loc, (tuple, list)):
+                missing.append(".".join(str(part) for part in loc))
+            elif loc:
+                missing.append(str(loc))
+    if missing:
+        return (
+            f"config for {schema_cls.__name__} is missing required field(s): "
+            + ", ".join(missing)
+        )
+    return f"config for {schema_cls.__name__} is invalid: {exc}"
 
 
 def _validate_on_load(module: Any, module_path: str) -> None:

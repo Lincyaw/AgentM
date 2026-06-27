@@ -8,7 +8,7 @@ Exposes two atoms:
   agent can write ``SELECT ... FROM abnormal_traces`` instead of
   ``read_parquet('/abs/path/abnormal_traces.parquet')``.
 * ``query_sql`` — execute a single read-only SQL statement against the
-  registered views and return rows as JSON, capped by a token budget.
+  registered views and return rows as TSV, capped by a token limit.
 
 The atom runs in one of two modes, selected at install time; the agent's
 prompt and the tool schemas are **identical** in both:
@@ -33,7 +33,7 @@ Configuration (local)::
         data_dir: /path/to/converted     # required; or AGENTM_RCA_DATA_DIR
         exclude: [conclusion.parquet]    # optional, hides ground truth
         row_limit: 200                   # optional default LIMIT
-        token_limit: 5000                # optional response token cap
+        max_tokens: 10000                # required response token cap
 
 Configuration (remote)::
 
@@ -45,7 +45,7 @@ Configuration (remote)::
         # keys: [a.parquet, b.parquet]          # explicit keys instead of a prefix
         # bearer token via AGENTM_DUCKDB_TOKEN env only (never in config/logs)
         row_limit: 200
-        token_limit: 5000
+        max_tokens: 10000
 
 Remote mode needs the optional ``rcabench`` SDK
 (``uv sync --extra duckdb-remote``); local mode does not import it.
@@ -63,7 +63,7 @@ from typing import Any, Final
 
 import duckdb  # type: ignore[import-not-found,import-untyped]
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agentm.core.abi import (
     ExtensionAPI,
@@ -71,9 +71,12 @@ from agentm.core.abi import (
     TextContent,
     ToolResult,
 )
+from agentm.core.lib import count_text_tokens, truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 
 class DuckdbSqlConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     data_dir: str | None = None
     endpoint: str | None = None
     bucket: str | None = None
@@ -82,7 +85,20 @@ class DuckdbSqlConfig(BaseModel):
     keys: list[str] | None = None
     exclude: list[str] = []
     row_limit: int | None = None
-    token_limit: int | None = None
+    max_tokens: int = Field(gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_renamed_limits(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "token_limit" in data:
+            raise ValueError(
+                "duckdb_sql config.token_limit has been renamed to max_tokens"
+            )
+        if isinstance(data, dict) and "max_chars" in data:
+            raise ValueError(
+                "duckdb_sql config.max_chars has been renamed to max_tokens"
+            )
+        return data
 
 MANIFEST = ExtensionManifest(
     name="duckdb_sql",
@@ -96,7 +112,6 @@ _WRITE_KEYWORDS = re.compile(
     r"PRAGMA|EXPORT|IMPORT|INSTALL|LOAD|CALL|SET)\b",
     re.IGNORECASE,
 )
-_DEFAULT_TOKEN_LIMIT = 5000  # rationale: fits RCA result rows in a compact tool turn.
 _DEFAULT_ROW_LIMIT = 200  # rationale: enough rows for patterns without flooding context.
 
 _ID_COLUMNS = frozenset({
@@ -189,10 +204,6 @@ def _compact_ids(rows: list[dict[str, Any]], cols: list[str]) -> list[dict[str, 
         out.append(r)
     return out
 
-def _estimate_tokens(text: str) -> int:
-    # Cheap heuristic; close enough for budget enforcement.
-    return (len(text) + 2) // 3
-
 def _format_value(v: Any) -> str:
     if v is None:
         return ""
@@ -208,7 +219,11 @@ def _err(msg: str, **extra: Any) -> ToolResult:
     return _ok(json.dumps({"error": msg, **extra}, ensure_ascii=False), is_error=True)
 
 def _rows_to_result(
-    rows: list[dict[str, Any]], cols: list[str], *, token_limit: int
+    rows: list[dict[str, Any]],
+    cols: list[str],
+    *,
+    max_tokens: int,
+    model_name: str | None,
 ) -> ToolResult:
     """Shape result rows into the agent-facing ``ToolResult`` as TSV."""
     rows = _compact_ids(rows, cols)
@@ -219,12 +234,22 @@ def _rows_to_result(
         "\t".join(_format_value(row.get(c)) for c in cols) for row in rows
     ]
     tsv = header + "\n" + "\n".join(data_lines)
-    if _estimate_tokens(tsv) <= token_limit:
+    token_count = count_text_tokens(tsv, model=model_name)
+    if token_count <= max_tokens:
         return _ok(tsv)
-    ratio = token_limit / max(1, _estimate_tokens(tsv))
+    ratio = max_tokens / max(1, token_count)
     keep = max(1, int(len(rows) * ratio * 0.8))
     result = header + "\n" + "\n".join(data_lines[:keep])
-    result += f"\n({len(rows)} total, {keep} shown. Add WHERE filters or smaller LIMIT.)"
+    if count_text_tokens(result, model=model_name) > max_tokens:
+        result = truncate_text_tokens(
+            result,
+            max_tokens,
+            model=model_name,
+        ).text
+    result += (
+        f"\n({len(rows)} total, {keep} shown. "
+        "Add WHERE filters or smaller LIMIT.)"
+    )
     return _ok(result)
 
 def _table_name(filename: str) -> str:
@@ -300,12 +325,12 @@ class _DuckDBState:
         data_dir: Path,
         exclude: set[str],
         row_limit: int,
-        token_limit: int,
+        max_tokens: int,
     ) -> None:
         self.data_dir = data_dir
         self.exclude = exclude
         self.row_limit = row_limit
-        self.token_limit = token_limit
+        self.max_tokens = max_tokens
         self.conn: duckdb.DuckDBPyConnection | None = None
         self.tables: list[str] = []
         self.sql_cache: dict[str, ToolResult] = {}
@@ -445,7 +470,7 @@ class _RemoteState:
         keys: list[str] | None,
         token: str | None,
         row_limit: int,
-        token_limit: int,
+        max_tokens: int,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._bucket = bucket
@@ -453,7 +478,7 @@ class _RemoteState:
         self._keys = keys
         self._token = token
         self.row_limit = row_limit
-        self.token_limit = token_limit
+        self.max_tokens = max_tokens
         self.sql_cache: dict[str, ToolResult] = {}
         self._blob: Any = None
 
@@ -543,17 +568,19 @@ def _resolve_remote(config: DuckdbSqlConfig) -> _RemoteState | None:
         keys=keys,
         token=os.environ.get("AGENTM_DUCKDB_TOKEN"),
         row_limit=config.row_limit or _DEFAULT_ROW_LIMIT,
-        token_limit=config.token_limit or _DEFAULT_TOKEN_LIMIT,
+        max_tokens=config.max_tokens,
     )
 
 def _build_local_handlers(
     config: DuckdbSqlConfig,
+    *,
+    model_name: str | None,
 ) -> tuple[Any, Any]:
     state = _DuckDBState(
         data_dir=_resolve_data_dir(config),
         exclude=set(config.exclude),
         row_limit=config.row_limit or _DEFAULT_ROW_LIMIT,
-        token_limit=config.token_limit or _DEFAULT_TOKEN_LIMIT,
+        max_tokens=config.max_tokens,
     )
 
     async def _list(_: dict[str, Any]) -> ToolResult:
@@ -599,7 +626,12 @@ def _build_local_handlers(
                 extra["hint"] = hint
             return _err(f"query failed: {exc}", **extra)
 
-        result = _rows_to_result(rows, cols, token_limit=state.token_limit)
+        result = _rows_to_result(
+            rows,
+            cols,
+            max_tokens=state.max_tokens,
+            model_name=model_name,
+        )
         state.sql_cache[cache_key] = result
         return result
 
@@ -678,7 +710,11 @@ def _post_query(
 # modes) and bounds its own DuckDB worker pool centrally, so the per-process
 # ``AGENTM_DUCKDB_THREADS`` cap is a no-op here — the agent carries zero
 # DuckDB footprint.
-def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
+def _build_remote_handlers(
+    state: _RemoteState,
+    *,
+    model_name: str | None,
+) -> tuple[Any, Any]:
     async def _list(_: dict[str, Any]) -> ToolResult:
         fetched = _post_query(state, _SCHEMA_DISCOVERY_SQL)
         if isinstance(fetched, ToolResult):
@@ -717,18 +753,24 @@ def _build_remote_handlers(state: _RemoteState) -> tuple[Any, Any]:
             return fetched
         rows, cols = fetched
         rows = [_serialize(r) for r in rows]
-        result = _rows_to_result(rows, cols, token_limit=state.token_limit)
+        result = _rows_to_result(
+            rows,
+            cols,
+            max_tokens=state.max_tokens,
+            model_name=model_name,
+        )
         state.sql_cache[cache_key] = result
         return result
 
     return _list, _query
 
 def install(api: ExtensionAPI, config: DuckdbSqlConfig) -> None:
+    model_name = api.model.id if api.model is not None else None
     remote = _resolve_remote(config)
     if remote is not None:
-        _list, _query = _build_remote_handlers(remote)
+        _list, _query = _build_remote_handlers(remote, model_name=model_name)
     else:
-        _list, _query = _build_local_handlers(config)
+        _list, _query = _build_local_handlers(config, model_name=model_name)
 
     api.register_tool(
         FunctionTool(
@@ -753,7 +795,7 @@ def install(api: ExtensionAPI, config: DuckdbSqlConfig) -> None:
                 "Run a single read-only DuckDB SQL statement (SELECT / WITH / "
                 "EXPLAIN / DESCRIBE / SHOW / SUMMARIZE) against the parquet "
                 "views. SELECTs are auto-wrapped with a LIMIT; results are "
-                "JSON-serialised and capped by a token budget. "
+                "TSV-serialised and capped by a token limit. "
                 'Double-quote dotted OTLP columns ("attr.status_code", '
                 '"attr.k8s.node.name"). Percentile helpers p50/p90/p95/p99(col) '
                 "are predefined (aliases for quantile_cont)."

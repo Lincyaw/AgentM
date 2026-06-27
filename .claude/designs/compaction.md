@@ -67,19 +67,20 @@ which read the observability JSONL for *cross-session, post-hoc* analysis.
 ## Trigger
 
 `should_compact`: `context_tokens > context_window − reserve_tokens`. Token
-count prefers the last assistant message's real provider `Usage`, falling back
-to a char/4 estimate. When `reserve_tokens >= context_window` the threshold is
-non-positive (a misconfiguration, or a tiny test model) and auto-compaction is
-disabled rather than firing every turn — lower `reserve_tokens` to compact on
-small-window models.
+count prefers the last assistant message's real provider `Usage` and uses the
+shared tiktoken helper for messages after that usage measurement. When
+`reserve_tokens >= context_window` the threshold is non-positive (a
+misconfiguration, or a tiny test model) and auto-compaction is disabled rather
+than firing every turn — lower `reserve_tokens` to compact on small-window
+models.
 
 ## Configuration
 
 `llm_compaction` config: `enabled`, `reserve_tokens`, `custom_instructions`
-(appended to the summary prompt as a focus hint). Prompt bodies live in the
-`compaction_prompts` floor atom and are overridable through its config.
-`read_history` config: `tool_result_max_chars`, `total_max_chars` (output
-caps).
+(appended to the summary prompt as a focus hint), `tool_result_max_tokens`.
+Prompt bodies live in the `compaction_prompts` floor atom and are overridable
+through its config. `read_history` config: `tool_result_max_tokens`,
+`total_max_tokens` (output caps).
 
 ## Boundaries
 

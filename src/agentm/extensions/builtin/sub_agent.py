@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import json
 import time
 import uuid
@@ -55,6 +56,7 @@ from agentm.core.lib import (
     to_jsonable,
 )
 from pydantic import BaseModel as PydanticBaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
@@ -1035,9 +1037,78 @@ class _ChildTaskManager:
             if child_sid:
                 self._child_registry.deregister(str(child_sid))
 
+def _validate_available_inherited_configs(
+    available_inherited: dict[str, Any],
+) -> None:
+    for name, entry in available_inherited.items():
+        if not isinstance(entry, dict):
+            raise ExtensionLoadError(
+                __name__,
+                ValueError(
+                    "sub_agent.available_inherited_extensions"
+                    f".{name} must be a mapping"
+                ),
+            )
+        module_path = entry.get("module")
+        if not isinstance(module_path, str) or not module_path:
+            continue
+        config = entry.get("config", {})
+        if not isinstance(config, dict):
+            raise ExtensionLoadError(
+                __name__,
+                ValueError(
+                    "sub_agent.available_inherited_extensions"
+                    f".{name}.config must be a mapping"
+                ),
+            )
+        try:
+            module = importlib.import_module(module_path)
+        except Exception as exc:  # noqa: BLE001
+            raise ExtensionLoadError(module_path, exc) from exc
+        manifest = getattr(module, "MANIFEST", None)
+        schema_cls = getattr(manifest, "config_schema", None)
+        if not (
+            isinstance(schema_cls, type)
+            and issubclass(schema_cls, PydanticBaseModel)
+        ):
+            continue
+        try:
+            schema_cls.model_validate(config)
+        except PydanticValidationError as exc:
+            raise ExtensionLoadError(
+                __name__,
+                ValueError(
+                    "sub_agent.available_inherited_extensions"
+                    f".{name}: {_format_config_validation_error(schema_cls, exc)}"
+                ),
+            ) from exc
+
+
+def _format_config_validation_error(
+    schema_cls: type[PydanticBaseModel],
+    exc: PydanticValidationError,
+) -> str:
+    missing: list[str] = []
+    for error in exc.errors():
+        if error.get("type") != "missing":
+            continue
+        loc = error.get("loc")
+        if isinstance(loc, (tuple, list)):
+            missing.append(".".join(str(part) for part in loc))
+        elif loc:
+            missing.append(str(loc))
+    if missing:
+        return (
+            f"config for {schema_cls.__name__} is missing required field(s): "
+            + ", ".join(missing)
+        )
+    return f"config for {schema_cls.__name__} is invalid: {exc}"
+
+
 async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
     inherit_extensions = list(config.inherit_extensions)
     available_inherited = dict(config.available_inherited_extensions)
+    _validate_available_inherited_configs(available_inherited)
     missing = [name for name in inherit_extensions if name not in available_inherited]
     if missing:
         raise ExtensionLoadError(

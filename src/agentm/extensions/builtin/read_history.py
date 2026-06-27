@@ -30,18 +30,20 @@ from agentm.core.abi import (
     ToolResultMessage,
     UserMessage,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.core.lib import Turn, enumerate_turns
+from agentm.core.lib import Turn, enumerate_turns, truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 
-# Higher than llm_compaction's 8k: the agent explicitly requested this detail.
-_DEFAULT_TOOL_RESULT_MAX_CHARS: Final = 20_000
-_DEFAULT_TOTAL_MAX_CHARS: Final = 200_000
-
 class ReadHistoryConfig(BaseModel):
-    tool_result_max_chars: int = _DEFAULT_TOOL_RESULT_MAX_CHARS
-    total_max_chars: int = _DEFAULT_TOTAL_MAX_CHARS
+    model_config = ConfigDict(extra="forbid")
+
+    # Per historical tool result. Prevents one old command output from
+    # crowding out the rest of the recalled turn range.
+    tool_result_max_tokens: int = Field(gt=0)
+    # Whole read_history response. Prevents broad turn ranges from undoing
+    # the context savings that compaction just created.
+    total_max_tokens: int = Field(gt=0)
 
 MANIFEST = ExtensionManifest(
     name="read_history",
@@ -75,10 +77,11 @@ _PARAMETERS: Final[dict[str, Any]] = {
 }
 
 def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
-    tool_result_cap = config.tool_result_max_chars
-    total_cap = config.total_max_chars
+    tool_result_max_tokens = config.tool_result_max_tokens
+    total_max_tokens = config.total_max_tokens
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
+        model_name = api.model.id if api.model is not None else None
         start = int(args["start"])
         end_raw = args.get("end")
         end = int(end_raw) if end_raw is not None else start
@@ -96,12 +99,17 @@ def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
 
         selected = [turn for turn in turns if start <= turn.index <= end]
         rendered = "\n\n".join(
-            _render_turn(turn, tool_result_cap) for turn in selected
+            _render_turn(turn, tool_result_max_tokens, model_name) for turn in selected
         )
-        if len(rendered) > total_cap:
+        truncated = truncate_text_tokens(
+            rendered,
+            total_max_tokens,
+            model=model_name,
+        )
+        if truncated.was_truncated:
             rendered = (
-                rendered[:total_cap]
-                + f"\n\n[... output truncated at {total_cap} chars; "
+                truncated.text
+                + f"\n\n[... {truncated.truncated_tokens} tokens truncated; "
                 "request a narrower turn range]"
             )
         return _ok(rendered)
@@ -120,13 +128,17 @@ def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
         )
     )
 
-def _render_turn(turn: Turn, tool_result_cap: int) -> str:
+def _render_turn(turn: Turn, tool_result_cap: int, model_name: str | None) -> str:
     lines = [f"=== Turn {turn.index} ==="]
     for message in turn.messages:
-        lines.append(_render_message(message, tool_result_cap))
+        lines.append(_render_message(message, tool_result_cap, model_name))
     return "\n".join(lines)
 
-def _render_message(message: AgentMessage, tool_result_cap: int) -> str:
+def _render_message(
+    message: AgentMessage,
+    tool_result_cap: int,
+    model_name: str | None,
+) -> str:
     if isinstance(message, UserMessage):
         text = "".join(
             block.text for block in message.content if isinstance(block, TextContent)
@@ -151,7 +163,7 @@ def _render_message(message: AgentMessage, tool_result_cap: int) -> str:
                 part.text for part in r_block.content if isinstance(part, TextContent)
             )
             tag = "tool result error" if r_block.is_error else "tool result"
-            r_parts.append(f"[{tag}] {_cap(text, tool_result_cap)}")
+            r_parts.append(f"[{tag}] {_cap(text, tool_result_cap, model_name)}")
         return "\n".join(r_parts)
 
     return ""
@@ -162,10 +174,14 @@ def _dump(value: Any) -> str:
     except (TypeError, ValueError):
         return repr(value)
 
-def _cap(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
+def _cap(text: str, max_tokens: int, model_name: str | None) -> str:
+    truncated = truncate_text_tokens(text, max_tokens, model=model_name)
+    if not truncated.was_truncated:
         return text
-    return f"{text[:max_chars]}\n[... {len(text) - max_chars} more chars truncated]"
+    return (
+        truncated.text
+        + f"\n[... {truncated.truncated_tokens} more tokens truncated]"
+    )
 
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])

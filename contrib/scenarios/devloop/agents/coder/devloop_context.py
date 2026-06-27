@@ -12,18 +12,23 @@ from typing import TypeAlias
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
+from pydantic import BaseModel, ConfigDict
+
+ContextValue: TypeAlias = (
+    str | int | float | bool | None | list["ContextValue"] | dict[str, "ContextValue"]
+)
+
+
+class DevloopContextConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
 
 MANIFEST = ExtensionManifest(
     name="devloop_context",
     description="Inject structured context data into the agent's system prompt.",
     registers=("event:before_agent_start",),
-    config_schema={"type": "object", "additionalProperties": True},
+    config_schema=DevloopContextConfig,
 )
-
-ContextValue: TypeAlias = (
-    str | int | float | bool | None | list["ContextValue"] | dict[str, "ContextValue"]
-)
-DevloopContextConfig: TypeAlias = dict[str, ContextValue]
 
 def _format_value(value: ContextValue) -> str:
     if isinstance(value, str):
@@ -33,12 +38,13 @@ def _format_value(value: ContextValue) -> str:
     return f"```json\n{json.dumps(value, indent=2, ensure_ascii=False)}\n```"
 
 def install(api: ExtensionAPI, config: DevloopContextConfig) -> None:
-    if not config:
+    context_values = dict(config.model_extra or {})
+    if not context_values:
         return
 
     parts = [
         f"## {key}\n\n{_format_value(value)}"
-        for key, value in config.items()
+        for key, value in context_values.items()
     ]
     context = "\n\n".join(parts)
 

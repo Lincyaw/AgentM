@@ -33,9 +33,17 @@ extensions:
   - module: agentm.extensions.builtin.retry_policy
 
   # === tool-result hygiene ==================================================
-  # cap: spill oversized outputs to disk; budget: truncate the in-context text.
-  - module: agentm.extensions.builtin.tool_result_cap
+  # tool_result_budget is the legacy name for a middle-out token limiter. It is
+  # a fallback if cap cannot spill; cap is mounted after it so its recoverable
+  # spill-path replacement wins when both handlers fire.
   - module: agentm.extensions.builtin.tool_result_budget
+    config:
+      max_tokens: 50000
+      error_floor_tokens: 256
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 50000
+      preview_tokens: 50000
   # Default English text for kernel-emitted ToolErrorEvent.
   - module: agentm.extensions.builtin.tool_error_messages
 
@@ -61,6 +69,8 @@ extensions:
   - module: agentm.extensions.builtin.observability
   # Agent-defined wakeups (schedule_wakeup) + bus subscriptions (create_monitor).
   - module: agentm.extensions.builtin.monitor
+    config:
+      event_summary_max_tokens: 80
 
   # === prompt assembly: a conversational base frame ========================
   - module: agentm.extensions.builtin.system_prompt
@@ -89,6 +99,7 @@ extensions:
   # run (absent files only — never clobbers the agent's own edits).
   - module: agentm.extensions.builtin.persona
     config:
+      max_tokens: 3000
       defaults:
         SOUL.md: |
           # Soul
@@ -123,7 +134,12 @@ extensions:
   # Summarize older turns into one structured checkpoint; read_history lets
   # the agent recover the verbatim content of any [Turn N] the summary cites.
   - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 8000
   - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 20000
+      total_max_tokens: 50000
 
   # === project-local persistent memory ======================================
   - module: agentm.extensions.builtin.memory
@@ -139,7 +155,8 @@ extensions:
   - module: agentm.extensions.builtin.loop_budget
   # Inject a budget runway warning as the loop approaches its caps.
   - module: agentm.extensions.builtin.turn_reminder
-  # Track estimated LLM spend; emit cost_budget_exceeded on overflow.
+  # Track LLM spend from provider usage tokens; emit cost_budget_exceeded on
+  # overflow.
   - module: agentm.extensions.builtin.cost_budget
     config:
       limit: 5.0
@@ -164,8 +181,8 @@ extensions:
         - file_tools
         - tool_bash
         - tool_bash_guard
-        - tool_result_cap
         - tool_result_budget
+        - tool_result_cap
         - observability
         - skill_loader
       available_inherited_extensions:
@@ -177,10 +194,16 @@ extensions:
           module: agentm.extensions.builtin.tool_bash
         tool_bash_guard:
           module: agentm.extensions.builtin.tool_bash_guard
-        tool_result_cap:
-          module: agentm.extensions.builtin.tool_result_cap
         tool_result_budget:
           module: agentm.extensions.builtin.tool_result_budget
+          config:
+            max_tokens: 50000
+            error_floor_tokens: 256
+        tool_result_cap:
+          module: agentm.extensions.builtin.tool_result_cap
+          config:
+            max_tokens: 50000
+            preview_tokens: 50000
         observability:
           module: agentm.extensions.builtin.observability
         skill_loader:

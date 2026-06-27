@@ -26,18 +26,20 @@ from pathlib import Path
 from typing import Any, Final
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
+from agentm.core.lib import truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 
 _DEFAULT_FILES: Final = ("SOUL.md", "IDENTITY.md", "USER.md")
-_DEFAULT_MAX_CHARS: Final = 12000
 
 class PersonaConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     dir: str | None = None
     files: list[str] | None = None
-    max_chars: int = _DEFAULT_MAX_CHARS
+    max_tokens: int = Field(gt=0)
     defaults: dict[str, str] | None = None
 
 MANIFEST = ExtensionManifest(
@@ -63,7 +65,12 @@ def _heading(filename: str) -> str:
     stem = Path(filename).stem.replace("_", " ").replace("-", " ").strip()
     return f"## {stem.title()}" if stem else f"## {filename}"
 
-async def _read_file(file_ops: Any, path: Path, max_chars: int) -> str | None:
+async def _read_file(
+    file_ops: Any,
+    path: Path,
+    max_tokens: int,
+    model_name: str | None,
+) -> str | None:
     """Return trimmed file text, or ``None`` when absent / empty / unreadable."""
     try:
         if not await file_ops.access(str(path)):
@@ -74,17 +81,24 @@ async def _read_file(file_ops: Any, path: Path, max_chars: int) -> str | None:
     text = raw.decode("utf-8", errors="replace").strip()
     if not text:
         return None
-    if len(text) > max_chars:
-        dropped = len(text) - max_chars
-        text = text[:max_chars] + f"\n... ({dropped} more chars truncated)"
-    return text
+    truncated = truncate_text_tokens(text, max_tokens, model=model_name)
+    if not truncated.was_truncated:
+        return text
+    return (
+        truncated.text
+        + f"\n... ({truncated.truncated_tokens} more tokens truncated)"
+    )
 
 async def _build_block(
-    file_ops: Any, base: Path, files: tuple[str, ...], max_chars: int
+    file_ops: Any,
+    base: Path,
+    files: tuple[str, ...],
+    max_tokens: int,
+    model_name: str | None,
 ) -> str:
     sections: list[str] = []
     for name in files:
-        body = await _read_file(file_ops, base / name, max_chars)
+        body = await _read_file(file_ops, base / name, max_tokens, model_name)
         if body is None:
             continue
         sections.append(f"{_heading(name)}\n\n{body}")
@@ -141,7 +155,7 @@ async def _seed_defaults(
 def install(api: ExtensionAPI, config: PersonaConfig) -> None:
     base = _resolve_dir(api.cwd, config.dir or ".")
     files = tuple(config.files) if config.files is not None else _DEFAULT_FILES
-    max_chars = config.max_chars
+    max_tokens = config.max_tokens
     defaults = dict(config.defaults) if config.defaults is not None else {}
     file_ops = api.get_operations().file
     writer = api.get_resource_writer() if defaults else None
@@ -156,7 +170,8 @@ def install(api: ExtensionAPI, config: PersonaConfig) -> None:
             seeded["done"] = True
             await _seed_defaults(file_ops, writer, base, api.cwd, files, defaults)
 
-        block = await _build_block(file_ops, base, files, max_chars)
+        model_name = api.model.id if api.model is not None else None
+        block = await _build_block(file_ops, base, files, max_tokens, model_name)
         if not block:
             return None
         current = str(event.system or "")

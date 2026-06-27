@@ -1,11 +1,11 @@
 """Cap tool-result size; spill large outputs to disk.
 
-When a tool result exceeds ``max_chars`` (default 8000), the full text is
-persisted to ``.agentm/tool_outputs/<tool_call_id>.txt`` and the in-context
-payload is replaced with a truncated preview plus the file path so the model
-can ``read`` the spill file on demand. This keeps conversation history lean
-and avoids blowing provider context windows on unexpectedly large outputs
-(e.g. a download script dumping megabytes of stdout).
+When a tool result exceeds the scenario-configured ``max_tokens``, the full
+text is persisted to ``.agentm/tool_outputs/<tool_call_id>.txt`` and the
+in-context payload is replaced with a token-bounded preview plus the file path so
+the model can ``read`` the spill file on demand. This keeps conversation
+history lean and avoids blowing provider context windows on unexpectedly
+large outputs (e.g. a download script dumping megabytes of stdout).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     ExtensionAPI,
@@ -22,13 +22,15 @@ from agentm.core.abi import (
     ToolResult,
     ToolResultEvent,
 )
+from agentm.core.lib import count_text_tokens, truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 
-class ToolResultCapConfig(BaseModel):
-    model_config = {"extra": "allow"}
 
-    max_chars: int = 8000
-    preview_chars: int = 2000
+class ToolResultCapConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_tokens: int = Field(gt=0)
+    preview_tokens: int = Field(ge=0)
 
 MANIFEST = ExtensionManifest(
     name="tool_result_cap",
@@ -42,24 +44,23 @@ MANIFEST = ExtensionManifest(
 )
 
 def install(api: ExtensionAPI, config: ToolResultCapConfig) -> None:
-    max_chars = max(0, config.max_chars)
-    preview_chars = max(0, config.preview_chars)
+    max_tokens = config.max_tokens
+    preview_tokens = config.preview_tokens
     output_dir = Path(api.cwd) / ".agentm" / "tool_outputs"
 
     def _on_tool_result(event: ToolResultEvent) -> ToolResult | None:
-        # Measure total text length across all TextContent blocks.
         text_blocks: list[str] = []
-        total_chars = 0
         for block in event.result.content:
             if isinstance(block, TextContent):
                 text_blocks.append(block.text)
-                total_chars += len(block.text)
 
-        if total_chars <= max_chars:
+        full_text = "\n".join(text_blocks)
+        model_name = api.model.id if api.model is not None else None
+        total_tokens = count_text_tokens(full_text, model=model_name)
+        if total_tokens <= max_tokens:
             return None
 
         # Spill to disk.
-        full_text = "\n".join(text_blocks)
         spill_path = output_dir / f"{event.tool_call_id}.txt"
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -72,9 +73,13 @@ def install(api: ExtensionAPI, config: ToolResultCapConfig) -> None:
             return None
 
         # Build replacement: preview + notice.
-        preview = full_text[:preview_chars]
+        preview = truncate_text_tokens(
+            full_text,
+            preview_tokens,
+            model=model_name,
+        ).text
         notice = (
-            f"\n\n[Output truncated: {total_chars} chars total. "
+            f"\n\n[Output truncated: {total_tokens} tokens total. "
             f"Full output saved to {spill_path}. "
             f"Use the read tool to inspect it.]"
         )

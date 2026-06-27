@@ -77,7 +77,7 @@ from typing import (
     overload,
 )
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from agentm.core.abi import (
     AgentMessage,
@@ -205,7 +205,7 @@ class WorkflowConfig(BaseModel):
     max_agents: int | None = None
     wall_clock_timeout_s: float | None = None
     default_scenario: str | None = None
-    budget_tokens: int | None = None
+    budget_tokens: int | None = Field(default=None, gt=0)
     default_agent_timeout_s: float | None = None
 
 
@@ -1712,11 +1712,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
         else None
     )
     default_scenario = config.default_scenario
-    budget_tokens: int | None = (
-        config.budget_tokens
-        if config.budget_tokens is not None and config.budget_tokens > 0
-        else None
-    )
+    budget_tokens = config.budget_tokens
     default_agent_timeout: float | None = (
         config.default_agent_timeout_s
         if config.default_agent_timeout_s is not None

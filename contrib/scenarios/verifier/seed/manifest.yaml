@@ -13,7 +13,7 @@ extensions:
     config:
       exclude:
         - conclusion.parquet
-      token_limit: 10000
+      max_tokens: 10000
   - local: seed_context
   - local: seed_finalize
   - module: agentm.extensions.builtin.observability

@@ -202,7 +202,7 @@ from .compaction import (
     CompactionPrompts,
     CompactionResult,
     CompactionSettings,
-    ContextUsageEstimate,
+    ContextUsageSnapshot,
 )
 
 # -- session -----------------------------------------------------------------
@@ -413,7 +413,7 @@ __all__ = [
     "CompactionPrompts",
     "CompactionResult",
     "CompactionSettings",
-    "ContextUsageEstimate",
+    "ContextUsageSnapshot",
     # session
     "ENTRY_MATERIALIZERS",
     "ENTRY_TYPE_BRANCH_SUMMARY",

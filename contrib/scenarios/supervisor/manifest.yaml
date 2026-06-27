@@ -10,8 +10,8 @@ extensions:
       backend: local
   - module: agentm.extensions.builtin.tool_result_cap
     config:
-      max_chars: 200000
-      preview_chars: 200000
+      max_tokens: 50000
+      preview_tokens: 50000
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.sub_agent
@@ -20,6 +20,8 @@ extensions:
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.skill_loader
   - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 8000
   - module: agentm.extensions.builtin.thinking_retry
   - module: agentm.extensions.builtin.system_prompt
     config:

@@ -11,6 +11,9 @@ extensions:
       backend: agent_env
       work_dir: /app
   - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 50000
+      preview_tokens: 50000
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability
@@ -23,4 +26,9 @@ extensions:
         relative paths such as INSTRUCTION.md and task project directories as
         relative to /app.
   - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 8000
   - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 20000
+      total_max_tokens: 50000

@@ -29,6 +29,9 @@ extensions:
     config:
       backend: local
   - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 50000
+      preview_tokens: 50000
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability
@@ -37,7 +40,12 @@ extensions:
       prompt: ""
   - module: agentm.extensions.builtin.runtime_context
   - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 8000
   - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 20000
+      total_max_tokens: 50000
 """
 
 SCENARIO_MANIFEST_HARNESS = """\
@@ -51,6 +59,9 @@ extensions:
     config:
       backend: local
   - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 50000
+      preview_tokens: 50000
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability
@@ -59,7 +70,12 @@ extensions:
       prompt: ""
   - module: agentm.extensions.builtin.runtime_context
   - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 8000
   - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 20000
+      total_max_tokens: 50000
   - module: llmharness.atom
     config:
       mode: sync
