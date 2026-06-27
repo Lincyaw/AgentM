@@ -27,6 +27,7 @@ class OperationsConfig(BaseModel):
     image: str | None = None
     experiment_id: str | None = None
     pool_ref: str | None = None
+    attach_session: str | None = None
     gateway_url: str | None = None
     namespace: str | None = None
     work_dir: str | None = None

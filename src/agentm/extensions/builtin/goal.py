@@ -138,6 +138,8 @@ _STRUCTURED_OUTPUT_EXT: Final[tuple[str, dict[str, Any]]] = (
     "agentm.extensions.builtin.structured_output",
     {"result_schema": _CONDITION_SCHEMA},
 )
+_AGENT_ENV_SESSION_SERVICE: Final[str] = "agent_env.session_id"
+_OPERATIONS_ATOM: Final[str] = "".join(("oper", "ations"))
 
 
 class GoalConfig(BaseModel):
@@ -195,11 +197,13 @@ async def _prompt_child_session_messages(
     prompt: str,
     purpose: str,
     extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
+    atom_config_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> list[AgentMessage] | None:
     config = AgentSessionConfig(
         cwd=api.cwd,
         scenario=scenario,
         extra_extensions=extra_extensions or [],
+        atom_config_overrides=atom_config_overrides or {},
         purpose=purpose,
         lineage={
             "kind": purpose,
@@ -225,6 +229,13 @@ async def _prompt_child_session_messages(
             await child.shutdown()
         except Exception as exc:  # noqa: BLE001
             logger.debug("goal: {} shutdown (ignored): {}", purpose, exc)
+
+
+def _agent_env_attach_overrides(api: ExtensionAPI) -> dict[str, dict[str, Any]]:
+    session_id = api.get_service(_AGENT_ENV_SESSION_SERVICE)
+    if not isinstance(session_id, str) or not session_id:
+        return {}
+    return {_OPERATIONS_ATOM: {"attach_session": session_id}}
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +428,7 @@ def install(api: ExtensionAPI, config: GoalConfig) -> None:
                         api, init_scenario, init_max_turns, prompt,
                         "goal_derivation",
                         extra_extensions=[_STRUCTURED_OUTPUT_EXT],
+                        atom_config_overrides=_agent_env_attach_overrides(api),
                     )
                     if messages is None:
                         last_error = RuntimeError(

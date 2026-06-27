@@ -69,6 +69,8 @@ from agentm.core.abi import (
     WriterAuthor,
 )
 
+_AGENT_ENV_SESSION_SERVICE = "agent_env.session_id"
+
 class AgentEnvConfig(BaseModel):
     image: str | None = None
     experiment_id: str | None = None
@@ -855,8 +857,22 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             "AGENTM_AGENT_ENV_ATTACH_SESSION / AGENTM_AGENT_ENV_IMAGE / "
             "AGENTM_AGENT_ENV_POOL_REF."
         )
+
+    session_id = getattr(session, "session_id", None) or getattr(session, "_session_id", None)
+    if isinstance(session_id, str) and session_id:
+        try:
+            api.set_service(_AGENT_ENV_SESSION_SERVICE, session_id)
+        except KeyError:
+            logger.debug("agent_env: service {} already registered", _AGENT_ENV_SESSION_SERVICE)
+
     if owned:
         session.create_sandbox()
+        session_id = getattr(session, "session_id", None) or getattr(session, "_session_id", None)
+        if isinstance(session_id, str) and session_id:
+            try:
+                api.set_service(_AGENT_ENV_SESSION_SERVICE, session_id)
+            except KeyError:
+                logger.debug("agent_env: service {} already registered", _AGENT_ENV_SESSION_SERVICE)
         _inject_gh_token(session, work_dir)
         _clone_repo_into_sandbox(session, work_dir)
         _upload_skills_to_sandbox(session, work_dir)

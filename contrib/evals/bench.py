@@ -37,6 +37,8 @@ app = typer.Typer(
     add_completion=False,
 )
 
+DEFAULT_LONGCLI_REGISTRY = "pair-diag-cn-guangzhou.cr.volces.com/pair"
+
 
 # ---------------------------------------------------------------------------
 # TB1 legacy helpers (used by build command)
@@ -313,7 +315,7 @@ def _resolve_source(
 def build(
     repo: Annotated[Path, typer.Option("--repo")],
     bench: Annotated[str, typer.Option("--bench")] = "tb1",
-    registry: Annotated[str, typer.Option()] = "opspai",
+    registry: Annotated[str, typer.Option()] = DEFAULT_LONGCLI_REGISTRY,
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
     push: Annotated[bool, typer.Option("--push")] = False,
@@ -425,7 +427,7 @@ def list_tasks(
     repo: Annotated[Path | None, typer.Option("--repo")] = None,
     source: Annotated[str | None, typer.Option("--source")] = None,
     bench: Annotated[str, typer.Option("--bench")] = "tb1",
-    registry: Annotated[str, typer.Option()] = "opspai",
+    registry: Annotated[str, typer.Option()] = DEFAULT_LONGCLI_REGISTRY,
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
     json_out: Annotated[bool, typer.Option("--json")] = False,
@@ -474,7 +476,7 @@ def run(
     bench: Annotated[str, typer.Option("--bench")] = "tb1",
     model: Annotated[str, typer.Option()] = "glm47",
     gateway: Annotated[str, typer.Option()] = "http://localhost:28080",
-    registry: Annotated[str, typer.Option()] = "opspai",
+    registry: Annotated[str, typer.Option()] = DEFAULT_LONGCLI_REGISTRY,
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
 ) -> None:
@@ -520,7 +522,7 @@ def batch(
     bench: Annotated[str, typer.Option("--bench")] = "tb1",
     model: Annotated[str, typer.Option()] = "glm47",
     gateway: Annotated[str, typer.Option()] = "http://localhost:28080",
-    registry: Annotated[str, typer.Option()] = "opspai",
+    registry: Annotated[str, typer.Option()] = DEFAULT_LONGCLI_REGISTRY,
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
     concurrency: Annotated[int, typer.Option("-j")] = 5,
