@@ -24,19 +24,18 @@ imports; ``core.abi`` only; no ``core.runtime.*`` / ``core._internal``.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any, Final
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from agentm.core.abi import (
     AgentMessage,
     AgentSessionConfig,
     AssistantMessage,
-    BeforeAgentStartEvent,
+    BeforeSendToLlmEvent,
     CommandSpec,
     DecideTurnActionEvent,
     ExtensionAPI,
@@ -50,7 +49,6 @@ from agentm.core.abi import (
     UserMessage,
     text_message,
 )
-from agentm.core.lib import assistant_text
 from agentm.extensions import ExtensionManifest
 
 _CLEAR_ALIASES: Final[frozenset[str]] = frozenset({
@@ -74,12 +72,19 @@ _CHECKER_PROMPT_TEMPLATE: Final[str] = (
 _AUTO_INIT_PROMPT: Final[str] = (
     "You are a goal-condition formulator. Your job is to derive a compound "
     "completion condition — not to execute the task itself.\n\n"
+    "Derive the condition for the ORIGINAL user request only. Do not make "
+    "`submit_result`, structured output, or this meta-task itself part of the "
+    "completion goal unless the original user request explicitly requires it.\n\n"
+    "Treat the system prompt as background policy/context, not as the task. "
+    "Do not derive the goal from runtime-context instructions such as "
+    "working-directory guidance unless the original user request is itself "
+    "about that runtime context.\n\n"
     "You may use tools to do lightweight exploration — list files, read "
     "schemas, run simple queries to understand what data or constraints "
     "exist. But keep it shallow: just enough to discover the implicit "
     "requirements, not to solve the problem.\n\n"
-    "## System prompt\n{system}\n\n"
-    "## User request\n{user_text}\n\n"
+    "## Parent system prompt (background only)\n{system}\n\n"
+    "## Original user request\n{user_text}\n\n"
     "Your output has three parts:\n\n"
     "### 1. Completion goal\n"
     "The final acceptance criterion (tests pass, output matches spec, etc.).\n\n"
@@ -143,6 +148,13 @@ class GoalConfig(BaseModel):
     auto_init: bool = False
     auto_init_scenario: str | None = None
     auto_init_max_turns: int = 10
+    auto_init_retries: int = 3
+
+
+class _ConditionPayload(BaseModel):
+    goal: str
+    invariants: list[str] = []
+    checklist: list[str] = []
 
 
 @dataclass
@@ -164,7 +176,7 @@ MANIFEST = ExtensionManifest(
     ),
     registers=(
         "event:decide_turn_action",
-        "event:before_agent_start",
+        "event:before_send_to_llm",
         "command:goal",
     ),
     config_schema=GoalConfig,
@@ -263,7 +275,8 @@ def _parse_verdict_from_tool_call(
 
 def _parse_structured_condition(
     messages: list[AgentMessage],
-) -> str | None:
+) -> str:
+    last_error: Exception | None = None
     for msg in reversed(messages):
         if not isinstance(msg, AssistantMessage):
             continue
@@ -271,33 +284,50 @@ def _parse_structured_condition(
             if isinstance(block, ToolCallBlock) and block.name == "submit_result":
                 result = block.arguments.get("result", block.arguments)
                 if not isinstance(result, dict):
+                    last_error = ValueError(
+                        f"submit_result arguments did not contain a result object: {result!r}"
+                    )
                     continue
-                goal = result.get("goal", "")
-                invariants = result.get("invariants", [])
-                checklist = result.get("checklist", [])
-                parts = [f"## Goal\n{goal}"]
-                if invariants:
-                    inv_lines = "\n".join(f"{i+1}. {v}" for i, v in enumerate(invariants))
+                try:
+                    payload = _ConditionPayload.model_validate(result)
+                except ValidationError as exc:
+                    last_error = exc
+                    continue
+                parts = [f"## Goal\n{payload.goal}"]
+                if payload.invariants:
+                    inv_lines = "\n".join(
+                        f"{i + 1}. {v}"
+                        for i, v in enumerate(payload.invariants)
+                    )
                     parts.append(f"## Invariants\n{inv_lines}")
-                if checklist:
-                    chk_lines = "\n".join(f"- {c}" for c in checklist)
+                if payload.checklist:
+                    chk_lines = "\n".join(f"- {c}" for c in payload.checklist)
                     parts.append(f"## Checklist\n{chk_lines}")
                 return "\n\n".join(parts)
-    return None
+    if last_error is not None:
+        raise last_error
+    raise ValueError("no submit_result tool call found")
 
 
-def _parse_condition(msg: AssistantMessage) -> str | None:
-    text = assistant_text(msg).strip()
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.upper().startswith("CONDITION:"):
-            rest_of_line = stripped[10:].strip()
-            remaining = "\n".join(lines[i + 1:]).strip()
-            if rest_of_line and remaining:
-                return f"{rest_of_line}\n{remaining}"
-            return rest_of_line or remaining or None
-    return None
+def _structured_retry_prompt(original: str, exc: Exception, attempt: int) -> str:
+    return (
+        f"{original}\n\n"
+        f"## Structured-output retry #{attempt}\n"
+        "Your previous response did not produce a valid structured result.\n"
+        f"Error: {str(exc)[:2000]}\n\n"
+        "You MUST call the submit_result tool exactly once with a valid "
+        "`result` object conforming to the required JSON schema."
+    )
+
+
+def _collect_user_text(messages: list[AgentMessage]) -> str:
+    user_parts: list[str] = []
+    for msg in messages:
+        if isinstance(msg, UserMessage):
+            for block in msg.content:
+                if isinstance(block, TextContent):
+                    user_parts.append(block.text)
+    return "\n".join(user_parts).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -362,14 +392,97 @@ def install(api: ExtensionAPI, config: GoalConfig) -> None:
         ),
     )
 
-    # -- decide_turn_action: evaluate after each turn -----------------------
+    # -- auto-init: derive goal before the first LLM request ----------------
 
-    _init_task: asyncio.Task[None] | None = None
+    _auto_init_started = False
+    if config.auto_init:
+        init_scenario = config.auto_init_scenario or api.scenario
+        init_max_turns = config.auto_init_max_turns
+        init_retries = max(config.auto_init_retries, 0)
+        if init_scenario is None:
+            logger.warning("goal: auto_init requires a scenario but none is set — skipping")
+
+        if init_scenario is not None and api.parent_session_id is None:
+
+            async def _derive_goal(system: str, user_text: str) -> None:
+                nonlocal state
+                base_prompt = _AUTO_INIT_PROMPT.format(
+                    system=system,
+                    user_text=user_text,
+                )
+                prompt = base_prompt
+                last_error: Exception | None = None
+                for attempt in range(init_retries + 1):
+                    messages = await _prompt_child_session_messages(
+                        api, init_scenario, init_max_turns, prompt,
+                        "goal_derivation",
+                        extra_extensions=[_STRUCTURED_OUTPUT_EXT],
+                    )
+                    if messages is None:
+                        last_error = RuntimeError(
+                            "goal derivation child produced no response"
+                        )
+                    else:
+                        try:
+                            condition = _parse_structured_condition(messages)
+                        except (TypeError, ValueError, ValidationError) as exc:
+                            last_error = exc
+                        else:
+                            if state is not None:
+                                return
+                            state = _GoalState(condition=condition)
+                            logger.info(
+                                "goal: auto-initialized after {} attempt(s) — {}",
+                                attempt + 1, condition,
+                            )
+                            return
+
+                    if attempt < init_retries:
+                        assert last_error is not None
+                        logger.warning(
+                            "goal: auto_init structured output invalid "
+                            "(attempt {}, retrying {} left): {}",
+                            attempt + 1, init_retries - attempt, last_error,
+                        )
+                        prompt = _structured_retry_prompt(
+                            base_prompt,
+                            last_error,
+                            attempt + 1,
+                        )
+                        continue
+
+                    if last_error is not None:
+                        logger.warning(
+                            "goal: auto_init failed after {} attempt(s); "
+                            "leaving goal unset: {}",
+                            attempt + 1, last_error,
+                    )
+                    return
+
+            async def _on_before_send(event: BeforeSendToLlmEvent) -> None:
+                nonlocal _auto_init_started
+                if state is not None:
+                    return
+                if _auto_init_started:
+                    return
+                user_text = _collect_user_text(event.messages)
+                if not user_text:
+                    logger.warning(
+                        "goal: auto_init skipped; no user message available "
+                        "before first LLM request"
+                    )
+                    _auto_init_started = True
+                    return
+
+                _auto_init_started = True
+                await _derive_goal(event.system or "", user_text)
+
+            api.on(BeforeSendToLlmEvent.CHANNEL, _on_before_send)
+
+    # -- decide_turn_action: evaluate after each turn -----------------------
 
     async def _on_decide(event: DecideTurnActionEvent) -> Any:
         nonlocal state
-        if _init_task is not None and not _init_task.done():
-            await _init_task
         if state is None or state.achieved:
             return None
 
@@ -403,50 +516,3 @@ def install(api: ExtensionAPI, config: GoalConfig) -> None:
         ])
 
     api.on(DecideTurnActionEvent.CHANNEL, _on_decide)
-
-    # -- auto-init: derive goal from user prompt at session start -----------
-
-    if config.auto_init:
-        init_scenario = config.auto_init_scenario or api.scenario
-        init_max_turns = config.auto_init_max_turns
-        if init_scenario is None:
-            logger.warning("goal: auto_init requires a scenario but none is set — skipping")
-
-        if init_scenario is not None and api.parent_session_id is None:
-
-            async def _derive_goal(system: str, user_text: str) -> None:
-                nonlocal state
-                prompt = _AUTO_INIT_PROMPT.format(system=system, user_text=user_text)
-                messages = await _prompt_child_session_messages(
-                    api, init_scenario, init_max_turns, prompt, "goal_derivation",
-                    extra_extensions=[_STRUCTURED_OUTPUT_EXT],
-                )
-                condition = _parse_structured_condition(messages) if messages else None
-                if not condition and messages:
-                    for msg in reversed(messages):
-                        if isinstance(msg, AssistantMessage):
-                            condition = _parse_condition(msg)
-                            break
-                if condition:
-                    state = _GoalState(condition=condition)
-                    logger.info("goal: auto-initialized — {}", condition)
-
-            def _on_before_start(event: BeforeAgentStartEvent) -> None:
-                if state is not None:
-                    return
-                system = event.system or ""
-                if not system:
-                    return
-
-                user_parts: list[str] = []
-                for msg in event.messages:
-                    if isinstance(msg, UserMessage):
-                        for block in msg.content:
-                            if isinstance(block, TextContent):
-                                user_parts.append(block.text)
-                user_text = "\n".join(user_parts) if user_parts else "(see system prompt)"
-
-                nonlocal _init_task
-                _init_task = asyncio.create_task(_derive_goal(system, user_text))
-
-            api.on(BeforeAgentStartEvent.CHANNEL, _on_before_start)

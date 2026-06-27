@@ -1,0 +1,23 @@
+name: terminal_bench_goal_deriver
+description: |
+  Minimal ARL-backed scenario for Terminal Bench goal derivation.
+  Tool calls execute inside the task sandbox at /app; no host runtime_context
+  is injected, so the deriver does not confuse the AgentM repo cwd with the
+  benchmark workspace.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      work_dir: /app
+  - module: agentm.extensions.builtin.tool_result_cap
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are deriving runtime-oversight conditions for a Terminal Bench task.
+        Your file and shell tools run in the remote benchmark sandbox. The
+        sandbox working directory is /app; task files such as INSTRUCTION.md
+        and the project directory are relative to /app.

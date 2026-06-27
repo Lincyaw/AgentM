@@ -136,7 +136,7 @@ class TerminalBenchAdapter:
 
     def pass_at_k_header(self) -> str:
         return (
-            f"  {'Task':<25} {'Best F2P':<10} {'Any pass':<10} "
+            f"  {'Task':<25} {'Best F2P':<10} {'F2P full':<10} "
             f"{'Avg F2P step':<14} {'Avg P2P step'}\n"
             f"  {'-' * 70}"
         )
@@ -144,7 +144,7 @@ class TerminalBenchAdapter:
     def pass_at_k_row(self, name: str, runs: list[dict]) -> tuple[str, dict]:
         f2p_steps: list[float] = []
         p2p_steps: list[float] = []
-        any_pass = False
+        any_f2p_full = False
 
         for r in runs:
             f2p = r.get("f2p")
@@ -152,31 +152,43 @@ class TerminalBenchAdapter:
             f2p_s = f2p.get("step_score") if isinstance(f2p, dict) else None
             if isinstance(f2p_s, (int, float)):
                 f2p_steps.append(f2p_s)
+                if f2p_s >= 1.0:
+                    any_f2p_full = True
             p2p_total = p2p.get("total", 0) if isinstance(p2p, dict) else 0
             p2p_passed = p2p.get("passed", 0) if isinstance(p2p, dict) else 0
             if p2p_total > 0:
                 p2p_steps.append(p2p_passed / p2p_total)
-            if self.is_pass(r):
-                any_pass = True
 
         best_f2p = max(f2p_steps) if f2p_steps else None
         avg_f2p = sum(f2p_steps) / len(f2p_steps) if f2p_steps else None
         avg_p2p = sum(p2p_steps) / len(p2p_steps) if p2p_steps else None
 
         best_str = f"{best_f2p:.1%}" if best_f2p is not None else "-"
-        pass_str = "YES" if any_pass else "no"
+        pass_str = "YES" if any_f2p_full else "no"
         avg_f2p_str = f"{avg_f2p:.1%}" if avg_f2p is not None else "-"
         avg_p2p_str = f"{avg_p2p:.1%}" if avg_p2p is not None else "-"
 
         line = f"  {name:<25} {best_str:<10} {pass_str:<10} {avg_f2p_str:<14} {avg_p2p_str}"
-        stats = {"any_pass": any_pass, "avg_f2p_step": avg_f2p, "avg_p2p_step": avg_p2p}
+        stats = {
+            "pass_at_k": best_f2p,
+            "any_pass": any_f2p_full,
+            "best_f2p_step": best_f2p,
+            "avg_f2p_step": avg_f2p,
+            "avg_p2p_step": avg_p2p,
+        }
         return line, stats
 
     def pass_at_k_footer(self, all_stats: list[dict], n_tasks: int) -> str:
-        pass_count = sum(1 for s in all_stats if s.get("any_pass"))
+        pass_values = [s["pass_at_k"] for s in all_stats if s.get("pass_at_k") is not None]
+        full_count = sum(1 for s in all_stats if s.get("any_pass"))
         f2p_avgs = [s["avg_f2p_step"] for s in all_stats if s.get("avg_f2p_step") is not None]
         p2p_avgs = [s["avg_p2p_step"] for s in all_stats if s.get("avg_p2p_step") is not None]
-        lines = [f"\n  Overall pass@k: {pass_count}/{n_tasks} = {pass_count / n_tasks:.1%}"]
+        lines = []
+        if pass_values:
+            lines.append(
+                f"\n  Overall pass@k F2P: {sum(pass_values) / n_tasks:.1%}"
+            )
+        lines.append(f"  Tasks with full F2P pass: {full_count}/{n_tasks}")
         if f2p_avgs:
             lines.append(f"  Avg F2P Step Score:  {sum(f2p_avgs) / len(f2p_avgs):.1%}")
         if p2p_avgs:

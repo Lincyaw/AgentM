@@ -18,7 +18,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -88,28 +88,32 @@ def _generate_skaffold(tasks: list[TaskSpec], registry: str, prefix: str, tag: s
 
 _active_procs: set[subprocess.Popen] = set()  # type: ignore[type-arg]
 _active_procs_lock = __import__("threading").Lock()
-_active_eval_sessions: set[object] = set()
+_active_eval_sessions: set[Any] = set()
 _active_eval_lock = __import__("threading").Lock()
 
 
 def _run_and_eval_one(
     task: TaskSpec, *,
-    adapter: object,
+    adapter: Any,
     source: str,
     model: str, gateway: str,
     registry: str, prefix: str, tag: str,
     out: Path, eval_timeout: int,
     api_key: str = "",
     scenario: str = "terminal_bench_arl",
-) -> dict:
+    attempt_idx: int | None = None,
+) -> dict[str, Any]:
     """Run agent + evaluate one task. Returns result dict."""
     import arl
 
     name = task.name
     log = out / f"{name}.log"
     score_file = out / f"{name}.score.json"
+    suffix = f"-a{attempt_idx}-{name}" if attempt_idx is not None else f"-{name}"
+    agent_exp_id = f"{prefix}-{model}{suffix}"
+    eval_exp_id = f"eval-{model}{suffix}"
 
-    image = adapter.get_image(task, registry, prefix, tag)  # type: ignore[union-attr]
+    image = adapter.get_image(task, registry, prefix, tag)
 
     # --- Agent phase ---
     session_id = None
@@ -128,7 +132,7 @@ def _run_and_eval_one(
             **os.environ,
             "AGENTM_AGENT_ENV_IMAGE": image,
             "AGENTM_AGENT_ENV_GATEWAY_URL": gateway,
-            "AGENTM_AGENT_ENV_EXPERIMENT_ID": f"{prefix}-{model}-{name}",
+            "AGENTM_AGENT_ENV_EXPERIMENT_ID": agent_exp_id,
             "AGENTM_AGENT_ENV_NAMESPACE": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
             "AGENTM_AGENT_ENV_CPU_REQUEST": "1",
             "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
@@ -172,7 +176,7 @@ def _run_and_eval_one(
     from arl.session import ResourceRequirements  # type: ignore[import-not-found]
     session = arl.ManagedSession(
         image=image,
-        experiment_id=f"eval-{model}-{name}",
+        experiment_id=eval_exp_id,
         namespace=os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
         gateway_url=gateway,
         workspace_dir="/app",
@@ -193,20 +197,19 @@ def _run_and_eval_one(
         _active_eval_sessions.add(session)
     try:
         replay_trajectory(session, session_id)
-        scores = adapter.evaluate(session, task, timeout=eval_timeout)  # type: ignore[union-attr]
+        scores = adapter.evaluate(session, task, timeout=eval_timeout)
     except Exception as e:
         scores = {"reward": 0.0, "eval_output": "", "error": str(e)}
         typer.echo(f"  [WARN] eval {name}: {e}", err=True)
     finally:
         with _active_eval_lock:
             _active_eval_sessions.discard(session)
-        eval_exp = f"eval-{model}-{name}"
         try:
             arl.GatewayClient(
                 base_url=gateway, api_key=api_key or None,
-            ).delete_experiment(eval_exp)
+            ).delete_experiment(eval_exp_id)
         except Exception as e:  # noqa: BLE001
-            typer.echo(f"  [WARN] cleanup {eval_exp}: {e}", err=True)
+            typer.echo(f"  [WARN] cleanup {eval_exp_id}: {e}", err=True)
 
     if scores.get("reward") is None:
         scores["reward"] = 0.0
@@ -216,13 +219,13 @@ def _run_and_eval_one(
     return {"task": name, "status": "done", "tools": tools_count, **scores}
 
 
-def _print_summary_table(results: dict[str, dict], adapter: object) -> None:
+def _print_summary_table(results: dict[str, dict], adapter: Any) -> None:
     """Print final summary table using adapter methods."""
     typer.echo(f"\n{'=' * 75}")
-    typer.echo(adapter.summary_header())  # type: ignore[union-attr]
+    typer.echo(adapter.summary_header())
     for name in sorted(results):
-        typer.echo(adapter.summary_row(name, results[name]))  # type: ignore[union-attr]
-    footer = adapter.summary_footer(results)  # type: ignore[union-attr]
+        typer.echo(adapter.summary_row(name, results[name]))
+    footer = adapter.summary_footer(results)
     if footer:
         typer.echo(footer)
 
@@ -231,7 +234,7 @@ def _print_pass_at_k(
     all_attempts: list[dict[str, dict]],
     tasks: list[TaskSpec],
     out: Path,
-    adapter: object,
+    adapter: Any,
 ) -> None:
     """Compute and print pass@k metrics across multiple attempts."""
     k = len(all_attempts)
@@ -244,26 +247,35 @@ def _print_pass_at_k(
 
     typer.echo(f"\n{'=' * 75}")
     typer.echo(f"  pass@{k} Summary ({k} attempts)")
-    typer.echo(adapter.pass_at_k_header())  # type: ignore[union-attr]
+    typer.echo(adapter.pass_at_k_header())
 
     all_stats: list[dict] = []
     summary_rows = []
     for name in task_names:
         runs = per_task[name]
-        line, stats = adapter.pass_at_k_row(name, runs)  # type: ignore[union-attr]
+        line, stats = adapter.pass_at_k_row(name, runs)
         typer.echo(line)
         all_stats.append(stats)
         summary_rows.append({"task": name, **stats, "attempts": [
             {k: v for k, v in r.items() if k != "eval_output"} for r in runs
         ]})
 
-    typer.echo(adapter.pass_at_k_footer(all_stats, len(task_names)))  # type: ignore[union-attr]
+    typer.echo(adapter.pass_at_k_footer(all_stats, len(task_names)))
 
     summary_file = out / "summary.json"
-    pass_count = sum(1 for s in all_stats if s.get("any_pass"))
+    pass_values = [
+        float(s["pass_at_k"])
+        for s in all_stats
+        if isinstance(s.get("pass_at_k"), (int, float))
+    ]
+    if len(pass_values) == len(all_stats):
+        pass_at_k = sum(pass_values) / len(task_names) if task_names else 0
+    else:
+        pass_count = sum(1 for s in all_stats if s.get("any_pass"))
+        pass_at_k = pass_count / len(task_names) if task_names else 0
     summary_file.write_text(json.dumps({
         "k": k,
-        "pass_at_k": pass_count / len(task_names) if task_names else 0,
+        "pass_at_k": pass_at_k,
         "tasks": summary_rows,
     }, ensure_ascii=False, indent=2))
     typer.echo(f"\n  Summary written to: {summary_file}")
@@ -527,7 +539,7 @@ def batch(
     Ctrl-C stops submitting new tasks and waits for in-flight ones to finish.
     """
     import signal
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
     from benchmarks.swebench import write_predictions
 
@@ -606,6 +618,7 @@ def batch(
     prev_handler = signal.signal(signal.SIGINT, _on_sigint)
 
     # Build flat job list: task-first so same-image jobs run together (warm pool)
+    all_attempt_results: list[dict[str, dict]] = [{} for _ in range(attempts)]
     jobs: list[tuple[int, TaskSpec]] = []
     for attempt_idx in range(attempts):
         out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
@@ -613,7 +626,20 @@ def batch(
     for t in tasks:
         for attempt_idx in range(attempts):
             out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
-            if (out / f"{t.name}.score.json").is_file():
+            score_path = out / f"{t.name}.score.json"
+            if score_path.is_file():
+                scores = json.loads(score_path.read_text())
+                log_path = out / f"{t.name}.log"
+                tools_count = "?"
+                if log_path.is_file():
+                    tools_m = re.search(rb"tool_calls=(\d+)", log_path.read_bytes())
+                    tools_count = tools_m.group(1).decode() if tools_m else "?"
+                all_attempt_results[attempt_idx][t.name] = {
+                    "task": t.name,
+                    "status": "done",
+                    "tools": tools_count,
+                    **scores,
+                }
                 continue
             jobs.append((attempt_idx, t))
 
@@ -626,12 +652,11 @@ def batch(
     typer.echo("")
 
     # Collect results per attempt
-    all_attempt_results: list[dict[str, dict]] = [{} for _ in range(attempts)]
     completed = 0
 
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            pending: dict[object, tuple[int, str]] = {}
+            pending: dict[Future[dict[str, Any]], tuple[int, str]] = {}
             for attempt_idx, t in jobs:
                 if interrupted:
                     break
@@ -644,6 +669,7 @@ def batch(
                     out=out, eval_timeout=eval_timeout,
                     api_key=api_key,
                     scenario=scenario,
+                    attempt_idx=attempt_idx if attempts > 1 else None,
                 )
                 pending[f] = (attempt_idx, t.name)
             for future in as_completed(pending):

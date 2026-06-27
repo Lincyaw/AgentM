@@ -32,7 +32,7 @@ class SWEBenchAdapter:
                        "Install with: pip install datasets", err=True)
             raise typer.Exit(1)
 
-        ds = _datasets.load_dataset(source, split="test")
+        ds = _datasets.load_dataset(source, split="test")  # type: ignore[attr-defined]
         tasks: list[TaskSpec] = []
         for row in ds:
             instance_id = row["instance_id"]

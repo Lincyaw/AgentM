@@ -16,7 +16,11 @@ extensions:
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.system_prompt
     config:
-      prompt: ""
-  - module: agentm.extensions.builtin.runtime_context
+      prompt: |
+        You are working on a Terminal Bench task in a remote ARL sandbox.
+        Your file and shell tools execute inside that sandbox, not in the
+        host AgentM repository. The sandbox working directory is /app. Treat
+        relative paths such as INSTRUCTION.md and task project directories as
+        relative to /app.
   - module: agentm.extensions.builtin.llm_compaction
   - module: agentm.extensions.builtin.read_history
