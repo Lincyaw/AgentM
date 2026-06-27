@@ -13,6 +13,7 @@ def _patch_test_sh(content: bytes) -> bytes:
     """Strip network-dependent installs from test.sh when uv is pre-installed."""
     text = content.decode("utf-8", errors="replace")
     text = re.sub(r"^.*curl\s.*astral\.sh/uv.*\n?", "# (uv pre-installed)\n", text, flags=re.MULTILINE)
+    text = re.sub(r"^.*source\s+\$HOME/\.local/bin/env.*\n?", "export PATH=/root/.local/bin:$PATH\n", text, flags=re.MULTILINE)
     text = re.sub(r"^.*apt-get\s+update.*\n?", "# (apt-get update skipped)\n", text, flags=re.MULTILINE)
     text = re.sub(r"^.*apt-get\s+install.*curl.*\n?", "# (curl pre-installed)\n", text, flags=re.MULTILINE)
     return text.encode("utf-8")
