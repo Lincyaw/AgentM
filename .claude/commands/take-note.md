@@ -80,7 +80,7 @@ Add or update the status line in `CONTEXT.md` for this experiment.
   (`agentm trace messages --session <id>`).
 - **No stale references**: if prior log entries reference data that has moved
   or been superseded, note that in the new entry.
-- **Commit**: git add + commit to the Notes repo after writing.
+- **Commit and push**: git add + commit + push to the Notes repo after writing.
 - **Cross-reference**: use `[[slug]]` wiki-links to reference other entries
   in the same research project.
 - **Machine context**: different experiments run on different machines.
