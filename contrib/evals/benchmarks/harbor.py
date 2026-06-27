@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import tomllib
 from pathlib import Path
 
@@ -10,13 +9,8 @@ from .base import TaskSpec, image_name, upload_file_to_sandbox
 
 
 def _patch_test_sh(content: bytes) -> bytes:
-    """Strip network-dependent installs from test.sh when uv is pre-installed."""
-    text = content.decode("utf-8", errors="replace")
-    text = re.sub(r"^.*curl\s.*astral\.sh/uv.*\n?", "# (uv pre-installed)\n", text, flags=re.MULTILINE)
-    text = re.sub(r"^.*source\s+\$HOME/\.local/bin/env.*\n?", "export PATH=/root/.local/bin:$PATH\n", text, flags=re.MULTILINE)
-    text = re.sub(r"^.*apt-get\s+update.*\n?", "# (apt-get update skipped)\n", text, flags=re.MULTILINE)
-    text = re.sub(r"^.*apt-get\s+install.*curl.*\n?", "# (curl pre-installed)\n", text, flags=re.MULTILINE)
-    return text.encode("utf-8")
+    """No-op: sandbox has network access, let test.sh install its own deps."""
+    return content
 
 
 class HarborAdapter:
@@ -95,19 +89,14 @@ class HarborAdapter:
             }])
 
         session.execute([{  # type: ignore[attr-defined]
-            "name": "ensure-uv",
-            "command": ["bash", "-lc",
-                "mkdir -p /root/.local/bin /logs/verifier && "
-                "if ! command -v uv >/dev/null 2>&1; then "
-                "curl -LsSf https://astral.sh/uv/install.sh | sh; "
-                "fi"],
+            "name": "prep-eval",
+            "command": ["bash", "-lc", "mkdir -p /logs/verifier"],
             "work_dir": "/app",
         }])
 
         r = session.execute([{  # type: ignore[attr-defined]
             "name": "eval",
             "command": ["bash", "-lc",
-                f"export PATH=/root/.local/bin:$PATH && "
                 f"timeout {timeout} bash /tests/test.sh 2>&1"],
             "work_dir": "/app",
         }])
