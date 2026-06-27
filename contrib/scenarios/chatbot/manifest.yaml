@@ -154,8 +154,37 @@ extensions:
   - module: agentm.extensions.builtin.atom_management
 
   # === orchestration ========================================================
+  # Discover .claude/agents/*.md and resolve them for dispatch_agent.
+  - module: agentm.extensions.builtin.claude_agents
   # Spawn nested AgentSession workers.
   - module: agentm.extensions.builtin.sub_agent
+    config:
+      inherit_extensions:
+        - operations
+        - file_tools
+        - tool_bash
+        - tool_bash_guard
+        - tool_result_cap
+        - tool_result_budget
+        - observability
+        - skill_loader
+      available_inherited_extensions:
+        operations:
+          module: agentm.extensions.builtin.operations
+        file_tools:
+          module: agentm.extensions.builtin.file_tools
+        tool_bash:
+          module: agentm.extensions.builtin.tool_bash
+        tool_bash_guard:
+          module: agentm.extensions.builtin.tool_bash_guard
+        tool_result_cap:
+          module: agentm.extensions.builtin.tool_result_cap
+        tool_result_budget:
+          module: agentm.extensions.builtin.tool_result_budget
+        observability:
+          module: agentm.extensions.builtin.observability
+        skill_loader:
+          module: agentm.extensions.builtin.skill_loader
   # LLM-authored JS workflow orchestration over child sessions (needs artifact_store).
   - module: agentm.extensions.builtin.artifact_store
   - module: agentm.extensions.builtin.workflow
