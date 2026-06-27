@@ -100,6 +100,7 @@ def _run_and_eval_one(
     registry: str, prefix: str, tag: str,
     out: Path, eval_timeout: int,
     api_key: str = "",
+    scenario: str = "terminal_bench_arl",
 ) -> dict:
     """Run agent + evaluate one task. Returns result dict."""
     import arl
@@ -138,7 +139,7 @@ def _run_and_eval_one(
         }
         cmd = [
             "uv", "run", "agentm",
-            "--scenario", "terminal_bench_arl",
+            "--scenario", scenario,
             "--model", model,
             "-p", prompt,
         ]
@@ -516,6 +517,7 @@ def batch(
     task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
     api_key: Annotated[str, typer.Option("--api-key", envvar="AGENTM_AGENT_ENV_API_KEY")] = "",
     attempts: Annotated[int, typer.Option("--attempts", "-n")] = 1,
+    scenario: Annotated[str, typer.Option("--scenario")] = "terminal_bench_arl",
 ) -> None:
     """Run all tasks in parallel, then evaluate. Results include scores.
 
@@ -641,6 +643,7 @@ def batch(
                     registry=registry, prefix=prefix, tag=tag,
                     out=out, eval_timeout=eval_timeout,
                     api_key=api_key,
+                    scenario=scenario,
                 )
                 pending[f] = (attempt_idx, t.name)
             for future in as_completed(pending):

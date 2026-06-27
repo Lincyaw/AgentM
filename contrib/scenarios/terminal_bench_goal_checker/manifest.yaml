@@ -1,0 +1,10 @@
+name: terminal_bench_goal_checker
+description: >
+  Minimal checker scenario: operations (required) + observability.
+  trace_query tools come via goal atom extra_extensions.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm.extensions.builtin.observability

@@ -1,0 +1,27 @@
+name: terminal_bench_arl_goal
+description: |
+  Terminal-bench with goal-driven oversight.
+  - auto_init: derives structured condition (goal + invariants + checklist) from task spec
+  - checker: uses trace_query to inspect parent trajectory, no sandbox tools
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      work_dir: /app
+  - module: agentm.extensions.builtin.tool_result_cap
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: ""
+  - module: agentm.extensions.builtin.runtime_context
+  - module: agentm.extensions.builtin.llm_compaction
+  - module: agentm.extensions.builtin.read_history
+  - module: agentm.extensions.builtin.goal
+    config:
+      auto_init: true
+      auto_init_scenario: "terminal_bench_arl"
+      checker_scenario: "terminal_bench_goal_checker"
+      checker_max_turns: 10

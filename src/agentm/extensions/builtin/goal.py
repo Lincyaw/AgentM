@@ -72,36 +72,66 @@ _CHECKER_PROMPT_TEMPLATE: Final[str] = (
 )
 
 _AUTO_INIT_PROMPT: Final[str] = (
-    "You are a goal-condition formulator. Your job is to derive a completion "
-    "condition, not to execute the task itself.\n\n"
+    "You are a goal-condition formulator. Your job is to derive a compound "
+    "completion condition — not to execute the task itself.\n\n"
     "You may use tools to do lightweight exploration — list files, read "
     "schemas, run simple queries to understand what data or constraints "
     "exist. But keep it shallow: just enough to discover the implicit "
     "requirements, not to solve the problem.\n\n"
     "## System prompt\n{system}\n\n"
     "## User request\n{user_text}\n\n"
-    "A good condition goes beyond surface-level deliverables ('called tool X'). "
-    "Look for implicit quality constraints hidden in the task and its domain. "
-    "Examples of what to look for in different domains:\n\n"
-    "- **Investigation/analysis tasks**: Does the domain imply exhaustive "
-    "coverage (all anomalies explained, not just the first)? Are there "
-    "multiple independent phenomena that each need separate explanation? "
-    "Is step-by-step causal reasoning with multi-source evidence required?\n"
-    "- **Coding tasks**: Are there existing tests, linters, type checkers, "
-    "or CI that must pass? Does the codebase have conventions (naming, "
-    "architecture, module boundaries) the change must respect? Is there a "
-    "spec, issue, or acceptance criteria the implementation must satisfy?\n"
-    "- **Any task with a structural output contract**: Must the deliverable "
-    "conform to a schema, format, or protocol?\n\n"
-    "These are examples — derive the actual constraints from the specific "
-    "task context. Keep exploration lightweight — just enough to find the "
-    "constraints, then formulate the condition.\n\n"
-    "When ready, respond with EXACTLY one line starting with:\n"
-    "CONDITION: <the completion condition>"
+    "Your output has three parts:\n\n"
+    "### 1. Completion goal\n"
+    "The final acceptance criterion (tests pass, output matches spec, etc.).\n\n"
+    "### 2. Implementation invariants\n"
+    "Specific correctness constraints that the implementation must satisfy. "
+    "These are the tricky edge cases where a developer is most likely to "
+    "make mistakes. Derive them from the task structure:\n"
+    "- **Initialization paths**: are there functions called during boot/init "
+    "with different preconditions than normal runtime?\n"
+    "- **Concurrency**: are there locks that could be re-acquired through "
+    "callbacks or interrupt handlers?\n"
+    "- **API surface**: are there test files or specs that define the exact "
+    "function signatures, names, or return types required?\n"
+    "- **Build system**: are there Makefiles, CMakeLists, or configs that "
+    "must be updated for new source files or targets?\n"
+    "- **Edge cases**: what happens at boundaries (empty input, max size, "
+    "zero refcount, null pointer)?\n\n"
+    "### 3. Verification checklist\n"
+    "Concrete checks the reviewer should perform on the code, each phrased "
+    "as a yes/no question. Focus on the invariants above.\n\n"
+    "When ready, call the `submit_result` tool with your structured output. "
+    "Do NOT output the condition as text — you MUST call the tool."
 )
 
 _TRACE_QUERY_EXT: Final[tuple[str, dict[str, Any]]] = (
     "agentm.extensions.builtin.trace_query", {},
+)
+
+_CONDITION_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "goal": {
+            "type": "string",
+            "description": "The final acceptance criterion.",
+        },
+        "invariants": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Correctness constraints the implementation must satisfy. Focus on tricky edge cases: init paths, concurrency, API surface, build system.",
+        },
+        "checklist": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Yes/no verification questions the reviewer should check against the code.",
+        },
+    },
+    "required": ["goal", "invariants", "checklist"],
+}
+
+_STRUCTURED_OUTPUT_EXT: Final[tuple[str, dict[str, Any]]] = (
+    "agentm.extensions.builtin.structured_output",
+    {"result_schema": _CONDITION_SCHEMA},
 )
 
 
@@ -231,13 +261,42 @@ def _parse_verdict_from_tool_call(
     return False, "checker did not call submit_verdict"
 
 
+def _parse_structured_condition(
+    messages: list[AgentMessage],
+) -> str | None:
+    for msg in reversed(messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in msg.content:
+            if isinstance(block, ToolCallBlock) and block.name == "submit_result":
+                result = block.arguments.get("result", block.arguments)
+                if not isinstance(result, dict):
+                    continue
+                goal = result.get("goal", "")
+                invariants = result.get("invariants", [])
+                checklist = result.get("checklist", [])
+                parts = [f"## Goal\n{goal}"]
+                if invariants:
+                    inv_lines = "\n".join(f"{i+1}. {v}" for i, v in enumerate(invariants))
+                    parts.append(f"## Invariants\n{inv_lines}")
+                if checklist:
+                    chk_lines = "\n".join(f"- {c}" for c in checklist)
+                    parts.append(f"## Checklist\n{chk_lines}")
+                return "\n\n".join(parts)
+    return None
+
+
 def _parse_condition(msg: AssistantMessage) -> str | None:
     text = assistant_text(msg).strip()
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped.upper().startswith("CONDITION:"):
-            cond = stripped[10:].strip()
-            return cond or None
+            rest_of_line = stripped[10:].strip()
+            remaining = "\n".join(lines[i + 1:]).strip()
+            if rest_of_line and remaining:
+                return f"{rest_of_line}\n{remaining}"
+            return rest_of_line or remaining or None
     return None
 
 
@@ -360,14 +419,14 @@ def install(api: ExtensionAPI, config: GoalConfig) -> None:
                 prompt = _AUTO_INIT_PROMPT.format(system=system, user_text=user_text)
                 messages = await _prompt_child_session_messages(
                     api, init_scenario, init_max_turns, prompt, "goal_derivation",
+                    extra_extensions=[_STRUCTURED_OUTPUT_EXT],
                 )
-                reply: AssistantMessage | None = None
-                if messages:
+                condition = _parse_structured_condition(messages) if messages else None
+                if not condition and messages:
                     for msg in reversed(messages):
                         if isinstance(msg, AssistantMessage):
-                            reply = msg
+                            condition = _parse_condition(msg)
                             break
-                condition = _parse_condition(reply) if reply else None
                 if condition:
                     state = _GoalState(condition=condition)
                     logger.info("goal: auto-initialized — {}", condition)
