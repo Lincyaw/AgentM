@@ -28,4 +28,4 @@ extensions:
       auto_init: true
       auto_init_scenario: "terminal_bench_goal_deriver"
       checker_scenario: "terminal_bench_goal_checker"
-      checker_max_turns: 10
+      checker_max_turns: 15
