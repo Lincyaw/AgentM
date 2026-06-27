@@ -17,7 +17,7 @@ the client.
 Always through the repo venv (editable gateway code):
 
 ```bash
-uv run python .Codex/skills/gateway-probe/probe.py [options]
+uv run python .agents/skills/gateway-probe/probe.py [options]
 ```
 
 Find the running gateway's address first:
@@ -30,15 +30,15 @@ pgrep -af "agentm gateway"   # look for the --bind ws://… / unix://… value
 
 ```bash
 # Full picture: what does the gateway emit for a fresh session + a real prompt?
-uv run python .Codex/skills/gateway-probe/probe.py \
+uv run python .agents/skills/gateway-probe/probe.py \
     --connect ws://127.0.0.1:8770 --chat-id probe-1 --send "hi" --summary
 
 # Is the command catalog on the wire? (session_ready carries command_names)
-uv run python .Codex/skills/gateway-probe/probe.py \
+uv run python .agents/skills/gateway-probe/probe.py \
     --connect ws://127.0.0.1:8770 --chat-id probe-2 --send "hi" --only session_ready
 
 # Does anything arrive on connect, before the first message?
-uv run python .Codex/skills/gateway-probe/probe.py --listen-on-connect 3 --listen 3
+uv run python .agents/skills/gateway-probe/probe.py --listen-on-connect 3 --listen 3
 ```
 
 Key flags: `--connect` (ws:// or unix:///), `--chat-id` (FRESH id → new session;
@@ -57,7 +57,7 @@ triggers a real LLM turn — costs tokens), `--only <kind>` filter, `--summary`,
 ## Notes
 
 - Throwaway sessions are `/end`-ed automatically (disable with `--no-end`).
-- This is debug tooling under `.Codex/`, not shipped product code — keep
+- This is debug tooling under `.agents/`, not shipped product code — keep
   gateway/wire probing here rather than re-deriving the `WireClient` +
   `resolve_connect` scaffolding ad hoc each time.
 - The probe reuses the real `agentm.gateway.client.WireClient` and

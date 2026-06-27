@@ -21,27 +21,27 @@ container registry. ARL pulls them on demand — no manual loading needed.
 
 ```bash
 # Prerequisites
-git clone https://github.com/finyorko/longcli-bench.git ~/AoyangSpace/longcli-bench
+git clone https://github.com/finyorko/longcli-bench.git ../longcli-bench
 
 # List all discovered tasks
 uv run python contrib/evals/bench.py list \
-  --repo ~/AoyangSpace/longcli-bench/tasks_long_cli
+  --repo ../longcli-bench/tasks_long_cli
 
 # Build + push all 20 task images (skaffold, concurrency=4)
 uv run python contrib/evals/bench.py build \
-  --repo ~/AoyangSpace/longcli-bench/tasks_long_cli \
-  --base-dir ~/AoyangSpace/longcli-bench/longcli_dockerImage \
+  --repo ../longcli-bench/tasks_long_cli \
+  --base-dir ../longcli-bench/longcli_dockerImage \
   --push
 
 # Only build specific tasks
 uv run python contrib/evals/bench.py build \
-  --repo ~/AoyangSpace/longcli-bench/tasks_long_cli \
+  --repo ../longcli-bench/tasks_long_cli \
   -t cs61_fa24_hog -t 61810_cow \
   --push
 
 # Custom registry
 uv run python contrib/evals/bench.py build \
-  --repo ~/AoyangSpace/longcli-bench/tasks_long_cli \
+  --repo ../longcli-bench/tasks_long_cli \
   --registry ghcr.io/myorg \
   --push
 ```
@@ -59,7 +59,7 @@ directory containing task subdirectories with `Dockerfile` + `INSTRUCTION.md`.
 # Auto-reads instruction from task.yaml
 uv run python contrib/evals/bench.py run \
   --task cs61_fa24_hog \
-  --repo ~/AoyangSpace/longcli-bench/tasks_long_cli \
+  --repo ../longcli-bench/tasks_long_cli \
   --model glm47 \
   --gateway http://<arl-gateway>:8080
 

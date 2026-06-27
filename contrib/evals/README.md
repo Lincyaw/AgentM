@@ -48,29 +48,29 @@ docker push opspai/tb2-*:v1  # Volcengine mirrors automatically
 
 ```bash
 # 1. Download dataset from Harbor registry
-harbor dataset download "terminal-bench@2.0" -o ~/AoyangSpace/harbor-datasets/
+harbor dataset download "terminal-bench@2.0" -o ../harbor-datasets/
 
 # 2. Mirror upstream images to Docker Hub (crane does registry-to-registry, no local pull)
 #    Install crane: go install github.com/google/go-containerregistry/cmd/crane@latest
 uv run python contrib/evals/bench.py mirror --bench harbor \
-    --repo ~/AoyangSpace/harbor-datasets/terminal-bench \
+    --repo ../harbor-datasets/terminal-bench \
     --registry opspai --prefix tb2 --tag v0 -j 8
 
 # 3. Build overlay images (pre-install uv + python for offline sandbox)
-for task in $(ls ~/AoyangSpace/harbor-datasets/terminal-bench/); do
+for task in $(ls ../harbor-datasets/terminal-bench/); do
   docker build --quiet --build-arg BASE_IMAGE=opspai/tb2-${task}:v0 \
     -f contrib/evals/benchmarks/Dockerfile.tb2-overlay \
     -t opspai/tb2-${task}:v1 contrib/evals/benchmarks/
 done
 
 # 4. Push overlay images (Volcengine mirrors docker.io/opspai/ automatically)
-for task in $(ls ~/AoyangSpace/harbor-datasets/terminal-bench/); do
+for task in $(ls ../harbor-datasets/terminal-bench/); do
   docker push opspai/tb2-${task}:v1
 done
 
 # 5. Run evaluation (use Volcengine registry prefix for ARL cluster)
 uv run python contrib/evals/bench.py batch --bench harbor \
-    --repo ~/AoyangSpace/harbor-datasets/terminal-bench \
+    --repo ../harbor-datasets/terminal-bench \
     --registry pair-cn-shanghai.cr.volces.com/opspai --prefix tb2 --tag v1 \
     --model litellm --gateway http://<arl-gateway> --api-key <key> \
     -j 5 --eval-timeout 900 --results /tmp/tb2-results

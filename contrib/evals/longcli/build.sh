@@ -7,7 +7,7 @@
 #   bash contrib/evals/longcli/build.sh -b longcli-cs61-fa24-hog --push  # single task
 #
 # Environment:
-#   LONGCLI_DIR  Path to longcli-bench repo (default: ~/AoyangSpace/longcli-bench)
+#   LONGCLI_DIR  Path to longcli-bench repo (default: ../longcli-bench)
 #   REGISTRY     Image registry prefix (default: opspai)
 #   TAG          Image tag (default: v0)
 #

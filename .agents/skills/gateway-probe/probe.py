@@ -9,21 +9,21 @@ gateway puts on the wire, with no TUI in the way.
 
 Run it through the repo venv so it imports the editable gateway code:
 
-    uv run python .claude/skills/gateway-probe/probe.py --help
+    uv run python .agents/skills/gateway-probe/probe.py --help
 
 Examples
 --------
 # What command list does the gateway send on a fresh session? (no LLM call if
 # you only send a gateway builtin like /help; a real prompt triggers a turn)
-uv run python .claude/skills/gateway-probe/probe.py \
+uv run python .agents/skills/gateway-probe/probe.py \
     --connect ws://127.0.0.1:8770 --chat-id probe-$RANDOM \
     --send "hi" --summary
 
 # Dump only session_ready frames (the command catalog lives here):
-uv run python .claude/skills/gateway-probe/probe.py --send "hi" --only session_ready
+uv run python .agents/skills/gateway-probe/probe.py --send "hi" --only session_ready
 
 # Just listen on connect (does anything arrive before the first inbound?):
-uv run python .claude/skills/gateway-probe/probe.py --listen 3
+uv run python .agents/skills/gateway-probe/probe.py --listen 3
 """
 from __future__ import annotations
 
@@ -66,9 +66,11 @@ async def _run(args: argparse.Namespace) -> int:
 
     skw = inspect.signature(client.send_inbound).parameters
     for i, content in enumerate(args.send):
-        call = {"session_key": f"terminal:{args.chat_id}",
-                "scenario": args.scenario if i == 0 else None,
-                "env_id": f"in-probe-{i}"}
+        call: dict[str, Any] = {
+            "session_key": f"terminal:{args.chat_id}",
+            "scenario": args.scenario if i == 0 else None,
+            "env_id": f"in-probe-{i}",
+        }
         call = {k: v for k, v in call.items() if k in skw}
         await client.send_inbound(
             {"channel": "terminal", "sender_id": args.sender_id,
@@ -109,8 +111,14 @@ async def _run(args: argparse.Namespace) -> int:
     # Clean up a throwaway session so probes don't leak sessions in the gateway.
     if args.end and args.send:
         try:
-            call = {k: v for k, v in {"session_key": f"terminal:{args.chat_id}",
-                    "env_id": "in-probe-end"}.items() if k in skw}
+            call = {
+                k: v
+                for k, v in {
+                    "session_key": f"terminal:{args.chat_id}",
+                    "env_id": "in-probe-end",
+                }.items()
+                if k in skw
+            }
             await client.send_inbound(
                 {"channel": "terminal", "sender_id": args.sender_id,
                  "chat_id": args.chat_id, "content": "/end"}, **call)

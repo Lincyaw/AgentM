@@ -5,15 +5,22 @@ description: Analyze agentm session traces using `agentm trace` atomic commands.
 
 # trace-analysis
 
-## Principle
+## Data sources
 
-`agentm trace` queries session traces from **ClickHouse** (default
-backend). Each subcommand returns structured data (`--format ndjson`)
-suitable for piping through `jq`. **Never parse OTLP JSONL or artifact
-files directly** — always use `agentm trace`.
+Session traces live in two backends. `agentm trace` abstracts both:
 
-A logical trace spans multiple sessions (one root + N spawned children).
-`index` lists all sessions; per-session commands query by `--session <id>`.
+| Backend | When active | Session selector |
+|---------|------------|-----------------|
+| **Local JSONL** (default) | Always; files at `<cwd>/.agentm/observability/<session_id>.jsonl` | `--file <path>` or `--session <id>` (resolves to the JSONL) |
+| **ClickHouse** | When `AGENTM_CLICKHOUSE_URL` is set or localhost:8123 is reachable | `--session <id>` (queries ClickHouse automatically) |
+
+`--latest` picks the most recent session file in the observability dir.
+When ClickHouse is available AND a local file exists, `--session` prefers
+ClickHouse. The same subcommands and `--format ndjson` work on both.
+
+Harness operational logs (loguru) are forwarded into the OTLP logs signal
+when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. They land in the same JSONL
+file interleaved with spans. Query them with `agentm trace logs`.
 
 ## Atomic commands
 
@@ -27,26 +34,20 @@ A logical trace spans multiple sessions (one root + N spawned children).
 | `messages` | full conversation trajectory in message order |
 | `chats` | per-LLM-call with duration |
 | `spans` | generic span query (custom `--name` / `--where` / `--since`) |
-| `logs` | generic log query |
+| `logs` | generic log query (harness operational logs) |
 | `stats` | histogram of event/span names (orientation) |
 
-All accept `--session <id>` and `--format ndjson`.
+All accept `--session <id>` / `--file <path>` / `--latest` and `--format ndjson`.
 
 ## Composition patterns
 
 ### Single session
 ```bash
-# Full trajectory
-agentm trace messages --session <sid>
-
-# Tool calls
-agentm trace tools --session <sid> --format ndjson | jq '.tool'
-
-# Specific tool
-agentm trace tools --session <sid> --tool submit_hop_verdict --format ndjson | jq '.args'
-
-# Token economics
-agentm trace usage --session <sid>
+agentm trace messages --latest                        # your own trajectory
+agentm trace tools --latest --format ndjson | jq '.tool'  # tool names
+agentm trace tools --latest --tool bash --format ndjson   # specific tool
+agentm trace usage --latest                           # token economics
+agentm trace logs --latest --format ndjson | jq '.body'   # harness logs
 ```
 
 ### Trace tree (parent + children)
@@ -63,19 +64,20 @@ agentm trace index --format ndjson \
   | jq -s '{sessions: length, input: (map(.input_tokens)|add), output: (map(.output_tokens)|add)}'
 ```
 
-### Tool-specific extraction across a trace
+### Tool-specific extraction
 ```bash
-# All hop verdicts in a trace
+# All verdicts in a verifier trace
 agentm trace index --format ndjson \
-  | jq -r --arg t "$TID" 'select(.trace_id==$t and .scenario=="verifier/hop") | .session_id' \
+  | jq -r --arg t "$TID" 'select(.trace_id==$t and .purpose=="hop_worker") | .session_id' \
   | while read sid; do agentm trace tools --session "$sid" --tool submit_hop_verdict --format ndjson; done \
   | jq -c '.args | {verdict, predicate, rationale}'
 ```
 
 ## Analysis order
 
-1. **Find the session** — from workflow delivery artifact (`child_sessions[].session_id`) or `index`
-2. **How much did it cost?** `usage --session <sid>`
+1. **Find the session** — `--latest`, workflow artifact `child_sessions[].session_id`, or `index`
+2. **Cost?** `usage --session <sid>`
 3. **What happened per turn?** `turns --session <sid>`
-4. **What specific calls?** `tools --session <sid> --tool <name>`
-5. **Raw trajectory?** `messages --session <sid>` only when the above don't suffice
+4. **Specific tool calls?** `tools --session <sid> --tool <name>`
+5. **Harness logs?** `logs --session <sid>` — look for warnings/errors
+6. **Raw trajectory?** `messages --session <sid>` — only when the above don't suffice

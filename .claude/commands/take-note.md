@@ -74,8 +74,9 @@ Add or update the status line in `CONTEXT.md` for this experiment.
 
 ## Guidelines
 
-- ***REMOVED***
-**Relative paths**: use paths relative to the relevant repo root or experiment directory, prefixed with the machine alias only when the data lives on a remote host.
+- **Relative paths**: use paths relative to the relevant repo root or
+  experiment directory, prefixed with the machine alias only when the data
+  lives on a remote host.
 - **Session IDs**: record AgentM session IDs for trajectory queries
   (`agentm trace messages --session <id>`).
 - **No stale references**: if prior log entries reference data that has moved
