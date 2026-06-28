@@ -140,10 +140,16 @@ func (c *WireClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("unexpected response kind: %s", resp.Kind)
 	}
 
+	if assignedPeerID, ok := resp.Body["peer_id"].(string); ok && assignedPeerID != "" {
+		// The gateway may assign a unique effective peer id when several
+		// terminal-go clients connect concurrently. Reuse it on reconnect so
+		// durable outbox rows remain attached to this client instance.
+		c.peerName = assignedPeerID
+	}
 	if caps, ok := resp.Body["capabilities"].(map[string]any); ok {
 		c.capabilities = caps
 	}
-	log.Printf("[wire] connected, welcome from server_version=%v", resp.Body["server_version"])
+	log.Printf("[wire] connected, welcome from server_version=%v peer_id=%s", resp.Body["server_version"], c.peerName)
 	go c.readLoop()
 	return nil
 }
@@ -293,7 +299,10 @@ func (c *WireClient) reconnect() bool {
 		}
 
 		// Reconnect succeeded.
-		log.Printf("[wire] reconnected, server_version=%v", resp.Body["server_version"])
+		if assignedPeerID, ok := resp.Body["peer_id"].(string); ok && assignedPeerID != "" {
+			c.peerName = assignedPeerID
+		}
+		log.Printf("[wire] reconnected, server_version=%v peer_id=%s", resp.Body["server_version"], c.peerName)
 
 		// Update capabilities.
 		if caps, ok := resp.Body["capabilities"].(map[string]any); ok {

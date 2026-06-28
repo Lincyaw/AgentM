@@ -83,17 +83,24 @@ def route_targets(
     peers: list[PeerSession],
     peer_channels: dict[str, str],
     target_channel: str,
+    *,
+    session_key: str | None = None,
+    peer_session_keys: dict[str, set[str]] | None = None,
 ) -> list[PeerSession]:
-    """Pick the peers an outbound for ``target_channel`` should reach (§3.2).
+    """Pick the peers an outbound should reach (§3.2).
 
-    A peer "serves" the channel it stamped on its inbound (§3.4), recorded
-    in ``peer_channels``. Route only to peers known to serve
-    ``target_channel`` — so a Feishu reply is not mis-delivered to a
-    simultaneously-connected terminal client. If no connected peer is known
-    to serve the channel (single-client deployment before its first inbound,
-    or an empty channel), fall back to every peer so the degenerate case
-    still delivers.
+    Prefer peers that have sent an inbound for this exact ``session_key``.
+    This lets multiple terminal clients (each a separate peer) connect to one
+    gateway without cross-delivering ``terminal`` traffic for different chats.
+    If no session-specific peer is known yet, fall back to the historical
+    channel routing so single-client and multi-surface deployments still work.
     """
+    if session_key and peer_session_keys:
+        session_matching = [
+            p for p in peers if session_key in peer_session_keys.get(p.peer_id, set())
+        ]
+        if session_matching:
+            return session_matching
     matching = [p for p in peers if peer_channels.get(p.peer_id) == target_channel]
     return matching if matching else peers
 
@@ -150,6 +157,7 @@ class GatewayRuntime:
         self._server: WireServer | None = None
         self._inflight: set[asyncio.Task[Any]] = set()
         self._peer_channels: dict[str, str] = {}
+        self._peer_session_keys: dict[str, set[str]] = {}
         self._peer_cwds: dict[str, str] = {}
         self._session_commands: dict[str, set[str]] = {}
         self._session_routes: dict[str, tuple[str, str, str | None]] = {}
@@ -246,7 +254,11 @@ class GatewayRuntime:
             body=body,
         )
         targets = route_targets(
-            list(self._server.registry), self._peer_channels, target_channel
+            list(self._server.registry),
+            self._peer_channels,
+            target_channel,
+            session_key=session_key,
+            peer_session_keys=self._peer_session_keys,
         )
         durable = kind in DURABLE_OUTBOUND_KINDS
         if not durable and kind not in EPHEMERAL_OUTBOUND_KINDS:
@@ -549,6 +561,7 @@ class GatewayRuntime:
         body = decision.body
         if body.channel:
             self._peer_channels[peer.peer_id] = body.channel
+        self._peer_session_keys.setdefault(peer.peer_id, set()).add(session_key)
         if peer.cwd is not None and session_key not in self._peer_cwds:
             self._peer_cwds[session_key] = peer.cwd
 

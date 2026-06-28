@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -209,33 +210,37 @@ class WireServer:
                 )
                 return
             body = hello.body if isinstance(hello.body, dict) else {}
-            peer_id = str(body.get("peer_name") or body.get("peer_id") or "")
+            peer_name = str(body.get("peer_name") or body.get("peer_id") or "")
+            peer_id = peer_name
             auth_raw = body.get("auth")
             token_raw = body.get("token") or (
                 auth_raw if isinstance(auth_raw, str) else None
             )
             token = str(token_raw) if isinstance(token_raw, str) else None
-            if not peer_id:
+            if not peer_name:
                 await _send(
                     writer,
                     _error_env("bad_hello", "hello body missing peer_name"),
                 )
                 return
-            ok = await self._auth.authenticate(peer_id, token, writer)
+            ok = await self._auth.authenticate(peer_name, token, writer)
             if not ok:
                 await _send(
                     writer,
-                    _error_env("auth_failed", f"auth failed for peer {peer_id!r}"),
+                    _error_env("auth_failed", f"auth failed for peer {peer_name!r}"),
                 )
                 return
+            # Peer names identify the client implementation (e.g. terminal-go),
+            # not a singleton process. Multiple terminal peers may connect to the
+            # same gateway concurrently, so derive an effective registry/outbox id
+            # when the requested name is already live instead of rejecting it.
             if peer_id in self._registry:
-                await _send(
-                    writer,
-                    _error_env(
-                        "duplicate_peer", f"peer {peer_id!r} already connected"
-                    ),
+                peer_id = f"{peer_name}#{uuid.uuid4().hex[:8]}"
+                logger.info(
+                    "gateway: peer name {} already connected; assigned peer_id {}",
+                    peer_name,
+                    peer_id,
                 )
-                return
 
             peer_cwd_raw = body.get("cwd")
             peer_cwd = str(peer_cwd_raw) if isinstance(peer_cwd_raw, str) and peer_cwd_raw.strip() else None
