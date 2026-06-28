@@ -734,7 +734,17 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
                 or (limit is not None and limit > 0 and offset + limit < total)
             )
 
-            record_read(path, total_lines=total, is_partial=is_partial)
+            record_kwargs: dict[str, Any] = {
+                "total_lines": total,
+                "is_partial": is_partial,
+                "content_hash": content_hash_for(data),
+            }
+            try:
+                fs = await _get_file_ops().stat(path)
+                record_kwargs["mtime_ns"] = fs.mtime_ns
+            except OSError as exc:
+                logger.debug("file_tools: read stat({}) failed: {}", path, exc)
+            record_read(path, **record_kwargs)
 
             numbered = [
                 f"{offset + i + 1}\t{line}"
@@ -826,7 +836,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
 
             # Gate 3: mtime must not have changed since the read.
             recorded_mtime = getattr(rs, "mtime_ns", None)
-            if recorded_mtime is not None:
+            if recorded_mtime:
                 try:
                     fs = await _get_file_ops().stat(normalized)
                     current_mtime: int | None = fs.mtime_ns
