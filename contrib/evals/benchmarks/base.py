@@ -170,6 +170,19 @@ def load_trace_tools(session_id: str) -> list[dict]:
     return [json.loads(line) for line in text.strip().split("\n") if line.strip()]
 
 
+def _should_skip_replay_bash(cmd: str) -> bool:
+    lower = cmd.lower()
+    skip = (
+        "qemu",
+        "make grade",
+        "timeout",
+        "python3 ok",
+        "make test",
+        "ctest",
+    )
+    return any(token in lower for token in skip)
+
+
 def replay_tools_to_sandbox(
     session: object, tools: list[dict], *, up_to_turn: int | None = None
 ) -> int:
@@ -208,11 +221,7 @@ def replay_tools_to_sandbox(
                     replayed += 1
             elif tool == "bash":
                 cmd = args.get("cmd", "")
-                skip = [
-                    "make grade", "make qemu", "qemu-system", "timeout",
-                    "python3 ok", "make test", "ctest",
-                ]
-                if cmd and not any(k in cmd for k in skip):
+                if cmd and not _should_skip_replay_bash(cmd):
                     session.execute([{  # type: ignore[attr-defined]
                         "name": "r", "command": ["bash", "-lc", cmd],
                         "work_dir": "/app",
