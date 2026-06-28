@@ -135,10 +135,11 @@ class BashOperations(Protocol):
 - `Tool` is the bare execution interface used by the agent loop.
 - `XxxOperations` is the **smallest possible port** for swapping environments (local FS → SSH → sandbox → in-memory). It is replaceable through `api.register_operations(file=..., bash=...)`, called by an early atom in the scenario manifest (default: `operations_local`). The substrate enforces "registered at most once before freeze" and "must be registered by freeze time, else fail loud".
 
-**File IO seam decision (issue #89)**: AgentM uses the hybrid seam. Read-only
-file tools (`read`, `grep`, `find`, `ls`) consume `api.get_operations().file`;
-write tools (`write`, `edit`) consume `api.get_resource_writer()`. The split is
-intentional: `FileOperations` is the environment read port, while
+**File IO seam decision (issue #89)**: AgentM uses the hybrid seam. Guarded
+reads (`read`) consume `api.get_operations().file`; mutating file tools
+(`write`, `edit`) consume `api.get_resource_writer()`. Local search is handled
+through `bash` and existing CLI tools (`rg`, `find`, `git ls-files`) rather than
+default thin wrappers. `FileOperations` is the environment read port, while
 `ResourceWriter` is the mutation chokepoint that enforces managed-resource
 versioning and constitution-path rejection. Scenario authors that need to
 redirect reads override `FileOperations`; scenario authors that need to redirect

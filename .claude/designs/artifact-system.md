@@ -185,8 +185,8 @@ Linear regex scan over filtered artifacts. Returns matched lines with
 configurable surrounding context (default 2 lines each side). Bounded by
 `max_hits` (default 20) to prevent runaway results blowing context.
 
-The four-tool surface mirrors `tool_read` / `tool_grep` / `tool_ls` from
-the file-system world. Deliberately no `artifact_edit` / `artifact_delete`.
+The artifact surface stays domain-specific instead of mirroring workspace
+search wrappers. Deliberately no `artifact_edit` / `artifact_delete`.
 
 ## Worker return convention
 

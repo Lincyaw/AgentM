@@ -50,9 +50,9 @@ _SKILL_CONFIG: dict[str, Any] = {
 }
 
 STRUCTURED_ONLY_TOOLS = ["submit_result"]
-CODING_TOOLS = ["read", "write", "edit", "glob", "grep", "bash"]
+CODING_TOOLS = ["read", "write", "edit", "bash"]
 TEST_RUN_TOOLS = ["bash", "submit_result"]
-REVIEW_TOOLS = ["read", "glob", "grep", "bash", "submit_result"]
+REVIEW_TOOLS = ["read", "bash", "submit_result"]
 STRUCTURED_BUDGET = [
     ("agentm.extensions.builtin.loop_budget", {
         "max_turns": 8,
@@ -327,7 +327,7 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         f"Decide what to do based on what you see. Do nothing if "
         f"the existing setup is adequate.",
         scenario=SUPERVISOR,
-        tool_allowlist=["read", "write", "edit", "glob", "grep", "bash"],
+        tool_allowlist=["read", "write", "edit", "bash"],
         extra_extensions=SUPERVISE_BUDGET,
         atom_config=_SKILL_CONFIG,
         timeout=args.agent_timeout_seconds,

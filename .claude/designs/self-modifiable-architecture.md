@@ -295,7 +295,7 @@ Atoms whose worst-case bug is "agent does worse on its task". Validator runs, re
 
 | Atom | Why tier 1 |
 |---|---|
-| `tool_read`, `tool_bash`, `tool_edit`, `tool_write`, `tool_grep`, `tool_find`, `tool_ls` | Bad tool → bad output → caught by metrics |
+| `file_tools`, `tool_bash` | Bad tool → bad output → caught by metrics |
 | `tool_hypothesis_store`, `tool_submit_plan`, `tool_trajectory_loader` | Domain tools, same logic |
 | `system_prompt`, `prompt_templates`, `skill_loader` | Prompt drift is observable |
 | `observability`, `trajectory` | Pure subscribers; cannot affect agent behavior |

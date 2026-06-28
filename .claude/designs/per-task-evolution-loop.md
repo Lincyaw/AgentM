@@ -186,8 +186,8 @@ scenarios/rca/
 name: rca_tuner
 description: Evolves the rca scenario by reading traces and proposing atom changes.
 extensions:
-  - module: agentm.extensions.builtin.tool_read
-  - module: agentm.extensions.builtin.tool_grep
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.tool_query_traces
   - module: agentm.extensions.builtin.tool_eval_run
     config:

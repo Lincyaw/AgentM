@@ -23,7 +23,7 @@ Three problems compound:
 
 1. `args` is `dict[str, Any]` — no static guarantee of `command: str`. Refactors are silent.
 2. Handlers can't be expressed with `match event:` for narrowing because every tool produces structurally identical events.
-3. As we add `grep`, `find`, `ls`, `tool_submit_plan`, etc., the proliferation of string-keyed dispatch grows linearly. Pi solves this with a discriminated union + TypeScript type guards. We can match the ergonomics with Python 3.12 dataclasses + `match` + `isinstance`.
+3. As we add domain-specific tools such as `tool_submit_plan`, the proliferation of string-keyed dispatch grows linearly. Pi solves this with a discriminated union + TypeScript type guards. We can match the ergonomics with Python 3.12 dataclasses + `match` + `isinstance`.
 
 ## Design Details
 
@@ -102,9 +102,6 @@ _TOOL_EVENT_TYPES: dict[str, type[ToolCallEvent]] = {
     "read": ReadToolCallEvent,
     "edit": EditToolCallEvent,
     "write": WriteToolCallEvent,
-    "grep": GrepToolCallEvent,
-    "find": FindToolCallEvent,
-    "ls": LsToolCallEvent,
 }
 
 def make_tool_call_event(tool_call_id: str, tool_name: str, args: dict) -> ToolCallEvent:
@@ -196,7 +193,7 @@ def is_bash_tool_result(e: ToolResultEvent) -> TypeGuard[BashToolResultEvent]: .
 
 1. `match event: case BashToolCallEvent(input={"command": cmd}): ...` narrows `cmd` to `str` under mypy.
 2. Existing `event.tool_name == "bash"` handlers keep working unchanged (subclass relationship preserved).
-3. `is_grep_tool_call(event)` returns `True` exactly when `event.tool_name == "grep"`.
+3. `is_read_tool_call(event)` returns `True` exactly when `event.tool_name == "read"`.
 4. A custom user-registered tool still produces a base `ToolCallEvent`; `match` falls through to `case ToolCallEvent()`.
 5. Mutating `event.input["command"]` from a handler mutates `event.args["command"]` (same dict).
 6. Per-tool subclasses appear in `__init__.py`'s `__all__` — visible to extension authors via plain import.
@@ -205,7 +202,7 @@ def is_bash_tool_result(e: ToolResultEvent) -> TypeGuard[BashToolResultEvent]: .
 
 - [pluggable-architecture.md](pluggable-architecture.md) §3.5 — event taxonomy
 - [extension-as-scenario.md](extension-as-scenario.md) §10b.1 — event additions list
-- [search-tools.md](search-tools.md) — adds `grep`/`find`/`ls` events
+- [search-tools.md](search-tools.md) — explains why search stays on `bash`
 - [edit-diff.md](edit-diff.md) — the upgraded `tool_edit` carries richer `EditToolDetails`
 
 ## Constraints and Decisions

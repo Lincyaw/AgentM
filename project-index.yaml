@@ -345,9 +345,9 @@ requirements:
   - id: REQ-089-file-tool-io-seams
     title: File tool atoms use documented read and write seams
     description: >
-      Builtin file tool atoms must use the documented hybrid IO seam: read-only
-      tools consume FileOperations through ExtensionAPI operations, while write
-      tools consume ResourceWriter exclusively so scenario overrides and managed
+      Builtin file tool atoms must use the documented hybrid IO seam: read
+      consumes FileOperations through ExtensionAPI operations, while write/edit
+      consume ResourceWriter exclusively so scenario overrides and managed
       resource protections intercept all file mutations consistently.
     priority: P0
     status: tested

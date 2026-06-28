@@ -552,13 +552,14 @@ class LocalFileOperations: ...     # stdlib-backed read environment
 class LocalBashOperations: ...     # asyncio.subprocess-backed
 ```
 
-Tool atoms use a deliberate hybrid seam: read-only file tools (`tool_read` /
-`tool_grep` / `tool_find` / `tool_ls`) accept `config["file_ops"]` and
-default to `api.get_operations().file`; write tools (`tool_write` / `tool_edit`)
-use `api.get_resource_writer()` exclusively so managed-resource versioning and
-constitution-path rejection remain the single mutation chokepoint. Swapping read
-transport = pass a different `FileOperations`; redirecting or auditing writes =
-replace `ResourceWriter`.
+Tool atoms use a deliberate hybrid seam: guarded reads (`read`) accept
+`config["file_ops"]` and default to `api.get_operations().file`; mutating file
+tools (`write` / `edit`) use `api.get_resource_writer()` exclusively so
+managed-resource versioning and constitution-path rejection remain the single
+mutation chokepoint. Local search is intentionally delegated to `bash` plus
+CLI tools such as `rg` / `find` rather than exposed as thin default wrappers.
+Swapping read transport = pass a different `FileOperations`; redirecting or
+auditing writes = replace `ResourceWriter`.
 
 This is delivered by **Phase 2 Group A0** before Group D1 so the tool atoms can be built against the ports from day one.
 

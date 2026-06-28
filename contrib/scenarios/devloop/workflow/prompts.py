@@ -151,7 +151,7 @@ def code_review_prompt(spec_json: str, review_round: int = 0) -> str:
         f"still true.\n\n"
         f"Operational rules:\n"
         f"- Inspect implementation/source files first; do not read every test file.\n"
-        f"- Use grep/glob/bash to summarize when possible instead of reading large files.\n"
+        f"- Use bash with rg/find to summarize when possible instead of reading large files.\n"
         f"- If evidence is insufficient for an AC, mark that AC as cannot_judge.\n"
         f"- Always finish by calling submit_result exactly once with the structured "
         f"CodeReview object; do not return prose or Markdown.\n\n"

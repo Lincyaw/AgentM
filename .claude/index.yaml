@@ -81,7 +81,7 @@ concepts:
     related_concepts: [extension_as_scenario, pluggable_architecture, single_file_extension_contract]
 
   operations_ports:
-    description: "FileOperations / BashOperations Protocols in src/agentm/core/abi/operations.py. Default LocalFileOperations / LocalBashOperations live as an atom in src/agentm/extensions/builtin/operations_local.py (Stage 1 of pluggable_architecture §10 landed 2026-05-11; the earlier core/_internal/operations_impl.py module has been deleted). The environment boundary is hybrid after issue #89: read-only file atom (tool_read) consumes FileOperations through ExtensionAPI operations, write atoms (tool_write, tool_edit) consume ResourceWriter as the single mutation chokepoint, and tool_bash consumes BashOperations (which subsumes ls/find/grep — those dedicated atoms were removed in favour of shell composition). Operations is registered like any other axis: an early atom in the default scenario calls api.register_operations(file=..., bash=...); the substrate enforces 'registered at most once before freeze' and 'must be registered by freeze time, else fail loud'. It is no longer a constitution-only axis."
+    description: "FileOperations / BashOperations Protocols in src/agentm/core/abi/operations.py. Default LocalFileOperations / LocalBashOperations live as an atom in src/agentm/extensions/builtin/operations_local.py (Stage 1 of pluggable_architecture §10 landed 2026-05-11; the earlier core/_internal/operations_impl.py module has been deleted). The environment boundary is hybrid after issue #89: file_tools read consumes FileOperations through ExtensionAPI operations, file_tools write/edit consume ResourceWriter as the single mutation chokepoint, and tool_bash consumes BashOperations (which subsumes ls/find/grep — dedicated default search atoms are removed in favour of shell composition). Operations is registered like any other axis: an early atom in the default scenario calls api.register_operations(file=..., bash=...); the substrate enforces 'registered at most once before freeze' and 'must be registered by freeze time, else fail loud'. It is no longer a constitution-only axis."
     design: "designs/extension-as-scenario.md#10b6"
     related_concepts: [pluggable_architecture, extension_as_scenario]
 
@@ -101,7 +101,7 @@ concepts:
     related_concepts: [prompt_templates, agent_loop, extension_as_scenario, pluggable_architecture, single_file_extension_contract, observability]
 
   search_tools:
-    description: "[HISTORICAL — tool_grep/tool_find/tool_ls atoms were removed in favour of shell composition via tool_bash. Default scenario now ships only tool_read + tool_bash for navigation/search. designs/search-tools.md is kept for context on the .gitignore-aware truncation helpers, which still live in core/lib/text_truncate.py + core/lib/path_utils.py.]"
+    description: "Current search tool policy: AgentM does not expose default grep/find/ls/glob tool atoms or thin CLI wrappers. Local workspace search stays on tool_bash with mature commands such as rg, rg --files, find, and git ls-files. file_tools registers only guarded read/write/edit; future dedicated search atoms must justify non-CLI semantics such as remote FileOperations support or explicit safety/audit contracts."
     design: "designs/search-tools.md"
     related_concepts: [edit_diff, tool_event_narrowing, extension_as_scenario, operations_ports, pluggable_architecture]
 
