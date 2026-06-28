@@ -492,6 +492,7 @@ class OpenAIStreamFn:
     azure_endpoint: str | None = None
     api_version: str | None = None
     _reported_thinking_drop: bool = field(default=False, init=False)
+    _reported_reasoning_skip: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if self.thinking_round_trip not in {"drop", "system_note", "raise"}:
@@ -513,6 +514,23 @@ class OpenAIStreamFn:
                     "OpenAI provider dropped assistant ThinkingBlock content; "
                     "set thinking_round_trip='system_note' or 'raise' to "
                     "change this behavior."
+                ),
+            ),
+        )
+
+    def _emit_reasoning_skip_diagnostic(self) -> None:
+        if self.events is None or self._reported_reasoning_skip:
+            return
+        self._reported_reasoning_skip = True
+        self.events.emit_sync(
+            DiagnosticEvent.CHANNEL,
+            DiagnosticEvent(
+                level="warning",
+                source="openai",
+                message=(
+                    "Azure OpenAI Chat Completions does not support the "
+                    "reasoning_effort convenience setting together with "
+                    "function tools; this request is continuing without it."
                 ),
             ),
         )
@@ -611,7 +629,10 @@ class OpenAIStreamFn:
 
         extra = dict(self.extra_body or {})
         if self.reasoning_effort is not None:
-            extra.setdefault("reasoning_effort", self.reasoning_effort)
+            if self.azure_endpoint is not None and tools:
+                self._emit_reasoning_skip_diagnostic()
+            else:
+                extra.setdefault("reasoning_effort", self.reasoning_effort)
         response_format = extra.pop("response_format", None)
         if response_format is not None:
             body["response_format"] = response_format
