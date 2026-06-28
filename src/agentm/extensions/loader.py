@@ -28,6 +28,8 @@ Path resolution:
        — the worktree directory in editable installs, found by walking
        up from the ``agentm`` package source. Wheel installs without a
        sibling ``contrib/`` simply skip this candidate.
+    5. ``agentm.scenarios.<name>/manifest.yaml`` packaged inside the wheel
+       for portable built-in scenarios such as ``chatbot``.
 """
 
 from __future__ import annotations
@@ -186,6 +188,31 @@ def _resolve_scenario_entrypoint(name: str) -> Path | None:
             return concrete
     return None
 
+
+def _resolve_packaged_scenario(name: str) -> Path | None:
+    """Resolve a built-in portable scenario bundled inside the ``agentm`` wheel.
+
+    These are fallbacks for wheel installs that do not have the source checkout's
+    ``contrib/scenarios`` tree. User-installed scenarios under ``~/.agentm`` are
+    resolved before this fallback, so local customization still wins.
+    """
+
+    if not name.isidentifier():
+        return None
+    try:
+        from importlib.resources import files
+    except Exception:  # noqa: BLE001 — importlib.resources is stdlib; defensive
+        return None
+    try:
+        manifest = files(f"agentm.scenarios.{name}") / "manifest.yaml"
+    except (ModuleNotFoundError, TypeError):
+        return None
+    try:
+        concrete = Path(os.fspath(manifest))  # type: ignore[call-overload]
+    except TypeError:
+        return None
+    return concrete if concrete.is_file() else None
+
 def load_scenario(
     name_or_path: str,
 ) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
@@ -248,7 +275,17 @@ def load_scenario(
                 relative = (
                     Path("contrib") / "scenarios" / name_or_path / "manifest.yaml"
                 )
-            manifest_path = _resolve_scenario_manifest(name_or_path, relative)
+            try:
+                manifest_path = _resolve_scenario_manifest(name_or_path, relative)
+            except ScenarioLoadError:
+                pkg_manifest = (
+                    _resolve_packaged_scenario(name_or_path)
+                    if ":" not in name_or_path
+                    else None
+                )
+                if pkg_manifest is None:
+                    raise
+                manifest_path = pkg_manifest
 
     extensions = _load_from_path(manifest_path)
     try:

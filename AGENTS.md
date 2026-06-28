@@ -13,6 +13,9 @@ mechanism; every policy is a replaceable atom. Boundary contract in
 
 - `agentm -p "<prompt>"` — one-shot prompt (default scenario `chatbot`).
 - `agentm` (no args) — show help and subcommand list.
+- `agentm contrib sync [--mode copy|symlink] [--overwrite]` — install bundled
+  or checkout contrib scenarios/extensions into `~/.agentm/contrib/` so
+  external `agentm -p` use does not depend on the source checkout.
 - `agentm trace …` — query session traces from ClickHouse (default
   backend) or local JSONL. Subcommands: `messages` · `turns` · `tools` ·
   `chats` · `info` · `index` · `spans` · `logs` · `stats` · `usage`.
@@ -129,7 +132,10 @@ substrate:  agentm.core/  (abi · runtime · lib — write-protected)
 - **Home contrib**: `~/.agentm/contrib/extensions/<name>.py` and
   `~/.agentm/contrib/scenarios/<name>/manifest.yaml` — user-installed
   atoms and scenarios that work from pip-installed wheels (similar to
-  Codex plugins). Respects `$AGENTM_HOME` override.
+  Codex plugins). Respects `$AGENTM_HOME` override. Use
+  `agentm contrib sync` to materialize bundled/source contrib resources there;
+  packaged portable scenarios (`chatbot`, `local`, `minimal`) are also a
+  fallback when no home/source checkout scenario exists.
 
 ## Design docs (`.claude/`)
 

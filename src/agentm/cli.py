@@ -26,6 +26,7 @@ from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
 from agentm.cli_trace import app as _trace_app
 from agentm.cli_validate import app as _validate_app
 from agentm.cli_workflow import app as _workflow_app
+from agentm.contrib_sync import app as _contrib_app
 from agentm.core.abi import LoopConfig
 from agentm.core.abi.events import (
     DiagnosticEvent,
@@ -768,10 +769,11 @@ def run_cmd(
         typer.Option(
             "--scenario",
             help=(
-                "Opt-in curated extension list. Bare name resolves under "
-                "<cwd>/contrib/scenarios/<name>/manifest.yaml. An absolute "
-                "path is also accepted. When unset, falls back to the "
-                "``local`` scenario (minimal default tool set)."
+                "Opt-in curated extension list. Bare names resolve from "
+                "$AGENTM_PROJECT_ROOT, the process cwd, ~/.agentm/contrib, "
+                "the AgentM checkout, or packaged portable scenarios. An "
+                "absolute path is also accepted. When unset, falls back to "
+                "the ``chatbot`` scenario."
             ),
         ),
     ] = None,
@@ -1400,6 +1402,7 @@ app.add_typer(_trace_app, name="trace")
 app.add_typer(_workflow_app, name="workflow")
 app.add_typer(_validate_app, name="validate")
 app.add_typer(_gateway_app, name="gateway")
+app.add_typer(_contrib_app, name="contrib")
 
 
 def main() -> None:

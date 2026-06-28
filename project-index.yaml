@@ -451,6 +451,13 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/cli.py
+      - path: src/agentm/contrib_sync.py
+      - path: src/agentm/extensions/loader.py
+      - path: contrib/scenarios/chatbot/manifest.yaml
+      - path: contrib/scenarios/local/manifest.yaml
+      - path: src/agentm/scenarios/chatbot/manifest.yaml
+      - path: src/agentm/scenarios/local/manifest.yaml
+      - path: src/agentm/scenarios/minimal/manifest.yaml
       - path: src/agentm/cli_workflow.py
       - path: src/agentm/gateway/cli.py
       - path: src/agentm/ai/types.py

@@ -30,7 +30,7 @@ validator rejects any extension that imports `core.runtime.*` or
 
 ```mermaid
 flowchart LR
-    SC["--scenario rca<br/>(or default: local)"] --> L["loader.load_scenario(name)"]
+    SC["--scenario rca<br/>(or default: chatbot)"] --> L["loader.load_scenario(name)"]
     EX["--extension &lt;dotted&gt;[:JSON]<br/>(repeatable, appended)"] --> R
     UA["&lt;cwd&gt;/.agentm/atoms/*.py<br/>(user atoms, layered on top)"] --> R
     L --> R["resolve &amp; topo-sort by MANIFEST.requires"]
@@ -46,10 +46,10 @@ flowchart LR
 from agentm.core.abi.extension import ExtensionAPI, ExtensionManifest
 
 MANIFEST = ExtensionManifest(
-    name="my_atom",                    # must equal the filename stem
+    name="my_atom",                 # must equal the filename stem
     version="0.1.0",
-    requires=("operations_local",),    # by atom NAME; topo-sorted
-    provides_role=(),                  # optional capability advertisement
+    requires=("operations",),       # by atom NAME; topo-sorted
+    provides_role=(),               # optional capability advertisement
 )
 
 def install(api: ExtensionAPI, config: dict) -> None:
@@ -76,11 +76,11 @@ subsystems are reached only via `ExtensionAPI` services.
 # contrib/scenarios/local/manifest.yaml
 name: local
 extensions:
-  - module: agentm.extensions.builtin.operations_local
-  - module: agentm.extensions.builtin.tool_read
-  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.operations
     config:
-      timeout_seconds: 60
+      backend: local
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
   - module: agentm.extensions.builtin.observability
 ```
 
@@ -123,13 +123,17 @@ its default injection.
 
 ## Enabling: from CLI to a running session
 
-The default scenario is `local` — no flag needed:
+The default scenario is `chatbot` — no flag needed. The process cwd is the
+workspace unless `--cwd` is supplied, so this works as an external tool in any
+repository:
 
 ```bash
-uv run agentm -p "list files in src/"
+agentm -p "list files in src/"
 ```
 
-Pick another by name (resolves to `contrib/scenarios/<name>/manifest.yaml`):
+Pick another by name. Scenario lookup checks `$AGENTM_PROJECT_ROOT`, the
+process cwd, `~/.agentm/contrib/scenarios`, the AgentM checkout, and packaged
+portable scenarios:
 
 ```bash
 uv run agentm --scenario rca "diagnose this trace"
@@ -176,15 +180,19 @@ agentm list-extensions          # every auto-discoverable atom, with its
 agentm --help                   # full flag list (--scenario, --extension,
                                 # --resume, --continue, --tools, ...)
 
+agentm contrib sync             # copy bundled/source contrib resources into
+                                # ~/.agentm/contrib for global customization
+
 ls contrib/scenarios/           # shipped scenarios: local, sandbox,
                                 # chatbot, format_fix, mcp_demo,
                                 # rca, rca_hfsm, terminal_bench
 ```
 
-Beyond the one-shot prompt, `agentm` has two subcommands: `agentm gateway`
-(single-process gateway holding all chat sessions in memory) and `agentm trace`
-(query the OTLP/JSON session log). The chat-client peers ship as **separate
-binaries** for vendor-SDK isolation only — `agentm-terminal` and
+Beyond the one-shot prompt, notable subcommands include `agentm gateway`
+(single-process gateway holding all chat sessions in memory), `agentm trace`
+(query the OTLP/JSON session log), and `agentm contrib sync` (materialize
+configurable contrib resources under `~/.agentm`). The chat-client peers ship
+as **separate binaries** for vendor-SDK isolation only — `agentm-terminal` and
 `agentm-feishu`. Run `agentm <sub> --help` or `<binary> --help` for flags.
 
 ## Five pluggability axes
@@ -224,6 +232,14 @@ uv sync
 uv run agentm -p "list files in src/"
 ```
 
+Installed as a tool, the same minimal invocation works from any repo:
+
+```bash
+agentm -p "summarize this repository"
+agentm --cwd /path/to/repo -p "run the relevant checks"
+agentm contrib sync --mode copy
+```
+
 Model provider settings can be supplied through environment variables or
 profiles in `~/.agentm/config.toml` (`$AGENTM_HOME/config.toml` overrides
 the directory). A minimal config profile:
@@ -246,11 +262,10 @@ Programmatic:
 ```python
 from agentm.core.abi.session_config import AgentSessionConfig
 from agentm.core.runtime.session import AgentSession
-from agentm.extensions.loader import load_scenario
 
 session = await AgentSession.create(AgentSessionConfig(
     cwd=".",
-    extensions=load_scenario("local"),
+    scenario="local",
     provider=("agentm.extensions.builtin.llm_anthropic",
               {"model": "claude-sonnet-4-6"}),
 ))
