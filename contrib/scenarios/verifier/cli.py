@@ -108,6 +108,7 @@ def _write_outputs(
     out: Path,
     meta: dict[str, Any],
     result: dict[str, Any],
+    data_profile: dict[str, Any] | None = None,
 ) -> None:
     confirmed_seed_ids = set(result.get("confirmed_seeds", []))
     scenario = assemble_scenario(
@@ -142,8 +143,58 @@ def _write_outputs(
         run_meta["seed_verdicts"] = result["seed_verdicts"]
     if result.get("confirmed_seeds") is not None:
         run_meta["confirmed_seeds"] = result.get("confirmed_seeds", [])
+    for key in (
+        "anomaly_inventory",
+        "candidate_edges",
+        "node_attribution",
+        "review_notes",
+    ):
+        if result.get(key):
+            run_meta[key] = result[key]
     (out / "run_meta.json").write_text(
         json.dumps(run_meta, indent=2, ensure_ascii=False, default=str) + "\n"
+    )
+    _write_review_packet(out, meta, result, scenario, data_profile or {})
+
+
+def _write_review_packet(
+    out: Path,
+    meta: dict[str, Any],
+    result: dict[str, Any],
+    scenario: dict[str, Any] | None,
+    data_profile: dict[str, Any],
+    error: str | None = None,
+) -> None:
+    """Write the compact human-adjudication packet for offline labeling."""
+    packet = {
+        "scenario_id": meta.get("scenario_id"),
+        "testbed": meta.get("testbed"),
+        "error": error,
+        "candidate_fpg": scenario or {},
+        "data_profile": data_profile,
+        "anomaly_inventory": result.get("anomaly_inventory", []),
+        "evidence_ledger": {
+            "seed_verdicts": result.get("seed_verdicts", {}),
+            "hop_verdicts": result.get("verdicts", {}),
+            "gate_log": result.get("gate_log", []),
+            "hop_log": result.get("hop_log", []),
+            "audit": result.get("audit", {}),
+            "audit_rounds": result.get("audit_rounds", []),
+        },
+        "candidate_edges": result.get("candidate_edges", []),
+        "node_attribution": result.get("node_attribution", {}),
+        "review_notes": result.get("review_notes", []),
+        "human_adjudication": {
+            "status": "pending",
+            "instructions": (
+                "Review the candidate FPG against the evidence ledger. "
+                "Mark changed telemetry as covered, unrelated/pre-existing, "
+                "or missed; decide any multi-fault gate semantics manually."
+            ),
+        },
+    }
+    (out / "review_packet.json").write_text(
+        json.dumps(packet, indent=2, ensure_ascii=False, default=str) + "\n"
     )
 
 
@@ -152,6 +203,7 @@ def _write_error_meta(
     error: str,
     result: dict[str, Any],
     meta: dict[str, Any],
+    data_profile: dict[str, Any] | None = None,
 ) -> None:
     run_meta: dict[str, Any] = {"error": error}
     if meta.get("scenario_id"):
@@ -180,9 +232,18 @@ def _write_error_meta(
         run_meta["seed_verdicts"] = result["seed_verdicts"]
     if result.get("confirmed_seeds") is not None:
         run_meta["confirmed_seeds"] = result.get("confirmed_seeds", [])
+    for key in (
+        "anomaly_inventory",
+        "candidate_edges",
+        "node_attribution",
+        "review_notes",
+    ):
+        if result.get(key):
+            run_meta[key] = result[key]
     (out / "run_meta.json").write_text(
         json.dumps(run_meta, indent=2, ensure_ascii=False, default=str) + "\n"
     )
+    _write_review_packet(out, meta, result, None, data_profile or {}, error=error)
 
 
 def _run_one(
@@ -191,6 +252,7 @@ def _run_one(
     budget: int = 15,
     judge_model: str | None = None,
     gate_retries: int = 3,
+    skip_judge: bool = False,
 ) -> dict:
     data_dir = case_dir.resolve()
     out = out_dir.resolve()
@@ -208,6 +270,7 @@ def _run_one(
     workflow_args = ctx.to_workflow_args(
         out_dir=str(out),
         budget=budget,
+        skip_judge=skip_judge,
         judge_model=judge_model,
         gate_retries=gate_retries,
     )
@@ -215,15 +278,15 @@ def _run_one(
 
     if result.get("execution_errors"):
         logger.warning("Verifier execution errors: {}", result["execution_errors"])
-        _write_error_meta(out, "execution errors", result, ctx.meta)
+        _write_error_meta(out, "execution errors", result, ctx.meta, ctx.data_profile)
         return {"case": data_dir.name, "error": "execution errors"}
 
     if not result.get("confirmed_seeds"):
         logger.warning("No seeds confirmed.")
-        _write_error_meta(out, "no seeds confirmed", result, ctx.meta)
+        _write_error_meta(out, "no seeds confirmed", result, ctx.meta, ctx.data_profile)
         return {"case": data_dir.name, "error": "no seeds confirmed"}
 
-    _write_outputs(out, ctx.meta, result)
+    _write_outputs(out, ctx.meta, result, ctx.data_profile)
 
     seeds = {i.get("node_id", i["target"]) for i in ctx.injections}
     confirmed = [n["id"] for n in result["nodes"]]
@@ -311,6 +374,13 @@ def run(
             help="retry a seed/hop this many times after its gate rejects it",
         ),
     ] = 3,
+    skip_judge: Annotated[
+        bool,
+        typer.Option(
+            "--skip-judge",
+            help="skip the audit loop after seed/hop propagation",
+        ),
+    ] = False,
 ) -> None:
     """Run propagation check on a single case."""
     if model:
@@ -322,6 +392,7 @@ def run(
         budget=budget,
         judge_model=judge_model,
         gate_retries=gate_retries,
+        skip_judge=skip_judge,
     )
     if "error" in summary:
         raise typer.Exit(1)

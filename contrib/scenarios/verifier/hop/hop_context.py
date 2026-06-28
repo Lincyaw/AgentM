@@ -7,6 +7,7 @@ stable for verifier/hop as a callable map function.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +33,8 @@ class HopContextConfig(BaseModel):
     fault_docs: dict[str, str] = Field(default_factory=dict)
     is_infra: bool = False
     upstream_evidence: dict[str, Any] | None = None
+    source_seed: str | None = None
+    observation_context: dict[str, Any] = Field(default_factory=dict)
     judge_context: str = ""
     prior_verdict: PriorVerdict | None = None
 
@@ -49,28 +52,23 @@ MANIFEST = ExtensionManifest(
 # ---------------------------------------------------------------
 
 _REL_DESCRIPTIONS: Final = {
-    "callee_to_caller": "{to} calls {frm}, so {frm} is {to}'s downstream "
-    "dependency. A degraded callee propagates UP to its "
-    "caller {to}, which blocks on or fails with the bad "
-    "response. This is the usual direction for latency "
-    "and error faults.",
-    "caller_to_callee": "{frm} calls {to}, so {to} is {frm}'s downstream "
-    "dependency. A caller affects its callee ONLY for "
-    "data-corruption / bad-request faults (it sends {to} "
-    "a wrong or corrupted request). A merely slow or "
-    "failing caller does NOT by itself degrade {to} — be "
-    "skeptical of confirming on this edge. If {frm} simply "
-    "sends fewer calls, use that as evidence about {frm}'s "
-    "interrupted path; do not confirm {to} unless {to} has "
-    "its own alarm/user-visible path interruption or stronger "
-    "timeout/error/fail-fast evidence.",
-    "co_deployed": "{frm} and {to} share a k8s node — ONLY a node-level "
-    "resource fault (CPU/memory/disk exhaustion) on one can "
-    "degrade the other. An app-logic, JVM, or network fault "
-    "does not cross to a co-located pod.",
+    "callee_to_caller": "Observed traces contain calls where {to} depends on "
+    "{frm}. Verify whether the already-confirmed symptom on {frm} is followed "
+    "by a statistically meaningful trace/metric/log change on {to}; do not "
+    "confirm from topology alone.",
+    "caller_to_callee": "Observed traces contain calls where {frm} sends work "
+    "to {to}. Verify whether the behavior sent by {frm} produced a meaningful "
+    "target-side trace/metric/log change on {to}; separate target degradation "
+    "from simple reduced demand.",
+    "co_deployed": "{frm} and {to} share runtime placement. Verify whether "
+    "resource, restart, node, or saturation evidence connects their windows; "
+    "do not assume co-location is causal.",
     "infra_dependency": "{frm} depends on the backing component {to} "
-    "(database/cache/broker). {to} is uninstrumented: it "
-    "has NO spans of its own — its calls live inside {frm}.",
+    "(database/cache/broker). Verify through client spans, resource metrics, "
+    "logs, or peer attributes that are actually observable in this case.",
+    "other": "{frm} and {to} were proposed by telemetry or audit rather than "
+    "by a known structural edge. First establish whether an observable "
+    "relationship exists, then test propagation evidence.",
 }
 
 
@@ -117,6 +115,7 @@ def build_hop_prompt(
     fault_docs: dict[str, str],
     is_infra: bool = False,
     upstream_evidence: EventNode | dict | None = None,  # type: ignore[type-arg]
+    observation_context: dict[str, Any] | None = None,
     judge_context: str = "",
     prior_verdict: PriorVerdict | None = None,
 ) -> str:
@@ -158,6 +157,23 @@ def build_hop_prompt(
             f"`{to_service}`'s own resource metrics."
         )
     sections.append("## Task\n" + "\n".join(task_lines))
+
+    if observation_context:
+        sections.append(
+            "## Observation context\n"
+            "This deterministic profile slice lists available modalities, "
+            "service-level statistics, nearby relationships, and precomputed "
+            "normal/abnormal anomaly candidates. Use it to plan checks; it is "
+            "not causal evidence by itself.\n"
+            "```json\n"
+            + json.dumps(
+                observation_context,
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            )
+            + "\n```"
+        )
 
     # -- 4. Re-evaluation context (optional) --------------------------------
     if prior_verdict and prior_verdict.verdict:

@@ -1,9 +1,10 @@
 """Prompt builder/config carrier for seed verification agents."""
 from __future__ import annotations
 
-from typing import Final
+import json
+from typing import Any, Final
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
@@ -17,6 +18,7 @@ class SeedContextConfig(BaseModel):
     fault_kind: str
     params: str = ""
     fault_doc: str = ""
+    observation_surface: dict[str, Any] = Field(default_factory=dict)
     judge_context: str = ""
 
 
@@ -34,6 +36,7 @@ def build_seed_prompt(
     fault_kind: str,
     params: str,
     fault_doc: str,
+    observation_surface: dict[str, Any] | None = None,
     judge_context: str = "",
 ) -> str:
     """Build the user prompt for verifying an injection target."""
@@ -50,6 +53,22 @@ def build_seed_prompt(
     if params:
         line += f" ({params})"
     sections.append("## Current injection\n" + line)
+
+    if observation_surface:
+        sections.append(
+            "## Observation surface\n"
+            "This deterministic map lists nearby services, available telemetry, "
+            "and visible normal/abnormal anomalies. Use it to scope your checks; "
+            "do not treat it as proof of causality.\n"
+            "```json\n"
+            + json.dumps(
+                observation_surface,
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            )
+            + "\n```"
+        )
 
     # -- Task --
     task_lines = [

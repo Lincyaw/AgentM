@@ -26,8 +26,25 @@ class Injection(TypedDict, total=False):
 
 HopLogEntry = TypedDict(
     "HopLogEntry",
-    {"round": int, "from": str, "to": str, "verdict": str},
+    {
+        "round": Required[int],
+        "from": Required[str],
+        "to": Required[str],
+        "verdict": Required[str],
+        "source_seed": str,
+    },
+    total=False,
 )
+
+
+class CandidateEdge(TypedDict, total=False):
+    source_seed: Required[str]
+    from_service: Required[str]
+    to_service: Required[str]
+    rel_type: Required[str]
+    source: str
+    reason: str
+    anomaly_ids: list[str]
 
 
 class SeedResult(TypedDict, total=False):
@@ -92,6 +109,8 @@ class HopRecheckRequest(BaseModel):
     kind: Literal["hop_recheck"]
     from_service: str
     to_service: str
+    rel_type: str | None = None
+    source_seed: str | None = None
     context: str = ""
 
 
@@ -187,3 +206,7 @@ class PropagationResult(TypedDict, total=False):
     audit: dict[str, Any]
     audit_rounds: list[dict[str, Any]]
     execution_errors: list[ExecutionError]
+    anomaly_inventory: list[dict[str, Any]]
+    candidate_edges: list[CandidateEdge]
+    node_attribution: dict[str, list[dict[str, Any]]]
+    review_notes: list[dict[str, Any]]
