@@ -2,6 +2,8 @@ package editor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -139,8 +141,6 @@ type editor struct {
 	banner *attachmentBanner
 	// attachments tracks all file attachments (pastes and file refs).
 	attachments []attachment
-	// pasteCounter tracks the next paste number for display purposes.
-	pasteCounter int
 	// recording tracks whether the editor is in recording mode (speech-to-text)
 	recording bool
 	// placeholder is the configured empty-editor placeholder, restored when
@@ -534,29 +534,14 @@ func deleteLastGraphemeCluster(s string) string {
 	return s[:lastClusterStart]
 }
 
-// refreshSuggestion updates the cached suggestion to reflect the current
-// textarea value and available history entries.
+// refreshSuggestion clears any stale suggestion. History-based inline
+// suggestions are intentionally disabled — they were confusing when the
+// ghost text was hard to see against dark terminal backgrounds, and the
+// value for ordinary input was low. Completion-managed suggestions (e.g.
+// @file, /command) are set directly via completion.SelectionChangedMsg
+// and are unaffected.
 func (e *editor) refreshSuggestion() {
-	// Don't overwrite completion-managed suggestions with history suggestions.
-	if e.currentCompletion != nil {
-		return
-	}
-
 	e.clearSuggestion()
-
-	current := e.textarea.Value()
-	if e.hist == nil || current == "" || !e.isCursorAtEnd() {
-		return
-	}
-
-	// Only show a suggestion when history has a longer match.
-	match := e.hist.LatestMatch(current)
-	if len(match) <= len(current) {
-		return
-	}
-
-	e.suggestion = match[len(current):]
-	e.hasSuggestion = true
 }
 
 // clearSuggestion removes any pending suggestion.
@@ -566,34 +551,6 @@ func (e *editor) clearSuggestion() {
 	}
 	e.hasSuggestion = false
 	e.suggestion = ""
-}
-
-// isCursorAtEnd returns true if the cursor is at the end of the text.
-func (e *editor) isCursorAtEnd() bool {
-	value := e.textarea.Value()
-	if value == "" {
-		return true
-	}
-
-	// Check if cursor is on the last logical line
-	lines := strings.Split(value, "\n")
-	lastLineIdx := len(lines) - 1
-	if e.textarea.Line() != lastLineIdx {
-		return false
-	}
-
-	// Check if cursor is at the end of the last line
-	lastLine := lines[lastLineIdx]
-	lastLineLen := len([]rune(lastLine))
-	lineInfo := e.textarea.LineInfo()
-
-	// For soft-wrapped lines, we need to calculate the total character position
-	// from the start of the logical line. CharOffset is relative to the visual line,
-	// so we need to add the characters from previous visual rows.
-	// StartColumn gives us the character index where the current visual line starts.
-	totalCharPos := lineInfo.StartColumn + lineInfo.ColumnOffset
-
-	return totalCharPos >= lastLineLen
 }
 
 // AcceptSuggestion applies the current suggestion into the textarea value and
@@ -974,97 +931,58 @@ func (e *editor) handleGraphemeBackspace() (layout.Model, tea.Cmd) {
 		return e, nil
 	}
 
-	// Get cursor position info
 	lines := strings.Split(value, "\n")
 	currentLine := e.textarea.Line()
-	lineInfo := e.textarea.LineInfo()
-
-	// CharOffset within the current visual line segment
-	colPos := lineInfo.CharOffset + lineInfo.StartColumn
-
 	if currentLine < 0 || currentLine >= len(lines) {
 		return e, nil
 	}
 
-	if colPos == 0 && currentLine > 0 {
-		// At beginning of line but not first line - let textarea handle line merge
+	currentLineRunes := []rune(lines[currentLine])
+	col := e.textarea.Column()
+	if col > len(currentLineRunes) {
+		col = len(currentLineRunes)
+	}
+
+	if col == 0 && currentLine > 0 {
+		// At beginning of line but not first line - let textarea handle line merge.
 		var cmd tea.Cmd
 		e.textarea, cmd = e.textarea.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+		e.userTyped = e.textarea.Value() != ""
 		e.refreshSuggestion()
 		return e, tea.Batch(cmd, e.updateCompletionQuery())
 	}
 
-	if colPos == 0 {
-		// At beginning of first line - nothing to delete
+	if col == 0 {
+		// At beginning of first line - nothing to delete.
 		return e, nil
 	}
 
-	// Delete the last grapheme cluster from the text before the cursor
-	currentLineText := lines[currentLine]
-
-	// Convert column position (based on display width) to rune position
-	runePos := 0
-	width := 0
-	for _, r := range currentLineText {
-		if width >= colPos {
-			break
-		}
-		width += runewidth.RuneWidth(r)
-		runePos++
-	}
-
-	// Text before cursor
-	runes := []rune(currentLineText)
-	if runePos > len(runes) {
-		runePos = len(runes)
-	}
-	beforeCursor := string(runes[:runePos])
-	afterCursor := string(runes[runePos:])
-
-	// Delete the last grapheme cluster from text before cursor
+	beforeCursor := string(currentLineRunes[:col])
+	afterCursor := string(currentLineRunes[col:])
 	newBeforeCursor := deleteLastGraphemeCluster(beforeCursor)
 
-	// Rebuild the line
 	lines[currentLine] = newBeforeCursor + afterCursor
 	newValue := strings.Join(lines, "\n")
 
-	// Calculate new cursor column position within the current line
-	newCol := len([]rune(newBeforeCursor))
-
-	// Build text before cursor position (all lines before current + new before cursor)
-	var beforeParts []string
-	for i := range currentLine {
-		beforeParts = append(beforeParts, lines[i])
-	}
-	beforeParts = append(beforeParts, newBeforeCursor)
-	textBeforeCursor := strings.Join(beforeParts, "\n")
-
-	// Build text after cursor position (after cursor on current line + remaining lines)
-	var textAfterCursorSb strings.Builder
-	textAfterCursorSb.WriteString(afterCursor)
+	// textarea.Column is a logical rune index, while LineInfo reports visual
+	// soft-wrap offsets. Keep the cursor in logical text coordinates by setting
+	// the rebuilt value, moving to the end, then stepping left over the suffix.
+	// This avoids deleting from the middle of long/wrapped lines and still lets
+	// deleteLastGraphemeCluster remove multi-rune graphemes as a unit.
+	var suffix strings.Builder
+	suffix.WriteString(afterCursor)
 	for i := currentLine + 1; i < len(lines); i++ {
-		textAfterCursorSb.WriteByte('\n')
-		textAfterCursorSb.WriteString(lines[i])
+		suffix.WriteByte('\n')
+		suffix.WriteString(lines[i])
 	}
-	textAfterCursor := textAfterCursorSb.String()
 
-	// Set the text before cursor and move to end
-	e.textarea.SetValue(textBeforeCursor)
+	e.textarea.SetValue(newValue)
 	e.textarea.MoveToEnd()
-
-	// Now insert the text after cursor - this positions cursor correctly
-	if textAfterCursor != "" {
-		e.textarea.SetValue(newValue)
-		e.textarea.MoveToBegin()
-
-		// Keep calling CursorDown until we're on the target logical line
-		for e.textarea.Line() < currentLine {
-			e.textarea.CursorDown()
-		}
-
-		e.textarea.SetCursorColumn(newCol)
+	for range []rune(suffix.String()) {
+		e.textarea, _ = e.textarea.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
 	}
 
+	e.userTyped = e.textarea.Value() != ""
 	e.refreshSuggestion()
 	return e, tea.Batch(textarea.Blink, e.updateCompletionQuery())
 }
@@ -1573,8 +1491,7 @@ func (e *editor) handlePaste(content string) bool {
 		return false
 	}
 
-	e.pasteCounter++
-	att, err := createPasteAttachment(content, e.pasteCounter)
+	att, err := createPasteAttachment(content)
 	if err != nil {
 		slog.Warn("failed to buffer paste", "error", err)
 		// Still return true to prevent the large paste from falling through
@@ -1630,7 +1547,7 @@ func (e *editor) updateAttachmentBanner() {
 	e.updateTextareaHeight()
 }
 
-func createPasteAttachment(content string, num int) (attachment, error) {
+func createPasteAttachment(content string) (attachment, error) {
 	pasteDir := filepath.Join(paths.GetDataDir(), "pastes")
 	if err := os.MkdirAll(pasteDir, 0o700); err != nil {
 		return attachment{}, fmt.Errorf("create paste dir: %w", err)
@@ -1646,7 +1563,12 @@ func createPasteAttachment(content string, num int) (attachment, error) {
 		return attachment{}, fmt.Errorf("write paste file: %w", err)
 	}
 
-	displayName := fmt.Sprintf("paste-%d", num)
+	displayName, err := randomPasteDisplayName()
+	if err != nil {
+		_ = os.Remove(file.Name())
+		return attachment{}, err
+	}
+
 	return attachment{
 		path:        file.Name(),
 		placeholder: "@" + displayName,
@@ -1654,6 +1576,14 @@ func createPasteAttachment(content string, num int) (attachment, error) {
 		sizeBytes:   len(content),
 		isTemp:      true,
 	}, nil
+}
+
+func randomPasteDisplayName() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate paste id: %w", err)
+	}
+	return "paste-" + hex.EncodeToString(b[:]), nil
 }
 
 func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
