@@ -63,6 +63,17 @@ def _trace_clickhouse_url(cwd: Path | None = None) -> str | None:
     return _ch().get_url()
 
 
+def _local_session_file(session: str | None, cwd: Path | None) -> Path | None:
+    """Return the local JSONL path for an explicit session if it exists."""
+    if session is None:
+        return None
+    from agentm.core.observability.otel_export import resolve_observability_dir
+
+    base = cwd if cwd is not None else Path.cwd()
+    path = resolve_observability_dir(base) / f"{session}.jsonl"
+    return path if path.is_file() else None
+
+
 def _ch_session(
     file: Path | None, session: str | None, latest: bool, cwd: Path | None = None,
 ) -> tuple[str, str] | None:
@@ -77,6 +88,26 @@ def _ch_session(
     url = _trace_clickhouse_url(cwd)
     if url is None:
         return None
+    local_file = _local_session_file(session, cwd)
+    if local_file is not None:
+        try:
+            if _ch().session_header(url, session) is None:
+                logger.debug(
+                    "trace: ClickHouse has no header for session {}; "
+                    "using local JSONL {}",
+                    session,
+                    local_file,
+                )
+                return None
+        except Exception as exc:
+            logger.debug(
+                "trace: ClickHouse session lookup failed for {}; "
+                "using local JSONL {}: {}",
+                session,
+                local_file,
+                exc,
+            )
+            return None
     resolved_cwd = cwd.expanduser().resolve() if cwd is not None else None
     sid = _ch().resolve_session(
         url, session, latest, str(resolved_cwd) if resolved_cwd is not None else None

@@ -15,8 +15,10 @@ Session traces live in two backends. `agentm trace` abstracts both:
 | **ClickHouse** | When `AGENTM_CLICKHOUSE_URL` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set | `--session <id>` (queries ClickHouse automatically) |
 
 `--latest` picks the most recent session file in the observability dir.
-When remote trace storage is configured AND a local file exists, `--session`
-prefers ClickHouse. The same subcommands and `--format ndjson` work on both.
+When remote trace storage is configured, `--session` tries ClickHouse first.
+If ClickHouse has no matching session header and a local JSONL file exists,
+it falls back to that file. The same subcommands and `--format ndjson` work
+on both.
 
 Harness operational logs (loguru) are forwarded into the OTLP logs signal
 when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. They land in the same JSONL

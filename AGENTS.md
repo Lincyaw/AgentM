@@ -57,8 +57,9 @@ supervisord for auto-restart and log rotation (`~/.agentm/weixin/logs/`).
 ### Trace debugging combos
 
 When ClickHouse trace storage is configured, traces are queryable by
-`--session <id>` across the full history; otherwise `--session <id>` resolves
-to `$AGENTM_HOME/observability/<id>.jsonl`. A logical trace spans multiple
+`--session <id>` across the full history; if ClickHouse has no matching
+session header and a local JSONL file exists, `--session <id>` falls back to
+`$AGENTM_HOME/observability/<id>.jsonl`. A logical trace spans multiple
 sessions — one root + N spawned children. Composition pattern:
 
 - `agentm trace index` — selection layer: emits one identity row per
