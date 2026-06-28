@@ -358,6 +358,7 @@ requirements:
       - path: src/agentm/extensions/builtin/_operations/local.py
       - path: src/agentm/core/runtime/resource_writer.py
       - path: src/agentm/extensions/builtin/file_tools.py
+      - path: src/agentm/core/lib/read_state.py
     tests:
       - path: tests/unit/extensions/test_extension_contract.py
     docs:

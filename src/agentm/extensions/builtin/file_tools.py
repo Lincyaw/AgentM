@@ -130,6 +130,12 @@ def _required_string_arg(
         )
     return value, None
 
+def _read_state_path(path: str, cwd: str) -> str:
+    """Return the stable key used for read-before-write/edit state."""
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    return os.path.normpath(os.path.join(cwd, path))
+
 # ---------------------------------------------------------------------------
 # Read helpers
 # ---------------------------------------------------------------------------
@@ -744,7 +750,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
                 record_kwargs["mtime_ns"] = fs.mtime_ns
             except OSError as exc:
                 logger.debug("file_tools: read stat({}) failed: {}", path, exc)
-            record_read(path, **record_kwargs)
+            record_read(_read_state_path(path, api.cwd), **record_kwargs)
 
             numbered = [
                 f"{offset + i + 1}\t{line}"
@@ -803,7 +809,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         assert content is not None
         rationale = str(args.get("rationale", "agent write via file_tools"))
 
-        normalized = os.path.normpath(path)
+        read_state_path = _read_state_path(path, api.cwd)
 
         # Determine if the file already exists on disk.
         writer = _get_writer()
@@ -817,7 +823,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             logger.debug("file_tools: existence probe read({!r}) failed: {}", path, exc)
 
         if file_exists and require_read:
-            rs = get_read_state(normalized)
+            rs = get_read_state(read_state_path)
 
             # Gate 1: must have been read at all.
             if rs is None:
@@ -838,7 +844,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             recorded_mtime = getattr(rs, "mtime_ns", None)
             if recorded_mtime:
                 try:
-                    fs = await _get_file_ops().stat(normalized)
+                    fs = await _get_file_ops().stat(path)
                     current_mtime: int | None = fs.mtime_ns
                 except OSError:
                     current_mtime = None
@@ -865,13 +871,13 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
                 "is_partial": False,
             }
             try:
-                disk_stat = await _get_file_ops().stat(normalized)
+                disk_stat = await _get_file_ops().stat(path)
                 record_kwargs["mtime_ns"] = disk_stat.mtime_ns
             except OSError as exc:
                 # mtime is an optimisation for read-state tracking; omit it if
                 # the post-write stat fails rather than failing the write.
-                logger.debug("file_tools: post-write stat({}) failed: {}", normalized, exc)
-            record_read(normalized, **record_kwargs)
+                logger.debug("file_tools: post-write stat({}) failed: {}", path, exc)
+            record_read(read_state_path, **record_kwargs)
 
             action = "Updated" if file_exists else "Created"
             byte_count = len(content.encode("utf-8"))
@@ -993,8 +999,8 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         replace_all = bool(args.get("replace_all", False))
         rationale = str(args.get("rationale", "agent edit via file_tools"))
 
-        normalized = os.path.normpath(path)
-        state = get_read_state(normalized)
+        read_state_path = _read_state_path(path, api.cwd)
+        state = get_read_state(read_state_path)
         if require_read and state is None:
             return _error(
                 f"You must read {path!r} before editing it. "
@@ -1002,7 +1008,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             )
 
         # File-modified-since-read detection (aligned with Claude Code)
-        if state is not None and file_modified_since_read(normalized):
+        if state is not None and file_modified_since_read(read_state_path):
             return _error(
                 f"File has been modified since you last read it. "
                 f"Read {path!r} again before editing."
@@ -1033,7 +1039,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             # Post-edit: update read_state so subsequent edits don't
             # false-positive on "modified since read".
             if not result.is_error:
-                await _update_read_state_after_edit(normalized, _get_file_ops())
+                await _update_read_state_after_edit(read_state_path, _get_file_ops())
 
             return result
         except Exception as exc:

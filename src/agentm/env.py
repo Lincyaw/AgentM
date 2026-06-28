@@ -11,8 +11,19 @@ from loguru import logger
 _PACKAGE_WALK_DEPTH = 8
 
 
+def _agentm_home_env() -> Path:
+    raw_home = os.environ.get("AGENTM_HOME")
+    home = Path(raw_home).expanduser() if raw_home else Path.home() / ".agentm"
+    return home / ".env"
+
+
 def autoload_dotenv(cwd: Path | None = None) -> None:
-    """Load cwd-local and workspace-root ``.env`` files without overriding env."""
+    """Load AgentM ``.env`` files without overriding existing environment.
+
+    Precedence follows candidate order because ``load_dotenv(..., override=False)``
+    keeps the first value it sees: cwd-local, workspace-root, then
+    ``$AGENTM_HOME/.env`` as machine/user defaults.
+    """
     if os.environ.get("AGENTM_SKIP_DOTENV"):
         return
 
@@ -39,6 +50,10 @@ def autoload_dotenv(cwd: Path | None = None) -> None:
         if walker.parent == walker:
             break
         walker = walker.parent
+
+    home_env = _agentm_home_env()
+    if home_env not in candidates:
+        candidates.append(home_env)
 
     for path in candidates:
         if path.is_file():
