@@ -32,9 +32,12 @@ _AUDIT_TASK_KINDS: Final = {"reachability", "coverage", "explore"}
 
 _DISCOVERY_RUBRIC: Final = (
     "Review this one discovery result for investigation completeness. "
-    "Use `task.fault_reference_document` as the authoritative fault "
-    "signature when deciding whether the investigation covered the right "
-    "trace, metric, log, caller, and propagation checks."
+    "Use `task.observation_surface` or `task.observation_context` to see "
+    "which telemetry modalities, nearby services, and precomputed anomaly "
+    "candidates exist. The fault reference can suggest where to look, but "
+    "do not require a mechanism-specific signature template. Accept only "
+    "when available trace, metric, and log evidence was either checked or "
+    "explicitly shown to be unavailable/uninformative."
 )
 
 _AUDIT_RUBRIC: Final = (
@@ -75,7 +78,12 @@ def build_gate_prompt(
     return (
         "## Gate input\n"
         + rubric
-        + " Return only the structured `submit_result` payload.\n\n"
+        + "\n\nCall the `submit_result` tool exactly once. Its `result` "
+        "object must match this schema exactly: `accepted` boolean, "
+        "`retryable` boolean, `missing_checks` array of strings, "
+        "`retry_prompt` string or null, `confidence` one of "
+        "`high`/`medium`/`low`, and `rationale` string. Do not answer in "
+        "plain prose or markdown.\n\n"
         "```json\n"
         + json.dumps(payload, indent=2, ensure_ascii=False, default=str)
         + "\n```"

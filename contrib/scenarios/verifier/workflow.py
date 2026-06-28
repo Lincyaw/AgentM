@@ -1,11 +1,11 @@
 """Fault propagation verification workflow (module mode), fpg-native.
 
-This module is the thin orchestration core. It wires three phases over a
+This module is the thin orchestration core. It wires the existing verifier flow over a
 ``GraphState``:
 
   - seed_phase   — verify each injection (``discovery.verify_seed``);
                    confirmed seeds become propagation roots.
-  - propagate    — BFS the neighbor graph, verifying each candidate edge
+  - propagate    — scan structural and anomaly-informed candidate edges
                    (``discovery.verify_hop``); cycles are never evaluated.
   - audit_loop   — run the audit map/reduce (``audit_map``), apply its
                    rework + edge drops, repeat until it accepts or the
@@ -32,12 +32,18 @@ from agentm.extensions.builtin.workflow import WorkflowContext
 
 from . import audit_map, discovery
 from .hop.hop_context import PriorVerdict
+from .lib.candidates import (
+    anomaly_candidates,
+    graph_rel_type,
+    structural_candidates,
+)
 from .lib.fpg import injection_node_id
 from .lib.schema import (
     AuditOutcome,
     HopRecheckRequest,
     HopResult,
     Injection,
+    CandidateEdge,
     PropagationResult,
     ReworkRequest,
     SeedCoverageStatus,
@@ -67,7 +73,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
 
 
 async def seed_phase(ctx: WorkflowContext, case: Case, state: GraphState) -> None:
-    """Phase 0: verify every injection seed in parallel."""
+    """Verify every injection seed in parallel."""
     ctx.phase("seed")
     state.init_fresh()
 
@@ -113,33 +119,49 @@ async def propagate(
     state: GraphState,
     roots: Sequence[str],
 ) -> bool:
-    """Phase 1: BFS the neighbor graph, verifying each candidate edge."""
-    queue = [
-        root
-        for root in dict.fromkeys(roots)
-        if root in state.nodes
-        and root not in case.infra_set
-        and root not in case.entry_services
-    ]
+    """Scan each confirmed fault chain over structural/anomaly candidates."""
+    queue: list[tuple[str, str]] = []
+    for root in dict.fromkeys(roots):
+        if root not in state.nodes or root in case.infra_set or root in case.entry_services:
+            continue
+        sources = state.node_sources.get(root) or {root}
+        queue.extend((root, source_seed) for source_seed in sorted(sources))
     changed_any = False
 
     while queue:
         state.round_n += 1
-        batch = list(queue)
+        batch = list(dict.fromkeys(queue))
         queue = []
 
-        pending_hops: list[list[str]] = []
-        for current in batch:
-            for neighbor_info in case.graph.get(current, []):
-                neighbor = neighbor_info[0]
-                rel_type = neighbor_info[1]
-                edge_key = current + "__" + neighbor
+        pending_hops: list[CandidateEdge] = []
+        for current, source_seed in batch:
+            structural = structural_candidates(
+                case.graph,
+                source_seed=source_seed,
+                from_service=current,
+            )
+            existing_targets = {candidate["to_service"] for candidate in structural}
+            candidates = [
+                *structural,
+                *anomaly_candidates(
+                    case.graph,
+                    case.anomaly_inventory,
+                    source_seed=source_seed,
+                    from_service=current,
+                    existing_targets=existing_targets,
+                ),
+            ]
+            for candidate in candidates:
+                neighbor = candidate["to_service"]
+                edge_key = state.edge_key(current, neighbor, source_seed)
                 if edge_key in state.checked_edges:
                     continue
                 state.checked_edges.add(edge_key)
+                state.record_candidate(candidate)
 
-                # fpg DAG rule: never evaluate an edge that would
-                # close a cycle through already-accepted edges.
+                # fpg DAG rule: never evaluate an edge that would close a cycle
+                # through already-accepted edges. The source seed is logged so a
+                # different co-injected fault can still scan the same edge.
                 if neighbor in state.nodes and _reaches(state.adj, neighbor, current):
                     state.hop_log.append(
                         {
@@ -147,24 +169,41 @@ async def propagate(
                             "from": current,
                             "to": neighbor,
                             "verdict": "skipped_cycle",
+                            "source_seed": source_seed,
                         }
                     )
                     continue
-                pending_hops.append([current, neighbor, rel_type])
+                pending_hops.append(candidate)
 
         if not pending_hops:
             continue
 
-        ctx.log(f"Round {state.round_n}: {len(pending_hops)} hops")
+        ctx.log(f"Round {state.round_n}: {len(pending_hops)} candidate hops")
 
         coros: list[Awaitable[HopResult | None]] = [
-            discovery.verify_hop(ctx, case, state, item[0], item[1], item[2])
+            discovery.verify_hop(
+                ctx,
+                case,
+                state,
+                item["from_service"],
+                item["to_service"],
+                item["rel_type"],
+                source_seed=item["source_seed"],
+                fault_record_override=state.fault_for_node(
+                    item["from_service"],
+                    item["source_seed"],
+                ),
+            )
             for item in pending_hops
         ]
         results = await ctx.parallel(coros)
 
-        for (from_svc, to_svc, rel_type), result in zip(pending_hops, results):
-            edge_key = from_svc + "__" + to_svc
+        for candidate, result in zip(pending_hops, results):
+            from_svc = candidate["from_service"]
+            to_svc = candidate["to_service"]
+            rel_type = candidate["rel_type"]
+            source_seed = candidate["source_seed"]
+            edge_key = state.edge_key(from_svc, to_svc, source_seed)
             if result is None:
                 state.record_error(
                     "hop",
@@ -179,26 +218,27 @@ async def propagate(
                     "from": from_svc,
                     "to": to_svc,
                     "verdict": verdict_label,
+                    "source_seed": source_seed,
                 }
             )
-            ctx.log(f"  {from_svc} -> {to_svc}: {verdict_label}")
+            ctx.log(f"  {source_seed}: {from_svc} -> {to_svc}: {verdict_label}")
             if result and verdict:
                 state.verdicts[edge_key] = result
 
             if verdict != "confirmed":
                 continue
             assert result is not None
-            was_new_node = to_svc not in state.nodes
             accepted = state.accept_hop_result(
                 from_svc,
                 to_svc,
                 rel_type,
                 result,
+                source_seed=source_seed,
+                fault=state.fault_for_node(from_svc, source_seed),
             )
             changed_any = accepted or changed_any
-            if accepted and was_new_node:
-                if to_svc not in case.infra_set and to_svc not in case.entry_services:
-                    queue.append(to_svc)
+            if accepted and to_svc not in case.infra_set and to_svc not in case.entry_services:
+                queue.append((to_svc, source_seed))
 
         if not queue:
             ctx.log("propagation frontier exhausted for this round")
@@ -211,15 +251,12 @@ async def audit_loop(
     case: Case,
     state: GraphState,
 ) -> AuditOutcome:
-    """Phase 2: two targeted passes + a free exploration sweep, looped to a
-    fixpoint.
+    """Run targeted audit passes plus a free exploration sweep to a fixpoint.
 
-    The audit never edits the graph. Each round runs Stage A (Pass 1
-    reachability + Pass 2 coverage) and Stage B (free exploration); every
-    gap becomes a re-dispatch request whose gated discovery verdict drives
-    the actual node/edge changes. The round's verified changes feed back
-    into the next round's passes. ``accepted`` is the fixpoint: a full round
-    that surfaces no re-dispatch and no unexplained anomaly.
+    The audit never edits the graph directly. Every gap becomes a
+    re-dispatch request whose gated discovery verdict drives the actual
+    node/edge changes. ``accepted`` is the fixpoint: a full round that
+    surfaces no re-dispatch and no unexplained anomaly.
     """
     coverage: dict[str, SeedCoverageStatus] = {}
     unexplained: list[str] = []
@@ -229,17 +266,20 @@ async def audit_loop(
         rounds = audit_round + 1
         ctx.phase("audit" if audit_round == 0 else f"audit-r{rounds}")
 
-        # Stage A — two targeted passes → re-dispatch
         coverage, reach_reqs, reach_reports = await audit_map.audit_pass_reachability(
             ctx, case, state, audit_round
         )
         unexplained, cov_reqs, cov_reports = await audit_map.audit_pass_coverage(
             ctx, case, state, audit_round
         )
-        stage_a_reqs: list[ReworkRequest] = [*reach_reqs, *cov_reqs]
-        a_changed, a_log = await redispatch(ctx, case, state, stage_a_reqs)
+        targeted_reqs: list[ReworkRequest] = [*reach_reqs, *cov_reqs]
+        targeted_changed, targeted_log = await redispatch(
+            ctx,
+            case,
+            state,
+            targeted_reqs,
+        )
 
-        # Stage B — free exploration (last step of the round) → re-dispatch
         explore_reqs, explore_report = await audit_map.free_explore(
             ctx, case, state, audit_round
         )
@@ -253,16 +293,16 @@ async def audit_loop(
                 "explore_report": explore_report,
                 "seed_coverage": coverage,
                 "unexplained_anomalies": unexplained,
-                "redispatch_results": [*a_log, *b_log],
+                "redispatch_results": [*targeted_log, *b_log],
             }
         )
 
         # Fixpoint: a full round surfaced no gaps and left nothing unexplained.
-        if not stage_a_reqs and not explore_reqs and not unexplained:
+        if not targeted_reqs and not explore_reqs and not unexplained:
             accepted = True
             break
         # No progress: the passes keep asking but no verdict changed the graph.
-        if not a_changed and not b_changed:
+        if not targeted_changed and not b_changed:
             ctx.log("audit made no progress this round; stopping")
             break
 
@@ -365,17 +405,18 @@ async def redispatch(
         async def _one_hop_rework(
             req: HopRecheckRequest,
         ) -> tuple[HopRecheckRequest, HopResult | None]:
-            rel_type = next(
-                (
-                    info[1]
-                    for info in case.graph.get(req.from_service, [])
-                    if info[0] == req.to_service
-                ),
-                "callee_to_caller",
+            rel_type = (
+                req.rel_type
+                or graph_rel_type(case.graph, req.from_service, req.to_service)
+                or "other"
+            )
+            source_seed = req.source_seed or next(
+                iter(sorted(state.node_sources.get(req.from_service, set()))),
+                None,
             )
             prior = dict(
                 state.verdicts.get(
-                    req.from_service + "__" + req.to_service,
+                    state.edge_key(req.from_service, req.to_service, source_seed),
                     {},
                 )
             )
@@ -387,6 +428,11 @@ async def redispatch(
                 req.to_service,
                 rel_type,
                 judge_context=req.context,
+                source_seed=source_seed,
+                fault_record_override=state.fault_for_node(
+                    req.from_service,
+                    source_seed,
+                ),
                 prior_verdict=PriorVerdict(
                     verdict=str(prior.get("verdict", "")),
                     rationale=str(prior.get("rationale", "")),
@@ -405,14 +451,19 @@ async def redispatch(
             result = pair[1]
             from_svc = hop_req.from_service
             to_svc = hop_req.to_service
+            source_seed = hop_req.source_seed or next(
+                iter(sorted(state.node_sources.get(from_svc, set()))),
+                None,
+            )
             hop_verdict: str | None = result.get("verdict") if result else None
-            edge_key = from_svc + "__" + to_svc
+            edge_key = state.edge_key(from_svc, to_svc, source_seed)
             state.hop_log.append(
                 {
                     "round": state.round_n,
                     "from": from_svc,
                     "to": to_svc,
                     "verdict": (hop_verdict or "no-result") + "(audit-rework)",
+                    "source_seed": source_seed or "",
                 }
             )
             if result and hop_verdict:
@@ -425,6 +476,7 @@ async def redispatch(
                     "kind": "hop_recheck",
                     "from": from_svc,
                     "to": to_svc,
+                    "source_seed": source_seed,
                     "verdict": hop_verdict or "no-result",
                     "rationale": result.get("rationale", "") if result else "",
                 }
@@ -435,30 +487,33 @@ async def redispatch(
             # Removal is verdict-driven: a re-verification that rejects the
             # propagation hypothesis removes the edge (and prunes orphans).
             if result is not None and hop_verdict == "rejected":
-                if state.remove_hop_edge(from_svc, to_svc):
+                if state.remove_hop_edge(from_svc, to_svc, source_seed):
                     changed = True
                 continue
             if hop_verdict != "confirmed" or result is None:
                 continue
-            was_new_node = to_svc not in state.nodes
-            rel_type = next(
-                (info[1] for info in case.graph.get(from_svc, []) if info[0] == to_svc),
-                "callee_to_caller",
+            rel_type = (
+                hop_req.rel_type
+                or graph_rel_type(case.graph, from_svc, to_svc)
+                or "other"
             )
-            changed = (
-                state.accept_hop_result(
-                    from_svc,
-                    to_svc,
-                    rel_type,
-                    result,
-                    claim_override=hop_req.context[:200],
-                )
-                or changed
+            accepted = state.accept_hop_result(
+                from_svc,
+                to_svc,
+                rel_type,
+                result,
+                claim_override=hop_req.context[:200],
+                source_seed=source_seed,
+                fault=state.fault_for_node(from_svc, source_seed),
             )
+            changed = accepted or changed
             if (
-                was_new_node
+                accepted
+                and
+                to_svc in state.nodes
                 and to_svc not in case.infra_set
                 and to_svc not in case.entry_services
+                and source_seed is not None
             ):
                 new_roots.append(to_svc)
     if new_roots:

@@ -25,6 +25,7 @@ from .lib.fpg import (
 )
 from .lib.schema import (
     AuditOutcome,
+    CandidateEdge,
     ExecutionError,
     HopLogEntry,
     HopResult,
@@ -73,6 +74,9 @@ class Case:
     infra_set: set[str]
     data_dir: str
     fault_docs: dict[str, str]
+    data_profile: dict[str, Any]
+    anomaly_inventory: list[dict[str, Any]]
+    seed_observation_surfaces: dict[str, dict[str, Any]]
     skip_judge: bool
     judge_model: str | None
     gate_retries: int
@@ -106,6 +110,15 @@ class Case:
             infra_set=set(args.get("infra_nodes", [])),
             data_dir=cast(str, args["data_dir"]),
             fault_docs=args.get("fault_docs", {}),
+            data_profile=cast(dict[str, Any], args.get("data_profile", {})),
+            anomaly_inventory=cast(
+                list[dict[str, Any]],
+                args.get("anomaly_inventory", []),
+            ),
+            seed_observation_surfaces=cast(
+                dict[str, dict[str, Any]],
+                args.get("seed_observation_surfaces", {}),
+            ),
             skip_judge=args.get("skip_judge", False),
             judge_model=judge_model,
             gate_retries=int(args.get("gate_retries", 3)),
@@ -121,6 +134,43 @@ class Case:
             "injections": self.injections,
             "entry_services": sorted(self.entry_services),
             "all_faults": self.all_faults,
+            "anomaly_inventory": self.anomaly_inventory,
+        }
+
+    def profile_context_for_services(
+        self,
+        services: list[str] | tuple[str, ...] | set[str],
+    ) -> dict[str, Any]:
+        """Return a bounded profile slice for one seed/hop/audit question."""
+        service_set = {svc for svc in services if svc}
+        structure = self.data_profile.get("structure", {})
+        statistics = self.data_profile.get("statistics", {})
+        relationships = [
+            rel
+            for rel in structure.get("relationships", [])
+            if isinstance(rel, dict)
+            and (rel.get("src") in service_set or rel.get("dst") in service_set)
+        ][:50]
+        anomalies = [
+            record
+            for record in self.anomaly_inventory
+            if str(record.get("subject", "")).removeprefix("svc:") in service_set
+        ][:20]
+        modality_stats: dict[str, Any] = {}
+        for modality in ("traces", "metrics", "logs"):
+            svc_stats = statistics.get(modality, {}).get("services", {})
+            if isinstance(svc_stats, dict):
+                modality_stats[modality] = {
+                    svc: svc_stats.get(svc)
+                    for svc in sorted(service_set)
+                    if svc in svc_stats
+                }
+        return {
+            "services": sorted(service_set),
+            "modalities": structure.get("modalities", {}),
+            "relationships": relationships,
+            "statistics": modality_stats,
+            "anomalies": anomalies,
         }
 
 
@@ -145,6 +195,10 @@ class GraphState:
         self.audit_rounds_log: list[dict[str, Any]] = []
         self.propagation_roots: list[str] = []
         self.checked_edges: set[str] = set()
+        self.candidate_edges: list[CandidateEdge] = []
+        self._candidate_keys: set[str] = set()
+        self.node_sources: dict[str, set[str]] = {}
+        self.node_fault_records: dict[str, dict[str, list[str]]] = {}
         self.reachability_warnings: list[str] = []
         self.unreachable: list[str] = []
 
@@ -170,6 +224,65 @@ class GraphState:
             for inj in self.case.injections
             if inj.get("target")
         }
+        for seed_id, fault in self.node_fault.items():
+            self._record_node_fault(seed_id, fault, seed_id)
+
+    # -- Attribution ------------------------------------------------------
+    def edge_key(
+        self,
+        from_svc: str,
+        to_svc: str,
+        source_seed: str | None = None,
+    ) -> str:
+        base = from_svc + "__" + to_svc
+        return f"{source_seed}::{base}" if source_seed else base
+
+    def _record_node_fault(
+        self,
+        node_id: str,
+        fault: list[str],
+        source_seed: str | None,
+    ) -> bool:
+        changed = False
+        if node_id not in self.node_fault:
+            self.node_fault[node_id] = fault
+            changed = True
+        if not source_seed:
+            return changed
+        if source_seed not in self.node_sources.setdefault(node_id, set()):
+            self.node_sources[node_id].add(source_seed)
+            changed = True
+        records = self.node_fault_records.setdefault(node_id, {})
+        if records.get(source_seed) != fault:
+            records[source_seed] = fault
+            changed = True
+        return changed
+
+    def fault_for_node(
+        self,
+        node_id: str,
+        source_seed: str | None = None,
+    ) -> list[str]:
+        if source_seed:
+            fault = self.node_fault_records.get(node_id, {}).get(source_seed)
+            if fault:
+                return fault
+        if node_id in self.node_fault:
+            return self.node_fault[node_id]
+        if self.case.all_faults:
+            return [self.case.all_faults[0][0], self.case.all_faults[0][1]]
+        return ["unknown", node_id]
+
+    def record_candidate(self, candidate: CandidateEdge) -> None:
+        key = self.edge_key(
+            candidate["from_service"],
+            candidate["to_service"],
+            candidate["source_seed"],
+        )
+        if key in self._candidate_keys:
+            return
+        self._candidate_keys.add(key)
+        self.candidate_edges.append(candidate)
 
     # -- Graph indices ----------------------------------------------------
     def rebuild_adjacency(self) -> tuple[dict[str, list[str]], dict[str, int]]:
@@ -195,6 +308,9 @@ class GraphState:
         for node_id in list(self.nodes):
             if node_id not in reachable:
                 self.nodes.pop(node_id, None)
+                self.node_sources.pop(node_id, None)
+                self.node_fault_records.pop(node_id, None)
+                self.node_fault.pop(node_id, None)
         self.edges[:] = [
             e for e in self.edges
             if e.get("src") in self.nodes and e.get("dst") in self.nodes
@@ -227,7 +343,9 @@ class GraphState:
     # -- Accepting verdicts into the graph --------------------------------
     def accept_seed_node(self, inj: Injection, seed_verdict: SeedResult) -> str:
         root_id = injection_node_id(inj)
+        seed_fault = fault_record(inj)
         self.nodes[root_id] = node_from_seed(inj, seed_verdict, self.case.window)
+        self._record_node_fault(root_id, seed_fault, root_id)
         if not is_link_injection(inj):
             self.propagation_roots.append(root_id)
             return root_id
@@ -239,7 +357,7 @@ class GraphState:
                 seed_verdict,
                 self.case.window,
             )
-        self.node_fault[effect_target] = fault_record(inj)
+        self._record_node_fault(effect_target, seed_fault, root_id)
         if effect_target not in self.adj.get(root_id, []):
             self.edges.append(
                 edge_dict(
@@ -263,6 +381,8 @@ class GraphState:
         result: HopResult,
         *,
         claim_override: str = "",
+        source_seed: str | None = None,
+        fault: list[str] | None = None,
     ) -> bool:
         if _reaches(self.adj, to_svc, from_svc):
             self.hop_log.append(
@@ -271,17 +391,16 @@ class GraphState:
                     "from": from_svc,
                     "to": to_svc,
                     "verdict": "dropped_cycle",
+                    "source_seed": source_seed or "",
                 }
             )
             return False
         changed = False
+        hop_fault = fault or self.fault_for_node(from_svc, source_seed)
         if to_svc not in self.nodes:
             self.nodes[to_svc] = node_from_verdict(to_svc, result, self.case.window)
-            self.node_fault[to_svc] = self.node_fault.get(
-                from_svc,
-                [self.case.all_faults[0][0], self.case.all_faults[0][1]],
-            )
             changed = True
+        changed = self._record_node_fault(to_svc, hop_fault, source_seed) or changed
         if to_svc not in self.adj.get(from_svc, []):
             self.edges.append(
                 edge_dict(
@@ -303,6 +422,7 @@ class GraphState:
             "nodes": [self.nodes[k] for k in sorted(self.nodes)],
             "edges": list(self.edges),
             "entry_services": sorted(self.case.entry_services),
+            "node_attribution": self.node_attribution(),
         }
 
     def ledger_snapshot(self) -> dict[str, Any]:
@@ -312,6 +432,7 @@ class GraphState:
             "hop_log": self.hop_log,
             "gate_log": self.gate_log,
             "confirmed_seeds": sorted(self.confirmed_seed_ids),
+            "candidate_edges": self.candidate_edges,
         }
 
     # -- Candidate paths --------------------------------------------------
@@ -341,13 +462,26 @@ class GraphState:
         return out
 
     # -- Edge removal (verdict-driven) ------------------------------------
-    def remove_hop_edge(self, from_svc: str, to_svc: str) -> bool:
+    def remove_hop_edge(
+        self,
+        from_svc: str,
+        to_svc: str,
+        source_seed: str | None = None,
+    ) -> bool:
         """Remove an edge whose re-dispatched hop verdict came back rejected.
 
         Audit never drops edges directly; removal is always the consequence
         of a gated re-verification rejecting the propagation hypothesis. The
         downstream nodes that lose their only support are pruned.
         """
+        suffix = from_svc + "__" + to_svc
+        for key, verdict in self.verdicts.items():
+            if not key.endswith(suffix):
+                continue
+            if source_seed and key.startswith(source_seed + "::"):
+                continue
+            if verdict.get("verdict") == "confirmed":
+                return False
         before = len(self.edges)
         self.edges[:] = [
             e
@@ -362,6 +496,56 @@ class GraphState:
         self.rebuild_graph_indices()
         self.prune_unreachable_nodes()
         return True
+
+    # -- Review metadata -------------------------------------------------
+    def node_attribution(self) -> dict[str, list[dict[str, Any]]]:
+        out: dict[str, list[dict[str, Any]]] = {}
+        for node_id, records in self.node_fault_records.items():
+            out[node_id] = [
+                {"source_seed": source_seed, "fault": fault}
+                for source_seed, fault in sorted(records.items())
+            ]
+        return out
+
+    def review_notes(self) -> list[dict[str, Any]]:
+        notes: list[dict[str, Any]] = []
+        for node_id, records in sorted(self.node_fault_records.items()):
+            if len(records) > 1:
+                notes.append(
+                    {
+                        "kind": "multi_fault_attribution",
+                        "node": node_id,
+                        "source_seeds": sorted(records),
+                        "note": (
+                            "Multiple injected faults have confirmed paths to this "
+                            "node; human review should decide whether the FPG node "
+                            "needs an OR/AND gate or separate event nodes."
+                        ),
+                    }
+                )
+        graph_subjects = {
+            str(node.get("subject", ""))
+            for node in self.nodes.values()
+            if isinstance(node, dict)
+        }
+        for record in self.case.anomaly_inventory:
+            if record.get("status") != "changed":
+                continue
+            subject = str(record.get("subject", ""))
+            if subject and subject not in graph_subjects:
+                notes.append(
+                    {
+                        "kind": "uncovered_anomaly",
+                        "anomaly_id": record.get("id"),
+                        "subject": subject,
+                        "note": (
+                            "This changed telemetry signal is not represented by a "
+                            "candidate FPG node; confirm whether it is unrelated, "
+                            "pre-existing/noisy, or a missed propagation branch."
+                        ),
+                    }
+                )
+        return notes[:50]
 
     # -- Finalization + output --------------------------------------------
     def audit_seed_coverage(
@@ -421,6 +605,10 @@ class GraphState:
             "seed_verdicts": self.seed_verdicts,
             "confirmed_seeds": sorted(self.confirmed_seed_ids),
             "gate_log": self.gate_log,
+            "anomaly_inventory": self.case.anomaly_inventory,
+            "candidate_edges": self.candidate_edges,
+            "node_attribution": self.node_attribution(),
+            "review_notes": self.review_notes(),
         }
         if audit_result:
             result_out["audit"] = audit_result.model_dump(mode="json")

@@ -50,6 +50,7 @@ async def gate(
         scenario="verifier/gate",
         model=case.judge_model,
         schema=GateDecision,
+        tool_allowlist=["submit_result"],
         atom_config={
             "duckdb_sql": {"data_dir": case.data_dir},
             "gate_context": {
@@ -75,6 +76,10 @@ async def verify_seed(
 ) -> tuple[Injection, SeedResult | None]:
     target = injection_node_id(inj) if is_link_injection(inj) else inj["target"]
     fault_kind = inj.get("chaos_type", "unknown")
+    observation_surface = case.seed_observation_surfaces.get(
+        injection_node_id(inj),
+        {},
+    )
     task = {
         "seed": injection_node_id(inj),
         "target": target,
@@ -85,6 +90,7 @@ async def verify_seed(
         },
         "params": inj.get("params", ""),
         "subject": injection_subject(inj),
+        "observation_surface": observation_surface,
     }
     feedback = judge_context
     last_result: SeedResult | None = None
@@ -95,6 +101,7 @@ async def verify_seed(
             fault_kind=fault_kind,
             params=inj.get("params", ""),
             fault_doc=case.fault_docs.get(fault_kind, ""),
+            observation_surface=observation_surface,
             judge_context=feedback,
         )
         result: AgentResult = await ctx.agent(
@@ -107,6 +114,7 @@ async def verify_seed(
                     "fault_kind": fault_kind,
                     "params": inj.get("params", ""),
                     "fault_doc": case.fault_docs.get(fault_kind, ""),
+                    "observation_surface": observation_surface,
                     "judge_context": feedback,
                 },
                 "seed_finalize": {"data_dir": case.data_dir},
@@ -194,15 +202,15 @@ async def verify_hop(
     *,
     judge_context: str = "",
     prior_verdict: PriorVerdict | None = None,
+    source_seed: str | None = None,
+    fault_record_override: list[str] | None = None,
 ) -> HopResult | None:
-    hop_fault = state.node_fault.get(
-        from_svc,
-        [case.all_faults[0][0], case.all_faults[0][1]],
-    )
+    hop_fault = fault_record_override or state.fault_for_node(from_svc, source_seed)
     edge_fault_kind = hop_fault[0]
     edge_fault_docs: dict[str, str] = {}
     if edge_fault_kind in case.fault_docs:
         edge_fault_docs[edge_fault_kind] = case.fault_docs[edge_fault_kind]
+    observation_context = case.profile_context_for_services({from_svc, to_svc})
     task = {
         "from_service": from_svc,
         "to_service": to_svc,
@@ -213,6 +221,8 @@ async def verify_hop(
             "content": case.fault_docs.get(edge_fault_kind, ""),
         },
         "is_infra": to_svc in case.infra_set,
+        "source_seed": source_seed,
+        "observation_context": observation_context,
         "prior_verdict": prior_verdict.model_dump(mode="json")
         if prior_verdict
         else {},
@@ -234,6 +244,7 @@ async def verify_hop(
             fault_docs=edge_fault_docs,
             is_infra=to_svc in case.infra_set,
             upstream_evidence=state.nodes.get(from_svc),
+            observation_context=observation_context,
             judge_context=feedback,
             prior_verdict=prior_verdict,
         )
@@ -255,6 +266,8 @@ async def verify_hop(
                     "fault_docs": edge_fault_docs,
                     "is_infra": to_svc in case.infra_set,
                     "upstream_evidence": state.nodes.get(from_svc),
+                    "source_seed": source_seed,
+                    "observation_context": observation_context,
                     "judge_context": feedback,
                     "prior_verdict": prior_verdict.model_dump(mode="json")
                     if prior_verdict

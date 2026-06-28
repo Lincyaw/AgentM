@@ -4,11 +4,11 @@ Each audit round runs three bounded agent fan-outs over the merged
 evidence, and every one of them produces *re-dispatch requests* rather than
 mutating the graph:
 
-  - Pass 1 (reachability) — per confirmed seed: does it have a coherent
+  - reachability — per confirmed seed: does it have a coherent
     causal path to an entry/SLO service? Invalid/unprovable paths emit a
     ``hop_recheck`` for the weakest edge; the gated re-verification decides
     whether the edge survives.
-  - Pass 2 (coverage) — per entry/SLO scope: are its meaningful anomalies
+  - coverage — per entry/SLO scope: are its meaningful anomalies
     explained by the candidate graph? Gaps emit seed/hop rechecks.
   - Free exploration — one unconstrained agent over the whole dashboard:
     surface services/anomalies the targeted passes never investigated, and
@@ -37,6 +37,24 @@ from .lib.schema import (
     SeedReachabilityReport,
 )
 from .state import Case, GraphState
+
+
+def _anomaly_service(record: dict[str, Any]) -> str | None:
+    subject = str(record.get("subject", ""))
+    if subject.startswith("svc:"):
+        return subject.removeprefix("svc:")
+    return None
+
+
+def _coverage_scopes(case: Case) -> list[str]:
+    scopes = set(case.entry_services)
+    for record in case.anomaly_inventory:
+        if record.get("status") != "changed":
+            continue
+        service = _anomaly_service(record)
+        if service:
+            scopes.add(service)
+    return sorted(scopes) or ["<entry-services-not-discovered>"]
 
 
 async def _agent(
@@ -112,7 +130,12 @@ async def _gated_agent(
             case,
             task_kind=task_kind,
             label=label,
-            task={"role": role, "instruction": instruction, **gate_item},
+            task={
+                "role": role,
+                "instruction": instruction,
+                "payload": payload,
+                **gate_item,
+            },
             submitted_result=submitted,
             child_session=find_child_session(ctx, label),
             attempt=attempt,
@@ -141,7 +164,7 @@ async def audit_pass_reachability(
     state: GraphState,
     audit_round: int,
 ) -> tuple[dict[str, SeedCoverageStatus], list[ReworkRequest], list[dict[str, Any]]]:
-    """Pass 1: every confirmed seed must reach an entry/SLO service."""
+    """Check whether every confirmed seed reaches an entry/SLO service."""
     graph_view = state.graph_snapshot()
     ledger_view = state.ledger_snapshot()
     case_view = case.case_summary()
@@ -168,6 +191,10 @@ async def audit_pass_reachability(
                 "candidate_graph": graph_view,
                 "evidence_ledger": ledger_view,
                 "paths_from_seed": state.paths_from(seed),
+                "anomaly_inventory": case.anomaly_inventory,
+                "data_profile_context": case.profile_context_for_services(
+                    set(case.entry_services) | {seed},
+                ),
             },
             schema=SeedReachabilityReport,
             gate_item={"seed": seed},
@@ -198,11 +225,11 @@ async def audit_pass_coverage(
     state: GraphState,
     audit_round: int,
 ) -> tuple[list[str], list[ReworkRequest], list[dict[str, Any]]]:
-    """Pass 2: every entry/SLO alarm must be explained by some seed fault."""
+    """Check whether each meaningful anomaly is explained by a seed fault."""
     graph_view = state.graph_snapshot()
     ledger_view = state.ledger_snapshot()
     case_view = case.case_summary()
-    scopes = sorted(case.entry_services) or ["<entry-services-not-discovered>"]
+    scopes = _coverage_scopes(case)
 
     results = await ctx.parallel([
         _gated_agent(
@@ -224,6 +251,8 @@ async def audit_pass_coverage(
                 "case": case_view,
                 "candidate_graph": graph_view,
                 "evidence_ledger": ledger_view,
+                "anomaly_inventory": case.anomaly_inventory,
+                "data_profile_context": case.profile_context_for_services({scope}),
             },
             schema=AnomalyCoverageReport,
             gate_item={"scope": scope},
@@ -254,7 +283,7 @@ async def free_explore(
     state: GraphState,
     audit_round: int,
 ) -> tuple[list[ReworkRequest], dict[str, Any] | None]:
-    """Stage B: one free agent over the whole dashboard.
+    """Run one free agent over the whole dashboard.
 
     Unlike the targeted seed/hop tasks, this agent is handed no single
     target — it surveys the full system dashboard for what the candidate
@@ -283,6 +312,8 @@ async def free_explore(
             "candidate_graph": state.graph_snapshot(),
             "evidence_ledger": state.ledger_snapshot(),
             "entry_services": sorted(case.entry_services),
+            "anomaly_inventory": case.anomaly_inventory,
+            "data_profile_structure": case.data_profile.get("structure", {}),
         },
         schema=ExploreReport,
         gate_item={},

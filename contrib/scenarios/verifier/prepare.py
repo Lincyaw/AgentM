@@ -6,8 +6,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from .lib.case_profile import (
+    build_anomaly_inventory,
+    build_data_profile,
+    build_seed_observation_surfaces,
+)
+from .lib.fpg import (
+    REL_MECHANISM,
+    load_injection_meta,
+)
 from .lib.graph import (
     SYNTHETIC,
     build_neighbor_graph,
@@ -16,10 +25,7 @@ from .lib.graph import (
     get_relationships,
 )
 from .lib.injection import get_injections, load_fault_doc
-from .lib.fpg import (
-    REL_MECHANISM,
-    load_injection_meta,
-)
+from .lib.schema import Injection
 
 FAULT_KINDS_DIR = Path(__file__).parent / "fault_kinds"
 
@@ -35,6 +41,9 @@ class CaseContext:
     infra_nodes: list[str]
     fault_docs: dict[str, str]
     meta: dict[str, Any]
+    data_profile: dict[str, Any] = field(default_factory=dict)
+    anomaly_inventory: list[dict[str, Any]] = field(default_factory=list)
+    seed_observation_surfaces: dict[str, dict[str, Any]] = field(default_factory=dict)
     rel_mechanism: dict[str, str] = field(default_factory=lambda: dict(REL_MECHANISM))
 
     def to_workflow_args(
@@ -54,6 +63,9 @@ class CaseContext:
             "graph": self.graph,
             "infra_nodes": self.infra_nodes,
             "fault_docs": self.fault_docs,
+            "data_profile": self.data_profile,
+            "anomaly_inventory": self.anomaly_inventory,
+            "seed_observation_surfaces": self.seed_observation_surfaces,
             "budget": budget,
             "out_dir": out_dir,
             "skip_judge": skip_judge,
@@ -61,6 +73,7 @@ class CaseContext:
             "gate_retries": gate_retries,
             "rel_mechanism": self.rel_mechanism,
         }
+
 
 def prepare_case(case_dir: Path) -> CaseContext:
     """Build a CaseContext from a case directory."""
@@ -96,6 +109,15 @@ def prepare_case(case_dir: Path) -> CaseContext:
         if i.get("target") and i["target"] not in SYNTHETIC
     ]
 
+    data_profile = build_data_profile(data_dir, graph_serializable, sorted(infra_nodes))
+    anomaly_inventory = build_anomaly_inventory(data_profile)
+    seed_surfaces = build_seed_observation_surfaces(
+        cast(list[Injection], clean_injections),
+        graph_serializable,
+        data_profile,
+        anomaly_inventory,
+    )
+
     return CaseContext(
         data_dir=str(data_dir),
         window=meta["window"],
@@ -104,4 +126,7 @@ def prepare_case(case_dir: Path) -> CaseContext:
         infra_nodes=sorted(infra_nodes),
         fault_docs=fault_docs,
         meta=meta,
+        data_profile=data_profile,
+        anomaly_inventory=anomaly_inventory,
+        seed_observation_surfaces=seed_surfaces,
     )
