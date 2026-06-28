@@ -567,6 +567,63 @@ requirements:
       - REQ-096-cli-provider-session-seams
       - REQ-098-textual-tui-registries
 
+  - id: REQ-181-cc-startup-claude-inheritance
+    title: Claude Code compatibility inherits startup CLAUDE.md safely
+    description: >
+      The opt-in Claude Code compatibility extension must inject the startup
+      directory CLAUDE.md into the agent system prompt through the public
+      BeforeAgentStart event, while keeping plugin/command/agent config defaults
+      immutable and treating missing, unreadable, invalid, or oversized startup
+      instruction files as non-fatal.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/cc/__init__.py
+    tests: []
+    docs:
+      - path: .claude/designs/extension-as-scenario.md
+    depends_on:
+      - REQ-100-cc-extension-package
+
+  - id: REQ-182-terminal-editor-input-correctness
+    title: Terminal editor preserves logical cursor text edits and paste identity
+    description: >
+      The Go terminal editor must delete complete grapheme clusters at the
+      logical cursor position across soft-wrapped, wide-rune, emoji, and
+      multiline inputs, and large paste attachment placeholders must avoid
+      collisions across editor instances by using random display ids.
+    priority: P1
+    status: tested
+    confidence: confirmed
+    code:
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/editor/editor.go
+    tests:
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/editor/editor_test.go
+    docs: []
+    depends_on: []
+
+  - id: REQ-183-gateway-concurrent-terminal-peers
+    title: Gateway routes concurrent terminal peers by effective peer and session
+    description: >
+      The gateway must allow multiple terminal-go chat clients with the same
+      implementation peer name to connect concurrently by assigning effective
+      peer ids, returning that id in the welcome handshake for reconnect reuse,
+      and preferring session_key affinity over channel-only routing so terminal
+      sessions do not receive each other's outbound frames.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/gateway/server.py
+      - path: src/agentm/gateway/runtime.py
+      - path: contrib/gateway-peers/terminal-go/internal/wire/client.go
+    tests: []
+    docs:
+      - path: .claude/designs/single-process-gateway.md
+    depends_on:
+      - REQ-096-cli-provider-session-seams
+
   - id: REQ-180-terminal-gateway-feedback
     title: Terminal gateway peer surfaces request and connection progress
     description: >
