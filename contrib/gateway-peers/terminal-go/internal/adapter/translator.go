@@ -46,6 +46,11 @@ type Translator struct {
 	// streaming tracks whether a stream is currently open so we can synthesise
 	// StreamStarted / StreamStopped around the gateway's turn boundaries.
 	streaming bool
+	// sawStreamText tracks whether the current stream painted live assistant text.
+	// Durable assistant_text frames are the reconnect/backpressure reliability
+	// floor; if no live text arrived, we render the durable final even while the
+	// stream is technically open.
+	sawStreamText bool
 
 	// pendingApprovalID is the approval_id of the most recent approval_request
 	// card. The controller reads it to compose the "<approval_id>:approve|deny"
@@ -157,12 +162,14 @@ func (t *Translator) handleOutbound(body map[string]any) {
 		// upcoming deltas under one assistant turn.
 		if !t.streaming {
 			t.streaming = true
+			t.sawStreamText = false
 			t.emit(runtime.StreamStarted(t.sessionID(), t.agentName))
 		}
 
 	case "stream_text":
 		t.ensureStreaming()
 		if content != "" {
+			t.sawStreamText = true
 			t.emit(runtime.AgentChoice(t.agentName, t.sessionID(), content))
 		}
 
@@ -173,15 +180,14 @@ func (t *Translator) handleOutbound(body map[string]any) {
 		}
 
 	case "assistant_text":
-		// Durable final assistant text. The streamed deltas already painted the
-		// transcript, but the assistant_text frame is the reliability floor (it
-		// is replayed on reconnect) and is the only assistant signal when the
-		// gateway dropped ephemeral stream frames under backpressure. Emitting an
-		// AgentChoice here would double-paint after streaming, so we only surface
-		// it when no stream produced text — approximated by "not currently
-		// streaming", i.e. the turn already closed without deltas.
-		if !t.streaming && content != "" {
+		// Durable final assistant text. The streamed deltas normally painted the
+		// transcript already, but this frame is replayed on reconnect and survives
+		// backpressure. Render it whenever no live stream_text painted this turn —
+		// even if the stream is still open because a later ephemeral agent_end was
+		// dropped or delayed.
+		if !t.sawStreamText && content != "" {
 			t.emit(runtime.AgentChoice(t.agentName, t.sessionID(), content))
+			t.sawStreamText = true
 		}
 
 	case "command_result":
@@ -214,6 +220,7 @@ func (t *Translator) handleOutbound(body map[string]any) {
 	case "agent_end":
 		if t.streaming {
 			t.streaming = false
+			t.sawStreamText = false
 			reason, _ := meta["cause"].(string)
 			t.emit(runtime.StreamStopped(t.sessionID(), t.agentName, reason))
 		}
@@ -286,10 +293,11 @@ func (t *Translator) handleOutbound(body map[string]any) {
 		t.handleSessionList(meta, content)
 		t.settleIdle()
 
+	case "request_ack":
+		t.handleRequestAck(meta)
+
 	case "session_snapshot":
-		// Acknowledged but no visual surface yet — the cagent session model
-		// does not carry a Phase field. The snapshot is still useful for
-		// debugging (logged at debug level by the default path otherwise).
+		t.handleSessionSnapshot(meta)
 
 	default:
 		// Truly unmapped kinds (ping/ack-adjacent noise, future additions):
@@ -305,7 +313,47 @@ func (t *Translator) handleOutbound(body map[string]any) {
 func (t *Translator) ensureStreaming() {
 	if !t.streaming {
 		t.streaming = true
+		t.sawStreamText = false
 		t.emit(runtime.StreamStarted(t.sessionID(), t.agentName))
+	}
+}
+
+func (t *Translator) handleRequestAck(meta map[string]any) {
+	status, _ := meta["status"].(string)
+	action, _ := meta["action"].(string)
+	requestID, _ := meta["request_id"].(string)
+	if status == "" {
+		return
+	}
+	t.emit(runtime.RequestStatus(requestID, action, status))
+}
+
+func (t *Translator) handleSessionSnapshot(meta map[string]any) {
+	phase, _ := meta["phase"].(string)
+	lastError, _ := meta["last_error"].(string)
+	switch phase {
+	case "running":
+		t.ensureStreaming()
+	case "waiting_interaction":
+		t.emit(runtime.Warning("agent is waiting for your input", t.agentName))
+	case "interrupting":
+		t.emit(runtime.Warning("interrupt requested", t.agentName))
+	case "errored":
+		if lastError == "" {
+			lastError = "agent session errored"
+		}
+		t.emit(runtime.Error(lastError))
+		t.settleSnapshotIdle("snapshot_errored")
+	case "idle":
+		t.settleSnapshotIdle("snapshot_idle")
+	}
+}
+
+func (t *Translator) settleSnapshotIdle(reason string) {
+	if t.streaming {
+		t.streaming = false
+		t.sawStreamText = false
+		t.emit(runtime.StreamStopped(t.sessionID(), t.agentName, reason))
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/skills"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui"
@@ -314,22 +315,26 @@ func (ad *Adapter) pump(ctx context.Context) {
 		case <-ad.client.Done():
 			if err := ad.client.Err(); err != nil {
 				log.Printf("[adapter] wire client closed: %v", err)
+				ad.translator.emit(runtime.Error("gateway connection closed: " + err.Error()))
 			}
 			return
 		case <-ad.client.Reconnecting():
 			// The wire client is reconnecting. Wait for either a new outbound
 			// channel (reconnect succeeded) or permanent closure.
 			log.Printf("[adapter] wire client reconnecting, waiting for recovery...")
+			ad.translator.emit(runtime.Warning("gateway disconnected; reconnecting…", ""))
 			reconnected := ad.client.Reconnected()
 			select {
 			case <-ad.client.Done():
 				if err := ad.client.Err(); err != nil {
 					log.Printf("[adapter] wire client reconnect failed: %v", err)
+					ad.translator.emit(runtime.Error("gateway reconnect failed: " + err.Error()))
 				}
 				return
 			case <-ctx.Done():
 				return
 			case <-reconnected:
+				ad.translator.emit(runtime.Warning("gateway reconnected", ""))
 				// New outbound channel is available via Outbound() — loop back
 				// and re-select with the fresh channel.
 				continue

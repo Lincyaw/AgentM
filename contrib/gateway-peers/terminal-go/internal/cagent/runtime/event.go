@@ -300,6 +300,27 @@ func SystemNote(content, sessionID, title string) Event {
 	}
 }
 
+// RequestStatusEvent is emitted when the gateway accepts or de-duplicates a
+// mutating inbound request before the agent stream itself has necessarily
+// started. It gives remote clients a visible "gateway heard me" signal.
+type RequestStatusEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	RequestID string `json:"request_id,omitempty"`
+	Action    string `json:"action,omitempty"`
+	Status    string `json:"status"`
+}
+
+func RequestStatus(requestID, action, status string) Event {
+	return &RequestStatusEvent{
+		Type:      "request_status",
+		RequestID: requestID,
+		Action:    action,
+		Status:    status,
+	}
+}
+
 type WarningEvent struct {
 	AgentContext
 

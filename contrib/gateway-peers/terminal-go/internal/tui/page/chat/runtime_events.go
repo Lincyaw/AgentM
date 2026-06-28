@@ -10,13 +10,13 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/sound"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/userconfig"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/notification"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/sidebar"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/dialog"
 	msgtypes "github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/types"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/userconfig"
 )
 
 // Runtime Event Handling
@@ -58,7 +58,18 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		if userconfig.Get().GetSound() {
 			sound.Play(sound.Failure)
 		}
-		return true, p.messages.AddErrorMessage(msg.Error)
+		p.msgCancel = nil
+		p.streamCancelled = false
+		p.streamDepth = 0
+		p.setPendingResponse(false)
+		return true, tea.Batch(
+			p.messages.AddErrorMessage(msg.Error),
+			p.setWorking(false),
+			p.messages.ScrollToBottom(),
+		)
+
+	case *runtime.RequestStatusEvent:
+		return true, p.handleRequestStatus(msg)
 
 	case *runtime.WarningEvent:
 		return true, notification.WarningCmd(msg.Message)
@@ -207,6 +218,24 @@ func (p *chatPage) handleTokenUsage(msg *runtime.TokenUsageEvent) {
 			}
 		}
 	}
+}
+
+func (p *chatPage) handleRequestStatus(msg *runtime.RequestStatusEvent) tea.Cmd {
+	switch msg.Status {
+	case "duplicate":
+		return notification.WarningCmd("Gateway already accepted this request")
+	case "accepted":
+		if msg.Action == "submit" {
+			return notification.InfoCmd("Message accepted by gateway")
+		}
+		if msg.Action == "interrupt" {
+			return notification.InfoCmd("Interrupt accepted by gateway")
+		}
+		if msg.Action != "" {
+			return notification.InfoCmd("Gateway accepted " + msg.Action)
+		}
+	}
+	return nil
 }
 
 func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent) tea.Cmd {

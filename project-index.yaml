@@ -556,13 +556,41 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/cli.py
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/adapter.go
       - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/runtime/event.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/runtime_events.go
     tests: []
     docs:
       - path: .claude/designs/textual-tui.md
     depends_on:
       - REQ-096-cli-provider-session-seams
       - REQ-098-textual-tui-registries
+
+  - id: REQ-180-terminal-gateway-feedback
+    title: Terminal gateway peer surfaces request and connection progress
+    description: >
+      The Go terminal gateway peer must make remote send progress diagnosable by
+      rendering gateway request acknowledgements, durable session snapshots,
+      connection reconnect/failure transitions, and durable assistant_text
+      fallbacks. After sending a message, the UI should distinguish accepted,
+      running, waiting-for-interaction, errored, idle, and disconnected states,
+      and backend/gateway errors must clear optimistic working indicators rather
+      than leaving the user with a silent spinner.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/adapter.go
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/runtime/event.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/runtime_events.go
+    tests: []
+    docs:
+      - path: .claude/designs/single-process-gateway.md
+      - path: .claude/designs/textual-tui.md
+    depends_on:
+      - REQ-096-cli-provider-session-seams
 
   - id: REQ-119-core-kernel-residuals
     title: Core kernel removes hard-coded layout literals and dead Tool surface
