@@ -146,6 +146,11 @@ Concept-change flow: update the design doc → check `index.yaml`
 Quality over quantity. A test exists only to protect a **fail-stop
 position**:
 
+- Do **not** add any new test case by default. Before writing a new test,
+  first ask the user and receive explicit confirmation that the behavior is
+  load-bearing enough to lock down. Trivial, ad hoc, or shape-only tests are
+  forbidden.
+
 | Position | Why load-bearing |
 |---|---|
 | Constitution boundary (`is_constitution_path`, manifest reload) | Agent self-modifies kernel |
@@ -154,7 +159,7 @@ position**:
 | Catalog freeze idempotence | Catalog state untrustworthy |
 | Indexer rebuild idempotence | Evolution evidence drifts |
 | Transactional reload atomicity | Live agent in inconsistent state |
-| extension contract validator | Bad atoms slip into catalog |
+| §11 extension contract validator | Bad atoms slip into catalog |
 
 `pytest` markers: `ui` (Textual TUI) and `slow` (real-LLM E2E,
 minutes-long) — both opt-in.
@@ -179,15 +184,26 @@ For identity-affecting changes (atoms, kernel, catalog): also run an E2E
 prompt against a sandbox repo and inspect the trace.
 
 CI lints/types a broader scope — `src/` (gateway lives at
-`src/agentm/gateway/`), `contrib/gateway-peers/{terminal,feishu,weixin}/src`,
+`src/agentm/gateway/`), `contrib/gateway-peers/{feishu,weixin}/src`,
 `contrib/extensions/llmharness/src`, `contrib/scenarios/rca/src` — and
 runs mypy per workspace from each member's root (per-package overrides).
-For sweeping changes, mirror that scope locally.
+The Go terminal peer lives at `contrib/gateway-peers/terminal-go/` and is
+checked with `go test ./...`. For sweeping changes, mirror that scope locally.
 
 ## Iteration tracking
 
 - `progress.tsv` — dev-loop keep/discard decisions + metric values.
 - `decisions.md` — long-horizon autonomous decisions (L2+).
+
+## Autonomy level: high
+
+(Per `/autoharness:long-horizon`. Decide through L4 autonomously, log in
+`decisions.md`, flag L4 entries with `[flagged]` for post-hoc review.
+Self-merge small / low-risk PRs (docs, single-atom cleanups, polish) once
+CI is green and any boundary review is clean. Escalate to the user only
+for: large/architectural PRs (hand off for review before merge),
+strategic drift (north-star changes, scope creep), access/credentials,
+or genuinely ambiguous requirements that research cannot resolve.)
 
 ## Conventions
 
@@ -195,7 +211,7 @@ For sweeping changes, mirror that scope locally.
   conversation in Chinese.
 - **No SDK / scenario conflation**: scenario-specific logic never inside
   `agentm.core`.
-- **atom contract**: enforced by `extensions.validate`.
+- **§11 atom contract**: enforced by `extensions.validate`.
 - **No preset enums for subjective fields** — free-text + LLM-decided.
 - **Auto-commit awareness**: `agentm` auto-commits during sessions; run
   E2E in a sandbox, never on `main`.
@@ -223,33 +239,99 @@ skill. Distinct from `.claude/index.yaml` (design-concept graph).
 <!-- auto-harness:begin -->
 ## Core principles
 
-1. **Quality over quantity** — a few things done well beats many done poorly.
-2. **Surface problems early** — fail fast, validate before investing, outline before drafting.
-3. **Deliberate execution** — every decision traceable to a reason.
+Three axioms govern all work. Fall back to these when a skill's instructions
+don't cover a situation:
+
+1. **Quality over quantity** — a few things done well beats many done poorly. Applies to tests, observations, skills, code, docs, experiments, ideas. If you can't say why each item exists, there are too many.
+2. **Surface problems early** — fail fast, validate before investing, outline before drafting. Never hide complexity to make something look simpler.
+3. **Deliberate execution** — every decision traceable to a reason. Understand before acting; validate manually before automating; measure before optimizing; consider removing before adding.
 
 Full text: `/autoharness:guide`.
 
 ## North-star targets
 
-| Target | Measure |
-|---|---|
-| Spec coverage | fraction of `project-index.yaml` requirements at `status: tested` |
-| Test health | `uv run pytest --tb=short` pass rate; every `implemented` requirement has tests |
-| Index integrity | `validate_index.py` reports 0 violations |
-| Code health | `uv run mypy src/` + `uv run ruff check src/` both clean |
+1. **Spec coverage** — active requirements at `status: tested` (currently:
+   7/26 = 26.9% on 2026-06-28 after stale path cleanup).
+   Measure: `project-index.yaml` status counts.
+   Mechanism: script.
+
+2. **Test health** — Python suite and terminal-go suite pass; every
+   `implemented` requirement should have tests.
+   Measure: `uv run pytest --tb=short` and
+   `cd contrib/gateway-peers/terminal-go && go test ./...`.
+   Mechanism: script.
+
+3. **Index integrity** — autoharness index validation reports 0 violations
+   (currently: 0 violations on 2026-06-28).
+   Measure: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml`.
+   Mechanism: script.
+
+4. **Code health** — lint and type checks stay clean across the Python
+   substrate and checked contrib peers.
+   Measure: CI lint/type commands listed below.
+   Mechanism: script.
 
 Secondary: simple code mapping cleanly to requirements > clever abstractions
 serving five.
 
+## Dev-loop stages
+
+| Stage | Command | Notes |
+|---|---|---|
+| Lint | `uv run ruff check src/ contrib/gateway-peers/feishu/src contrib/gateway-peers/weixin/src contrib/extensions/llmharness/src contrib/scenarios/rca/src` | Run after code changes in the touched scope; mirror CI for sweeping changes. |
+| Type check | `uv run mypy src/` | Root package check. |
+| Type check peers | `cd contrib/gateway-peers/feishu && uv run mypy src/agentm_feishu`; `cd contrib/gateway-peers/weixin && uv run mypy src/agentm_weixin`; `cd contrib/extensions/llmharness && uv run mypy src/llmharness`; `cd contrib/scenarios/rca && uv run mypy src/rca src/rca_eval` | Run from each workspace member root so package-local config applies. |
+| Python tests | `uv run pytest --tb=short` | Default excludes `ui`; slow/real-provider tests are opt-in. |
+| Terminal peer tests | `cd contrib/gateway-peers/terminal-go && go test ./...` | Go peer is separate from the Python workspace. |
+| Index validation | `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml` | Must stay clean; stale path references are regressions. |
+
+## Observation setup
+
+- **Automated**: CI-style lint, mypy, pytest, terminal-go `go test`, and
+  project-index validation. Keep commands deterministic and run the narrowest
+  touched scope first, then the broader gate before declaring done.
+- **Agent**: periodically review boundary isolation, requirement-code mapping,
+  test necessity, and whether new abstractions preserve the pluggability axes.
+- **Human**: ask before adding new tests, before L4+ scope changes, and before
+  strategic/north-star changes.
+- **Priority**: boundary contract and CI health first; index integrity improves
+  opportunistically as affected requirements are touched.
+
+## Project conventions
+
+- `uv` only for Python dependency and command execution.
+- Python 3.12+ for the SDK and Python peers; terminal-go is a separate Go peer.
+- Scenario-specific logic never goes into `agentm.core`.
+- New tests require explicit confirmation that the behavior is load-bearing.
+- For identity-affecting changes (atoms, kernel, catalog), run an E2E prompt
+  in a sandbox repo and inspect it via `agentm trace`.
+
+## Requirements index (MANDATORY)
+
+This project uses `project-index.yaml` as the single source of truth for all
+requirements. Every code change must keep the index synchronized:
+
+1. **Before implementing**: find the matching requirement in `project-index.yaml`. If none exists, add one first.
+2. **After implementing**: update the requirement's `code` paths and set `status: implemented`.
+3. **After adding tests**: update the requirement's `tests` paths and set `status: tested`.
+4. **After refactoring**: update any affected `code`/`tests` paths if files were moved or renamed.
+5. **Never skip**: a code change without the corresponding index update is incomplete work.
+
+Validate with: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml`.
+
 ## Active skills
 
-| Skill | Purpose |
-|---|---|
-| `/autoharness:guide` | methodology briefing |
-| `/autoharness:dev-loop` | implement → test → vibe → review → measure |
-| `/autoharness:north-star` | define and track optimization targets |
-| `/autoharness:long-horizon` | autonomous decisions with escalation ladder |
-| `/autoharness:existing-project` | recover `project-index.yaml` from current code/docs |
-| `/autoharness:notify` | push iteration reports (not yet configured) |
-| `/autoharness:skill-feedback` | file issues back to the autoharness plugin |
+- `/autoharness:guide` — methodology briefing.
+- `/autoharness:dev-loop` — implement → test → vibe → review → measure.
+- `/autoharness:north-star` — define and track optimization targets.
+- `/autoharness:long-horizon` — autonomous decisions with escalation ladder.
+- `/autoharness:existing-project` — recover and maintain `project-index.yaml`.
+- `/autoharness:notify` — push iteration reports when configured.
+- `/autoharness:skill-feedback` — file issues back to the autoharness plugin.
 <!-- auto-harness:end -->
+
+## Related plugins
+
+- **workbuddy** — pipeline monitoring / repo setup / incident handling.
+  Repo carries `.github/workbuddy/`; install with
+  `/plugin install workbuddy@workbuddy-local`.

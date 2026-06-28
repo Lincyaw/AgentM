@@ -26,11 +26,17 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: contrib/gateway-peers/terminal-go/go.mod
+          cache-dependency-path: contrib/gateway-peers/terminal-go/go.sum
+
       - name: Install dependencies
         run: uv sync --frozen
 
       - name: Lint (ruff)
-        run: uv run ruff check src/ contrib/gateway-peers/terminal/src contrib/gateway-peers/feishu/src contrib/extensions/llmharness/src contrib/scenarios/rca/src
+        run: uv run ruff check src/ contrib/gateway-peers/feishu/src contrib/gateway-peers/weixin/src contrib/extensions/llmharness/src contrib/scenarios/rca/src
 
       - name: Type check (mypy)
         # The gateway lives in src/ (channels v2 — single process). Chat-client
@@ -38,10 +44,14 @@ jobs:
         # per-package overrides apply.
         run: |
           uv run mypy src/
-          cd contrib/gateway-peers/terminal && uv run mypy src/agentm_terminal
-          cd ../feishu && uv run mypy src/agentm_feishu
+          cd contrib/gateway-peers/feishu && uv run mypy src/agentm_feishu
+          cd ../weixin && uv run mypy src/agentm_weixin
           cd ../../extensions/llmharness && uv run mypy src/llmharness
-          cd ../../scenarios/rca && uv run mypy src/agentm_rca
+          cd ../../scenarios/rca && uv run mypy src/rca src/rca_eval
 
       - name: Tests (pytest)
         run: uv run pytest --tb=short
+
+      - name: Tests (terminal-go)
+        working-directory: contrib/gateway-peers/terminal-go
+        run: go test ./...

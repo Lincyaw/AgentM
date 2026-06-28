@@ -1,7 +1,8 @@
 """AgentM CLI (typer-based).
 
-Single runtime: load the ``local`` scenario by default (a curated minimal
-atom set). A different curated list is opted into via ``--scenario X``.
+Single runtime: load the ``chatbot`` scenario by default (the curated
+conversation-oriented atom set). A different curated list is opted into via
+``--scenario X``.
 Subsystems are turned off via ``--no-*`` flags. Failures during
 construction emit diagnostics through the EventBus rather than raising;
 only a missing provider is fatal.

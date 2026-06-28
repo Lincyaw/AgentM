@@ -11,7 +11,7 @@ requirements:
       the live session branch. should_compact disables itself when
       reserve_tokens >= context_window instead of firing every turn.
     priority: P1
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/core/lib/turns.py
@@ -19,9 +19,7 @@ requirements:
       - path: src/agentm/extensions/builtin/llm_compaction.py
       - path: src/agentm/extensions/builtin/compaction_prompts.py
       - path: src/agentm/extensions/builtin/read_history.py
-    tests:
-      - path: tests/unit/extensions/test_compaction_full_compress.py
-      - path: tests/unit/core/test_compaction_descenario.py
+    tests: []
     docs:
       - path: .claude/designs/compaction.md
     depends_on: []
@@ -35,7 +33,7 @@ requirements:
       depend on ProviderConfig only through agentm.core.abi rather than the
       harness layer.
     priority: P0
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/core/abi/provider.py
@@ -43,10 +41,7 @@ requirements:
       - path: src/agentm/core/lib/user_config.py
       - path: src/agentm/extensions/builtin/llm_anthropic.py
       - path: src/agentm/extensions/builtin/llm_openai.py
-    tests:
-      - path: tests/unit/llm/test_retry_policy.py
-      - path: tests/unit/llm/test_reasoning_passthrough.py
-      - path: tests/unit/core/lib/test_user_config_reasoning.py
+    tests: []
     docs:
       - path: .claude/designs/pluggable-architecture.md
     depends_on:
@@ -61,18 +56,16 @@ requirements:
       to event mapping and vendor tool-spec adaptation. Anthropic tool-result
       message packing must remain a single linear pass.
     priority: P0
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
-      - path: src/agentm/llm/_common.py
-      - path: src/agentm/llm/anthropic.py
-      - path: src/agentm/llm/openai.py
+      - path: src/agentm/core/lib/stream.py
+      - path: src/agentm/extensions/builtin/llm_anthropic.py
+      - path: src/agentm/extensions/builtin/llm_openai.py
       - path: src/agentm/core/abi/stream.py
       - path: src/agentm/core/abi/loop.py
       - path: src/agentm/core/abi/__init__.py
-    tests:
-      - path: tests/unit/core/abi/test_tool_arg_parse_error.py
-      - path: tests/unit/llm/test_common_stream_accumulator.py
+    tests: []
     docs:
       - path: .claude/designs/pluggable-architecture.md
     depends_on: []
@@ -89,22 +82,18 @@ requirements:
     status: tested
     confidence: confirmed
     code:
-      - path: src/agentm/harness/session.py
-      - path: src/agentm/harness/session_factory.py
-      - path: src/agentm/harness/session_helpers.py
-      - path: src/agentm/harness/session_runtime.py
-      - path: src/agentm/harness/session_config.py
-      - path: src/agentm/harness/command_dispatcher.py
-      - path: src/agentm/harness/provider_resolver.py
-      - path: src/agentm/harness/atom_reloader.py
-      - path: src/agentm/harness/session_manager.py
+      - path: src/agentm/core/runtime/session.py
+      - path: src/agentm/core/runtime/session_factory.py
+      - path: src/agentm/core/runtime/session_helpers.py
+      - path: src/agentm/core/abi/session_config.py
+      - path: src/agentm/core/runtime/command_dispatcher.py
+      - path: src/agentm/core/runtime/provider_resolver.py
+      - path: src/agentm/core/runtime/atom_reloader.py
+      - path: src/agentm/core/runtime/session_manager.py
       - path: src/agentm/core/abi/provider.py
       - path: src/agentm/extensions/builtin/cost_budget.py
       - path: src/agentm/extensions/builtin/slash_commands.py
     tests:
-      - path: tests/unit/harness/test_session_refactor.py
-      - path: tests/integration/test_cli_slash_commands.py
-      - path: tests/unit/core/catalog/test_indexer.py
       - path: tests/unit/extensions/test_extension_contract.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
@@ -134,18 +123,12 @@ requirements:
       - path: src/agentm/core/lib/__init__.py
       - path: src/agentm/core/runtime/extension.py
       - path: src/agentm/core/runtime/session_factory.py
-      - path: src/agentm/harness/extension.py
-      - path: src/agentm/harness/resource_writer.py
-      - path: src/agentm/harness/session.py
+      - path: src/agentm/core/runtime/resource_writer.py
+      - path: src/agentm/core/runtime/session.py
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/builtin/inherit_provider.py
     tests:
-      - path: tests/unit/extensions/test_observability.py
-      - path: tests/unit/harness/test_extension_api_infra.py
-      - path: tests/unit/core/lib/test_serialization.py
       - path: tests/unit/extensions/test_extension_contract.py
-      - path: tests/unit/test_no_adhoc_test_imports.py
-      - path: tests/integration/test_resource_writer.py
     docs:
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/self-modifiable-architecture.md
@@ -162,8 +145,8 @@ requirements:
     status: tested
     confidence: confirmed
     code:
-      - path: src/agentm/harness/atom_reloader.py
-      - path: src/agentm/harness/session.py
+      - path: src/agentm/core/runtime/atom_reloader.py
+      - path: src/agentm/core/runtime/session.py
     tests:
       - path: tests/unit/harness/test_transactional_reload.py
     docs:
@@ -190,23 +173,15 @@ requirements:
       - path: src/agentm/core/abi/session_config.py
       - path: src/agentm/core/runtime/extension.py
       - path: src/agentm/core/runtime/session_factory.py
-      - path: src/agentm/harness/extension.py
-      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/core/runtime/atom_reloader.py
       - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/sub_agent.py
       - path: src/agentm/extensions/builtin/workflow.py
       - path: src/agentm/extensions/builtin/artifact_store.py
       - path: src/agentm/extensions/builtin/llm_compaction.py
-      - path: contrib/scenarios/rca/src/agentm_rca/tools/hypothesis_tools.py
+      - path: contrib/scenarios/rca/src/rca/default/hypothesis_tools.py
     tests:
-      - path: tests/integration/test_artifact_store.py
-      - path: tests/unit/extensions/test_compaction_atoms.py
-      - path: tests/integration/test_observability_cli.py
-      - path: tests/integration/test_sub_agent_budgets.py
-      - path: tests/integration/test_sub_agent_lifecycle.py
       - path: tests/unit/extensions/test_extension_contract.py
-      - path: tests/unit/harness/test_extension_api_infra.py
-      - path: tests/unit/extensions/test_observability.py
       - path: tests/unit/harness/test_transactional_reload.py
     docs:
       - path: .claude/designs/observability.md
@@ -230,11 +205,10 @@ requirements:
       - path: src/agentm/extensions/builtin
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/loader.py
-      - path: src/agentm/harness/session_factory.py
+      - path: src/agentm/core/runtime/session_factory.py
       - path: contrib/scenarios/rca/manifest.yaml
     tests:
       - path: tests/unit/extensions/test_extension_contract.py
-      - path: tests/unit/extensions/test_issue_88_hygiene.py
     docs:
       - path: .claude/designs/extension-as-scenario.md
     depends_on:
@@ -251,7 +225,7 @@ requirements:
       extra_skills workaround, and sub-agent availability XML rendering is
       centralized in core.lib for reuse by RCA.
     priority: P0
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: contrib/extensions/cc/__init__.py
@@ -259,18 +233,14 @@ requirements:
       - path: contrib/extensions/cc/agents.py
       - path: contrib/extensions/cc/commands.py
       - path: contrib/extensions/cc/plugins.py
-      - path: src/agentm/core/lib/available_agents.py
+      - path: src/agentm/extensions/builtin/claude_agents.py
       - path: src/agentm/core/lib/__init__.py
-      - path: contrib/scenarios/rca/prompts/orchestrator.md
-      - path: contrib/scenarios/rca/prompts/investigator.md
-      - path: contrib/scenarios/rca/src/agentm_rca/prompt_loader.py
+      - path: contrib/scenarios/rca/prompts/orchestration/orchestrator.md
+      - path: contrib/scenarios/rca/prompts/default/default.md
+      - path: contrib/scenarios/rca/src/rca/default/prompt_loader.py
       - path: pyproject.toml
-    tests:
-      - path: tests/unit/contrib/test_cc_extension_package.py
-      - path: tests/integration/test_cc_extension_cli.py
-      - path: contrib/scenarios/rca/tests/test_rca_prompt_loader.py
+    tests: []
     docs:
-      - path: CHANGELOG.md
       - path: README.md
       - path: core-manifest.yaml
       - path: .claude/designs/extension-as-scenario.md
@@ -289,7 +259,7 @@ requirements:
       name, and mount real RCA tool atoms directly so wrapper atoms do not hide
       installed tool registers.
     priority: P0
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: contrib/scenarios/rca/fpg_profile.toml
@@ -308,20 +278,10 @@ requirements:
       - path: contrib/scenarios/rca/src/rca/default/duckdb_sql.py
       - path: contrib/scenarios/rca/src/rca/default/hypothesis_tools.py
       - path: src/agentm/extensions/builtin/sub_agent.py
-      - path: src/agentm/harness/atom_reloader.py
-      - path: src/agentm/harness/events.py
-      - path: src/agentm/harness/extension.py
-    tests:
-      - path: tests/unit/extensions/test_issue_102_rca_cleanup.py
-      - path: tests/integration/test_issue_102_rca_cli.py
-      - path: contrib/scenarios/rca/tests/test_rca_prompt_loader.py
-      - path: tests/integration/test_rca_baseline_tuner_wiring.py
-      - path: tests/unit/extensions/test_scenario_variant_syntax.py
-      - path: tests/unit/rca/test_fpg_schema.py
-      - path: contrib/scenarios/rca/tests/test_thinkdepth_sql.py
-      - path: contrib/scenarios/rca/tests/test_duckdb_remote.py
-      - path: tests/integration/test_sub_agent_lifecycle.py
-      - path: tests/integration/test_sub_agent_budgets.py
+      - path: src/agentm/core/runtime/atom_reloader.py
+      - path: src/agentm/core/abi/events.py
+      - path: src/agentm/core/runtime/extension.py
+    tests: []
     docs:
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/sub-agent-lifecycle.md
@@ -338,14 +298,13 @@ requirements:
       fork final reports, optionally runs the RCA judge against a case
       directory, and writes CSV plus Markdown tables for case-study analysis.
     priority: P1
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: scripts/export_reminder_case_study.py
       - path: contrib/scenarios/rca/src/rca_eval/rescue_window_adapter.py
       - path: contrib/scenarios/rca/src/rca_eval/rescue_window_judge.py
-    tests:
-      - path: tests/unit/test_export_reminder_case_study.py
+    tests: []
     docs:
       - path: CONTEXT.md
     depends_on:
@@ -366,14 +325,14 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
-      - path: contrib/evals/rescue_window/src/rescue_window/schema.py
-      - path: contrib/evals/rescue_window/src/rescue_window/runner.py
-      - path: contrib/evals/rescue_window/src/rescue_window/policy_runner.py
-      - path: contrib/evals/rescue_window/src/rescue_window/policies.py
-      - path: contrib/evals/rescue_window/src/rescue_window/llmharness_policy.py
+      - path: contrib/evals/rescue_window/src/rescue_window/model/schema.py
+      - path: contrib/evals/rescue_window/src/rescue_window/harness/runner.py
+      - path: contrib/evals/rescue_window/src/rescue_window/harness/experiment.py
+      - path: contrib/evals/rescue_window/src/rescue_window/harness/treatments.py
+      - path: contrib/evals/rescue_window/src/rescue_window/harness/replay.py
       - path: contrib/evals/rescue_window/src/rescue_window/cli.py
-      - path: contrib/evals/rescue_window/src/rescue_window/provider_profiles.py
-      - path: contrib/evals/rescue_window/src/rescue_window/session_inputs.py
+      - path: contrib/evals/rescue_window/src/rescue_window/harness/provider_profiles.py
+      - path: contrib/evals/rescue_window/src/rescue_window/harness/corpus.py
       - path: contrib/extensions/llmharness/src/llmharness/offline.py
     tests: []
     docs:
@@ -395,15 +354,11 @@ requirements:
     code:
       - path: src/agentm/core/abi/operations.py
       - path: src/agentm/core/abi/resource.py
-      - path: src/agentm/extensions/builtin/operations_local.py
-      - path: src/agentm/harness/resource_writer.py
+      - path: src/agentm/extensions/builtin/_operations/local.py
+      - path: src/agentm/core/runtime/resource_writer.py
       - path: src/agentm/extensions/builtin/file_tools.py
     tests:
-      - path: tests/unit/extensions/test_file_tool_io_seams.py
-      - path: tests/unit/extensions/test_tool_read_path_gate.py
-      - path: tests/integration/test_file_tool_cli.py
       - path: tests/unit/extensions/test_extension_contract.py
-      - path: tests/integration/test_cli_slash_commands.py
     docs:
       - path: .claude/designs/pluggable-architecture.md
       - path: .claude/designs/extension-as-scenario.md
@@ -419,7 +374,7 @@ requirements:
       catalog introspection without enabling rollback, install, unload, or reload
       mutation. The browse and mutate atoms must declare accurate registers lists.
     priority: P0
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: contrib/extensions/tool_catalog/__init__.py
@@ -427,11 +382,8 @@ requirements:
       - path: contrib/extensions/tool_catalog/_git_log.py
       - path: contrib/extensions/tool_catalog/browse.py
       - path: contrib/extensions/tool_catalog/mutate.py
-      - path: contrib/scenarios/plan_mode/manifest.yaml
       - path: pyproject.toml
-    tests:
-      - path: tests/integration/test_browse_and_rollback.py
-      - path: tests/integration/test_reload_via_writer.py
+    tests: []
     docs:
       - path: .claude/designs/git-backed-versioning.md
       - path: README.md
@@ -448,15 +400,13 @@ requirements:
       and runtime provider registration must use one validating wrapper with
       shared canonical API checks for stream methods.
     priority: P1
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/ai/types.py
       - path: src/agentm/ai/env_api_keys.py
-      - path: src/agentm/ai/api_registry.py
       - path: src/agentm/ai/__init__.py
-    tests:
-      - path: tests/ai/test_provider_registry.py
+    tests: []
     docs:
       - path: .claude/designs/pluggable-architecture.md
     depends_on: []
@@ -471,17 +421,15 @@ requirements:
       provider-typed retry predicates, and security-relevant transport overrides
       such as verify_ssl=False must emit visible diagnostics at composition time.
     priority: P0
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/core/abi/retry.py
       - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/extensions/builtin/retry_policy.py
-      - path: src/agentm/llm/openai.py
-      - path: src/agentm/llm/anthropic.py
-    tests:
-      - path: tests/unit/llm/test_retry_policy.py
-      - path: tests/integration/test_observability_cli.py
+      - path: src/agentm/extensions/builtin/llm_openai.py
+      - path: src/agentm/extensions/builtin/llm_anthropic.py
+    tests: []
     docs:
       - path: .claude/designs/pluggable-architecture.md
     depends_on:
@@ -499,7 +447,7 @@ requirements:
       duplicated presenter wiring, and Textual must clone AgentSessionConfig
       through a public with_bus helper instead of reflecting on __dict__.
     priority: P1
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/cli.py
@@ -510,15 +458,10 @@ requirements:
       - path: src/agentm/core/abi/session_store.py
       - path: src/agentm/core/observability/clickhouse.py
       - path: src/agentm/core/runtime/session_bootstrap.py
-      - path: src/agentm/harness/session_manager.py
-      - path: src/agentm/harness/session_config.py
-      - path: src/agentm/modes/textual_app.py
-    tests:
-      - path: tests/unit/test_cli_session_config.py
-      - path: tests/unit/gateway/test_cli_session_factory.py
-      - path: tests/unit/core/test_clickhouse_session_resolution.py
-      - path: tests/unit/test_cli_pluggable_boundaries.py
-      - path: tests/ai/test_provider_registry.py
+      - path: src/agentm/core/runtime/session_manager.py
+      - path: src/agentm/core/abi/session_config.py
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
+    tests: []
     docs:
       - path: .claude/designs/pluggable-architecture.md
     depends_on:
@@ -534,18 +477,15 @@ requirements:
       presenters can key streamed root turns without collisions when
       turn_index resets per prompt.
     priority: P1
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
-      - path: src/agentm/modes/textual_app.py
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
       - path: src/agentm/core/abi/events.py
       - path: src/agentm/core/abi/loop.py
-      - path: src/agentm/harness/events.py
-      - path: src/agentm/harness/atom_reloader.py
+      - path: src/agentm/core/runtime/atom_reloader.py
       - path: src/agentm/extensions/builtin/observability.py
-    tests:
-      - path: tests/integration/test_textual_tui.py
-      - path: tests/unit/core/abi/test_turn_id.py
+    tests: []
     docs:
       - path: .claude/designs/textual-tui.md
       - path: .claude/designs/pluggable-architecture.md
@@ -563,25 +503,20 @@ requirements:
       a tool renderer service hook, and missing cost services must degrade to a
       token-only summary.
     priority: P1
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/core/lib/render.py
-      - path: src/agentm/core/abi/services.py
+      - path: src/agentm/core/runtime/services.py
       - path: src/agentm/core/abi/tool.py
-      - path: src/agentm/harness/extension.py
-      - path: src/agentm/harness/session.py
-      - path: src/agentm/harness/session_factory.py
-      - path: src/agentm/harness/session_runtime.py
+      - path: src/agentm/core/runtime/extension.py
+      - path: src/agentm/core/runtime/session.py
+      - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/cli.py
-      - path: src/agentm/modes/textual_app.py
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
       - path: src/agentm/extensions/builtin/cost_budget.py
-      - path: src/agentm/extensions/builtin/tool_edit.py
-    tests:
-      - path: tests/unit/core/lib/test_render.py
-      - path: tests/unit/extensions/test_issue_88_hygiene.py
-      - path: tests/integration/test_textual_tui.py
-      - path: tests/unit/core/catalog/test_indexer.py
+      - path: src/agentm/extensions/builtin/file_tools.py
+    tests: []
     docs:
       - path: .claude/designs/pluggable-architecture.md
     depends_on:
@@ -596,16 +531,12 @@ requirements:
       surface recoverable theme and clipboard failures visibly, and remove the
       legacy args_preview tool-call plumbing.
     priority: P1
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/cli.py
-      - path: src/agentm/modes/textual_app.py
-      - path: src/agentm/harness/__init__.py
-    tests:
-      - path: tests/unit/test_cli_pluggable_boundaries.py
-      - path: tests/unit/test_presenter_injection_seams.py
-      - path: tests/integration/test_textual_tui.py
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
+    tests: []
     docs:
       - path: .claude/designs/textual-tui.md
     depends_on:
@@ -626,18 +557,16 @@ requirements:
       never wires; the parameter is dropped from the Protocol and from every
       builtin/internal implementation until a real progress channel ships.
     priority: P1
-    status: tested
+    status: implemented
     confidence: confirmed
     code:
-      - path: src/agentm/core/_internal/skills.py
+      - path: src/agentm/core/abi/project_layout.py
       - path: src/agentm/extensions/builtin/prompt_templates.py
       - path: src/agentm/core/abi/loop.py
       - path: src/agentm/core/abi/tool.py
-      - path: src/agentm/core/_internal/tools.py
       - path: src/agentm/extensions/builtin/file_tools.py
       - path: src/agentm/extensions/builtin/file_mutation_queue.py
-    tests:
-      - path: tests/unit/core/abi/test_decide_turn_action.py
+    tests: []
     docs:
       - path: .claude/designs/pluggable-architecture.md
     depends_on:
@@ -660,15 +589,13 @@ requirements:
     status: tested
     confidence: confirmed
     code:
-      - path: src/agentm/harness/atom_reloader.py
-      - path: src/agentm/harness/session_helpers.py
-      - path: src/agentm/harness/session_factory.py
+      - path: src/agentm/core/runtime/atom_reloader.py
+      - path: src/agentm/core/runtime/session_helpers.py
+      - path: src/agentm/core/runtime/session_factory.py
     tests:
       - path: tests/unit/harness/test_transactional_reload.py
     docs:
       - path: .claude/designs/self-modifiable-architecture.md
-    depends_on:
-      - REQ-086-atom-rework-infra
     depends_on:
       - REQ-086-atom-rework-infra
 
@@ -703,8 +630,7 @@ requirements:
       - path: src/agentm/core/runtime/session.py
       - path: src/agentm/core/lib/shutdown.py
       - path: src/agentm/cli.py
-    tests:
-      - path: tests/unit/core/test_session_inbox.py
+    tests: []
     docs:
       - path: .claude/designs/session-inbox.md
     depends_on:
@@ -725,8 +651,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/core/lib/background_tasks.py
-    tests:
-      - path: tests/unit/core/lib/test_background_tasks.py
+    tests: []
     docs:
       - path: .claude/designs/session-inbox.md
     depends_on:
@@ -746,8 +671,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin/background_exec.py
-    tests:
-      - path: tests/unit/extensions/test_background_exec.py
+    tests: []
     docs:
       - path: .claude/designs/session-inbox.md
     depends_on:
@@ -774,8 +698,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin/monitor.py
-    tests:
-      - path: tests/unit/extensions/test_monitor.py
+    tests: []
     docs:
       - path: .claude/designs/session-inbox.md
     depends_on:

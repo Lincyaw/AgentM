@@ -7,11 +7,11 @@ follow links for detail.
 
 AgentM — pluggable agent framework. Python 3.12+, `uv` only. The SDK is a
 mechanism; every policy is a replaceable atom. Boundary contract in
-`.Codex/designs/pluggable-architecture.md`.
+`.claude/designs/pluggable-architecture.md`.
 
 ## CLI
 
-- `agentm -p "<prompt>"` — one-shot prompt (default scenario `local`).
+- `agentm -p "<prompt>"` — one-shot prompt (default scenario `chatbot`).
 - `agentm` (no args) — show help and subcommand list.
 - `agentm trace …` — query session traces from ClickHouse (default
   backend) or local JSONL. Subcommands: `messages` · `turns` · `tools` ·
@@ -20,30 +20,17 @@ mechanism; every policy is a replaceable atom. Boundary contract in
   JSONL or artifacts.
 - `agentm gateway --bind …` — single-process gateway subcommand: holds
   all chat sessions in memory and serves chat-client peers over the v2
-  wire protocol (`.Codex/designs/single-process-gateway.md`).
+  wire protocol (`.claude/designs/single-process-gateway.md`).
 - Chat-client peer CLIs (separate binaries, vendor-SDK isolation only):
-  `agentm-terminal`, `agentm-feishu`.
+  `agentm-terminal`, `agentm-feishu`, `agentm-weixin`.
 - Shared `AGENTM_*` env namespace; `.env` autoloaded. Long-lived model
   settings can live in `~/.agentm/config.toml` instead of env vars
   (`$AGENTM_HOME/config.toml` overrides the directory). Precedence:
   CLI flag > shell env / `.env` > `config.toml` profile/default_model >
   provider default. Per-CLI prefixes (`AGENTM_GATEWAY_*`) are **not**
-  supported. Minimal config:
-  ```toml
-  default_model = "doubao"
-
-  [models.doubao]
-  provider = "openai"
-  model = "doubao-seed-2-0-pro-260215"
-  base_url = "https://ark.cn-beijing.volces.com/api/v3"
-  api_key = "..."
-  context_window = 131072
-  reasoning_effort = "high"          # → OpenAI reasoning_effort / Anthropic output_config.effort
-
-  [models.doubao.extra_body]         # escape hatch, forwarded verbatim to create(extra_body=)
-  thinking = { type = "enabled" }    # provider-specific thinking toggle, future params, etc.
-  ```
-  Select a profile with `agentm --model doubao`; if `default_model` is set,
+  supported. Model profiles live in `~/.agentm/config.toml`
+  (`$AGENTM_HOME/config.toml` overrides the directory).
+  Select a profile with `agentm --model <name>`; if `default_model` is set,
   no env vars are needed for the default provider/model/key. The
   `reasoning_effort` convenience knob also has a CLI flag
   `--reasoning-effort` and env `AGENTM_REASONING_EFFORT` (precedence: flag >
@@ -51,6 +38,14 @@ mechanism; every policy is a replaceable atom. Boundary contract in
   user-set `extra_body` key winning. Run `<cli> --help` for flags.
 - Optional extra: `uv sync --extra agent-env` installs `arl-env` for the
   `operations_agent_env` atom (ARL-sandboxed Operations).
+
+### WeChat (微信) peer
+
+Personal WeChat gateway peer via iLink Bot API
+(`contrib/gateway-peers/weixin/`). Subcommands: `login` (QR scan),
+`run` (connect to existing gateway), `serve` (supervisord: gateway +
+adapter in one command), `list` (show accounts). `serve` uses
+supervisord for auto-restart and log rotation (`~/.agentm/weixin/logs/`).
 
 ### Trace debugging combos
 
@@ -73,9 +68,41 @@ root + N spawned children. Composition pattern:
 - `ls src/agentm/extensions/builtin/` — builtin atoms (one file per atom)
 - `ls contrib/extensions/` — third-party atoms (flat files auto-discover;
   nested packages need `--extension <dotted.path>`)
-- `.Codex/index.yaml` — design-concept graph; `.Codex/designs/` — concept docs
+- `.claude/index.yaml` — design-concept graph; `.claude/designs/` — concept docs
 - `CONTEXT.md` — project glossary; check here when an unfamiliar term appears.
 - `core-manifest.yaml` — constitution layer (kernel-singleton declarations); read-only.
+
+### Finding existing capabilities
+
+Before building something new, check what already exists. Read the
+docstring at the top of each atom file — it describes what the atom does
+and what tools/events it registers.
+
+- **Tools**: `grep -rn "register_tool" src/agentm/extensions/builtin/` —
+  every tool registration with its name.
+- **Events**: `grep "CHANNEL.*=" src/agentm/core/abi/events.py` — all
+  kernel event channels.
+- **Key builtin atoms by capability area**:
+  - Orchestration: `workflow.py` (Python script orchestration over child
+    sessions — `agent()`, `parallel()`, `pipeline()`), `sub_agent.py`
+    (spawn/check/wait/abort workers).
+  - File ops: `file_tools.py` (`read`/`write`/`edit`/`glob`/`grep`).
+  - Execution: `tool_bash.py`, `background_exec.py`
+    (background process management).
+  - Monitoring: `monitor.py` (wakeup scheduling, monitors).
+  - Knowledge: `skill_loader.py` (SKILL.md discovery + `load_skill`
+    tool), `memory.py` (persistent key-value memory).
+  - Data: `query_tools.py` (DuckDB queries), `artifact_store.py`.
+  - Self-modification: `atom_management.py` (`install_atom` /
+    `reload_atom`), `structured_output.py` (`submit_result`).
+  - Safety: `tool_bash_guard.py`, `tool_filter.py`, `tool_result_budget.py`,
+    `tool_error_messages.py`, `permission.py`, `dedup.py`.
+  - LLM: `llm_openai.py`, `llm_anthropic.py`, `llm_compaction.py`,
+    `thinking_retry.py`, `retry_policy.py`.
+  - Observability: `observability.py`, `otlp_export.py`, `cost_budget.py`,
+    `loop_budget.py`.
+  - UI: `wire_driver.py` (gateway wire protocol), `tui_snapshot.py`,
+    `slash_commands.py`.
 
 ## Architecture
 
@@ -88,7 +115,7 @@ substrate:  agentm.core/  (abi · runtime · lib — write-protected)
 - Atoms reach stateful subsystems only through `ExtensionAPI` services;
   `extensions.validate` rejects direct `core.runtime.*` imports.
 - Five pluggability axes are `Protocol`s in `core.abi`, registered by atoms
-  via `api.register_*`. See `.Codex/designs/pluggable-architecture.md`.
+  via `api.register_*`. See `.claude/designs/pluggable-architecture.md`.
 
 ## Extensions & scenarios
 
@@ -96,7 +123,7 @@ substrate:  agentm.core/  (abi · runtime · lib — write-protected)
   exports `MANIFEST` + `install(api, config)`. §11 contract: no
   atom-to-atom imports, no `core.runtime.*`, no `core._internal`.
 - **Scenario**: YAML at `contrib/scenarios/<name>/manifest.yaml`, selected
-  via `--scenario <name>`. Default is `local`.
+  via `--scenario <name>`. Default is `chatbot`.
 - **contrib/extensions/**: flat `<name>.py` auto-discovers; nested packages
   mount via `--extension <dotted.path>` and are **not** scenarios.
 - **Home contrib**: `~/.agentm/contrib/extensions/<name>.py` and
@@ -104,7 +131,7 @@ substrate:  agentm.core/  (abi · runtime · lib — write-protected)
   atoms and scenarios that work from pip-installed wheels (similar to
   Codex plugins). Respects `$AGENTM_HOME` override.
 
-## Design docs (`.Codex/`)
+## Design docs (`.claude/`)
 
 - `index.yaml` — concept graph; keep in sync on every concept change.
 - `designs/<concept>.md` — continuously maintained; one per live concept.
@@ -157,10 +184,11 @@ For identity-affecting changes (atoms, kernel, catalog): also run an E2E
 prompt against a sandbox repo and inspect the trace.
 
 CI lints/types a broader scope — `src/` (gateway lives at
-`src/agentm/gateway/`), `contrib/gateway-peers/{terminal,feishu}/src`,
+`src/agentm/gateway/`), `contrib/gateway-peers/{feishu,weixin}/src`,
 `contrib/extensions/llmharness/src`, `contrib/scenarios/rca/src` — and
 runs mypy per workspace from each member's root (per-package overrides).
-For sweeping changes, mirror that scope locally.
+The Go terminal peer lives at `contrib/gateway-peers/terminal-go/` and is
+checked with `go test ./...`. For sweeping changes, mirror that scope locally.
 
 ## Iteration tracking
 
@@ -192,6 +220,12 @@ or genuinely ambiguous requirements that research cannot resolve.)
   **forbidden**. Always use recoverable alternatives (`git stash`,
   `git revert`, `git reset --soft`, worktree isolation). Uncommitted
   changes in the working tree may contain the user's in-progress work.
+- **No `path.resolve().parent`** — chaining `.resolve()` before
+  `.parent` obscures intent and silently follows symlinks. For
+  `__file__` (absolute in Python 3.12+), drop `resolve()`:
+  `Path(__file__).parent` / `Path(__file__).parents[N]`. For dynamic
+  paths that genuinely need symlink resolution, split into two steps:
+  `real = p.resolve(); real.parent / …`.
 
 ## Requirements index
 
@@ -200,40 +234,100 @@ requirements. Every code change keeps `code` / `tests` paths and `status`
 in sync — many entries currently have stale paths from the harness-collapse
 migration (e.g. `src/agentm/harness/`, `src/agentm/llm/`); fix them as you
 touch the affected requirements. Validation runs through the autoharness
-skill. Distinct from `.Codex/index.yaml` (design-concept graph).
+skill. Distinct from `.claude/index.yaml` (design-concept graph).
 
 <!-- auto-harness:begin -->
 ## Core principles
 
-1. **Quality over quantity** — a few things done well beats many done poorly.
-2. **Surface problems early** — fail fast, validate before investing, outline before drafting.
-3. **Deliberate execution** — every decision traceable to a reason.
+Three axioms govern all work. Fall back to these when a skill's instructions
+don't cover a situation:
+
+1. **Quality over quantity** — a few things done well beats many done poorly. Applies to tests, observations, skills, code, docs, experiments, ideas. If you can't say why each item exists, there are too many.
+2. **Surface problems early** — fail fast, validate before investing, outline before drafting. Never hide complexity to make something look simpler.
+3. **Deliberate execution** — every decision traceable to a reason. Understand before acting; validate manually before automating; measure before optimizing; consider removing before adding.
 
 Full text: `/autoharness:guide`.
 
 ## North-star targets
 
-| Target | Measure |
-|---|---|
-| Spec coverage | fraction of `project-index.yaml` requirements at `status: tested` |
-| Test health | `uv run pytest --tb=short` pass rate; every `implemented` requirement has tests |
-| Index integrity | `validate_index.py` reports 0 violations |
-| Code health | `uv run mypy src/` + `uv run ruff check src/` both clean |
+1. **Spec coverage** — active requirements at `status: tested` (currently:
+   7/26 = 26.9% on 2026-06-28 after stale path cleanup).
+   Measure: `project-index.yaml` status counts.
+   Mechanism: script.
+
+2. **Test health** — Python suite and terminal-go suite pass; every
+   `implemented` requirement should have tests.
+   Measure: `uv run pytest --tb=short` and
+   `cd contrib/gateway-peers/terminal-go && go test ./...`.
+   Mechanism: script.
+
+3. **Index integrity** — autoharness index validation reports 0 violations
+   (currently: 0 violations on 2026-06-28).
+   Measure: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml`.
+   Mechanism: script.
+
+4. **Code health** — lint and type checks stay clean across the Python
+   substrate and checked contrib peers.
+   Measure: CI lint/type commands listed below.
+   Mechanism: script.
 
 Secondary: simple code mapping cleanly to requirements > clever abstractions
 serving five.
 
+## Dev-loop stages
+
+| Stage | Command | Notes |
+|---|---|---|
+| Lint | `uv run ruff check src/ contrib/gateway-peers/feishu/src contrib/gateway-peers/weixin/src contrib/extensions/llmharness/src contrib/scenarios/rca/src` | Run after code changes in the touched scope; mirror CI for sweeping changes. |
+| Type check | `uv run mypy src/` | Root package check. |
+| Type check peers | `cd contrib/gateway-peers/feishu && uv run mypy src/agentm_feishu`; `cd contrib/gateway-peers/weixin && uv run mypy src/agentm_weixin`; `cd contrib/extensions/llmharness && uv run mypy src/llmharness`; `cd contrib/scenarios/rca && uv run mypy src/rca src/rca_eval` | Run from each workspace member root so package-local config applies. |
+| Python tests | `uv run pytest --tb=short` | Default excludes `ui`; slow/real-provider tests are opt-in. |
+| Terminal peer tests | `cd contrib/gateway-peers/terminal-go && go test ./...` | Go peer is separate from the Python workspace. |
+| Index validation | `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml` | Must stay clean; stale path references are regressions. |
+
+## Observation setup
+
+- **Automated**: CI-style lint, mypy, pytest, terminal-go `go test`, and
+  project-index validation. Keep commands deterministic and run the narrowest
+  touched scope first, then the broader gate before declaring done.
+- **Agent**: periodically review boundary isolation, requirement-code mapping,
+  test necessity, and whether new abstractions preserve the pluggability axes.
+- **Human**: ask before adding new tests, before L4+ scope changes, and before
+  strategic/north-star changes.
+- **Priority**: boundary contract and CI health first; index integrity improves
+  opportunistically as affected requirements are touched.
+
+## Project conventions
+
+- `uv` only for Python dependency and command execution.
+- Python 3.12+ for the SDK and Python peers; terminal-go is a separate Go peer.
+- Scenario-specific logic never goes into `agentm.core`.
+- New tests require explicit confirmation that the behavior is load-bearing.
+- For identity-affecting changes (atoms, kernel, catalog), run an E2E prompt
+  in a sandbox repo and inspect it via `agentm trace`.
+
+## Requirements index (MANDATORY)
+
+This project uses `project-index.yaml` as the single source of truth for all
+requirements. Every code change must keep the index synchronized:
+
+1. **Before implementing**: find the matching requirement in `project-index.yaml`. If none exists, add one first.
+2. **After implementing**: update the requirement's `code` paths and set `status: implemented`.
+3. **After adding tests**: update the requirement's `tests` paths and set `status: tested`.
+4. **After refactoring**: update any affected `code`/`tests` paths if files were moved or renamed.
+5. **Never skip**: a code change without the corresponding index update is incomplete work.
+
+Validate with: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml`.
+
 ## Active skills
 
-| Skill | Purpose |
-|---|---|
-| `/autoharness:guide` | methodology briefing |
-| `/autoharness:dev-loop` | implement → test → vibe → review → measure |
-| `/autoharness:north-star` | define and track optimization targets |
-| `/autoharness:long-horizon` | autonomous decisions with escalation ladder |
-| `/autoharness:existing-project` | recover `project-index.yaml` from current code/docs |
-| `/autoharness:notify` | push iteration reports (not yet configured) |
-| `/autoharness:skill-feedback` | file issues back to the autoharness plugin |
+- `/autoharness:guide` — methodology briefing.
+- `/autoharness:dev-loop` — implement → test → vibe → review → measure.
+- `/autoharness:north-star` — define and track optimization targets.
+- `/autoharness:long-horizon` — autonomous decisions with escalation ladder.
+- `/autoharness:existing-project` — recover and maintain `project-index.yaml`.
+- `/autoharness:notify` — push iteration reports when configured.
+- `/autoharness:skill-feedback` — file issues back to the autoharness plugin.
 <!-- auto-harness:end -->
 
 ## Related plugins
