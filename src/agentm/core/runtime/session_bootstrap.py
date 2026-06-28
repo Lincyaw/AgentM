@@ -9,9 +9,9 @@ flavored error wrapping on top.
 Two functions:
 
 * :func:`make_default_session_store` — returns the canonical session
-  store.  When ClickHouse is reachable the store reads session state
-  from the collector (no local JSONL); otherwise falls back to
-  ``JsonlSessionStore``.
+  store.  When ClickHouse is reachable and OTLP export is configured the
+  store reads session state from the collector (no local JSONL);
+  otherwise falls back to ``JsonlSessionStore``.
 * :func:`resolve_session_state` — picks the right :class:`SessionState`
   given a resume id / continue-recent flag, falling back to a fresh
   state when neither is requested. Raises :class:`FileNotFoundError`
@@ -22,6 +22,7 @@ Two functions:
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 from typing import Any
 
@@ -139,15 +140,21 @@ class ClickHouseSessionStore:
 def make_default_session_store(cwd: str) -> SessionStore:
     """Return the best available session store.
 
-    Prefers ClickHouse when reachable (no local file I/O); falls back
-    to the JSONL-backed store otherwise.
+    Prefers ClickHouse only when both the query backend is reachable and
+    network export is configured. Otherwise sessions must persist locally so
+    traces are not silently dropped.
     """
 
     try:
         from agentm.core.observability import clickhouse
         url = clickhouse.get_url()
         if url is not None:
-            return ClickHouseSessionStore(url)  # type: ignore[return-value]
+            if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+                return ClickHouseSessionStore(url)  # type: ignore[return-value]
+            logger.debug(
+                "session store: ClickHouse query backend is available but "
+                "OTEL_EXPORTER_OTLP_ENDPOINT is unset; using JSONL store"
+            )
     except Exception as exc:
         # ClickHouse store unavailable/misconfigured — fall back to the local
         # JSONL store. Log so an operator who expected CH knows why it fell back.

@@ -20,60 +20,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from loguru import logger
+from agentm.env import autoload_dotenv
 
 
 __version__ = "0.2.0"
-
-_dotenv_loaded: bool = False
-
-
-def autoload_dotenv() -> None:
-    """Idempotent ``.env`` autoload for gateway / chat-client CLIs.
-
-    Must be called at module-import time in every gateway-related CLI so
-    environment variables (``AGENTM_PROVIDER``, ``LARK_APP_ID``, …) are
-    visible by the time typer evaluates option defaults (including
-    ``envvar=...``). Subsequent calls are no-ops.
-
-    Opt-out: set ``AGENTM_SKIP_DOTENV=1`` to disable autoloading. Tests
-    rely on this to keep the repo's own ``.env`` out of fixtures.
-    """
-    global _dotenv_loaded
-    if _dotenv_loaded:
-        return
-    _dotenv_loaded = True
-    if os.environ.get("AGENTM_SKIP_DOTENV"):
-        return
-    _load_dotenv_files(Path.cwd())
-
-
-def _load_dotenv_files(cwd: Path) -> None:
-    """Best-effort ``.env`` autoload: ``<cwd>/.env`` then the workspace-root
-    ``.env`` (next to the nearest ``[tool.uv.workspace]`` pyproject, walked
-    up at most 8 levels). No-op when ``python-dotenv`` isn't installed."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    candidates: list[Path] = [cwd / ".env"]
-    walker = cwd.resolve()
-    for _ in range(8):
-        manifest = walker / "pyproject.toml"
-        if manifest.exists():
-            try:
-                if "[tool.uv.workspace]" in manifest.read_text(encoding="utf-8"):
-                    candidates.append(walker / ".env")
-                    break
-            except OSError as exc:
-                # Unreadable pyproject while walking up for the workspace .env.
-                logger.debug("gateway: could not read {} during .env discovery: {}", manifest, exc)
-        if walker.parent == walker:
-            break
-        walker = walker.parent
-    for path in candidates:
-        if path.exists():
-            load_dotenv(path, override=False)
 
 
 def default_socket_url() -> str:

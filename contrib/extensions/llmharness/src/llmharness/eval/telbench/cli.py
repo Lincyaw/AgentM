@@ -132,7 +132,7 @@ def telbench(
     # OTEL_EXPORTER_OTLP_ENDPOINT (trajectories ship to ClickHouse) and the
     # model/provider profile without the caller having to ``source .env`` first.
     try:
-        from agentm.cli import autoload_dotenv
+        from agentm.env import autoload_dotenv
 
         autoload_dotenv()
     except ImportError:

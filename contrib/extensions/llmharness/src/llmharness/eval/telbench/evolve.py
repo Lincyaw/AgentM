@@ -123,7 +123,7 @@ def evolve(
     import os
 
     try:
-        from agentm.cli import autoload_dotenv
+        from agentm.env import autoload_dotenv
 
         autoload_dotenv()
     except ImportError:

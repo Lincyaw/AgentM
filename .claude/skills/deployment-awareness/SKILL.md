@@ -90,7 +90,7 @@ process (`systemctl --user restart agentm-feishu` / `agentm-gateway`).
 | Central config | `~/.agentm/config.toml` |
 | Per-bot workspaces | `~/.agentm/workspaces/{channel_name}/` |
 | Persona / character files | `<workspace>/persona.md` |
-| Observability trace | `<workspace>/.agentm/observability/<session_id>.jsonl` |
+| Observability trace | `$AGENTM_HOME/observability/<session_id>.jsonl` |
 | Example config | `config.toml.example` at repo root |
 
 ## Multi-bot configuration

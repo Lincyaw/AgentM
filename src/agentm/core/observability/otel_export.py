@@ -1,8 +1,8 @@
 """File-backed OTLP exporters for spans and logs.
 
 Writes one OTLP ``ResourceSpans`` / ``ResourceLogs`` element per line as
-ndjson at ``<cwd>/.agentm/observability/<session_id>.jsonl``. Each line is a
-self-contained JSON object that would be a valid element inside
+ndjson at ``$AGENTM_HOME/observability/<session_id>.jsonl`` by default. Each
+line is a self-contained JSON object that would be a valid element inside
 ``ExportTraceServiceRequest.resource_spans[]`` or
 ``ExportLogsServiceRequest.resource_logs[]`` — collector pipelines (e.g.
 ``filelog`` + ``otlpjson`` decoders) consume this directly. Lines do **not**
@@ -776,7 +776,7 @@ def setup_session_telemetry(
     them. The processors forward exclusively to this session's file
     exporter, so concurrent sessions never cross-contaminate.
 
-    The output path defaults to ``<cwd>/.agentm/observability/<session_id>.jsonl``.
+    The output path defaults to ``$AGENTM_HOME/observability/<session_id>.jsonl``.
     Callers that already know the absolute path (e.g. :class:`SessionManager`
     direct-write callers) may override via ``file_path``; the ``cwd``
     argument is then only used as a hint for resolving the default.
@@ -799,8 +799,7 @@ def setup_session_telemetry(
     tracer_provider, logger_provider = setup_process_telemetry()
 
     # File export: only when caller passes an explicit path (SessionManager
-    # persistence) or the user opted in via AGENTM_OBSERVABILITY_DIR. The
-    # default path — OTLP remote only — avoids writing local files.
+    # persistence) or the user opted in via AGENTM_OBSERVABILITY_DIR.
     write_files = file_path is not None or file_export_requested()
     resolved_path: Path | None = None
     span_exporter: FileSpanExporter | None = None
@@ -861,5 +860,3 @@ def setup_session_telemetry(
         span_exporter=span_exporter,
         log_exporter=log_exporter,
     )
-
-

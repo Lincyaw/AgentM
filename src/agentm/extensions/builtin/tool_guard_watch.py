@@ -2,7 +2,7 @@
 
 Passive observer. Hooks ``SessionReadyEvent`` for the configured
 ``target_scenario``; on each production session start, scans the most
-recent ``recent_n`` ``.agentm/observability/<trace>.jsonl`` files,
+recent ``recent_n`` local observability JSONL files,
 computes a guard metric per trace (currently ``tool_error_rate`` —
 heuristic, count of error tool results / turn count), and compares
 each sample against a configurable regression threshold. If

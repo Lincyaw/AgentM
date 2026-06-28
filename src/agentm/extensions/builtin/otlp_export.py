@@ -1,9 +1,10 @@
 """Builtin ``otlp_export`` atom: ship spans + logs to a remote OTLP endpoint.
 
 AgentM's canonical wire format is OTLP/JSON ndjson written to
-``<cwd>/.agentm/observability/<session_id>.jsonl`` (see ``observability.py``
-+ ``core.runtime.otel_export.FileSpanExporter``/``FileLogExporter``). That
-file path is enough for self-contained replay, evolution, and llmharness
+``$AGENTM_HOME/observability/<session_id>.jsonl`` by default (see
+``observability.py`` +
+``core.runtime.otel_export.FileSpanExporter``/``FileLogExporter``). That file
+path is enough for self-contained replay, evolution, and llmharness
 distillation. For *live* observability against a remote collector
 (Jaeger / Tempo / Phoenix / Grafana Cloud / Honeycomb) you mount this
 atom on top, which attaches process-level OTLP exporters to the same

@@ -518,7 +518,8 @@ class ExtensionAPI(Protocol):
         """This session's OTel ``span_id`` — 8 bytes / 16 hex chars.
         Always set; identifies the *session-root span* inside the trace.
         The observability sink uses it as the JSONL filename so each
-        session lands in ``.agentm/observability/<session_id>.jsonl``.
+        session lands in ``$AGENTM_HOME/observability/<session_id>.jsonl``
+        by default.
         Cross-process embedders that already maintain an OTel span id
         can supply it on :class:`AgentSessionConfig.session_id`."""
         ...

@@ -203,6 +203,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin
+      - path: src/agentm/extensions/builtin/task_tracking.py
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/loader.py
       - path: src/agentm/core/runtime/session_factory.py
@@ -444,14 +445,17 @@ requirements:
       defaults come from ProviderRegistry descriptors, CLI resume/continue
       flows consume the SessionStore protocol with JsonlSessionStore as the
       default implementation, shared diagnostic/session-config helpers remove
-      duplicated presenter wiring, and Textual must clone AgentSessionConfig
+      duplicated presenter wiring, dotenv loading is centralized, local JSONL
+      fallback lives under AGENTM_HOME, and Textual must clone AgentSessionConfig
       through a public with_bus helper instead of reflecting on __dict__.
     priority: P1
     status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/cli.py
+      - path: src/agentm/cli_trace.py
       - path: src/agentm/contrib_sync.py
+      - path: src/agentm/env.py
       - path: src/agentm/extensions/loader.py
       - path: contrib/scenarios/chatbot/manifest.yaml
       - path: contrib/scenarios/local/manifest.yaml
@@ -460,13 +464,20 @@ requirements:
       - path: src/agentm/scenarios/minimal/manifest.yaml
       - path: src/agentm/cli_workflow.py
       - path: src/agentm/gateway/cli.py
+      - path: src/agentm/gateway/__init__.py
       - path: src/agentm/ai/types.py
       - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/core/abi/session_store.py
+      - path: src/agentm/core/lib/observability_dir.py
       - path: src/agentm/core/observability/clickhouse.py
       - path: src/agentm/core/runtime/session_bootstrap.py
       - path: src/agentm/core/runtime/session_manager.py
       - path: src/agentm/core/abi/session_config.py
+      - path: contrib/extensions/llmharness/src/llmharness/eval/telbench/cli.py
+      - path: contrib/extensions/llmharness/src/llmharness/eval/telbench/evolve.py
+      - path: contrib/extensions/llmharness/src/llmharness/eval/telbench/iterate.py
+      - path: contrib/scenarios/rca/src/rca_eval/seed_dataset.py
+      - path: contrib/scenarios/verifier/cli.py
       - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
     tests: []
     docs:

@@ -20,7 +20,9 @@ mechanism; every policy is a replaceable atom. Boundary contract in
   backend) or local JSONL. Subcommands: `messages` · `turns` · `tools` ·
   `chats` · `info` · `index` · `spans` · `logs` · `stats` · `usage`.
   Always use `agentm trace` to inspect trajectories — never hand-parse
-  JSONL or artifacts.
+  JSONL or artifacts. Local JSONL fallback lives in
+  `$AGENTM_HOME/observability/` (default `~/.agentm/observability/`; override
+  with `AGENTM_OBSERVABILITY_DIR`).
 - `agentm gateway --bind …` — single-process gateway subcommand: holds
   all chat sessions in memory and serves chat-client peers over the v2
   wire protocol (`.claude/designs/single-process-gateway.md`).

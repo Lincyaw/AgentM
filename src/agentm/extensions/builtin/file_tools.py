@@ -86,6 +86,50 @@ def _ok(text: str) -> ToolResult:
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
 
+_PATH_ALIASES: Final[tuple[str, ...]] = ("file_path",)
+
+def _required_string_arg(
+    args: dict[str, Any],
+    key: str,
+    tool_name: str,
+    *,
+    aliases: tuple[str, ...] = (),
+    allow_empty: bool = False,
+    hint: str,
+) -> tuple[str | None, ToolResult | None]:
+    """Return a required string argument or a model-facing tool error."""
+    supplied_name = next((name for name in (key, *aliases) if name in args), None)
+    if supplied_name is None:
+        alias_text = ""
+        if aliases:
+            alias_text = f" Accepted aliases: {', '.join(repr(a) for a in aliases)}."
+        return (
+            None,
+            _error(
+                f"Invalid {tool_name} call: missing required argument {key!r}."
+                f"{alias_text} Use {hint}."
+            ),
+        )
+
+    value = args[supplied_name]
+    if not isinstance(value, str):
+        return (
+            None,
+            _error(
+                f"Invalid {tool_name} call: argument {supplied_name!r} must be a "
+                f"string, got {type(value).__name__}. Use {hint}."
+            ),
+        )
+    if not allow_empty and value == "":
+        return (
+            None,
+            _error(
+                f"Invalid {tool_name} call: argument {supplied_name!r} must not "
+                f"be empty. Use {hint}."
+            ),
+        )
+    return value, None
+
 # ---------------------------------------------------------------------------
 # Read helpers
 # ---------------------------------------------------------------------------
@@ -635,7 +679,16 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
     # --- read tool --------------------------------------------------------
 
     async def _read_execute(args: dict[str, Any]) -> ToolResult:
-        path = str(args["path"])
+        path, arg_error = _required_string_arg(
+            args,
+            "path",
+            "read",
+            aliases=_PATH_ALIASES,
+            hint='{"path": "..."}',
+        )
+        if arg_error is not None:
+            return arg_error
+        assert path is not None
         raw_offset = args.get("offset")
         raw_limit = args.get("limit")
 
@@ -717,8 +770,27 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
     # --- write tool -------------------------------------------------------
 
     async def _write_execute(args: dict[str, Any]) -> ToolResult:
-        path = str(args["path"])
-        content = str(args["content"])
+        path, arg_error = _required_string_arg(
+            args,
+            "path",
+            "write",
+            aliases=_PATH_ALIASES,
+            hint='{"path": "...", "content": "..."}',
+        )
+        if arg_error is not None:
+            return arg_error
+        assert path is not None
+
+        content, arg_error = _required_string_arg(
+            args,
+            "content",
+            "write",
+            allow_empty=True,
+            hint='{"path": "...", "content": "..."}',
+        )
+        if arg_error is not None:
+            return arg_error
+        assert content is not None
         rationale = str(args.get("rationale", "agent write via file_tools"))
 
         normalized = os.path.normpath(path)
@@ -884,8 +956,27 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         return _ok(f"Replaced lines {start}-{end} in {path!r}:\n{snippet}")
 
     async def _edit_execute(args: dict[str, Any]) -> ToolResult:
-        path = str(args["path"])
-        new_string = str(args["new_string"])
+        path, arg_error = _required_string_arg(
+            args,
+            "path",
+            "edit",
+            aliases=_PATH_ALIASES,
+            hint='{"path": "...", "old_string": "...", "new_string": "..."}',
+        )
+        if arg_error is not None:
+            return arg_error
+        assert path is not None
+
+        new_string, arg_error = _required_string_arg(
+            args,
+            "new_string",
+            "edit",
+            allow_empty=True,
+            hint='{"path": "...", "old_string": "...", "new_string": "..."}',
+        )
+        if arg_error is not None:
+            return arg_error
+        assert new_string is not None
         old_string = args.get("old_string")
         start_line = args.get("start_line")
         end_line = args.get("end_line")
@@ -960,7 +1051,15 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
     cwd = api.cwd
 
     async def _glob_execute(args: dict[str, Any]) -> ToolResult:
-        pattern = str(args["pattern"])
+        pattern, arg_error = _required_string_arg(
+            args,
+            "pattern",
+            "glob",
+            hint='{"pattern": "..."}',
+        )
+        if arg_error is not None:
+            return arg_error
+        assert pattern is not None
         search_root = str(args.get("path") or cwd)
         limit = int(args.get("limit", 100))
 
@@ -1063,7 +1162,15 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         return _rg_available[0]  # type: ignore[return-value]
 
     async def _grep_execute(args: dict[str, Any]) -> ToolResult:
-        pattern: str = args["pattern"]
+        pattern, arg_error = _required_string_arg(
+            args,
+            "pattern",
+            "grep",
+            hint='{"pattern": "..."}',
+        )
+        if arg_error is not None:
+            return arg_error
+        assert pattern is not None
         path: str = args.get("path", cwd)
         glob_filter: str | None = args.get("glob")
         output_mode: str = args.get("output_mode", "content")

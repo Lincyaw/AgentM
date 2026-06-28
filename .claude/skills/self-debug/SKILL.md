@@ -43,7 +43,7 @@ the user runs **`/dump`** in the client, that frame is written to a file
 
 | Data | Location | Query with |
 |------|----------|-----------|
-| Session traces (spans + tool calls + messages) | `<cwd>/.agentm/observability/<session_id>.jsonl` | `agentm trace` subcommands |
+| Session traces (spans + tool calls + messages) | `$AGENTM_HOME/observability/<session_id>.jsonl` | `agentm trace` subcommands |
 | Harness operational logs (loguru) | Same JSONL file (interleaved as OTLP log records) when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; otherwise **stderr only** | `agentm trace logs --latest` |
 | ClickHouse (when configured) | `AGENTM_CLICKHOUSE_URL` or localhost:8123 | `agentm trace --session <id>` (auto-detects) |
 

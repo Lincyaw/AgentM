@@ -53,7 +53,7 @@ extensions:
 
   # === tool-call gating ====================================================
   # Block recently repeated tool calls within a sliding window.
-  - module: agentm.extensions.builtin.dedup
+  # - module: agentm.extensions.builtin.dedup
   # allow/deny tool-call gate — empty lists = allow-all (no-op by default).
   - module: agentm.extensions.builtin.permission
   # allow/deny catalog filter — empty lists = expose-all (no-op by default).

@@ -32,11 +32,11 @@ from pathlib import Path
 from typing import Any
 
 from agentm.core.abi import TraceReader
+from agentm.core.lib.observability_dir import resolve_observability_dir
 
-# tool_eval_run cd's into the tuner cwd; observability lives under
-# ``<cwd>/.agentm/observability/<trace>.jsonl``. The grader runs in the same
-# process, so plain Path().cwd() resolves to the tuner cwd.
-_OBS_DIR = Path(".agentm") / "observability"
+# The grader runs in the same process as tool_eval_run; resolve from cwd so
+# AGENTM_OBSERVABILITY_DIR and AGENTM_HOME follow the same rules as agentm.
+_OBS_DIR = resolve_observability_dir(Path.cwd())
 _SQL_EVIDENCE_EXCLUDE = frozenset({"conclusion.parquet"})
 _SQL_ALLOWED_HEADS = {"SELECT", "WITH", "EXPLAIN", "DESCRIBE", "SHOW", "SUMMARIZE"}
 _SQL_WRITE_KEYWORDS = re.compile(
@@ -204,7 +204,7 @@ def _summarize(
     if not got_services and not got_fault_kinds and not (verdict.get("raw") or ""):
         return (
             "Could not extract agent verdict from trace; check submit_final_report "
-            "tool emit (no matching task_id in .agentm/observability)."
+            "tool emit (no matching task_id in the observability log)."
         )
     parts = []
     if service_hit == 1.0:
@@ -237,10 +237,7 @@ def _first_overlap(expected: list[str], got: list[str]) -> str:
 
 
 def _extract_verdict_from_trace(task: dict[str, Any]) -> dict[str, Any] | None:
-    """Walk the most recent trace under .agentm/observability whose
-    task_meta.task_id matches ``task['id']`` and an eval_run_id is set.
-    Pull ``submit_final_report`` args into a flat verdict.
-    """
+    """Walk the most recent trace whose task metadata matches this eval case."""
     task_id = str(task.get("id") or "")
     if not task_id or not _OBS_DIR.is_dir():
         return None

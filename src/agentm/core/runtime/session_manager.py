@@ -245,7 +245,7 @@ class SessionManager:
 
     @staticmethod
     def default_session_dir(cwd: str) -> Path:
-        """Per-cwd session log directory (``<cwd>/.agentm/observability/``)."""
+        """Default session log directory (``$AGENTM_HOME/observability/``)."""
 
         from agentm.core.observability.otel_export import resolve_observability_dir
 

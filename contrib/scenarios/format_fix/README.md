@@ -50,7 +50,7 @@ agentm --scenario format_fix \
 
 The agent calls `normalize_json`, copies its text result verbatim, and
 that becomes the final answer. Observability traces land under
-`<cwd>/.agentm/observability/`.
+`$AGENTM_HOME/observability/` by default.
 
 ## Run the tuner (one iteration)
 

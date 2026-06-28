@@ -64,7 +64,8 @@ uses metadata already present on handlers; the atom no longer rewrites
 
 `extensions/builtin/observability.py`:
 
-- Opens `<cwd>/.agentm/observability/<trace_id>.jsonl`.
+- Opens `$AGENTM_HOME/observability/<session_id>.jsonl` by default
+  (override with `AGENTM_OBSERVABILITY_DIR`).
 - Attaches an `_Observer` via `api.add_observer` → `event.dispatch` +
   `handler.invoke` for every channel automatically.
 - Subscribes to all the harness/kernel signal events listed above and
@@ -98,7 +99,7 @@ attributes, status`.
 ```yaml
 - module: agentm.extensions.builtin.observability
   config:
-    path: ".agentm/observability/{session_id}.jsonl"  # default
+    path: "$AGENTM_HOME/observability/{session_id}.jsonl"  # default
     include_handler_records: true                       # default
 ```
 

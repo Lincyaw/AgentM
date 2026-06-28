@@ -36,7 +36,7 @@ Before the merge, a single session produced **two parallel JSONL streams**:
 | Path | Content | Write path |
 |---|---|---|
 | `~/.agentm/sessions/--<cwd>--/<ts>_<id>.jsonl` | trajectory — one entry per `AgentMessage` | `SessionManager._append_record`: synchronous `open("a") + write + close` per message |
-| `<cwd>/.agentm/observability/<trace>.jsonl` | OTel-shaped events — spans, dispatches, handler invocations, llm.request.start/end | observability builtin: bounded async queue, drops on full, `flush()` per record |
+| `$AGENTM_HOME/observability/<session_id>.jsonl` | OTel-shaped events — spans, dispatches, handler invocations, llm.request.start/end | observability builtin: bounded async queue, drops on full, `flush()` per record |
 
 The two streams were largely **overlapping**: every trajectory entry was
 mirrored into observability via `emit:tool_call`, `emit:tool_result`,
@@ -58,7 +58,8 @@ separation. It carried four costs:
 
 Single per-session event log, OTLP/JSON ndjson on disk.
 
-- **One file per session**, at `<cwd>/.agentm/observability/<session_id>.jsonl`.
+- **One file per session**, at `$AGENTM_HOME/observability/<session_id>.jsonl`
+  by default (override with `AGENTM_OBSERVABILITY_DIR`).
 - **`SessionManager._append_record` no longer writes its own file.** Instead
   it dispatches a `MessageAppendedEvent` through the EventBus; the
   observability atom subscribes and writes an `agentm.message.appended` log
@@ -325,8 +326,9 @@ verified end-to-end by
 - Not a schema change to the underlying `Event` dataclasses — kernel
   events stay as they are. `MessageAppendedEvent` was already in place
   before this work; PR-B/C just wired it through OTel.
-- Not a change to retention or where files live in the filesystem
-  hierarchy. The path is still `<cwd>/.agentm/observability/<session_id>.jsonl`.
+- Not a schema change to the retained event shape. The default local path is
+  now `$AGENTM_HOME/observability/<session_id>.jsonl`, with
+  `AGENTM_OBSERVABILITY_DIR` for explicit overrides.
 - Not a stable public schema for third parties. The on-disk shape **is**
   OTLP/JSON ndjson, which is a stable open format — but the
   `agentm.*` event names and attribute namespace are project-internal

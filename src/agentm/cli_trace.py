@@ -31,6 +31,7 @@ import typer
 from loguru import logger
 
 from agentm.core.abi import LogRecord, Span, TraceReader
+from agentm.env import autoload_dotenv
 
 # ClickHouse backend — lazy import to avoid urllib cost on the prompt path.
 _ch_mod: Any = None
@@ -56,6 +57,7 @@ def _ch_session(
     """
     if file is not None:
         return None
+    autoload_dotenv(cwd)
     ch = _ch()
     url = ch.get_url()
     if url is None:
@@ -116,7 +118,7 @@ def _resolve_source(
             2,
             "argument",
             "must specify one of --file, --session, or --latest",
-            "pass --latest to grab the most recent session under <cwd>/.agentm/observability/",
+            "pass --latest to grab the most recent session under $AGENTM_HOME/observability/",
         )
     if chosen > 1:
         _fail(
@@ -140,7 +142,7 @@ def _resolve_source(
                 3,
                 "not_found",
                 f"observability directory not found: {obs_dir}",
-                "cd into a run directory or pass --cwd",
+                "run `agentm` once to produce a session log, or set AGENTM_OBSERVABILITY_DIR",
             )
         candidates = sorted(
             (p for p in obs_dir.glob("*.jsonl") if p.is_file()),
@@ -509,19 +511,22 @@ SessionOpt = Annotated[
     str | None,
     typer.Option(
         "--session",
-        help="Session id; resolves to <cwd>/.agentm/observability/<id>.jsonl.",
+        help="Session id; resolves to $AGENTM_HOME/observability/<id>.jsonl.",
     ),
 ]
 LatestOpt = Annotated[
     bool,
     typer.Option(
         "--latest",
-        help="Use the most recently modified *.jsonl under <cwd>/.agentm/observability/.",
+        help="Use the most recently modified *.jsonl under $AGENTM_HOME/observability/.",
     ),
 ]
 CwdOpt = Annotated[
     Path,
-    typer.Option("--cwd", help="Working directory for --session/--latest resolution."),
+    typer.Option(
+        "--cwd",
+        help="Working directory for .env loading and ClickHouse --latest filtering.",
+    ),
 ]
 FormatOpt = Annotated[
     str | None,
@@ -1545,7 +1550,7 @@ def index_cmd(
         Path | None,
         typer.Option(
             "--dir",
-            help="Observability directory to scan (default <cwd>/.agentm/observability/).",
+            help="Observability directory to scan (default $AGENTM_HOME/observability/).",
         ),
     ] = None,
     trace_id: Annotated[
@@ -1630,7 +1635,7 @@ def index_cmd(
       agentm trace index --roots-only --scenario rca
       agentm trace index --children-of abc123 --purpose cognitive_audit_auditor
       agentm trace index --min-records 10 --format ndjson
-      agentm trace index --dir /path/to/.agentm/observability --format text
+      agentm trace index --dir ~/.agentm/observability --format text
     """
 
     if roots_only and children_of is not None:
@@ -1642,6 +1647,7 @@ def index_cmd(
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
+        autoload_dotenv(cwd)
 
         def _render(d: dict[str, Any]) -> str:
             return (
@@ -1690,7 +1696,7 @@ def index_cmd(
                 3,
                 "not_found",
                 f"observability directory not found: {obs_dir}",
-                "pass --dir, or cd into a run directory / pass --cwd",
+                "pass --dir, run `agentm` once, or set AGENTM_OBSERVABILITY_DIR",
             )
         files = sorted(p for p in obs_dir.glob("*.jsonl") if p.is_file())
 

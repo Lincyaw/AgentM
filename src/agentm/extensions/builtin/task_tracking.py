@@ -235,6 +235,15 @@ def _error(msg: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=msg)], is_error=True)
 
 
+def _optional_id_list(args: dict[str, Any], key: str) -> list[str] | ToolResult | None:
+    value = args.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return _error(f"{key} must be a list of task ids")
+    return [str(x) for x in value]
+
+
 # ---------------------------------------------------------------------------
 # install
 # ---------------------------------------------------------------------------
@@ -270,27 +279,39 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if task is None:
             return _error(f"task {task_id!r} not found")
 
-        if "subject" in args:
-            task.subject = str(args["subject"])
-        if "description" in args:
-            task.description = str(args["description"])
+        subject = args.get("subject")
+        if subject is not None:
+            task.subject = str(subject)
+        description = args.get("description")
+        if description is not None:
+            task.description = str(description)
         if "active_form" in args:
-            task.active_form = args["active_form"]
+            active_form = args.get("active_form")
+            task.active_form = str(active_form) if active_form is not None else None
 
-        if "metadata" in args and isinstance(args["metadata"], dict):
-            for k, v in args["metadata"].items():
+        metadata = args.get("metadata")
+        if isinstance(metadata, dict):
+            for k, v in metadata.items():
                 if v is None:
                     task.metadata.pop(k, None)
                 else:
                     task.metadata[k] = v
+        elif metadata is not None:
+            return _error("metadata must be an object")
 
-        if "add_blocks" in args:
-            err = mgr.add_blocks(task_id, [str(x) for x in args["add_blocks"]])
+        add_blocks = _optional_id_list(args, "add_blocks")
+        if isinstance(add_blocks, ToolResult):
+            return add_blocks
+        if add_blocks:
+            err = mgr.add_blocks(task_id, add_blocks)
             if err:
                 return _error(err)
 
-        if "add_blocked_by" in args:
-            err = mgr.add_blocked_by(task_id, [str(x) for x in args["add_blocked_by"]])
+        add_blocked_by = _optional_id_list(args, "add_blocked_by")
+        if isinstance(add_blocked_by, ToolResult):
+            return add_blocked_by
+        if add_blocked_by:
+            err = mgr.add_blocked_by(task_id, add_blocked_by)
             if err:
                 return _error(err)
 

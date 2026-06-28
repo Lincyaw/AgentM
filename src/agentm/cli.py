@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Annotated, Any, TextIO, cast
 
 import typer
-from dotenv import load_dotenv
 from loguru import logger
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
@@ -27,6 +26,7 @@ from agentm.cli_trace import app as _trace_app
 from agentm.cli_validate import app as _validate_app
 from agentm.cli_workflow import app as _workflow_app
 from agentm.contrib_sync import app as _contrib_app
+from agentm.env import autoload_dotenv
 from agentm.core.abi import LoopConfig
 from agentm.core.abi.events import (
     DiagnosticEvent,
@@ -57,8 +57,6 @@ DEFAULT_SCENARIO = "chatbot"
 # converts that into a visible warning + clean exit. Long-lived hosts (gateway
 # / worker / TUI) own their loop and never call ``idle()``.
 ONESHOT_IDLE_TIMEOUT_SECONDS = 120.0
-
-_PACKAGE_WALK_DEPTH = 8
 
 app = typer.Typer(
     add_completion=False,
@@ -100,53 +98,6 @@ class CliRunConfig:
     atom_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     profile: ModelProfile | None = None
     reasoning_effort: str | None = None
-
-
-def autoload_dotenv(cwd: Path | None = None) -> None:
-    """Load ``.env`` files for the ``agentm`` CLI.
-
-    Honoured order (each call uses ``override=False`` so the first value
-    wins across both files and the already-set process env):
-
-    1. Process env (always wins — explicit ``KEY=... agentm`` keeps top
-       priority because ``load_dotenv(..., override=False)`` is a no-op
-       on already-set names).
-    2. ``<cwd>/.env`` — cwd-local file wins on conflict with the
-       workspace-root file because it is loaded first.
-    3. Workspace-root ``.env`` — the ``.env`` next to the nearest
-       ``[tool.uv.workspace]`` pyproject, walked up at most
-       ``_PACKAGE_WALK_DEPTH`` levels from ``cwd``.
-
-    Disabled entirely when ``AGENTM_SKIP_DOTENV`` is truthy. The env-var
-    check happens **before** any filesystem call (including ``Path.cwd()``
-    resolution of the caller-supplied path) so tests can short-circuit
-    without leaking cwd-noise into the candidate list.
-    """
-
-    if os.environ.get("AGENTM_SKIP_DOTENV"):
-        return
-    base = (cwd if cwd is not None else Path.cwd()).resolve()
-    candidates: list[Path] = [base / ".env"]
-    walker = base
-    for _ in range(_PACKAGE_WALK_DEPTH):
-        manifest = walker / "pyproject.toml"
-        if manifest.exists():
-            try:
-                if "[tool.uv.workspace]" in manifest.read_text(encoding="utf-8"):
-                    workspace_env = walker / ".env"
-                    if workspace_env != candidates[0]:
-                        candidates.append(workspace_env)
-                    break
-            except OSError as exc:
-                # Unreadable pyproject while walking up for the workspace .env —
-                # skip this level and keep searching ancestors.
-                logger.debug("cli: could not read {} during .env discovery: {}", manifest, exc)
-        if walker.parent == walker:
-            break
-        walker = walker.parent
-    for path in candidates:
-        if path.is_file():
-            load_dotenv(path, override=False)
 
 
 def _print_final(
@@ -986,12 +937,6 @@ def run_cmd(
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
-    # When a subcommand (``trace`` / ``gateway`` / ``list-extensions``) is
-    # being dispatched, this root callback fires first but must defer to the
-    # subcommand rather than treat its absent ``--prompt`` as an error.
-    if ctx.invoked_subcommand is not None:
-        return
-
     # ``.env`` must load BEFORE provider/model resolution: if the user
     # only set AGENTM_PROVIDER / AGENTM_MODEL in ``.env`` (not in the
     # shell), ``_resolve_provider_model_cwd`` would otherwise read an
@@ -1001,6 +946,14 @@ def run_cmd(
     # ``--cwd /b`` still consults ``/b/.env`` not the process cwd.
     pre_cwd = cwd or os.environ.get("AGENTM_CWD") or os.getcwd()
     autoload_dotenv(Path(pre_cwd))
+
+    # When a subcommand (``trace`` / ``gateway`` / ``list-extensions``) is
+    # being dispatched, this root callback fires first but must defer to the
+    # subcommand rather than treat its absent ``--prompt`` as an error. The
+    # dotenv load above is intentionally shared with subcommands so trace
+    # backends see repo-local observability env.
+    if ctx.invoked_subcommand is not None:
+        return
     provider_was_explicit = provider is not None
     model_was_explicit = model is not None
     provider, model, cwd, profile = _resolve_provider_model_cwd(

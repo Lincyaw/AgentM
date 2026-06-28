@@ -22,18 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
-
-def _walk_dotenv() -> None:
-    """Mirror the ``rca llm-eval run`` lookup so seeding sees the same DB."""
-    cwd = Path.cwd()
-    for d in (cwd, *cwd.parents):
-        candidate = d / ".env"
-        if candidate.is_file():
-            load_dotenv(str(candidate))
-            return
-    load_dotenv()
+from agentm.env import autoload_dotenv
 
 
 def main() -> int:
@@ -51,7 +40,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    _walk_dotenv()
+    autoload_dotenv()
 
     from rcabench_platform.v3.sdk.llm_eval.db import DatasetSample
     from rcabench_platform.v3.sdk.llm_eval.utils import SQLModelUtils

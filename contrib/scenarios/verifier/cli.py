@@ -284,7 +284,8 @@ app = typer.Typer(
 
 @app.callback(invoke_without_command=True)
 def _main(ctx: typer.Context) -> None:
-    from agentm.cli import autoload_dotenv
+    from agentm.env import autoload_dotenv
+
     autoload_dotenv(REPO)
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())

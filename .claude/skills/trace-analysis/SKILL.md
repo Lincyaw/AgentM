@@ -11,7 +11,7 @@ Session traces live in two backends. `agentm trace` abstracts both:
 
 | Backend | When active | Session selector |
 |---------|------------|-----------------|
-| **Local JSONL** (default) | Always; files at `<cwd>/.agentm/observability/<session_id>.jsonl` | `--file <path>` or `--session <id>` (resolves to the JSONL) |
+| **Local JSONL** (default) | Always; files at `$AGENTM_HOME/observability/<session_id>.jsonl` | `--file <path>` or `--session <id>` (resolves to the JSONL) |
 | **ClickHouse** | When `AGENTM_CLICKHOUSE_URL` is set or localhost:8123 is reachable | `--session <id>` (queries ClickHouse automatically) |
 
 `--latest` picks the most recent session file in the observability dir.

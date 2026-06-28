@@ -16,7 +16,7 @@ This is the operational shape of self-modification we want — not "agent gradua
 
 The reframe has three load-bearing consequences:
 
-1. **JSONL is the source of truth.** Each production run already writes a complete OTel-flavored trace at `.agentm/observability/<trace_id>.jsonl`. The tuner's input is N such files, filtered by `(task_class, fingerprint)`. The catalog substrate (`.agentm/catalog/atoms/<hash>/metrics.jsonl`) becomes a *secondary index* — useful for cross-scenario browsing, not load-bearing for decisions. (See [evolution-substrate.md §3](evolution-substrate.md) for catalog layout; this doc demotes it.)
+1. **JSONL is the source of truth.** Each production run already writes a complete OTel-flavored trace at `$AGENTM_HOME/observability/<session_id>.jsonl` by default. The tuner's input is N such files, filtered by `(task_class, fingerprint)`. The catalog substrate (`.agentm/catalog/atoms/<hash>/metrics.jsonl`) becomes a *secondary index* — useful for cross-scenario browsing, not load-bearing for decisions. (See [evolution-substrate.md §3](evolution-substrate.md) for catalog layout; this doc demotes it.)
 
 2. **No predefined stats API.** `compare()` / `find_best()` were Phase 2 of evolution-substrate.md. Per-task-class evolution does not need them — the tuner is itself an LLM agent that reads raw traces and decides what matters for *this* task class. "What counts as success on RCA" is policy that lives in the tuner's system prompt, not in a stats library. As models improve, analysis improves automatically; a fixed `compare()` cannot benefit from that.
 

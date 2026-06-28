@@ -211,7 +211,9 @@ which extension fills each role; extensions register via `api.register_*` hooks.
 Every signal — install, LLM request, tool call, mutation, turn summary —
 flows through the **same** `EventBus`. The `observability` builtin is a pure
 subscriber writing OTel-flavored JSONL to
-`<cwd>/.agentm/observability/<trace_id>.jsonl`.
+`$AGENTM_HOME/observability/<session_id>.jsonl` (default:
+`~/.agentm/observability/<session_id>.jsonl`; override with
+`AGENTM_OBSERVABILITY_DIR`).
 
 ## Showcase
 
@@ -252,6 +254,8 @@ provider = "openai"
 model = "gpt-4o"
 base_url = "https://api.openai.com/v1"
 api_key = "..."
+# Optional: OpenAI-compatible providers default to 32768.
+max_output_tokens = 32768
 ```
 
 Select a profile with `uv run agentm --model my-model -p "..."`; if

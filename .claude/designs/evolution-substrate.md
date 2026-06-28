@@ -138,7 +138,7 @@ Append-only. Records every activation, deactivation, regress flag, rollback. **R
 The binding mechanism between observation and version. Every observability trace begins with a `session.start` record carrying the fingerprint of the *complete loaded set* of versions:
 
 ```jsonc
-// First record of .agentm/observability/<trace_id>.jsonl
+// First record of $AGENTM_HOME/observability/<session_id>.jsonl
 {
   "type": "session.start",
   "trace_id": "01JX...",

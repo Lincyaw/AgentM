@@ -182,16 +182,17 @@ def _build_model(
     model_id: str,
     *,
     context_window: int = 128_000,
-    max_output_tokens: int = 4_096,
+    max_output_tokens: int = 32_768,
 ) -> Model:
     """Construct a kernel ``Model`` descriptor for the given OpenAI-compat id.
 
     ``context_window`` and ``max_output_tokens`` come from caller config —
     we do not maintain a hard-coded model table since OpenAI-compatible
     proxies (LiteLLM, DeepSeek, Doubao, Kimi …) ship arbitrary ids that no
-    static table can keep up with. Defaults are conservative: 128K/4096
-    works for most modern models; override via ``config['context_window']``
-    / ``config['max_output_tokens']`` when the deployed model differs.
+    static table can keep up with. Defaults are sized for long tool-call
+    arguments on capable models: 128K/32768. Override via
+    ``config['context_window']`` / ``config['max_output_tokens']`` when the
+    deployed model differs.
     """
 
     return Model(
