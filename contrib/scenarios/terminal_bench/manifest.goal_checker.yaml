@@ -1,4 +1,4 @@
-name: terminal_bench_goal_checker
+name: terminal_bench:goal_checker
 description: >
   Minimal checker scenario: operations + observability + turn reminder.
   trace_query tools and submit_verdict come via goal atom extra_extensions.

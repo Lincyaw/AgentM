@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Final
 
@@ -10,7 +11,6 @@ from pydantic import BaseModel
 from agentm.core.abi import (
     BashOperations,
     ExtensionAPI,
-    FunctionTool,
     TextContent,
     ToolResult,
 )
@@ -54,12 +54,46 @@ def install(api: ExtensionAPI, config: ToolBashConfig) -> None:
         },
     }
 
-    async def _execute(args: dict[str, Any]) -> ToolResult:
+    api.register_tool(
+        _BashTool(
+            api=api,
+            bash_ops=bash_ops,
+            default_timeout=default_timeout,
+            parameters=parameters,
+        )
+    )
+
+
+class _BashTool:
+    name = "bash"
+    description = "Execute a shell command in the session cwd."
+
+    def __init__(
+        self,
+        *,
+        api: ExtensionAPI,
+        bash_ops: BashOperations,
+        default_timeout: float,
+        parameters: dict[str, Any],
+    ) -> None:
+        self.parameters = parameters
+        self._api = api
+        self._bash_ops = bash_ops
+        self._default_timeout = default_timeout
+
+    async def execute(
+        self,
+        args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None = None,
+    ) -> ToolResult:
         cmd = str(args["cmd"])
-        timeout = float(args.get("timeout", default_timeout))
+        timeout = float(args.get("timeout", self._default_timeout))
         t0 = time.monotonic()
         try:
-            result = await bash_ops.exec(cmd, cwd=api.cwd, timeout=timeout)
+            result = await self._bash_ops.exec(
+                cmd, cwd=self._api.cwd, timeout=timeout, signal=signal
+            )
         except Exception as exc:
             return _error(f"Failed to run command {cmd!r}: {exc}")
         wall_time = round(time.monotonic() - t0, 1)
@@ -90,15 +124,6 @@ def install(api: ExtensionAPI, config: ToolBashConfig) -> None:
             content=[TextContent(type="text", text=text)],
             is_error=is_error,
         )
-
-    api.register_tool(
-        FunctionTool(
-            name="bash",
-            description="Execute a shell command in the session cwd.",
-            parameters=parameters,
-            fn=_execute,
-        )
-    )
 
 def _coerce_bash_ops(api: ExtensionAPI, candidate: Any) -> BashOperations:
     return candidate if candidate is not None else api.get_operations().bash

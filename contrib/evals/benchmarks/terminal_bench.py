@@ -90,6 +90,14 @@ class TerminalBenchAdapter:
         }])
         eval_out = r.results[0].output.stdout
 
+        session.execute([{  # type: ignore[attr-defined]
+            "name": "collect-test-output",
+            "command": ["bash", "-lc",
+                "mkdir -p /workspace/test_output && "
+                "cp -a /app/test_output/. /workspace/test_output/ 2>/dev/null || true"],
+            "work_dir": "/app",
+        }])
+
         scores = _parse_scores(session, eval_out)
         scores["eval_output"] = eval_out or ""
         return scores

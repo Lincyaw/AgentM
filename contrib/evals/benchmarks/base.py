@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 import subprocess
+import uuid
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Protocol
 
 
@@ -102,12 +105,60 @@ def image_name(task_name: str, registry: str, prefix: str, tag: str) -> str:
 
 
 def upload_file_to_sandbox(session: object, path: str, content: bytes) -> None:
-    """Upload a file to the sandbox via ARL WriteFile API."""
+    """Upload a file into the sandbox's /app tree via ARL's workspace file API."""
+    rel_path = str(PurePosixPath(path.lstrip("/")))
+    target = f"/app/{rel_path}"
+    upload_rel = f".agentm_eval_uploads/{uuid.uuid4().hex}"
     session._client.upload_file(  # type: ignore[attr-defined]
-        session._session_id, path,  # type: ignore[attr-defined]
+        session._session_id, upload_rel,  # type: ignore[attr-defined]
         base64.b64encode(content).decode(),
         encoding="base64",
     )
+    source_candidates = [
+        f"/workspace/{upload_rel}",
+        f"/app/{upload_rel}",
+    ]
+    candidate_tests = " ".join(shlex.quote(candidate) for candidate in source_candidates)
+    script = f"""
+set -e
+src=""
+for candidate in {candidate_tests}; do
+  if [ -f "$candidate" ]; then
+    src="$candidate"
+    break
+  fi
+done
+if [ -z "$src" ]; then
+  echo "uploaded file not found in sandbox workspace" >&2
+  exit 1
+fi
+mkdir -p "$(dirname -- {shlex.quote(target)})"
+cat "$src" > {shlex.quote(target)}
+rm -f "$src"
+"""
+    result = session.execute([{  # type: ignore[attr-defined]
+        "name": "upload-copy",
+        "command": ["bash", "-lc", script],
+        "work_dir": "/app",
+    }])
+    if not result.results or result.results[0].output.exit_code != 0:
+        stderr = result.results[0].output.stderr if result.results else "no result"
+        raise RuntimeError(f"failed to place uploaded file at {target}: {stderr}")
+
+
+def read_file_from_sandbox(session: object, path: str) -> bytes:
+    """Read a file from the sandbox's /app tree without using workspace file paths."""
+    rel_path = str(PurePosixPath(path.lstrip("/")))
+    target = f"/app/{rel_path}"
+    result = session.execute([{  # type: ignore[attr-defined]
+        "name": "read-file",
+        "command": ["bash", "-lc", f"base64 -w0 -- {shlex.quote(target)}"],
+        "work_dir": "/app",
+    }])
+    if not result.results or result.results[0].output.exit_code != 0:
+        stderr = result.results[0].output.stderr if result.results else "no result"
+        raise FileNotFoundError(stderr or target)
+    return base64.b64decode(result.results[0].output.stdout)
 
 
 def load_trace_tools(session_id: str) -> list[dict]:
@@ -141,9 +192,9 @@ def replay_tools_to_sandbox(
                 old, new = args.get("old_string", ""), args.get("new_string", "")
                 if path and old:
                     rel = path.lstrip("/").removeprefix("app/")
-                    cur = session._client.download_file(  # type: ignore[attr-defined]
-                        session._session_id, rel  # type: ignore[attr-defined]
-                    ).decode("utf-8", errors="replace")
+                    cur = read_file_from_sandbox(session, rel).decode(
+                        "utf-8", errors="replace"
+                    )
                     upd = cur.replace(old, new, 1)
                     if upd != cur:
                         upload_file_to_sandbox(session, rel, upd.encode())

@@ -78,6 +78,7 @@ _COMPANION_TOOLS = frozenset({"check_background", "wait_background", "cancel_bac
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_HEARTBEAT = 120.0
 _DEFAULT_SILENCE_WARNING = 300.0
+_MAX_WAIT_BACKGROUND_SECONDS = 30.0
 
 class BackgroundExecConfig(BaseModel):
     timeout: float = _DEFAULT_TIMEOUT
@@ -551,15 +552,14 @@ class _BgManager:
     # --- companion tools ---------------------------------------------------
 
     async def check_background(self, _args: dict[str, Any]) -> ToolResult:
-        """List task states, blocking on the first running task to complete.
+        """List task states without waiting for running work to complete.
 
-        A terminal task surfaced here is marked ``read`` (like
+        Terminal tasks surfaced here are marked ``read`` (like
         ``sub_agent.check_tasks``) so the completion reported in this tool
         result is NOT also re-injected into the inbox by ``_watch`` — the agent
         would otherwise see the same completion twice.
         """
 
-        await self._registry.poll_first_completed()
         async with self._registry.lock:
             tasks = self._registry.values()
             for state in tasks:
@@ -568,19 +568,45 @@ class _BgManager:
         return _tool_result({"tasks": [_task_payload(state) for state in tasks]})
 
     async def wait_background(self, args: dict[str, Any]) -> ToolResult:
-        """Block until one task reaches a terminal state, then report it."""
+        """Wait briefly for one task to reach a terminal state, then report it."""
 
         task_id = str(args.get("task_id", ""))
+        raw_timeout = args.get("timeout_s", 30.0)
+        try:
+            requested_timeout_s = max(0.0, float(raw_timeout))
+        except (TypeError, ValueError):
+            return _tool_result(
+                {"error": f"invalid timeout_s: {raw_timeout!r}"},
+                is_error=True,
+            )
+        timeout_s = min(
+            requested_timeout_s,
+            max(0.0, self.timeout),
+            _MAX_WAIT_BACKGROUND_SECONDS,
+        )
         async with self._registry.lock:
-            if self._registry.get(task_id) is None:
+            state = self._registry.get(task_id)
+            if state is None:
                 return _tool_result(
                     {"error": f"unknown task_id: {task_id}"}, is_error=True
                 )
-        await self._registry.wait_one(task_id)
+            task = state.task if state.status == _RUNNING else None
+        if task is not None:
+            await asyncio.wait({task}, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED)
         async with self._registry.lock:
             state = self._registry.get(task_id)
             assert state is not None
             payload = _task_payload(state)
+            if state.status == _RUNNING:
+                payload["note"] = (
+                    f"still running after waiting {timeout_s:g}s; do not call "
+                    "wait_background again for this task unless new evidence is "
+                    "needed. Continue other work or cancel_background if this "
+                    "background task is no longer useful."
+                )
+                if requested_timeout_s > timeout_s:
+                    payload["requested_timeout_s"] = requested_timeout_s
+                    payload["timeout_cap_s"] = timeout_s
         return _tool_result(payload)
 
     async def cancel_background(self, args: dict[str, Any]) -> ToolResult:
@@ -664,8 +690,7 @@ def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
         FunctionTool(
             name="check_background",
             description=(
-                "List background tasks (state + elapsed). Blocks until the "
-                "first still-running task completes, then returns all states."
+                "List background tasks (state + elapsed) without waiting."
             ),
             parameters={
                 "type": "object",
@@ -678,10 +703,22 @@ def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
     api.register_tool(
         FunctionTool(
             name="wait_background",
-            description="Wait for one background task to reach a terminal state.",
+            description=(
+                "Wait briefly for one background task to reach a terminal state; "
+                "returns the current running status if timeout_s elapses."
+            ),
             parameters={
                 "type": "object",
-                "properties": {"task_id": {"type": "string"}},
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "timeout_s": {
+                        "type": "number",
+                        "description": (
+                            "Requested maximum seconds to wait before returning current "
+                            "status; capped by the background_exec timeout."
+                        ),
+                    },
+                },
                 "required": ["task_id"],
                 "additionalProperties": False,
             },

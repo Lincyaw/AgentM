@@ -38,6 +38,7 @@ app = typer.Typer(
 )
 
 DEFAULT_LONGCLI_REGISTRY = "pair-diag-cn-guangzhou.cr.volces.com/pair"
+DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO = "terminal_bench:arl"
 
 
 # ---------------------------------------------------------------------------
@@ -100,9 +101,9 @@ def _run_and_eval_one(
     source: str,
     model: str, gateway: str,
     registry: str, prefix: str, tag: str,
-    out: Path, eval_timeout: int,
+    out: Path, eval_timeout: int, agent_timeout: int = 0,
     api_key: str = "",
-    scenario: str = "terminal_bench_arl",
+    scenario: str = DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
     attempt_idx: int | None = None,
 ) -> dict[str, Any]:
     """Run agent + evaluate one task. Returns result dict."""
@@ -119,9 +120,11 @@ def _run_and_eval_one(
 
     # --- Agent phase ---
     session_id = None
+    agent_timed_out = False
     if log.is_file():
         raw = log.read_bytes()
-        m = re.search(rb"session_id=(\S+)", raw)
+        agent_timed_out = b"[bench] agent timeout" in raw
+        m = re.search(rb"(?:session_id=|session id:\s*)(\S+)", raw)
         if m:
             session_id = m.group(1).decode()
 
@@ -154,13 +157,26 @@ def _run_and_eval_one(
             with _active_procs_lock:
                 _active_procs.add(proc)
             try:
-                proc.wait()
+                try:
+                    proc.wait(timeout=agent_timeout if agent_timeout > 0 else None)
+                except subprocess.TimeoutExpired:
+                    agent_timed_out = True
+                    f.write(f"\n[bench] agent timeout after {agent_timeout}s; terminating\n")
+                    f.flush()
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        f.write("[bench] agent did not terminate; killing\n")
+                        f.flush()
+                        proc.kill()
+                        proc.wait()
             finally:
                 with _active_procs_lock:
                     _active_procs.discard(proc)
 
         raw = log.read_bytes()
-        m = re.search(rb"session_id=(\S+)", raw)
+        m = re.search(rb"(?:session_id=|session id:\s*)(\S+)", raw)
         if m:
             session_id = m.group(1).decode()
 
@@ -215,6 +231,8 @@ def _run_and_eval_one(
 
     if scores.get("reward") is None:
         scores["reward"] = 0.0
+    if agent_timed_out:
+        scores["agent_timed_out"] = True
 
     score_file.write_text(json.dumps({"task": name, **scores}, ensure_ascii=False))
 
@@ -509,7 +527,7 @@ def run(
         "AGENTM_AGENT_ENV_MEMORY_LIMIT": "16Gi",
     }
     result = subprocess.run([
-        "uv", "run", "agentm", "--scenario", "terminal_bench_arl",
+        "uv", "run", "agentm", "--scenario", DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
         "--model", model, "-p", prompt,
     ], env=env)
     raise typer.Exit(result.returncode)
@@ -528,10 +546,11 @@ def batch(
     concurrency: Annotated[int, typer.Option("-j")] = 5,
     results_dir: Annotated[Path, typer.Option("--results")] = Path("/tmp/bench-results"),
     eval_timeout: Annotated[int, typer.Option("--eval-timeout")] = 300,
+    agent_timeout: Annotated[int, typer.Option("--agent-timeout")] = 0,
     task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
     api_key: Annotated[str, typer.Option("--api-key", envvar="AGENTM_AGENT_ENV_API_KEY")] = "",
     attempts: Annotated[int, typer.Option("--attempts", "-n")] = 1,
-    scenario: Annotated[str, typer.Option("--scenario")] = "terminal_bench_arl",
+    scenario: Annotated[str, typer.Option("--scenario")] = DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
 ) -> None:
     """Run all tasks in parallel, then evaluate. Results include scores.
 
@@ -649,6 +668,7 @@ def batch(
     typer.echo(
         f"Batch: {len(tasks)} tasks × {attempts} attempt(s) = {total_jobs} jobs | "
         f"bench={bench} | model={model} | concurrency={concurrency}"
+        + (f" | agent_timeout={agent_timeout}s" if agent_timeout > 0 else "")
     )
     typer.echo(f"Results: {base_out}")
     typer.echo("")
@@ -668,7 +688,7 @@ def batch(
                     adapter=adapter, source=resolved_source,
                     model=model, gateway=gateway,
                     registry=registry, prefix=prefix, tag=tag,
-                    out=out, eval_timeout=eval_timeout,
+                    out=out, eval_timeout=eval_timeout, agent_timeout=agent_timeout,
                     api_key=api_key,
                     scenario=scenario,
                     attempt_idx=attempt_idx if attempts > 1 else None,

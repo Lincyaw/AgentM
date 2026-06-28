@@ -48,8 +48,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import os
 import shlex
+import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
@@ -87,6 +89,9 @@ class AgentEnvConfig(BaseModel):
     cpu_limit: str | None = None
     memory_request: str | None = None
     memory_limit: str | None = None
+    max_replicas: int | None = None
+    min_replicas: int | None = None
+    scale_up_step: int | None = None
     delete_on_shutdown: bool | None = None
 
 def _resolve_str(value: str | None, env_var: str, default: str | None) -> str | None:
@@ -97,6 +102,12 @@ def _resolve_str(value: str | None, env_var: str, default: str | None) -> str | 
         return env_value
     return default
 
+def _resolve_int(value: int | None, env_var: str) -> int | None:
+    if value is not None:
+        return value
+    env_value = os.environ.get(env_var)
+    return int(env_value) if env_value else None
+
 def _resolve_bool(value: bool | None, env_var: str, default: bool) -> bool:
     if value is not None:
         return value
@@ -104,6 +115,28 @@ def _resolve_bool(value: bool | None, env_var: str, default: bool) -> bool:
     if env_value is None:
         return default
     return env_value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+def _filter_supported_kwargs(target: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    try:
+        signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        return kwargs
+
+    parameters = signature.parameters
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return kwargs
+
+    supported: dict[str, Any] = {}
+    for name, value in kwargs.items():
+        if name in parameters:
+            supported[name] = value
+        elif value is not None:
+            logger.warning(
+                "agent_env: ARL {} does not support {}; ignoring configured value",
+                getattr(target, "__name__", target.__class__.__name__),
+                name,
+            )
+    return supported
 
 # Versioning-token script. Emits ``<mtime_ns>-<sha16>`` for files up to
 # ``_MTIME_TOKEN_SIZE_CAP`` bytes, ``<mtime_ns>-size<size>`` for larger
@@ -165,27 +198,36 @@ class _AgentEnvBashOperations:
             if effective_timeout is not None
             else None
         )
-        command = ["bash", "-lc", cmd]
+        exec_id = f"agentm-{uuid.uuid4().hex}"
+        quoted_cmd = shlex.quote(cmd)
+        runner = f"exec bash -lc {quoted_cmd}"
         if timeout_seconds is not None:
-            quoted_cmd = shlex.quote(cmd)
-            command = [
-                "bash",
-                "-lc",
-                (
-                    "if command -v timeout >/dev/null 2>&1; then "
-                    f"exec timeout -k 5s {timeout_seconds}s bash -lc {quoted_cmd}; "
-                    "else "
-                    f"exec bash -lc {quoted_cmd}; "
-                    "fi"
-                ),
-            ]
+            runner = (
+                "if command -v timeout >/dev/null 2>&1; then "
+                f"exec timeout -k 5s {timeout_seconds}s bash -lc {quoted_cmd}; "
+                "else "
+                f"{runner}; "
+                "fi"
+            )
+        command = [
+            "bash",
+            "-lc",
+            (
+                "if command -v setsid >/dev/null 2>&1; then "
+                f"exec setsid bash -lc {shlex.quote(runner)}; "
+                "else "
+                f"{runner}; "
+                "fi"
+            ),
+        ]
+        step_env = dict(env or {})
+        step_env["AGENTM_EXEC_ID"] = exec_id
         step: dict[str, Any] = {
             "name": "agentm_bash",
             "command": command,
             "work_dir": work_dir,
+            "env": step_env,
         }
-        if env:
-            step["env"] = dict(env)
         if timeout_seconds is not None:
             # Give the in-container `timeout` wrapper a short grace window to
             # return its 124 status instead of letting the gateway sever the
@@ -193,12 +235,44 @@ class _AgentEnvBashOperations:
             step["timeout"] = timeout_seconds + 15
 
         timed_out = False
+        execute_task = asyncio.create_task(
+            asyncio.to_thread(self._session.execute, [step])
+        )
+        signal_task: asyncio.Task[bool] | None = None
+        if signal is not None:
+            signal_task = asyncio.create_task(signal.wait())
         try:
-            response = await asyncio.to_thread(self._session.execute, [step])
+            wait_set: set[asyncio.Task[Any]] = {execute_task}
+            if signal_task is not None:
+                wait_set.add(signal_task)
+            done, _pending = await asyncio.wait(
+                wait_set, return_when=asyncio.FIRST_COMPLETED
+            )
+            if signal_task is not None and signal_task in done and not execute_task.done():
+                await self._cancel_remote_exec(exec_id, work_dir)
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.shield(execute_task), timeout=20
+                    )
+                except TimeoutError:
+                    execute_task.add_done_callback(_consume_task_result)
+                    return ExecResult(
+                        stdout=b"",
+                        stderr=b"agent-env execute cancelled\n",
+                        exit_code=130,
+                        timed_out=True,
+                    )
+                timed_out = True
+            else:
+                response = await execute_task
         except Exception as exc:  # noqa: BLE001
             stderr = f"agent-env execute failed: {exc}".encode()
             timed_out = effective_timeout is not None and "timeout" in str(exc).lower()
             return ExecResult(stdout=b"", stderr=stderr, exit_code=124, timed_out=timed_out)
+        finally:
+            if signal_task is not None and not signal_task.done():
+                signal_task.cancel()
+                await asyncio.gather(signal_task, return_exceptions=True)
 
         if not response.results:
             return ExecResult(stdout=b"", stderr=b"agent-env returned no results", exit_code=1, timed_out=False)
@@ -218,6 +292,47 @@ class _AgentEnvBashOperations:
             exit_code=result.output.exit_code,
             timed_out=timed_out,
         )
+
+    async def _cancel_remote_exec(self, exec_id: str, work_dir: str) -> None:
+        marker = f"AGENTM_EXEC_ID={exec_id}"
+        script = f"""
+set +e
+marker={shlex.quote(marker)}
+targets=""
+for envf in /proc/[0-9]*/environ; do
+  pid="${{envf#/proc/}}"
+  pid="${{pid%/environ}}"
+  case "$pid" in ''|*[!0-9]*) continue ;; esac
+  if tr '\\000' '\\n' < "$envf" 2>/dev/null | grep -qx -- "$marker"; then
+    targets="$targets $pid"
+  fi
+done
+for pid in $targets; do
+  kill -TERM "$pid" 2>/dev/null || true
+done
+sleep 2
+for pid in $targets; do
+  kill -KILL "$pid" 2>/dev/null || true
+done
+printf 'cancelled %s pids:%s\\n' "$marker" "$targets"
+"""
+        step = {
+            "name": "agentm_cancel_bash",
+            "command": ["bash", "-lc", script],
+            "work_dir": work_dir,
+            "timeout": 15,
+        }
+        try:
+            await asyncio.to_thread(self._session.execute, [step])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("agent_env: failed to cancel remote exec {}: {}", exec_id, exc)
+
+
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    try:
+        task.result()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("agent_env: cancelled execute task finished late: {}", exc)
 
 class _AgentEnvFileOperations:
     """``FileOperations`` impl that reads through the sandbox's shell.
@@ -287,6 +402,9 @@ class _AgentEnvFileOperations:
         if code != 0:
             raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
         parts = stdout.decode().strip().split(None, 2)
+        if len(parts) < 2:
+            detail = stderr.decode("utf-8", "replace").strip()
+            raise FileNotFoundError(detail or f"stat returned no metadata for {path}")
         size = int(parts[0])
         mtime_s = int(parts[1])
         ftype = parts[2] if len(parts) > 2 else ""
@@ -391,16 +509,37 @@ class _AgentEnvResourceWriter:
 
     async def _write_bytes(self, abs_path: str, content: bytes) -> tuple[bool, str]:
         await self._run(["bash", "-lc", f"mkdir -p \"$(dirname -- {_sh_quote(abs_path)})\""])
-        rel_path = abs_path
-        if rel_path.startswith(self._work_dir + "/"):
-            rel_path = rel_path[len(self._work_dir) + 1:]
-        elif rel_path.startswith(self._work_dir):
-            rel_path = rel_path[len(self._work_dir):]
+        upload_rel = f".agentm_uploads/{uuid.uuid4().hex}"
+        upload_candidates = [
+            f"/workspace/{upload_rel}",
+            f"{self._work_dir.rstrip('/')}/{upload_rel}",
+        ]
         try:
-            self._session.upload_file(rel_path, content)
-            return True, ""
+            self._session.upload_file(upload_rel, content)
         except Exception as exc:
             return False, str(exc)
+        candidate_tests = " ".join(_sh_quote(path) for path in upload_candidates)
+        copy_script = f"""
+set -e
+src=""
+for candidate in {candidate_tests}; do
+  if [ -f "$candidate" ]; then
+    src="$candidate"
+    break
+  fi
+done
+if [ -z "$src" ]; then
+  echo "uploaded file not found in sandbox workspace" >&2
+  exit 1
+fi
+mkdir -p "$(dirname -- {_sh_quote(abs_path)})"
+cat "$src" > {_sh_quote(abs_path)}
+rm -f "$src"
+"""
+        _stdout, stderr, code = await self._run(["bash", "-lc", copy_script])
+        if code != 0:
+            return False, stderr.decode("utf-8", "replace")
+        return True, ""
 
     # --- ResourceWriter API ----------------------------------------------
 
@@ -797,8 +936,12 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     cpu_lim = _resolve_str(config.cpu_limit, "AGENTM_AGENT_ENV_CPU_LIMIT", None)
     mem_req = _resolve_str(config.memory_request, "AGENTM_AGENT_ENV_MEMORY_REQUEST", None)
     mem_lim = _resolve_str(config.memory_limit, "AGENTM_AGENT_ENV_MEMORY_LIMIT", None)
-    max_replicas_str = _resolve_str(None, "AGENTM_AGENT_ENV_MAX_REPLICAS", None)
-    max_replicas = int(max_replicas_str) if max_replicas_str else None
+    max_replicas = _resolve_int(config.max_replicas, "AGENTM_AGENT_ENV_MAX_REPLICAS")
+    min_replicas = _resolve_int(config.min_replicas, "AGENTM_AGENT_ENV_MIN_REPLICAS")
+    scale_up_step = _resolve_int(
+        config.scale_up_step,
+        "AGENTM_AGENT_ENV_SCALE_UP_STEP",
+    )
     resources = None
     if any((cpu_req, cpu_lim, mem_req, mem_lim)):
         from arl.session import ResourceRequirements  # type: ignore[import-not-found]
@@ -830,17 +973,23 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             "AGENTM_AGENT_ENV_EXPERIMENT_ID",
             None,
         ) or api.session_id
-        session = arl.ManagedSession(
-            image=image,
-            experiment_id=experiment_id,
-            namespace=namespace,
-            gateway_url=gateway_url,
-            workspace_dir=work_dir,
-            api_key=api_key,
-            timeout=create_timeout,
-            resources=resources,
-            max_replicas=max_replicas,
+        session_kwargs = _filter_supported_kwargs(
+            arl.ManagedSession,
+            {
+                "image": image,
+                "experiment_id": experiment_id,
+                "namespace": namespace,
+                "gateway_url": gateway_url,
+                "workspace_dir": work_dir,
+                "api_key": api_key,
+                "timeout": create_timeout,
+                "resources": resources,
+                "max_replicas": max_replicas,
+                "min_replicas": min_replicas,
+                "scale_up_step": scale_up_step,
+            },
         )
+        session = arl.ManagedSession(**session_kwargs)
     elif pool_ref:
         session = arl.SandboxSession(
             pool_ref=pool_ref,

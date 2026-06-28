@@ -1,4 +1,4 @@
-name: terminal_bench_arl_harness
+name: terminal_bench:arl_harness
 description: |
   Terminal-bench with llmharness runtime oversight.
   - coding_task auditor fires every 5 turns (sync mode)
@@ -13,9 +13,10 @@ extensions:
     config:
       max_tokens: 50000
       preview_tokens: 50000
-      spill_read_limit: 200
   - module: agentm.extensions.builtin.file_tools
   - module: agentm.extensions.builtin.tool_bash
+    config:
+      default_timeout: 1200
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.system_prompt
     config:
@@ -25,6 +26,17 @@ extensions:
         host AgentM repository. The sandbox working directory is /app. Treat
         relative paths such as INSTRUCTION.md and task project directories as
         relative to /app.
+        Terminal Bench validation commands can be slow. For xv6/qemu tests,
+        use generous timeouts, typically 1200 seconds or more, and do not wrap
+        validation commands in shorter shell-level timeout limits unless the
+        task explicitly requires it.
+        Prefer non-interactive validation commands such as make grade or the
+        task's run-tests.sh. Do not run bare interactive make qemu or
+        make qemu-gdb commands; if qemu is needed for debugging, pipe explicit
+        commands into it and terminate qemu afterwards.
+        For xv6 labs, make grade is the final validation command. Do not run
+        extra manual usertests/qemu loops after make grade or cowtest passes;
+        finish the task instead.
   - module: agentm.extensions.builtin.llm_compaction
     config:
       tool_result_max_tokens: 8000
@@ -38,3 +50,6 @@ extensions:
       audit_interval_turns: 5
       auditor_prompt: coding_task
       enable_reminders: true
+  - module: agentm.extensions.builtin.background_exec
+    config:
+      timeout: 120

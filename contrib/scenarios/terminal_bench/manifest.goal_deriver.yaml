@@ -1,4 +1,4 @@
-name: terminal_bench_goal_deriver
+name: terminal_bench:goal_deriver
 description: |
   Minimal ARL-backed scenario for Terminal Bench goal derivation.
   Tool calls execute inside the task sandbox at /app; no host runtime_context
