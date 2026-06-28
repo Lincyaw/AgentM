@@ -16,9 +16,11 @@ mechanism; every policy is a replaceable atom. Boundary contract in
 - `agentm contrib sync [--mode copy|symlink] [--overwrite]` — install bundled
   or checkout contrib scenarios/extensions into `~/.agentm/contrib/` so
   external `agentm -p` use does not depend on the source checkout.
-- `agentm trace …` — query session traces from ClickHouse (default
-  backend) or local JSONL. Subcommands: `messages` · `turns` · `tools` ·
-  `chats` · `info` · `index` · `spans` · `logs` · `stats` · `usage`.
+- `agentm trace …` — query session traces from ClickHouse when remote trace
+  storage is configured (`AGENTM_CLICKHOUSE_URL` or
+  `OTEL_EXPORTER_OTLP_ENDPOINT`), otherwise local JSONL. Subcommands:
+  `messages` · `turns` · `tools` · `chats` · `info` · `index` · `spans` ·
+  `logs` · `stats` · `usage`.
   Always use `agentm trace` to inspect trajectories — never hand-parse
   JSONL or artifacts. Local JSONL fallback lives in
   `$AGENTM_HOME/observability/` (default `~/.agentm/observability/`; override
@@ -54,9 +56,10 @@ supervisord for auto-restart and log rotation (`~/.agentm/weixin/logs/`).
 
 ### Trace debugging combos
 
-Default backend is ClickHouse; traces are queryable by `--session <id>`
-across the full history. A logical trace spans multiple sessions — one
-root + N spawned children. Composition pattern:
+When ClickHouse trace storage is configured, traces are queryable by
+`--session <id>` across the full history; otherwise `--session <id>` resolves
+to `$AGENTM_HOME/observability/<id>.jsonl`. A logical trace spans multiple
+sessions — one root + N spawned children. Composition pattern:
 
 - `agentm trace index` — selection layer: emits one identity row per
   session (`{session_id, trace_id, parent_session_id, purpose, scenario}`).

@@ -46,24 +46,39 @@ def _ch() -> Any:
     return _ch_mod
 
 
+def _trace_clickhouse_url(cwd: Path | None = None) -> str | None:
+    """Return a ClickHouse URL only when remote trace storage is configured.
+
+    ``clickhouse.get_url()`` also auto-detects localhost for operators who call
+    the backend directly. The trace CLI is stricter: a local ClickHouse query
+    endpoint should not shadow a freshly written JSONL fallback session unless
+    the environment says this run is exporting remote traces.
+    """
+    autoload_dotenv(cwd)
+    if not (
+        os.environ.get("AGENTM_CLICKHOUSE_URL")
+        or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    ):
+        return None
+    return _ch().get_url()
+
+
 def _ch_session(
     file: Path | None, session: str | None, latest: bool, cwd: Path | None = None,
 ) -> tuple[str, str] | None:
     """Try to resolve a ClickHouse-backed session.
 
-    Returns ``(ch_url, session_id)`` when ClickHouse is available and
-    ``--file`` is not forcing JSONL mode. Returns ``None`` to fall back
-    to the JSONL path.
+    Returns ``(ch_url, session_id)`` when remote trace storage is configured
+    and ``--file`` is not forcing JSONL mode. Returns ``None`` to fall back
+    to the local JSONL path.
     """
     if file is not None:
         return None
-    autoload_dotenv(cwd)
-    ch = _ch()
-    url = ch.get_url()
+    url = _trace_clickhouse_url(cwd)
     if url is None:
         return None
     resolved_cwd = cwd.expanduser().resolve() if cwd is not None else None
-    sid = ch.resolve_session(
+    sid = _ch().resolve_session(
         url, session, latest, str(resolved_cwd) if resolved_cwd is not None else None
     )
     if sid is None:
@@ -1661,7 +1676,7 @@ def index_cmd(
 
         # ClickHouse fast path (skip when --dir forces JSONL scan)
         if directory is None:
-            ch_url = _ch().get_url()
+            ch_url = _trace_clickhouse_url(cwd)
             if ch_url is not None:
                 raw = _ch().index(
                     ch_url,

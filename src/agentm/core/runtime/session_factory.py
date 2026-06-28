@@ -415,6 +415,7 @@ async def create_agent_session(
         gateway=reloader,
         child_session_factory=child_session_fn,
         resource_writer=resource_writer,
+        session_file=session_manager.session_file,
         service_registry=services,
     )
 

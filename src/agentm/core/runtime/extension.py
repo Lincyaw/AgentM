@@ -200,13 +200,14 @@ class _SessionTelemetryHolder:
 
 
 def _default_session_telemetry_factory(
-    *, cwd: str, session_id: str, scenario: str | None
+    *, cwd: str, session_id: str, scenario: str | None, file_path: Path | None = None
 ) -> SessionTelemetryFactory:
     def _build() -> SessionTelemetry:
         return setup_session_telemetry(
             session_id=session_id,
             cwd=Path(cwd) if cwd else Path.cwd(),
             scenario_name=scenario,
+            file_path=file_path,
         )
 
     return _build
@@ -273,6 +274,7 @@ def build_extension_api_scope(
     catalog: CatalogService | None = None,
     child_session_factory: ChildSessionFactory | None = None,
     resource_writer: ResourceWriter | None = None,
+    session_file: Path | None = None,
     telemetry_factory: SessionTelemetryFactory | None = None,
     service_registry: dict[str, Any] | None = None,
 ) -> ExtensionAPIScope:
@@ -312,7 +314,10 @@ def build_extension_api_scope(
         telemetry=_SessionTelemetryHolder(
             telemetry_factory
             or _default_session_telemetry_factory(
-                cwd=cwd, session_id=session_id, scenario=scenario
+                cwd=cwd,
+                session_id=session_id,
+                scenario=scenario,
+                file_path=session_file,
             ),
             bus=bus,
         ),
