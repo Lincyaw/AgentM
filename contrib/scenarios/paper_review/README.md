@@ -91,6 +91,10 @@ simulate a linear first read by updating `Reading Notes` in the artifact after
 each reading unit. A healthy trace should show multiple `write`/`edit` updates
 before the pass finishes.
 
+The final `paper-review` pass must synthesize rather than concatenate prior
+artifacts: it de-duplicates overlapping findings, groups them by aspect, and
+sorts each group by severity and revision impact.
+
 ## Notes
 
 The workflow deliberately does not copy the paper skill prompts into code.

@@ -1028,7 +1028,10 @@ requirements:
       tools needed for discovery and review. The paper-reader pass must treat
       Reading Notes as an incremental live reader state, persist multiple
       updates to the artifact while reading in document order, and avoid using
-      later sections to resolve earlier confusion.
+      later sections to resolve earlier confusion. The final paper-review pass
+      must synthesize prior artifacts by de-duplicating overlapping findings,
+      grouping canonical issues by aspect, and sorting each group by severity
+      and revision impact rather than concatenating pass outputs.
     priority: P1
     status: implemented
     confidence: confirmed

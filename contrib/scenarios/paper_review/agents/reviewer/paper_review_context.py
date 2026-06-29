@@ -76,6 +76,38 @@ def _paper_reader_process_rules() -> str:
     )
 
 
+def _paper_review_final_rules() -> str:
+    return _section(
+        "Final Report Synthesis Requirements",
+        "\n".join([
+            "These extra requirements apply only to the final `paper-review` pass.",
+            "",
+            "1. Read every prior pass artifact before writing the final report.",
+            "2. The final report is a synthesis, not a pass-by-pass concatenation. "
+            "Do not preserve duplicate findings just because multiple passes "
+            "reported them.",
+            "3. Merge overlapping findings into one canonical item. Preserve the "
+            "strongest wording, all important source locations, and the pass "
+            "evidence that supports the merged item.",
+            "4. Group findings by aspect first, then sort within each aspect by "
+            "severity and revision impact. Choose aspect names that fit the "
+            "paper, such as evidence support, argument structure, consistency "
+            "and notation, reader flow, prose/style, figures/tables, and "
+            "future-work feasibility.",
+            "5. Avoid duplicate blocker/major items for the same underlying "
+            "problem. If one issue is a special case of another, keep the "
+            "broader canonical issue and mention the special case under it.",
+            "6. Keep a concise executive summary and a prioritized revision "
+            "plan. Counts must match the actual grouped findings.",
+            "7. Include pass provenance compactly, for example `Sources: "
+            "reader, consistency, evidence`, instead of copying full prior "
+            "artifact sections verbatim.",
+            "8. Use the current run context when writing metadata. If the exact "
+            "date is not provided, omit the date instead of inventing one.",
+        ]),
+    )
+
+
 def install(api: ExtensionAPI, config: PaperReviewContextConfig) -> None:
     parts: list[str] = [
         "# Paper Review Workflow Context",
@@ -110,6 +142,8 @@ def install(api: ExtensionAPI, config: PaperReviewContextConfig) -> None:
 
     if config.role == "paper-reader":
         parts.extend(["", _paper_reader_process_rules()])
+    elif config.role == "paper-review":
+        parts.extend(["", _paper_review_final_rules()])
 
     task_section = _section("Task", config.task)
     if task_section:
