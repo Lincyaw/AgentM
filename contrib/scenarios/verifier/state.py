@@ -23,10 +23,12 @@ from .lib.fpg import (
     node_from_verdict,
     seed_effect_target,
 )
+from .lib.final_checks import frontend_services, run_final_checks
 from .lib.schema import (
     AuditOutcome,
     CandidateEdge,
     ExecutionError,
+    FinalCheckReport,
     HopLogEntry,
     HopResult,
     Injection,
@@ -81,6 +83,7 @@ class Case:
     judge_model: str | None
     gate_retries: int
     agent_retries: int
+    max_parallel_tasks: int
     max_audit_rounds: int
     seeds: set[str]
     entry_services: set[str]
@@ -123,6 +126,7 @@ class Case:
             judge_model=judge_model,
             gate_retries=int(args.get("gate_retries", 3)),
             agent_retries=int(args.get("agent_retries", 3)),
+            max_parallel_tasks=max(1, int(args.get("max_parallel_tasks", 4))),
             max_audit_rounds=int(args.get("max_audit_rounds", 3)),
             seeds=seeds,
             entry_services=_entry_services_from_graph(graph),
@@ -201,6 +205,7 @@ class GraphState:
         self.node_fault_records: dict[str, dict[str, list[str]]] = {}
         self.reachability_warnings: list[str] = []
         self.unreachable: list[str] = []
+        self.final_checks: FinalCheckReport | None = None
 
     # -- Execution-error ledger -------------------------------------------
     def execution_key(self, stage: str, item: str) -> str:
@@ -322,6 +327,13 @@ class GraphState:
         for e in self.edges:
             fpg_adj.setdefault(e["src"], set()).add(e["dst"])
 
+        slo_targets = set(
+            frontend_services(
+                graph=self.case.graph,
+                data_profile=self.case.data_profile,
+                entry_services=self.case.entry_services,
+            )
+        )
         unreachable: list[str] = []
         for seed_svc in sorted(self.confirmed_seed_ids):
             if seed_svc not in self.nodes:
@@ -336,7 +348,7 @@ class GraphState:
                 visited.add(cur)
                 for nxt in fpg_adj.get(cur, set()):
                     queue.append(nxt)
-            if not (visited & self.case.entry_services):
+            if not (visited & slo_targets):
                 unreachable.append(seed_svc)
         return unreachable
 
@@ -557,6 +569,19 @@ class GraphState:
             return None
         return audit_result.seed_coverage.get(seed)
 
+    def evaluate_final_checks(self) -> FinalCheckReport:
+        return run_final_checks(
+            data_dir=self.case.data_dir,
+            graph=self.case.graph,
+            data_profile=self.case.data_profile,
+            anomaly_inventory=self.case.anomaly_inventory,
+            entry_services=self.case.entry_services,
+            seeds=self.case.seeds,
+            confirmed_seed_ids=self.confirmed_seed_ids,
+            nodes=self.nodes,
+            adj=self.adj,
+        )
+
     def finalize(self, audit_result: AuditOutcome | None) -> None:
         # fpg rule: in-degree >= 2 requires combine; each confirmed edge is
         # an independently sufficient path, so the combination is OR.
@@ -568,6 +593,13 @@ class GraphState:
 
         # Validation: unresolved seeds should either reach entry or be
         # audit-resolved.
+        slo_targets = set(
+            frontend_services(
+                graph=self.case.graph,
+                data_profile=self.case.data_profile,
+                entry_services=self.case.entry_services,
+            )
+        )
         self.reachability_warnings = self.unreachable_seed_nodes()
         resolved_non_entry = {"local_only", "benign_or_no_effect"}
         self.unreachable = [
@@ -588,12 +620,22 @@ class GraphState:
                     )
                     continue
                 self.log(
-                    f"⚠ seed {seed_svc}: no path to entry services "
-                    f"{sorted(self.case.entry_services)} in fpg"
+                    f"⚠ seed {seed_svc}: no path to SLO/entry services "
+                    f"{sorted(slo_targets)} in fpg"
                 )
 
         if not self.unreachable:
             self.log("✓ no unresolved confirmed seeds lack entry-service coverage")
+
+        self.final_checks = self.evaluate_final_checks()
+        if self.final_checks["passed"]:
+            self.log("✓ final entry/anomaly invariants satisfied")
+        else:
+            for issue in self.final_checks["issues"]:
+                self.log(
+                    "⚠ final check "
+                    f"{issue['check']} {issue['item']}: {issue['reason']}"
+                )
 
     def to_result(self, audit_result: AuditOutcome | None) -> PropagationResult:
         result_out: PropagationResult = {
@@ -609,6 +651,7 @@ class GraphState:
             "candidate_edges": self.candidate_edges,
             "node_attribution": self.node_attribution(),
             "review_notes": self.review_notes(),
+            "final_checks": self.final_checks or self.evaluate_final_checks(),
         }
         if audit_result:
             result_out["audit"] = audit_result.model_dump(mode="json")
