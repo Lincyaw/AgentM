@@ -35,8 +35,10 @@ required; if both are set, ``image`` wins (managed pool path):
                       default ``default``)
 - ``work_dir``      — Default cwd inside the sandbox (default ``/workspace``)
 - ``timeout``       — Per-step timeout seconds; ``None`` means no timeout
-- ``idle_timeout_seconds`` — Sandbox idle TTL on the gateway (legacy path only;
-                      ManagedSession handles idle policy server-side).
+- ``idle_timeout_seconds`` — Sandbox idle TTL on the gateway (env:
+                      ``AGENTM_AGENT_ENV_IDLE_TIMEOUT_SECONDS``).
+- ``max_lifetime_seconds`` — Sandbox max lifetime on the gateway (env:
+                      ``AGENTM_AGENT_ENV_MAX_LIFETIME_SECONDS``).
 - ``delete_on_shutdown`` — Delete an owned sandbox when AgentM shuts down
                       (env: ``AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN``, default
                       ``true``). Benchmark harnesses can set this to ``false``
@@ -84,6 +86,7 @@ class AgentEnvConfig(BaseModel):
     work_dir: str | None = None
     timeout: float | None = None
     idle_timeout_seconds: int | None = None
+    max_lifetime_seconds: int | None = None
     create_timeout: float | None = None
     cpu_request: str | None = None
     cpu_limit: str | None = None
@@ -921,7 +924,14 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     ) or "default"
     work_dir = config.work_dir or "/workspace"
     timeout_value: float | None = config.timeout
-    idle_value: int | None = config.idle_timeout_seconds
+    idle_value = _resolve_int(
+        config.idle_timeout_seconds,
+        "AGENTM_AGENT_ENV_IDLE_TIMEOUT_SECONDS",
+    )
+    max_lifetime = _resolve_int(
+        config.max_lifetime_seconds,
+        "AGENTM_AGENT_ENV_MAX_LIFETIME_SECONDS",
+    )
     api_key = _resolve_str(config.api_key, "AGENTM_AGENT_ENV_API_KEY", None)
     delete_on_shutdown = _resolve_bool(
         config.delete_on_shutdown,
@@ -987,6 +997,8 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
                 "max_replicas": max_replicas,
                 "min_replicas": min_replicas,
                 "scale_up_step": scale_up_step,
+                "idle_timeout_seconds": idle_value,
+                "max_lifetime_seconds": max_lifetime,
             },
         )
         session = arl.ManagedSession(**session_kwargs)

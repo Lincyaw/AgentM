@@ -93,7 +93,7 @@ requires-dist = [
     { name = "agentm-mcp-bridge", marker = "extra == 'mcp'", editable = "contrib/extensions/mcp_bridge" },
     { name = "agentm-rescue-window", marker = "extra == 'eval'", editable = "contrib/evals/rescue_window" },
     { name = "anthropic", specifier = ">=0.86.0" },
-    { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.2.0" },
+    { name = "arl-env", marker = "extra == 'agent-env'", specifier = ">=0.14.0" },
     { name = "duckdb", marker = "extra == 'eval'", specifier = ">=1.5.2" },
     { name = "fpg", marker = "extra == 'eval'", git = "https://github.com/Lincyaw/fpg-convention" },
     { name = "llmharness", marker = "extra == 'all-contrib'", editable = "contrib/extensions/llmharness" },
@@ -452,16 +452,16 @@ wheels = [
 
 [[package]]
 name = "arl-env"
-version = "0.11.0"
+version = "0.14.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c2/19/874cf50f848bb1444048cc4330969810c4e342901136e5db157c6a81b803/arl_env-0.11.0.tar.gz", hash = "sha256:222eea15fffb8707107ea0e74919fcc9c2d116b2e2719618676ed940e7aeafe2", size = 20829, upload-time = "2026-06-25T19:28:25.254Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4d/0d/38dd8aaa5a5c13e2a41d56abc979889cab66880227b14e2f1762eeb84903/arl_env-0.14.0.tar.gz", hash = "sha256:4f9a3c893d3125b41a0c0befc509bb09fffd44f67d50580ab50455418e387dc4", size = 20907, upload-time = "2026-06-26T20:24:29.77Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4c/21/c7de62f90ef18ca3a057f760010e8f042b3ea2e8d597f46d16f46324db00/arl_env-0.11.0-py3-none-any.whl", hash = "sha256:ebf6f2ae3fb2482edfd75c67c1c0f8ead8ba4af48da919e9a876c0477fa3108a", size = 23828, upload-time = "2026-06-25T19:28:24.401Z" },
+    { url = "https://files.pythonhosted.org/packages/67/ae/668a97b563c49e1e88c1b248e0edf8e445e07eb3ff02a225fa2ed327ed6c/arl_env-0.14.0-py3-none-any.whl", hash = "sha256:689041879ce07a2ceefba8ac6cbc758fec172be7c4837b45400941a99f61a6ca", size = 23901, upload-time = "2026-06-26T20:24:28.894Z" },
 ]
 
 [[package]]

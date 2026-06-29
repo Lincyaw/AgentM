@@ -895,6 +895,33 @@ requirements:
       - REQ-176-session-inbox
       - REQ-176-background-tasks-registry
 
+  - id: REQ-187-agent-env-pool-scaling
+    title: ARL agent-env sessions pass pool scaling hints for concurrent benchmarks
+    description: >
+      The agent-env operations backend must require an ARL SDK version that
+      accepts managed-session pool scaling fields, expose those fields through
+      the operations manifest config, and have the benchmark runner pass
+      scale_up_step, max_replicas as a hard ceiling, min_replicas defaulting to
+      0, and longer create/session TTLs so pass@k attempts do not fail just
+      because the managed pool defaulted to fewer ready pods than the requested
+      benchmark concurrency. Benchmark agent sandboxes must also survive until
+      replay/evaluation completes; the runner, not the agent session shutdown
+      hook, owns experiment cleanup so agent timeouts do not turn into
+      missing-source-session eval failures.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: pyproject.toml
+      - path: uv.lock
+      - path: src/agentm/extensions/builtin/operations.py
+      - path: src/agentm/extensions/builtin/_operations/agent_env.py
+      - path: contrib/evals/bench.py
+    tests: []
+    docs: []
+    depends_on:
+      - REQ-089-file-tool-io-seams
+
   - id: REQ-176-monitor-atom
     title: Builtin monitor atom — agent-defined wakeups + channel subscriptions
     description: >
@@ -920,6 +947,7 @@ requirements:
       - path: .claude/designs/session-inbox.md
     depends_on:
       - REQ-176-session-inbox
+
   - id: REQ-188-paper-review-workflow
     title: Paper review workflow scenario
     description: >
@@ -1015,5 +1043,23 @@ requirements:
     tests: []
     docs:
       - path: .claude/designs/dynamic-workflow.md
+    depends_on:
+      - REQ-087-builtin-atoms-extension-api
+
+  - id: REQ-192-native-log-defaults
+    title: Console entrypoint suppresses noisy native dependency logs by default
+    description: >
+      The ``agentm`` console-script entrypoint must set conservative default
+      native dependency logging environment variables before importing the CLI,
+      so gRPC C-core INFO diagnostics do not leak into normal workflow output.
+      These defaults must use ``setdefault``-style behavior so explicit
+      operator-provided environment variables remain authoritative.
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/__init__.py
+    tests: []
+    docs: []
     depends_on:
       - REQ-087-builtin-atoms-extension-api

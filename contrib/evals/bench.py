@@ -12,11 +12,14 @@ Usage:
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
 import subprocess
 import tempfile
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -39,6 +42,58 @@ app = typer.Typer(
 
 DEFAULT_LONGCLI_REGISTRY = "pair-diag-cn-guangzhou.cr.volces.com/pair"
 DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO = "terminal_bench:arl"
+
+_INFRA_RETRY_LOG_MARKERS = (
+    b"404 Client Error",
+    b"session not found",
+    b"Source session",
+    b"ImagePullBackOff",
+    b"Failed to pull image",
+    b"failed to pull image",
+)
+
+
+def _filter_supported_kwargs(
+    callable_obj: object,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        sig = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return kwargs
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()):
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in sig.parameters}
+
+
+def _safe_experiment_id(raw: str, max_len: int = 63) -> str:
+    value = re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")
+    if len(value) > max_len:
+        value = value[:max_len].rstrip("-")
+    return value or f"exp-{uuid.uuid4().hex[:8]}"
+
+
+def _default_run_id() -> str:
+    return _safe_experiment_id(
+        os.environ.get("AGENTM_BENCH_RUN_ID")
+        or f"r{datetime.now(UTC):%m%d%H%M%S}-{uuid.uuid4().hex[:4]}",
+        max_len=24,
+    )
+
+
+def _experiment_ids(
+    prefix: str,
+    model: str,
+    run_id: str,
+    task: str,
+    attempt_idx: int | None,
+) -> tuple[str, str]:
+    attempt = f"a{attempt_idx}" if attempt_idx is not None else "a0"
+    suffix = f"{run_id}-{model}-{attempt}-{task}"
+    return (
+        _safe_experiment_id(f"{prefix}-{suffix}"),
+        _safe_experiment_id(f"eval-{suffix}"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -102,8 +157,11 @@ def _run_and_eval_one(
     model: str, gateway: str,
     registry: str, prefix: str, tag: str,
     out: Path, eval_timeout: int, agent_timeout: int = 0,
+    agent_pool_replicas: int = 1,
+    agent_env_create_timeout: int = 1200,
     api_key: str = "",
     scenario: str = DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
+    run_id: str = "",
     attempt_idx: int | None = None,
 ) -> dict[str, Any]:
     """Run agent + evaluate one task. Returns result dict."""
@@ -112,9 +170,13 @@ def _run_and_eval_one(
     name = task.name
     log = out / f"{name}.log"
     score_file = out / f"{name}.score.json"
-    suffix = f"-a{attempt_idx}-{name}" if attempt_idx is not None else f"-{name}"
-    agent_exp_id = f"{prefix}-{model}{suffix}"
-    eval_exp_id = f"eval-{model}{suffix}"
+    agent_exp_id, eval_exp_id = _experiment_ids(
+        prefix,
+        model,
+        run_id,
+        name,
+        attempt_idx,
+    )
 
     image = adapter.get_image(task, registry, prefix, tag)
 
@@ -124,15 +186,19 @@ def _run_and_eval_one(
     if log.is_file():
         raw = log.read_bytes()
         agent_timed_out = b"[bench] agent timeout" in raw
-        m = re.search(rb"(?:session_id=|session id:\s*)(\S+)", raw)
-        if m:
-            session_id = m.group(1).decode()
+        if not any(marker in raw for marker in _INFRA_RETRY_LOG_MARKERS):
+            m = re.search(rb"(?:session_id=|session id:\s*)(\S+)", raw)
+            if m:
+                session_id = m.group(1).decode()
 
     if session_id is None:
         prompt = task.prompt
         if not prompt:
             return {"task": name, "status": "no_instruction"}
 
+        pool_replicas = max(1, agent_pool_replicas)
+        idle_timeout = max(3600, agent_timeout * 2 if agent_timeout > 0 else 0)
+        max_lifetime = max(7200, agent_timeout * 3 if agent_timeout > 0 else 0)
         env = {
             **os.environ,
             "AGENTM_AGENT_ENV_IMAGE": image,
@@ -143,7 +209,34 @@ def _run_and_eval_one(
             "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
             "AGENTM_AGENT_ENV_MEMORY_REQUEST": "2Gi",
             "AGENTM_AGENT_ENV_MEMORY_LIMIT": "16Gi",
-            "AGENTM_AGENT_ENV_MAX_REPLICAS": "8",
+            "AGENTM_AGENT_ENV_MAX_REPLICAS": os.environ.get(
+                "AGENTM_AGENT_ENV_MAX_REPLICAS",
+                str(pool_replicas),
+            ),
+            "AGENTM_AGENT_ENV_MIN_REPLICAS": os.environ.get(
+                "AGENTM_AGENT_ENV_MIN_REPLICAS",
+                "0",
+            ),
+            "AGENTM_AGENT_ENV_SCALE_UP_STEP": os.environ.get(
+                "AGENTM_AGENT_ENV_SCALE_UP_STEP",
+                str(pool_replicas),
+            ),
+            "AGENTM_AGENT_ENV_IDLE_TIMEOUT_SECONDS": os.environ.get(
+                "AGENTM_AGENT_ENV_IDLE_TIMEOUT_SECONDS",
+                str(idle_timeout),
+            ),
+            "AGENTM_AGENT_ENV_MAX_LIFETIME_SECONDS": os.environ.get(
+                "AGENTM_AGENT_ENV_MAX_LIFETIME_SECONDS",
+                str(max_lifetime),
+            ),
+            "AGENTM_AGENT_ENV_CREATE_TIMEOUT": os.environ.get(
+                "AGENTM_AGENT_ENV_CREATE_TIMEOUT",
+                str(agent_env_create_timeout),
+            ),
+            "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN": os.environ.get(
+                "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN",
+                "false",
+            ),
             **({"AGENTM_AGENT_ENV_API_KEY": api_key} if api_key else {}),
         }
         cmd = [
@@ -192,42 +285,79 @@ def _run_and_eval_one(
         return {"task": name, "status": "done", "tools": tools_count, **scores}
 
     from arl.session import ResourceRequirements  # type: ignore[import-not-found]
+    eval_idle_timeout = max(3600, eval_timeout * 2)
+    eval_max_lifetime = max(7200, eval_timeout * 3)
     session = arl.ManagedSession(
-        image=image,
-        experiment_id=eval_exp_id,
-        namespace=os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
-        gateway_url=gateway,
-        workspace_dir="/app",
-        api_key=api_key or None,
-        timeout=max(600.0, eval_timeout * 2.0),
-        max_replicas=1,
-        resources=ResourceRequirements(
-            requests={"cpu": "1", "memory": "2Gi"},
-            limits={"cpu": "8", "memory": "16Gi"},
-        ),
+        **_filter_supported_kwargs(
+            arl.ManagedSession,
+            {
+                "image": image,
+                "experiment_id": eval_exp_id,
+                "namespace": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
+                "gateway_url": gateway,
+                "workspace_dir": "/app",
+                "api_key": api_key or None,
+                "timeout": max(600.0, eval_timeout * 2.0),
+                "max_replicas": 1,
+                "min_replicas": 0,
+                "scale_up_step": 1,
+                "idle_timeout_seconds": eval_idle_timeout,
+                "max_lifetime_seconds": eval_max_lifetime,
+                "resources": ResourceRequirements(
+                    requests={"cpu": "1", "memory": "2Gi"},
+                    limits={"cpu": "8", "memory": "16Gi"},
+                ),
+            },
+        )
     )
     try:
         session.create_sandbox()
     except Exception as e:
+        try:
+            arl.GatewayClient(
+                base_url=gateway, api_key=api_key or None,
+            ).delete_experiment(agent_exp_id)
+        except Exception as cleanup_exc:  # noqa: BLE001
+            typer.echo(f"  [WARN] cleanup {agent_exp_id}: {cleanup_exc}", err=True)
         return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": str(e)}
 
     with _active_eval_lock:
         _active_eval_sessions.add(session)
+    scores: dict[str, Any] | None = None
+    eval_error: Exception | None = None
     try:
         replay_trajectory(session, session_id)
         scores = adapter.evaluate(session, task, timeout=eval_timeout)
     except Exception as e:
-        scores = {"reward": 0.0, "eval_output": "", "error": str(e)}
+        eval_error = e
         typer.echo(f"  [WARN] eval {name}: {e}", err=True)
     finally:
         with _active_eval_lock:
             _active_eval_sessions.discard(session)
+        client = arl.GatewayClient(base_url=gateway, api_key=api_key or None)
         try:
-            arl.GatewayClient(
-                base_url=gateway, api_key=api_key or None,
-            ).delete_experiment(eval_exp_id)
+            client.delete_experiment(eval_exp_id)
         except Exception as e:  # noqa: BLE001
             typer.echo(f"  [WARN] cleanup {eval_exp_id}: {e}", err=True)
+        try:
+            client.delete_experiment(agent_exp_id)
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"  [WARN] cleanup {agent_exp_id}: {e}", err=True)
+        client.close()
+
+    if eval_error is not None:
+        result: dict[str, Any] = {
+            "task": name,
+            "status": "eval_failed",
+            "tools": tools_count,
+            "error": str(eval_error),
+        }
+        if agent_timed_out:
+            result["agent_timed_out"] = True
+        return result
+
+    if scores is None:
+        scores = {"reward": 0.0, "eval_output": "", "error": "eval returned no scores"}
 
     if scores.get("reward") is None:
         scores["reward"] = 0.0
@@ -547,10 +677,12 @@ def batch(
     results_dir: Annotated[Path, typer.Option("--results")] = Path("/tmp/bench-results"),
     eval_timeout: Annotated[int, typer.Option("--eval-timeout")] = 300,
     agent_timeout: Annotated[int, typer.Option("--agent-timeout")] = 0,
+    agent_env_create_timeout: Annotated[int, typer.Option("--agent-env-create-timeout")] = 1200,
     task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
     api_key: Annotated[str, typer.Option("--api-key", envvar="AGENTM_AGENT_ENV_API_KEY")] = "",
     attempts: Annotated[int, typer.Option("--attempts", "-n")] = 1,
     scenario: Annotated[str, typer.Option("--scenario")] = DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
+    run_id: Annotated[str | None, typer.Option("--run-id")] = None,
 ) -> None:
     """Run all tasks in parallel, then evaluate. Results include scores.
 
@@ -575,6 +707,7 @@ def batch(
 
     base_out = results_dir / f"{bench}-{model}"
     base_out.mkdir(parents=True, exist_ok=True)
+    resolved_run_id = _safe_experiment_id(run_id, max_len=24) if run_id else _default_run_id()
 
     interrupted = False
 
@@ -593,7 +726,7 @@ def batch(
                 p.kill()
 
     def _cleanup_experiments(
-        gw: str, key: str, pfx: str, mdl: str,
+        gw: str, key: str, pfx: str, mdl: str, rid: str,
         task_list: list[TaskSpec], n_attempts: int,
     ) -> None:
         try:
@@ -602,8 +735,14 @@ def batch(
             cleaned = 0
             for t in task_list:
                 for attempt_idx in range(n_attempts):
-                    suffix = f"-a{attempt_idx}-{t.name}" if n_attempts > 1 else f"-{t.name}"
-                    for exp_id in [f"{pfx}-{mdl}{suffix}", f"eval-{mdl}{suffix}"]:
+                    exp_ids = _experiment_ids(
+                        pfx,
+                        mdl,
+                        rid,
+                        t.name,
+                        attempt_idx if n_attempts > 1 else None,
+                    )
+                    for exp_id in exp_ids:
                         try:
                             client.delete_experiment(exp_id)
                             cleaned += 1
@@ -665,11 +804,13 @@ def batch(
             jobs.append((attempt_idx, t))
 
     total_jobs = len(jobs)
+    agent_pool_replicas = max(1, min(concurrency, attempts))
     typer.echo(
         f"Batch: {len(tasks)} tasks × {attempts} attempt(s) = {total_jobs} jobs | "
         f"bench={bench} | model={model} | concurrency={concurrency}"
         + (f" | agent_timeout={agent_timeout}s" if agent_timeout > 0 else "")
     )
+    typer.echo(f"Run id: {resolved_run_id}")
     typer.echo(f"Results: {base_out}")
     typer.echo("")
 
@@ -689,8 +830,11 @@ def batch(
                     model=model, gateway=gateway,
                     registry=registry, prefix=prefix, tag=tag,
                     out=out, eval_timeout=eval_timeout, agent_timeout=agent_timeout,
+                    agent_pool_replicas=agent_pool_replicas,
+                    agent_env_create_timeout=agent_env_create_timeout,
                     api_key=api_key,
                     scenario=scenario,
+                    run_id=resolved_run_id,
                     attempt_idx=attempt_idx if attempts > 1 else None,
                 )
                 pending[f] = (attempt_idx, t.name)
@@ -708,7 +852,7 @@ def batch(
     finally:
         signal.signal(signal.SIGINT, prev_handler)
         _cleanup_eval_sessions()
-        _cleanup_experiments(gateway, api_key, prefix, model, tasks, attempts)
+        _cleanup_experiments(gateway, api_key, prefix, model, resolved_run_id, tasks, attempts)
 
     # Per-attempt summaries
     for attempt_idx in range(attempts):

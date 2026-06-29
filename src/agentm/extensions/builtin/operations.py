@@ -29,10 +29,21 @@ class OperationsConfig(BaseModel):
     pool_ref: str | None = None
     attach_session: str | None = None
     gateway_url: str | None = None
+    api_key: str | None = None
     namespace: str | None = None
     work_dir: str | None = None
     timeout: float | None = None
     idle_timeout_seconds: int | None = None
+    max_lifetime_seconds: int | None = None
+    create_timeout: float | None = None
+    cpu_request: str | None = None
+    cpu_limit: str | None = None
+    memory_request: str | None = None
+    memory_limit: str | None = None
+    max_replicas: int | None = None
+    min_replicas: int | None = None
+    scale_up_step: int | None = None
+    delete_on_shutdown: bool | None = None
 
 MANIFEST = ExtensionManifest(
     name="operations",

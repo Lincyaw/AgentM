@@ -39,7 +39,7 @@ dependencies = [
 # can create sandbox sessions. Install with ``uv sync --extra agent-env``
 # (workspace) or ``pip install agentm[agent-env]``.
 agent-env = [
-    "arl-env>=0.2.0",
+    "arl-env>=0.14.0",
 ]
 eval = [
     "agentm-rescue-window",
