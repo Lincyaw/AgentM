@@ -15,19 +15,16 @@ import (
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/browser"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/evaluation"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/shellpath"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
-	mcptools "github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/mcp"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/userconfig"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/notification"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/tool/editfile"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/dialog"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/userconfig"
 )
 
 // --- Session management ---
@@ -208,12 +205,7 @@ func (m *appModel) handleDeleteSession(sessionID string) (tea.Model, tea.Cmd) {
 	return m, notification.SuccessCmd("Session deleted.")
 }
 
-// --- Eval / Export / Compact / Copy ---
-
-func (m *appModel) handleEvalSession(filename string) (tea.Model, tea.Cmd) {
-	evalFile, _ := evaluation.Save(m.application.Session(), filename)
-	return m, notification.SuccessCmd("Eval saved to file " + evalFile)
-}
+// --- Export / Compact / Copy ---
 
 func (m *appModel) handleExportSession(filename string) (tea.Model, tea.Cmd) {
 	exportFile, err := m.application.ExportHTML(context.Background(), filename)
@@ -437,12 +429,8 @@ func (m *appModel) handleShowToolsDialog() (tea.Model, tea.Cmd) {
 	if err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load tools: %v", err))
 	}
-	// Read toolset statuses *after* CurrentAgentTools so the snapshot
-	// reflects the same Started state the user just observed (Tools()
-	// drives lazy startup of any not-yet-started toolset).
-	statuses := m.application.CurrentAgentToolsetStatuses()
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewToolsDialog(statuses, agentTools),
+		Model: dialog.NewToolsDialog(agentTools),
 	})
 }
 
@@ -450,52 +438,6 @@ func (m *appModel) handleShowSkillsDialog() (tea.Model, tea.Cmd) {
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewSkillsDialog(m.application.CurrentAgentSkills()),
 	})
-}
-
-// handleRestartToolset asks the runtime to restart the named toolset.
-// The actual call can block for up to ~35s (the supervisor's
-// reconnect timeout), so we run it inside a tea.Cmd goroutine and
-// surface the result via a notification toast on completion.
-func (m *appModel) handleRestartToolset(name string) (tea.Model, tea.Cmd) {
-	if name == "" {
-		return m, notification.ErrorCmd("usage: /toolset-restart <name>")
-	}
-	appRef := m.application
-	return m, tea.Batch(
-		notification.InfoCmd(fmt.Sprintf("Restarting toolset %q…", name)),
-		func() tea.Msg {
-			if err := appRef.RestartToolset(context.Background(), name); err != nil {
-				return notification.ShowMsg{
-					Text: fmt.Sprintf("Failed to restart %q: %v", name, err),
-					Type: notification.TypeError,
-				}
-			}
-			return notification.ShowMsg{
-				Text: fmt.Sprintf("Toolset %q restarted", name),
-				Type: notification.TypeSuccess,
-			}
-		},
-	)
-}
-
-// --- MCP prompts ---
-
-func (m *appModel) handleShowMCPPromptInput(promptName string, promptInfo any) (tea.Model, tea.Cmd) {
-	info, ok := promptInfo.(mcptools.PromptInfo)
-	if !ok {
-		return m, notification.ErrorCmd("Invalid prompt info")
-	}
-	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewMCPPromptInputDialog(promptName, info),
-	})
-}
-
-func (m *appModel) handleMCPPrompt(promptName string, arguments map[string]string) (tea.Model, tea.Cmd) {
-	promptContent, err := m.application.ExecuteMCPPrompt(context.Background(), promptName, arguments)
-	if err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Error executing MCP prompt '%s': %v", promptName, err))
-	}
-	return m, core.CmdHandler(messages.SendMsg{Content: promptContent})
 }
 
 // --- Model picker ---
@@ -771,14 +713,6 @@ func (m *appModel) closeTranscriptCh() {
 		close(m.transcriptCh)
 		m.transcriptCh = nil
 	}
-}
-
-func (m *appModel) handleElicitationResponse(action tools.ElicitationAction, content map[string]any) (tea.Model, tea.Cmd) {
-	if err := m.application.ResumeElicitation(context.Background(), action, content); err != nil {
-		slog.Error("Failed to resume elicitation", "action", action, "error", err)
-		return m, notification.ErrorCmd("Failed to complete server request: " + err.Error())
-	}
-	return m, nil
 }
 
 func (m *appModel) startShell() (tea.Model, tea.Cmd) {

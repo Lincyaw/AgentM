@@ -19,7 +19,6 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/transfertask"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/animation"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/markdown"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/message"
@@ -32,6 +31,7 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/toolschema"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/types"
 )
 
@@ -1142,7 +1142,7 @@ func (m *model) needsSeparator(index int) bool {
 	nextIsToolCall := m.messages[index+1].Type == types.MessageTypeToolCall
 
 	// Always add a separator before transfer_task, even between consecutive tool calls
-	if nextIsToolCall && m.messages[index+1].ToolCall.Function.Name == transfertask.ToolNameTransferTask {
+	if nextIsToolCall && m.messages[index+1].ToolCall.Function.Name == toolschema.ToolNameTransferTask {
 		return true
 	}
 

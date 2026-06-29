@@ -2,14 +2,12 @@ package commands
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/feedback"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/toolcommon"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
@@ -211,7 +209,7 @@ func builtInSessionCommands() []Item {
 			ID:           "session.tools",
 			Label:        "Tools",
 			SlashCommand: "/tools",
-			Description:  "Show every toolset (with lifecycle state) and the tools they expose",
+			Description:  "Show tools advertised by the gateway",
 			Category:     "Session",
 			Immediate:    true,
 			Execute: func(string) tea.Cmd {
@@ -272,29 +270,6 @@ func builtInSettingsCommands() []Item {
 			Immediate:    true,
 			Execute: func(string) tea.Cmd {
 				return core.CmdHandler(messages.OpenThemePickerMsg{})
-			},
-		},
-	}
-}
-
-func builtInFeedbackCommands() []Item {
-	return []Item{
-		{
-			ID:          "feedback.feedback",
-			Label:       "Give Feedback",
-			Description: "Provide feedback about docker agent",
-			Category:    "Feedback",
-			Execute: func(string) tea.Cmd {
-				return core.CmdHandler(messages.OpenURLMsg{URL: feedback.Link})
-			},
-		},
-		{
-			ID:          "feedback.bug",
-			Label:       "Report Bug",
-			Description: "Report a bug or issue",
-			Category:    "Feedback",
-			Execute: func(string) tea.Cmd {
-				return core.CmdHandler(messages.OpenURLMsg{URL: "https://github.com/AoyangSpace/agentm-terminal/issues/new/choose"})
 			},
 		},
 	}
@@ -381,78 +356,6 @@ func BuildCommandCategories(ctx context.Context, application *app.App) []Categor
 		})
 	}
 
-	mcpPrompts := application.CurrentMCPPrompts(ctx)
-	if len(mcpPrompts) > 0 {
-		mcpCommands := make([]Item, 0, len(mcpPrompts))
-		for promptName, promptInfo := range mcpPrompts {
-			// Build description with argument info
-			description := promptInfo.Description
-			if len(promptInfo.Arguments) > 0 {
-				// Count required arguments
-				requiredCount := 0
-				for _, arg := range promptInfo.Arguments {
-					if arg.Required {
-						requiredCount++
-					}
-				}
-
-				if requiredCount > 0 {
-					if description != "" {
-						description += " "
-					}
-					if requiredCount == 1 {
-						description += "(1 required arg)"
-					} else {
-						description += fmt.Sprintf("(%d required args)", requiredCount)
-					}
-				}
-			}
-
-			// Truncate long descriptions to fit on one line
-			description = toolcommon.TruncateText(description, 55)
-
-			// Create closure variables to capture current iteration values
-			currentPromptName := promptName
-			currentPromptInfo := promptInfo
-
-			mcpCommands = append(mcpCommands, Item{
-				ID:          "mcp.prompt." + promptName,
-				Label:       promptName,
-				Description: description,
-				Category:    "MCP Prompts",
-				Execute: func(string) tea.Cmd {
-					// If prompt has no required arguments, execute immediately
-					hasRequiredArgs := false
-					for _, arg := range currentPromptInfo.Arguments {
-						if arg.Required {
-							hasRequiredArgs = true
-							break
-						}
-					}
-
-					if !hasRequiredArgs {
-						// Execute prompt with empty arguments
-						return core.CmdHandler(messages.MCPPromptMsg{
-							PromptName: currentPromptName,
-							Arguments:  make(map[string]string),
-						})
-					} else {
-						// Show parameter input dialog for prompts with required arguments
-						return core.CmdHandler(messages.ShowMCPPromptInputMsg{
-							PromptName: currentPromptName,
-							PromptInfo: currentPromptInfo,
-						})
-					}
-				},
-			})
-		}
-
-		categories = append(categories, Category{
-			Name:     "MCP Prompts",
-			Commands: mcpCommands,
-		})
-	}
-
 	// Add skill commands if skills are enabled for the current agent
 	skillsList := application.CurrentAgentSkills()
 	if len(skillsList) > 0 {
@@ -484,17 +387,10 @@ func BuildCommandCategories(ctx context.Context, application *app.App) []Categor
 		})
 	}
 
-	// Settings and Feedback are always last, in that order.
-	categories = append(categories,
-		Category{
-			Name:     "Settings",
-			Commands: builtInSettingsCommands(),
-		},
-		Category{
-			Name:     "Feedback",
-			Commands: builtInFeedbackCommands(),
-		},
-	)
+	categories = append(categories, Category{
+		Name:     "Settings",
+		Commands: builtInSettingsCommands(),
+	})
 
 	// Filter out hidden commands and sort by label in all categories.
 	for i := range categories {

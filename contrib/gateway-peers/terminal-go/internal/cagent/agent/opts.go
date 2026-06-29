@@ -1,9 +1,5 @@
 package agent
 
-import (
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
-)
-
 // Opt configures an Agent at construction time.
 type Opt func(a *Agent)
 
@@ -55,9 +51,4 @@ func WithSubAgents(subAgents ...*Agent) Opt {
 // WithHandoffs sets the agent's handoff agents.
 func WithHandoffs(handoffs ...*Agent) Opt {
 	return func(a *Agent) { a.handoffs = handoffs }
-}
-
-// WithToolSets sets the agent's toolsets.
-func WithToolSets(toolSets ...tools.ToolSet) Opt {
-	return func(a *Agent) { a.toolsets = toolSets }
 }

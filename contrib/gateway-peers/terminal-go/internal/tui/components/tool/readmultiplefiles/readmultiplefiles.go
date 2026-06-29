@@ -8,12 +8,12 @@ import (
 	"charm.land/lipgloss/v2"
 
 	pathx "github.com/AoyangSpace/agentm-terminal/internal/cagent/path"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/filesystem"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/spinner"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/toolcommon"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/toolschema"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/types"
 )
 
@@ -23,7 +23,7 @@ func New(msg *types.Message, sessionState service.SessionStateReader) layout.Mod
 
 func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
 	// Parse arguments
-	var args filesystem.ReadMultipleFilesArgs
+	var args toolschema.ReadMultipleFilesArgs
 	if err := json.Unmarshal([]byte(msg.ToolCall.Function.Arguments), &args); err != nil {
 		return toolcommon.RenderTool(msg, s, "", "", width, sessionState.HideToolResults())
 	}
@@ -37,9 +37,9 @@ func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionS
 	}
 
 	// For completed/error state, render each file line
-	var meta *filesystem.ReadMultipleFilesMeta
+	var meta *toolschema.ReadMultipleFilesMeta
 	if msg.ToolResult != nil {
-		if m, ok := msg.ToolResult.Meta.(filesystem.ReadMultipleFilesMeta); ok {
+		if m, ok := msg.ToolResult.Meta.(toolschema.ReadMultipleFilesMeta); ok {
 			meta = &m
 		}
 	}
@@ -91,7 +91,7 @@ type fileSummary struct {
 }
 
 // formatSummaryLines creates a summary for each file from metadata.
-func formatSummaryLines(meta *filesystem.ReadMultipleFilesMeta) []fileSummary {
+func formatSummaryLines(meta *toolschema.ReadMultipleFilesMeta) []fileSummary {
 	if meta == nil || len(meta.Files) == 0 {
 		return nil
 	}

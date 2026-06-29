@@ -45,7 +45,6 @@ import (
 //
 // Dialogs:
 //   - MaxIterationsReachedEvent → Show max iterations dialog
-//   - ElicitationRequestEvent   → Show elicitation/OAuth dialog
 
 // handleRuntimeEvent processes runtime events and returns the appropriate command.
 // Returns (handled, cmd) where handled indicates if the event was processed.
@@ -175,9 +174,6 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 	// ===== Dialog Events =====
 	case *runtime.MaxIterationsReachedEvent:
 		return true, p.handleMaxIterationsReached(msg)
-
-	case *runtime.ElicitationRequestEvent:
-		return true, p.handleElicitationRequest(msg)
 	}
 
 	return false, nil
@@ -399,46 +395,6 @@ func (p *chatPage) handleMaxIterationsReached(msg *runtime.MaxIterationsReachedE
 		OriginatingEvent: msg,
 	})
 	return tea.Batch(spinnerCmd, dialogCmd)
-}
-
-func (p *chatPage) handleElicitationRequest(msg *runtime.ElicitationRequestEvent) tea.Cmd {
-	spinnerCmd := p.setWorking(false)
-
-	// Check if this is an OAuth flow by looking at the meta type
-	// Guard against nil Meta map to prevent panic
-	if msg.Meta != nil {
-		if elicitationType, ok := msg.Meta["docker-agent/type"].(string); ok && elicitationType == "oauth_flow" {
-			// OAuth flow - show the OAuth authorization dialog
-			var serverURL string
-			if url, ok := msg.Meta["docker-agent/server_url"].(string); ok {
-				serverURL = url
-			}
-			dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-				Model:            dialog.NewOAuthAuthorizationDialog(serverURL, p.app),
-				OriginatingEvent: msg,
-			})
-			return tea.Batch(spinnerCmd, dialogCmd)
-		}
-	}
-
-	// Check elicitation mode
-	switch msg.Mode {
-	case "url":
-		// URL-based elicitation - show URL dialog
-		dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewURLElicitationDialog(msg.Message, msg.URL),
-			OriginatingEvent: msg,
-		})
-		return tea.Batch(spinnerCmd, dialogCmd)
-
-	default:
-		// Form-based elicitation (default) - show form dialog
-		dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewElicitationDialog(msg.Message, msg.Schema, msg.Meta),
-			OriginatingEvent: msg,
-		})
-		return tea.Batch(spinnerCmd, dialogCmd)
-	}
 }
 
 // isSuccessfulStop returns true when the stream reason indicates a

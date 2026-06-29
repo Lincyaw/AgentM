@@ -30,7 +30,7 @@ type Option func(*StatusBar)
 
 // WithTitle sets a custom title for the status bar.
 //
-// If not provided, defaults to "docker agent".
+// If not provided, defaults to "AgentM Terminal".
 func WithTitle(title string) Option {
 	return func(s *StatusBar) {
 		s.title = title
@@ -41,7 +41,7 @@ func WithTitle(title string) Option {
 func New(help core.KeyMapHelp, opts ...Option) StatusBar {
 	s := StatusBar{
 		help:       help,
-		title:      "docker agent",
+		title:      "AgentM Terminal",
 		cacheDirty: true,
 	}
 
@@ -152,7 +152,7 @@ func (s *StatusBar) rebuild() {
 
 // View renders the status bar.
 //
-// Layout: [ help text ...           (+ new tab)  docker agent VERSION ]
+// Layout: [ help text ...           (+ new tab)  AgentM Terminal VERSION ]
 func (s *StatusBar) View() string {
 	if s.cacheDirty {
 		s.rebuild()

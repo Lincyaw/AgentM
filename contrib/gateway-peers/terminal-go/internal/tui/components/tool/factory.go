@@ -6,13 +6,6 @@
 package tool
 
 import (
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/fetch"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/filesystem"
-	handofftool "github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/handoff"
-	shelltool "github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/shell"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/todo"
-	transfertasktool "github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/transfertask"
-	userpromptool "github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/userprompt"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/tool/api"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/tool/defaulttool"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/tool/directorytree"
@@ -29,6 +22,7 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/tool/writefile"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/toolschema"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/types"
 )
 
@@ -38,23 +32,23 @@ type builder func(msg *types.Message, sessionState service.SessionStateReader) l
 // builders maps a tool name (or a "category:<name>" key) to its renderer.
 // Tools sharing the same visual representation point at the same builder.
 var builders = map[string]builder{
-	transfertasktool.ToolNameTransferTask: transfertask.New,
-	handofftool.ToolNameHandoff:           handoff.New,
-	filesystem.ToolNameEditFile:           editfile.New,
-	filesystem.ToolNameWriteFile:          writefile.New,
-	filesystem.ToolNameReadFile:           readfile.New,
-	filesystem.ToolNameReadMultipleFiles:  readmultiplefiles.New,
-	filesystem.ToolNameListDirectory:      listdirectory.New,
-	filesystem.ToolNameDirectoryTree:      directorytree.New,
-	filesystem.ToolNameSearchFilesContent: searchfilescontent.New,
-	shelltool.ToolNameShell:               shell.New,
-	userpromptool.ToolNameUserPrompt:      userprompt.New,
-	fetch.ToolNameFetch:                   api.New,
+	toolschema.ToolNameTransferTask:       transfertask.New,
+	toolschema.ToolNameHandoff:            handoff.New,
+	toolschema.ToolNameEditFile:           editfile.New,
+	toolschema.ToolNameWriteFile:          writefile.New,
+	toolschema.ToolNameReadFile:           readfile.New,
+	toolschema.ToolNameReadMultipleFiles:  readmultiplefiles.New,
+	toolschema.ToolNameListDirectory:      listdirectory.New,
+	toolschema.ToolNameDirectoryTree:      directorytree.New,
+	toolschema.ToolNameSearchFilesContent: searchfilescontent.New,
+	toolschema.ToolNameShell:              shell.New,
+	toolschema.ToolNameUserPrompt:         userprompt.New,
+	toolschema.ToolNameFetch:              api.New,
 	"category:api":                        api.New,
-	todo.ToolNameCreateTodo:               todotool.New,
-	todo.ToolNameCreateTodos:              todotool.New,
-	todo.ToolNameUpdateTodos:              todotool.New,
-	todo.ToolNameListTodos:                todotool.New,
+	toolschema.ToolNameCreateTodo:         todotool.New,
+	toolschema.ToolNameCreateTodos:        todotool.New,
+	toolschema.ToolNameUpdateTodos:        todotool.New,
+	toolschema.ToolNameListTodos:          todotool.New,
 }
 
 // New returns the appropriate tool view for the given message.

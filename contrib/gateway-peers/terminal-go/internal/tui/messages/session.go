@@ -35,9 +35,6 @@ type (
 	// ExitAfterFirstResponseMsg exits TUI after first assistant response completes.
 	ExitAfterFirstResponseMsg struct{}
 
-	// EvalSessionMsg saves evaluation data to the specified file.
-	EvalSessionMsg struct{ Filename string }
-
 	// CompactSessionMsg generates a summary and compacts session history.
 	CompactSessionMsg struct{ AdditionalPrompt string }
 

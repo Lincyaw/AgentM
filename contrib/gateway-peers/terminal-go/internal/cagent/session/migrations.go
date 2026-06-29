@@ -101,9 +101,9 @@ func (m *MigrationManager) checkForUnknownMigrations(ctx context.Context) error 
 
 	if maxAppliedID > maxKnownID {
 		return fmt.Errorf(
-			"%w: you are running docker-agent %s which supports migrations up to %d, "+
+			"%w: you are running AgentM Terminal %s which supports migrations up to %d, "+
 				"but the session database has migration %d from a newer version; "+
-				"please upgrade docker-agent to the latest version",
+				"please upgrade AgentM Terminal to the latest version",
 			ErrNewerDatabase, version.Version, maxKnownID, maxAppliedID)
 	}
 

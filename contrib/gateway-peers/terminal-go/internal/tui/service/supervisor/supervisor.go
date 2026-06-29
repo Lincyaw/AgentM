@@ -174,7 +174,7 @@ func (s *Supervisor) handleRuntimeEvent(sessionID string, msg tea.Msg) {
 		runner.Title = ev.Title
 		s.notifyTabsUpdated()
 
-	case *runtime.ToolCallConfirmationEvent, *runtime.MaxIterationsReachedEvent, *runtime.ElicitationRequestEvent:
+	case *runtime.ToolCallConfirmationEvent, *runtime.MaxIterationsReachedEvent:
 		// These require user attention
 		if sessionID != s.activeID {
 			runner.NeedsAttn = true

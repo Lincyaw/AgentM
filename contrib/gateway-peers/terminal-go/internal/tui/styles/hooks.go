@@ -34,7 +34,7 @@ func runThemeChangeHooks() {
 // ApplyThemeRef loads the theme by reference and applies it, falling back
 // to the default theme when the reference does not resolve. It is the
 // one-call entry point for embedders that align their host theme with
-// docker-agent's components and only know a theme name. The applied theme
+// AgentM Terminal components and only know a theme name. The applied theme
 // is returned.
 func ApplyThemeRef(ref string) *Theme {
 	theme, err := LoadTheme(ref)

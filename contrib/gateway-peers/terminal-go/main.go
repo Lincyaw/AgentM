@@ -1,7 +1,6 @@
 // Command agentm-terminal is the AgentM gateway's terminal chat-client peer.
-// It renders Docker cagent's TUI (vendored verbatim under internal/tui) but
-// sources every event from the AgentM gateway wire protocol (internal/wire)
-// via internal/adapter, instead of a local agent runtime.
+// It renders a cagent-derived TUI adapted to the AgentM gateway wire protocol
+// (internal/wire) via internal/adapter, instead of a local agent runtime.
 package main
 
 import (

@@ -4,16 +4,15 @@
 // title generator into the App the TUI talks to. In the agentm-terminal peer
 // the runtime is the gateway wire protocol; the real implementation of these
 // methods is supplied later by internal/adapter. This file exists so the
-// vendored TUI compiles against a stable App surface: the exported method
-// signatures are kept byte-identical to cagent's pkg/app so internal/tui needs
-// no edits, while the bodies are stubs (zero value / not-implemented error)
-// until the adapter takes over.
+// cagent-derived TUI compiles against a stable App surface: the exported
+// methods are the subset the gateway-backed TUI still needs, while the bodies
+// are stubs (zero value / not-implemented error) until the adapter takes over.
 //
 // Only the symbols the TUI references are exposed:
 //
 //	App, New, WithReadOnly,
 //	(*App).Run, CompactSession, ResolveInput, RunBangCommand, RunSkillFork,
-//	UpdateSessionTitle, ResumeElicitation, CurrentAgentSkills,
+//	UpdateSessionTitle, CurrentAgentSkills,
 //	CurrentAgentCommands, IsReadOnly, ShouldExitAfterFirstResponse,
 //	SkillCommandFork, Session,
 //	ErrTitleGenerating, ErrNothingToUndo.
@@ -32,7 +31,6 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/skills"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
-	mcptools "github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/mcp"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 )
 
@@ -60,8 +58,6 @@ type Controller interface {
 	CompactSession(ctx context.Context, cancel context.CancelFunc, additionalPrompt string)
 	// Resume delivers a tool-confirmation decision to a waiting tool call.
 	Resume(req runtime.ResumeRequest)
-	// ResumeElicitation answers a pending elicitation request.
-	ResumeElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any) error
 	// UpdateSessionTitle sets and persists the session title.
 	UpdateSessionTitle(ctx context.Context, title string) error
 	// RunBangCommand runs a shell command and surfaces its output.
@@ -231,15 +227,6 @@ func (a *App) UpdateSessionTitle(ctx context.Context, title string) error {
 	return nil
 }
 
-// ResumeElicitation resumes an elicitation request with the given action and
-// content. Delegates to the wire-backed controller.
-func (a *App) ResumeElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any) error {
-	if a.controller != nil {
-		return a.controller.ResumeElicitation(ctx, action, content)
-	}
-	return nil
-}
-
 // CurrentAgentSkills returns the available skills for the current agent,
 // sourced from the welcome-handshake capability block (skills are gateway
 // commands under the "skill" namespace). Empty until SetSkills runs.
@@ -379,13 +366,6 @@ func (a *App) SnapshotsEnabled() bool {
 	return false
 }
 
-// CurrentMCPPrompts returns the available MCP prompts for the active agent.
-// Stub: returns nil until the adapter takes over.
-func (a *App) CurrentMCPPrompts(ctx context.Context) map[string]mcptools.PromptInfo {
-	_ = ctx
-	return nil
-}
-
 // SendFirstMessage returns a command that sends the first message of the
 // session. When the controller has a queued first message it is emitted as a
 // SendMsg so it flows through the normal TUI send path (queueing, title
@@ -515,19 +495,6 @@ func (a *App) CurrentAgentTools(ctx context.Context) ([]tools.Tool, error) {
 	return ts, nil
 }
 
-// CurrentAgentToolsetStatuses returns the lifecycle status of each toolset.
-// Stub: returns nil until the adapter takes over.
-func (a *App) CurrentAgentToolsetStatuses() []tools.ToolsetStatus {
-	return nil
-}
-
-// RestartToolset restarts a named toolset. Stub: returns nil until the adapter
-// takes over.
-func (a *App) RestartToolset(ctx context.Context, name string) error {
-	_, _ = ctx, name
-	return nil
-}
-
 // ResolveCommand converts a /command into its prompt text. Stub: returns the
 // input unchanged until the adapter takes over.
 func (a *App) ResolveCommand(ctx context.Context, userInput string) string {
@@ -540,13 +507,6 @@ func (a *App) ResolveCommand(ctx context.Context, userInput string) string {
 func (a *App) LookupCommand(ctx context.Context, userInput string) (types.Command, string, bool) {
 	_, _ = ctx, userInput
 	return types.Command{}, "", false
-}
-
-// ExecuteMCPPrompt executes an MCP prompt. Stub: returns empty content and nil
-// until the adapter takes over.
-func (a *App) ExecuteMCPPrompt(ctx context.Context, promptName string, arguments map[string]string) (string, error) {
-	_, _, _ = ctx, promptName, arguments
-	return "", nil
 }
 
 // TrackCurrentAgentModel records the active agent's current model. Stub: no-op.

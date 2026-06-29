@@ -4,12 +4,12 @@ import (
 	"fmt"
 
 	pathx "github.com/AoyangSpace/agentm-terminal/internal/cagent/path"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/filesystem"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/spinner"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/toolcommon"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/toolschema"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/types"
 )
 
@@ -32,7 +32,7 @@ func render(
 	_ int,
 ) string {
 	// Parse tool arguments to extract the file path for display.
-	args, err := filesystem.ParseEditFileArgs([]byte(msg.ToolCall.Function.Arguments))
+	args, err := toolschema.ParseEditFileArgs([]byte(msg.ToolCall.Function.Arguments))
 	if err != nil {
 		// If arguments cannot be parsed, fail silently to avoid breaking the TUI.
 		return ""
@@ -111,7 +111,7 @@ func renderCollapsed(
 	width,
 	_ int,
 ) string {
-	args, err := filesystem.ParseEditFileArgs([]byte(msg.ToolCall.Function.Arguments))
+	args, err := toolschema.ParseEditFileArgs([]byte(msg.ToolCall.Function.Arguments))
 	if err != nil {
 		return ""
 	}

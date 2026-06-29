@@ -732,6 +732,69 @@ requirements:
     depends_on:
       - REQ-096-cli-provider-session-seams
 
+  - id: REQ-189-terminal-wire-only-tool-surface
+    title: Terminal peer keeps tool/request surfaces wire-only
+    description: >
+      The Go terminal gateway peer must not carry local builtin toolsets, MCP
+      host implementations, tool lifecycle supervisors, schema generators, or
+      handler/executor helpers. Tool execution belongs to AgentM gateway atoms;
+      terminal-go may keep only lightweight wire/TUI data types, tool-call
+      renderers, approval responses, a gateway-advertised tool catalogue, and
+      TUI chrome that is backed by the current gateway wire protocol.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/controller.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/agent/agent.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/agent/opts.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/app/app.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/history/history.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/paths/paths.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/runtime/event.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/session/migrations.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/session/session.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/session/store.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/tools/description.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/tools/tools.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/messages/messages.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/sidebar/sidebar.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/statusbar/statusbar.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/directorytree/directorytree.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/editfile/editfile.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/editfile/render.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/factory.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/handoff/handoff.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/listdirectory/listdirectory.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/readfile/readfile.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/readmultiplefiles/readmultiplefiles.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/searchfilescontent/searchfilescontent.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/shell/shell.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/todotool/sidebar.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/transfertask/transfertask.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tool/writefile/writefile.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/commands/commands.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/toolconfirm/toolconfirm.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/dialog/base.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/dialog/theme_picker.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/dialog/tools.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/handlers.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/messages/messages.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/messages/toggle.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/runtime_events.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/service/supervisor/supervisor.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/styles/hooks.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/toolschema/schema.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/tui.go
+      - path: contrib/gateway-peers/terminal-go/go.mod
+      - path: contrib/gateway-peers/terminal-go/go.sum
+      - path: contrib/gateway-peers/terminal-go/main.go
+    tests: []
+    docs:
+      - path: .claude/designs/go-terminal-tui.md
+    depends_on:
+      - REQ-180-terminal-gateway-feedback
+
   - id: REQ-119-core-kernel-residuals
     title: Core kernel removes hard-coded layout literals and dead Tool surface
     description: >

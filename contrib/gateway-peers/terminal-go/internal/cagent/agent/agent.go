@@ -7,16 +7,12 @@
 // surface of an agent (Name, Model, Provider, Thinking, Description) plus a
 // handful of accessors used when building invariant system messages
 // (Name, Description, HasSubAgents, SubAgents, Handoffs, Instruction,
-// NumHistoryItems, ToolSets).
+// NumHistoryItems).
 //
 // Everything provider/model-heavy (model selection, fallbacks, overrides,
 // hooks, cache, harness) has been dropped. The UI sidebar reads the same
 // descriptive fields off runtime.AgentDetails, not off this type.
 package agent
-
-import (
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
-)
 
 // Agent is the minimal agent identity consumed by the session/chat seam.
 //
@@ -39,7 +35,6 @@ type Agent struct {
 	subAgents       []*Agent
 	handoffs        []*Agent
 	parents         []*Agent
-	toolsets        []tools.ToolSet
 }
 
 // New creates a new agent with the given name and applies the options.
@@ -74,6 +69,3 @@ func (a *Agent) Handoffs() []*Agent { return a.handoffs }
 
 // Parents returns the list of parent agents.
 func (a *Agent) Parents() []*Agent { return a.parents }
-
-// ToolSets returns the agent's toolsets.
-func (a *Agent) ToolSets() []tools.ToolSet { return a.toolsets }

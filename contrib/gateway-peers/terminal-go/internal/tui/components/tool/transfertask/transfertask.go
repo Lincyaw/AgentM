@@ -6,12 +6,12 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/transfertask"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/spinner"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/toolcommon"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/toolschema"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/types"
 )
 
@@ -20,7 +20,7 @@ func New(msg *types.Message, sessionState service.SessionStateReader) layout.Mod
 }
 
 func render(msg *types.Message, _ spinner.Spinner, _ service.SessionStateReader, width, _ int) string {
-	var params transfertask.Args
+	var params toolschema.TransferTaskArgs
 	if err := json.Unmarshal([]byte(msg.ToolCall.Function.Arguments), &params); err != nil {
 		return ""
 	}

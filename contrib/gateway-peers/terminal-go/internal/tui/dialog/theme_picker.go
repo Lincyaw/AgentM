@@ -22,7 +22,7 @@ type ThemeChoice struct {
 	Name      string // Display name
 	IsCurrent bool   // Currently active theme
 	IsDefault bool   // Built-in default theme ("default")
-	IsBuiltin bool   // Built-in theme shipped with docker agent
+	IsBuiltin bool   // Built-in theme shipped with AgentM Terminal
 }
 
 // themePickerDialog is a dialog for selecting a theme.

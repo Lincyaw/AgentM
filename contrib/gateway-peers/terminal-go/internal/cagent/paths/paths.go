@@ -47,13 +47,11 @@ func SetConfigDir(dir string) { configDirOverride.Set(dir) }
 // An empty value restores the default behaviour.
 func SetDataDir(dir string) { dataDirOverride.Set(dir) }
 
-// SetRoot re-homes all docker-agent state under one directory: data,
+// SetRoot re-homes all AgentM Terminal state under one directory: data,
 // config, and cache land in the "data", "config", and "cache"
 // subdirectories of root. It is the one-call override for embedders that
-// must keep their embedded agent's state isolated from a docker-agent
-// installation on the same machine (e.g. the Gordon assistant in Docker
-// Sandboxes homes everything under ~/.sbx/gordon). An empty root restores
-// the per-directory defaults.
+// must keep their embedded agent's state isolated from another installation.
+// An empty root restores the per-directory defaults.
 func SetRoot(root string) {
 	if root == "" {
 		SetDataDir("")
@@ -66,7 +64,7 @@ func SetRoot(root string) {
 	SetCacheDir(filepath.Join(root, "cache"))
 }
 
-// GetCacheDir returns the user's cache directory for docker agent.
+// GetCacheDir returns the user's cache directory for AgentM Terminal.
 //
 // If an override has been set via [SetCacheDir] it is returned instead.
 //
@@ -86,7 +84,7 @@ func GetCacheDir() string {
 	})
 }
 
-// GetConfigDir returns the user's config directory for docker agent.
+// GetConfigDir returns the user's config directory for AgentM Terminal.
 //
 // If an override has been set via [SetConfigDir] it is returned instead.
 //
@@ -103,7 +101,7 @@ func GetConfigDir() string {
 	})
 }
 
-// GetDataDir returns the user's data directory for docker agent (caches, content, logs).
+// GetDataDir returns the user's data directory for AgentM Terminal (caches, content, logs).
 //
 // If an override has been set via [SetDataDir] it is returned instead.
 //

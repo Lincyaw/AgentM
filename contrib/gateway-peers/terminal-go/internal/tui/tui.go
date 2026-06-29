@@ -164,8 +164,7 @@ type appModel struct {
 
 	// stashedDialogs holds background dialog instances that were on screen
 	// when the user navigated away from a tab. The dialog instance preserves
-	// in-progress input (e.g. text typed into a user_prompt elicitation) so
-	// that returning to the tab restores the same dialog rather than
+	// in-progress input so that returning to the tab restores the same dialog rather than
 	// rebuilding a fresh one from the originating runtime event.
 	//
 	// The stored event is matched against the supervisor's pending event on
@@ -230,7 +229,7 @@ func WithHideSidebar() Option {
 
 // WithAppName sets the application name.
 //
-// If not provided, defaults to "docker agent".
+// If not provided, defaults to "AgentM Terminal".
 func WithAppName(name string) Option {
 	return func(m *appModel) {
 		m.appName = name
@@ -356,7 +355,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		editorLines:                   3,
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
-		appName:                       "docker agent",
+		appName:                       "AgentM Terminal",
 		appVersion:                    version.Version,
 	}
 
@@ -949,9 +948,6 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.ResetSnapshotMsg:
 		return m.handleResetSnapshot(msg.Keep)
 
-	case messages.EvalSessionMsg:
-		return m.handleEvalSession(msg.Filename)
-
 	case messages.ExportSessionMsg:
 		return m.handleExportSession(msg.Filename)
 
@@ -986,9 +982,6 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.ShowSkillsDialogMsg:
 		return m.handleShowSkillsDialog()
-
-	case messages.RestartToolsetMsg:
-		return m.handleRestartToolset(msg.Name)
 
 	case messages.AgentCommandMsg:
 		return m.handleAgentCommand(msg.Command)
@@ -1040,14 +1033,6 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.waitForTranscript()
 		return m, cmd
 
-	// --- MCP prompts ---
-
-	case messages.ShowMCPPromptInputMsg:
-		return m.handleShowMCPPromptInput(msg.PromptName, msg.PromptInfo)
-
-	case messages.MCPPromptMsg:
-		return m.handleMCPPrompt(msg.PromptName, msg.Arguments)
-
 	// --- File attachments ---
 
 	case messages.AttachFileMsg:
@@ -1064,11 +1049,6 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.OpenURLMsg:
 		return m.handleOpenURL(msg.URL)
-
-	// --- Elicitation ---
-
-	case messages.ElicitationResponseMsg:
-		return m.handleElicitationResponse(msg.Action, msg.Content)
 
 	// --- Errors ---
 
@@ -1408,7 +1388,7 @@ type stashedDialog struct {
 // Existing chat pages and editors are preserved (not recreated) so that in-flight streaming
 // content and draft text are retained when switching back to a tab.
 func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
-	// If a background dialog (e.g. pending elicitation) is open on the
+	// If a background dialog is open on the
 	// outgoing tab, capture both its originating event and the live dialog
 	// instance before the supervisor flips activeID. We only commit the
 	// re-stash after SwitchTo succeeds — otherwise a failed switch would
@@ -1416,8 +1396,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	// on screen.
 	//
 	// Stashing the dialog instance (rather than rebuilding it from the event
-	// on return) preserves any in-progress input the user typed — e.g. text
-	// already entered into a user_prompt elicitation. See issue #2770.
+	// on return) preserves any in-progress input the user typed. See issue #2770.
 	var (
 		backgroundEvent  tea.Msg
 		backgroundDialog dialog.Dialog
@@ -1541,8 +1520,8 @@ func (m *appModel) applySidebarCollapsed(sessionID string) tea.Cmd {
 	return m.resizeAll()
 }
 
-// replayPendingEvent checks if a session has a pending attention event (e.g. tool confirmation,
-// max iterations, elicitation) that was received while the tab was inactive.
+// replayPendingEvent checks if a session has a pending attention event (e.g. tool confirmation
+// or max iterations) that was received while the tab was inactive.
 // If found, it opens the appropriate dialog. The event was already processed by the chat page
 // (updating the message list), but the dialog command was discarded for inactive sessions.
 //
@@ -1590,41 +1569,9 @@ func (m *appModel) replayPendingEvent(sessionID string) tea.Cmd {
 			OriginatingEvent: ev,
 		})
 
-	case *runtime.ElicitationRequestEvent:
-		return m.replayElicitationEvent(ev)
 	}
 
 	return nil
-}
-
-// replayElicitationEvent opens the appropriate elicitation dialog for a pending event.
-func (m *appModel) replayElicitationEvent(ev *runtime.ElicitationRequestEvent) tea.Cmd {
-	// Check if this is an OAuth flow
-	if ev.Meta != nil {
-		if elicitationType, ok := ev.Meta["docker-agent/type"].(string); ok && elicitationType == "oauth_flow" {
-			var serverURL string
-			if url, ok := ev.Meta["docker-agent/server_url"].(string); ok {
-				serverURL = url
-			}
-			return core.CmdHandler(dialog.OpenDialogMsg{
-				Model:            dialog.NewOAuthAuthorizationDialog(serverURL, m.application),
-				OriginatingEvent: ev,
-			})
-		}
-	}
-
-	switch ev.Mode {
-	case "url":
-		return core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewURLElicitationDialog(ev.Message, ev.URL),
-			OriginatingEvent: ev,
-		})
-	default:
-		return core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewElicitationDialog(ev.Message, ev.Schema, ev.Meta),
-			OriginatingEvent: ev,
-		})
-	}
 }
 
 // handleReorderTab moves a tab from one position to another.
@@ -1945,8 +1892,8 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		})
 	}
 
-	// Dialog gets priority when open, EXCEPT for background dialogs (e.g.
-	// pending elicitations) which let tab-navigation keys keep working so
+	// Dialog gets priority when open, EXCEPT for background dialogs, which
+	// let tab-navigation keys keep working so
 	// the user can switch to another conversation while the prompt waits.
 	if m.dialogMgr.Open() {
 		if m.dialogMgr.TopIsBackground() && !m.leanMode && !m.editor.IsHistorySearchActive() {
@@ -2111,8 +2058,8 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 
 	// Dialogs use full-window coordinates (they're positioned over the entire screen)
 	if m.dialogMgr.Open() {
-		// Background dialogs (e.g. pending elicitations) let tab-bar clicks
-		// pass through so the user can keep navigating between tabs.
+		// Background dialogs let tab-bar clicks pass through so the user can
+		// keep navigating between tabs.
 		if m.dialogMgr.TopIsBackground() && !m.leanMode && m.hitTestRegion(msg.Y) == regionTabBar {
 			adjustedMsg := msg
 			adjustedMsg.X = msg.X - styles.AppPadding

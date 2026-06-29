@@ -519,47 +519,6 @@ func StreamStopped(sessionID, agentName, reason string) Event {
 
 func (e *StreamStoppedEvent) GetSessionID() string { return e.SessionID }
 
-// ElicitationRequestEvent is sent when an elicitation request is received from an MCP server
-type ElicitationRequestEvent struct {
-	AgentContext
-
-	Type          string         `json:"type"`
-	Message       string         `json:"message"`
-	Mode          string         `json:"mode,omitempty"` // "form" or "url"
-	Schema        any            `json:"schema,omitempty"`
-	URL           string         `json:"url,omitempty"`
-	ElicitationID string         `json:"elicitation_id,omitempty"`
-	Meta          map[string]any `json:"meta,omitempty"`
-}
-
-func ElicitationRequest(message, mode string, schema any, url, elicitationID string, meta map[string]any, agentName string) Event {
-	return &ElicitationRequestEvent{
-		Type:          "elicitation_request",
-		Message:       message,
-		Mode:          mode,
-		Schema:        schema,
-		URL:           url,
-		ElicitationID: elicitationID,
-		Meta:          meta,
-		AgentContext:  newAgentContext(agentName),
-	}
-}
-
-type AuthorizationEvent struct {
-	AgentContext
-
-	Type         string                  `json:"type"`
-	Confirmation tools.ElicitationAction `json:"confirmation"`
-}
-
-func Authorization(confirmation tools.ElicitationAction, agentName string) Event {
-	return &AuthorizationEvent{
-		Type:         "authorization_event",
-		Confirmation: confirmation,
-		AgentContext: newAgentContext(agentName),
-	}
-}
-
 type MaxIterationsReachedEvent struct {
 	AgentContext
 
@@ -571,33 +530,6 @@ func MaxIterationsReached(maxIterations int) Event {
 	return &MaxIterationsReachedEvent{
 		Type:          "max_iterations_reached",
 		MaxIterations: maxIterations,
-	}
-}
-
-// MCPInitStartedEvent is for MCP initialization lifecycle events
-type MCPInitStartedEvent struct {
-	AgentContext
-
-	Type string `json:"type"`
-}
-
-func MCPInitStarted(agentName string) Event {
-	return &MCPInitStartedEvent{
-		Type:         "mcp_init_started",
-		AgentContext: newAgentContext(agentName),
-	}
-}
-
-type MCPInitFinishedEvent struct {
-	AgentContext
-
-	Type string `json:"type"`
-}
-
-func MCPInitFinished(agentName string) Event {
-	return &MCPInitFinishedEvent{
-		Type:         "mcp_init_finished",
-		AgentContext: newAgentContext(agentName),
 	}
 }
 
@@ -674,8 +606,8 @@ func AgentSwitching(switching bool, fromAgent, toAgent string) Event {
 	}
 }
 
-// ToolsetInfoEvent is sent when toolset information is available
-// When Loading is true, more tools may still be loading (e.g., MCP servers starting)
+// ToolsetInfoEvent is sent when gateway-advertised tool information is available.
+// When Loading is true, more tools may still be loading.
 type ToolsetInfoEvent struct {
 	AgentContext
 

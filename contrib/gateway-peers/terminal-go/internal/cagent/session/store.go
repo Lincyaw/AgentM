@@ -21,7 +21,7 @@ import (
 var (
 	ErrEmptyID       = errors.New("session ID cannot be empty")
 	ErrNotFound      = errors.New("session not found")
-	ErrNewerDatabase = errors.New("session database was created by a newer version of docker-agent")
+	ErrNewerDatabase = errors.New("session database was created by a newer version of AgentM Terminal")
 )
 
 // IsRelativeSessionRef reports whether ref is a relative session reference
@@ -618,7 +618,7 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 // scanSession scans a single row into a Session struct.
 // Note: Messages are loaded separately from session_items table.
 // The thinking column is read but discarded — it is kept in the schema for
-// backward compatibility with older docker-agent versions that wrote it.
+// backward compatibility with older cagent-derived versions that wrote it.
 func scanSession(scanner interface {
 	Scan(dest ...any) error
 },

@@ -6,10 +6,10 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/todo"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/tab"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/toolcommon"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/toolschema"
 )
 
 // renderCacheCap bounds the per-width render cache. Only a couple of widths are
@@ -20,7 +20,7 @@ const renderCacheCap = 8
 
 // SidebarComponent represents the todo display component for the sidebar
 type SidebarComponent struct {
-	todos []todo.Todo
+	todos []toolschema.Todo
 	width int
 
 	// renderCache memoizes the rendered todo list keyed by content width.
@@ -47,7 +47,7 @@ func (c *SidebarComponent) SetTodos(result *tools.ToolCallResult) error {
 		return nil
 	}
 
-	todos, ok := result.Meta.([]todo.Todo)
+	todos, ok := result.Meta.([]toolschema.Todo)
 	if !ok {
 		return nil
 	}
@@ -85,7 +85,7 @@ func (c *SidebarComponent) Render() string {
 	return rendered
 }
 
-func (c *SidebarComponent) renderTodoLine(todoItem todo.Todo) string {
+func (c *SidebarComponent) renderTodoLine(todoItem toolschema.Todo) string {
 	icon, style := renderTodoIcon(todoItem.Status)
 
 	prefix := icon + " "

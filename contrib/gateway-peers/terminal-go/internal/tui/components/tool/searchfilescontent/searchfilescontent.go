@@ -4,10 +4,10 @@ import (
 	"fmt"
 
 	pathx "github.com/AoyangSpace/agentm-terminal/internal/cagent/path"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/filesystem"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/toolcommon"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/toolschema"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/types"
 )
 
@@ -19,7 +19,7 @@ func New(msg *types.Message, sessionState service.SessionStateReader) layout.Mod
 }
 
 func extractArgs(args string) string {
-	parsed, err := toolcommon.ParseArgs[filesystem.SearchFilesContentArgs](args)
+	parsed, err := toolcommon.ParseArgs[toolschema.SearchFilesContentArgs](args)
 	if err != nil {
 		return ""
 	}
@@ -40,7 +40,7 @@ func extractResult(msg *types.Message) string {
 	if msg.ToolResult == nil || msg.ToolResult.Meta == nil {
 		return "no matches"
 	}
-	meta, ok := msg.ToolResult.Meta.(filesystem.SearchFilesContentMeta)
+	meta, ok := msg.ToolResult.Meta.(toolschema.SearchFilesContentMeta)
 	if !ok {
 		return "no matches"
 	}

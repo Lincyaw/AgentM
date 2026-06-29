@@ -118,7 +118,6 @@ type model struct {
 	layoutCfg          LayoutConfig              // layout configuration for spacing
 	sessionUsage       map[string]*runtime.Usage // sessionID -> latest usage snapshot
 	todoComp           *todotool.SidebarComponent
-	mcpInit            bool
 	ragIndexing        map[string]*ragIndexingState // strategy name -> indexing state
 	spinner            spinner.Spinner
 	spinnerActive      bool // true when spinner is registered with animation coordinator
@@ -201,7 +200,7 @@ func (m *model) Init() tea.Cmd {
 
 // needsSpinner returns true if any spinner-driving state is active.
 func (m *model) needsSpinner() bool {
-	return m.workingAgent != "" || m.toolsLoading || m.mcpInit || m.titleRegenerating
+	return m.workingAgent != "" || m.toolsLoading || m.titleRegenerating
 }
 
 // startSpinner registers the spinner with the animation coordinator if not already active.
@@ -645,25 +644,6 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case *runtime.TokenUsageEvent:
 		m.SetTokenUsage(msg)
 		return m, nil
-	case *runtime.MCPInitStartedEvent:
-		// Ignore if stream was cancelled (stale event from before cancellation)
-		if m.streamCancelled {
-			return m, nil
-		}
-		if !m.mcpInit {
-			m.mcpInit = true
-			m.invalidateCache()
-			cmd := m.startSpinner()
-			return m, cmd
-		}
-		return m, nil
-	case *runtime.MCPInitFinishedEvent:
-		if m.mcpInit {
-			m.mcpInit = false
-			m.invalidateCache()
-			m.stopSpinner() // Will only stop if no other state needs it
-		}
-		return m, nil
 	case *runtime.RAGIndexingStartedEvent:
 		// Ignore if stream was cancelled (stale event from before cancellation)
 		if m.streamCancelled {
@@ -778,7 +758,6 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		m.workingAgent = ""
 		m.sessionStack = nil
 		m.toolsLoading = false
-		m.mcpInit = false
 		m.titleRegenerating = false
 		// Force-stop main spinner if it was active (state is now cleared)
 		if m.spinnerActive {
@@ -826,8 +805,8 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		var cmds []tea.Cmd
 		needsInvalidate := false
 
-		// Update main spinner when MCP is initializing, tools are loading, agent is working, or title is regenerating
-		if m.mcpInit || m.toolsLoading || m.workingAgent != "" || m.titleRegenerating {
+		// Update main spinner when tools are loading, the agent is working, or title is regenerating.
+		if m.toolsLoading || m.workingAgent != "" || m.titleRegenerating {
 			model, cmd := m.spinner.Update(msg)
 			m.spinner = model.(spinner.Spinner)
 			cmds = append(cmds, cmd)
@@ -1051,10 +1030,6 @@ func (m *model) groupedRAGIndexing() (ragNames []string, ragGroups map[string][]
 func (m *model) workingIndicator() string {
 	var indicators []string
 
-	if m.mcpInit {
-		indicators = append(indicators, styles.ActiveStyle.Render(m.spinner.View()+" Initializing MCP servers…"))
-	}
-
 	ragNames, ragGroups := m.groupedRAGIndexing()
 	for _, ragName := range ragNames {
 		strategies := ragGroups[ragName]
@@ -1083,10 +1058,6 @@ func (m *model) workingIndicator() string {
 // workingIndicatorCollapsed returns a single-line version of the working indicator for collapsed mode
 func (m *model) workingIndicatorCollapsed() string {
 	var labels []string
-
-	if m.mcpInit {
-		labels = append(labels, "Initializing MCP servers…")
-	}
 
 	ragNames, ragGroups := m.groupedRAGIndexing()
 	for _, ragName := range ragNames {

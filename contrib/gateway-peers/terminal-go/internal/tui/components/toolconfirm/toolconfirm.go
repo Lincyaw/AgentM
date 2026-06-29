@@ -1,6 +1,6 @@
 // Package toolconfirm centralizes the tool-confirmation policy shared by
-// docker-agent's own confirmation dialog and embedders that bring their own
-// dialog framework (e.g. the Gordon assistant embedded in Docker Sandboxes):
+// AgentM Terminal's confirmation dialog and embedders that bring their own
+// dialog framework:
 // the decision set and its runtime resume semantics, the "always allow"
 // permission-pattern construction, key bindings, and the user-facing strings.
 //

@@ -17,8 +17,8 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/concurrent"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/lrucache"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/filesystem"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/toolschema"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/types"
 )
 
@@ -123,7 +123,7 @@ func renderEditFile(toolCall tools.ToolCall, width int, splitView bool, toolStat
 }
 
 func renderEditFileUncached(toolCall tools.ToolCall, width int, splitView bool, toolStatus types.ToolStatus) string {
-	args, err := filesystem.ParseEditFileArgs([]byte(toolCall.Function.Arguments))
+	args, err := toolschema.ParseEditFileArgs([]byte(toolCall.Function.Arguments))
 	if err != nil {
 		return ""
 	}
@@ -174,7 +174,7 @@ func countDiffLines(toolCall tools.ToolCall, _ types.ToolStatus) (added, removed
 }
 
 func countDiffLinesUncached(toolCall tools.ToolCall) (added, removed int) {
-	args, err := filesystem.ParseEditFileArgs([]byte(toolCall.Function.Arguments))
+	args, err := toolschema.ParseEditFileArgs([]byte(toolCall.Function.Arguments))
 	if err != nil {
 		return 0, 0
 	}

@@ -3,12 +3,12 @@ package shell
 import (
 	"strings"
 
-	builtinshell "github.com/AoyangSpace/agentm-terminal/internal/cagent/tools/builtin/shell"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/spinner"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/toolcommon"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/toolschema"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/types"
 )
 
@@ -21,7 +21,7 @@ func New(msg *types.Message, sessionState service.SessionStateReader) layout.Mod
 func renderShell(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
 	arg := ""
 	if msg.ToolCall.Function.Arguments != "" {
-		arg = toolcommon.ExtractField(func(a builtinshell.RunShellArgs) string { return a.Cmd })(msg.ToolCall.Function.Arguments)
+		arg = toolcommon.ExtractField(func(a toolschema.RunShellArgs) string { return a.Cmd })(msg.ToolCall.Function.Arguments)
 	}
 
 	result := ""

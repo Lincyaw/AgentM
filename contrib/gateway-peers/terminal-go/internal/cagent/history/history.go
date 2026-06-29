@@ -47,7 +47,7 @@ func New(baseDir string) (*History, error) {
 // NewAtDir loads the history stored at dir/history, without the ".cagent"
 // path segment New inserts. It is for embedders that keep the agent's
 // state under their own directory layout and must not mix prompt history
-// with a docker-agent installation on the same machine.
+// with another installation on the same machine.
 func NewAtDir(dir string) (*History, error) {
 	h := &History{path: filepath.Join(dir, "history")}
 	if err := h.load(); err != nil && !os.IsNotExist(err) {

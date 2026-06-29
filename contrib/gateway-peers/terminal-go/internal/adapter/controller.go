@@ -9,7 +9,6 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/wire"
 )
@@ -271,16 +270,6 @@ func (c *Controller) Resume(req runtime.ResumeRequest) {
 		decision = "approve"
 	}
 	c.sendInbound(map[string]any{"button_value": approvalID + ":" + decision})
-}
-
-// ResumeElicitation answers a pending elicitation. The gateway has no first-class
-// elicitation channel on the wire; forward the decision as text so the scenario
-// can interpret it. Returns nil since the send is best-effort.
-func (c *Controller) ResumeElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any) error {
-	_ = ctx
-	_ = content
-	c.sendInbound(map[string]any{"content": "elicitation: " + string(action)})
-	return nil
 }
 
 // UpdateSessionTitle sets the local session title and echoes a SessionTitle

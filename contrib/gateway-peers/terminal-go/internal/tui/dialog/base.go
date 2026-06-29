@@ -7,10 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
-	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
-	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
 )
 
@@ -98,14 +95,6 @@ func ContentStartRow(dialogRow int, headerContent string) int {
 func ContentEndRow(dialogRow, dialogHeight int) int {
 	frameBottom := styles.DialogStyle.GetBorderBottomSize() + styles.DialogStyle.GetPaddingBottom()
 	return dialogRow + dialogHeight - 1 - frameBottom
-}
-
-// CloseWithElicitationResponse returns a command that closes the dialog and sends an elicitation response.
-func CloseWithElicitationResponse(action tools.ElicitationAction, content map[string]any) tea.Cmd {
-	return tea.Sequence(
-		core.CmdHandler(CloseDialogMsg{}),
-		core.CmdHandler(messages.ElicitationResponseMsg{Action: action, Content: content}),
-	)
 }
 
 // RenderTitle renders a dialog title with the given style and width.

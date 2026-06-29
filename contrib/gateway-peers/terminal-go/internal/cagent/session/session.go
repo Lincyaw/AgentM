@@ -315,7 +315,7 @@ type EvalCriteria struct {
 	Relevance  []string `json:"relevance"`             // Statements that should be true about the response
 	WorkingDir string   `json:"working_dir,omitempty"` // Subdirectory under evals/working_dirs/
 	Size       string   `json:"size,omitempty"`        // Expected response size: S, M, L, XL
-	Setup      string   `json:"setup,omitempty"`       // Optional sh script to run in the container before docker agent run --exec
+	Setup      string   `json:"setup,omitempty"`       // Optional sh script to run in the container before execution.
 	Image      string   `json:"image,omitempty"`       // Custom Docker image for this eval (overrides --base-image)
 }
 
@@ -932,15 +932,6 @@ func buildInvariantSystemMessages(a *agent.Agent) []chat.Message {
 			Role:    chat.MessageRoleSystem,
 			Content: instructions,
 		})
-	}
-
-	for _, toolSet := range a.ToolSets() {
-		if instructions := tools.GetInstructions(toolSet); instructions != "" {
-			messages = append(messages, chat.Message{
-				Role:    chat.MessageRoleSystem,
-				Content: instructions,
-			})
-		}
 	}
 
 	return messages
