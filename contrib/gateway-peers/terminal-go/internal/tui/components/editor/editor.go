@@ -92,6 +92,9 @@ type Editor interface {
 	EnterHistorySearch() (layout.Model, tea.Cmd)
 	// SendContent triggers sending the current editor content
 	SendContent() tea.Cmd
+	// SendContentQueued triggers sending the current editor content with
+	// QueueIfBusy set, so it enqueues instead of interrupting.
+	SendContentQueued() tea.Cmd
 	// SetCompletions replaces the registered completion providers.
 	SetCompletions(comps ...completions.Completion) tea.Cmd
 }
@@ -621,6 +624,42 @@ func (e *editor) resetAndSend(content string) tea.Cmd {
 	e.userTyped = false
 	e.clearSuggestion()
 	return core.CmdHandler(messages.SendMsg{Content: content, Attachments: finalAttachments})
+}
+
+// resetAndSendQueued is like resetAndSend but marks the message with
+// QueueIfBusy so it enqueues instead of interrupting a running agent.
+func (e *editor) resetAndSendQueued(content string) tea.Cmd {
+	e.tryAddFileRef(e.pendingFileRef)
+	e.pendingFileRef = ""
+	attachments := e.collectAttachments(content)
+
+	var finalAttachments []messages.Attachment
+	var pastes []messages.Attachment
+
+	for _, att := range attachments {
+		if att.Content != "" && strings.HasPrefix(att.Name, "paste-") {
+			pastes = append(pastes, att)
+		} else {
+			finalAttachments = append(finalAttachments, att)
+		}
+	}
+
+	slices.SortFunc(pastes, func(a, b messages.Attachment) int {
+		return len(b.Name) - len(a.Name)
+	})
+
+	for _, att := range pastes {
+		content = strings.ReplaceAll(content, "@"+att.Name, att.Content)
+	}
+
+	e.textarea.Reset()
+	e.userTyped = false
+	e.clearSuggestion()
+	return core.CmdHandler(messages.SendMsg{
+		Content:     content,
+		Attachments: finalAttachments,
+		QueueIfBusy: true,
+	})
 }
 
 // configureNewlineKeybinding sets up the appropriate newline keybinding
@@ -1455,6 +1494,16 @@ func (e *editor) SendContent() tea.Cmd {
 		return nil
 	}
 	return e.resetAndSend(value)
+}
+
+// SendContentQueued triggers sending the current editor content with
+// QueueIfBusy set, so it enqueues instead of interrupting a running agent.
+func (e *editor) SendContentQueued() tea.Cmd {
+	value := e.textarea.Value()
+	if value == "" {
+		return nil
+	}
+	return e.resetAndSendQueued(value)
 }
 
 func (e *editor) handlePaste(content string) bool {

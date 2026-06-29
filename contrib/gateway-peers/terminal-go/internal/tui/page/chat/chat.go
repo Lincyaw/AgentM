@@ -646,8 +646,7 @@ func (p *chatPage) SetCommandParser(parser *commands.Parser) {
 	p.commandParser = parser
 }
 
-// handleSendMsg handles incoming messages from the editor and always processes
-// them immediately.
+// handleSendMsg handles incoming messages from the editor.
 func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	// Handle "exit", "quit", and ":q" as special keywords to quit the session
 	// immediately, equivalent to the /exit slash command.
@@ -676,6 +675,15 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	if msg.BypassQueue || isBangCommand(msg.Content) {
 		cmd := p.processMessage(msg)
 		return p, cmd
+	}
+
+	// QueueIfBusy: submit cooperatively to the gateway/core inbox instead of
+	// interrupting or holding a separate TUI-local queue.
+	if msg.QueueIfBusy && (p.working || p.msgCancel != nil) {
+		return p, tea.Batch(
+			p.processCooperativeMessage(msg),
+			notification.InfoCmd("Message queued"),
+		)
 	}
 
 	// Keep the response path live by interrupting the in-flight run and
@@ -909,6 +917,22 @@ func (p *chatPage) processMessage(msg msgtypes.SendMsg) tea.Cmd {
 	}()
 
 	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, loadingCmd)
+}
+
+// processCooperativeMessage submits content to the gateway without cancelling
+// the active stream. The gateway pushes it into the core SessionInbox; the
+// session driver, not the TUI, owns the actual queueing semantics.
+func (p *chatPage) processCooperativeMessage(msg msgtypes.SendMsg) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		p.app.RunCooperative(
+			ctx,
+			func() {},
+			p.app.ResolveInput(ctx, msg.Content),
+			msg.Attachments,
+		)
+		return nil
+	}
 }
 
 // CompactSession generates a summary and compacts the session history

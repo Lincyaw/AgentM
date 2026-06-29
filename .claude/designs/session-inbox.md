@@ -37,9 +37,13 @@ producers on top of it.
 
 ### What exists today
 
-- The loop is async but tool execution is **sequential and blocking**: each call is
-  `await tool.execute(args, signal=signal)` (`core/abi/loop.py:706`); the turn does
-  not end until every call returns.
+- The loop executes tool calls sequentially, but each call now enters through the
+  substrate executor (`core/abi/tool_executor.py`) instead of inline
+  `tool.execute`. The default execution domain is still the session event loop;
+  tools may opt into `metadata["execution_domain"] = "thread"` to protect the
+  core loop from blocking tool code, or `"process"` when the parent must be
+  able to terminate/kill a non-cooperative child. `sandbox` remains reserved
+  until resource-isolated execution lands.
 - The **only** clean seam for getting an out-of-band message into the loop is the
   `decide_turn_action` channel returning `Inject(messages=[...])`
   (`core/abi/loop.py:599-620`, `Inject` at `core/abi/events.py:252`). A handler can
@@ -175,14 +179,17 @@ on `wait_nonempty` and a ticker push wakes it.
 
 Wraps registered tools via `api.tools` mutation (the pattern `tool_filter` /
 `file_mutation_queue` already use). Auto-backgrounding needs no coroutine "pause" — it
-runs the call in a task from the start and stops *waiting*, not the task:
+runs the call through the core tool executor from the start and stops *waiting*,
+not the task:
 
 ```python
-task = asyncio.create_task(tool.execute(args, signal))
-done, _ = await asyncio.wait({task}, timeout=interval)   # interval from atom config, default 60s
+task = asyncio.create_task(execute_tool_call(tool, args, signal=signal))
+done, _ = await asyncio.wait(
+    {task, timeout_sleep, inbox_wait}, return_when=asyncio.FIRST_COMPLETED
+)
 if task in done:
     return task.result()                                 # finished in time → normal return
-register(task)                                            # else: leave it running
+register(task)                                            # timeout or new input: leave it running
 return ticket                                             # {task_id, status:"running", note:"moved to background"}
 ```
 
@@ -191,6 +198,12 @@ tool_call gets a result this turn" protocol); the real result arrives later as a
 inbox item (`source="background"`). Companion tools `check_background` /
 `wait_background` / `cancel_background` are the generalization of `sub_agent`'s polling
 tools.
+
+Soft-preempt policy (2026-06-29): a foreground wrapped tool also stops being awaited
+when core inbox input arrives. The tool is not cancelled; it is registered as a
+background task and returns a ticket so the loop can reach the next turn boundary,
+drain the user's message, and let the model respond promptly. A true interrupt remains
+separate: it sets the session signal and may abort cooperative tools.
 
 **Ticker policy (resolved #2): milestone-driven + sparse heartbeat fallback.** The
 ticker pushes immediately on a milestone (completion / error / new output / a
@@ -204,13 +217,23 @@ long-turn agent never finds a pile of stale status lines.
 - **ABI `ExtensionAPI.post_inbox(*, source, payload, dedup_key=None)`** is the generic
   producer entry. `send_user_message` becomes `post_inbox(source="user", …)`;
   background_exec / monitor / the step-5 sub_agent rewrite all post through it.
-  (ExtensionAPI gains a method only because a real producer now needs it.)
+  `ExtensionAPI.wait_inbox_nonempty()` exposes a non-draining wakeup so
+  background_exec can soft-preempt on pending user input without stealing the
+  runtime-owned drain role.
 - **Wrapping scope.** background_exec is opt-in (a scenario lists it). At install it
   wraps every tool in `api.tools` with a transparent auto-bg shim:
-  `asyncio.wait({task}, timeout)` (config, default 60s). Fast tools finish within the
-  timeout and return normally — **no behaviour change; existing tool tests must stay
-  green** — only an overrun returns the ticket. Optional `denylist` config (default
-  empty) excludes tools that must never background.
+  `asyncio.wait({task, timeout_sleep, inbox_wait}, FIRST_COMPLETED)` (timeout config,
+  default 60s). Fast tools finish normally — **no behaviour change; existing tool tests
+  must stay green** — only an overrun or pending inbox input returns the ticket.
+  Optional `denylist` config (default empty) excludes tools that must never background.
+  The shim itself stays on the event-loop domain because it touches the session
+  inbox and registry, but the wrapped tool is executed via `execute_tool_call`, so
+  the wrapped tool's own `execution_domain` metadata is still honored.
+- **Companion tools are never wrapped.** `check_background`, `wait_background`,
+  and `cancel_background` are registry controls, not backgroundable work. A
+  timed-out `wait_background` returns the current running status and must not
+  create a second background task for the wait itself; cancellation then targets
+  the original task id.
 - **Terminal tools.** A foreground completion (<timeout) returning `ToolTerminate`
   works unchanged. A *backgrounded* tool that ultimately returns `ToolTerminate`
   posts its completion with `InboxItem.terminal=True` (#177): the `context` drain

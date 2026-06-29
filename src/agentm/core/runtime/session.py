@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from loguru import logger
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from agentm.core.abi import (
     AgentEndEvent,
     AgentMessage,
     DecideTurnActionEvent,
+    DiagnosticEvent,
     EventBus,
     ImageContent,
     Inject,
@@ -55,6 +57,28 @@ from agentm.core.runtime.session_manager import SessionManager
 # the substrate-private callsite and intentionally has no config knob; atoms
 # expose ``shutdown_grace_seconds`` themselves.
 _DRIVER_SHUTDOWN_GRACE_SECONDS = DEFAULT_SHUTDOWN_GRACE_SECONDS
+
+_DEFAULT_EVENT_LOOP_LAG_INTERVAL_SECONDS = 1.0
+_DEFAULT_EVENT_LOOP_LAG_WARNING_SECONDS = 5.0
+_EVENT_LOOP_LAG_RATE_LIMIT_SECONDS = 60.0
+_EVENT_LOOP_LAG_INTERVAL_ENV = "AGENTM_EVENT_LOOP_LAG_INTERVAL_SECONDS"
+_EVENT_LOOP_LAG_WARNING_ENV = "AGENTM_EVENT_LOOP_LAG_WARNING_SECONDS"
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "invalid {}={!r}; using default {}",
+            name,
+            raw,
+            default,
+        )
+        return default
 
 
 # --- Config -----------------------------------------------------------------
@@ -163,6 +187,9 @@ class AgentSession:
             ) from exc
         self._driver_task: asyncio.Task[None] = asyncio.create_task(
             self._driver(), name=f"agentm-session-driver-{session_id}"
+        )
+        self._watchdog_task: asyncio.Task[None] | None = (
+            self._spawn_event_loop_lag_watchdog()
         )
 
     # --- SessionInbox runtime handlers ------------------------------------
@@ -487,6 +514,67 @@ class AgentSession:
             self._signal.set()
 
         return asyncio.create_task(_forward())
+
+    def _spawn_event_loop_lag_watchdog(self) -> asyncio.Task[None] | None:
+        threshold = _env_float(
+            _EVENT_LOOP_LAG_WARNING_ENV,
+            _DEFAULT_EVENT_LOOP_LAG_WARNING_SECONDS,
+        )
+        if threshold <= 0:
+            return None
+        interval = max(
+            0.1,
+            _env_float(
+                _EVENT_LOOP_LAG_INTERVAL_ENV,
+                _DEFAULT_EVENT_LOOP_LAG_INTERVAL_SECONDS,
+            ),
+        )
+        return asyncio.create_task(
+            self._event_loop_lag_watchdog(
+                interval_seconds=interval,
+                threshold_seconds=threshold,
+            ),
+            name=f"agentm-session-watchdog-{self._session_id}",
+        )
+
+    async def _event_loop_lag_watchdog(
+        self,
+        *,
+        interval_seconds: float,
+        threshold_seconds: float,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        expected = loop.time() + interval_seconds
+        last_warning_at = 0.0
+        while not self._closed:
+            await asyncio.sleep(interval_seconds)
+            now = loop.time()
+            lag = max(0.0, now - expected)
+            expected = now + interval_seconds
+            if lag < threshold_seconds:
+                continue
+            if now - last_warning_at < _EVENT_LOOP_LAG_RATE_LIMIT_SECONDS:
+                continue
+            last_warning_at = now
+            message = (
+                "session event loop lag detected: expected watchdog wake was "
+                f"delayed by {lag:.1f}s (threshold {threshold_seconds:.1f}s); "
+                "a blocking tool or handler may be starving the core session"
+            )
+            logger.warning(message)
+            try:
+                await self._bus.emit(
+                    DiagnosticEvent.CHANNEL,
+                    DiagnosticEvent(
+                        level="warning",
+                        source="event_loop_watchdog",
+                        message=message,
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception("failed to emit event loop lag diagnostic")
 
     # --- tick (resume-without-prompt) -------------------------------------
 
@@ -863,6 +951,10 @@ class AgentSession:
         except Exception as exc:  # noqa: BLE001
             logger.exception(f"agentm session driver: shutdown await raised ({type(exc).__name__}); continuing")
             driver_exc = exc
+
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            await asyncio.gather(self._watchdog_task, return_exceptions=True)
 
         for fut in self._end_waiters:
             if not fut.done():

@@ -557,8 +557,11 @@ requirements:
     code:
       - path: src/agentm/cli.py
       - path: contrib/gateway-peers/terminal-go/internal/adapter/adapter.go
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/controller.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/app/app.go
       - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
       - path: contrib/gateway-peers/terminal-go/internal/cagent/runtime/event.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/chat.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/runtime_events.go
     tests: []
     docs:
@@ -622,6 +625,37 @@ requirements:
     depends_on:
       - REQ-098-textual-tui-registries
 
+  - id: REQ-185-process-tool-executor
+    title: Process tool execution domain is killable and event-loop safe
+    description: >
+      Tools declaring ``metadata["execution_domain"] = "process"`` must run in
+      a child process owned by the substrate executor rather than on the
+      session event loop. The parent watches a result pipe and the session
+      signal; signal or coroutine cancellation sets the child signal, then
+      escalates through ``terminate()`` and ``kill()`` before ``join()`` so a
+      non-cooperative blocking tool cannot strand the core session. The process
+      domain is spawn-backed and is a kill boundary, not shared runtime state:
+      process-domain tools must be pickleable/importable and must not rely on
+      child writes to parent bus/session/API objects.
+    priority: P0
+    status: tested
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/core/abi/loop.py
+      - path: src/agentm/core/abi/tool.py
+      - path: src/agentm/core/abi/tool_executor.py
+      - path: src/agentm/extensions/builtin/background_exec.py
+    tests:
+      - path: tests/unit/core/test_tool_executor.py
+    docs:
+      - path: .claude/designs/agent-loop.md
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/designs/session-inbox.md
+    depends_on:
+      - REQ-119-core-kernel-residuals
+      - REQ-176-background-exec-atom
+
   - id: REQ-183-gateway-concurrent-terminal-peers
     title: Gateway routes concurrent terminal peers by effective peer and session
     description: >
@@ -681,6 +715,15 @@ requirements:
       Protocol must not advertise an ``on_update`` parameter that the kernel
       never wires; the parameter is dropped from the Protocol and from every
       builtin/internal implementation until a real progress channel ships.
+      Tool execution must enter through the substrate executor rather than
+      inline ``tool.execute``: the default ``event_loop`` domain creates an
+      explicit asyncio task boundary, the ``thread`` domain runs the tool
+      coroutine in a worker-thread event loop to protect core sessions from
+      event-loop starvation, the ``process`` domain gives a killable child
+      process boundary for non-cooperative blocking tools, and reserved
+      ``sandbox`` fails loudly until resource-isolated execution is
+      implemented. Runtime sessions emit rate-limited diagnostics when the
+      event loop watchdog observes sustained lag.
     priority: P1
     status: implemented
     confidence: confirmed
@@ -689,10 +732,13 @@ requirements:
       - path: src/agentm/extensions/builtin/prompt_templates.py
       - path: src/agentm/core/abi/loop.py
       - path: src/agentm/core/abi/tool.py
+      - path: src/agentm/core/abi/tool_executor.py
+      - path: src/agentm/core/runtime/session.py
       - path: src/agentm/extensions/builtin/file_tools.py
       - path: src/agentm/extensions/builtin/file_mutation_queue.py
     tests: []
     docs:
+      - path: .claude/designs/agent-loop.md
       - path: .claude/designs/pluggable-architecture.md
     depends_on:
       - REQ-086-atom-rework-infra
@@ -747,12 +793,18 @@ requirements:
       ``False`` without raising so a leaked counter or a stuck background unit
       becomes a visible warning + clean exit rather than a silent permanent
       hang, while ``timeout=None`` keeps the unbounded #179 semantics (#201).
+      ``ExtensionAPI.wait_inbox_nonempty`` exposes a non-draining wakeup so
+      producer atoms can react to pending input without bypassing the runtime
+      context-drain handler.
     priority: P0
     status: implemented
     confidence: confirmed
     code:
+      - path: src/agentm/core/abi/extension.py
+      - path: src/agentm/core/runtime/extension.py
       - path: src/agentm/core/runtime/session_inbox.py
       - path: src/agentm/core/runtime/session.py
+      - path: src/agentm/core/abi/loop.py
       - path: src/agentm/core/lib/shutdown.py
       - path: src/agentm/cli.py
     tests: []
@@ -786,17 +838,27 @@ requirements:
     title: Builtin background_exec atom — auto-background overran tool calls
     description: >
       The ``background_exec`` atom wraps every registered tool in an auto-bg
-      shim: fast calls return unchanged, overruns move to a detached task and
-      return a ticket plus inbox-driven progress reports (ticker + completion
-      milestone). Companion tools ``check_background`` / ``wait_background``
-      / ``cancel_background`` poll the registry; a session_shutdown handler
-      drains running tasks under a configurable grace.
+      shim: fast calls return unchanged; overruns and pending core-inbox input
+      move the running tool to a detached task and return a ticket plus
+      inbox-driven progress reports (ticker + completion milestone). Companion
+      tools ``check_background`` / ``wait_background`` / ``cancel_background``
+      poll the registry and are never themselves auto-backgrounded; a
+      timed-out ``wait_background`` returns running status rather than creating
+      a second detached wait task. ``cancel_background`` must propagate through
+      the per-task abort signal to local bash process groups so nested commands
+      such as shell-managed ``sleep`` processes are killed. A session_shutdown
+      handler drains running tasks under a configurable grace. The shim keeps
+      its session-state wrapper on the event loop but executes the wrapped tool
+      through the core tool executor, preserving the wrapped tool's own
+      ``execution_domain`` metadata.
     priority: P0
-    status: implemented
+    status: tested
     confidence: confirmed
     code:
+      - path: src/agentm/extensions/builtin/_operations/local.py
       - path: src/agentm/extensions/builtin/background_exec.py
-    tests: []
+    tests:
+      - path: tests/unit/extensions/test_background_exec_bash.py
     docs:
       - path: .claude/designs/session-inbox.md
     depends_on:

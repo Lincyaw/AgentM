@@ -119,7 +119,9 @@ class ToolDefinition(Generic[P, D]):
 class Tool(Protocol):                 # what the loop sees
     name: str
     parameters: TypeSchema
-    async def execute(self, args, signal, on_update) -> ToolResult: ...
+    # optional: metadata["execution_domain"] = "event_loop" | "thread" |
+    # "process" | "sandbox"
+    async def execute(self, args, signal=None) -> ToolResult | ToolOutcome: ...
 
 class FileOperations(Protocol):       # the environment port
     async def read_file(self, path: str) -> bytes: ...
@@ -134,6 +136,16 @@ class BashOperations(Protocol):
 - `ToolDefinition` is the runtime/UI-facing record.
 - `Tool` is the bare execution interface used by the agent loop.
 - `XxxOperations` is the **smallest possible port** for swapping environments (local FS → SSH → sandbox → in-memory). It is replaceable through `api.register_operations(file=..., bash=...)`, called by an early atom in the scenario manifest (default: `operations_local`). The substrate enforces "registered at most once before freeze" and "must be registered by freeze time, else fail loud".
+
+The agent loop calls tools through the substrate executor, not inline. The
+default domain is `event_loop` (explicit `asyncio.Task` boundary); `thread` runs
+the tool coroutine in a worker-thread event loop so a blocking tool does not
+starve the session loop; `process` runs the tool coroutine in a spawned child
+process so the parent can terminate/kill and join non-cooperative blocking code
+(process-domain tools must be pickleable/importable and must not rely on child
+writes to parent runtime state). `sandbox` is reserved for resource-isolated
+execution and currently fails loudly if requested. The domain is metadata rather
+than a required Protocol member so existing atoms remain ABI-compatible.
 
 **File IO seam decision (issue #89)**: AgentM uses the hybrid seam. Guarded
 reads (`read`) consume `api.get_operations().file`; mutating file tools

@@ -105,6 +105,7 @@ from .tool import (
     ToolResult,
     ToolTerminate,
 )
+from .tool_executor import execute_tool_call
 
 
 
@@ -710,8 +711,8 @@ class AgentLoop:
                     )
                 else:
                     try:
-                        raw_out = await tool.execute(
-                            tc_event.args, signal=signal
+                        raw_out = await self._execute_tool_task(
+                            tool, tc_event.args, signal=signal
                         )
                     except asyncio.CancelledError:
                         # Hard cancellation: propagate without emitting
@@ -776,6 +777,17 @@ class AgentLoop:
             ),
         )
         return paired
+
+    async def _execute_tool_task(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None,
+    ) -> ToolResult | ToolOutcome:
+        """Run one tool through the substrate execution boundary."""
+
+        return await execute_tool_call(tool, args, signal=signal)
 
     async def _make_error_result(
         self,

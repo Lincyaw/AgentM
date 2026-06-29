@@ -8,10 +8,11 @@ What it does (opt-in; a scenario lists it):
 
 - At ``agent_start`` it wraps **every** registered tool (minus a ``denylist``
   and its own companion tools) in a transparent auto-bg shim. The shim runs the
-  inner tool in an ``asyncio.Task`` and waits at most ``timeout`` seconds:
+  inner tool in an ``asyncio.Task`` and waits for whichever happens first:
+  completion, ``timeout`` seconds, or a new core-inbox item:
   - finished in time  → return the inner result **unchanged** (fast tools are
     byte-for-byte unaffected; existing tool tests must stay green);
-  - overran           → register the still-running task in a
+  - overran / inbox input arrived → register the still-running task in a
     :class:`BackgroundTaskRegistry`, spin up a per-task *ticker*, and return an
     immediate ticket ``ToolResult`` so the turn's "every tool_call gets a
     result" protocol is satisfied. The real result arrives later as a
@@ -48,12 +49,15 @@ from agentm.core.abi import (
     ExtensionStaleError,
     FunctionTool,
     SessionShutdownEvent,
+    TOOL_EXECUTION_DOMAIN_EVENT_LOOP,
+    TOOL_EXECUTION_DOMAIN_METADATA_KEY,
     TextContent,
     Tool,
     ToolContinue,
     ToolOutcome,
     ToolResult,
     ToolTerminate,
+    execute_tool_call,
 )
 from agentm.core.lib import (
     BackgroundTask,
@@ -213,9 +217,10 @@ class _BgTool:
 
     Presents the same ``name`` / ``description`` / ``parameters`` surface as
     the wrapped tool so the kernel and the LLM see no difference. On
-    :meth:`execute` it runs the inner tool in a task and waits ``timeout``
-    seconds: a fast call returns its real result unchanged; an overrun hands
-    the live task to the manager and returns a ticket.
+    :meth:`execute` it runs the inner tool in a task and waits for completion,
+    timeout, or pending core inbox input: a fast call returns its real result
+    unchanged; timeout or input arrival hands the live task to the manager and
+    returns a ticket.
     """
 
     def __init__(self, wrapped: Tool, manager: _BgManager) -> None:
@@ -224,6 +229,14 @@ class _BgTool:
         self.name = wrapped.name
         self.description = wrapped.description
         self.parameters = wrapped.parameters
+        metadata = getattr(wrapped, "metadata", {})
+        self.metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        # Keep the wrapper itself on the session event loop because it touches
+        # the session inbox/registry. The wrapped tool's own execution domain
+        # is still honored below through execute_tool_call().
+        self.metadata[TOOL_EXECUTION_DOMAIN_METADATA_KEY] = (
+            TOOL_EXECUTION_DOMAIN_EVENT_LOOP
+        )
 
     async def execute(
         self,
@@ -243,26 +256,73 @@ class _BgTool:
         if signal is not None:
             forwarder = asyncio.create_task(_forward_abort(signal, abort))
         task: asyncio.Task[ToolResult | ToolOutcome] = asyncio.create_task(
-            self._wrapped.execute(args, signal=abort)
+            execute_tool_call(self._wrapped, args, signal=abort),
+            name=f"agentm-bg-inner-{self.name}",
         )
-        done, _pending = await asyncio.wait(
-            {task}, timeout=self._manager.timeout
-        )
-        if task in done:
+        try:
+            foreground_done, reason = await self._wait_foreground(task)
+        except asyncio.CancelledError:
+            if forwarder is not None:
+                forwarder.cancel()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        if foreground_done:
             # Finished within the foreground window → byte-for-byte unchanged.
             # A foreground ToolTerminate (sub-timeout) passes through verbatim.
             if forwarder is not None:
                 forwarder.cancel()
             return task.result()
-        # Overran: leave it running in the background, return a ticket. The
-        # manager takes ownership of the forwarder and tears it down on the
-        # task's terminal transition.
+        # Overran or user input arrived: leave it running in the background,
+        # return a ticket. The manager takes ownership of the forwarder and
+        # tears it down on the task's terminal transition.
         return await self._manager.background(
             tool_name=self.name,
             task=task,
             abort_signal=abort,
             forwarder=forwarder,
+            note=reason,
         )
+
+    async def _wait_foreground(
+        self, task: asyncio.Task[ToolResult | ToolOutcome]
+    ) -> tuple[bool, str]:
+        """Wait until the tool finishes, times out, or core inbox gets input."""
+
+        if self._manager.timeout <= 0:
+            done, _pending = await asyncio.wait({task}, timeout=0)
+            return task in done, f"moved to background after {self._manager.timeout:g}s"
+
+        timeout_task = asyncio.create_task(asyncio.sleep(self._manager.timeout))
+        inbox_task = asyncio.create_task(self._manager.wait_inbox_nonempty())
+        try:
+            waiters: set[asyncio.Task[Any]] = {task, timeout_task, inbox_task}
+            while True:
+                done, _pending = await asyncio.wait(
+                    waiters, return_when=asyncio.FIRST_COMPLETED
+                )
+                if task in done:
+                    return True, ""
+                if timeout_task in done:
+                    return (
+                        False,
+                        f"moved to background after {self._manager.timeout:g}s",
+                    )
+                if inbox_task in done:
+                    if inbox_task.result():
+                        return (
+                            False,
+                            "moved to background because new input is pending",
+                        )
+                    await asyncio.sleep(0.05)
+                    waiters.remove(inbox_task)
+                    inbox_task = asyncio.create_task(
+                        self._manager.wait_inbox_nonempty()
+                    )
+                    waiters.add(inbox_task)
+        finally:
+            timeout_task.cancel()
+            inbox_task.cancel()
 
 class _BgManager:
     """Per-session registry + ticker/completion machinery for backgrounded
@@ -325,6 +385,7 @@ class _BgManager:
         task: asyncio.Task[ToolResult | ToolOutcome],
         abort_signal: asyncio.Event,
         forwarder: asyncio.Task[None] | None = None,
+        note: str | None = None,
     ) -> ToolResult:
         """Register an overran tool task and return its immediate ticket."""
 
@@ -384,9 +445,15 @@ class _BgManager:
             {
                 "task_id": task_id,
                 "status": _RUNNING,
-                "note": f"moved to background after {self.timeout:g}s",
+                "note": note or f"moved to background after {self.timeout:g}s",
             }
         )
+
+    async def wait_inbox_nonempty(self) -> bool:
+        try:
+            return await self._api.wait_inbox_nonempty()
+        except ExtensionStaleError:
+            return False
 
     async def _watch(
         self,
@@ -423,6 +490,10 @@ class _BgManager:
                 if isinstance(outcome, ToolOutcome)
                 else ToolContinue(result=outcome)
             )
+            if state.abort_signal.is_set():
+                state.status = _CANCELLED
+                self._finalize(state)
+                return
             # #177: a backgrounded tool that ultimately returns ToolTerminate
             # carries a terminate intent. ``_post_completion`` posts the
             # completion with ``terminal=True`` so the runtime drain seam routes

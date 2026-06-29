@@ -186,6 +186,25 @@ func (c *Controller) Run(ctx context.Context, cancel context.CancelFunc, message
 	c.trackRun(ctx)
 }
 
+// RunCooperative sends one user turn without interrupting the current gateway
+// run. The gateway queues the content in the core SessionInbox; if a foreground
+// tool is wrapped by background_exec, that pending inbox item can soft-preempt
+// the tool into the background.
+func (c *Controller) RunCooperative(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
+	_ = ctx
+	_ = cancel
+	_ = attachments
+	if message == "" {
+		return
+	}
+	c.echoUserMessage(message)
+	c.sendInbound(map[string]any{
+		"content": message,
+		"action":  "submit",
+		"policy":  "cooperative",
+	})
+}
+
 // echoUserMessage renders the user's turn into the transcript locally. The
 // gateway does not echo inbound user messages back over the wire (there is no
 // user_message outbound kind), and unlike the in-process cagent runtime the

@@ -154,12 +154,27 @@ from .tool import (
     FILE_OP_READ,
     FILE_OP_WRITE,
     FunctionTool,
+    TOOL_EXECUTION_DOMAIN_EVENT_LOOP,
+    TOOL_EXECUTION_DOMAIN_METADATA_KEY,
+    TOOL_EXECUTION_DOMAIN_PROCESS,
+    TOOL_EXECUTION_DOMAIN_SANDBOX,
+    TOOL_EXECUTION_DOMAIN_THREAD,
     TOOL_RESULT_FORMAT_METADATA_KEY,
     Tool,
     ToolContinue,
+    ToolExecutionDomain,
     ToolOutcome,
     ToolResult,
     ToolTerminate,
+)
+
+# -- tool execution ----------------------------------------------------------
+from .tool_executor import (
+    ToolExecutionDomainUnavailable,
+    ToolProcessFailed,
+    ToolProcessTerminated,
+    execute_tool_call,
+    tool_execution_domain,
 )
 
 # -- extension ---------------------------------------------------------------
@@ -377,12 +392,23 @@ __all__ = [
     "FILE_OP_READ",
     "FILE_OP_WRITE",
     "FunctionTool",
+    "TOOL_EXECUTION_DOMAIN_EVENT_LOOP",
+    "TOOL_EXECUTION_DOMAIN_METADATA_KEY",
+    "TOOL_EXECUTION_DOMAIN_PROCESS",
+    "TOOL_EXECUTION_DOMAIN_SANDBOX",
+    "TOOL_EXECUTION_DOMAIN_THREAD",
     "TOOL_RESULT_FORMAT_METADATA_KEY",
     "Tool",
     "ToolContinue",
+    "ToolExecutionDomain",
     "ToolOutcome",
     "ToolResult",
     "ToolTerminate",
+    "ToolExecutionDomainUnavailable",
+    "ToolProcessFailed",
+    "ToolProcessTerminated",
+    "execute_tool_call",
+    "tool_execution_domain",
     # extension
     "AtomInfo",
     "CommandSpec",

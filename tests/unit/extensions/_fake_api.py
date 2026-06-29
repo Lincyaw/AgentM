@@ -7,6 +7,8 @@ and ``test_monitor.py`` (B7 boundary-review fix). Covers the minimal
 * :meth:`post_inbox` — delegates to a real :class:`SessionInbox` so the
   dedup-replace contract is the genuine one (the runtime impl does exactly
   this); tests can drain the inbox to assert pushed items.
+* :meth:`wait_inbox_nonempty` — delegates to the same inbox wakeup path used
+  by producer atoms that soft-preempt foreground work.
 * :meth:`register_tool` — collects registered tools on ``self.tools``.
 * :meth:`on` — records handlers per channel; returns a real
   ``Unsubscribe``-shaped callable so subscribe/unsubscribe semantics survive.
@@ -70,6 +72,10 @@ class FakeExtensionAPI:
             yield
         finally:
             self.inbox.note_work_finished()
+
+    async def wait_inbox_nonempty(self) -> bool:
+        await self.inbox.wait_nonempty()
+        return not self.inbox.is_empty()
 
     def register_tool(self, tool: Any) -> None:
         self.tools.append(tool)

@@ -416,6 +416,16 @@ class ExtensionAPI(Protocol):
         """
         ...
 
+    async def wait_inbox_nonempty(self) -> bool:
+        """Wait until the core session inbox has pending items.
+
+        Producer atoms use this as a mechanism-level wakeup only. The method
+        does not drain or claim the item; the session's runtime-owned context
+        handler remains the only inbox drain site. It returns ``False`` when a
+        wakeup was only a driver kick and no item is actually pending.
+        """
+        ...
+
     def send_user_message(self, content: str | list[Any]) -> None: ...
     async def spawn_child_session(
         self, config: Any | None = None, **kwargs: Any

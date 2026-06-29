@@ -2042,9 +2042,13 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("tab"))):
 		return m.switchFocus()
 
-	// Esc: cancel stream (works regardless of focus)
+	// Esc: submit editor content as queued message (non-interrupting).
+	// If the editor is empty, falls through to chat page for inline
+	// editing cancel / stream cancel / other ESC uses.
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
-		// Forward to content view for stream cancellation
+		if cmd := m.editor.SendContentQueued(); cmd != nil {
+			return m, cmd
+		}
 		return m.forwardChat(msg)
 
 	default:

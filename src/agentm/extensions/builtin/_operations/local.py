@@ -140,7 +140,11 @@ class LocalBashOperations:
             if wait_task in done:
                 await wait_task
             else:
-                timed_out = wait_task not in done and timeout is not None
+                timed_out = (
+                    timeout is not None
+                    and signal_task not in done
+                    and wait_task not in done
+                )
                 await self._terminate_process_group(process)
                 await wait_task
         finally:

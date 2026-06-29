@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from .messages import ImageContent, TextContent
 
@@ -38,6 +38,22 @@ FILE_OP_READ = "read"
 FILE_OP_WRITE = "write"
 FILE_OP_EDIT = "edit"
 TOOL_RESULT_FORMAT_METADATA_KEY = "result_format"
+
+# --- Tool execution metadata vocabulary ------------------------------------
+#
+# Tools default to running on the session event loop. Tool authors may opt into
+# a different substrate-owned executor by setting
+# ``metadata[TOOL_EXECUTION_DOMAIN_METADATA_KEY]`` to one of the constants
+# below. The kernel intentionally keeps this as metadata so existing Tool
+# implementers are not forced to grow a new required Protocol member.
+
+ToolExecutionDomain = Literal["event_loop", "thread", "process", "sandbox"]
+
+TOOL_EXECUTION_DOMAIN_METADATA_KEY = "execution_domain"
+TOOL_EXECUTION_DOMAIN_EVENT_LOOP: ToolExecutionDomain = "event_loop"
+TOOL_EXECUTION_DOMAIN_THREAD: ToolExecutionDomain = "thread"
+TOOL_EXECUTION_DOMAIN_PROCESS: ToolExecutionDomain = "process"
+TOOL_EXECUTION_DOMAIN_SANDBOX: ToolExecutionDomain = "sandbox"
 
 
 @dataclass(slots=True)
@@ -116,6 +132,10 @@ class Tool(Protocol):
 
     Returning a bare :class:`ToolResult` is treated as ``ToolContinue(result)``;
     a tool that wants to end the loop returns :class:`ToolTerminate` instead.
+    Tools may also expose an optional ``metadata`` dict. The kernel reads
+    ``metadata["execution_domain"]`` when present to choose a task, thread, or
+    process execution boundary; missing metadata preserves the default
+    event-loop behavior.
     """
 
     name: str
@@ -193,9 +213,15 @@ __all__ = [
     "FILE_OP_READ",
     "FILE_OP_WRITE",
     "FunctionTool",
+    "TOOL_EXECUTION_DOMAIN_EVENT_LOOP",
+    "TOOL_EXECUTION_DOMAIN_METADATA_KEY",
+    "TOOL_EXECUTION_DOMAIN_PROCESS",
+    "TOOL_EXECUTION_DOMAIN_SANDBOX",
+    "TOOL_EXECUTION_DOMAIN_THREAD",
     "TOOL_RESULT_FORMAT_METADATA_KEY",
     "Tool",
     "ToolContinue",
+    "ToolExecutionDomain",
     "ToolOutcome",
     "ToolResult",
     "ToolTerminate",

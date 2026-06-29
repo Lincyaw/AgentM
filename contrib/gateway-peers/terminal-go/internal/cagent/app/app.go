@@ -52,6 +52,8 @@ import (
 type Controller interface {
 	// Run sends one user turn to the backend.
 	Run(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment)
+	// RunCooperative sends one user turn without interrupting an active run.
+	RunCooperative(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment)
 	// RunWithMessage sends a pre-built message (e.g. with attachments).
 	RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg *session.Message)
 	// CompactSession asks the backend to summarise + compact history.
@@ -180,6 +182,13 @@ func (a *App) EmitEvent(ev runtime.Event) {
 func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
 	if a.controller != nil {
 		a.controller.Run(ctx, cancel, message, attachments)
+	}
+}
+
+// RunCooperative sends one user turn without interrupting an active backend run.
+func (a *App) RunCooperative(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
+	if a.controller != nil {
+		a.controller.RunCooperative(ctx, cancel, message, attachments)
 	}
 }
 

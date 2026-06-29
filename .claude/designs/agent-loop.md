@@ -30,6 +30,43 @@ Tools may return either a bare `ToolResult` or a `ToolOutcome`. Bare results nor
 
 **`reason` namespace convention.** `ToolTerminate.reason` is opaque to the kernel — it is surfaced verbatim through `ToolTerminated.reason`. To prevent accidental collisions when two scenarios pick the same bare label, prefix the reason with the extension or scenario short name and a colon: `"rca:final-report-submitted"`, `"plan_mode:plan-accepted"`, `"code_review:approved"`. The kernel does not enforce the convention, but observability indexers should treat the reason as opaque inside the namespace.
 
+### Tool Execution Boundary
+
+`AgentLoop` does not call `tool.execute` inline. Every foreground tool call
+goes through `core/abi/tool_executor.py::execute_tool_call`, which applies a
+substrate-owned execution boundary before the tool coroutine is awaited.
+
+Execution domain is declared as optional tool metadata, not a new required
+Protocol field:
+
+```python
+metadata = {"execution_domain": "thread"}
+```
+
+Supported values:
+
+| domain | status | meaning |
+|---|---|---|
+| `event_loop` | default | run the tool coroutine behind an explicit `asyncio.Task` on the session event loop |
+| `thread` | implemented | run the tool coroutine inside a worker-thread event loop; forward the abort signal cooperatively |
+| `process` | implemented | run the tool coroutine in a spawned child process; signal/cancel terminates, then kills and joins the child if needed |
+| `sandbox` | reserved | fail loudly until the sandbox executor exists |
+
+The `thread` domain protects the core session event loop from a blocking tool,
+but it is not a kill boundary: cancelling the outer await cannot forcibly stop a
+Python thread. Tools still need to honor the forwarded signal. The `process`
+domain is the killable boundary for untrusted/blocking tool code: the parent
+waits on a result pipe plus the session signal, and on signal/cancel asks the
+child to stop, then escalates through `terminate()` and `kill()` before joining
+it. Process-domain tools should be pure with respect to the parent runtime:
+child writes to the bus/session/API state do not mutate the parent. Because the
+process executor uses the multiprocessing `spawn` start method, process-domain
+tool objects must be pickleable/importable. `sandbox` is the later
+resource-isolated variant. Wrapper atoms such as `background_exec` should keep
+their wrapper logic on `event_loop` when touching session state, but execute the
+wrapped tool through `execute_tool_call` so the wrapped tool's own domain is
+preserved.
+
 ### `TerminationCause` — why the loop is stopping
 
 | variant | `final` | rationale |

@@ -97,6 +97,7 @@ type (
 		Content     string       // Full content sent to the agent (with file contents expanded)
 		Attachments []Attachment // Attached files or inline content (e.g. pastes)
 		BypassQueue bool         // Process immediately even while the agent is working.
+		QueueIfBusy bool         // If true and agent is working, enqueue instead of interrupting.
 	}
 
 	// SendAttachmentMsg is a message for the first message with an attachment.

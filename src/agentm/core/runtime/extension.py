@@ -484,6 +484,12 @@ class _ExtensionAPIImpl:
         finally:
             self._inbox.note_work_finished()
 
+    async def wait_inbox_nonempty(self) -> bool:
+        self._assert_active()
+        await self._inbox.wait_nonempty()
+        self._assert_active()
+        return not self._inbox.is_empty()
+
     def send_user_message(self, content: str | list[Any]) -> None:
         from agentm.core.abi.events import ApiSendUserMessageEvent
 
