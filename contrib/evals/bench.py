@@ -317,9 +317,6 @@ def _run_and_eval_one(
                 "workspace_dir": "/app",
                 "api_key": api_key or None,
                 "timeout": max(600.0, eval_timeout * 2.0),
-                "max_replicas": max_replicas,
-                "min_replicas": min_replicas,
-                "scale_up_step": scale_up_step,
                 "idle_timeout_seconds": eval_idle_timeout,
                 "max_lifetime_seconds": eval_max_lifetime,
                 "resources": ResourceRequirements(
