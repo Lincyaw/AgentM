@@ -181,8 +181,8 @@ def _default_httpx_client(*, verify: bool) -> Any:
 def _build_model(
     model_id: str,
     *,
-    context_window: int = 128_000,
-    max_output_tokens: int = 32_768,
+    context_window: int = 1_000_000,
+    max_output_tokens: int = 64_000,
 ) -> Model:
     """Construct a kernel ``Model`` descriptor for the given OpenAI-compat id.
 
@@ -190,7 +190,7 @@ def _build_model(
     we do not maintain a hard-coded model table since OpenAI-compatible
     proxies (LiteLLM, DeepSeek, Doubao, Kimi …) ship arbitrary ids that no
     static table can keep up with. Defaults are sized for long tool-call
-    arguments on capable models: 128K/32768. Override via
+    arguments on capable models: 1M/64K. Override via
     ``config['context_window']`` / ``config['max_output_tokens']`` when the
     deployed model differs.
     """

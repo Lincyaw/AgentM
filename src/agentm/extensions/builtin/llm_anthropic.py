@@ -126,17 +126,16 @@ class _IdentityRetryPolicy:
 def _build_model(
     model_id: str,
     *,
-    context_window: int = 200_000,
-    max_output_tokens: int = 8_192,
+    context_window: int = 1_000_000,
+    max_output_tokens: int = 64_000,
 ) -> Model:
     """Construct a kernel ``Model`` descriptor for the given Anthropic id.
 
     ``context_window`` and ``max_output_tokens`` come from caller config —
     we do not maintain a hard-coded model table, since Anthropic-compatible
     proxies (mimo, MiniMax, Doubao, …) ship arbitrary ids that no static
-    table can keep up with. Defaults are conservative: the 200K/8192 pair
-    works for every modern Claude model and most proxies advertise at
-    least that. Override via ``config['context_window']`` /
+    table can keep up with. Defaults are sized for long tool-call
+    arguments on capable models: 1M/64K. Override via ``config['context_window']`` /
     ``config['max_output_tokens']`` when the deployed model differs.
     """
 
