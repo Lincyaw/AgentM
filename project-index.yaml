@@ -920,3 +920,99 @@ requirements:
       - path: .claude/designs/session-inbox.md
     depends_on:
       - REQ-176-session-inbox
+  - id: REQ-188-paper-review-workflow
+    title: Paper review workflow scenario
+    description: >
+      The contrib paper_review workflow must run the converted paper-review
+      process as a minimal fixed-order AgentM workflow: accept one paper path,
+      validate that it exists, run paper-reader, paper-prose,
+      paper-consistency, paper-evidence, paper-structure, and a final
+      paper-review worker through a reviewer child scenario, pass Markdown
+      artifacts forward without structured report parsing, and write the final
+      worker's Markdown verbatim. The workflow must not pre-enumerate paper
+      source files; reviewer workers receive the input path and discover the
+      relevant files themselves using file tools and bash. The reviewer
+      scenario must expose only the paper-review skill family plus the file,
+      bash, and load_skill tools needed for discovery and review.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/scenarios/paper_review/agents/reviewer/manifest.yaml
+      - path: contrib/scenarios/paper_review/agents/reviewer/paper_review_context.py
+      - path: contrib/scenarios/paper_review/workflow/paper_review_workflow.py
+      - path: contrib/scenarios/paper_review/workflow/types.py
+      - path: contrib/scenarios/paper_review/workflow/__init__.py
+      - path: contrib/scenarios/paper_review/pyproject.toml
+    tests: []
+    docs:
+      - path: contrib/scenarios/paper_review/README.md
+    depends_on:
+      - REQ-087-builtin-atoms-extension-api
+
+  - id: REQ-189-workflow-agent-mock
+    title: Workflow agent-call mock mode for dry-run debugging
+    description: >
+      The builtin workflow atom must support an agent mock mode that keeps the
+      workflow script running while replacing ctx.agent/agent calls with
+      synthetic results. Mocked calls must not spawn child sessions, must log
+      the prompt and effective child-session options through workflow progress
+      events so traces expose the dry-run plan, and must return schema-shaped
+      JSON for structured agent calls so Pydantic-validated workflows can
+      dry-run without validation failures. The standalone ``agentm workflow
+      run`` command must expose this as ``--mock-agents``.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/workflow.py
+      - path: src/agentm/cli_workflow.py
+    tests: []
+    docs:
+      - path: .claude/designs/dynamic-workflow.md
+    depends_on:
+      - REQ-087-builtin-atoms-extension-api
+
+  - id: REQ-190-llm-preflight-prompt-debug
+    title: LLM preflight prompt dump and dry-run debugging
+    description: >
+      The agent loop must expose an environment-gated preflight debug path at
+      the final LLM boundary, after before_send_to_llm handlers have run and
+      before the provider StreamFn is invoked. ``AGENTM_LLM_PROMPT_DUMP=1``
+      must record the final system prompt, messages, model, and tools as an
+      ``llm_prompt_dump`` diagnostic while continuing to the provider.
+      ``AGENTM_LLM_PROMPT_DRY_RUN=1`` must record the same diagnostic, skip
+      the provider call, and synthesize a normal end-turn assistant response so
+      workflow/sub-agent prompt assembly can be inspected without spending a
+      model call.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/core/abi/loop.py
+    tests: []
+    docs:
+      - path: .claude/designs/agent-loop.md
+      - path: .claude/index.yaml
+    depends_on:
+      - REQ-087-builtin-atoms-extension-api
+
+  - id: REQ-191-workflow-free-text-agent-output
+    title: Workflow free-text agent output extraction
+    description: >
+      Workflow child-agent calls that return free text must use the worker's
+      final natural-language assistant message as the agent result. Ordinary
+      tool results, such as file reads, must not be mistaken for the worker's
+      return value. Explicit ``submit_*`` tools remain authoritative for
+      structured/finalize-style workers, including ``schema=`` calls wired
+      through ``submit_result``.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/workflow.py
+    tests: []
+    docs:
+      - path: .claude/designs/dynamic-workflow.md
+    depends_on:
+      - REQ-087-builtin-atoms-extension-api

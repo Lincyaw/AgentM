@@ -89,6 +89,7 @@ from agentm.core.abi import (
     ExtensionStaleError,
     FunctionTool,
     TextContent,
+    ToolCallBlock,
     ToolResult,
     ToolResultMessage,
     TurnEndEvent,
@@ -125,6 +126,9 @@ AgentResult = str | dict[str, Any] | list[Any] | BaseModel
 
 WorkflowResult = str | dict[str, Any] | list[Any]
 """Return type of a workflow run."""
+
+AgentMockMode = Literal["off", "mock"]
+"""Workflow agent mock mode. ``mock`` dry-runs ctx.agent/agent calls."""
 
 # ``Any`` is used deliberately only for genuinely arbitrary script values
 # (the ``args`` payload, decoded-JSON tool params, the pipeline item / result
@@ -176,6 +180,7 @@ class RunSummary(TypedDict):
     """Post-execution summary of a workflow run."""
 
     agents_spawned: int
+    agents_mocked: int
     agents_succeeded: int
     agents_failed: int
     agents_retried: int
@@ -192,6 +197,7 @@ def _empty_budget_snapshot() -> BudgetSnapshot:
 def _empty_run_summary() -> RunSummary:
     return RunSummary(
         agents_spawned=0,
+        agents_mocked=0,
         agents_succeeded=0,
         agents_failed=0,
         agents_retried=0,
@@ -207,6 +213,14 @@ class WorkflowConfig(BaseModel):
     default_scenario: str | None = None
     budget_tokens: int | None = Field(default=None, gt=0)
     default_agent_timeout_s: float | None = None
+    agent_mock: AgentMockMode = Field(
+        default="off",
+        description=(
+            "Set to 'mock' to dry-run workflow agent() calls without spawning "
+            "child sessions. Each call logs its parameters and returns a "
+            "synthetic result."
+        ),
+    )
 
 
 MANIFEST = ExtensionManifest(
@@ -239,6 +253,9 @@ _WORKER_PURPOSE: Final[str] = "workflow"
 # Lifetime backstop: a runaway script cannot spawn more than this many
 # child sessions across the whole workflow run.
 _AGENT_COUNT_BACKSTOP: Final[int] = 1000
+_MOCK_DEBUG_STRING_LIMIT: Final[int] = 4000
+_MOCK_DEBUG_SEQUENCE_LIMIT: Final[int] = 20
+_MOCK_DEBUG_DEPTH_LIMIT: Final[int] = 8
 
 # Worker-isolation atom (``isolation="agent_env"``). Soft/optional dependency:
 # NOT in MANIFEST.requires (that would force every workflow user to load
@@ -483,6 +500,102 @@ def _default_concurrency() -> int:
     return max(1, min(16, cpu - 2))
 
 
+def _json_debug(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+
+
+def _truncate_debug_string(value: str) -> str:
+    if len(value) <= _MOCK_DEBUG_STRING_LIMIT:
+        return value
+    omitted = len(value) - _MOCK_DEBUG_STRING_LIMIT
+    return f"{value[:_MOCK_DEBUG_STRING_LIMIT]}\n... <truncated {omitted} chars>"
+
+
+def _debug_payload(value: Any, *, depth: int = 0) -> Any:
+    if depth >= _MOCK_DEBUG_DEPTH_LIMIT:
+        return f"<truncated depth {depth}>"
+    if isinstance(value, str):
+        return _truncate_debug_string(value)
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for index, (key, child) in enumerate(value.items()):
+            if index >= _MOCK_DEBUG_SEQUENCE_LIMIT:
+                out["..."] = f"<truncated {len(value) - index} keys>"
+                break
+            out[str(key)] = _debug_payload(child, depth=depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        items = [
+            _debug_payload(child, depth=depth + 1)
+            for child in value[:_MOCK_DEBUG_SEQUENCE_LIMIT]
+        ]
+        if len(value) > _MOCK_DEBUG_SEQUENCE_LIMIT:
+            items.append(f"<truncated {len(value) - _MOCK_DEBUG_SEQUENCE_LIMIT} items>")
+        return items
+    return value
+
+
+def _coerce_agent_mock(value: object | None, default: AgentMockMode) -> AgentMockMode:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return "mock" if value else "off"
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "0", "false", "no", "off"}:
+            return "off"
+        if normalized in {"1", "true", "yes", "on", "mock"}:
+            return "mock"
+    raise ValueError("workflow: agent_mock must be 'off' or 'mock'")
+
+
+def _mock_value_for_schema(schema: Any) -> Any:
+    if not isinstance(schema, dict):
+        return {"mock": True}
+
+    if "const" in schema:
+        return schema["const"]
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        return enum[0]
+
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list) and any_of:
+        for option in any_of:
+            if isinstance(option, dict) and option.get("type") != "null":
+                return _mock_value_for_schema(option)
+        return None
+
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list) and one_of:
+        return _mock_value_for_schema(one_of[0])
+
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        schema_type = next((t for t in schema_type if t != "null"), schema_type[0])
+
+    if schema_type == "object" or "properties" in schema:
+        props = schema.get("properties")
+        if not isinstance(props, dict):
+            return {}
+        return {
+            str(name): _mock_value_for_schema(prop)
+            for name, prop in props.items()
+            if isinstance(prop, dict)
+        }
+    if schema_type == "array":
+        return [_mock_value_for_schema(schema.get("items"))]
+    if schema_type == "integer":
+        return 0
+    if schema_type == "number":
+        return 0.0
+    if schema_type == "boolean":
+        return True
+    if schema_type == "null":
+        return None
+    return "mock"
+
+
 @dataclass(slots=True)
 class _WorkflowRun:
     """One ``workflow`` tool invocation. Owns the journal, budget aggregator,
@@ -497,10 +610,12 @@ class _WorkflowRun:
     default_scenario: str | None = None
     max_agents: int = _AGENT_COUNT_BACKSTOP
     agents_spawned: int = 0
+    agents_mocked: int = 0
     agents_succeeded: int = 0
     agents_failed: int = 0
     agents_retried: int = 0
     default_agent_timeout_s: float | None = None
+    agent_mock: AgentMockMode = "off"
     args_payload: dict[str, Any] = field(default_factory=dict)
     cwd_override: str | None = None
     provider_override: ProviderOverride | None = None
@@ -577,6 +692,33 @@ class _WorkflowRun:
         model_name = model.strip() if isinstance(model, str) and model.strip() else None
         if model_name is not None:
             opts["model"] = model_name
+
+        if self.agent_mock == "mock":
+            async with self._agent_lock:
+                if self.agents_spawned + self.agents_mocked >= self.max_agents:
+                    raise RuntimeError(
+                        f"workflow agent-count backstop reached "
+                        f"({self.max_agents}); aborting runaway script"
+                    )
+                self.agents_mocked += 1
+                call_index = self.agents_mocked
+            result = self._mock_agent_result(
+                prompt=prompt,
+                opts=opts,
+                json_schema=json_schema,
+                model_name=model_name,
+                session_id=session_id,
+                trace_label=trace_label,
+                call_index=call_index,
+            )
+            parsed = _auto_parse(result)
+            if model_cls is not None:
+                validated = model_cls.model_validate(parsed)
+                self.agents_succeeded += 1
+                return validated
+            self.agents_succeeded += 1
+            return parsed
+
         key = _Journal.key(prompt, opts)
         cached = await self.journal.lookup(key)
         if cached is not None:
@@ -678,6 +820,68 @@ class _WorkflowRun:
 
         assert last_error is not None
         raise last_error
+
+    def _mock_agent_result(
+        self,
+        *,
+        prompt: str,
+        opts: dict[str, Any],
+        json_schema: JsonSchema | None,
+        model_name: str | None,
+        session_id: str | None,
+        trace_label: str | None,
+        call_index: int,
+    ) -> str:
+        effective_scenario = (
+            opts.get("scenario") or self.default_scenario or self.api.scenario
+        )
+        payload: dict[str, Any] = {
+            "mock": True,
+            "call_index": call_index,
+            "prompt": prompt,
+            "scenario": opts.get("scenario"),
+            "effective_scenario": effective_scenario,
+            "model": model_name,
+            "isolation": opts.get("isolation"),
+            "tool_allowlist": opts.get("tool_allowlist"),
+            "extra_extensions": opts.get("extra_extensions"),
+            "atom_config": opts.get("atom_config"),
+            "schema": json_schema,
+            "session_id": session_id,
+            "trace_label": trace_label,
+        }
+        self.child_sessions.append(
+            {
+                "mock": True,
+                "mock_id": f"mock-{call_index}",
+                "session_id": None,
+                "scenario": effective_scenario,
+                "model": model_name,
+                "trace_label": trace_label,
+                "workflow_node_id": trace_label,
+                "prompt": prompt[:200],
+            }
+        )
+        self._emit_phase(
+            "log",
+            "workflow mock agent call:\n" + _json_debug(_debug_payload(payload)),
+        )
+
+        if json_schema is not None:
+            return json.dumps(
+                _mock_value_for_schema(json_schema),
+                ensure_ascii=False,
+                default=str,
+            )
+        summary = {
+            "mock": True,
+            "call_index": call_index,
+            "prompt": _truncate_debug_string(prompt),
+            "effective_scenario": effective_scenario,
+            "model": model_name,
+            "trace_label": trace_label,
+        }
+        return "# Mock Agent Result\n\n```json\n" + _json_debug(summary) + "\n```"
 
     async def parallel(self, aws: list[Awaitable[_T]]) -> list[_T | None]:
         """Barrier fan-out: await every awaitable and return one result slot
@@ -1027,22 +1231,66 @@ class WorkflowContext:
 
 
 def _last_tool_result_text(
-    messages: list[AgentMessage], *, want_error: bool
+    messages: list[AgentMessage],
+    *,
+    want_error: bool,
+    tool_call_names: set[str] | None = None,
 ) -> str | None:
     """Scan messages backward for the last tool-result text block.
 
     ``want_error`` selects error blocks (failure diagnostics) or non-error
-    blocks (the authoritative finalize-tool output)."""
+    blocks. When ``tool_call_names`` is provided, only results for those
+    tool calls are considered."""
+    call_names_by_id = _tool_call_names_by_id(messages) if tool_call_names else {}
     for msg in reversed(messages):
         if not isinstance(msg, ToolResultMessage):
             continue
         for result_block in reversed(msg.content):
             if result_block.is_error != want_error:
                 continue
+            if tool_call_names is not None:
+                name = call_names_by_id.get(result_block.tool_call_id)
+                if name not in tool_call_names:
+                    continue
             for inner in reversed(result_block.content):
                 text = getattr(inner, "text", None)
                 if isinstance(text, str) and text:
                     return text
+    return None
+
+
+def _tool_call_names_by_id(messages: list[AgentMessage]) -> dict[str, str]:
+    """Map tool-call ids to tool names from assistant messages."""
+    names: dict[str, str] = {}
+    for msg in messages:
+        if not isinstance(msg, AssistantMessage):
+            continue
+        for block in msg.content:
+            if isinstance(block, ToolCallBlock):
+                names[block.id] = block.name
+    return names
+
+
+def _submission_tool_names(messages: list[AgentMessage]) -> set[str]:
+    """Return tool names that should be treated as explicit worker returns."""
+    return {
+        name
+        for name in _tool_call_names_by_id(messages).values()
+        if name.startswith("submit_")
+    }
+
+
+def _final_assistant_text(messages: list[AgentMessage]) -> str | None:
+    """Return the last natural-language assistant answer, excluding tool turns."""
+    for msg in reversed(messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        if any(isinstance(block, ToolCallBlock) for block in msg.content):
+            continue
+        for block in reversed(msg.content):
+            text = getattr(block, "text", None)
+            if isinstance(text, str) and text:
+                return text
     return None
 
 
@@ -1080,27 +1328,28 @@ def _final_session_output(messages: list[AgentMessage]) -> str:
 
     Scans backward for the last meaningful output:
 
-    1. If the session's last ``ToolResultMessage`` contains a
-       non-error result, return that text — this is the output from
-       a ``ToolTerminate``-style finalize tool (e.g.
-       ``submit_hop_verdict``, ``submit_final_report``).
-    2. Otherwise fall back to the last ``AssistantMessage`` text block.
+    1. If the worker used an explicit ``submit_*`` tool, return that
+       non-error tool result. This preserves structured/finalize-style
+       workflows such as ``schema=``/``submit_result``.
+    2. Otherwise return the last natural-language ``AssistantMessage`` that
+       does not contain tool calls.
     3. If neither is found, return empty string and log a warning
        (the agent likely hit its budget without submitting a result).
     """
 
-    # Finalize-tool results are authoritative even if the model emits a
-    # trailing assistant acknowledgement after the tool call.
-    tool_text = _last_tool_result_text(messages, want_error=False)
-    if tool_text is not None:
-        return tool_text
+    submission_names = _submission_tool_names(messages)
+    if submission_names:
+        tool_text = _last_tool_result_text(
+            messages,
+            want_error=False,
+            tool_call_names=submission_names,
+        )
+        if tool_text is not None:
+            return tool_text
 
-    for msg in reversed(messages):
-        if isinstance(msg, AssistantMessage):
-            for block in reversed(msg.content):
-                text = getattr(block, "text", None)
-                if isinstance(text, str) and text:
-                    return text
+    assistant_text = _final_assistant_text(messages)
+    if assistant_text is not None:
+        return assistant_text
 
     logger.warning(
         "workflow agent produced no output — "
@@ -1449,6 +1698,15 @@ _WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
                 "sessions. Defaults to the caller's model."
             ),
         },
+        "agent_mock": {
+            "type": "string",
+            "enum": ["off", "mock"],
+            "description": (
+                "Set to 'mock' to dry-run agent() calls. The workflow still "
+                "executes, but ctx.agent/agent returns synthetic results and "
+                "logs call parameters via workflow_phase events."
+            ),
+        },
     },
     "additionalProperties": False,
 }
@@ -1479,6 +1737,7 @@ class WorkflowRunner:
         default_scenario: str | None,
         budget_tokens: int | None,
         default_agent_timeout: float | None,
+        agent_mock: AgentMockMode,
         model_resolver: ModelResolver | None,
     ) -> None:
         self._api = api
@@ -1488,6 +1747,7 @@ class WorkflowRunner:
         self._default_scenario = default_scenario
         self._budget_tokens = budget_tokens
         self._default_agent_timeout = default_agent_timeout
+        self._agent_mock = agent_mock
         self._model_resolver = model_resolver
         self._last_run: _WorkflowRun | None = None
         self._last_wall_clock_s: float = 0.0
@@ -1512,6 +1772,7 @@ class WorkflowRunner:
             return _empty_run_summary()
         return RunSummary(
             agents_spawned=self._last_run.agents_spawned,
+            agents_mocked=self._last_run.agents_mocked,
             agents_succeeded=self._last_run.agents_succeeded,
             agents_failed=self._last_run.agents_failed,
             agents_retried=self._last_run.agents_retried,
@@ -1583,6 +1844,7 @@ class WorkflowRunner:
         *,
         cwd: str | None = None,
         provider: tuple[str, dict[str, Any]] | None = None,
+        agent_mock: AgentMockMode | None = None,
     ) -> WorkflowResult:
         """Run a pre-written workflow script file."""
         sp = Path(path)
@@ -1598,6 +1860,7 @@ class WorkflowRunner:
             source_path=sp,
             cwd=cwd,
             provider=provider,
+            agent_mock=agent_mock,
         )
 
     async def run_script(
@@ -1607,6 +1870,7 @@ class WorkflowRunner:
         *,
         cwd: str | None = None,
         provider: tuple[str, dict[str, Any]] | None = None,
+        agent_mock: AgentMockMode | None = None,
     ) -> WorkflowResult:
         """Run an inline workflow script string."""
         if not script.strip():
@@ -1616,6 +1880,7 @@ class WorkflowRunner:
             args or {},
             cwd=cwd,
             provider=provider,
+            agent_mock=agent_mock,
         )
 
     async def _execute(
@@ -1626,6 +1891,7 @@ class WorkflowRunner:
         source_path: Path | None = None,
         cwd: str | None = None,
         provider: tuple[str, dict[str, Any]] | None = None,
+        agent_mock: AgentMockMode | None = None,
     ) -> WorkflowResult:
         # --- pre-execution validation ---
         mode = _detect_script_mode(script)
@@ -1649,6 +1915,7 @@ class WorkflowRunner:
             default_scenario=self._default_scenario,
             max_agents=self._max_agents,
             default_agent_timeout_s=self._default_agent_timeout,
+            agent_mock=agent_mock or self._agent_mock,
             args_payload=dict(args_payload),
             cwd_override=cwd,
             provider_override=provider,
@@ -1719,6 +1986,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
         and config.default_agent_timeout_s > 0
         else None
     )
+    agent_mock = config.agent_mock
 
     from agentm.core.abi import MODEL_RESOLVER_SERVICE
 
@@ -1732,6 +2000,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
         default_scenario=default_scenario,
         budget_tokens=budget_tokens,
         default_agent_timeout=default_agent_timeout,
+        agent_mock=agent_mock,
         model_resolver=model_resolver,
     )
     api.set_service(_WORKFLOW_RUNNER_SERVICE, runner)
@@ -1761,12 +2030,18 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
                 return _error(f"workflow: unknown model profile '{model_arg}'")
 
         try:
+            agent_mock_arg = _coerce_agent_mock(args.get("agent_mock"), agent_mock)
+        except ValueError as exc:
+            return _error(str(exc))
+
+        try:
             if isinstance(script_path_raw, str) and script_path_raw.strip():
                 result = await runner.run_file(
                     script_path_raw,
                     args.get("args"),
                     cwd=cwd,
                     provider=provider,
+                    agent_mock=agent_mock_arg,
                 )
             elif isinstance(script, str) and script.strip():
                 result = await runner.run_script(
@@ -1774,6 +2049,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
                     args.get("args"),
                     cwd=cwd,
                     provider=provider,
+                    agent_mock=agent_mock_arg,
                 )
             else:
                 return _error("workflow: either 'script' or 'script_path' is required")

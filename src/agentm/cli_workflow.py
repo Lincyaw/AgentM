@@ -1,6 +1,6 @@
 """``agentm workflow`` subcommand — run or validate workflow scripts.
 
-``agentm workflow run <script> [--args JSON] [--model M]``
+``agentm workflow run <script> [--args JSON] [--model M] [--mock-agents]``
   Create a minimal workflow session (operations + observability +
   artifact_store + workflow atoms), invoke WorkflowRunner.run_file,
   print the JSON result. No orchestrator manifest needed.
@@ -61,6 +61,16 @@ def run(
         bool,
         typer.Option("--quiet", "-q", help="Suppress progress output."),
     ] = False,
+    mock_agents: Annotated[
+        bool,
+        typer.Option(
+            "--mock-agents",
+            help=(
+                "Dry-run ctx.agent/agent calls: do not spawn child sessions; "
+                "return synthetic results and log call parameters."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Run a workflow script."""
     import asyncio
@@ -79,7 +89,7 @@ def run(
     script_path = script.resolve()
 
     exit_code = asyncio.run(
-        _run_async(script_path, workflow_args, resolved_cwd, model, quiet)
+        _run_async(script_path, workflow_args, resolved_cwd, model, quiet, mock_agents)
     )
     raise SystemExit(exit_code)
 
@@ -90,6 +100,7 @@ async def _run_async(
     resolved_cwd: str,
     model_flag: str | None,
     quiet: bool,
+    mock_agents: bool,
 ) -> int:
     from agentm.ai import DEFAULT_PROVIDER_REGISTRY
     from agentm.core.abi.events import EventBus
@@ -122,10 +133,17 @@ async def _run_async(
 
         bus.on(WorkflowPhaseEvent.CHANNEL, _on_phase)
 
+    workflow_config: dict[str, object] = {"agent_mock": "mock"} if mock_agents else {}
+    extensions = [
+        (module, dict(ext_config))
+        for module, ext_config in _WORKFLOW_EXTENSIONS
+    ]
+    extensions[-1] = ("agentm.extensions.builtin.workflow", workflow_config)
+
     config = AgentSessionConfig(
         cwd=resolved_cwd,
         provider=provider_spec,
-        extensions=[(m, dict(c)) for m, c in _WORKFLOW_EXTENSIONS],
+        extensions=extensions,
         auto_commit=False,
         bus=bus,
         lineage={
@@ -141,7 +159,11 @@ async def _run_async(
             logger.error("workflow_runner service not found in session")
             return 1
 
-        result = await runner.run_file(script_path, workflow_args)
+        result = await runner.run_file(
+            script_path,
+            workflow_args,
+            agent_mock="mock" if mock_agents else None,
+        )
         output = json.dumps(result, indent=2, ensure_ascii=False, default=str)
         print(output)
 
@@ -149,8 +171,9 @@ async def _run_async(
             summary = runner.last_run_summary
             logger.info("--- workflow summary ---")
             logger.info(
-                "agents: {spawned} spawned, {ok} ok, {failed} failed, {retried} retried",
+                "agents: {spawned} spawned, {mocked} mocked, {ok} ok, {failed} failed, {retried} retried",
                 spawned=summary["agents_spawned"],
+                mocked=summary.get("agents_mocked", 0),
                 ok=summary["agents_succeeded"],
                 failed=summary["agents_failed"],
                 retried=summary["agents_retried"],

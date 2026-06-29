@@ -1,0 +1,16 @@
+[project]
+name = "agentm-paper-review"
+version = "0.1.0"
+description = "Minimal paper review AgentM workflow"
+requires-python = ">=3.12"
+dependencies = ["agentm"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = []
+
+[tool.uv.sources]
+agentm = { path = "../../..", editable = true }

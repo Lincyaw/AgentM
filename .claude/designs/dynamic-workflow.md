@@ -67,13 +67,14 @@ script; **`operations_agent_env`** confines a *worker's* bash/file ops.
 
 | Primitive | Built from | Status |
 |---|---|---|
-| `agent(prompt, *, schema=, scenario=, isolation=, tool_allowlist=)` → str \| dict | `spawn_child_session(cfg)` → `child.prompt(msg)` → last `AssistantMessage.text` or `submit_result` tool call → `child.shutdown()` | reuse (same recipe as `tool_eval_run` + `sub_agent`) |
+| `agent(prompt, *, schema=, scenario=, isolation=, tool_allowlist=)` → str \| dict | `spawn_child_session(cfg)` → `child.prompt(msg)` → last natural-language `AssistantMessage.text` or explicit `submit_*` tool result → `child.shutdown()` | reuse (same recipe as `tool_eval_run` + `sub_agent`) |
 | `agent(prompt, schema={...})` (structured output) | Auto-wires `structured_output` atom into the child; worker calls `submit_result` terminal tool; orchestrator extracts and JSON-parses the result | new convenience |
 | `parallel(aws)` → list | `asyncio.gather`; each `agent` self-limits via a shared `Semaphore` | reuse |
 | `pipeline(items, *stages)` → list | per-item `_chain` (await each stage, sync or async) under `asyncio.gather`; **no cross-item barrier** | **implemented** (native async) |
 | `budget` (`.total`/`.spent()`/`.remaining()`) | `_BudgetService` summing child `TurnEndEvent.message.usage`; ceiling from `budget_tokens` config | new aggregation |
 | `args` (dict) / `log(msg)` / `phase(name)` | caller payload / fire-and-forget `WorkflowPhaseEvent` on the parent bus | reuse |
 | worker isolation (`isolation="agent_env"`) | include `operations_agent_env` in the child `extensions`, guarded by a runtime `list_atoms()` check | reuse + soft-dep guard |
+| mock workers (`agent_mock="mock"` / CLI `--mock-agents`) | bypass `spawn_child_session`, emit each `agent()` call's prompt/options as `workflow_phase` logs, return synthetic Markdown or schema-shaped JSON | debug aid |
 
 `agent()` takes **real kwargs** (not a JS opts object); `parallel`/`pipeline`
 take **real awaitables/callables**, because it is native Python — a direct win
@@ -107,6 +108,25 @@ extracts the tool call arguments and returns a parsed dict/list to the script
 instead of a plain string. If the worker fails to call `submit_result`, the
 fallback is `_final_assistant_text` (the plain-text path). The journal stores
 the JSON string; `agent()` parses it back on cache hits.
+
+**Free-text output.** Workers that are meant to return Markdown or prose do not
+need a finalize tool. The workflow result extractor returns the last assistant
+message that contains natural-language text and no tool calls. Plain tool
+results such as `read` output are never treated as worker returns; only explicit
+`submit_*` tools are interpreted as structured/finalize-style results.
+
+**Mock workers for workflow debugging.** `agent_mock="mock"` on the workflow
+atom/tool, or `agentm workflow run --mock-agents`, keeps the Python workflow
+control flow live while replacing each `agent()` call with a synthetic result.
+No child session is spawned and no journal entry is written. Each mocked call
+emits a `workflow_phase` log containing the prompt, effective scenario, model,
+tool allowlist, extra extensions, atom config, schema, session id, and trace
+label, so `agentm trace logs --session <root>` can show what would have been
+sent to every worker. Very large nested strings/lists are truncated in the log
+payload to keep recursive handoffs from exploding the trace. For structured
+`schema=` calls the mock result is a minimal JSON value shaped from the JSON
+Schema, so Pydantic-validated workflows can dry-run without validation
+failures.
 
 **Do not use `tool_allowlist=[]` to slim workers.** `tool_allowlist` filters the
 tool list after extensions install, which can starve an extension that requires

@@ -36,7 +36,10 @@ concepts:
       disagreements and buried multi-handler resolution rules in folklore
       comments. Hard-cut migration in PR #58 (no shims): tools wanting to
       terminate return ToolTerminate; before_agent_end handlers move to
-      decide_turn_action returning Inject(messages=[...]).
+      decide_turn_action returning Inject(messages=[...]). LLM preflight
+      debugging is owned at this same loop boundary: env-gated prompt dump /
+      dry-run fires after before_send_to_llm and before StreamFn so traces show
+      the final system/messages/tools payload without provider-specific code.
     design: "designs/agent-loop.md"
     related_concepts: [pluggable_architecture, sub_agent_lifecycle, observability, extension_as_scenario, session_inbox, handler_priority]
 

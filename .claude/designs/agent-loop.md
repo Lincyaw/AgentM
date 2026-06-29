@@ -67,6 +67,28 @@ their wrapper logic on `event_loop` when touching session state, but execute the
 wrapped tool through `execute_tool_call` so the wrapped tool's own domain is
 preserved.
 
+### LLM Preflight Prompt Debugging
+
+The last inspection point before bytes leave AgentM is immediately after
+`before_send_to_llm` and immediately before `StreamFn` is called. Two
+environment variables expose that boundary:
+
+| env | behavior |
+|---|---|
+| `AGENTM_LLM_PROMPT_DUMP=1` | Emit an `agentm.diagnostic` record with `source="llm_prompt_dump"` containing the final system prompt, messages, model, and tool schemas, then continue to the provider. |
+| `AGENTM_LLM_PROMPT_DRY_RUN=1` | Emit the same diagnostic record, skip the provider call, and synthesize a normal end-turn assistant message. |
+
+The diagnostic is intentionally emitted from the kernel loop rather than from
+workflow/sub-agent code, so it captures the fully assembled prompt after
+scenario atoms, `skill_loader`, `system_prompt`, context handlers, and tool
+filters have all run. Payload strings, sequences, and nested objects are
+bounded so a large paper or tool schema does not make the trace unusable.
+
+Use `agentm trace logs --session <session> --format ndjson` and filter for
+`agentm.diagnostic.source == "llm_prompt_dump"` to inspect the payload. For a
+workflow tree, inspect the child session that corresponds to the worker whose
+prompt you want.
+
 ### `TerminationCause` — why the loop is stopping
 
 | variant | `final` | rationale |

@@ -37,10 +37,11 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 from loguru import logger
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, TypeVar
 
 from .bus import EventBus
@@ -51,6 +52,7 @@ from .events import (
     BudgetExhausted,
     ContextEvent,
     DecideTurnActionEvent,
+    DiagnosticEvent,
     Inject,
     LlmRequestEndEvent,
     LlmRequestStartEvent,
@@ -136,6 +138,11 @@ class LoopConfig:
 
 T = TypeVar("T")
 
+_ENV_TRUE_VALUES = {"1", "true", "yes", "on"}
+_PROMPT_DEBUG_STRING_LIMIT = 20_000
+_PROMPT_DEBUG_SEQUENCE_LIMIT = 200
+_PROMPT_DEBUG_DEPTH_LIMIT = 12
+
 
 def _last_of(returns: list[Any], typ: type[T]) -> T | None:
     """Return the last value matching ``typ`` (last-wins scan)."""
@@ -144,6 +151,141 @@ def _last_of(returns: list[Any], typ: type[T]) -> T | None:
         if isinstance(value, typ):
             chosen = value
     return chosen
+
+
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _ENV_TRUE_VALUES
+
+
+def _debug_string(value: str) -> str:
+    if len(value) <= _PROMPT_DEBUG_STRING_LIMIT:
+        return value
+    omitted = len(value) - _PROMPT_DEBUG_STRING_LIMIT
+    return f"{value[:_PROMPT_DEBUG_STRING_LIMIT]}\n... <truncated {omitted} chars>"
+
+
+def _debug_jsonable(value: Any, *, depth: int = 0) -> Any:
+    if depth >= _PROMPT_DEBUG_DEPTH_LIMIT:
+        return f"<truncated depth {depth}>"
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return _debug_string(value)
+    if isinstance(value, bytes):
+        return {"type": "bytes", "size": len(value)}
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for index, (key, child) in enumerate(value.items()):
+            if index >= _PROMPT_DEBUG_SEQUENCE_LIMIT:
+                out["..."] = f"<truncated {len(value) - index} keys>"
+                break
+            out[str(key)] = _debug_jsonable(child, depth=depth + 1)
+        return out
+    if isinstance(value, (list, tuple, set, frozenset)):
+        seq = list(value)
+        out_list = [
+            _debug_jsonable(child, depth=depth + 1)
+            for child in seq[:_PROMPT_DEBUG_SEQUENCE_LIMIT]
+        ]
+        if len(seq) > _PROMPT_DEBUG_SEQUENCE_LIMIT:
+            out_list.append(f"<truncated {len(seq) - _PROMPT_DEBUG_SEQUENCE_LIMIT} items>")
+        return out_list
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _debug_jsonable(getattr(value, field.name), depth=depth + 1)
+            for field in fields(value)
+        }
+    return repr(value)
+
+
+def _tool_prompt_view(tool: Tool) -> dict[str, Any]:
+    return {
+        "name": getattr(tool, "name", ""),
+        "description": _debug_jsonable(getattr(tool, "description", "")),
+        "parameters": _debug_jsonable(getattr(tool, "parameters", {})),
+        "metadata": _debug_jsonable(getattr(tool, "metadata", {})),
+    }
+
+
+def _llm_prompt_dump_payload(
+    *,
+    turn_index: int,
+    turn_id: int,
+    messages: list[AgentMessage],
+    model: Model,
+    tools: list[Tool],
+    system: str | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    return {
+        "dry_run": dry_run,
+        "turn_index": turn_index,
+        "turn_id": turn_id,
+        "model": _debug_jsonable(model),
+        "system": _debug_jsonable(system or ""),
+        "messages": _debug_jsonable(messages),
+        "tools": [_tool_prompt_view(tool) for tool in tools],
+    }
+
+
+async def _emit_llm_prompt_dump(
+    bus: EventBus,
+    *,
+    turn_index: int,
+    turn_id: int,
+    messages: list[AgentMessage],
+    model: Model,
+    tools: list[Tool],
+    system: str | None,
+    dry_run: bool,
+) -> None:
+    payload = _llm_prompt_dump_payload(
+        turn_index=turn_index,
+        turn_id=turn_id,
+        messages=messages,
+        model=model,
+        tools=tools,
+        system=system,
+        dry_run=dry_run,
+    )
+    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    logger.info("LLM prompt dump (dry_run={}):\n{}", dry_run, text)
+    await bus.emit(
+        DiagnosticEvent.CHANNEL,
+        DiagnosticEvent(
+            level="info",
+            source="llm_prompt_dump",
+            message=text,
+        ),
+    )
+
+
+def _dry_run_assistant_message(
+    *,
+    turn_index: int,
+    turn_id: int,
+    model: Model,
+    messages: list[AgentMessage],
+    tools: list[Tool],
+) -> AssistantMessage:
+    text = (
+        "# AgentM LLM Prompt Dry Run\n\n"
+        "Provider call skipped because `AGENTM_LLM_PROMPT_DRY_RUN` is enabled. "
+        "Read the `llm_prompt_dump` diagnostic in this session trace for the "
+        "full preflight prompt payload.\n\n"
+        f"- turn_index: {turn_index}\n"
+        f"- turn_id: {turn_id}\n"
+        f"- model: {getattr(model, 'id', '')}\n"
+        f"- message_count: {len(messages)}\n"
+        f"- tool_count: {len(tools)}"
+    )
+    return AssistantMessage(
+        role="assistant",
+        content=[TextContent(type="text", text=text)],
+        timestamp=_now(),
+        stop_reason="end_turn",
+        termination=EndTurn(),
+    )
 
 
 def _last_key(returns: list[Any], key: str) -> Any | None:
@@ -459,6 +601,18 @@ class AgentLoop:
                     system=system,
                 )
                 await self._bus.emit(BeforeSendToLlmEvent.CHANNEL, before_send_event)
+                prompt_dry_run = _env_enabled("AGENTM_LLM_PROMPT_DRY_RUN")
+                if prompt_dry_run or _env_enabled("AGENTM_LLM_PROMPT_DUMP"):
+                    await _emit_llm_prompt_dump(
+                        self._bus,
+                        turn_index=turn_index,
+                        turn_id=turn_id,
+                        messages=messages,
+                        model=model,
+                        tools=tools,
+                        system=system,
+                        dry_run=prompt_dry_run,
+                    )
 
                 # Drain the LLM stream, emitting llm_request_start/end so
                 # observers (cost trackers, observability) see request
@@ -482,25 +636,38 @@ class AgentLoop:
                 stream_start_ns = time.perf_counter_ns()
                 stream_error: str | None = None
                 try:
-                    async for ev in self._stream_fn(
-                        messages=messages,
-                        model=model,
-                        tools=tools,
-                        system=system,
-                        signal=signal,
-                    ):
-                        stream_events.append(ev)
-                        # Forward each chunk so presenters (TUI, JSON tap)
-                        # can render token-by-token. The kernel still
-                        # assembles the full message itself and publishes
-                        # it via ``turn_end``; this channel is purely
-                        # additive and ignored by everyone else.
-                        await self._bus.emit(
-                            StreamDeltaEvent.CHANNEL,
-                            StreamDeltaEvent(turn_index=turn_index, delta=ev, turn_id=turn_id),
+                    if prompt_dry_run:
+                        stream_events.append(
+                            MessageEnd(
+                                _dry_run_assistant_message(
+                                    turn_index=turn_index,
+                                    turn_id=turn_id,
+                                    model=model,
+                                    messages=messages,
+                                    tools=tools,
+                                )
+                            )
                         )
-                        if isinstance(ev, ToolCallArgsParseError):
-                            await self._bus.emit(ev.CHANNEL, ev)
+                    else:
+                        async for ev in self._stream_fn(
+                            messages=messages,
+                            model=model,
+                            tools=tools,
+                            system=system,
+                            signal=signal,
+                        ):
+                            stream_events.append(ev)
+                            # Forward each chunk so presenters (TUI, JSON tap)
+                            # can render token-by-token. The kernel still
+                            # assembles the full message itself and publishes
+                            # it via ``turn_end``; this channel is purely
+                            # additive and ignored by everyone else.
+                            await self._bus.emit(
+                                StreamDeltaEvent.CHANNEL,
+                                StreamDeltaEvent(turn_index=turn_index, delta=ev, turn_id=turn_id),
+                            )
+                            if isinstance(ev, ToolCallArgsParseError):
+                                await self._bus.emit(ev.CHANNEL, ev)
                 except Exception as exc:
                     stream_error = repr(exc)
                     await self._bus.emit(
