@@ -126,6 +126,7 @@ type model struct {
 	lineOffsets       []int                            // Prefix-sum: lineOffsets[i] = starting global line of view i
 	totalHeight       int                              // Total height of all content in lines
 	renderDirty       bool                             // True when rendered content needs rebuild
+	renderDirtyFrom   int                              // First view index that needs rebuild; -1 means full rebuild
 
 	selection selectionState
 
@@ -182,6 +183,7 @@ func newModel(width, height int, sessionState *service.SessionState) *model {
 		inlineEditMsgIndex:   -1,
 		hoveredMessageIndex:  -1,
 		renderDirty:          true,
+		renderDirtyFrom:      -1,
 	}
 }
 
@@ -199,6 +201,7 @@ func (m *model) Init() tea.Cmd {
 // Update handles messages and updates the component state
 func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	_, isAnimationTick := msg.(animation.TickMsg)
 
 	switch msg := msg.(type) {
 	case messages.StreamCancelledMsg:
@@ -257,19 +260,14 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case animation.TickMsg:
-		// Invalidate render cache if there's animated content that needs redrawing.
-		// This ensures fades, spinners, etc. actually update visually on each tick.
-		if m.hasAnimatedContent() {
-			m.renderDirty = true
-		}
-		// Fall through to forward tick to all views
+		// Fall through to forward tick to child views. Children that actually
+		// animate return a command and are invalidated individually below.
 
 	case tea.PasteMsg:
 		// Insert paste content into the inline edit textarea
 		if m.inlineEditMsgIndex >= 0 {
 			m.inlineEditTextarea.InsertString(msg.Content)
 			m.invalidateItem(m.inlineEditMsgIndex)
-			m.renderDirty = true
 		}
 		return m, nil
 
@@ -277,14 +275,22 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m.handleKeyPress(msg)
 	}
 
-	// Forward updates to all message views
+	// Forward updates to message views. Animation ticks only need to reach views
+	// that can visually change on ticks; long transcripts otherwise paid an O(N)
+	// scan on every spinner frame.
 	for i, view := range m.views {
+		needsTick := isAnimationTick && m.viewNeedsAnimationTick(i, view)
+		if isAnimationTick && !needsTick {
+			continue
+		}
 		updatedView, cmd := view.Update(msg)
 		m.views[i] = updatedView
 		if cmd != nil {
 			cmds = append(cmds, cmd)
-			// Child state changed (e.g., spinner tick), invalidate render cache
-			m.renderDirty = true
+		}
+		if cmd != nil || needsTick {
+			// Child state changed (e.g., spinner tick), invalidate only that item.
+			m.invalidateItem(i)
 		}
 	}
 
@@ -293,7 +299,7 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// fades out. Must run after children update so reasoning blocks have
 	// applied their fade state, and before tui.go's HasActive() check so the
 	// subscription is registered when the next tick is scheduled.
-	if _, ok := msg.(animation.TickMsg); ok {
+	if isAnimationTick {
 		cmds = append(cmds, m.handleAnimationTick())
 	}
 
@@ -421,7 +427,6 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 		if newHovered >= 0 {
 			m.invalidateItem(newHovered)
 		}
-		m.renderDirty = true
 	}
 
 	// Track hovered URL for underline effect
@@ -468,7 +473,6 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.inlineEditTextarea, cmd = m.inlineEditTextarea.Update(msg)
 			m.invalidateItem(m.inlineEditMsgIndex)
-			m.renderDirty = true
 			return m, cmd
 		}
 
@@ -486,7 +490,6 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.inlineEditTextarea, cmd = m.inlineEditTextarea.Update(msg)
 			m.invalidateItem(m.inlineEditMsgIndex)
-			m.renderDirty = true
 			return m, cmd
 		}
 	}
@@ -645,6 +648,24 @@ func (m *model) maxBottomSlack() int {
 // one line, and keeps the slack subscription alive while slack > 0 so
 // further ticks fire even after fade animations finish. Returns the command
 // to schedule the next tick when the subscription transitions to active.
+func (m *model) viewNeedsAnimationTick(index int, view layout.Model) bool {
+	if index < 0 || index >= len(m.messages) {
+		return false
+	}
+
+	switch msg := m.messages[index]; msg.Type {
+	case types.MessageTypeSpinner, types.MessageTypeLoading:
+		return true
+	case types.MessageTypeToolCall:
+		return msg.ToolStatus == types.ToolStatusPending || msg.ToolStatus == types.ToolStatusRunning
+	case types.MessageTypeAssistantReasoningBlock:
+		block, ok := view.(*reasoningblock.Model)
+		return ok && block.NeedsTick()
+	default:
+		return false
+	}
+}
+
 func (m *model) handleAnimationTick() tea.Cmd {
 	m.updateScrollState()
 	if !m.userHasScrolled && m.bottomSlack > 0 {
@@ -700,7 +721,6 @@ func (m *model) Focus() tea.Cmd {
 	if m.selectedMessageIndex >= 0 {
 		m.invalidateItem(m.selectedMessageIndex)
 	}
-	m.renderDirty = true
 	return nil
 }
 
@@ -713,7 +733,6 @@ func (m *model) Blur() tea.Cmd {
 	if oldIndex >= 0 {
 		m.invalidateItem(oldIndex)
 	}
-	m.renderDirty = true
 	return nil
 }
 
@@ -740,7 +759,6 @@ func (m *model) FocusAt(x, y int) tea.Cmd {
 	if m.selectedMessageIndex >= 0 && m.selectedMessageIndex != oldIndex {
 		m.invalidateItem(m.selectedMessageIndex)
 	}
-	m.renderDirty = true
 
 	if m.messageTypeChanged(oldIndex, m.selectedMessageIndex) {
 		return core.CmdHandler(messages.InvalidateStatusBarMsg{})
@@ -937,7 +955,6 @@ func (m *model) selectPreviousMessage() tea.Cmd {
 			m.invalidateItem(oldIndex)
 		}
 		m.invalidateItem(prevIndex)
-		m.renderDirty = true
 		m.scrollToSelectedMessage()
 		if m.messageTypeChanged(oldIndex, prevIndex) {
 			return core.CmdHandler(messages.InvalidateStatusBarMsg{})
@@ -957,7 +974,6 @@ func (m *model) selectNextMessage() tea.Cmd {
 			m.invalidateItem(oldIndex)
 		}
 		m.invalidateItem(nextIndex)
-		m.renderDirty = true
 		m.scrollToSelectedMessage()
 		if m.messageTypeChanged(oldIndex, nextIndex) {
 			return core.CmdHandler(messages.InvalidateStatusBarMsg{})
@@ -1140,11 +1156,32 @@ func (m *model) ensureAllItemsRendered() {
 
 	if len(m.views) == 0 {
 		m.renderedLines = nil
+		m.lineOffsets = nil
 		m.totalHeight = 0
 		m.renderDirty = false
+		m.renderDirtyFrom = -1
 		return
 	}
 
+	if m.canRebuildFromDirtyIndex() {
+		m.rebuildRenderedTail(m.renderDirtyFrom)
+		return
+	}
+
+	m.rebuildAllRenderedItems()
+}
+
+func (m *model) canRebuildFromDirtyIndex() bool {
+	if m.renderDirtyFrom < 0 || m.renderDirtyFrom >= len(m.views) {
+		return false
+	}
+	if len(m.lineOffsets) == len(m.views) && m.renderDirtyFrom < len(m.lineOffsets) {
+		return true
+	}
+	return len(m.lineOffsets) == m.renderDirtyFrom
+}
+
+func (m *model) rebuildAllRenderedItems() {
 	var allLines []string
 	offsets := make([]int, len(m.views))
 
@@ -1162,19 +1199,68 @@ func (m *model) ensureAllItemsRendered() {
 		}
 	}
 
-	// Store lines directly - avoid join/split on every View() call
 	m.renderedLines = allLines
 	m.lineOffsets = offsets
 	m.totalHeight = len(allLines)
 	m.urlSpans.clear()
 	m.renderDirty = false
+	m.renderDirtyFrom = -1
+}
+
+func (m *model) rebuildRenderedTail(start int) {
+	prefixLen := len(m.renderedLines)
+	if start < len(m.lineOffsets) {
+		prefixLen = m.lineOffsets[start]
+	}
+	if prefixLen < 0 || prefixLen > len(m.renderedLines) {
+		m.rebuildAllRenderedItems()
+		return
+	}
+
+	m.renderedLines = m.renderedLines[:prefixLen]
+	if len(m.lineOffsets) != len(m.views) {
+		m.lineOffsets = append(m.lineOffsets[:start], make([]int, len(m.views)-start)...)
+	}
+	for i := start; i < len(m.views); i++ {
+		m.lineOffsets[i] = len(m.renderedLines)
+		item := m.renderItem(i, m.views[i])
+		if len(item.lines) == 0 {
+			continue
+		}
+
+		m.renderedLines = append(m.renderedLines, item.lines...)
+
+		if m.needsSeparator(i) {
+			m.renderedLines = append(m.renderedLines, "")
+		}
+	}
+
+	m.totalHeight = len(m.renderedLines)
+	m.urlSpans.clear()
+	m.renderDirty = false
+	m.renderDirtyFrom = -1
 }
 
 func (m *model) invalidateItem(index int) {
+	if index < 0 || index >= len(m.views) {
+		m.invalidateAllItems()
+		return
+	}
 	if m.shouldCacheMessage(index) {
 		m.renderedItems.Delete(index)
 	}
+	m.markRenderDirtyFrom(index)
+}
+
+func (m *model) markRenderDirtyFrom(index int) {
 	m.renderDirty = true
+	if index < 0 {
+		m.renderDirtyFrom = -1
+		return
+	}
+	if m.renderDirtyFrom < 0 || index < m.renderDirtyFrom {
+		m.renderDirtyFrom = index
+	}
 }
 
 func (m *model) invalidateAllItems() {
@@ -1184,6 +1270,7 @@ func (m *model) invalidateAllItems() {
 	m.totalHeight = 0
 	m.urlSpans.clear()
 	m.renderDirty = true
+	m.renderDirtyFrom = -1
 }
 
 // finalizePreviousMessageView releases per-message render state on the most
@@ -1253,7 +1340,7 @@ func (m *model) AddCancelledMessage() tea.Cmd {
 	m.messages = append(m.messages, msg)
 	view := m.createMessageView(msg)
 	m.views = append(m.views, view)
-	m.renderDirty = true
+	m.markRenderDirtyFrom(len(m.views) - 1)
 	return view.Init()
 }
 
@@ -1265,7 +1352,7 @@ func (m *model) AddWelcomeMessage(content string) tea.Cmd {
 	m.messages = append(m.messages, msg)
 	view := m.createMessageView(msg)
 	m.views = append(m.views, view)
-	m.renderDirty = true
+	m.markRenderDirtyFrom(len(m.views) - 1)
 	return view.Init()
 }
 
@@ -1278,7 +1365,7 @@ func (m *model) addMessage(msg *types.Message) tea.Cmd {
 	view := m.createMessageView(msg)
 	m.sessionState.SetPreviousMessage(msg)
 	m.views = append(m.views, view)
-	m.renderDirty = true
+	m.markRenderDirtyFrom(len(m.views) - 1)
 
 	var cmds []tea.Cmd
 	if initCmd := view.Init(); initCmd != nil {
@@ -1342,8 +1429,11 @@ func (m *model) LoadFromSession(sess *session.Session) tea.Cmd {
 	m.views = nil
 	m.renderedItems.Clear()
 	m.renderedLines = nil
+	m.lineOffsets = nil
 	m.scrollOffset = 0
 	m.totalHeight = 0
+	m.renderDirty = true
+	m.renderDirtyFrom = -1
 	m.bottomSlack = 0
 	m.selectedMessageIndex = -1
 	m.hoveredMessageIndex = -1
@@ -1499,7 +1589,7 @@ func (m *model) AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, t
 	m.messages = append(m.messages, msg)
 	view := m.createToolCallView(msg)
 	m.views = append(m.views, view)
-	m.renderDirty = true
+	m.markRenderDirtyFrom(len(m.views) - 1)
 
 	return view.Init()
 }
@@ -1640,7 +1730,7 @@ func (m *model) addReasoningBlock(agentName, content string) tea.Cmd {
 	m.messages = append(m.messages, msg)
 	m.views = append(m.views, block)
 	m.sessionState.SetPreviousMessage(msg)
-	m.renderDirty = true
+	m.markRenderDirtyFrom(len(m.views) - 1)
 
 	var cmds []tea.Cmd
 	if initCmd := block.Init(); initCmd != nil {
@@ -1740,11 +1830,7 @@ func (m *model) removeSpinner() {
 		// it would otherwise wipe up to 500 cached renderings once per
 		// assistant turn, forcing every previous message to be re-parsed
 		// from markdown on the next render.
-		m.renderedLines = nil
-		m.lineOffsets = nil
-		m.totalHeight = 0
-		m.urlSpans.clear()
-		m.renderDirty = true
+		m.markRenderDirtyFrom(lastIdx)
 	}
 }
 
@@ -1947,35 +2033,6 @@ func (m *model) handleScrollviewUpdate(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// hasAnimatedContent returns true if the message list contains content that
-// requires tick-driven updates (spinners, fades, etc.). Used to decide whether
-// to invalidate the render cache on animation ticks.
-func (m *model) hasAnimatedContent() bool {
-	for i, msg := range m.messages {
-		switch msg.Type {
-		case types.MessageTypeSpinner, types.MessageTypeLoading:
-			// Spinner/loading messages always need ticks
-			return true
-		case types.MessageTypeToolCall:
-			// Tool calls with pending/running status have spinners
-			if msg.ToolStatus == types.ToolStatusPending ||
-				msg.ToolStatus == types.ToolStatusRunning {
-				return true
-			}
-		case types.MessageTypeAssistantReasoningBlock:
-			// Check if reasoning block needs tick updates
-			if i < len(m.views) {
-				if block, ok := m.views[i].(*reasoningblock.Model); ok {
-					if block.NeedsTick() {
-						return true
-					}
-				}
-			}
-		}
-	}
-	return false
-}
-
 // StartInlineEdit begins inline editing for the specified message.
 func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) tea.Cmd {
 	if msgIndex < 0 || msgIndex >= len(m.messages) {
@@ -2043,7 +2100,6 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 
 	m.inlineEditTextarea = ta
 	m.invalidateItem(msgIndex)
-	m.renderDirty = true
 
 	// Invalidate statusbar cache since bindings have changed
 	return tea.Batch(ta.Focus(), core.CmdHandler(messages.InvalidateStatusBarMsg{}))
@@ -2055,7 +2111,6 @@ func (m *model) CancelInlineEdit() tea.Cmd {
 		return nil
 	}
 
-	msgIndex := m.inlineEditMsgIndex
 	prevSelection := m.inlineEditPrevSelection
 
 	m.inlineEditMsgIndex = -1
@@ -2074,9 +2129,7 @@ func (m *model) CancelInlineEdit() tea.Cmd {
 		m.selectedMessageIndex = -1
 	}
 
-	m.invalidateItem(msgIndex)
 	m.invalidateAllItems() // Invalidate all to update selection highlight
-	m.renderDirty = true
 
 	// Invalidate statusbar cache since bindings have changed
 	return tea.Batch(

@@ -603,6 +603,25 @@ requirements:
     docs: []
     depends_on: []
 
+  - id: REQ-184-terminal-tui-render-performance
+    title: Terminal TUI keeps long transcripts responsive
+    description: >
+      The Go terminal message list must avoid full transcript rebuilds when only
+      the tail message changes during streaming or spinner ticks. Render cache
+      invalidation should be scoped to the first affected message, while
+      structural changes such as resize, theme changes, or non-tail removals may
+      still force a full rebuild.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/messages/messages.go
+    tests: []
+    docs:
+      - path: .claude/designs/textual-tui.md
+    depends_on:
+      - REQ-098-textual-tui-registries
+
   - id: REQ-183-gateway-concurrent-terminal-peers
     title: Gateway routes concurrent terminal peers by effective peer and session
     description: >
