@@ -7,17 +7,26 @@ protocol and bridges inbound Feishu messages / card-button clicks into
 the gateway, then renders gateway outbounds as Feishu interactive
 cards. Replaces the legacy in-process `FeishuChannel` driver.
 
+Production deployment is managed by the gateway installer, not by hand-written
+service files:
+
 ```sh
-agentm gateway --bind unix:///tmp/gw.sock &
-agentm-feishu \
-  --connect unix:///tmp/gw.sock \
-  --app-id cli_xxxx \
-  --app-secret /run/secrets/feishu_app_secret
+uv sync --all-packages
+agentm gateway --cwd /path/to/workspace --install-systemd
+loginctl enable-linger "$(whoami)"
 ```
 
-The app secret is read from a file (or `LARK_APP_SECRET` env). It is
-never accepted as a CLI argument — secrets must not appear in argv
-(per `autoharness:cli-design` rule group 5).
+The installer writes both user units and pins the gateway/Feishu connection to
+`unix://%t/agentm/gw.sock`. For local development only, run both processes
+manually with the same explicit URL:
+
+```sh
+agentm gateway --bind unix:///tmp/gw.sock &
+agentm-feishu --connect unix:///tmp/gw.sock --verbose
+```
+
+Secrets come from `~/.agentm/config.toml`, `<workspace>/.env`, a secret file,
+or env vars. Do not put secrets in argv.
 
 Exit codes (per `cli-design` rule group 3):
 

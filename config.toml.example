@@ -61,10 +61,14 @@ scenario = "rca"
 
 # ── Usage ────────────────────────────────────────────────────────────
 #
-# Start the gateway (one process):
-#   agentm gateway --bind ws://0.0.0.0:8765
+# Production deployment: let the CLI write managed user units for the gateway
+# and Feishu peer, with a pinned unix socket and <workspace>/.env loaded:
+#   uv sync --all-packages
+#   agentm gateway --cwd /path/to/workspace --install-systemd
+#   loginctl enable-linger "$(whoami)"
 #
-# Start the feishu peer (reads [feishu.bots] from this file):
+# Local development only: run both processes manually with matching URLs:
+#   agentm gateway --bind ws://127.0.0.1:8765
 #   agentm-feishu --connect ws://127.0.0.1:8765 --verbose
 #
 # Result:

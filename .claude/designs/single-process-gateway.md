@@ -74,8 +74,14 @@ Process-launch contract:
 
 | Process | Binary | Purpose |
 |---|---|---|
-| Gateway | `agentm gateway --bind unix:///tmp/gw.sock` | Long-lived. Holds all sessions. |
-| Chat client | `agentm-feishu --connect …` / `agentm-terminal --connect …` | One per platform. |
+| Gateway | `agentm gateway --bind <url>` | Long-lived. Holds all sessions. |
+| Chat client | `agentm-feishu --connect <same-url>` / `agentm-terminal --connect <same-url>` | One per platform. |
+
+Deployment contract: do not hand-write service files. Use
+`agentm gateway --cwd <workspace> --install-systemd`, which writes managed
+user units for the gateway and Feishu peer, pins both to
+`unix://%t/agentm/gw.sock`, and loads `<workspace>/.env`. Literal `/tmp/*.sock`
+paths are fine for ad-hoc local development but are not the deployment path.
 
 The standalone-prompt mode (`agentm prompt "..."`) still exists for non-chat usage — that's the existing CLI, untouched by this doc.
 

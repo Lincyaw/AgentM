@@ -57,15 +57,19 @@ ls ~/.agentm/workspaces/ 2>/dev/null
 - **Workspace routing**: when `[gateway] workspace_root` is set, the gateway
   resolves each channel to `{root}/{channel}/`, auto-creating on first use.
 
-When deployed as systemd user units:
+When deployed as systemd user units, install with the CLI-managed path:
 
-| Unit | Command |
-|------|---------|
-| `agentm-gateway.service` | `agentm gateway --bind ws://0.0.0.0:8765` |
-| `agentm-feishu.service` | `agentm-feishu --connect ws://127.0.0.1:8765` |
+```bash
+agentm gateway --cwd <workspace> --install-systemd
+loginctl enable-linger "$(whoami)"
+```
 
-Both are `Restart=always`. The feishu unit is loosely coupled (`Wants=`,
-not `Requires=`) — it reconnects on its own when the gateway restarts.
+The installer writes `agentm-gateway.service` and, when `agentm-feishu` is
+installed, `agentm-feishu.service`. It pins both units to the same runtime-dir
+unix socket (`unix://%t/agentm/gw.sock`) and points `EnvironmentFile=` at
+`<workspace>/.env`. Both are `Restart=always`. The feishu unit is loosely
+coupled (`Wants=`, not `Requires=`) — it reconnects on its own when the
+gateway restarts.
 
 ## Configuration
 
@@ -209,7 +213,13 @@ journalctl --user -u agentm-gateway -u agentm-feishu -f
 Updating from source:
 
 ```bash
-cd <repo> && git pull --ff-only && uv sync --all-packages
+contrib/gateway-peers/deploy/update.sh              # pull + sync + restart gateway
+contrib/gateway-peers/deploy/update.sh --with-feishu # also reload feishu code
+```
+
+If the baked systemd invocation itself must change, reinstall explicitly:
+
+```bash
 agentm gateway --uninstall-systemd
 agentm gateway --cwd <workspace> --install-systemd
 ```
@@ -224,15 +234,17 @@ it mid-task.
 cp config.toml.example ~/.agentm/config.toml
 vim ~/.agentm/config.toml
 
-# 2. Start the gateway
-agentm gateway --bind ws://0.0.0.0:8765
+# 2. Install managed user services
+uv sync --all-packages
+agentm gateway --cwd ~/.agentm/workspaces --install-systemd
+loginctl enable-linger "$(whoami)"
 
-# 3. Start the feishu peer (auto-reads [feishu.bots])
-agentm-feishu --connect ws://127.0.0.1:8765 --verbose
-
-# 4. Validate without connecting
+# 3. Validate bot config and inspect services
 agentm-feishu --check-config
+systemctl --user status agentm-gateway agentm-feishu
 ```
 
-@-mention each bot in Feishu. The gateway creates workspaces on first
-message. Tell the bot its role through conversation.
+For local development only, you can still run `agentm gateway --bind ...` and
+`agentm-feishu --connect ...` manually with matching URLs. For deployment, use
+the managed user units. @-mention each bot in Feishu. The gateway creates
+workspaces on first message. Tell the bot its role through conversation.
