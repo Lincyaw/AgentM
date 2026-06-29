@@ -54,6 +54,10 @@ async def _default_resume(_sid: str) -> None:
     raise NotImplementedError("resume_session not wired")
 
 
+async def _default_load_session_history(_sid: str) -> dict[str, Any] | None:
+    return None
+
+
 async def _default_fork(_up_to: int | None) -> str | None:
     raise NotImplementedError("fork_session not wired")
 
@@ -172,6 +176,12 @@ class CommandContext:
     ``session_id`` so the next inbound message resumes from that
     session's transcript."""
 
+    load_session_history: Callable[[str], Awaitable[dict[str, Any] | None]] = (
+        lambda _sid: _default_load_session_history(_sid)
+    )
+    """Return a JSON-safe transcript payload for a previously persisted session,
+    or ``None`` when the session cannot be loaded."""
+
     fork_session: Callable[[int | None], Awaitable[str | None]] = (
         lambda _up_to: _default_fork(_up_to)
     )
@@ -195,6 +205,17 @@ class CommandContext:
             channel=self.channel,
             chat_id=self.chat_id,
             content=text,
+            thread_id=self.thread_id,
+            metadata=metadata,
+        )
+
+    def session_history(self, payload: dict[str, Any]) -> OutboundBody:
+        """Build a ``session_history`` outbound carrying a replayable transcript."""
+        metadata: dict[str, Any] = {"kind": "session_history", **payload}
+        return OutboundBody(
+            channel=self.channel,
+            chat_id=self.chat_id,
+            content="",
             thread_id=self.thread_id,
             metadata=metadata,
         )

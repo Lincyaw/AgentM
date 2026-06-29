@@ -312,6 +312,13 @@ func (a *App) Session() *session.Session {
 	return a.session
 }
 
+// SetSession replaces the current session view-model.
+func (a *App) SetSession(sess *session.Session) {
+	if sess != nil {
+		a.session = sess
+	}
+}
+
 // SubscribeWith subscribes to app events using a custom send function.
 // Multiple concurrent subscribers are supported: a single fan-out goroutine
 // drains the event stream and dispatches a copy to each one. Slow subscribers

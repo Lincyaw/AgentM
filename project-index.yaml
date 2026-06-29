@@ -625,6 +625,36 @@ requirements:
     depends_on:
       - REQ-098-textual-tui-registries
 
+
+  - id: REQ-186-terminal-resume-history-display
+    title: Terminal resume restores visible transcript without internal stop labels
+    description: >
+      The gateway-backed Go terminal must immediately replace the visible
+      transcript when /resume switches to an existing session, using a durable
+      history replay frame rather than waiting for the next user message. Normal
+      model completion must not surface kernel-internal termination class names
+      such as ModelEndTurn as user-facing status or error text.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/gateway/commands/builtins/resume.py
+      - path: src/agentm/gateway/commands/protocol.py
+      - path: src/agentm/gateway/runtime.py
+      - path: src/agentm/gateway/wire/types.py
+      - path: src/agentm/extensions/builtin/wire_driver.py
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/app/app.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/runtime/event.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/runtime_events.go
+    tests: []
+    docs:
+      - path: .claude/designs/single-process-gateway.md
+      - path: .claude/designs/textual-tui.md
+    depends_on:
+      - REQ-096-cli-provider-session-seams
+      - REQ-180-terminal-gateway-feedback
+
   - id: REQ-185-process-tool-executor
     title: Process tool execution domain is killable and event-loop safe
     description: >

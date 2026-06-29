@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/chat"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/tools"
@@ -505,6 +507,168 @@ func (t *Translator) handleSessionList(meta map[string]any, textFallback string)
 	if t.app != nil {
 		t.app.EmitEvent(messages.OpenSessionBrowserWithDataMsg{Sessions: summaries})
 	}
+}
+
+func (t *Translator) handleSessionHistory(meta map[string]any) {
+	sess := t.sessionFromHistory(meta)
+	if sess == nil {
+		t.emit(runtime.Warning("failed to load resumed session history", t.agentName))
+		return
+	}
+	t.sess = sess
+	if t.app != nil {
+		t.app.SetSession(sess)
+	}
+	t.streaming = false
+	t.sawStreamText = false
+	t.emit(runtime.SessionHistory(sess, t.agentName))
+}
+
+func (t *Translator) sessionFromHistory(meta map[string]any) *session.Session {
+	sid, _ := meta["session_id"].(string)
+	if sid == "" {
+		return nil
+	}
+	sess := session.New(session.WithID(sid), session.WithTitle("agentm"))
+	if cwd, _ := meta["cwd"].(string); cwd != "" {
+		sess.WorkingDir = cwd
+	}
+	items, ok := meta["messages"].([]any)
+	if !ok {
+		return sess
+	}
+	for _, raw := range items {
+		msg := historyMessageFromMap(raw)
+		if msg != nil {
+			sess.AddMessage(msg)
+		}
+	}
+	return sess
+}
+
+func historyMessageFromMap(raw any) *session.Message {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	role, _ := m["role"].(string)
+	switch role {
+	case "user":
+		return session.UserMessage(historyTextContent(m["content"]))
+	case "assistant":
+		msg := &chat.Message{
+			Role:             chat.MessageRoleAssistant,
+			Content:          historyAssistantText(m["content"]),
+			ReasoningContent: historyThinkingText(m["content"]),
+			ToolCalls:        historyToolCalls(m["content"]),
+		}
+		return session.NewAgentMessage(defaultAgentName, msg)
+	case "tool_result":
+		return historyToolResultMessage(m["content"])
+	default:
+		return nil
+	}
+}
+
+func historyTextContent(raw any) string {
+	blocks, ok := raw.([]any)
+	if !ok {
+		return ""
+	}
+	var parts []string
+	for _, block := range blocks {
+		b, ok := block.(map[string]any)
+		if !ok || b["type"] != "text" {
+			continue
+		}
+		if text, _ := b["text"].(string); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func historyAssistantText(raw any) string {
+	blocks, ok := raw.([]any)
+	if !ok {
+		return ""
+	}
+	var parts []string
+	for _, block := range blocks {
+		b, ok := block.(map[string]any)
+		if !ok || b["type"] != "text" {
+			continue
+		}
+		if text, _ := b["text"].(string); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func historyThinkingText(raw any) string {
+	blocks, ok := raw.([]any)
+	if !ok {
+		return ""
+	}
+	var parts []string
+	for _, block := range blocks {
+		b, ok := block.(map[string]any)
+		if !ok || b["type"] != "thinking" {
+			continue
+		}
+		if text, _ := b["text"].(string); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func historyToolCalls(raw any) []tools.ToolCall {
+	blocks, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	var calls []tools.ToolCall
+	for _, block := range blocks {
+		b, ok := block.(map[string]any)
+		if !ok || b["type"] != "tool_call" {
+			continue
+		}
+		id, _ := b["id"].(string)
+		name, _ := b["name"].(string)
+		args := jsonString(b["arguments"])
+		calls = append(calls, tools.ToolCall{
+			ID:   id,
+			Type: tools.ToolType("function"),
+			Function: tools.FunctionCall{
+				Name:      name,
+				Arguments: args,
+			},
+		})
+	}
+	return calls
+}
+
+func historyToolResultMessage(raw any) *session.Message {
+	blocks, ok := raw.([]any)
+	if !ok || len(blocks) == 0 {
+		return nil
+	}
+	first, ok := blocks[0].(map[string]any)
+	if !ok || first["type"] != "tool_result" {
+		return nil
+	}
+	toolCallID, _ := first["tool_call_id"].(string)
+	msg := &chat.Message{
+		Role:       chat.MessageRoleTool,
+		ToolCallID: toolCallID,
+		Content:    historyTextContent(first["content"]),
+	}
+	if isErr, _ := first["is_error"].(bool); isErr {
+		msg.IsError = true
+	}
+	return session.NewAgentMessage("", msg)
 }
 
 // extensionInstallEvent renders an extension_install frame. A non-empty error is

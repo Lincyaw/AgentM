@@ -457,6 +457,30 @@ func SessionSummary(sessionID, summary, agentName string, firstKeptEntry int) Ev
 
 func (e *SessionSummaryEvent) GetSessionID() string { return e.SessionID }
 
+// SessionHistoryEvent replaces the visible transcript after a gateway-side
+// resume loads an existing session.
+type SessionHistoryEvent struct {
+	AgentContext
+
+	Type    string           `json:"type"`
+	Session *session.Session `json:"-"`
+}
+
+func SessionHistory(sess *session.Session, agentName string) Event {
+	return &SessionHistoryEvent{
+		Type:         "session_history",
+		Session:      sess,
+		AgentContext: newAgentContext(agentName),
+	}
+}
+
+func (e *SessionHistoryEvent) GetSessionID() string {
+	if e.Session == nil {
+		return ""
+	}
+	return e.Session.ID
+}
+
 type SessionCompactionEvent struct {
 	AgentContext
 

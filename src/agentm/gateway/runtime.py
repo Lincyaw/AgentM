@@ -395,7 +395,16 @@ class GatewayRuntime:
             cause = metadata.get("cause")
             if isinstance(cause, str) and cause:
                 lowered = cause.lower()
-                if lowered in {"none", "cancel", "cancelled", "keyboardinterrupt"}:
+                if lowered in {
+                    "none",
+                    "normal",
+                    "end_turn",
+                    "modelendturn",
+                    "toolterminated",
+                    "cancel",
+                    "cancelled",
+                    "keyboardinterrupt",
+                }:
                     snapshot.last_error = None
                 else:
                     snapshot.last_error = cause
@@ -821,6 +830,9 @@ class GatewayRuntime:
             sess = self._sessions.get(session_key)
             return sess.extension_api if sess is not None else None
 
+        async def load_session_history(target_sid: str) -> dict[str, Any] | None:
+            return await self._load_session_history(target_sid)
+
         def list_models() -> tuple[str, list[str]]:
             from agentm.core.lib.user_config import load_user_config
 
@@ -861,9 +873,34 @@ class GatewayRuntime:
             switch_model=switch_model,
             cwd=self._cwd,
             resume_session=resume_session,
+            load_session_history=load_session_history,
             fork_session=fork_session,
             list_session_commands=list_session_commands,
         )
+
+
+    async def _load_session_history(self, session_id: str) -> dict[str, Any] | None:
+        """Load a JSON-safe transcript for a previously persisted session."""
+        if not session_id:
+            return None
+
+        def _load() -> dict[str, Any] | None:
+            from agentm.core.lib.message_codec import serialize_payload
+            from agentm.core.runtime.session_bootstrap import make_default_session_store
+
+            try:
+                state = make_default_session_store(self._cwd).open(session_id)
+            except FileNotFoundError:
+                return None
+            header = state.get_header()
+            context = state.build_session_context()
+            return {
+                "session_id": state.get_session_id(),
+                "cwd": header.cwd if header is not None else self._cwd,
+                "messages": [serialize_payload(message) for message in context.messages],
+            }
+
+        return await asyncio.to_thread(_load)
 
     async def _switch_model(self, session_key: str, name: str) -> tuple[bool, str]:
         """Swap the session factory to ``name``'s model profile and start a

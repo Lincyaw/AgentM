@@ -106,23 +106,20 @@ class ResumeCommand:
                 return CommandResult(
                     outbound=[ctx.notice("Already on the latest session.")]
                 )
-            await ctx.resume_session(sid)
-            return CommandResult(outbound=[ctx.notice(_resumed_notice(sid))])
+            return await self._resume_with_history(ctx, sid)
 
         target_lower = target.lower()
         exact = [s for s in sessions if s["session_id"] == target_lower]
         if exact:
             sid = exact[0]["session_id"]
-            await ctx.resume_session(sid)
-            return CommandResult(outbound=[ctx.notice(_resumed_notice(sid))])
+            return await self._resume_with_history(ctx, sid)
 
         prefix = [
             s for s in sessions if s["session_id"].startswith(target_lower)
         ]
         if len(prefix) == 1:
             sid = prefix[0]["session_id"]
-            await ctx.resume_session(sid)
-            return CommandResult(outbound=[ctx.notice(_resumed_notice(sid))])
+            return await self._resume_with_history(ctx, sid)
         if len(prefix) > 1:
             ids = ", ".join(f"`{s['session_id'][:12]}…`" for s in prefix[:5])
             return CommandResult(
@@ -142,6 +139,18 @@ class ResumeCommand:
                 )
             ]
         )
+
+    async def _resume_with_history(
+        self, ctx: CommandContext, sid: str
+    ) -> CommandResult:
+        await ctx.resume_session(sid)
+        outbound: list[OutboundBody] = []
+        history = await ctx.load_session_history(sid)
+        if history is not None:
+            outbound.append(ctx.session_history(history))
+        outbound.append(ctx.notice(_resumed_notice(sid)))
+        return CommandResult(outbound=outbound)
+
 
 
 # --- session discovery (ClickHouse → JSONL fallback) ----------------------

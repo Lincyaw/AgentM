@@ -220,6 +220,26 @@ func (p *chatPage) handleTokenUsage(msg *runtime.TokenUsageEvent) {
 	}
 }
 
+func (p *chatPage) handleSessionHistory(msg *runtime.SessionHistoryEvent) tea.Cmd {
+	if msg.Session == nil {
+		return nil
+	}
+	if p.app != nil {
+		p.app.SetSession(msg.Session)
+	}
+	p.sidebar.LoadFromSession(msg.Session)
+	p.messages.RemoveSpinner()
+	p.msgCancel = nil
+	p.streamCancelled = false
+	p.streamDepth = 0
+	p.hasReceivedAssistantContent = false
+	return tea.Batch(
+		p.messages.LoadFromSession(msg.Session),
+		p.setWorking(false),
+		p.messages.ScrollToBottom(),
+	)
+}
+
 func (p *chatPage) handleRequestStatus(msg *runtime.RequestStatusEvent) tea.Cmd {
 	switch msg.Status {
 	case "duplicate":

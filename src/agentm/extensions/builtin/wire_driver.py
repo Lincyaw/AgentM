@@ -243,7 +243,10 @@ def _p_diagnostic(ev: DiagnosticEvent) -> ProjectorResult:
     return None  # info is not surfaced
 
 def _p_agent_end(ev: AgentEndEvent) -> ProjectorResult:
-    return {"kind": "agent_end", "cause": type(ev.cause).__name__}
+    cause = type(ev.cause).__name__
+    if cause == "ModelEndTurn":
+        cause = "normal"
+    return {"kind": "agent_end", "cause": cause}
 
 def _p_extension_install(ev: ExtensionInstallEvent) -> ProjectorResult:
     return {
