@@ -86,6 +86,11 @@ The final `paper-review` worker writes the final report directly to
 `output_path`. Earlier pass artifact paths are passed to later workers; the
 workflow does not inline or parse their Markdown.
 
+The `paper-reader` pass is stricter than the later review passes: it must
+simulate a linear first read by updating `Reading Notes` in the artifact after
+each reading unit. A healthy trace should show multiple `write`/`edit` updates
+before the pass finishes.
+
 ## Notes
 
 The workflow deliberately does not copy the paper skill prompts into code.

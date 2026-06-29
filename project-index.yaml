@@ -962,7 +962,10 @@ requirements:
       reviewer workers receive the input path and discover the relevant files
       themselves using file tools and bash. The reviewer scenario must expose
       only the paper-review skill family plus the file, bash, and load_skill
-      tools needed for discovery and review.
+      tools needed for discovery and review. The paper-reader pass must treat
+      Reading Notes as an incremental live reader state, persist multiple
+      updates to the artifact while reading in document order, and avoid using
+      later sections to resolve earlier confusion.
     priority: P1
     status: implemented
     confidence: confirmed

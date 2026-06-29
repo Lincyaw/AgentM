@@ -37,6 +37,45 @@ def _section(title: str, body: str) -> str:
     return f"## {title}\n\n{clean}"
 
 
+def _paper_reader_process_rules() -> str:
+    return _section(
+        "Pass 1 Linear Reading Process Requirements",
+        "\n".join([
+            "These extra requirements apply only to `paper-reader`.",
+            "",
+            "1. First discover the real reading order from the paper entry "
+            "point. Follow the rendered document order: title/front matter, "
+            "abstract, introduction, then later chapters/sections.",
+            "2. Do not batch-read future sections or chapters. Read one "
+            "reading unit at a time: abstract, section, subsection, or a "
+            "small paragraph chunk when a section is large.",
+            "3. Treat `Reading Notes` as the reader's live mental state, not "
+            "as a final summary. After every reading unit, persist the "
+            "current notes to the output artifact path using `write` or "
+            "`edit` before reading the next unit. The trace must show "
+            "multiple continuous artifact updates, not one final write after "
+            "reading the whole paper.",
+            "4. If the output artifact already exists or `write` reports "
+            "that it exists, read it first and then overwrite or edit it. "
+            "Do not skip incremental persistence because of an existing file.",
+            "5. Each persisted update must reflect only text already read. "
+            "Never use later sections to explain, resolve, soften, or "
+            "reinterpret confusion from an earlier section.",
+            "6. In Pass 1, keep unresolved confusion in `Open Questions` and "
+            "keep future-looking commitments in `Promises To Verify Later`. "
+            "Do not mark promises fulfilled and do not move questions to "
+            "`Resolved Questions`.",
+            "7. The artifact should expose the thinking trajectory: each "
+            "update should make clear what was known, what became confusing, "
+            "what questions were opened, and what promises were recorded at "
+            "that point in the reading order.",
+            "8. The final artifact may clean up formatting, but it must "
+            "preserve the first-read state trajectory accumulated through "
+            "the incremental updates.",
+        ]),
+    )
+
+
 def install(api: ExtensionAPI, config: PaperReviewContextConfig) -> None:
     parts: list[str] = [
         "# Paper Review Workflow Context",
@@ -68,6 +107,9 @@ def install(api: ExtensionAPI, config: PaperReviewContextConfig) -> None:
         "return a short Markdown status line that names the artifact path. "
         "Do not wrap the status in JSON.",
     ]
+
+    if config.role == "paper-reader":
+        parts.extend(["", _paper_reader_process_rules()])
 
     task_section = _section("Task", config.task)
     if task_section:
