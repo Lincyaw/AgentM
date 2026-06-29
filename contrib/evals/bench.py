@@ -21,7 +21,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Callable, cast
 
 import typer
 
@@ -58,7 +58,7 @@ def _filter_supported_kwargs(
     kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     try:
-        sig = inspect.signature(callable_obj)
+        sig = inspect.signature(cast(Callable[..., Any], callable_obj))
     except (TypeError, ValueError):
         return kwargs
     if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()):
@@ -79,6 +79,16 @@ def _default_run_id() -> str:
         or f"r{datetime.now(UTC):%m%d%H%M%S}-{uuid.uuid4().hex[:4]}",
         max_len=24,
     )
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def _experiment_ids(
@@ -179,6 +189,16 @@ def _run_and_eval_one(
     )
 
     image = adapter.get_image(task, registry, prefix, tag)
+    pool_replicas = max(1, agent_pool_replicas)
+    max_replicas = max(
+        pool_replicas,
+        _env_int("AGENTM_AGENT_ENV_MAX_REPLICAS", pool_replicas),
+    )
+    min_replicas = max(0, _env_int("AGENTM_AGENT_ENV_MIN_REPLICAS", 0))
+    scale_up_step = max(
+        1,
+        _env_int("AGENTM_AGENT_ENV_SCALE_UP_STEP", pool_replicas),
+    )
 
     # --- Agent phase ---
     session_id = None
@@ -196,7 +216,6 @@ def _run_and_eval_one(
         if not prompt:
             return {"task": name, "status": "no_instruction"}
 
-        pool_replicas = max(1, agent_pool_replicas)
         idle_timeout = max(3600, agent_timeout * 2 if agent_timeout > 0 else 0)
         max_lifetime = max(7200, agent_timeout * 3 if agent_timeout > 0 else 0)
         env = {
@@ -211,15 +230,15 @@ def _run_and_eval_one(
             "AGENTM_AGENT_ENV_MEMORY_LIMIT": "16Gi",
             "AGENTM_AGENT_ENV_MAX_REPLICAS": os.environ.get(
                 "AGENTM_AGENT_ENV_MAX_REPLICAS",
-                str(pool_replicas),
+                str(max_replicas),
             ),
             "AGENTM_AGENT_ENV_MIN_REPLICAS": os.environ.get(
                 "AGENTM_AGENT_ENV_MIN_REPLICAS",
-                "0",
+                str(min_replicas),
             ),
             "AGENTM_AGENT_ENV_SCALE_UP_STEP": os.environ.get(
                 "AGENTM_AGENT_ENV_SCALE_UP_STEP",
-                str(pool_replicas),
+                str(scale_up_step),
             ),
             "AGENTM_AGENT_ENV_IDLE_TIMEOUT_SECONDS": os.environ.get(
                 "AGENTM_AGENT_ENV_IDLE_TIMEOUT_SECONDS",
@@ -281,8 +300,8 @@ def _run_and_eval_one(
 
     # --- Eval phase ---
     if score_file.is_file():
-        scores = json.loads(score_file.read_text())
-        return {"task": name, "status": "done", "tools": tools_count, **scores}
+        cached_scores = json.loads(score_file.read_text())
+        return {"task": name, "status": "done", "tools": tools_count, **cached_scores}
 
     from arl.session import ResourceRequirements  # type: ignore[import-not-found]
     eval_idle_timeout = max(3600, eval_timeout * 2)
@@ -298,9 +317,9 @@ def _run_and_eval_one(
                 "workspace_dir": "/app",
                 "api_key": api_key or None,
                 "timeout": max(600.0, eval_timeout * 2.0),
-                "max_replicas": 1,
-                "min_replicas": 0,
-                "scale_up_step": 1,
+                "max_replicas": max_replicas,
+                "min_replicas": min_replicas,
+                "scale_up_step": scale_up_step,
                 "idle_timeout_seconds": eval_idle_timeout,
                 "max_lifetime_seconds": eval_max_lifetime,
                 "resources": ResourceRequirements(

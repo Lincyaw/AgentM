@@ -980,6 +980,7 @@ requirements:
       - path: src/agentm/extensions/builtin/operations.py
       - path: src/agentm/extensions/builtin/_operations/agent_env.py
       - path: contrib/evals/bench.py
+      - path: contrib/evals/benchmarks/terminal_bench.py
     tests: []
     docs: []
     depends_on:

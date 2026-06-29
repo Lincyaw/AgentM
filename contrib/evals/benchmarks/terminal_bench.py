@@ -117,7 +117,13 @@ class TerminalBenchAdapter:
         step = f2p.get("step_score", "-") if isinstance(f2p, dict) else "-"
         if isinstance(step, float):
             step = f"{step:.0%}"
-        return f"  [{status}] {name} tools={tools} f2p={step}"
+        line = f"  [{status}] {name} tools={tools} f2p={step}"
+        if status != "DONE" and r.get("error"):
+            error = " ".join(str(r["error"]).split())
+            if len(error) > 180:
+                error = error[:177] + "..."
+            line += f" error={error}"
+        return line
 
     def summary_header(self) -> str:
         return (
