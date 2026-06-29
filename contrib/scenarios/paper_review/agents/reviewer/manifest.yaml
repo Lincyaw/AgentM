@@ -2,7 +2,7 @@ name: reviewer
 description: >
   Paper review worker used by the paper_review workflow. The workflow supplies
   role-specific context and the worker must load exactly the matching paper
-  skill before returning a Markdown review artifact.
+  skill before writing a Markdown review artifact.
 
 extensions:
   - module: agentm.extensions.builtin.operations
@@ -49,7 +49,9 @@ extensions:
         - Use file tools and bash as needed for source discovery, targeted
           checks, and exact location/text verification.
         - Every actionable finding must include location and original text.
-        - Return Markdown only. Do not wrap the result in JSON.
+        - Write the requested Markdown artifact to the path supplied by the
+          workflow, then return a short Markdown status. Do not wrap the result
+          in JSON.
 
   - local: paper_review_context
 

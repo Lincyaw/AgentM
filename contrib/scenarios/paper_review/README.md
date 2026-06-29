@@ -12,9 +12,10 @@ path
 This scenario follows the same shape as `contrib/scenarios/devloop`: a
 checked-in workflow script coordinates a small child agent scenario. The
 workflow is deliberately thin: it validates the input path, runs the roles in
-order, passes prior Markdown forward, and writes the final report. The child
-agent receives the input path and discovers the relevant paper files itself
-with file tools and bash. It can load only these paper skills:
+order, assigns artifact paths, and checks that each artifact file exists. The
+child agent receives the input path and discovers the relevant paper files
+itself with file tools and bash. It writes its own Markdown artifact with the
+file tools and can load only these paper skills:
 
 - `paper-review`
 - `paper-reader`
@@ -65,6 +66,26 @@ agentm workflow run contrib/scenarios/paper_review/workflow/paper_review_workflo
 | `agent_timeout_seconds` | float | `1200` | Per-reviewer timeout. |
 | `agent_retries` | int | `2` | Child-agent retry count. |
 
+## Artifacts
+
+Intermediate pass artifacts are written by the reviewer workers under a
+sibling artifact directory named after the report. For example, the default
+report path `paper-review-report.md` uses:
+
+```text
+paper-review-report.artifacts/
+  01-paper-reader.md
+  02-paper-prose.md
+  03-paper-consistency.md
+  04-paper-evidence.md
+  05-paper-structure.md
+paper-review-report.md
+```
+
+The final `paper-review` worker writes the final report directly to
+`output_path`. Earlier pass artifact paths are passed to later workers; the
+workflow does not inline or parse their Markdown.
+
 ## Notes
 
 The workflow deliberately does not copy the paper skill prompts into code.
@@ -74,7 +95,7 @@ default/user skills are not visible during the review.
 
 The workflow does not pre-read the paper, scan `.tex` files, build line
 indexes, maintain a structured notes object, or render a structured report.
-Each worker discovers and reads the paper files it needs and returns Markdown.
-The last worker loads
-`paper-review`, receives the prior Markdown artifacts, and returns the final
-report; the workflow writes that Markdown verbatim.
+Each worker discovers and reads the paper files it needs, writes its Markdown
+artifact to the path supplied by the workflow, and returns only a short status.
+The last worker loads `paper-review`, reads the prior artifact files, and
+writes the final report.

@@ -927,13 +927,14 @@ requirements:
       process as a minimal fixed-order AgentM workflow: accept one paper path,
       validate that it exists, run paper-reader, paper-prose,
       paper-consistency, paper-evidence, paper-structure, and a final
-      paper-review worker through a reviewer child scenario, pass Markdown
-      artifacts forward without structured report parsing, and write the final
-      worker's Markdown verbatim. The workflow must not pre-enumerate paper
-      source files; reviewer workers receive the input path and discover the
-      relevant files themselves using file tools and bash. The reviewer
-      scenario must expose only the paper-review skill family plus the file,
-      bash, and load_skill tools needed for discovery and review.
+      paper-review worker through a reviewer child scenario, assign Markdown
+      artifact paths for the workers to write, pass only prior artifact paths
+      forward, and verify that each artifact file exists without structured
+      report parsing. The workflow must not pre-enumerate paper source files;
+      reviewer workers receive the input path and discover the relevant files
+      themselves using file tools and bash. The reviewer scenario must expose
+      only the paper-review skill family plus the file, bash, and load_skill
+      tools needed for discovery and review.
     priority: P1
     status: implemented
     confidence: confirmed

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 from agentm.extensions import ExtensionManifest
@@ -18,7 +18,8 @@ class PaperReviewContextConfig(BaseModel):
     pass_name: str = ""
     task: str = ""
     input_path: str = ""
-    prior_markdown: str = ""
+    output_artifact_path: str = ""
+    prior_artifact_paths: list[str] = Field(default_factory=list)
 
 
 MANIFEST = ExtensionManifest(
@@ -46,8 +47,9 @@ def install(api: ExtensionAPI, config: PaperReviewContextConfig) -> None:
         "",
         "Before doing any review work, call `load_skill` with exactly this "
         f"name: `{config.skill_name}`. Use the loaded skill instructions as "
-        "the authority for this role. If that skill is unavailable, return "
-        "a Markdown error section explaining the missing skill.",
+        "the authority for this role. If that skill is unavailable, write "
+        "a Markdown error artifact explaining the missing skill to the output "
+        "artifact path and then return a short status.",
         "",
         "Only load the required skill for this role. Do not load other skills.",
         "",
@@ -60,8 +62,11 @@ def install(api: ExtensionAPI, config: PaperReviewContextConfig) -> None:
         "template, cache, and hidden-tooling directories unless the paper "
         "itself references them.",
         "",
-        "Return Markdown only, using the loaded skill's output shape where "
-        "possible. Do not wrap the result in JSON.",
+        "Write the complete Markdown artifact for this pass to the output "
+        "artifact path below using the `write` tool. The workflow will not "
+        "copy your final response into that file. After writing the file, "
+        "return a short Markdown status line that names the artifact path. "
+        "Do not wrap the status in JSON.",
     ]
 
     task_section = _section("Task", config.task)
@@ -71,10 +76,17 @@ def install(api: ExtensionAPI, config: PaperReviewContextConfig) -> None:
     if config.input_path:
         parts.extend(["", _section("Input Path", config.input_path)])
 
-    if config.prior_markdown:
+    if config.output_artifact_path:
+        parts.extend(["", _section("Output Artifact Path", config.output_artifact_path)])
+
+    if config.prior_artifact_paths:
+        paths = "\n".join(f"- {path}" for path in config.prior_artifact_paths)
         parts.extend([
             "",
-            _section("Prior Pass Markdown Artifacts", config.prior_markdown),
+            _section("Prior Pass Artifact Paths", paths),
+            "",
+            "Read these Markdown files as needed. They are the persisted "
+            "outputs from earlier passes and are the only handoff channel.",
         ])
 
     context = "\n".join(part for part in parts if part != "")

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentm.extensions.builtin.workflow import AgentResult, WorkflowContext
+from agentm.extensions.builtin.workflow import WorkflowContext
 
 from .types import PaperReviewArgs
 
@@ -15,8 +15,8 @@ REVIEW_BUDGET = [
     (
         "agentm.extensions.builtin.loop_budget",
         {
-            "max_turns": 24,
-            "max_tool_calls": 40,
+            "max_turns": 30,
+            "max_tool_calls": 200,
         },
     )
 ]
@@ -25,27 +25,27 @@ ROLE_SEQUENCE: tuple[tuple[str, str, str], ...] = (
     (
         "paper-reader",
         "Pass 1 Linear Reading",
-        "Run the linear first-read simulation and return Markdown findings.",
+        "Run the linear first-read simulation and write Markdown findings.",
     ),
     (
         "paper-prose",
         "Pass 1 Prose-Flow Review",
-        "Review prose patterns that interrupt first-read flow and return Markdown findings.",
+        "Review prose patterns that interrupt first-read flow and write Markdown findings.",
     ),
     (
         "paper-consistency",
         "Pass 2 Consistency Review",
-        "Review whole-paper consistency and return Markdown findings.",
+        "Review whole-paper consistency and write Markdown findings.",
     ),
     (
         "paper-evidence",
         "Pass 2 Evidence Review",
-        "Review claim-evidence support and return Markdown findings.",
+        "Review claim-evidence support and write Markdown findings.",
     ),
     (
         "paper-structure",
         "Pass 3 Global Review",
-        "Review the global argument structure and return Markdown findings.",
+        "Review the global argument structure and write Markdown findings.",
     ),
     (
         "paper-review",
@@ -56,10 +56,10 @@ ROLE_SEQUENCE: tuple[tuple[str, str, str], ...] = (
 
 
 @dataclass(frozen=True, slots=True)
-class RoleMarkdown:
+class RoleArtifact:
     role: str
     pass_name: str
-    markdown: str
+    artifact_path: str
 
 
 def _resolve_input_path(raw: str, cwd: str) -> Path:
@@ -90,9 +90,7 @@ def _validate_input_path(raw: str, cwd: str) -> Path:
     return input_path
 
 
-def _resolve_output_path(
-    output_path: str | None, cwd: str, input_path: Path
-) -> Path:
+def _resolve_output_path(output_path: str | None, cwd: str, input_path: Path) -> Path:
     if output_path is None or not output_path.strip():
         base = input_path if input_path.is_dir() else input_path.parent
         return base / "paper-review-report.md"
@@ -102,17 +100,28 @@ def _resolve_output_path(
     return out
 
 
-def _coerce_markdown(result: AgentResult) -> str:
-    if isinstance(result, str):
-        return result
-    return f"```text\n{result}\n```"
+def _resolve_artifact_dir(output_path: Path) -> Path:
+    name = output_path.name
+    if output_path.suffix:
+        name = output_path.name[: -len(output_path.suffix)]
+    return output_path.with_name(f"{name}.artifacts")
 
 
-def _append_artifact(prior_markdown: str, output: RoleMarkdown) -> str:
-    block = f"## {output.role}\n\n{output.markdown.strip()}"
-    if not prior_markdown.strip():
-        return block
-    return f"{prior_markdown.rstrip()}\n\n{block}"
+def _pass_artifact_path(
+    artifact_dir: Path, output_path: Path, index: int, role: str
+) -> Path:
+    if role == "paper-review":
+        return output_path
+    return artifact_dir / f"{index:02d}-{role}.md"
+
+
+def _require_artifact(path: Path, role: str) -> None:
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"paper_review expected {role} to write artifact: {path}"
+        )
+    if path.stat().st_size <= 0:
+        raise RuntimeError(f"paper_review artifact is empty for {role}: {path}")
 
 
 async def _run_role(
@@ -123,10 +132,11 @@ async def _run_role(
     pass_name: str,
     task: str,
     input_path: str,
-    prior_markdown: str,
-) -> RoleMarkdown:
+    output_artifact_path: str,
+    prior_artifact_paths: list[str],
+) -> RoleArtifact:
     ctx.log(f"Running {pass_name} with {role}")
-    result = await ctx.agent(
+    await ctx.agent(
         f"Run {pass_name} as {role}. Load skill {role} first.",
         scenario=REVIEWER,
         tool_allowlist=TOOL_ALLOWLIST,
@@ -138,15 +148,20 @@ async def _run_role(
                 "pass_name": pass_name,
                 "task": task,
                 "input_path": input_path,
-                "prior_markdown": prior_markdown,
+                "output_artifact_path": output_artifact_path,
+                "prior_artifact_paths": prior_artifact_paths,
             }
         },
         retry=args.agent_retries,
         timeout=args.agent_timeout_seconds,
         trace_label=role,
     )
-    return RoleMarkdown(
-        role=role, pass_name=pass_name, markdown=_coerce_markdown(result)
+    artifact_path = Path(output_artifact_path)
+    _require_artifact(artifact_path, role)
+    return RoleArtifact(
+        role=role,
+        pass_name=pass_name,
+        artifact_path=output_artifact_path,
     )
 
 
@@ -157,16 +172,26 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
     ctx.phase("prepare")
     input_path = _validate_input_path(args.path, cwd)
     ctx.log(f"Using paper input path: {input_path}")
+    output_path = _resolve_output_path(args.output_path, cwd, input_path)
+    artifact_dir = _resolve_artifact_dir(output_path)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ctx.log(f"Using pass artifact directory: {artifact_dir}")
 
-    results: list[RoleMarkdown] = []
-    prior_markdown = ""
-    final_report = ""
+    results: list[RoleArtifact] = []
+    prior_artifact_paths: list[str] = []
 
-    for role, pass_name, task in ROLE_SEQUENCE:
+    for index, (role, pass_name, task) in enumerate(ROLE_SEQUENCE, start=1):
         phase = (
             "report" if role == "paper-review" else pass_name.lower().replace(" ", "-")
         )
         ctx.phase(phase)
+        pass_artifact_path = _pass_artifact_path(
+            artifact_dir,
+            output_path,
+            index,
+            role,
+        )
         output = await _run_role(
             ctx,
             args=args,
@@ -174,28 +199,25 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             pass_name=pass_name,
             task=task,
             input_path=str(input_path),
-            prior_markdown=prior_markdown,
+            output_artifact_path=str(pass_artifact_path),
+            prior_artifact_paths=prior_artifact_paths,
         )
+        ctx.log(f"Wrote pass artifact: {pass_artifact_path}")
         results.append(output)
-        if role == "paper-review":
-            final_report = output.markdown
-        prior_markdown = _append_artifact(prior_markdown, output)
+        prior_artifact_paths.append(str(pass_artifact_path))
 
-    report = final_report or results[-1].markdown
-    output_path = _resolve_output_path(args.output_path, cwd, input_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(report, encoding="utf-8")
     ctx.log(f"Wrote report: {output_path}")
 
     return {
         "success": True,
         "report_path": str(output_path),
+        "artifact_dir": str(artifact_dir),
         "input_path": str(input_path),
         "passes": [
             {
                 "role": result.role,
                 "pass_name": result.pass_name,
-                "markdown": result.markdown,
+                "artifact_path": result.artifact_path,
             }
             for result in results
         ],
