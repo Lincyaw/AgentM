@@ -37,6 +37,7 @@ from .lib.candidates import (
     graph_rel_type,
     structural_candidates,
 )
+from .lib.final_checks import frontend_like
 from .lib.fpg import injection_node_id
 from .lib.schema import (
     AuditOutcome,
@@ -44,6 +45,7 @@ from .lib.schema import (
     HopResult,
     Injection,
     CandidateEdge,
+    FinalCheckReport,
     PropagationResult,
     ReworkRequest,
     SeedCoverageStatus,
@@ -66,6 +68,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
         ctx.log("audit skipped by request")
     else:
         audit_result = await audit_loop(ctx, case, state)
+    await final_check_loop(ctx, case, state)
 
     ctx.phase("validate")
     state.finalize(audit_result)
@@ -81,7 +84,7 @@ async def seed_phase(ctx: WorkflowContext, case: Case, state: GraphState) -> Non
     seed_coros: list[Awaitable[tuple[Injection, SeedResult | None]]] = [
         discovery.verify_seed(ctx, case, state, inj) for inj in seed_injections
     ]
-    seed_results = await ctx.parallel(seed_coros)
+    seed_results = await parallel_limited(ctx, seed_coros, case.max_parallel_tasks)
     for inj, result in zip(seed_injections, seed_results):
         if result is None:
             state.record_error(
@@ -122,7 +125,7 @@ async def propagate(
     """Scan each confirmed fault chain over structural/anomaly candidates."""
     queue: list[tuple[str, str]] = []
     for root in dict.fromkeys(roots):
-        if root not in state.nodes or root in case.infra_set or root in case.entry_services:
+        if root not in state.nodes or root in case.infra_set or is_slo_endpoint(case, root):
             continue
         sources = state.node_sources.get(root) or {root}
         queue.extend((root, source_seed) for source_seed in sorted(sources))
@@ -196,7 +199,7 @@ async def propagate(
             )
             for item in pending_hops
         ]
-        results = await ctx.parallel(coros)
+        results = await parallel_limited(ctx, coros, case.max_parallel_tasks)
 
         for candidate, result in zip(pending_hops, results):
             from_svc = candidate["from_service"]
@@ -237,7 +240,7 @@ async def propagate(
                 fault=state.fault_for_node(from_svc, source_seed),
             )
             changed_any = accepted or changed_any
-            if accepted and to_svc not in case.infra_set and to_svc not in case.entry_services:
+            if accepted and to_svc not in case.infra_set and not is_slo_endpoint(case, to_svc):
                 queue.append((to_svc, source_seed))
 
         if not queue:
@@ -321,6 +324,165 @@ async def audit_loop(
     )
 
 
+async def final_check_loop(
+    ctx: WorkflowContext,
+    case: Case,
+    state: GraphState,
+) -> None:
+    """Turn deterministic final-check gaps into gated re-verification work."""
+    for round_idx in range(case.max_audit_rounds):
+        report = state.evaluate_final_checks()
+        if report["passed"]:
+            return
+        requests = final_check_rework_requests(case, state, report)
+        state.audit_rounds_log.append(
+            {
+                "round": f"final-check-{round_idx + 1}",
+                "final_check_report": report,
+                "redispatch_requests": [
+                    req.model_dump(mode="json") for req in requests
+                ],
+            }
+        )
+        if not requests:
+            ctx.log("final checks found gaps but no direct recheck is available")
+            return
+        ctx.phase(
+            "final-check-rework"
+            if round_idx == 0
+            else f"final-check-rework-{round_idx + 1}"
+        )
+        ctx.log(f"Final checks requested {len(requests)} rechecks")
+        graph_before = (
+            frozenset(state.nodes),
+            tuple((edge.get("src"), edge.get("dst")) for edge in state.edges),
+        )
+        changed, rework_log = await redispatch(ctx, case, state, requests)
+        state.audit_rounds_log[-1]["redispatch_results"] = rework_log
+        graph_after = (
+            frozenset(state.nodes),
+            tuple((edge.get("src"), edge.get("dst")) for edge in state.edges),
+        )
+        if not changed or graph_after == graph_before:
+            ctx.log("final-check rework made no graph progress; stopping")
+            return
+
+
+def final_check_rework_requests(
+    case: Case,
+    state: GraphState,
+    report: FinalCheckReport,
+) -> list[ReworkRequest]:
+    requests: list[ReworkRequest] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    for issue in report["issues"]:
+        if issue["check"] != "frontend_anomaly_explained":
+            continue
+        service = str(issue.get("details", {}).get("service") or "")
+        details = issue.get("details", {})
+        requests.extend(
+            _requests_to_target(
+                case,
+                state,
+                service,
+                context=(
+                    "Final invariant gap: explain SLO/frontend anomaly "
+                    f"{issue['item']} on {service}. "
+                    f"Subject={details.get('subject')}; "
+                    f"component={details.get('component')}. "
+                    "This is an endpoint/anomaly coverage check, not a "
+                    "generic service-health check. Add this hop only if "
+                    "same-trace or endpoint-specific evidence connects the "
+                    "confirmed upstream fault path to this requested SLO "
+                    "symptom. Aggregate frontend/proxy error rate, latency, "
+                    "or span count alone is insufficient. If only a subset "
+                    "of frontend/proxy failures is path-aligned with the "
+                    "fault, say exactly which subset is explained and "
+                    "separate unrelated/background frontend failures."
+                ),
+                seen=seen,
+                allow_other=True,
+                frontier_only=True,
+            )
+        )
+    targeted_seeds = {
+        req.source_seed for req in requests
+        if isinstance(req, HopRecheckRequest) and req.source_seed
+    }
+    for issue in report["issues"]:
+        if issue["check"] == "seed_reaches_entry":
+            seed = issue["item"]
+            if seed in targeted_seeds:
+                continue
+            targets = issue.get("details", {}).get("frontend_services", [])
+            if not isinstance(targets, list) or not targets:
+                targets = sorted(case.entry_services)
+            for target in sorted(str(target) for target in targets):
+                requests.extend(
+                    _requests_to_target(
+                        case,
+                        state,
+                        target,
+                        source_seed=seed,
+                        context=(
+                            "Final invariant gap: confirmed seed must reach an "
+                            f"SLO/entry endpoint. Verify whether the path from "
+                            f"{seed} reaches {target} through this hop."
+                        ),
+                        seen=seen,
+                    )
+                )
+    return requests
+
+
+def _requests_to_target(
+    case: Case,
+    state: GraphState,
+    target: str,
+    *,
+    context: str,
+    seen: set[tuple[str, str, str | None]],
+    source_seed: str | None = None,
+    allow_other: bool = False,
+    frontier_only: bool = False,
+) -> list[ReworkRequest]:
+    if not target:
+        return []
+    out: list[ReworkRequest] = []
+    for from_svc in sorted(state.nodes):
+        if from_svc == target:
+            continue
+        if frontier_only and state.adj.get(from_svc):
+            continue
+        rel_type = graph_rel_type(case.graph, from_svc, target)
+        if not rel_type and not allow_other:
+            continue
+        rel_type = rel_type or "other"
+        source_seeds = (
+            [source_seed]
+            if source_seed
+            else sorted(state.node_sources.get(from_svc, set()))
+        )
+        for seed in source_seeds:
+            if not seed or not _reaches(state.adj, seed, from_svc):
+                continue
+            key = (from_svc, target, seed)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                HopRecheckRequest(
+                    kind="hop_recheck",
+                    from_service=from_svc,
+                    to_service=target,
+                    rel_type=rel_type,
+                    source_seed=seed,
+                    context=context,
+                )
+            )
+    return out
+
+
 async def redispatch(
     ctx: WorkflowContext,
     case: Case,
@@ -350,13 +512,15 @@ async def redispatch(
     if seed_requests:
         ctx.phase("audit-seed-rework")
         ctx.log(f"Audit requested {len(seed_requests)} seed rechecks")
-        seed_results = await ctx.parallel(
+        seed_results = await parallel_limited(
+            ctx,
             [
                 discovery.verify_seed(
                     ctx, case, state, inj_by_seed[req.seed], req.context
                 )
                 for req in seed_requests
-            ]
+            ],
+            case.max_parallel_tasks,
         )
         for req, seed_pair in zip(seed_requests, seed_results):
             if seed_pair is None:
@@ -439,7 +603,11 @@ async def redispatch(
                 ),
             )
 
-        hop_results = await ctx.parallel([_one_hop_rework(req) for req in hop_requests])
+        hop_results = await parallel_limited(
+            ctx,
+            [_one_hop_rework(req) for req in hop_requests],
+            case.max_parallel_tasks,
+        )
         for hop_req, pair in zip(hop_requests, hop_results):
             if pair is None:
                 state.record_error(
@@ -512,7 +680,7 @@ async def redispatch(
                 and
                 to_svc in state.nodes
                 and to_svc not in case.infra_set
-                and to_svc not in case.entry_services
+                and not is_slo_endpoint(case, to_svc)
                 and source_seed is not None
             ):
                 new_roots.append(to_svc)
@@ -521,3 +689,23 @@ async def redispatch(
         ctx.log(f"Propagating from {len(set(new_roots))} audit-confirmed roots")
         changed = await propagate(ctx, case, state, new_roots) or changed
     return changed, rework_log
+
+
+def is_slo_endpoint(case: Case, service: str) -> bool:
+    return frontend_like(service, case.entry_services)
+
+
+async def parallel_limited(
+    ctx: WorkflowContext,
+    coros: Sequence[Awaitable[Any]],
+    limit: int,
+) -> list[Any]:
+    """Run all tasks, but avoid spawning an unbounded number of child agents."""
+    if not coros:
+        return []
+    if limit <= 0 or len(coros) <= limit:
+        return list(await ctx.parallel(list(coros)))
+    out: list[Any] = []
+    for start in range(0, len(coros), limit):
+        out.extend(await ctx.parallel(list(coros[start:start + limit])))
+    return out

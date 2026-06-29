@@ -40,7 +40,10 @@ the graph.
    a round surfaces no re-dispatch request and no unexplained anomaly, or until
    `max_audit_rounds` is reached. The audit never edits the graph directly; it
    only emits `seed_recheck` or `hop_recheck` requests.
-5. `cli.py` writes:
+5. Final deterministic checks run even when audit is skipped: every seed must be
+   confirmed and reach an entry service, and every frontend/entry anomaly must
+   be represented by a node reachable from a confirmed seed.
+6. `cli.py` writes:
    - `fpg_scenario.json`: candidate FPG conforming to the local FPG profile.
    - `run_meta.json`: execution ledger and audit metadata.
    - `review_packet.json`: candidate FPG, data profile, anomaly inventory,
@@ -76,6 +79,7 @@ the graph.
 | `audit_map.py` | Gated audit agents for reachability, coverage, and exploration. |
 | `lib/case_profile.py` | Bounded telemetry profile and anomaly inventory builders. |
 | `lib/candidates.py` | Structural/anomaly-informed candidate-edge enumeration. |
+| `lib/final_checks.py` | Deterministic output invariants for seed reachability and frontend anomaly coverage. |
 | `lib/fpg.py` | FPG vocabulary mapping and scenario serialization. |
 | `lib/schema.py` | TypedDict/Pydantic workflow contracts. |
 

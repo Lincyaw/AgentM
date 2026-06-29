@@ -146,6 +146,7 @@ def _write_outputs(
     for key in (
         "anomaly_inventory",
         "candidate_edges",
+        "final_checks",
         "node_attribution",
         "review_notes",
     ):
@@ -182,6 +183,7 @@ def _write_review_packet(
             "audit_rounds": result.get("audit_rounds", []),
         },
         "candidate_edges": result.get("candidate_edges", []),
+        "final_checks": result.get("final_checks", {}),
         "node_attribution": result.get("node_attribution", {}),
         "review_notes": result.get("review_notes", []),
         "human_adjudication": {
@@ -235,6 +237,7 @@ def _write_error_meta(
     for key in (
         "anomaly_inventory",
         "candidate_edges",
+        "final_checks",
         "node_attribution",
         "review_notes",
     ):
@@ -253,6 +256,7 @@ def _run_one(
     judge_model: str | None = None,
     gate_retries: int = 3,
     skip_judge: bool = False,
+    max_parallel_tasks: int = 4,
 ) -> dict:
     data_dir = case_dir.resolve()
     out = out_dir.resolve()
@@ -273,6 +277,7 @@ def _run_one(
         skip_judge=skip_judge,
         judge_model=judge_model,
         gate_retries=gate_retries,
+        max_parallel_tasks=max_parallel_tasks,
     )
     result = asyncio.run(_run_workflow(workflow_args, out))
 
@@ -287,6 +292,11 @@ def _run_one(
         return {"case": data_dir.name, "error": "no seeds confirmed"}
 
     _write_outputs(out, ctx.meta, result, ctx.data_profile)
+
+    final_checks = result.get("final_checks", {})
+    if isinstance(final_checks, dict) and final_checks.get("passed") is False:
+        logger.warning("Final invariant checks failed: {}", final_checks.get("issues", []))
+        return {"case": data_dir.name, "error": "final checks failed"}
 
     seeds = {i.get("node_id", i["target"]) for i in ctx.injections}
     confirmed = [n["id"] for n in result["nodes"]]
@@ -308,6 +318,16 @@ def _run_one(
 def _read_cached(out_dir: Path, case_name: str) -> dict | None:
     scenario_path = out_dir / "fpg_scenario.json"
     meta_path = out_dir / "run_meta.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:  # noqa: BLE001
+            return None
+        final_checks = meta.get("final_checks")
+        if isinstance(final_checks, dict) and final_checks.get("passed") is False:
+            return {"case": case_name, "error": "final checks failed", "cached": True}
+        if meta.get("error"):
+            return {"case": case_name, "error": meta["error"], "cached": True}
     if scenario_path.exists():
         try:
             scenario = json.loads(scenario_path.read_text())
@@ -322,13 +342,6 @@ def _read_cached(out_dir: Path, case_name: str) -> dict | None:
             "propagated": [s for s in confirmed if s not in seeds],
             "cached": True,
         }
-    if meta_path.exists():
-        try:
-            meta = json.loads(meta_path.read_text())
-        except Exception:  # noqa: BLE001
-            return None
-        if meta.get("error"):
-            return {"case": case_name, "error": meta["error"], "cached": True}
     return None
 
 
@@ -381,6 +394,13 @@ def run(
             help="skip the audit loop after seed/hop propagation",
         ),
     ] = False,
+    max_parallel_tasks: Annotated[
+        int,
+        typer.Option(
+            "--max-parallel-tasks",
+            help="max child agents to run concurrently inside one workflow phase",
+        ),
+    ] = 4,
 ) -> None:
     """Run propagation check on a single case."""
     if model:
@@ -393,6 +413,7 @@ def run(
         judge_model=judge_model,
         gate_retries=gate_retries,
         skip_judge=skip_judge,
+        max_parallel_tasks=max_parallel_tasks,
     )
     if "error" in summary:
         raise typer.Exit(1)
@@ -450,6 +471,20 @@ def batch(
             help="retry each seed/hop this many times after its gate rejects it",
         ),
     ] = 3,
+    skip_judge: Annotated[
+        bool,
+        typer.Option(
+            "--skip-judge",
+            help="skip the audit loop after seed/hop propagation",
+        ),
+    ] = False,
+    max_parallel_tasks: Annotated[
+        int,
+        typer.Option(
+            "--max-parallel-tasks",
+            help="max child agents to run concurrently inside one workflow phase",
+        ),
+    ] = 4,
     limit: Annotated[int | None, typer.Option(help="max cases")] = None,
     offset: Annotated[int, typer.Option(help="skip first N cases")] = 0,
 ) -> None:
@@ -480,6 +515,8 @@ def batch(
                 budget=budget,
                 judge_model=judge_model,
                 gate_retries=gate_retries,
+                skip_judge=skip_judge,
+                max_parallel_tasks=max_parallel_tasks,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[{}] {}", name, exc)

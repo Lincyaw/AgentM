@@ -34,6 +34,11 @@ Check the submission for these properties:
 8. For audit tasks, the agent actually covered the requested scope: the relevant
    seeds, entry/SLO scopes, anomaly inventory items, and visibly degraded
    services, instead of only the current candidate graph.
+9. For final-check/SLO rework, the submission is path-aligned: it explains the
+   requested endpoint/anomaly with same-trace or endpoint-specific evidence
+   that connects the confirmed fault path to the SLO symptom. Reject aggregate
+   service-level explanations that do not separate unrelated/background
+   frontend errors from the fault-specific SLO impact.
 
 Judge from the supplied task payload, submitted result, and child-session
 metadata. Do not run extra data queries in the gate; when the submitted

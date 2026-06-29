@@ -54,6 +54,7 @@ class CaseContext:
         skip_judge: bool = False,
         judge_model: str | None = None,
         gate_retries: int = 3,
+        max_parallel_tasks: int = 4,
     ) -> dict[str, Any]:
         """Serialize to the dict the workflow script expects."""
         return {
@@ -71,6 +72,7 @@ class CaseContext:
             "skip_judge": skip_judge,
             "judge_model": judge_model,
             "gate_retries": gate_retries,
+            "max_parallel_tasks": max_parallel_tasks,
             "rel_mechanism": self.rel_mechanism,
         }
 

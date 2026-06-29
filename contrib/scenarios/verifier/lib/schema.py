@@ -75,6 +75,23 @@ class ExecutionError(TypedDict):
     reason: str
 
 
+class FinalCheckIssue(TypedDict, total=False):
+    check: Required[str]
+    item: Required[str]
+    reason: Required[str]
+    details: dict[str, Any]
+
+
+class FinalCheckReport(TypedDict):
+    passed: bool
+    entry_services: list[str]
+    frontend_services: list[str]
+    seed_reachability: dict[str, list[list[str]]]
+    frontend_anomalies: list[dict[str, Any]]
+    unexplained_frontend_anomalies: list[dict[str, Any]]
+    issues: list[FinalCheckIssue]
+
+
 # -- Gate ------------------------------------------------------------------
 class GateDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -210,3 +227,4 @@ class PropagationResult(TypedDict, total=False):
     candidate_edges: list[CandidateEdge]
     node_attribution: dict[str, list[dict[str, Any]]]
     review_notes: list[dict[str, Any]]
+    final_checks: FinalCheckReport

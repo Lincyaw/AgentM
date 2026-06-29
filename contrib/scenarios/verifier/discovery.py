@@ -222,11 +222,15 @@ async def verify_hop(
         },
         "is_infra": to_svc in case.infra_set,
         "source_seed": source_seed,
+        "upstream_evidence": state.nodes.get(from_svc),
+        "fault_record": hop_fault,
         "observation_context": observation_context,
         "prior_verdict": prior_verdict.model_dump(mode="json")
         if prior_verdict
         else {},
     }
+    if judge_context:
+        task["audit_context"] = judge_context
     feedback = judge_context
     last_result: HopResult | None = None
     for attempt in range(case.gate_retries + 1):
