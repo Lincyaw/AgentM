@@ -32,9 +32,11 @@ class HopContextConfig(BaseModel):
     all_faults: list[tuple[str, str, str]] = Field(default_factory=list)
     fault_docs: dict[str, str] = Field(default_factory=dict)
     is_infra: bool = False
+    is_entry_target: bool = False
     upstream_evidence: dict[str, Any] | None = None
     source_seed: str | None = None
     observation_context: dict[str, Any] = Field(default_factory=dict)
+    obligation: dict[str, Any] = Field(default_factory=dict)
     judge_context: str = ""
     prior_verdict: PriorVerdict | None = None
 
@@ -114,8 +116,10 @@ def build_hop_prompt(
     all_faults: list[tuple[str, str, str]],
     fault_docs: dict[str, str],
     is_infra: bool = False,
+    is_entry_target: bool = False,
     upstream_evidence: EventNode | dict | None = None,  # type: ignore[type-arg]
     observation_context: dict[str, Any] | None = None,
+    obligation: dict[str, Any] | None = None,
     judge_context: str = "",
     prior_verdict: PriorVerdict | None = None,
 ) -> str:
@@ -156,6 +160,23 @@ def build_hop_prompt(
             f"`{from_service}` (attr.span_kind = 'Client') and/or "
             f"`{to_service}`'s own resource metrics."
         )
+    if is_entry_target:
+        task_lines.append(
+            f"`{to_service}` is a user-facing SLO/entry target. For this target, "
+            "path-specific endpoint symptoms count as propagation: vanished or "
+            "collapsed request volume for the affected endpoint, frontend/client "
+            "latency or error changes, timeout-like spans, or other endpoint-level "
+            "SLO changes aligned with the upstream path. Do not require the whole "
+            "frontend process to show CPU/memory/log degradation. In multi-fault "
+            "cases, unrelated frontend endpoints may also change; that does not "
+            "disprove this edge if a concrete endpoint/anomaly on this path has "
+            "its own aligned change. Reject only when the requested or affected "
+            "endpoint has no signal beyond global drift or reduced demand. If "
+            "frontend-wide volume also collapsed, do not overclaim span-count "
+            "selectivity; compare endpoint ratios against the service total and "
+            "use same-trace, endpoint-latency, error/timeout, terminal-alarm, or "
+            "vanished-child-path evidence for the path-specific part."
+        )
     sections.append("## Task\n" + "\n".join(task_lines))
 
     if observation_context:
@@ -172,6 +193,18 @@ def build_hop_prompt(
                 ensure_ascii=False,
                 default=str,
             )
+            + "\n```"
+        )
+
+    if obligation:
+        sections.append(
+            "## Final proof obligation\n"
+            "This hop is being rechecked for a concrete final invariant. "
+            "Answer this obligation, not only the generic service-to-service "
+            "edge. The same edge may be relevant to one frontend symptom and "
+            "irrelevant to another.\n"
+            "```json\n"
+            + json.dumps(obligation, indent=2, ensure_ascii=False, default=str)
             + "\n```"
         )
 

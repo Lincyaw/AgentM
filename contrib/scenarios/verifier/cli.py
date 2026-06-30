@@ -146,7 +146,9 @@ def _write_outputs(
     for key in (
         "anomaly_inventory",
         "candidate_edges",
+        "final_anomaly_resolutions",
         "final_checks",
+        "edge_attribution",
         "node_attribution",
         "review_notes",
     ):
@@ -181,10 +183,15 @@ def _write_review_packet(
             "hop_log": result.get("hop_log", []),
             "audit": result.get("audit", {}),
             "audit_rounds": result.get("audit_rounds", []),
+            "final_anomaly_resolutions": result.get(
+                "final_anomaly_resolutions",
+                {},
+            ),
         },
         "candidate_edges": result.get("candidate_edges", []),
         "final_checks": result.get("final_checks", {}),
         "node_attribution": result.get("node_attribution", {}),
+        "edge_attribution": result.get("edge_attribution", []),
         "review_notes": result.get("review_notes", []),
         "human_adjudication": {
             "status": "pending",
@@ -237,7 +244,9 @@ def _write_error_meta(
     for key in (
         "anomaly_inventory",
         "candidate_edges",
+        "final_anomaly_resolutions",
         "final_checks",
+        "edge_attribution",
         "node_attribution",
         "review_notes",
     ):
@@ -257,6 +266,7 @@ def _run_one(
     gate_retries: int = 3,
     skip_judge: bool = False,
     max_parallel_tasks: int = 4,
+    propagation_window: int | None = None,
 ) -> dict:
     data_dir = case_dir.resolve()
     out = out_dir.resolve()
@@ -278,6 +288,7 @@ def _run_one(
         judge_model=judge_model,
         gate_retries=gate_retries,
         max_parallel_tasks=max_parallel_tasks,
+        propagation_window=propagation_window,
     )
     result = asyncio.run(_run_workflow(workflow_args, out))
 
@@ -401,6 +412,17 @@ def run(
             help="max child agents to run concurrently inside one workflow phase",
         ),
     ] = 4,
+    propagation_window: Annotated[
+        int | None,
+        typer.Option(
+            "--propagation-window",
+            help=(
+                "first priority wave size for propagation candidates; later "
+                "waves fan out to max-parallel-tasks if final checks still fail "
+                "(default: min(max-parallel-tasks, 8))"
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run propagation check on a single case."""
     if model:
@@ -414,6 +436,7 @@ def run(
         gate_retries=gate_retries,
         skip_judge=skip_judge,
         max_parallel_tasks=max_parallel_tasks,
+        propagation_window=propagation_window,
     )
     if "error" in summary:
         raise typer.Exit(1)
@@ -485,6 +508,17 @@ def batch(
             help="max child agents to run concurrently inside one workflow phase",
         ),
     ] = 4,
+    propagation_window: Annotated[
+        int | None,
+        typer.Option(
+            "--propagation-window",
+            help=(
+                "first priority wave size for propagation candidates; later "
+                "waves fan out to max-parallel-tasks if final checks still fail "
+                "(default: min(max-parallel-tasks, 8))"
+            ),
+        ),
+    ] = None,
     limit: Annotated[int | None, typer.Option(help="max cases")] = None,
     offset: Annotated[int, typer.Option(help="skip first N cases")] = 0,
 ) -> None:
@@ -517,6 +551,7 @@ def batch(
                 gate_retries=gate_retries,
                 skip_judge=skip_judge,
                 max_parallel_tasks=max_parallel_tasks,
+                propagation_window=propagation_window,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[{}] {}", name, exc)

@@ -32,6 +32,7 @@ HopLogEntry = TypedDict(
         "to": Required[str],
         "verdict": Required[str],
         "source_seed": str,
+        "obligation_id": str,
     },
     total=False,
 )
@@ -88,6 +89,7 @@ class FinalCheckReport(TypedDict):
     frontend_services: list[str]
     seed_reachability: dict[str, list[list[str]]]
     frontend_anomalies: list[dict[str, Any]]
+    resolved_frontend_anomalies: list[dict[str, Any]]
     unexplained_frontend_anomalies: list[dict[str, Any]]
     issues: list[FinalCheckIssue]
 
@@ -129,6 +131,11 @@ class HopRecheckRequest(BaseModel):
     rel_type: str | None = None
     source_seed: str | None = None
     context: str = ""
+    obligation_id: str | None = None
+    obligation_kind: Literal["seed_reachability", "frontend_anomaly"] | None = None
+    target_frontend: str | None = None
+    anomaly_id: str | None = None
+    anomaly_component: str | None = None
 
 
 ReworkRequest = Annotated[
@@ -226,5 +233,7 @@ class PropagationResult(TypedDict, total=False):
     anomaly_inventory: list[dict[str, Any]]
     candidate_edges: list[CandidateEdge]
     node_attribution: dict[str, list[dict[str, Any]]]
+    edge_attribution: list[dict[str, Any]]
     review_notes: list[dict[str, Any]]
     final_checks: FinalCheckReport
+    final_anomaly_resolutions: dict[str, dict[str, Any]]

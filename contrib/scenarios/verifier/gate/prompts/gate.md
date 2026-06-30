@@ -38,7 +38,12 @@ Check the submission for these properties:
    requested endpoint/anomaly with same-trace or endpoint-specific evidence
    that connects the confirmed fault path to the SLO symptom. Reject aggregate
    service-level explanations that do not separate unrelated/background
-   frontend errors from the fault-specific SLO impact.
+   frontend errors from the fault-specific SLO impact. Do not reject merely
+   because unrelated frontend endpoints also changed in a multi-fault case; a
+   complete investigation may confirm the path-specific subset and separate the
+   rest as background or another fault. Conversely, if frontend-wide volume
+   collapsed, the submission must not overclaim endpoint count selectivity
+   without comparing against the service total.
 
 Judge from the supplied task payload, submitted result, and child-session
 metadata. Do not run extra data queries in the gate; when the submitted

@@ -20,10 +20,18 @@ from .lib.fpg import (
     injection_subject,
     is_link_injection,
 )
+from .lib.final_checks import frontend_like
 from .lib.retry import build_retry_context
 from .lib.schema import GateDecision, HopResult, Injection, SeedResult
 from .seed.seed_context import build_seed_prompt
 from .state import Case, GraphState
+
+
+def _label_part(value: str | None) -> str:
+    """Make a compact trace-label fragment for source-specific child sessions."""
+    if not value:
+        return ""
+    return "".join(ch if ch.isalnum() else "-" for ch in value)[:80]
 
 
 async def gate(
@@ -204,6 +212,7 @@ async def verify_hop(
     prior_verdict: PriorVerdict | None = None,
     source_seed: str | None = None,
     fault_record_override: list[str] | None = None,
+    obligation_context: dict[str, Any] | None = None,
 ) -> HopResult | None:
     hop_fault = fault_record_override or state.fault_for_node(from_svc, source_seed)
     edge_fault_kind = hop_fault[0]
@@ -211,6 +220,7 @@ async def verify_hop(
     if edge_fault_kind in case.fault_docs:
         edge_fault_docs[edge_fault_kind] = case.fault_docs[edge_fault_kind]
     observation_context = case.profile_context_for_services({from_svc, to_svc})
+    is_entry_target = frontend_like(to_svc, case.entry_services)
     task = {
         "from_service": from_svc,
         "to_service": to_svc,
@@ -221,10 +231,12 @@ async def verify_hop(
             "content": case.fault_docs.get(edge_fault_kind, ""),
         },
         "is_infra": to_svc in case.infra_set,
+        "is_entry_target": is_entry_target,
         "source_seed": source_seed,
         "upstream_evidence": state.nodes.get(from_svc),
         "fault_record": hop_fault,
         "observation_context": observation_context,
+        "obligation": obligation_context or {},
         "prior_verdict": prior_verdict.model_dump(mode="json")
         if prior_verdict
         else {},
@@ -234,7 +246,11 @@ async def verify_hop(
     feedback = judge_context
     last_result: HopResult | None = None
     for attempt in range(case.gate_retries + 1):
-        label = f"hop-{from_svc}-to-{to_svc}-a{attempt}"
+        source_part = _label_part(source_seed)
+        label = f"hop-{from_svc}-to-{to_svc}"
+        if source_part:
+            label += f"-src-{source_part}"
+        label += f"-a{attempt}"
         prompt = build_hop_prompt(
             from_service=from_svc,
             to_service=to_svc,
@@ -247,8 +263,10 @@ async def verify_hop(
             ],
             fault_docs=edge_fault_docs,
             is_infra=to_svc in case.infra_set,
+            is_entry_target=is_entry_target,
             upstream_evidence=state.nodes.get(from_svc),
             observation_context=observation_context,
+            obligation=obligation_context,
             judge_context=feedback,
             prior_verdict=prior_verdict,
         )
@@ -269,9 +287,11 @@ async def verify_hop(
                     ],
                     "fault_docs": edge_fault_docs,
                     "is_infra": to_svc in case.infra_set,
+                    "is_entry_target": is_entry_target,
                     "upstream_evidence": state.nodes.get(from_svc),
                     "source_seed": source_seed,
                     "observation_context": observation_context,
+                    "obligation": obligation_context or {},
                     "judge_context": feedback,
                     "prior_verdict": prior_verdict.model_dump(mode="json")
                     if prior_verdict
@@ -326,6 +346,8 @@ async def verify_hop(
             "label": label,
             "from": from_svc,
             "to": to_svc,
+            "source_seed": source_seed,
+            "obligation": obligation_context or {},
             "gate": gate_payload,
         })
         if gate_decision.accepted:

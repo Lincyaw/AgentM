@@ -54,7 +54,15 @@ Trace signals can include count drop/vanish, latency increase, fail-fast latency
   terminal alarm must be in traces that also contain the confirmed upstream
   fault path, or it must have a selective endpoint-level change that matches
   that path. Explicitly separate unrelated/background frontend errors from the
-  fault-specific SLO impact.
+  fault-specific SLO impact. In multi-fault cases, other frontend endpoints may
+  also be abnormal; this does not refute propagation for a concrete
+  path-aligned endpoint/anomaly. Confirm only the subset that is connected to
+  this source path, and reject only when that subset has no signal beyond
+  global drift or reduced demand. If the whole frontend's request volume also
+  collapsed, do not overclaim count-drop selectivity; compare endpoint ratios
+  against the service total and rely on same-trace linkage, endpoint latency,
+  errors/timeouts, terminal alarms, or vanished child-path evidence for the
+  path-specific part.
 
 ## Verdict Policy
 

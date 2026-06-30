@@ -23,7 +23,7 @@ from .lib.fpg import (
     node_from_verdict,
     seed_effect_target,
 )
-from .lib.final_checks import frontend_services, run_final_checks
+from .lib.final_checks import frontend_anomalies, frontend_services, run_final_checks
 from .lib.schema import (
     AuditOutcome,
     CandidateEdge,
@@ -84,6 +84,7 @@ class Case:
     gate_retries: int
     agent_retries: int
     max_parallel_tasks: int
+    propagation_window: int
     max_audit_rounds: int
     seeds: set[str]
     entry_services: set[str]
@@ -105,6 +106,16 @@ class Case:
             for inj in injections
             if inj.get("target")
         ]
+        max_parallel_tasks = max(1, int(args.get("max_parallel_tasks", 4)))
+        raw_window = args.get("propagation_window")
+        default_window = min(max_parallel_tasks, 8)
+        propagation_window = (
+            default_window
+            if raw_window is None
+            else max(1, int(raw_window))
+        )
+        propagation_window = min(propagation_window, max_parallel_tasks)
+
         return cls(
             injections=injections,
             window=cast(dict[str, str], args["window"]),
@@ -126,7 +137,8 @@ class Case:
             judge_model=judge_model,
             gate_retries=int(args.get("gate_retries", 3)),
             agent_retries=int(args.get("agent_retries", 3)),
-            max_parallel_tasks=max(1, int(args.get("max_parallel_tasks", 4))),
+            max_parallel_tasks=max_parallel_tasks,
+            propagation_window=propagation_window,
             max_audit_rounds=int(args.get("max_audit_rounds", 3)),
             seeds=seeds,
             entry_services=_entry_services_from_graph(graph),
@@ -159,7 +171,30 @@ class Case:
             record
             for record in self.anomaly_inventory
             if str(record.get("subject", "")).removeprefix("svc:") in service_set
-        ][:20]
+        ]
+        frontend_set = set(
+            frontend_services(
+                graph=self.graph,
+                data_profile=self.data_profile,
+                entry_services=self.entry_services,
+            )
+        )
+        if service_set & frontend_set:
+            anomalies.extend(
+                frontend_anomalies(
+                    data_dir=self.data_dir,
+                    anomaly_inventory=self.anomaly_inventory,
+                    frontend_set=frontend_set,
+                )
+            )
+        deduped_anomalies: list[dict[str, Any]] = []
+        seen_anomalies: set[str] = set()
+        for record in anomalies:
+            anomaly_id = str(record.get("id") or record)
+            if anomaly_id in seen_anomalies:
+                continue
+            seen_anomalies.add(anomaly_id)
+            deduped_anomalies.append(dict(record))
         modality_stats: dict[str, Any] = {}
         for modality in ("traces", "metrics", "logs"):
             svc_stats = statistics.get(modality, {}).get("services", {})
@@ -174,7 +209,7 @@ class Case:
             "modalities": structure.get("modalities", {}),
             "relationships": relationships,
             "statistics": modality_stats,
-            "anomalies": anomalies,
+            "anomalies": deduped_anomalies[:20],
         }
 
 
@@ -188,6 +223,7 @@ class GraphState:
         self.edges: list[dict[str, Any]] = []
         self.adj: dict[str, list[str]] = {}  # accepted-edge adjacency, cycle guard
         self.in_deg: dict[str, int] = {}
+        self.edge_sources: dict[tuple[str, str], set[str]] = {}
         self.verdicts: dict[str, HopResult] = {}  # "from__to" -> hop verdict
         self.hop_log: list[HopLogEntry] = []
         self.round_n: int = 0
@@ -206,6 +242,7 @@ class GraphState:
         self.reachability_warnings: list[str] = []
         self.unreachable: list[str] = []
         self.final_checks: FinalCheckReport | None = None
+        self.final_anomaly_resolutions: dict[str, dict[str, Any]] = {}
 
     # -- Execution-error ledger -------------------------------------------
     def execution_key(self, stage: str, item: str) -> str:
@@ -321,12 +358,17 @@ class GraphState:
             if e.get("src") in self.nodes and e.get("dst") in self.nodes
         ]
         self.rebuild_graph_indices()
+        valid_edges = {
+            (str(edge.get("src", "")), str(edge.get("dst", "")))
+            for edge in self.edges
+        }
+        self.edge_sources = {
+            edge: sources
+            for edge, sources in self.edge_sources.items()
+            if edge in valid_edges and sources
+        }
 
     def unreachable_seed_nodes(self) -> list[str]:
-        fpg_adj: dict[str, set[str]] = {}
-        for e in self.edges:
-            fpg_adj.setdefault(e["src"], set()).add(e["dst"])
-
         slo_targets = set(
             frontend_services(
                 graph=self.case.graph,
@@ -340,6 +382,7 @@ class GraphState:
                 unreachable.append(seed_svc)
                 continue
             visited: set[str] = set()
+            fpg_adj = self.source_adjacency(seed_svc)
             queue = [seed_svc]
             while queue:
                 cur = queue.pop()
@@ -382,6 +425,7 @@ class GraphState:
             )
             self.adj.setdefault(root_id, []).append(effect_target)
             self.in_deg[effect_target] = self.in_deg.get(effect_target, 0) + 1
+        self.edge_sources.setdefault((root_id, effect_target), set()).add(root_id)
         self.propagation_roots.append(effect_target)
         return root_id
 
@@ -409,6 +453,11 @@ class GraphState:
             return False
         changed = False
         hop_fault = fault or self.fault_for_node(from_svc, source_seed)
+        if source_seed:
+            sources = self.edge_sources.setdefault((from_svc, to_svc), set())
+            if source_seed not in sources:
+                sources.add(source_seed)
+                changed = True
         if to_svc not in self.nodes:
             self.nodes[to_svc] = node_from_verdict(to_svc, result, self.case.window)
             changed = True
@@ -435,6 +484,7 @@ class GraphState:
             "edges": list(self.edges),
             "entry_services": sorted(self.case.entry_services),
             "node_attribution": self.node_attribution(),
+            "edge_attribution": self.edge_attribution(),
         }
 
     def ledger_snapshot(self) -> dict[str, Any]:
@@ -451,6 +501,7 @@ class GraphState:
     def paths_from(self, seed: str, max_depth: int = 10) -> list[list[str]]:
         if seed not in self.nodes:
             return []
+        adj = self.source_adjacency(seed)
         paths: list[list[str]] = []
         stack: list[tuple[str, list[str]]] = [(seed, [seed])]
         while stack:
@@ -460,7 +511,7 @@ class GraphState:
                 continue
             if len(path) >= max_depth:
                 continue
-            for nxt in self.adj.get(cur, []):
+            for nxt in adj.get(cur, []):
                 if nxt in path:
                     continue
                 stack.append((nxt, path + [nxt]))
@@ -486,6 +537,13 @@ class GraphState:
         of a gated re-verification rejecting the propagation hypothesis. The
         downstream nodes that lose their only support are pruned.
         """
+        support_key = (from_svc, to_svc)
+        sources = self.edge_sources.get(support_key)
+        if source_seed and sources and source_seed in sources:
+            sources.remove(source_seed)
+            if sources:
+                return True
+            self.edge_sources.pop(support_key, None)
         suffix = from_svc + "__" + to_svc
         for key, verdict in self.verdicts.items():
             if not key.endswith(suffix):
@@ -509,6 +567,20 @@ class GraphState:
         self.prune_unreachable_nodes()
         return True
 
+    def source_adjacency(self, source_seed: str) -> dict[str, list[str]]:
+        """Return accepted edges supported by one seed's own hop verdicts."""
+        adj: dict[str, list[str]] = {}
+        for (src, dst), sources in self.edge_sources.items():
+            if source_seed in sources:
+                adj.setdefault(src, []).append(dst)
+        return adj
+
+    def source_adjacencies(self) -> dict[str, dict[str, list[str]]]:
+        return {
+            seed: self.source_adjacency(seed)
+            for seed in sorted(self.confirmed_seed_ids)
+        }
+
     # -- Review metadata -------------------------------------------------
     def node_attribution(self) -> dict[str, list[dict[str, Any]]]:
         out: dict[str, list[dict[str, Any]]] = {}
@@ -518,6 +590,17 @@ class GraphState:
                 for source_seed, fault in sorted(records.items())
             ]
         return out
+
+    def edge_attribution(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "src": src,
+                "dst": dst,
+                "source_seeds": sorted(sources),
+            }
+            for (src, dst), sources in sorted(self.edge_sources.items())
+            if sources
+        ]
 
     def review_notes(self) -> list[dict[str, Any]]:
         notes: list[dict[str, Any]] = []
@@ -580,7 +663,30 @@ class GraphState:
             confirmed_seed_ids=self.confirmed_seed_ids,
             nodes=self.nodes,
             adj=self.adj,
+            source_adj_by_seed=self.source_adjacencies(),
+            resolved_frontend_anomalies=self.final_anomaly_resolutions,
         )
+
+    def resolve_frontend_anomaly(
+        self,
+        anomaly_id: str,
+        *,
+        resolution: str,
+        rationale: str,
+        evidence: list[dict[str, Any]] | None = None,
+        source: str = "final-check-rework",
+    ) -> bool:
+        previous = self.final_anomaly_resolutions.get(anomaly_id)
+        current = {
+            "resolution": resolution,
+            "rationale": rationale,
+            "evidence": evidence or [],
+            "source": source,
+        }
+        if previous == current:
+            return False
+        self.final_anomaly_resolutions[anomaly_id] = current
+        return True
 
     def finalize(self, audit_result: AuditOutcome | None) -> None:
         # fpg rule: in-degree >= 2 requires combine; each confirmed edge is
@@ -650,8 +756,10 @@ class GraphState:
             "anomaly_inventory": self.case.anomaly_inventory,
             "candidate_edges": self.candidate_edges,
             "node_attribution": self.node_attribution(),
+            "edge_attribution": self.edge_attribution(),
             "review_notes": self.review_notes(),
             "final_checks": self.final_checks or self.evaluate_final_checks(),
+            "final_anomaly_resolutions": self.final_anomaly_resolutions,
         }
         if audit_result:
             result_out["audit"] = audit_result.model_dump(mode="json")

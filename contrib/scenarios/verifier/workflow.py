@@ -18,13 +18,14 @@ the accept decision — there is no harness force-accept.
 Input via ``ctx.args`` (built by ``prepare.CaseContext.to_workflow_args``):
     data_dir, graph, injections, infra_nodes, fault_docs,
     gate_retries, agent_retries, max_audit_rounds, judge_model,
-    skip_judge, window, rel_mechanism.
+    max_parallel_tasks, propagation_window, skip_judge, window, rel_mechanism.
 
 Output: a ``PropagationResult`` dict (see ``state.GraphState.to_result``).
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Sequence
 from typing import Any
 
@@ -39,6 +40,17 @@ from .lib.candidates import (
 )
 from .lib.final_checks import frontend_like
 from .lib.fpg import injection_node_id
+from .lib.obligations import (
+    obligation_payload,
+    obligations_from_report,
+    rework_requests_for_obligations,
+)
+from .lib.scheduler import (
+    build_priority_context,
+    build_propagation_needs,
+    candidate_addresses_needs,
+    prioritize_candidates,
+)
 from .lib.schema import (
     AuditOutcome,
     HopRecheckRequest,
@@ -60,6 +72,7 @@ async def run(ctx: WorkflowContext) -> PropagationResult:
     state = GraphState(case, ctx.log)
 
     await seed_phase(ctx, case, state)
+    await seed_recheck_unconfirmed_phase(ctx, case, state)
     ctx.phase("propagate")
     await propagate(ctx, case, state, state.propagation_roots or list(state.nodes))
 
@@ -116,6 +129,62 @@ async def seed_phase(ctx: WorkflowContext, case: Case, state: GraphState) -> Non
         ctx.log("no seeds confirmed after seed map; audit may request rechecks")
 
 
+async def seed_recheck_unconfirmed_phase(
+    ctx: WorkflowContext,
+    case: Case,
+    state: GraphState,
+) -> None:
+    """Run final-contract seed rechecks before propagation starts."""
+    inj_by_seed = {
+        injection_node_id(inj): inj for inj in case.injections if inj.get("target")
+    }
+    missing_seeds = [
+        seed_id
+        for seed_id in sorted(case.seeds)
+        if seed_id not in state.confirmed_seed_ids and seed_id in inj_by_seed
+    ]
+    if not missing_seeds:
+        return
+    ctx.phase("seed-recheck")
+    ctx.log(f"Rechecking {len(missing_seeds)} unconfirmed seeds before propagation")
+    context_by_seed = {
+        obligation.source_seed: obligation.context
+        for obligation in obligations_from_report(state.evaluate_final_checks())
+        if obligation.kind == "seed_confirmed" and obligation.source_seed
+    }
+    seed_results = await parallel_limited(
+        ctx,
+        [
+            discovery.verify_seed(
+                ctx,
+                case,
+                state,
+                inj_by_seed[seed_id],
+                context_by_seed.get(seed_id, ""),
+            )
+            for seed_id in missing_seeds
+        ],
+        case.max_parallel_tasks,
+    )
+    for seed_id, seed_pair in zip(missing_seeds, seed_results):
+        if seed_pair is None:
+            state.record_error(
+                "seed",
+                seed_id,
+                "seed recheck failed before returning a result",
+            )
+            continue
+        inj, seed_verdict = seed_pair
+        if seed_verdict:
+            state.seed_verdicts[seed_id] = seed_verdict
+        verdict = seed_verdict.get("verdict") if seed_verdict else "no-result"
+        ctx.log(f"seed recheck {seed_id}: {verdict}")
+        if seed_verdict and verdict == "confirmed":
+            accepted_seed = state.accept_seed_node(inj, seed_verdict)
+            state.confirmed_seed_ids.add(accepted_seed)
+            state.clear_error("seed", accepted_seed)
+
+
 async def propagate(
     ctx: WorkflowContext,
     case: Case,
@@ -132,11 +201,29 @@ async def propagate(
     changed_any = False
 
     while queue:
+        needs = build_propagation_needs(
+            report=state.evaluate_final_checks(),
+            graph=case.graph,
+        )
+        if needs.passed:
+            ctx.log("final checks satisfied before next propagation round")
+            return changed_any
         state.round_n += 1
         batch = list(dict.fromkeys(queue))
         queue = []
+        priority_context = build_priority_context(
+            graph=case.graph,
+            data_profile=case.data_profile,
+            data_dir=case.data_dir,
+            entry_services=case.entry_services,
+            anomaly_inventory=case.anomaly_inventory,
+            accepted_adj=state.adj,
+            gate_log=state.gate_log,
+            source_adj_by_seed=state.source_adjacencies(),
+        )
 
         pending_hops: list[CandidateEdge] = []
+        scheduled_edge_keys: set[str] = set()
         for current, source_seed in batch:
             structural = structural_candidates(
                 case.graph,
@@ -154,18 +241,22 @@ async def propagate(
                     existing_targets=existing_targets,
                 ),
             ]
+            candidates = prioritize_candidates(candidates, priority_context)
             for candidate in candidates:
+                if not candidate_addresses_needs(candidate, needs):
+                    continue
                 neighbor = candidate["to_service"]
                 edge_key = state.edge_key(current, neighbor, source_seed)
-                if edge_key in state.checked_edges:
+                if edge_key in state.checked_edges or edge_key in scheduled_edge_keys:
                     continue
-                state.checked_edges.add(edge_key)
+                scheduled_edge_keys.add(edge_key)
                 state.record_candidate(candidate)
 
                 # fpg DAG rule: never evaluate an edge that would close a cycle
                 # through already-accepted edges. The source seed is logged so a
                 # different co-injected fault can still scan the same edge.
                 if neighbor in state.nodes and _reaches(state.adj, neighbor, current):
+                    state.checked_edges.add(edge_key)
                     state.hop_log.append(
                         {
                             "round": state.round_n,
@@ -181,67 +272,202 @@ async def propagate(
         if not pending_hops:
             continue
 
-        ctx.log(f"Round {state.round_n}: {len(pending_hops)} candidate hops")
+        pending_hops = prioritize_candidates(pending_hops, priority_context)
+        first_wave_size = min(case.max_parallel_tasks, case.propagation_window)
+        ctx.log(
+            f"Round {state.round_n}: {len(pending_hops)} candidate hops "
+            f"(priority wave {first_wave_size})"
+        )
 
-        coros: list[Awaitable[HopResult | None]] = [
-            discovery.verify_hop(
-                ctx,
-                case,
-                state,
-                item["from_service"],
-                item["to_service"],
-                item["rel_type"],
-                source_seed=item["source_seed"],
-                fault_record_override=state.fault_for_node(
-                    item["from_service"],
-                    item["source_seed"],
-                ),
+        is_first_wave = True
+        advanced_sources: set[str] = set()
+        deferred_frontiers: set[tuple[str, str]] = set()
+        while pending_hops:
+            needs = build_propagation_needs(
+                report=state.evaluate_final_checks(),
+                graph=case.graph,
             )
-            for item in pending_hops
-        ]
-        results = await parallel_limited(ctx, coros, case.max_parallel_tasks)
+            if needs.passed:
+                ctx.log("final checks satisfied during propagation; stopping expansion")
+                return changed_any
+            priority_context = build_priority_context(
+                graph=case.graph,
+                data_profile=case.data_profile,
+                data_dir=case.data_dir,
+                entry_services=case.entry_services,
+                anomaly_inventory=case.anomaly_inventory,
+                accepted_adj=state.adj,
+                gate_log=state.gate_log,
+                source_adj_by_seed=state.source_adjacencies(),
+            )
+            active_seed_sources = needs.unresolved_seed_sources - advanced_sources
+            pending_hops = prioritize_candidates(
+                [
+                    item
+                    for item in pending_hops
+                    if candidate_addresses_needs(
+                        item,
+                        needs,
+                        active_seed_sources=active_seed_sources,
+                    )
+                ],
+                priority_context,
+            )
+            if not pending_hops:
+                break
+            if active_seed_sources:
+                wave_size = first_wave_size
+            else:
+                wave_size = first_wave_size if is_first_wave else case.max_parallel_tasks
+            chunk = pending_hops[:wave_size]
+            pending_hops = pending_hops[wave_size:]
+            is_first_wave = False
+            async def _verify_candidate(
+                item: CandidateEdge,
+            ) -> tuple[CandidateEdge, HopResult | None]:
+                try:
+                    result = await discovery.verify_hop(
+                        ctx,
+                        case,
+                        state,
+                        item["from_service"],
+                        item["to_service"],
+                        item["rel_type"],
+                        source_seed=item["source_seed"],
+                        fault_record_override=state.fault_for_node(
+                            item["from_service"],
+                            item["source_seed"],
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    ctx.log(
+                        "  "
+                        f"{item['source_seed']}: "
+                        f"{item['from_service']} -> {item['to_service']}: "
+                        f"task error {type(exc).__name__}: {exc}"
+                    )
+                    result = None
+                return item, result
 
-        for candidate, result in zip(pending_hops, results):
-            from_svc = candidate["from_service"]
-            to_svc = candidate["to_service"]
-            rel_type = candidate["rel_type"]
-            source_seed = candidate["source_seed"]
-            edge_key = state.edge_key(from_svc, to_svc, source_seed)
-            if result is None:
-                state.record_error(
-                    "hop",
-                    edge_key,
-                    "hop verifier task failed before returning a result",
+            task_candidates = {
+                asyncio.create_task(_verify_candidate(item)): item for item in chunk
+            }
+            tasks = set(task_candidates)
+            defer_to_next_round = False
+            while tasks:
+                done, tasks = await asyncio.wait(
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-            verdict = result.get("verdict") if result else None
-            verdict_label = verdict or "no-result"
-            state.hop_log.append(
-                {
-                    "round": state.round_n,
-                    "from": from_svc,
-                    "to": to_svc,
-                    "verdict": verdict_label,
-                    "source_seed": source_seed,
-                }
-            )
-            ctx.log(f"  {source_seed}: {from_svc} -> {to_svc}: {verdict_label}")
-            if result and verdict:
-                state.verdicts[edge_key] = result
+                for task in done:
+                    task_candidates.pop(task, None)
+                    candidate, result = task.result()
+                    from_svc = candidate["from_service"]
+                    to_svc = candidate["to_service"]
+                    rel_type = candidate["rel_type"]
+                    source_seed = candidate["source_seed"]
+                    edge_key = state.edge_key(from_svc, to_svc, source_seed)
+                    state.checked_edges.add(edge_key)
+                    if result is None:
+                        state.record_error(
+                            "hop",
+                            edge_key,
+                            "hop verifier task failed before returning a result",
+                        )
+                    verdict = result.get("verdict") if result else None
+                    verdict_label = verdict or "no-result"
+                    state.hop_log.append(
+                        {
+                            "round": state.round_n,
+                            "from": from_svc,
+                            "to": to_svc,
+                            "verdict": verdict_label,
+                            "source_seed": source_seed,
+                        }
+                    )
+                    ctx.log(
+                        f"  {source_seed}: {from_svc} -> {to_svc}: {verdict_label}"
+                    )
+                    if result and verdict:
+                        state.verdicts[edge_key] = result
 
-            if verdict != "confirmed":
-                continue
-            assert result is not None
-            accepted = state.accept_hop_result(
-                from_svc,
-                to_svc,
-                rel_type,
-                result,
-                source_seed=source_seed,
-                fault=state.fault_for_node(from_svc, source_seed),
-            )
-            changed_any = accepted or changed_any
-            if accepted and to_svc not in case.infra_set and not is_slo_endpoint(case, to_svc):
-                queue.append((to_svc, source_seed))
+                    if verdict != "confirmed":
+                        continue
+                    assert result is not None
+                    accepted = state.accept_hop_result(
+                        from_svc,
+                        to_svc,
+                        rel_type,
+                        result,
+                        source_seed=source_seed,
+                        fault=state.fault_for_node(from_svc, source_seed),
+                    )
+                    changed_any = accepted or changed_any
+                    if (
+                        accepted
+                        and to_svc not in case.infra_set
+                        and not is_slo_endpoint(case, to_svc)
+                    ):
+                        queue.append((to_svc, source_seed))
+                        if to_svc in priority_context.distance_to_target:
+                            advanced_sources.add(source_seed)
+                            deferred_frontiers.add((from_svc, source_seed))
+
+                if state.evaluate_final_checks()["passed"]:
+                    if tasks:
+                        ctx.log(
+                            "final checks satisfied; canceling "
+                            f"{len(tasks)} lower-priority in-flight hop checks"
+                        )
+                        await cancel_tasks(tasks)
+                    ctx.log(
+                        "final checks satisfied during propagation; stopping expansion"
+                    )
+                    return changed_any
+                needs_after_chunk = build_propagation_needs(
+                    report=state.evaluate_final_checks(),
+                    graph=case.graph,
+                )
+                still_unadvanced = (
+                    needs_after_chunk.unresolved_seed_sources - advanced_sources
+                )
+                if needs_after_chunk.unresolved_seed_sources and not still_unadvanced:
+                    direct_entry_tasks = {
+                        task
+                        for task in tasks
+                        if is_slo_endpoint(
+                            case,
+                            task_candidates[task]["to_service"],
+                        )
+                    }
+                    if direct_entry_tasks:
+                        cancelable = tasks - direct_entry_tasks
+                        if cancelable:
+                            ctx.log(
+                                "all unresolved seeds advanced; canceling "
+                                f"{len(cancelable)} deferred sibling hop checks "
+                                "while direct entry checks finish"
+                            )
+                            tasks.difference_update(cancelable)
+                            for task in cancelable:
+                                task_candidates.pop(task, None)
+                            await cancel_tasks(cancelable)
+                        continue
+                    queue.extend(sorted(deferred_frontiers))
+                    if tasks:
+                        ctx.log(
+                            "all unresolved seeds advanced; canceling "
+                            f"{len(tasks)} deferred sibling hop checks"
+                        )
+                        await cancel_tasks(tasks)
+                    ctx.log(
+                        "all unresolved seeds advanced to a nearer frontier; "
+                        "deferring sibling candidates"
+                    )
+                    defer_to_next_round = True
+                    break
+            if defer_to_next_round:
+                break
 
         if not queue:
             ctx.log("propagation frontier exhausted for this round")
@@ -353,19 +579,39 @@ async def final_check_loop(
             else f"final-check-rework-{round_idx + 1}"
         )
         ctx.log(f"Final checks requested {len(requests)} rechecks")
-        graph_before = (
-            frozenset(state.nodes),
-            tuple((edge.get("src"), edge.get("dst")) for edge in state.edges),
-        )
+        graph_before = graph_progress_signature(state)
         changed, rework_log = await redispatch(ctx, case, state, requests)
         state.audit_rounds_log[-1]["redispatch_results"] = rework_log
-        graph_after = (
-            frozenset(state.nodes),
-            tuple((edge.get("src"), edge.get("dst")) for edge in state.edges),
+        resolution_changed = resolve_frontend_obligations_from_rework(
+            state,
+            requests,
+            rework_log,
         )
-        if not changed or graph_after == graph_before:
+        if resolution_changed:
+            state.audit_rounds_log[-1]["resolved_frontend_anomalies"] = (
+                state.final_anomaly_resolutions
+            )
+            changed = True
+        graph_after = graph_progress_signature(state)
+        if not changed or (graph_after == graph_before and not resolution_changed):
             ctx.log("final-check rework made no graph progress; stopping")
             return
+
+
+def graph_progress_signature(state: GraphState) -> tuple[
+    frozenset[str],
+    tuple[tuple[object, object], ...],
+    tuple[tuple[str, str, tuple[str, ...]], ...],
+]:
+    """Capture graph progress, including source-specific edge attribution."""
+    return (
+        frozenset(state.nodes),
+        tuple((edge.get("src"), edge.get("dst")) for edge in state.edges),
+        tuple(
+            (src, dst, tuple(sorted(sources)))
+            for (src, dst), sources in sorted(state.edge_sources.items())
+        ),
+    )
 
 
 def final_check_rework_requests(
@@ -373,114 +619,86 @@ def final_check_rework_requests(
     state: GraphState,
     report: FinalCheckReport,
 ) -> list[ReworkRequest]:
-    requests: list[ReworkRequest] = []
-    seen: set[tuple[str, str, str | None]] = set()
-    for issue in report["issues"]:
-        if issue["check"] != "frontend_anomaly_explained":
-            continue
-        service = str(issue.get("details", {}).get("service") or "")
-        details = issue.get("details", {})
-        requests.extend(
-            _requests_to_target(
-                case,
-                state,
-                service,
-                context=(
-                    "Final invariant gap: explain SLO/frontend anomaly "
-                    f"{issue['item']} on {service}. "
-                    f"Subject={details.get('subject')}; "
-                    f"component={details.get('component')}. "
-                    "This is an endpoint/anomaly coverage check, not a "
-                    "generic service-health check. Add this hop only if "
-                    "same-trace or endpoint-specific evidence connects the "
-                    "confirmed upstream fault path to this requested SLO "
-                    "symptom. Aggregate frontend/proxy error rate, latency, "
-                    "or span count alone is insufficient. If only a subset "
-                    "of frontend/proxy failures is path-aligned with the "
-                    "fault, say exactly which subset is explained and "
-                    "separate unrelated/background frontend failures."
-                ),
-                seen=seen,
-                allow_other=True,
-                frontier_only=True,
-            )
-        )
-    targeted_seeds = {
-        req.source_seed for req in requests
-        if isinstance(req, HopRecheckRequest) and req.source_seed
-    }
-    for issue in report["issues"]:
-        if issue["check"] == "seed_reaches_entry":
-            seed = issue["item"]
-            if seed in targeted_seeds:
-                continue
-            targets = issue.get("details", {}).get("frontend_services", [])
-            if not isinstance(targets, list) or not targets:
-                targets = sorted(case.entry_services)
-            for target in sorted(str(target) for target in targets):
-                requests.extend(
-                    _requests_to_target(
-                        case,
-                        state,
-                        target,
-                        source_seed=seed,
-                        context=(
-                            "Final invariant gap: confirmed seed must reach an "
-                            f"SLO/entry endpoint. Verify whether the path from "
-                            f"{seed} reaches {target} through this hop."
-                        ),
-                        seen=seen,
-                    )
-                )
-    return requests
+    obligations = obligations_from_report(report)
+    return rework_requests_for_obligations(
+        graph=case.graph,
+        nodes=state.nodes,
+        adj=state.adj,
+        source_adj_by_seed=state.source_adjacencies(),
+        node_sources=state.node_sources,
+        obligations=obligations,
+    )
 
 
-def _requests_to_target(
-    case: Case,
+def _hop_rework_verdict_key(
     state: GraphState,
-    target: str,
-    *,
-    context: str,
-    seen: set[tuple[str, str, str | None]],
-    source_seed: str | None = None,
-    allow_other: bool = False,
-    frontier_only: bool = False,
-) -> list[ReworkRequest]:
-    if not target:
-        return []
-    out: list[ReworkRequest] = []
-    for from_svc in sorted(state.nodes):
-        if from_svc == target:
+    req: HopRecheckRequest,
+    source_seed: str | None,
+) -> str:
+    edge_key = state.edge_key(req.from_service, req.to_service, source_seed)
+    if req.obligation_kind == "frontend_anomaly" and req.obligation_id:
+        return f"{edge_key}@@{req.obligation_id}"
+    return edge_key
+
+
+def resolve_frontend_obligations_from_rework(
+    state: GraphState,
+    requests: Sequence[ReworkRequest],
+    rework_log: Sequence[dict[str, Any]],
+) -> bool:
+    """Resolve concrete frontend anomalies when all candidate paths reject."""
+    request_counts: dict[str, int] = {}
+    anomaly_by_obligation: dict[str, str] = {}
+    for req in requests:
+        if (
+            isinstance(req, HopRecheckRequest)
+            and req.obligation_kind == "frontend_anomaly"
+            and req.obligation_id
+            and req.anomaly_id
+        ):
+            request_counts[req.obligation_id] = request_counts.get(req.obligation_id, 0) + 1
+            anomaly_by_obligation[req.obligation_id] = req.anomaly_id
+
+    results_by_obligation: dict[str, list[dict[str, Any]]] = {}
+    for row in rework_log:
+        obligation = row.get("obligation", {})
+        if not isinstance(obligation, dict):
             continue
-        if frontier_only and state.adj.get(from_svc):
+        obligation_id = str(obligation.get("id") or "")
+        if obligation_id in request_counts:
+            results_by_obligation.setdefault(obligation_id, []).append(row)
+
+    changed = False
+    for obligation_id, expected_count in request_counts.items():
+        rows = results_by_obligation.get(obligation_id, [])
+        if len(rows) < expected_count:
             continue
-        rel_type = graph_rel_type(case.graph, from_svc, target)
-        if not rel_type and not allow_other:
+        verdicts = [str(row.get("verdict") or "") for row in rows]
+        if not verdicts or any(verdict != "rejected" for verdict in verdicts):
             continue
-        rel_type = rel_type or "other"
-        source_seeds = (
-            [source_seed]
-            if source_seed
-            else sorted(state.node_sources.get(from_svc, set()))
+        anomaly_id = anomaly_by_obligation[obligation_id]
+        rationale = (
+            "All gated candidate paths for this frontend anomaly were rejected "
+            "as not causally connected to the confirmed seed paths. Treating "
+            "the anomaly as unrelated/background for final-check purposes."
         )
-        for seed in source_seeds:
-            if not seed or not _reaches(state.adj, seed, from_svc):
-                continue
-            key = (from_svc, target, seed)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(
-                HopRecheckRequest(
-                    kind="hop_recheck",
-                    from_service=from_svc,
-                    to_service=target,
-                    rel_type=rel_type,
-                    source_seed=seed,
-                    context=context,
-                )
-            )
-    return out
+        evidence = [
+            {
+                "from": row.get("from"),
+                "to": row.get("to"),
+                "source_seed": row.get("source_seed"),
+                "verdict": row.get("verdict"),
+                "rationale": row.get("rationale", ""),
+            }
+            for row in rows
+        ]
+        changed = state.resolve_frontend_anomaly(
+            anomaly_id,
+            resolution="unrelated_or_background",
+            rationale=rationale,
+            evidence=evidence,
+        ) or changed
+    return changed
 
 
 async def redispatch(
@@ -562,6 +780,29 @@ async def redispatch(
         for req in requests
         if isinstance(req, HopRecheckRequest) and req.from_service in state.nodes
     ]
+    if new_roots:
+        ctx.phase("audit-propagate-rework")
+        ctx.log(f"Propagating from {len(set(new_roots))} audit-confirmed roots")
+        changed = await propagate(ctx, case, state, new_roots) or changed
+        new_roots = []
+        if state.evaluate_final_checks()["passed"]:
+            return changed, rework_log
+        active_obligations = {
+            obligation.id
+            for obligation in obligations_from_report(state.evaluate_final_checks())
+        }
+        before_filter = len(hop_requests)
+        hop_requests = [
+            req
+            for req in hop_requests
+            if not req.obligation_id or req.obligation_id in active_obligations
+        ]
+        if len(hop_requests) != before_filter:
+            ctx.log(
+                "Skipping "
+                f"{before_filter - len(hop_requests)} obsolete hop rechecks "
+                "after seed propagation"
+            )
     if hop_requests:
         ctx.phase("audit-hop-rework")
         ctx.log(f"Audit requested {len(hop_requests)} hop rechecks")
@@ -579,10 +820,11 @@ async def redispatch(
                 None,
             )
             prior = dict(
-                state.verdicts.get(
-                    state.edge_key(req.from_service, req.to_service, source_seed),
-                    {},
+                state.verdicts.get(_hop_rework_verdict_key(state, req, source_seed))
+                or state.verdicts.get(
+                    state.edge_key(req.from_service, req.to_service, source_seed)
                 )
+                or {}
             )
             return req, await discovery.verify_hop(
                 ctx,
@@ -601,6 +843,7 @@ async def redispatch(
                     verdict=str(prior.get("verdict", "")),
                     rationale=str(prior.get("rationale", "")),
                 ),
+                obligation_context=obligation_payload(req),
             )
 
         hop_results = await parallel_limited(
@@ -625,6 +868,8 @@ async def redispatch(
             )
             hop_verdict: str | None = result.get("verdict") if result else None
             edge_key = state.edge_key(from_svc, to_svc, source_seed)
+            verdict_key = _hop_rework_verdict_key(state, hop_req, source_seed)
+            obligation = obligation_payload(hop_req)
             state.hop_log.append(
                 {
                     "round": state.round_n,
@@ -632,11 +877,16 @@ async def redispatch(
                     "to": to_svc,
                     "verdict": (hop_verdict or "no-result") + "(audit-rework)",
                     "source_seed": source_seed or "",
+                    "obligation_id": hop_req.obligation_id or "",
                 }
             )
             if result and hop_verdict:
-                previous_hop_verdict = state.verdicts.get(edge_key)
-                state.verdicts[edge_key] = result
+                previous_hop_verdict = state.verdicts.get(verdict_key)
+                state.verdicts[verdict_key] = result
+                if hop_req.obligation_kind == "frontend_anomaly" and (
+                    hop_verdict == "confirmed"
+                ):
+                    state.verdicts[edge_key] = result
                 if result != previous_hop_verdict:
                     changed = True
             rework_log.append(
@@ -645,6 +895,7 @@ async def redispatch(
                     "from": from_svc,
                     "to": to_svc,
                     "source_seed": source_seed,
+                    "obligation": obligation,
                     "verdict": hop_verdict or "no-result",
                     "rationale": result.get("rationale", "") if result else "",
                 }
@@ -655,7 +906,10 @@ async def redispatch(
             # Removal is verdict-driven: a re-verification that rejects the
             # propagation hypothesis removes the edge (and prunes orphans).
             if result is not None and hop_verdict == "rejected":
-                if state.remove_hop_edge(from_svc, to_svc, source_seed):
+                if (
+                    hop_req.obligation_kind != "frontend_anomaly"
+                    and state.remove_hop_edge(from_svc, to_svc, source_seed)
+                ):
                     changed = True
                 continue
             if hop_verdict != "confirmed" or result is None:
@@ -709,3 +963,40 @@ async def parallel_limited(
     for start in range(0, len(coros), limit):
         out.extend(await ctx.parallel(list(coros[start:start + limit])))
     return out
+
+
+async def cancel_tasks(tasks: set[asyncio.Task[Any]]) -> None:
+    """Cancel in-flight speculative checks once the current obligations are met."""
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    tasks.clear()
+
+
+def _chunks(items: Sequence[Any], limit: int) -> list[Sequence[Any]]:
+    """Split work into bounded batches while preserving priority order."""
+    if not items:
+        return []
+    if limit <= 0 or len(items) <= limit:
+        return [items]
+    return [items[start:start + limit] for start in range(0, len(items), limit)]
+
+
+def _priority_waves(
+    items: Sequence[Any],
+    *,
+    first_wave: int,
+    fallback: int,
+) -> list[Sequence[Any]]:
+    """Run the highest-priority edge wave first, then fan out if needed."""
+    if not items:
+        return []
+    first_wave = max(1, first_wave)
+    fallback = max(1, fallback)
+    if len(items) <= first_wave:
+        return [items]
+    first = items[:first_wave]
+    rest = items[first_wave:]
+    return [first, *_chunks(rest, fallback)]
