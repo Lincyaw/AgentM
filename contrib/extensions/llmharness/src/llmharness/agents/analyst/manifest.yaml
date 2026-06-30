@@ -1,0 +1,11 @@
+name: analyst
+description: >
+  Offline failure analysis agent: compares successful and failed trajectories
+  for the same task via trace query tools. Outputs structured skill documents.
+
+extensions:
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.operations
+  - module: agentm.extensions.builtin.structured_output
+  - module: llmharness.agents.analyst.context
+  - module: llmharness.agents.analyst.trace_tools

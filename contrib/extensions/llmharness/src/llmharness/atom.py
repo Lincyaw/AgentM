@@ -52,6 +52,8 @@ class LLMHarnessConfig(BaseModel):
     enable_auditor: bool = True
     enable_reminders: bool = True
     finalize_tool: str | None = None
+    enable_methodology: bool = False
+    methodology_model: str | None = None
 
 
 REMINDER_OPEN: Final = "<system-reminder>\n"
@@ -307,13 +309,73 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
     finalize_tool = cfg.finalize_tool
 
     auditor_provider = _resolve_provider(cfg.auditor_model, cfg.auditor_provider)
+    methodology_provider = _resolve_provider(cfg.methodology_model, None) if cfg.methodology_model else auditor_provider
 
     # State
     cumulative = CumulativeAuditState.hydrate_from_session_log(api.session.get_branch())
     pending_reminders: list[Reminder] = []
     turn_count = 0
+    cached_methodology: list[str] = []
 
     aud_scenario = auditor_scenario()
+
+    # ------------------------------------------------------------------
+    # Methodology generation (spec-driven, runs once)
+    # ------------------------------------------------------------------
+
+    async def _generate_methodology(messages: list[AgentMessage]) -> list[str]:
+        """Extract task spec from messages and generate auditor methodology.
+
+        Looks for the task spec in this order:
+        1. Tool results containing INSTRUCTION.md content (most complete)
+        2. First user message (fallback — may be just a pointer)
+        """
+        spec_parts: list[str] = []
+        user_prompt = ""
+        for msg in messages:
+            if isinstance(msg, UserMessage) and not user_prompt:
+                for block in msg.content:
+                    text = getattr(block, "text", None)
+                    if isinstance(text, str) and text:
+                        user_prompt = text
+                        break
+            if isinstance(msg, ToolResultMessage):
+                for block in msg.content:
+                    if isinstance(block, ToolResultBlock) and not block.is_error:
+                        for sub in block.content:
+                            text = getattr(sub, "text", None)
+                            if isinstance(text, str) and len(text) > 200 and (
+                                "instruction" in text.lower()[:100]
+                                or "lab:" in text.lower()[:100]
+                                or "task:" in text.lower()[:100]
+                                or "# " in text[:20]
+                            ):
+                                spec_parts.append(text[:5000])
+        task_spec = "\n\n".join(spec_parts) if spec_parts else user_prompt
+        if not task_spec:
+            logger.warning("llmharness: no task spec found for methodology generation")
+            return []
+
+        child_msgs = await _run_child(
+            api,
+            scenario="llmharness:methodology_gen",
+            prompt=f"Generate auditor methodology for the following task spec:\n\n{task_spec}",
+            purpose="methodology_generation",
+            provider=methodology_provider,
+        )
+        if child_msgs is None:
+            logger.warning("llmharness: methodology generation child failed")
+            return []
+        methodology_text = _render_message_text(child_msgs[-1]) if child_msgs else ""
+        if not methodology_text:
+            for msg in reversed(child_msgs):
+                methodology_text = _render_message_text(msg)
+                if methodology_text:
+                    break
+        if methodology_text:
+            logger.info(f"llmharness: generated methodology ({len(methodology_text)} chars)")
+            return [methodology_text]
+        return []
 
     # ------------------------------------------------------------------
     # Core pipeline step
@@ -325,13 +387,24 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         *,
         force: bool = False,
     ) -> None:
-        nonlocal turn_count
+        nonlocal turn_count, cached_methodology
         turn_count = tc
 
         auditor_due = enable_auditor and ((tc % auditor_k) == 0 or force)
 
+        # --- Methodology (once, on first auditor firing) ---
+        if auditor_due and cfg.enable_methodology and not cached_methodology:
+            cached_methodology = await _generate_methodology(messages)
+
         # --- Auditor ---
         if auditor_due:
+            auditor_config: dict[str, Any] = {
+                "continuation_notes": list(cumulative.last_continuation_notes),
+                "prompt_name": cfg.auditor_prompt,
+            }
+            if cached_methodology:
+                auditor_config["methodology"] = cached_methodology
+
             child_msgs = await _run_child(
                 api,
                 scenario=aud_scenario,
@@ -350,10 +423,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                     ("agentm.extensions.builtin.trace_query", {}),
                 ],
                 atom_config_overrides={
-                    "auditor_context": {
-                        "continuation_notes": list(cumulative.last_continuation_notes),
-                        "prompt_name": cfg.auditor_prompt,
-                    },
+                    "auditor_context": auditor_config,
                     "auditor_tools": {},
                 },
                 provider=auditor_provider,

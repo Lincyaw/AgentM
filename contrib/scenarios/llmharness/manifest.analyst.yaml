@@ -1,0 +1,15 @@
+name: llmharness:analyst
+description: >
+  Offline failure analysis: compare successful and failed trajectories
+  to extract domain knowledge as skills for the online auditor.
+
+  Usage:
+    agentm --scenario llmharness:analyst --model litellm -p \
+      "Analyze task 61810_cow. Success session_id: <sid>. Fail session_id: <sid>."
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.structured_output
+  - module: llmharness.agents.analyst.context
+  - module: llmharness.agents.analyst.trace_tools
