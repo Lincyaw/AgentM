@@ -1,6 +1,8 @@
 """Priority helpers for seed-rooted propagation edge scheduling."""
 from __future__ import annotations
 
+import dataclasses
+import math
 from collections import Counter, deque
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -24,6 +26,7 @@ class EdgePriorityContext:
     accepted_adj: Mapping[str, Sequence[str]]
     source_adj_by_seed: Mapping[str, Mapping[str, Sequence[str]]]
     rejected_gate_counts: Mapping[tuple[str, str, str], int]
+    change_magnitude: Mapping[str, float] = dataclasses.field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -97,6 +100,7 @@ def build_priority_context(
         accepted_adj=accepted_adj,
         source_adj_by_seed=source_adj_by_seed or {},
         rejected_gate_counts=rejected_gate_counts,
+        change_magnitude=_compute_change_magnitudes(data_profile),
     )
 
 
@@ -170,7 +174,7 @@ def prioritize_candidates(
 def edge_priority(
     candidate: CandidateEdge,
     context: EdgePriorityContext,
-) -> tuple[int, int, int, int, int, int, int, int, int, str, str, str]:
+) -> tuple[int, int, int, int, int, int, int, float, int, int, str, str, str]:
     """Rank a candidate; lower tuple values run earlier.
 
     The ordering keeps expansion rooted at confirmed seeds but spends work first
@@ -206,6 +210,8 @@ def edge_priority(
         context.frontend_anomaly_terms,
     )
     anomaly_rank = 0 if to_service in context.anomaly_services else 1
+    magnitude = context.change_magnitude.get(to_service, 0.0)
+    magnitude_rank = -magnitude
     rel_rank = _relationship_rank(str(candidate.get("rel_type", "")))
     depth = _accepted_distance(source_adj, source_seed, from_service)
     retry_count = context.rejected_gate_counts.get(
@@ -221,6 +227,7 @@ def edge_priority(
         frontend_affinity,
         rel_rank,
         anomaly_rank,
+        magnitude_rank,
         depth,
         retry_count,
         source_seed,
@@ -251,6 +258,71 @@ def _reverse_distances(
             distances[prev] = next_distance
             queue.append(prev)
     return distances
+
+
+def _change_ratio(normal: float, abnormal: float) -> float:
+    """Log-scale change ratio; 0 when unchanged, higher when more different."""
+    if normal <= 0 and abnormal <= 0:
+        return 0.0
+    if normal <= 0:
+        return math.log1p(abnormal)
+    if abnormal <= 0:
+        return math.log1p(normal)
+    ratio = max(abnormal / normal, normal / abnormal)
+    return math.log(ratio)
+
+
+def _compute_change_magnitudes(
+    data_profile: Mapping[str, Any],
+) -> dict[str, float]:
+    """Compute a composite change-magnitude score per service from statistics.
+
+    Combines trace (span count shift + latency shift + error shift), metric,
+    and log signals into a single float. Higher = more changed = verify first.
+    """
+    stats = data_profile.get("statistics", {})
+    scores: dict[str, float] = {}
+
+    for modality, weight in [("traces", 1.0), ("logs", 0.5), ("metrics", 0.3)]:
+        services = stats.get(modality, {}).get("services", {})
+        if not isinstance(services, Mapping):
+            continue
+        for svc, svc_stats in services.items():
+            if not isinstance(svc_stats, Mapping):
+                continue
+            normal = svc_stats.get("normal", {})
+            abnormal = svc_stats.get("abnormal", {})
+            if not normal or not abnormal:
+                continue
+            score = 0.0
+            if modality == "traces":
+                n_count = normal.get("span_count", 0)
+                a_count = abnormal.get("span_count", 0)
+                score += _change_ratio(n_count, a_count)
+                n_p95 = normal.get("p95_duration", 0)
+                a_p95 = abnormal.get("p95_duration", 0)
+                if n_p95 > 0 and a_p95 > 0:
+                    score += _change_ratio(n_p95, a_p95)
+                n_err = normal.get("error_rate", 0)
+                a_err = abnormal.get("error_rate", 0)
+                if a_err > n_err + 0.01:
+                    score += (a_err - n_err) * 10
+            elif modality == "logs":
+                n_count = normal.get("row_count", 0)
+                a_count = abnormal.get("row_count", 0)
+                score += _change_ratio(n_count, a_count)
+                n_elevated = normal.get("elevated_level_count", 0)
+                a_elevated = abnormal.get("elevated_level_count", 0)
+                if a_elevated > n_elevated:
+                    score += _change_ratio(max(n_elevated, 1), a_elevated)
+            elif modality == "metrics":
+                n_count = normal.get("sample_count", 0)
+                a_count = abnormal.get("sample_count", 0)
+                score += _change_ratio(n_count, a_count)
+
+            scores[svc] = scores.get(svc, 0.0) + score * weight
+
+    return scores
 
 
 def _relationship_rank(rel_type: str) -> int:
