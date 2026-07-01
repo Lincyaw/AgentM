@@ -170,12 +170,28 @@ def _open_append(path: Path) -> IO[str]:
     return path.open("a", encoding="utf-8")
 
 
+_file_export_locks_guard = threading.Lock()
+_file_export_locks: dict[Path, threading.Lock] = {}
+
+
+def _file_export_lock(path: Path) -> threading.Lock:
+    key = path.absolute()
+    with _file_export_locks_guard:
+        lock = _file_export_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _file_export_locks[key] = lock
+        return lock
+
+
 class _FileOtlpExporter:
     """Shared ndjson-file writer for OTLP spans and logs.
 
     Subclasses only set ``_encode``, ``_payload_key``, and result-type
     constants — the serialization, file I/O, locking, and lifecycle are
-    identical for both signal types.
+    identical for both signal types. Span and log exporters for one session
+    deliberately share a path-level lock so each OTLP element lands as one
+    valid NDJSON line even though the SDK exports both signals concurrently.
     """
 
     _encode: Any  # set by subclass
@@ -183,7 +199,7 @@ class _FileOtlpExporter:
 
     def __init__(self, file_path: Path) -> None:
         self._path = Path(file_path)
-        self._lock = threading.Lock()
+        self._lock = _file_export_lock(self._path)
         self._fh = _open_append(self._path)
         self._closed = False
 

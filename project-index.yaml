@@ -472,6 +472,7 @@ requirements:
       - path: src/agentm/core/abi/session_store.py
       - path: src/agentm/core/lib/observability_dir.py
       - path: src/agentm/core/observability/clickhouse.py
+      - path: src/agentm/core/observability/otel_export.py
       - path: src/agentm/core/runtime/session_bootstrap.py
       - path: src/agentm/core/runtime/extension.py
       - path: src/agentm/core/runtime/session_factory.py
