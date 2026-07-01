@@ -210,6 +210,13 @@ def run_final_checks(
         paths = paths_to_targets(adj, seed, slo_targets)
         seed_reachability[seed] = paths
         if not paths:
+            has_outgoing = bool(seed_adj.get(seed))
+            if not has_outgoing:
+                # Confirmed but no outgoing edges: the seed's effect stopped
+                # at the injection target (e.g. MemoryStress with no latency
+                # propagation). This is a legitimate local-only seed, not a
+                # gap the verifier should try to close.
+                continue
             issues.append(
                 {
                     "check": "seed_reaches_entry",
