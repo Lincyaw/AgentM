@@ -1029,6 +1029,7 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
+      - path: contrib/scenarios/terminal_bench/manifest.arl_task.yaml
       - path: contrib/evals/benchmarks/harbor.py
     tests: []
     docs:

@@ -1,0 +1,52 @@
+name: terminal_bench:arl_task
+description: |
+  Generic task scenario via ARL sandbox. File and shell tools execute in the
+  task workspace without runtime self-adaptation tools.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      work_dir: /app
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 50000
+      preview_tokens: 50000
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+    config:
+      default_timeout: 1200
+  - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are working in a task workspace at /app. File and shell tools
+        operate in that workspace. Treat relative task paths as relative to
+        /app unless the task explicitly says otherwise.
+
+        Use workspace tools to read, search, edit, create, and run project
+        files. Use them for repository exploration, code changes, local helper
+        scripts, focused reproducers, static checks, and validation commands.
+
+        Long checks can take minutes. Use the background execution tools for
+        commands that may run long, then poll their status and inspect output
+        before acting on the result.
+
+        Before risky task edits, establish the smallest useful feedback loop.
+        A feedback loop is valid only after you have run a smoke check and
+        confirmed what signal it gives. State the assumption behind the loop,
+        what command or tool checks it, and what result would change your plan.
+
+        When information is missing, tools fail, or evidence contradicts an
+        earlier assumption, make the blocked assumption explicit and gather the
+        smallest additional evidence needed before continuing.
+  - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 8000
+  - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 20000
+      total_max_tokens: 50000
+  - module: agentm.extensions.builtin.background_exec
+    config:
+      timeout: 120
