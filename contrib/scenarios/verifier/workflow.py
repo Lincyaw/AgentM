@@ -26,6 +26,7 @@ Output: a ``PropagationResult`` dict (see ``state.GraphState.to_result``).
 from __future__ import annotations
 
 import asyncio
+import heapq
 from collections.abc import Awaitable, Sequence
 from typing import Any
 
@@ -49,7 +50,7 @@ from .lib.scheduler import (
     build_priority_context,
     build_propagation_needs,
     candidate_addresses_needs,
-    prioritize_candidates,
+    edge_priority,
 )
 from .lib.schema import (
     AuditOutcome,
@@ -191,27 +192,40 @@ async def propagate(
     state: GraphState,
     roots: Sequence[str],
 ) -> bool:
-    """Scan each confirmed fault chain over structural/anomaly candidates."""
-    queue: list[tuple[str, str]] = []
-    for root in dict.fromkeys(roots):
-        if root not in state.nodes or root in case.infra_set or is_slo_endpoint(case, root):
-            continue
-        sources = state.node_sources.get(root) or {root}
-        queue.extend((root, source_seed) for source_seed in sorted(sources))
-    changed_any = False
+    """Stream candidates through a worker pool — no round or wave barriers.
 
-    while queue:
-        needs = build_propagation_needs(
-            report=state.evaluate_final_checks(),
-            graph=case.graph,
-        )
-        if needs.passed:
-            ctx.log("final checks satisfied before next propagation round")
-            return changed_any
-        state.round_n += 1
-        batch = list(dict.fromkeys(queue))
-        queue = []
-        priority_context = build_priority_context(
+    Confirmed hops immediately enqueue the new node's candidates. Workers
+    pick them up as capacity frees. The only synchronization point is
+    ``FIRST_COMPLETED``: each result is processed the moment it arrives
+    and idle workers are refilled from the priority queue.
+
+    Needs filtering happens at dequeue time (lazy): candidates that no
+    longer address an unresolved obligation are skipped without an LLM
+    call. Final checks are cached and only recomputed when the graph
+    actually changes.
+    """
+    state.round_n += 1
+
+    # -- Cached final checks (recomputed only when graph changes) ----------
+    _fc_report: FinalCheckReport | None = None
+
+    def _checks() -> FinalCheckReport:
+        nonlocal _fc_report
+        if _fc_report is None:
+            _fc_report = state.evaluate_final_checks()
+        return _fc_report
+
+    def _invalidate() -> None:
+        nonlocal _fc_report
+        _fc_report = None
+
+    if _checks()["passed"]:
+        ctx.log("final checks already satisfied")
+        return False
+
+    # -- Priority context (rebuilt cheaply on each confirmed hop) ----------
+    def _build_pctx() -> Any:
+        return build_priority_context(
             graph=case.graph,
             data_profile=case.data_profile,
             data_dir=case.data_dir,
@@ -222,257 +236,175 @@ async def propagate(
             source_adj_by_seed=state.source_adjacencies(),
         )
 
-        pending_hops: list[CandidateEdge] = []
-        scheduled_edge_keys: set[str] = set()
-        for current, source_seed in batch:
-            structural = structural_candidates(
-                case.graph,
-                source_seed=source_seed,
-                from_service=current,
-            )
-            existing_targets = {candidate["to_service"] for candidate in structural}
-            candidates = [
-                *structural,
-                *anomaly_candidates(
-                    case.graph,
-                    case.anomaly_inventory,
-                    source_seed=source_seed,
-                    from_service=current,
-                    existing_targets=existing_targets,
-                ),
-            ]
-            candidates = prioritize_candidates(candidates, priority_context)
-            for candidate in candidates:
-                if not candidate_addresses_needs(candidate, needs):
-                    continue
-                neighbor = candidate["to_service"]
-                edge_key = state.edge_key(current, neighbor, source_seed)
-                if edge_key in state.checked_edges or edge_key in scheduled_edge_keys:
-                    continue
-                scheduled_edge_keys.add(edge_key)
-                state.record_candidate(candidate)
+    pctx = _build_pctx()
 
-                # fpg DAG rule: never evaluate an edge that would close a cycle
-                # through already-accepted edges. The source seed is logged so a
-                # different co-injected fault can still scan the same edge.
-                if neighbor in state.nodes and _reaches(state.adj, neighbor, current):
-                    state.checked_edges.add(edge_key)
-                    state.hop_log.append(
-                        {
-                            "round": state.round_n,
-                            "from": current,
-                            "to": neighbor,
-                            "verdict": "skipped_cycle",
-                            "source_seed": source_seed,
-                        }
-                    )
-                    continue
-                pending_hops.append(candidate)
+    # -- Priority queue: (priority_tuple, seq, candidate) ------------------
+    pq: list[tuple[Any, int, CandidateEdge]] = []
+    _seq = 0
+    _scheduled: set[str] = set()
 
-        if not pending_hops:
-            continue
-
-        pending_hops = prioritize_candidates(pending_hops, priority_context)
-        first_wave_size = min(case.max_parallel_tasks, case.propagation_window)
-        ctx.log(
-            f"Round {state.round_n}: {len(pending_hops)} candidate hops "
-            f"(priority wave {first_wave_size})"
+    def _enqueue(candidate: CandidateEdge) -> None:
+        nonlocal _seq
+        key = state.edge_key(
+            candidate["from_service"],
+            candidate["to_service"],
+            candidate["source_seed"],
         )
+        if key in _scheduled or key in state.checked_edges:
+            return
+        _scheduled.add(key)
+        src, dst = candidate["from_service"], candidate["to_service"]
+        if dst in state.nodes and _reaches(state.adj, dst, src):
+            state.checked_edges.add(key)
+            state.hop_log.append({
+                "round": state.round_n,
+                "from": src,
+                "to": dst,
+                "verdict": "skipped_cycle",
+                "source_seed": candidate["source_seed"],
+            })
+            return
+        state.record_candidate(candidate)
+        heapq.heappush(pq, (edge_priority(candidate, pctx), _seq, candidate))
+        _seq += 1
 
-        is_first_wave = True
-        advanced_sources: set[str] = set()
-        deferred_frontiers: set[tuple[str, str]] = set()
-        while pending_hops:
-            needs = build_propagation_needs(
-                report=state.evaluate_final_checks(),
-                graph=case.graph,
+    def _enqueue_frontier(node: str, source_seed: str) -> None:
+        structural = structural_candidates(
+            case.graph, source_seed=source_seed, from_service=node,
+        )
+        existing = {c["to_service"] for c in structural}
+        for c in structural:
+            _enqueue(c)
+        for c in anomaly_candidates(
+            case.graph, case.anomaly_inventory,
+            source_seed=source_seed, from_service=node,
+            existing_targets=existing,
+        ):
+            _enqueue(c)
+
+    # -- Seed initial candidates from roots --------------------------------
+    for root in dict.fromkeys(roots):
+        if root not in state.nodes or root in case.infra_set or is_slo_endpoint(case, root):
+            continue
+        for source_seed in sorted(state.node_sources.get(root) or {root}):
+            _enqueue_frontier(root, source_seed)
+
+    if not pq:
+        ctx.log("propagation frontier exhausted")
+        return False
+
+    ctx.log(
+        f"Propagation: {len(pq)} candidates, "
+        f"up to {case.max_parallel_tasks} concurrent workers"
+    )
+
+    # -- Worker pool -------------------------------------------------------
+    in_flight: dict[
+        asyncio.Task[tuple[CandidateEdge, HopResult | None]],
+        CandidateEdge,
+    ] = {}
+    changed = False
+
+    async def _verify(
+        item: CandidateEdge,
+    ) -> tuple[CandidateEdge, HopResult | None]:
+        try:
+            result = await discovery.verify_hop(
+                ctx, case, state,
+                item["from_service"],
+                item["to_service"],
+                item["rel_type"],
+                source_seed=item["source_seed"],
+                fault_record_override=state.fault_for_node(
+                    item["from_service"], item["source_seed"],
+                ),
             )
+        except Exception as exc:  # noqa: BLE001
+            ctx.log(
+                f"  {item['source_seed']}: "
+                f"{item['from_service']} -> {item['to_service']}: "
+                f"task error {type(exc).__name__}: {exc}"
+            )
+            result = None
+        return item, result
+
+    def _fill() -> None:
+        """Submit highest-priority candidates to idle workers."""
+        needs = build_propagation_needs(
+            report=_checks(), graph=case.graph,
+        )
+        while pq and len(in_flight) < case.max_parallel_tasks:
             if needs.passed:
-                ctx.log("final checks satisfied during propagation; stopping expansion")
-                return changed_any
-            priority_context = build_priority_context(
-                graph=case.graph,
-                data_profile=case.data_profile,
-                data_dir=case.data_dir,
-                entry_services=case.entry_services,
-                anomaly_inventory=case.anomaly_inventory,
-                accepted_adj=state.adj,
-                gate_log=state.gate_log,
-                source_adj_by_seed=state.source_adjacencies(),
-            )
-            active_seed_sources = needs.unresolved_seed_sources - advanced_sources
-            pending_hops = prioritize_candidates(
-                [
-                    item
-                    for item in pending_hops
-                    if candidate_addresses_needs(
-                        item,
-                        needs,
-                        active_seed_sources=active_seed_sources,
-                    )
-                ],
-                priority_context,
-            )
-            if not pending_hops:
                 break
-            if active_seed_sources:
-                wave_size = first_wave_size
-            else:
-                wave_size = first_wave_size if is_first_wave else case.max_parallel_tasks
-            chunk = pending_hops[:wave_size]
-            pending_hops = pending_hops[wave_size:]
-            is_first_wave = False
-            async def _verify_candidate(
-                item: CandidateEdge,
-            ) -> tuple[CandidateEdge, HopResult | None]:
-                try:
-                    result = await discovery.verify_hop(
-                        ctx,
-                        case,
-                        state,
-                        item["from_service"],
-                        item["to_service"],
-                        item["rel_type"],
-                        source_seed=item["source_seed"],
-                        fault_record_override=state.fault_for_node(
-                            item["from_service"],
-                            item["source_seed"],
-                        ),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    ctx.log(
-                        "  "
-                        f"{item['source_seed']}: "
-                        f"{item['from_service']} -> {item['to_service']}: "
-                        f"task error {type(exc).__name__}: {exc}"
-                    )
-                    result = None
-                return item, result
+            _, _, candidate = heapq.heappop(pq)
+            if not candidate_addresses_needs(candidate, needs):
+                continue
+            task = asyncio.create_task(_verify(candidate))
+            in_flight[task] = candidate
 
-            task_candidates = {
-                asyncio.create_task(_verify_candidate(item)): item for item in chunk
-            }
-            tasks = set(task_candidates)
-            defer_to_next_round = False
-            while tasks:
-                done, tasks = await asyncio.wait(
-                    tasks,
-                    return_when=asyncio.FIRST_COMPLETED,
+    _fill()
+
+    while in_flight:
+        done, _ = await asyncio.wait(
+            set(in_flight), return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            in_flight.pop(task)
+            candidate, result = task.result()
+            from_svc = candidate["from_service"]
+            to_svc = candidate["to_service"]
+            source_seed = candidate["source_seed"]
+            rel_type = candidate["rel_type"]
+            edge_key = state.edge_key(from_svc, to_svc, source_seed)
+            state.checked_edges.add(edge_key)
+
+            if result is None:
+                state.record_error(
+                    "hop", edge_key,
+                    "hop verifier task failed before returning a result",
                 )
-                for task in done:
-                    task_candidates.pop(task, None)
-                    candidate, result = task.result()
-                    from_svc = candidate["from_service"]
-                    to_svc = candidate["to_service"]
-                    rel_type = candidate["rel_type"]
-                    source_seed = candidate["source_seed"]
-                    edge_key = state.edge_key(from_svc, to_svc, source_seed)
-                    state.checked_edges.add(edge_key)
-                    if result is None:
-                        state.record_error(
-                            "hop",
-                            edge_key,
-                            "hop verifier task failed before returning a result",
-                        )
-                    verdict = result.get("verdict") if result else None
-                    verdict_label = verdict or "no-result"
-                    state.hop_log.append(
-                        {
-                            "round": state.round_n,
-                            "from": from_svc,
-                            "to": to_svc,
-                            "verdict": verdict_label,
-                            "source_seed": source_seed,
-                        }
-                    )
-                    ctx.log(
-                        f"  {source_seed}: {from_svc} -> {to_svc}: {verdict_label}"
-                    )
-                    if result and verdict:
-                        state.verdicts[edge_key] = result
+            verdict = result.get("verdict") if result else None
+            verdict_label = verdict or "no-result"
+            state.hop_log.append({
+                "round": state.round_n,
+                "from": from_svc,
+                "to": to_svc,
+                "verdict": verdict_label,
+                "source_seed": source_seed,
+            })
+            ctx.log(f"  {source_seed}: {from_svc} -> {to_svc}: {verdict_label}")
+            if result and verdict:
+                state.verdicts[edge_key] = result
 
-                    if verdict != "confirmed":
-                        continue
-                    assert result is not None
-                    accepted = state.accept_hop_result(
-                        from_svc,
-                        to_svc,
-                        rel_type,
-                        result,
-                        source_seed=source_seed,
-                        fault=state.fault_for_node(from_svc, source_seed),
-                    )
-                    changed_any = accepted or changed_any
-                    if (
-                        accepted
-                        and to_svc not in case.infra_set
-                        and not is_slo_endpoint(case, to_svc)
-                    ):
-                        queue.append((to_svc, source_seed))
-                        if to_svc in priority_context.distance_to_target:
-                            advanced_sources.add(source_seed)
-                            deferred_frontiers.add((from_svc, source_seed))
+            if verdict != "confirmed":
+                continue
+            assert result is not None
+            accepted = state.accept_hop_result(
+                from_svc, to_svc, rel_type, result,
+                source_seed=source_seed,
+                fault=state.fault_for_node(from_svc, source_seed),
+            )
+            if not accepted:
+                continue
+            changed = True
+            _invalidate()
+            pctx = _build_pctx()
+            if to_svc not in case.infra_set and not is_slo_endpoint(case, to_svc):
+                _enqueue_frontier(to_svc, source_seed)
 
-                if state.evaluate_final_checks()["passed"]:
-                    if tasks:
-                        ctx.log(
-                            "final checks satisfied; canceling "
-                            f"{len(tasks)} lower-priority in-flight hop checks"
-                        )
-                        await cancel_tasks(tasks)
-                    ctx.log(
-                        "final checks satisfied during propagation; stopping expansion"
-                    )
-                    return changed_any
-                needs_after_chunk = build_propagation_needs(
-                    report=state.evaluate_final_checks(),
-                    graph=case.graph,
+        if _checks()["passed"]:
+            if in_flight:
+                ctx.log(
+                    f"final checks satisfied; canceling "
+                    f"{len(in_flight)} in-flight hops"
                 )
-                still_unadvanced = (
-                    needs_after_chunk.unresolved_seed_sources - advanced_sources
-                )
-                if needs_after_chunk.unresolved_seed_sources and not still_unadvanced:
-                    direct_entry_tasks = {
-                        task
-                        for task in tasks
-                        if is_slo_endpoint(
-                            case,
-                            task_candidates[task]["to_service"],
-                        )
-                    }
-                    if direct_entry_tasks:
-                        cancelable = tasks - direct_entry_tasks
-                        if cancelable:
-                            ctx.log(
-                                "all unresolved seeds advanced; canceling "
-                                f"{len(cancelable)} deferred sibling hop checks "
-                                "while direct entry checks finish"
-                            )
-                            tasks.difference_update(cancelable)
-                            for task in cancelable:
-                                task_candidates.pop(task, None)
-                            await cancel_tasks(cancelable)
-                        continue
-                    queue.extend(sorted(deferred_frontiers))
-                    if tasks:
-                        ctx.log(
-                            "all unresolved seeds advanced; canceling "
-                            f"{len(tasks)} deferred sibling hop checks"
-                        )
-                        await cancel_tasks(tasks)
-                    ctx.log(
-                        "all unresolved seeds advanced to a nearer frontier; "
-                        "deferring sibling candidates"
-                    )
-                    defer_to_next_round = True
-                    break
-            if defer_to_next_round:
-                break
+                await cancel_tasks(set(in_flight))
+                in_flight.clear()
+            break
 
-        if not queue:
-            ctx.log("propagation frontier exhausted for this round")
+        _fill()
 
-    return changed_any
+    return changed
 
 
 async def audit_loop(
@@ -975,28 +907,3 @@ async def cancel_tasks(tasks: set[asyncio.Task[Any]]) -> None:
     tasks.clear()
 
 
-def _chunks(items: Sequence[Any], limit: int) -> list[Sequence[Any]]:
-    """Split work into bounded batches while preserving priority order."""
-    if not items:
-        return []
-    if limit <= 0 or len(items) <= limit:
-        return [items]
-    return [items[start:start + limit] for start in range(0, len(items), limit)]
-
-
-def _priority_waves(
-    items: Sequence[Any],
-    *,
-    first_wave: int,
-    fallback: int,
-) -> list[Sequence[Any]]:
-    """Run the highest-priority edge wave first, then fan out if needed."""
-    if not items:
-        return []
-    first_wave = max(1, first_wave)
-    fallback = max(1, fallback)
-    if len(items) <= first_wave:
-        return [items]
-    first = items[:first_wave]
-    rest = items[first_wave:]
-    return [first, *_chunks(rest, fallback)]

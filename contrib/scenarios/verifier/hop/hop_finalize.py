@@ -52,6 +52,50 @@ NodePredicate = cast(type[Enum], _SCHEMA.NodePredicate)
 _STRICT: Final = ConfigDict(extra="forbid")
 
 
+class SelectivityComparison(BaseModel):
+    """One target-vs-control comparison backed by SQL query results."""
+
+    model_config = _STRICT
+    metric: str = Field(
+        description="What is being compared, e.g. 'span_count', "
+        "'p95_latency_ms', 'error_rate', 'log_error_count'."
+    )
+    target_query: Evidence = Field(
+        description="SQL query measuring the metric on the TARGET path "
+        "(the downstream service endpoint affected by the upstream fault)."
+    )
+    target_normal: float | None = Field(
+        default=None,
+        description="Target metric value in the normal window.",
+    )
+    target_abnormal: float | None = Field(
+        default=None,
+        description="Target metric value in the abnormal window.",
+    )
+    control_query: Evidence = Field(
+        description="SQL query measuring the SAME metric on comparable "
+        "non-target paths (sibling endpoints on the same target service, "
+        "or endpoints not on this fault's call path)."
+    )
+    control_normal: float | None = Field(
+        default=None,
+        description="Control metric value in the normal window.",
+    )
+    control_abnormal: float | None = Field(
+        default=None,
+        description="Control metric value in the abnormal window.",
+    )
+    selective: bool = Field(
+        description="Your assessment: did the target change meaningfully "
+        "MORE than the control? True only when the target's shift is "
+        "clearly disproportionate to the control's shift."
+    )
+    comparison_rationale: str = Field(
+        description="One sentence: why the target change is or is not "
+        "selective relative to the control."
+    )
+
+
 class InvestigationCoverage(BaseModel):
     model_config = _STRICT
     schema_discovery: str = Field(
@@ -104,6 +148,14 @@ class HopVerdict(BaseModel):
         "statements (query.language='sql') comparing normal vs abnormal "
         "windows, plus an explanation of what the result shows."
     )
+    selectivity: list[SelectivityComparison] = Field(
+        default_factory=list,
+        description="REQUIRED for confirmed verdicts. At least one "
+        "target-vs-control comparison showing the observed change is "
+        "selective to the upstream fault path and not a proportional "
+        "system-wide or workload shift. Each comparison must include "
+        "SQL queries with results for both target and control paths.",
+    )
     relationship: Evidence | None = Field(
         default=None,
         description="Proof of the call relationship between the two "
@@ -126,6 +178,18 @@ class HopVerdict(BaseModel):
                 raise ValueError("confirmed verdict requires predicate")
             if self.relationship is None:
                 raise ValueError("confirmed verdict requires relationship evidence")
+            if not self.selectivity:
+                raise ValueError(
+                    "confirmed verdict requires at least one selectivity "
+                    "comparison (target path vs control path with SQL "
+                    "queries and results)"
+                )
+            if not any(s.selective for s in self.selectivity):
+                raise ValueError(
+                    "confirmed verdict requires at least one selectivity "
+                    "comparison marked selective=true; if no comparison is "
+                    "selective, the verdict should be rejected or inconclusive"
+                )
         elif self.predicate is not None:
             raise ValueError("non-confirmed verdict must omit predicate")
         return self
@@ -165,6 +229,9 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
     ]
     if verdict.relationship is not None:
         items.append(("relationship", verdict.relationship))
+    for i, sel in enumerate(verdict.selectivity):
+        items.append((f"selectivity[{i}].target_query", sel.target_query))
+        items.append((f"selectivity[{i}].control_query", sel.control_query))
 
     statements: list[tuple[str, str]] = []
     for location, ev in items:

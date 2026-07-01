@@ -44,6 +44,15 @@ Check the submission for these properties:
    rest as background or another fault. Conversely, if frontend-wide volume
    collapsed, the submission must not overclaim endpoint count selectivity
    without comparing against the service total.
+10. **Selectivity evidence (for confirmed verdicts)**: the submission must include
+    at least one `selectivity` comparison with SQL queries and results for both
+    a target path and a control path. Verify: (a) the control paths are
+    structurally comparable — sibling endpoints or services NOT on the fault
+    path; (b) the reported metric values are plausible given your knowledge of
+    `DataProfile.statistics`; (c) if the target change and control change are
+    proportional (both dropped/rose by similar ratios), `selective` should be
+    false and the verdict should not be confirmed. Reject confirmed verdicts
+    whose selectivity comparisons show proportional target/control changes.
 
 Judge from the supplied task payload, submitted result, and child-session
 metadata. Do not run extra data queries in the gate; when the submitted

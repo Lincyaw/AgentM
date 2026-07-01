@@ -55,6 +55,50 @@ NodePredicate = cast(type[Enum], _SCHEMA.NodePredicate)
 _STRICT: Final = ConfigDict(extra="forbid")
 
 
+class SelectivityComparison(BaseModel):
+    """One target-vs-control comparison backed by SQL query results."""
+
+    model_config = _STRICT
+    metric: str = Field(
+        description="What is being compared, e.g. 'span_count', "
+        "'p95_latency_ms', 'error_rate', 'log_error_count'."
+    )
+    target_query: Evidence = Field(
+        description="SQL query measuring the metric on the TARGET path "
+        "(the injected/propagated service, endpoint, or link)."
+    )
+    target_normal: float | None = Field(
+        default=None,
+        description="Target metric value in the normal window.",
+    )
+    target_abnormal: float | None = Field(
+        default=None,
+        description="Target metric value in the abnormal window.",
+    )
+    control_query: Evidence = Field(
+        description="SQL query measuring the SAME metric on comparable "
+        "non-target paths (sibling endpoints, sibling services at same "
+        "topology depth, or same service on a different node)."
+    )
+    control_normal: float | None = Field(
+        default=None,
+        description="Control metric value in the normal window.",
+    )
+    control_abnormal: float | None = Field(
+        default=None,
+        description="Control metric value in the abnormal window.",
+    )
+    selective: bool = Field(
+        description="Your assessment: did the target change meaningfully "
+        "MORE than the control? True only when the target's shift is "
+        "clearly disproportionate to the control's shift."
+    )
+    comparison_rationale: str = Field(
+        description="One sentence: why the target change is or is not "
+        "selective relative to the control."
+    )
+
+
 class InvestigationCoverage(BaseModel):
     model_config = _STRICT
     schema_discovery: str = Field(
@@ -116,6 +160,14 @@ class SeedVerdict(BaseModel):
         "statements (query.language='sql') comparing normal vs abnormal "
         "windows, plus an explanation of what the result shows."
     )
+    selectivity: list[SelectivityComparison] = Field(
+        default_factory=list,
+        description="REQUIRED for confirmed verdicts. At least one "
+        "target-vs-control comparison showing the observed change is "
+        "selective to the injected path and not a proportional "
+        "system-wide or workload shift. Each comparison must include "
+        "SQL queries with results for both target and control paths.",
+    )
     investigation_coverage: InvestigationCoverage = Field(
         description="REQUIRED for all verdicts. Summarize schema discovery "
         "plus target trace, caller/link trace, metric, log, and fault-specific "
@@ -138,6 +190,18 @@ class SeedVerdict(BaseModel):
         if self.verdict == "confirmed":
             if self.predicate is None:
                 raise ValueError("confirmed verdict requires predicate")
+            if not self.selectivity:
+                raise ValueError(
+                    "confirmed verdict requires at least one selectivity "
+                    "comparison (target path vs control path with SQL "
+                    "queries and results)"
+                )
+            if not any(s.selective for s in self.selectivity):
+                raise ValueError(
+                    "confirmed verdict requires at least one selectivity "
+                    "comparison marked selective=true; if no comparison is "
+                    "selective, the verdict should be rejected or inconclusive"
+                )
         elif self.predicate is not None:
             raise ValueError("non-confirmed verdict must omit predicate")
         return self
@@ -172,32 +236,39 @@ def _validate_sqls(data_dir: Path, verdict: SeedVerdict) -> list[dict[str, str]]
 
     failures: list[dict[str, str]] = []
     statements: list[tuple[str, str]] = []
-    for i, ev in enumerate(verdict.evidence):
+
+    def _check_evidence(location: str, ev: Evidence) -> None:
         if ev.query.language != "sql":
             failures.append({
-                "location": f"evidence[{i}]",
+                "location": location,
                 "error": "only query.language='sql' is executable",
                 "sql": ev.query.statement,
             })
-            continue
-        statements.append((f"evidence[{i}]", ev.query.statement))
-        shape_failure = sql_statement_shape_failure(f"evidence[{i}]", ev.query.statement)
+            return
+        statements.append((location, ev.query.statement))
+        shape_failure = sql_statement_shape_failure(location, ev.query.statement)
         if shape_failure:
             failures.append(shape_failure)
-            continue
+            return
         try:
             rows = conn.execute(ev.query.statement).fetchall()
             if not rows:
                 failures.append({
-                    "location": f"evidence[{i}]",
+                    "location": location,
                     "error": "0 rows", "sql": ev.query.statement,
                 })
         except Exception as exc:  # noqa: BLE001
             failures.append({
-                "location": f"evidence[{i}]",
+                "location": location,
                 "error": str(exc).splitlines()[0][:300],
                 "sql": ev.query.statement,
             })
+
+    for i, ev in enumerate(verdict.evidence):
+        _check_evidence(f"evidence[{i}]", ev)
+    for i, sel in enumerate(verdict.selectivity):
+        _check_evidence(f"selectivity[{i}].target_query", sel.target_query)
+        _check_evidence(f"selectivity[{i}].control_query", sel.control_query)
 
     failures.extend(duration_unit_failures(statements))
     del view_names

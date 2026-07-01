@@ -74,6 +74,16 @@ def build_seed_prompt(
     task_lines = [
         f"Target: **{target}**",
         "Verify whether this injected fault actually took effect by comparing normal vs abnormal traces, metrics, logs, and caller/link behavior for the target.",
+        "",
+        "**Selectivity requirement**: if you confirm, you must include at "
+        "least one selectivity comparison in your submission. A selectivity "
+        "comparison has two SQL queries: one measuring a metric on the "
+        "TARGET path (the injected service/endpoint/method), and one "
+        "measuring the SAME metric on CONTROL paths (sibling endpoints on "
+        "the same service or entry layer, or sibling services at the same "
+        "topology depth that are NOT affected by this injection). If the "
+        "target's change is proportional to the control's change, the "
+        "change is a workload shift, not a fault effect — do not confirm.",
     ]
     if target.startswith("link:") and "->" in target:
         left, right = target.removeprefix("link:").split("->", 1)

@@ -152,6 +152,17 @@ def build_hop_prompt(
         f"Target: **{to_service}**",
         f"Relationship: {rel_text}",
         f"Task: verify whether the fault propagated from **{from_service}** to **{to_service}** on this single edge.",
+        "",
+        "**Selectivity requirement**: if you confirm, you must include at "
+        "least one selectivity comparison in your submission. A selectivity "
+        "comparison has two SQL queries: one measuring a metric on the "
+        "TARGET path (the endpoint/call-path affected by the upstream "
+        "fault), and one measuring the SAME metric on CONTROL paths "
+        "(sibling endpoints on the same target service that do NOT route "
+        "through the upstream fault, or other callers of the target that "
+        "are unaffected). If the target's change is proportional to the "
+        "control's change, the change is workload-driven, not "
+        "propagation — do not confirm.",
     ]
     if is_infra:
         task_lines.append(
