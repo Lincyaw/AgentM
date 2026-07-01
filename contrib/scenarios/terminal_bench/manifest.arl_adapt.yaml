@@ -39,6 +39,10 @@ extensions:
           whether your custom extension actually loaded.
 
         Self-observation:
+        - At the start of the task, call adapt_status and
+          adapt_list_events(visibility="recommended"). Use the returned
+          runtime state and event catalog to decide whether a workspace helper
+          is enough or a runtime observer atom would provide useful signal.
         - Observe task state with workspace tools: files, logs, command output,
           process status, test artifacts, and validation results.
         - Observe your own tool-use behavior with runtime events. Event
@@ -63,6 +67,9 @@ extensions:
         with the file-based adaptation tool, and verify that the install
         returned ok before relying on it. If validation fails, inspect the
         diagnostics, fix and reload it, or fall back to a workspace helper.
+        When the same command, tool call, or validation path fails repeatedly,
+        inspect adapt_events and the relevant event schema before repeating the
+        same action again.
 
         When information is missing, tools fail, or evidence contradicts an
         earlier assumption, make the blocked assumption explicit and gather the
