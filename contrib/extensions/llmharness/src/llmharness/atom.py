@@ -123,11 +123,15 @@ def _resolve_provider(
 
 def _render_message_text(msg: AgentMessage) -> str:
     """Extract all text from a message into one string (for witness validation)."""
+    from agentm.core.abi import ThinkingBlock
+
     parts: list[str] = []
     content = getattr(msg, "content", None)
     if not isinstance(content, list):
         return ""
     for block in content:
+        if isinstance(block, ThinkingBlock):
+            continue
         text = getattr(block, "text", None)
         if isinstance(text, str) and text:
             parts.append(text)
