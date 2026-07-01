@@ -273,7 +273,8 @@ def _doc_summary(obj: Any) -> str:
     return "\n".join(line.strip() for line in doc.splitlines() if line.strip())
 
 
-def _hook_payload(event_cls: type[Any]) -> dict[str, Any]:
+def _hook_payload(event_cls: type[Any], event_doc: str) -> dict[str, Any]:
+    event_notes = [event_doc] if event_doc else []
     hook = getattr(event_cls, "HOOK", None)
     if hook is None:
         return {
@@ -282,15 +283,18 @@ def _hook_payload(event_cls: type[Any]) -> dict[str, Any]:
             "return_contract": None,
             "mutation_contract": None,
             "handler": "sync_or_async",
-            "notes": [],
+            "notes": event_notes,
+            "extra_notes": [],
         }
+    extra_notes = list(getattr(hook, "notes", ()))
     return {
         "visibility": getattr(hook, "visibility", "advanced"),
         "effects": list(getattr(hook, "effects", ("observe",))),
         "return_contract": getattr(hook, "return_contract", None),
         "mutation_contract": getattr(hook, "mutation_contract", None),
         "handler": getattr(hook, "handler", "sync_or_async"),
-        "notes": list(getattr(hook, "notes", ())),
+        "notes": [*event_notes, *extra_notes],
+        "extra_notes": extra_notes,
     }
 
 
@@ -306,13 +310,14 @@ def _event_payload(event_cls: type[Any]) -> dict[str, Any] | None:
             event_fields.append(
                 {"name": field.name, "type": _type_label(field.type)}
             )
+    doc = _doc_summary(event_cls)
     return {
         "channel": channel,
         "event_type": event_cls.__name__,
         "import": f"from agentm.core.abi import {event_cls.__name__}",
         "fields": event_fields,
-        "doc": _doc_summary(event_cls),
-        "hook": _hook_payload(event_cls),
+        "doc": doc,
+        "hook": _hook_payload(event_cls, doc),
         "subscribe_example": (
             f"api.on({event_cls.__name__}.CHANNEL, _on_{channel.replace('-', '_')})"
         ),

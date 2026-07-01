@@ -75,6 +75,7 @@ class HookContract:
     mutation_contract: str | None = None
     handler: Literal["sync_or_async", "sync_only"] = "sync_or_async"
     notes: tuple[str, ...] = ()
+    """Additional caveats not already covered by the Event class docstring."""
 
 
 # --- Event types ------------------------------------------------------------
@@ -308,10 +309,6 @@ class DecideTurnActionEvent(Event):
         visibility="recommended",
         effects=("observe", "override_loop_action", "inject_messages"),
         return_contract="LoopAction | None",
-        notes=(
-            "Inject wins over Stop; Stop can override Step; final Stop causes "
-            "cannot be overridden.",
-        ),
     )
     observation: TurnObservation
 
@@ -346,10 +343,6 @@ class TurnEndEvent(Event):
     HOOK: ClassVar[HookContract] = HookContract(
         visibility="recommended",
         effects=("observe",),
-        notes=(
-            "Use this for per-turn summaries; messages includes the current "
-            "assistant message and prior tool results.",
-        ),
     )
     turn_index: int
     message: AssistantMessage
@@ -398,7 +391,6 @@ class ToolResultEvent(Event):
         visibility="recommended",
         effects=("observe", "replace_result"),
         return_contract="ToolResult | None",
-        notes=("The last non-None replacement wins.",),
     )
     tool_call_id: str
     tool_name: str
@@ -530,6 +522,9 @@ class StreamDeltaEvent(Event):
     The kernel still assembles the full ``AssistantMessage`` itself and
     publishes it via ``turn_end``; ``stream_delta`` is purely additive.
 
+    This is a high-volume channel; prefer ``turn_end`` unless token-level
+    streaming is required.
+
     ``delta`` is the same ``AssistantStreamEvent`` instance the loop
     received from ``stream_fn`` — typically a ``TextDelta``,
     ``ToolCallStart``, or ``MessageEnd``. Subscribers should pattern-match
@@ -540,7 +535,6 @@ class StreamDeltaEvent(Event):
     HOOK: ClassVar[HookContract] = HookContract(
         visibility="internal",
         effects=("observe",),
-        notes=("High-volume provider stream; prefer turn_end unless needed.",),
     )
     turn_index: int
     delta: Any  # AssistantStreamEvent — typed Any here to avoid pulling
@@ -630,7 +624,6 @@ class BeforeAgentStartEvent(Event):
         effects=("observe", "mutate_system", "veto_prompt"),
         return_contract="{\"system\": str} | {\"block\": true, \"cause\": TerminationCause} | None",
         mutation_contract="event.system may be mutated; event.veto may be set.",
-        notes=("Prefer mutation over deprecated return dictionaries.",),
     )
     messages: list[AgentMessage]
     system: str | None
@@ -772,7 +765,6 @@ class ChildSessionExtendingEvent(Event):
         effects=("observe", "extend_child_session"),
         return_contract="list[tuple[str, dict[str, Any]]] | None",
         handler="sync_only",
-        notes=("Return extension module/config tuples to append to the child.",),
     )
     parent_session_id: str
     child_config: "AgentSessionConfig"
@@ -843,13 +835,14 @@ class MessagePersistedEvent(Event):
     Whole-list replacements done by compaction / context-rewrite handlers
     via ``messages[:] = ...`` deliberately do NOT emit this event — those
     are ephemeral context rewrites, not durable additions.
+
+    This can be high-volume in tool-heavy runs.
     """
 
     CHANNEL: ClassVar[Literal["message_persisted"]] = "message_persisted"
     HOOK: ClassVar[HookContract] = HookContract(
         visibility="advanced",
         effects=("observe",),
-        notes=("Durable message append; high volume in tool-heavy runs.",),
     )
     message: AgentMessage
     source: Literal["assistant", "tool_result", "injected"]
@@ -955,7 +948,6 @@ class SessionReadyEvent(Event):
     HOOK: ClassVar[HookContract] = HookContract(
         visibility="recommended",
         effects=("observe", "initialize_after_tools_ready"),
-        notes=("Best point to inspect the final tool list and model.",),
     )
     cwd: str
     session_id: str
@@ -1139,7 +1131,6 @@ class ApiRegisterEvent(Event):
         visibility="recommended",
         effects=("observe",),
         handler="sync_only",
-        notes=("Fires when atoms register tools, commands, providers, renderers.",),
     )
     kind: Literal["tool", "command", "provider", "renderer"]
     name: str
