@@ -596,11 +596,35 @@ def _configure_manifest(cwd: str) -> None:
     try:
         from agentm.core._internal.catalog import manifest as _manifest_mod
 
-        manifest_path = Path(cwd) / "core-manifest.yaml"
-        if manifest_path.exists():
+        manifest_path = _find_core_manifest(cwd)
+        if manifest_path is not None:
             _manifest_mod.configure_manifest_path(manifest_path)
     except Exception as exc:
         logger.warning(f"agentm core-manifest configuration failed during startup: {exc!r}")
+
+
+def _find_core_manifest(cwd: str) -> Path | None:
+    candidates = [Path(cwd) / "core-manifest.yaml"]
+    project_root = os.environ.get("AGENTM_PROJECT_ROOT")
+    if project_root:
+        candidates.append(Path(project_root) / "core-manifest.yaml")
+
+    try:
+        import agentm
+
+        walker = Path(agentm.__file__).parent
+        for _ in range(6):
+            candidates.append(walker / "core-manifest.yaml")
+            if walker.parent == walker:
+                break
+            walker = walker.parent
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("agentm core-manifest package-root discovery failed: {}", exc)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _migrate_catalog(cwd: str) -> None:

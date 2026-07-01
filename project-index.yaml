@@ -1026,6 +1026,7 @@ requirements:
     status: implemented
     confidence: inferred
     code:
+      - path: src/agentm/core/runtime/session_factory.py
       - path: contrib/scenarios/terminal_bench/adapt.py
       - path: contrib/scenarios/terminal_bench/manifest.arl_adapt.yaml
     tests: []
