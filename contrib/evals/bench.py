@@ -41,7 +41,7 @@ app = typer.Typer(
     add_completion=False,
 )
 
-DEFAULT_LONGCLI_REGISTRY = "pair-diag-cn-guangzhou.cr.volces.com/pair"
+DEFAULT_IMAGE_REGISTRY = "pair-diag-cn-guangzhou.cr.volces.com/pair"
 DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO = "terminal_bench:arl"
 
 _INFRA_RETRY_LOG_MARKERS = (
@@ -171,41 +171,64 @@ def _build_eval_images(
     tag: str,
     push: bool,
 ) -> None:
-    dockerfile = Path(__file__).parent / "benchmarks" / "Dockerfile.tb1-eval"
-    if not dockerfile.is_file():
-        typer.echo(f"Error: missing eval Dockerfile: {dockerfile}", err=True)
+    build_eval_image = getattr(adapter, "build_eval_image", None)
+    if not callable(build_eval_image):
+        typer.echo(
+            f"Error: {type(adapter).__name__} does not support private eval image builds. "
+            "Implement build_eval_image() in the benchmark adapter.",
+            err=True,
+        )
         raise typer.Exit(1)
 
     for task in tasks:
-        task_dir = Path(task.path)
-        missing = [
-            str(path.relative_to(task_dir))
-            for path in (task_dir / "tests", task_dir / "run-tests.sh")
-            if not path.exists()
-        ]
-        if missing:
-            typer.echo(
-                f"Error: {task.name} cannot build eval image; missing {', '.join(missing)}",
-                err=True,
-            )
-            raise typer.Exit(1)
-
         base_image = adapter.get_image(task, registry, prefix, tag)
         eval_image = _get_eval_image(adapter, task, registry, prefix, tag)
         typer.echo(f"  Building eval {eval_image} <- {base_image}")
-        result = subprocess.run([
-            "docker", "build",
-            "-f", str(dockerfile),
-            "--build-arg", f"BASE_IMAGE={base_image}",
-            "-t", eval_image,
-            str(task_dir),
-        ])
-        if result.returncode != 0:
-            raise typer.Exit(result.returncode)
-        if push:
-            push_result = subprocess.run(["docker", "push", eval_image])
-            if push_result.returncode != 0:
-                raise typer.Exit(push_result.returncode)
+        try:
+            build_eval_image(
+                task,
+                base_image=base_image,
+                eval_image=eval_image,
+                push=push,
+            )
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"Error: failed to build eval image for {task.name}: {e}", err=True)
+            raise typer.Exit(1) from e
+
+
+def _private_eval_container(
+    adapter: Any,
+    task: TaskSpec,
+    registry: str,
+    prefix: str,
+    tag: str,
+    *,
+    container: str,
+) -> dict[str, Any]:
+    image_pull_policy = os.environ.get(
+        "AGENTM_BENCH_PRIVATE_EVAL_IMAGE_PULL_POLICY",
+        "IfNotPresent",
+    )
+    spec_hook = getattr(adapter, "private_eval_container", None)
+    if callable(spec_hook):
+        return dict(
+            spec_hook(
+                task,
+                registry,
+                prefix,
+                tag,
+                container=container,
+                image_pull_policy=image_pull_policy,
+            )
+        )
+    return {
+        "name": container,
+        "image": _get_eval_image(adapter, task, registry, prefix, tag),
+        "mountWorkspace": True,
+        "workspaceMountPath": "/app",
+        "workspaceAccess": "readWrite",
+        "imagePullPolicy": image_pull_policy,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +415,14 @@ def _run_and_eval_one(
 
     # --- Eval phase ---
     wanted_eval_mode = _eval_mode(private_eval)
+    evaluate_private = getattr(adapter, "evaluate_private_container", None)
+    if private_eval and not callable(evaluate_private):
+        return {
+            "task": name,
+            "status": "eval_failed",
+            "tools": tools_count,
+            "error": f"{type(adapter).__name__} does not support private eval",
+        }
     if score_file.is_file():
         cached_scores = json.loads(score_file.read_text())
         cached_eval_mode = cached_scores.get("eval_mode", "uploaded_tests")
@@ -403,17 +434,16 @@ def _run_and_eval_one(
     eval_max_lifetime = max(7200, eval_timeout * 3)
     private_containers: list[dict[str, Any]] | None = None
     if private_eval:
-        private_containers = [{
-            "name": private_eval_container,
-            "image": _get_eval_image(adapter, task, registry, prefix, tag),
-            "mountWorkspace": True,
-            "workspaceMountPath": "/app",
-            "workspaceAccess": "readWrite",
-            "imagePullPolicy": os.environ.get(
-                "AGENTM_BENCH_PRIVATE_EVAL_IMAGE_PULL_POLICY",
-                "IfNotPresent",
+        private_containers = [
+            _private_eval_container(
+                adapter,
+                task,
+                registry,
+                prefix,
+                tag,
+                container=private_eval_container,
             ),
-        }]
+        ]
 
     session_kwargs = {
         "image": image,
@@ -464,10 +494,7 @@ def _run_and_eval_one(
     try:
         replay_trajectory(session, session_id)
         if private_eval:
-            evaluate_private = getattr(adapter, "evaluate_private_container", None)
-            if not callable(evaluate_private):
-                raise RuntimeError(f"{type(adapter).__name__} does not support private eval")
-            scores = evaluate_private(
+            scores = cast(Callable[..., dict], evaluate_private)(
                 session,
                 task,
                 container=private_eval_container,
@@ -611,7 +638,7 @@ def _resolve_source(
 def build(
     repo: Annotated[Path, typer.Option("--repo")],
     bench: Annotated[str, typer.Option("--bench")] = "tb1",
-    registry: Annotated[str, typer.Option()] = DEFAULT_LONGCLI_REGISTRY,
+    registry: Annotated[str, typer.Option()] = DEFAULT_IMAGE_REGISTRY,
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
     push: Annotated[bool, typer.Option("--push")] = False,
@@ -621,7 +648,7 @@ def build(
         bool,
         typer.Option(
             "--eval-images",
-            help="Also build paired private evaluator images with /tests assets.",
+            help="Also build paired adapter-defined private evaluator images.",
         ),
     ] = False,
     eval_only: Annotated[
@@ -634,7 +661,7 @@ def build(
 ) -> None:
     """Build (and optionally push) task environment images."""
     adapter = get_adapter(bench)
-    if not adapter.supports_build():
+    if not eval_only and not adapter.supports_build():
         typer.echo(f"Error: {bench} uses pre-built images, nothing to build.", err=True)
         raise typer.Exit(1)
 
@@ -749,7 +776,7 @@ def list_tasks(
     repo: Annotated[Path | None, typer.Option("--repo")] = None,
     source: Annotated[str | None, typer.Option("--source")] = None,
     bench: Annotated[str, typer.Option("--bench")] = "tb1",
-    registry: Annotated[str, typer.Option()] = DEFAULT_LONGCLI_REGISTRY,
+    registry: Annotated[str, typer.Option()] = DEFAULT_IMAGE_REGISTRY,
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
     json_out: Annotated[bool, typer.Option("--json")] = False,
@@ -798,7 +825,7 @@ def run(
     bench: Annotated[str, typer.Option("--bench")] = "tb1",
     model: Annotated[str, typer.Option()] = "glm47",
     gateway: Annotated[str, typer.Option()] = "http://localhost:28080",
-    registry: Annotated[str, typer.Option()] = DEFAULT_LONGCLI_REGISTRY,
+    registry: Annotated[str, typer.Option()] = DEFAULT_IMAGE_REGISTRY,
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
 ) -> None:
@@ -844,7 +871,7 @@ def batch(
     bench: Annotated[str, typer.Option("--bench")] = "tb1",
     model: Annotated[str, typer.Option()] = "glm47",
     gateway: Annotated[str, typer.Option()] = "http://localhost:28080",
-    registry: Annotated[str, typer.Option()] = DEFAULT_LONGCLI_REGISTRY,
+    registry: Annotated[str, typer.Option()] = DEFAULT_IMAGE_REGISTRY,
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
     concurrency: Annotated[int, typer.Option("-j")] = 5,
@@ -887,6 +914,12 @@ def batch(
 
     resolved_source = _resolve_source(repo, source, bench)
     adapter = get_adapter(bench)
+    if private_eval and not callable(getattr(adapter, "evaluate_private_container", None)):
+        typer.echo(
+            f"Error: {bench} adapter does not support --private-eval.",
+            err=True,
+        )
+        raise typer.Exit(1)
     tasks = adapter.discover_tasks(resolved_source)
     if task:
         tasks = [t for t in tasks if t.name in task]

@@ -987,15 +987,15 @@ requirements:
     depends_on:
       - REQ-089-file-tool-io-seams
 
-  - id: REQ-193-longcli-private-eval-containers
-    title: LongCLI evaluation can keep test assets in private ARL containers
+  - id: REQ-193-benchmark-private-eval-containers
+    title: Benchmark adapters can keep evaluator assets in private ARL containers
     description: >
-      The LongCLI/Terminal-Bench runner must be able to build paired evaluator
-      images that contain run-tests.sh and tests/ assets, then evaluate replayed
-      trajectories by executing those tests inside a gateway-managed private
-      container mounted on the shared workspace. The default uploaded-tests
-      path must remain available, and score caching must distinguish the two
-      evaluation modes.
+      The benchmark runner must expose adapter-level hooks for paired private
+      evaluator images, private container specs, and private-container scoring,
+      so benchmark-specific test layouts stay outside the top-level runner.
+      The Terminal-Bench adapter must implement those hooks for run-tests.sh
+      and tests/ assets. The default uploaded-tests path must remain available,
+      and score caching must distinguish the two evaluation modes.
     priority: P1
     status: implemented
     confidence: confirmed
@@ -1004,9 +1004,10 @@ requirements:
       - path: contrib/evals/bench.py
       - path: contrib/evals/benchmarks/base.py
       - path: contrib/evals/benchmarks/terminal_bench.py
-      - path: contrib/evals/benchmarks/Dockerfile.tb1-eval
+      - path: contrib/evals/benchmarks/Dockerfile.terminal-bench-eval
     tests: []
     docs:
+      - path: contrib/evals/README.md
       - path: contrib/evals/longcli/README.md
     depends_on:
       - REQ-187-agent-env-pool-scaling

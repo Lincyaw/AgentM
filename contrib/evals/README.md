@@ -29,6 +29,24 @@ uv run python contrib/evals/bench.py batch --bench tb1 --repo ~/longcli-bench/ta
     --model litellm -j 20 --attempts 8 --results /tmp/pass8-results
 ```
 
+## Private evaluator containers
+
+`bench.py` supports `--private-eval` as an adapter-level capability: the runner
+creates the ARL private container and calls the adapter's private scoring hook,
+but it does not know the benchmark's test layout. Adapters that want this path
+implement `build_eval_image()`, optional `private_eval_container()`, and
+`evaluate_private_container()`.
+
+The Terminal Bench adapter implements these hooks for `tests/` +
+`run-tests.sh` tasks:
+
+```bash
+uv run python contrib/evals/bench.py build --bench tb1 \
+    --repo ~/longcli-bench/tasks_long_cli --eval-only --push
+uv run python contrib/evals/bench.py batch --bench tb1 \
+    --repo ~/longcli-bench/tasks_long_cli --private-eval
+```
+
 ## TB2 image overlay
 
 ARL sandbox cannot access github.com. TB2 test.sh scripts download uv + python

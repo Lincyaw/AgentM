@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 from .base import TaskSpec, eval_image_name, image_name, upload_file_to_sandbox
@@ -62,6 +63,59 @@ class TerminalBenchAdapter:
 
     def get_eval_image(self, task: TaskSpec, registry: str, prefix: str, tag: str) -> str:
         return eval_image_name(task.name, registry, prefix, tag)
+
+    def build_eval_image(
+        self,
+        task: TaskSpec,
+        *,
+        base_image: str,
+        eval_image: str,
+        push: bool = False,
+    ) -> None:
+        task_dir = Path(task.path)
+        missing = [
+            str(path.relative_to(task_dir))
+            for path in (task_dir / "tests", task_dir / "run-tests.sh")
+            if not path.exists()
+        ]
+        if missing:
+            raise RuntimeError(
+                f"{task.name} cannot build eval image; missing {', '.join(missing)}"
+            )
+
+        dockerfile = Path(__file__).with_name("Dockerfile.terminal-bench-eval")
+        result = subprocess.run([
+            "docker", "build",
+            "-f", str(dockerfile),
+            "--build-arg", f"BASE_IMAGE={base_image}",
+            "-t", eval_image,
+            str(task_dir),
+        ])
+        if result.returncode != 0:
+            raise RuntimeError(f"docker build failed for {eval_image}")
+        if push:
+            push_result = subprocess.run(["docker", "push", eval_image])
+            if push_result.returncode != 0:
+                raise RuntimeError(f"docker push failed for {eval_image}")
+
+    def private_eval_container(
+        self,
+        task: TaskSpec,
+        registry: str,
+        prefix: str,
+        tag: str,
+        *,
+        container: str,
+        image_pull_policy: str,
+    ) -> dict:
+        return {
+            "name": container,
+            "image": self.get_eval_image(task, registry, prefix, tag),
+            "mountWorkspace": True,
+            "workspaceMountPath": "/app",
+            "workspaceAccess": "readWrite",
+            "imagePullPolicy": image_pull_policy,
+        }
 
     def get_source_image(self, task: TaskSpec) -> str | None:
         return None

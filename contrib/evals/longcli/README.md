@@ -33,7 +33,7 @@ uv run python contrib/evals/bench.py build \
   --base-dir ../longcli-bench/longcli_dockerImage \
   --push
 
-# Build paired private evaluator images with /tests assets
+# Build paired private evaluator images using the Terminal-Bench adapter hook
 uv run python contrib/evals/bench.py build \
   --repo ../longcli-bench/tasks_long_cli \
   --eval-only \
@@ -94,9 +94,8 @@ bash contrib/evals/longcli/run_batch.sh \
   --gateway http://<arl-gateway>:8080 \
   --model glm47
 
-# Run batch evaluation with paired private evaluator images. The agent-facing
-# container still uses the normal task image; tests are only present in the
-# private eval container.
+# Run batch evaluation with paired private evaluator images. bench.py only
+# orchestrates this path; the Terminal-Bench adapter defines the test layout.
 uv run python contrib/evals/bench.py batch \
   --bench tb1 \
   --repo ../longcli-bench/tasks_long_cli \
@@ -122,10 +121,11 @@ tests. By default, after the agent finishes, evaluation works by:
 4. Running `run-tests.sh` → parsing F2P/P2P scores
 
 With `--private-eval`, each eval sandbox also starts a private container from
-`{registry}/{prefix}-{task}-eval:{tag}`. The private image contains
-`/tests/run-tests.sh` and `/tests/*`, mounts the shared workspace at `/app`,
-and runs the same `run-tests.sh` there. The agent-facing executor container
-never receives those test files during the agent phase.
+`{registry}/{prefix}-{task}-eval:{tag}`. For Terminal-Bench-format tasks, the
+adapter builds that image with `/tests/run-tests.sh` and `/tests/*`, mounts the
+shared workspace at `/app`, and runs the same `run-tests.sh` there. The
+agent-facing executor container never receives those test files during the
+agent phase.
 
 See `rescue_window/harness/replay.py` for the replay module and
 `longcli-bench/tasks_long_cli/<task>/tests/` for test suites.
