@@ -33,6 +33,12 @@ uv run python contrib/evals/bench.py build \
   --base-dir ../longcli-bench/longcli_dockerImage \
   --push
 
+# Build paired private evaluator images with /tests assets
+uv run python contrib/evals/bench.py build \
+  --repo ../longcli-bench/tasks_long_cli \
+  --eval-only \
+  --push
+
 # Only build specific tasks
 uv run python contrib/evals/bench.py build \
   --repo ../longcli-bench/tasks_long_cli \
@@ -88,6 +94,16 @@ bash contrib/evals/longcli/run_batch.sh \
   --gateway http://<arl-gateway>:8080 \
   --model glm47
 
+# Run batch evaluation with paired private evaluator images. The agent-facing
+# container still uses the normal task image; tests are only present in the
+# private eval container.
+uv run python contrib/evals/bench.py batch \
+  --bench tb1 \
+  --repo ../longcli-bench/tasks_long_cli \
+  --gateway http://<arl-gateway>:8080 \
+  --model glm47 \
+  --private-eval
+
 # Only specific tasks
 bash contrib/evals/longcli/run_batch.sh --task cs61_fa24_hog --task 61810_cow
 ```
@@ -98,12 +114,18 @@ tasks (resumable).
 ### Evaluate results
 
 Task images contain only the project skeleton and INSTRUCTION.md — no
-tests. After the agent finishes, evaluate by:
+tests. By default, after the agent finishes, evaluation works by:
 
 1. Creating a fresh sandbox with the same task image
 2. Replaying the agent's tool calls (from ClickHouse trajectory)
 3. Uploading the task's test suite via `session.upload_file()` / `download_file()`
 4. Running `run-tests.sh` → parsing F2P/P2P scores
+
+With `--private-eval`, each eval sandbox also starts a private container from
+`{registry}/{prefix}-{task}-eval:{tag}`. The private image contains
+`/tests/run-tests.sh` and `/tests/*`, mounts the shared workspace at `/app`,
+and runs the same `run-tests.sh` there. The agent-facing executor container
+never receives those test files during the agent phase.
 
 See `rescue_window/harness/replay.py` for the replay module and
 `longcli-bench/tasks_long_cli/<task>/tests/` for test suites.

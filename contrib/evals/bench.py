@@ -16,6 +16,7 @@ import inspect
 import json
 import os
 import re
+import signal
 import subprocess
 import tempfile
 import uuid
@@ -26,7 +27,7 @@ from typing import Annotated, Any, Callable, cast
 import typer
 
 from benchmarks import get_adapter
-from benchmarks.base import TaskSpec, image_name, replay_trajectory
+from benchmarks.base import TaskSpec, eval_image_name, image_name, replay_trajectory
 
 try:
     import yaml as _yaml
@@ -91,6 +92,10 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _eval_mode(private_eval: bool) -> str:
+    return "private_container" if private_eval else "uploaded_tests"
+
+
 def _experiment_ids(
     prefix: str,
     model: str,
@@ -143,11 +148,64 @@ def _generate_skaffold(tasks: list[TaskSpec], registry: str, prefix: str, tag: s
         "kind": "Config",
         "metadata": {"name": f"{prefix}-images"},
         "build": {
-            "tagPolicy": {"envTemplate": {"template": "{{.IMAGE_NAME}}:" + tag}},
+            "tagPolicy": {"envTemplate": {"template": tag}},
             "local": {"concurrency": 4, "useBuildkit": True, "push": False},
             "artifacts": artifacts,
         },
     }
+
+
+def _get_eval_image(adapter: Any, task: TaskSpec, registry: str, prefix: str, tag: str) -> str:
+    getter = getattr(adapter, "get_eval_image", None)
+    if callable(getter):
+        return str(getter(task, registry, prefix, tag))
+    return eval_image_name(task.name, registry, prefix, tag)
+
+
+def _build_eval_images(
+    tasks: list[TaskSpec],
+    *,
+    adapter: Any,
+    registry: str,
+    prefix: str,
+    tag: str,
+    push: bool,
+) -> None:
+    dockerfile = Path(__file__).parent / "benchmarks" / "Dockerfile.tb1-eval"
+    if not dockerfile.is_file():
+        typer.echo(f"Error: missing eval Dockerfile: {dockerfile}", err=True)
+        raise typer.Exit(1)
+
+    for task in tasks:
+        task_dir = Path(task.path)
+        missing = [
+            str(path.relative_to(task_dir))
+            for path in (task_dir / "tests", task_dir / "run-tests.sh")
+            if not path.exists()
+        ]
+        if missing:
+            typer.echo(
+                f"Error: {task.name} cannot build eval image; missing {', '.join(missing)}",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        base_image = adapter.get_image(task, registry, prefix, tag)
+        eval_image = _get_eval_image(adapter, task, registry, prefix, tag)
+        typer.echo(f"  Building eval {eval_image} <- {base_image}")
+        result = subprocess.run([
+            "docker", "build",
+            "-f", str(dockerfile),
+            "--build-arg", f"BASE_IMAGE={base_image}",
+            "-t", eval_image,
+            str(task_dir),
+        ])
+        if result.returncode != 0:
+            raise typer.Exit(result.returncode)
+        if push:
+            push_result = subprocess.run(["docker", "push", eval_image])
+            if push_result.returncode != 0:
+                raise typer.Exit(push_result.returncode)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +216,39 @@ _active_procs: set[subprocess.Popen] = set()  # type: ignore[type-arg]
 _active_procs_lock = __import__("threading").Lock()
 _active_eval_sessions: set[Any] = set()
 _active_eval_lock = __import__("threading").Lock()
+
+
+def _terminate_process_group(
+    proc: subprocess.Popen,  # type: ignore[type-arg]
+    *,
+    grace_seconds: float = 10.0,
+    log_file: Any | None = None,
+) -> None:
+    if proc.poll() is not None:
+        return
+
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        proc.terminate()
+
+    try:
+        proc.wait(timeout=grace_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        if log_file is not None:
+            log_file.write("[bench] agent did not terminate; killing process group\n")
+            log_file.flush()
+
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        proc.kill()
+    proc.wait()
 
 
 def _run_and_eval_one(
@@ -173,6 +264,8 @@ def _run_and_eval_one(
     scenario: str = DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
     run_id: str = "",
     attempt_idx: int | None = None,
+    private_eval: bool = False,
+    private_eval_container: str = "eval",
 ) -> dict[str, Any]:
     """Run agent + evaluate one task. Returns result dict."""
     import arl
@@ -265,7 +358,13 @@ def _run_and_eval_one(
             "-p", prompt,
         ]
         with open(log, "w") as f:
-            proc = subprocess.Popen(cmd, env=env, stdout=f, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
             with _active_procs_lock:
                 _active_procs.add(proc)
             try:
@@ -275,14 +374,7 @@ def _run_and_eval_one(
                     agent_timed_out = True
                     f.write(f"\n[bench] agent timeout after {agent_timeout}s; terminating\n")
                     f.flush()
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        f.write("[bench] agent did not terminate; killing\n")
-                        f.flush()
-                        proc.kill()
-                        proc.wait()
+                    _terminate_process_group(proc, log_file=f)
             finally:
                 with _active_procs_lock:
                     _active_procs.discard(proc)
@@ -299,42 +391,70 @@ def _run_and_eval_one(
     tools_count = tools_m.group(1).decode() if tools_m else "?"
 
     # --- Eval phase ---
+    wanted_eval_mode = _eval_mode(private_eval)
     if score_file.is_file():
         cached_scores = json.loads(score_file.read_text())
-        return {"task": name, "status": "done", "tools": tools_count, **cached_scores}
+        cached_eval_mode = cached_scores.get("eval_mode", "uploaded_tests")
+        if cached_eval_mode == wanted_eval_mode:
+            return {"task": name, "status": "done", "tools": tools_count, **cached_scores}
 
     from arl.session import ResourceRequirements  # type: ignore[import-not-found]
     eval_idle_timeout = max(3600, eval_timeout * 2)
     eval_max_lifetime = max(7200, eval_timeout * 3)
+    private_containers: list[dict[str, Any]] | None = None
+    if private_eval:
+        private_containers = [{
+            "name": private_eval_container,
+            "image": _get_eval_image(adapter, task, registry, prefix, tag),
+            "mountWorkspace": True,
+            "workspaceMountPath": "/app",
+            "workspaceAccess": "readWrite",
+            "imagePullPolicy": os.environ.get(
+                "AGENTM_BENCH_PRIVATE_EVAL_IMAGE_PULL_POLICY",
+                "IfNotPresent",
+            ),
+        }]
+
+    session_kwargs = {
+        "image": image,
+        "experiment_id": eval_exp_id,
+        "namespace": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
+        "gateway_url": gateway,
+        "workspace_dir": "/app",
+        "api_key": api_key or None,
+        "timeout": max(600.0, eval_timeout * 2.0),
+        "idle_timeout_seconds": eval_idle_timeout,
+        "max_lifetime_seconds": eval_max_lifetime,
+        "resources": ResourceRequirements(
+            requests={"cpu": "1", "memory": "2Gi"},
+            limits={"cpu": "8", "memory": "16Gi"},
+        ),
+    }
+    if private_containers is not None:
+        session_kwargs["private_containers"] = private_containers
+    supported_session_kwargs = _filter_supported_kwargs(arl.ManagedSession, session_kwargs)
+    if private_eval and "private_containers" not in supported_session_kwargs:
+        return {
+            "task": name,
+            "status": "eval_create_failed",
+            "tools": tools_count,
+            "error": "installed arl-env SDK does not support private_containers",
+        }
     session = arl.ManagedSession(
-        **_filter_supported_kwargs(
-            arl.ManagedSession,
-            {
-                "image": image,
-                "experiment_id": eval_exp_id,
-                "namespace": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
-                "gateway_url": gateway,
-                "workspace_dir": "/app",
-                "api_key": api_key or None,
-                "timeout": max(600.0, eval_timeout * 2.0),
-                "idle_timeout_seconds": eval_idle_timeout,
-                "max_lifetime_seconds": eval_max_lifetime,
-                "resources": ResourceRequirements(
-                    requests={"cpu": "1", "memory": "2Gi"},
-                    limits={"cpu": "8", "memory": "16Gi"},
-                ),
-            },
-        )
+        **supported_session_kwargs
     )
     try:
         session.create_sandbox()
     except Exception as e:
+        client = arl.GatewayClient(base_url=gateway, api_key=api_key or None)
         try:
-            arl.GatewayClient(
-                base_url=gateway, api_key=api_key or None,
-            ).delete_experiment(agent_exp_id)
-        except Exception as cleanup_exc:  # noqa: BLE001
-            typer.echo(f"  [WARN] cleanup {agent_exp_id}: {cleanup_exc}", err=True)
+            for exp_id in (eval_exp_id, agent_exp_id):
+                try:
+                    client.delete_experiment(exp_id)
+                except Exception as cleanup_exc:  # noqa: BLE001
+                    typer.echo(f"  [WARN] cleanup {exp_id}: {cleanup_exc}", err=True)
+        finally:
+            client.close()
         return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": str(e)}
 
     with _active_eval_lock:
@@ -343,7 +463,18 @@ def _run_and_eval_one(
     eval_error: Exception | None = None
     try:
         replay_trajectory(session, session_id)
-        scores = adapter.evaluate(session, task, timeout=eval_timeout)
+        if private_eval:
+            evaluate_private = getattr(adapter, "evaluate_private_container", None)
+            if not callable(evaluate_private):
+                raise RuntimeError(f"{type(adapter).__name__} does not support private eval")
+            scores = evaluate_private(
+                session,
+                task,
+                container=private_eval_container,
+                timeout=eval_timeout,
+            )
+        else:
+            scores = adapter.evaluate(session, task, timeout=eval_timeout)
     except Exception as e:
         eval_error = e
         typer.echo(f"  [WARN] eval {name}: {e}", err=True)
@@ -377,6 +508,7 @@ def _run_and_eval_one(
 
     if scores.get("reward") is None:
         scores["reward"] = 0.0
+    scores.setdefault("eval_mode", wanted_eval_mode)
     if agent_timed_out:
         scores["agent_timed_out"] = True
 
@@ -485,6 +617,20 @@ def build(
     push: Annotated[bool, typer.Option("--push")] = False,
     base_dir: Annotated[Path | None, typer.Option("--base-dir")] = None,
     task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
+    eval_images: Annotated[
+        bool,
+        typer.Option(
+            "--eval-images",
+            help="Also build paired private evaluator images with /tests assets.",
+        ),
+    ] = False,
+    eval_only: Annotated[
+        bool,
+        typer.Option(
+            "--eval-only",
+            help="Build only paired private evaluator images; task images must already exist.",
+        ),
+    ] = False,
 ) -> None:
     """Build (and optionally push) task environment images."""
     adapter = get_adapter(bench)
@@ -503,24 +649,36 @@ def build(
         typer.echo("No tasks found.", err=True)
         raise typer.Exit(1)
 
-    if _yaml is None:
+    if not eval_only and _yaml is None:
         typer.echo("Error: PyYAML required for skaffold config generation.", err=True)
         raise typer.Exit(1)
 
-    skaffold_cfg = _generate_skaffold(tasks, registry, prefix, tag)
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-        _yaml.dump(skaffold_cfg, f)
-        skaffold_path = f.name
-    try:
-        cmd = ["skaffold", "build", "-f", skaffold_path]
-        if push:
-            cmd.append("--push")
-        result = subprocess.run(cmd, env={**os.environ, "TAG": tag})
-        if result.returncode != 0:
-            raise typer.Exit(result.returncode)
-    finally:
-        os.unlink(skaffold_path)
-    typer.echo(f"Built {len(tasks)} images ({registry}/{prefix}-*:{tag})")
+    if not eval_only:
+        skaffold_cfg = _generate_skaffold(tasks, registry, prefix, tag)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _yaml.dump(skaffold_cfg, f)
+            skaffold_path = f.name
+        try:
+            cmd = ["skaffold", "build", "-f", skaffold_path]
+            if push:
+                cmd.append("--push")
+            result = subprocess.run(cmd, env={**os.environ, "TAG": tag})
+            if result.returncode != 0:
+                raise typer.Exit(result.returncode)
+        finally:
+            os.unlink(skaffold_path)
+        typer.echo(f"Built {len(tasks)} images ({registry}/{prefix}-*:{tag})")
+
+    if eval_images or eval_only:
+        _build_eval_images(
+            tasks,
+            adapter=adapter,
+            registry=registry,
+            prefix=prefix,
+            tag=tag,
+            push=push,
+        )
+        typer.echo(f"Built {len(tasks)} eval images ({registry}/{prefix}-*-eval:{tag})")
 
 
 @app.command()
@@ -699,6 +857,21 @@ def batch(
     attempts: Annotated[int, typer.Option("--attempts", "-n")] = 1,
     scenario: Annotated[str, typer.Option("--scenario")] = DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
     run_id: Annotated[str | None, typer.Option("--run-id")] = None,
+    private_eval: Annotated[
+        bool,
+        typer.Option(
+            "--private-eval",
+            envvar="AGENTM_BENCH_PRIVATE_EVAL",
+            help="Evaluate with a paired private container image instead of uploading tests.",
+        ),
+    ] = False,
+    private_eval_container: Annotated[
+        str,
+        typer.Option(
+            "--private-eval-container",
+            help="Private container name used for evaluator execution.",
+        ),
+    ] = "eval",
 ) -> None:
     """Run all tasks in parallel, then evaluate. Results include scores.
 
@@ -731,15 +904,7 @@ def batch(
         with _active_procs_lock:
             procs = list(_active_procs)
         for p in procs:
-            try:
-                p.terminate()
-            except OSError:
-                pass
-        for p in procs:
-            try:
-                p.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                p.kill()
+            _terminate_process_group(p, grace_seconds=5.0)
 
     def _cleanup_experiments(
         gw: str, key: str, pfx: str, mdl: str, rid: str,
@@ -825,6 +990,7 @@ def batch(
         f"Batch: {len(tasks)} tasks × {attempts} attempt(s) = {total_jobs} jobs | "
         f"bench={bench} | model={model} | concurrency={concurrency}"
         + (f" | agent_timeout={agent_timeout}s" if agent_timeout > 0 else "")
+        + (" | private_eval" if private_eval else "")
     )
     typer.echo(f"Run id: {resolved_run_id}")
     typer.echo(f"Results: {base_out}")
@@ -852,6 +1018,8 @@ def batch(
                     scenario=scenario,
                     run_id=resolved_run_id,
                     attempt_idx=attempt_idx if attempts > 1 else None,
+                    private_eval=private_eval,
+                    private_eval_container=private_eval_container,
                 )
                 pending[f] = (attempt_idx, t.name)
             for future in as_completed(pending):

@@ -1,0 +1,10 @@
+ARG BASE_IMAGE=scratch
+FROM ${BASE_IMAGE}
+
+USER root
+
+RUN mkdir -p /tests
+COPY tests/ /tests/
+COPY run-tests.sh /tests/run-tests.sh
+
+RUN chmod -R a+rX /tests && find /tests -type f -exec chmod +x {} +

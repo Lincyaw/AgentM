@@ -39,7 +39,7 @@ dependencies = [
 # can create sandbox sessions. Install with ``uv sync --extra agent-env``
 # (workspace) or ``pip install agentm[agent-env]``.
 agent-env = [
-    "arl-env>=0.14.0",
+    "arl-env>=0.15.4",
 ]
 eval = [
     "agentm-rescue-window",
@@ -105,6 +105,7 @@ agentm-harbor = { workspace = true }
 rca-scenario = { workspace = true }
 trajectory-index = { workspace = true }
 agentm = { workspace = true }
+arl-env = { path = "../agent-env/sdk/python/arl", editable = true }
 
 [tool.pytest.ini_options]
 # UI tests exercise the Textual TUI; they pass but don't map to any

@@ -26,7 +26,6 @@ class OperationsConfig(BaseModel):
     # agent_env-specific properties (ignored when backend=local)
     image: str | None = None
     experiment_id: str | None = None
-    pool_ref: str | None = None
     attach_session: str | None = None
     gateway_url: str | None = None
     api_key: str | None = None

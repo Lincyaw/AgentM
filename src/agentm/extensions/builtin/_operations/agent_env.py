@@ -15,8 +15,8 @@ read and write semantics consistent with bash. The sandbox writer refuses any pa
 outside ``work_dir`` (including every host path), so an agent in a sandboxed
 session cannot modify its own AgentM code.
 
-Config (env-var fallbacks shown). Exactly one of ``image`` / ``pool_ref`` is
-required; if both are set, ``image`` wins (managed pool path):
+Config (env-var fallbacks shown). Set ``image`` to create a managed sandbox
+session, or ``attach_session`` to reuse an existing sandbox:
 
 - ``image``         — Container image for the managed pool (env:
                       ``AGENTM_AGENT_ENV_IMAGE``). When set, the atom uses
@@ -26,9 +26,9 @@ required; if both are set, ``image`` wins (managed pool path):
                       ``agentm-default``). Lets you bulk-delete all sandboxes
                       spawned by one AgentM workload via
                       ``GatewayClient.delete_experiment``.
-- ``pool_ref``      — Pre-created WarmPool to allocate from (env:
-                      ``AGENTM_AGENT_ENV_POOL_REF``). Legacy / advanced path,
-                      kept for backward compatibility.
+- ``attach_session`` — Existing ARL session id to attach to without creating
+                      a new managed session (env:
+                      ``AGENTM_AGENT_ENV_ATTACH_SESSION``).
 - ``gateway_url``   — ARL Gateway base URL (env: ``AGENTM_AGENT_ENV_GATEWAY_URL``,
                       default ``http://localhost:8080``)
 - ``namespace``     — Kubernetes namespace (env: ``AGENTM_AGENT_ENV_NAMESPACE``,
@@ -78,7 +78,6 @@ _AGENT_ENV_SESSION_SERVICE = "agent_env.session_id"
 class AgentEnvConfig(BaseModel):
     image: str | None = None
     experiment_id: str | None = None
-    pool_ref: str | None = None
     attach_session: str | None = None
     gateway_url: str | None = None
     api_key: str | None = None
@@ -912,7 +911,6 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         ) from exc
 
     image = _resolve_str(config.image, "AGENTM_AGENT_ENV_IMAGE", None)
-    pool_ref = _resolve_str(config.pool_ref, "AGENTM_AGENT_ENV_POOL_REF", None)
     attach_session = _resolve_str(
         config.attach_session, "AGENTM_AGENT_ENV_ATTACH_SESSION", None
     )
@@ -1002,21 +1000,11 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             },
         )
         session = arl.ManagedSession(**session_kwargs)
-    elif pool_ref:
-        session = arl.SandboxSession(
-            pool_ref=pool_ref,
-            namespace=namespace,
-            gateway_url=gateway_url,
-            keep_alive=False,
-            idle_timeout_seconds=idle_value,
-            api_key=api_key,
-        )
     else:
         raise RuntimeError(
-            "operations backend 'agent_env': one of 'attach_session', 'image', "
-            "or 'pool_ref' is required. Set the atom config field or use "
-            "AGENTM_AGENT_ENV_ATTACH_SESSION / AGENTM_AGENT_ENV_IMAGE / "
-            "AGENTM_AGENT_ENV_POOL_REF."
+            "operations backend 'agent_env': either 'image' or 'attach_session' "
+            "is required. Set the atom config field or use "
+            "AGENTM_AGENT_ENV_IMAGE / AGENTM_AGENT_ENV_ATTACH_SESSION."
         )
 
     session_id = getattr(session, "session_id", None) or getattr(session, "_session_id", None)

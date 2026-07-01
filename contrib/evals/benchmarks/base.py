@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import shlex
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Protocol
+from typing import Iterator, Protocol
 
 
 # ---------------------------------------------------------------------------
@@ -99,20 +101,42 @@ class BenchAdapter(Protocol):
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
 def image_name(task_name: str, registry: str, prefix: str, tag: str) -> str:
     """Convention-based image name: {registry}/{prefix}-{task}:{tag}."""
     return f"{registry}/{prefix}-{task_name}:{tag}"
+
+
+def eval_image_name(task_name: str, registry: str, prefix: str, tag: str) -> str:
+    """Convention-based private evaluator image name."""
+    return f"{registry}/{prefix}-{task_name}-eval:{tag}"
+
+
+def _iter_upload_chunks(content: bytes) -> Iterator[bytes]:
+    for offset in range(0, len(content), _UPLOAD_CHUNK_BYTES):
+        yield content[offset : offset + _UPLOAD_CHUNK_BYTES]
 
 
 def upload_file_to_sandbox(session: object, path: str, content: bytes) -> None:
     """Upload a file into the sandbox's /app tree via ARL's workspace file API."""
     rel_path = str(PurePosixPath(path.lstrip("/")))
     target = f"/app/{rel_path}"
-    upload_rel = f".agentm_eval_uploads/{uuid.uuid4().hex}"
-    session._client.upload_file(  # type: ignore[attr-defined]
-        session._session_id, upload_rel,  # type: ignore[attr-defined]
-        content,
-    )
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    upload_rel = ""
+    for attempt in range(1, 5):
+        upload_rel = f".agentm_eval_uploads/{uuid.uuid4().hex}"
+        try:
+            session.upload_file(  # type: ignore[attr-defined]
+                upload_rel,
+                _iter_upload_chunks(content),
+                sha256=expected_sha256,
+            )
+            break
+        except Exception:
+            if attempt == 4:
+                raise
+            time.sleep(2 ** (attempt - 1))
     source_candidates = [
         f"/workspace/{upload_rel}",
         f"/app/{upload_rel}",

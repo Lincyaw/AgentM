@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from .base import TaskSpec, image_name, upload_file_to_sandbox
+from .base import TaskSpec, eval_image_name, image_name, upload_file_to_sandbox
 
 try:
     import yaml as _yaml
@@ -60,6 +60,9 @@ class TerminalBenchAdapter:
     def get_image(self, task: TaskSpec, registry: str, prefix: str, tag: str) -> str:
         return image_name(task.name, registry, prefix, tag)
 
+    def get_eval_image(self, task: TaskSpec, registry: str, prefix: str, tag: str) -> str:
+        return eval_image_name(task.name, registry, prefix, tag)
+
     def get_source_image(self, task: TaskSpec) -> str | None:
         return None
 
@@ -100,6 +103,45 @@ class TerminalBenchAdapter:
 
         scores = _parse_scores(session, eval_out)
         scores["eval_output"] = eval_out or ""
+        scores["eval_mode"] = "uploaded_tests"
+        return scores
+
+    def evaluate_private_container(
+        self,
+        session: object,
+        task: TaskSpec,
+        *,
+        container: str = "eval",
+        timeout: int = 300,
+    ) -> dict:
+        task_dir = Path(task.path)
+        folder = _detect_project_folder(task_dir)
+
+        _require_private_tests(session, container)
+
+        prep = session.execute_container(container, [{  # type: ignore[attr-defined]
+            "name": "cp-tests",
+            "command": ["bash", "-lc", (
+                f"mkdir -p /app/test_output /app/{folder} && "
+                f"cp -a /tests/. /app/{folder}/ 2>/dev/null || true"
+            )],
+            "workDir": "/app",
+        }])
+        _raise_failed_step(prep, "cp-tests")
+
+        r = session.execute_container(container, [{  # type: ignore[attr-defined]
+            "name": "eval",
+            "command": ["bash", "-lc",
+                f"export TEST_DIR=/tests && cd /app && "
+                f"killall qemu-system-riscv64 2>/dev/null; "
+                f"timeout {timeout} bash /tests/run-tests.sh 2>&1"],
+            "workDir": "/app",
+        }])
+        eval_out = r.results[0].output.stdout if r.results else ""
+
+        scores = _parse_scores(session, eval_out)
+        scores["eval_output"] = eval_out or ""
+        scores["eval_mode"] = "private_container"
         return scores
 
     def is_pass(self, result: dict) -> bool:
@@ -269,6 +311,28 @@ def _upload_tests(session: object, task_dir: Path) -> None:
         "command": ["bash", "-lc", "rm -rf /app/_eval_staging"],
         "work_dir": "/app",
     }])
+
+
+def _raise_failed_step(response: object, name: str) -> None:
+    results = getattr(response, "results", None) or []
+    if not results:
+        raise RuntimeError(f"{name} produced no result")
+    output = results[0].output
+    if output.exit_code != 0:
+        detail = output.stderr or output.stdout or f"exit code {output.exit_code}"
+        raise RuntimeError(f"{name} failed: {detail.strip()}")
+
+
+def _require_private_tests(session: object, container: str) -> None:
+    result = session.execute_container(container, [{  # type: ignore[attr-defined]
+        "name": "check-private-tests",
+        "command": ["bash", "-lc", "test -d /tests && test -x /tests/run-tests.sh"],
+        "workDir": "/app",
+    }])
+    _raise_failed_step(
+        result,
+        "private evaluator image must contain executable /tests/run-tests.sh",
+    )
 
 
 def _parse_scores(session: object, eval_out: str) -> dict:
