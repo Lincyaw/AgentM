@@ -49,7 +49,8 @@ MANIFEST = ExtensionManifest(
     registers=(
         "tool:adapt_status",
         "tool:adapt_events",
-        "tool:adapt_event_catalog",
+        "tool:adapt_list_events",
+        "tool:adapt_get_event",
         "tool:adapt_event_scaffold",
         "tool:adapt_install",
         "tool:adapt_install_file",
@@ -83,11 +84,7 @@ class _EventsParams(_StrictParams):
     )
 
 
-class _EventCatalogParams(_StrictParams):
-    channel: str | None = Field(
-        default=None,
-        description="Optional event channel filter, e.g. tool_result.",
-    )
+class _ListEventsParams(_StrictParams):
     visibility: Literal["recommended", "advanced", "all"] = Field(
         default="recommended",
         description=(
@@ -95,6 +92,14 @@ class _EventCatalogParams(_StrictParams):
             "advanced hooks; all: include every discovered ABI event."
         ),
     )
+    include_observed: bool = Field(
+        default=True,
+        description="Include per-channel counts observed in the current session.",
+    )
+
+
+class _GetEventParams(_StrictParams):
+    channel: str = Field(description="Event channel to inspect, e.g. tool_result.")
     include_observed: bool = Field(
         default=True,
         description="Include per-channel counts observed in the current session.",
@@ -322,6 +327,48 @@ def _event_payload(event_cls: type[Any]) -> dict[str, Any] | None:
             f"api.on({event_cls.__name__}.CHANNEL, _on_{channel.replace('-', '_')})"
         ),
     }
+
+
+def _observed_payload(
+    observed_events: dict[str, dict[str, Any]],
+    channel: str,
+) -> dict[str, Any]:
+    return observed_events.get(
+        channel,
+        {
+            "count": 0,
+            "last_event_type": None,
+            "last_fields": [],
+        },
+    )
+
+
+def _doc_teaser(doc: str) -> str:
+    if not doc:
+        return ""
+    first_paragraph = doc.split("\n\n", 1)[0]
+    return first_paragraph.strip()
+
+
+def _event_summary(
+    item: dict[str, Any],
+    *,
+    observed_events: dict[str, dict[str, Any]],
+    include_observed: bool,
+) -> dict[str, Any]:
+    raw_hook = item.get("hook")
+    hook = raw_hook if isinstance(raw_hook, dict) else {}
+    channel = str(item["channel"])
+    summary = {
+        "channel": channel,
+        "event_type": item["event_type"],
+        "visibility": hook.get("visibility", "advanced"),
+        "effects": list(hook.get("effects", ())),
+        "summary": _doc_teaser(str(item.get("doc", ""))),
+    }
+    if include_observed:
+        summary["observed"] = _observed_payload(observed_events, channel)
+    return summary
 
 
 def _discover_events() -> list[dict[str, Any]]:
@@ -605,9 +652,9 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
             "check and inspect failures with adapt_events/adapt_status.",
             "",
             "When writing an AgentM atom that hooks framework events, call "
-            "adapt_event_catalog first to discover available Event channels "
-            "and handler contracts. Use adapt_event_scaffold for a minimal "
-            "event-observer atom template.",
+            "adapt_list_events first to choose a channel, then adapt_get_event "
+            "for the full handler contract. Use adapt_event_scaffold for a "
+            "minimal event-observer atom template.",
         ]
         recent = list(events)[-inject_events:]
         if recent:
@@ -650,31 +697,53 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         limit = max(1, min(params.limit, max_events))
         return _json_tool({"ok": True, "events": list(events)[-limit:]})
 
-    async def _event_catalog(args: dict[str, Any]) -> ToolResult:
-        params = _parse_params(_EventCatalogParams, args)
+    async def _list_events(args: dict[str, Any]) -> ToolResult:
+        params = _parse_params(_ListEventsParams, args)
         if isinstance(params, ToolResult):
             return params
         catalog = _filter_event_catalog(
             _discover_events(),
-            channel=params.channel,
+            channel=None,
             visibility=params.visibility,
         )
-        if params.include_observed:
-            for item in catalog:
-                item["observed"] = observed_events.get(
-                    item["channel"],
-                    {
-                        "count": 0,
-                        "last_event_type": None,
-                        "last_fields": [],
-                    },
-                )
         return _json_tool(
             {
                 "ok": True,
                 "source": "agentm.core.abi Event subclasses",
                 "count": len(catalog),
-                "events": catalog,
+                "events": [
+                    _event_summary(
+                        item,
+                        observed_events=observed_events,
+                        include_observed=params.include_observed,
+                    )
+                    for item in catalog
+                ],
+            }
+        )
+
+    async def _get_event(args: dict[str, Any]) -> ToolResult:
+        params = _parse_params(_GetEventParams, args)
+        if isinstance(params, ToolResult):
+            return params
+        matching = _filter_event_catalog(
+            _discover_events(),
+            channel=params.channel,
+            visibility="all",
+        )
+        if not matching:
+            return _json_tool(
+                {"ok": False, "error": f"unknown event channel {params.channel!r}"},
+                is_error=True,
+            )
+        event = matching[0]
+        if params.include_observed:
+            event["observed"] = _observed_payload(observed_events, params.channel)
+        return _json_tool(
+            {
+                "ok": True,
+                "source": "agentm.core.abi Event subclasses",
+                "event": event,
             }
         )
 
@@ -909,15 +978,28 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
     )
     api.register_tool(
         FunctionTool(
-            name="adapt_event_catalog",
+            name="adapt_list_events",
             description=(
-                "Automatically discover AgentM ABI Event hook points from "
-                "agentm.core.abi. Returns channel names, payload fields, "
-                "handler contracts, import snippets, subscription examples, "
-                "and optionally observed per-channel counts for this session."
+                "List AgentM ABI Event hook points as a compact catalog. "
+                "Returns channel names, event types, visibility, effects, "
+                "short summaries, and optionally observed counts. Call "
+                "adapt_get_event for full fields and handler contracts."
             ),
-            parameters=_EventCatalogParams,
-            fn=_event_catalog,
+            parameters=_ListEventsParams,
+            fn=_list_events,
+        )
+    )
+    api.register_tool(
+        FunctionTool(
+            name="adapt_get_event",
+            description=(
+                "Get the complete AgentM ABI Event hook contract for one "
+                "channel, including docstring-derived notes, payload fields, "
+                "return/mutation contract, import snippet, subscription "
+                "example, and optionally observed counts."
+            ),
+            parameters=_GetEventParams,
+            fn=_get_event,
         )
     )
     api.register_tool(

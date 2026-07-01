@@ -1019,7 +1019,9 @@ requirements:
       Terminal Bench ARL agents must have an opt-in adapt scenario that keeps
       task execution in the ARL sandbox while exposing host-side
       self-adaptation tools for installing, reloading, unloading, and
-      diagnosing agent-authored atoms. The scenario must support atom source
+      diagnosing agent-authored atoms. Event hook discovery must support a
+      compact list-then-get workflow so agents can choose a channel before
+      pulling full handler contracts. The scenario must support atom source
       supplied inline or read through the current operations backend, so ARL
       agents can write source in /app and ask the host AgentM process to load
       it without making native atoms execute remotely.
