@@ -189,7 +189,8 @@ def test_real_agent_adapt_event_tools_emit_expected_trace(tmp_path: Path) -> Non
 
     status = payloads["adapt_status"]
     assert status["ok"] is True
-    assert status["scenario"] == "terminal_bench:arl_adapt"
+    assert status["workspace_root"] == str(workspace)
+    assert status["scenario_local_extensions"] is True
     assert any(atom["name"] == "adapt" for atom in status["loaded_atoms"])
 
     events = payloads["adapt_events"]

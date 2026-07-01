@@ -8,6 +8,7 @@ Multi-format benchmark runner for evaluating AgentM on terminal agent tasks.
 |---|---|---|---|
 | Terminal Bench 1.0 | `--bench tb1` | Local repo (Dockerfile + task.yaml) | F2P / P2P step scores |
 | Harbor (TB 2.0) | `--bench harbor` | Local repo (task.toml + instruction.md) | reward (0-1 float) |
+| SWE-bench Pro (Harbor) | `--bench harbor` | Harbor export of `scale-ai/swe-bench-pro` | reward (0-1 float) |
 | SWE-bench | `--bench swebench-verified` | HuggingFace dataset | Patch extraction (scored upstream) |
 
 ## Quick start
@@ -183,3 +184,47 @@ Passed tasks: `cobol-modernization`, `code-from-image`, `constraints-scheduling`
    (ephemeral-storage eviction on nodes → pod killed → connection refused).
    These get reward=0.0 as fallback. True pass rate may be slightly higher
    with a healthier cluster.
+
+## Running SWE-bench Pro from Harbor
+
+Harbor publishes Scale AI's SWE-bench Pro as `scale-ai/swe-bench-pro`.
+Export the dataset or a selected task with the Harbor CLI, then use the generic
+Harbor adapter:
+
+```bash
+# Full dataset export (731 tasks; usually do this once)
+uv run harbor download scale-ai/swe-bench-pro@latest \
+    -o runs/harbor-datasets --export
+
+# Or export one known task for smoke tests
+uv run harbor task download scale-ai/<task-name>@<sha256-ref> \
+    -o runs/swebenchpro-harbor-sample --export
+
+# Mirror task images into the Guangzhou registry used by ARL.
+# The adapter reads source images from either task.toml environment.docker_image
+# or environment/Dockerfile's FROM line.
+uv run python contrib/evals/bench.py mirror --bench harbor \
+    --repo runs/harbor-datasets/swe-bench-pro \
+    --registry pair-diag-cn-guangzhou.cr.volces.com/pair \
+    --prefix swebenchpro --tag v0 -j 8
+
+# Baseline
+uv run python contrib/evals/bench.py batch --bench harbor \
+    --repo runs/harbor-datasets/swe-bench-pro \
+    --registry pair-diag-cn-guangzhou.cr.volces.com/pair \
+    --prefix swebenchpro --tag v0 \
+    --model azure-gpt --gateway http://<arl-gateway> --api-key <key> \
+    --scenario terminal_bench:arl \
+    --agent-timeout 7200 --eval-timeout 3000 \
+    --results runs/swebenchpro-baseline
+
+# Adapt agent
+uv run python contrib/evals/bench.py batch --bench harbor \
+    --repo runs/harbor-datasets/swe-bench-pro \
+    --registry pair-diag-cn-guangzhou.cr.volces.com/pair \
+    --prefix swebenchpro --tag v0 \
+    --model azure-gpt --gateway http://<arl-gateway> --api-key <key> \
+    --scenario terminal_bench:arl_adapt \
+    --agent-timeout 7200 --eval-timeout 3000 \
+    --results runs/swebenchpro-adapt
+```

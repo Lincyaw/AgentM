@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import tomllib
 from pathlib import Path
 
@@ -11,6 +12,25 @@ from .base import TaskSpec, image_name, upload_file_to_sandbox
 def _patch_test_sh(content: bytes) -> bytes:
     """No-op: sandbox has network access, let test.sh install its own deps."""
     return content
+
+
+def _source_image_from_dockerfile(task_dir: Path) -> str:
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    if not dockerfile.is_file():
+        return ""
+    for raw_line in dockerfile.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = shlex.split(line, comments=True)
+        if not parts or parts[0].upper() != "FROM":
+            continue
+        image_idx = 1
+        while image_idx < len(parts) and parts[image_idx].startswith("--"):
+            image_idx += 1
+        if image_idx < len(parts):
+            return parts[image_idx]
+    return ""
 
 
 class HarborAdapter:
@@ -37,14 +57,20 @@ class HarborAdapter:
             env_section = meta.get("environment", {})
             if isinstance(env_section, dict):
                 image = env_section.get("docker_image", "")
+            if not image:
+                image = _source_image_from_dockerfile(task_dir)
+
+            metadata = meta.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
 
             tasks.append(TaskSpec(
                 name=task_dir.name,
                 prompt=prompt,
                 image=image,
                 path=str(task_dir),
-                difficulty=meta.get("difficulty", ""),
-                category=meta.get("category", ""),
+                difficulty=metadata.get("difficulty", meta.get("difficulty", "")),
+                category=metadata.get("category", meta.get("category", "")),
                 extra=meta,
             ))
         return tasks

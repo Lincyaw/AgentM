@@ -31,8 +31,9 @@ session, or ``attach_session`` to reuse an existing sandbox:
                       ``AGENTM_AGENT_ENV_ATTACH_SESSION``).
 - ``gateway_url``   — ARL Gateway base URL (env: ``AGENTM_AGENT_ENV_GATEWAY_URL``,
                       default ``http://localhost:8080``)
-- ``namespace``     — Kubernetes namespace (env: ``AGENTM_AGENT_ENV_NAMESPACE``,
-                      default ``default``)
+- ``profile``       — ARL pool-selection profile (env:
+                      ``AGENTM_AGENT_ENV_PROFILE``). The gateway is scoped to
+                      one namespace, so namespace is no longer passed by the SDK.
 - ``work_dir``      — Default cwd inside the sandbox (default ``/workspace``)
 - ``timeout``       — Per-step timeout seconds; ``None`` means no timeout
 - ``idle_timeout_seconds`` — Sandbox idle TTL on the gateway (env:
@@ -82,6 +83,7 @@ class AgentEnvConfig(BaseModel):
     gateway_url: str | None = None
     api_key: str | None = None
     namespace: str | None = None
+    profile: str | None = None
     work_dir: str | None = None
     timeout: float | None = None
     idle_timeout_seconds: int | None = None
@@ -917,9 +919,7 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     gateway_url = _resolve_str(
         config.gateway_url, "AGENTM_AGENT_ENV_GATEWAY_URL", "http://localhost:8080"
     ) or "http://localhost:8080"
-    namespace = _resolve_str(
-        config.namespace, "AGENTM_AGENT_ENV_NAMESPACE", "default"
-    ) or "default"
+    profile = _resolve_str(config.profile, "AGENTM_AGENT_ENV_PROFILE", None)
     work_dir = config.work_dir or "/workspace"
     timeout_value: float | None = config.timeout
     idle_value = _resolve_int(
@@ -944,12 +944,6 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     cpu_lim = _resolve_str(config.cpu_limit, "AGENTM_AGENT_ENV_CPU_LIMIT", None)
     mem_req = _resolve_str(config.memory_request, "AGENTM_AGENT_ENV_MEMORY_REQUEST", None)
     mem_lim = _resolve_str(config.memory_limit, "AGENTM_AGENT_ENV_MEMORY_LIMIT", None)
-    max_replicas = _resolve_int(config.max_replicas, "AGENTM_AGENT_ENV_MAX_REPLICAS")
-    min_replicas = _resolve_int(config.min_replicas, "AGENTM_AGENT_ENV_MIN_REPLICAS")
-    scale_up_step = _resolve_int(
-        config.scale_up_step,
-        "AGENTM_AGENT_ENV_SCALE_UP_STEP",
-    )
     resources = None
     if any((cpu_req, cpu_lim, mem_req, mem_lim)):
         from arl.session import ResourceRequirements  # type: ignore[import-not-found]
@@ -986,15 +980,12 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             {
                 "image": image,
                 "experiment_id": experiment_id,
-                "namespace": namespace,
                 "gateway_url": gateway_url,
                 "workspace_dir": work_dir,
                 "api_key": api_key,
                 "timeout": create_timeout,
                 "resources": resources,
-                "max_replicas": max_replicas,
-                "min_replicas": min_replicas,
-                "scale_up_step": scale_up_step,
+                "profile": profile,
                 "idle_timeout_seconds": idle_value,
                 "max_lifetime_seconds": max_lifetime,
             },

@@ -1,7 +1,7 @@
 name: terminal_bench:arl_adapt
 description: |
-  Terminal-bench via ARL sandbox with the adapt self-modification helper.
-  The agent may build task-specific feedback loops and host-side AgentM atoms.
+  Task scenario with the adapt self-modification helper.
+  The agent may build task-specific feedback loops and runtime extensions.
 
 extensions:
   - module: agentm.extensions.builtin.operations
@@ -18,40 +18,56 @@ extensions:
       default_timeout: 1200
   - module: agentm.extensions.builtin.observability
   - module: agentm.extensions.builtin.adapt
+  - module: agentm.extensions.builtin.tool_index
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
-        You are working on a Terminal Bench task in a remote ARL sandbox.
-        Your file and shell tools execute inside that sandbox, not in the
-        host AgentM repository. The sandbox working directory is /app. Treat
-        relative paths such as INSTRUCTION.md and task project directories as
-        relative to /app.
+        You are working in a task workspace at /app. File and shell tools
+        operate in that workspace. Treat relative task paths as relative to
+        /app unless the task explicitly says otherwise.
 
-        You may first build a small task-specific feedback loop: scripts,
-        checks, static analyzers, debuggers, or other fast-feedback helpers.
-        Keep normal task helpers in /app and validate them with small smoke
-        checks before relying on them. Iterate those helpers while solving the
-        task when they materially improve feedback.
+        Capability map:
+        - Workspace tools read, search, edit, create, and run project files.
+          Use them for repository exploration, code changes, local helper
+          scripts, focused reproducers, static checks, and validation commands.
+        - Background execution tools run long checks without blocking the
+          conversation. Use them for commands that may take minutes, then poll
+          their status and inspect output before acting on the result.
+        - Runtime adaptation tools let you observe and extend your own runtime.
+          Use them when workspace scripts cannot expose enough signal about
+          tool use, tool failures, repeated mistakes, runtime diagnostics, or
+          whether your custom extension actually loaded.
 
-        Use adapt tools only when you need AgentM-native behavior. In ARL,
-        adapt_install and adapt_reload install host-side AgentM atoms, not
-        sandbox code. If you author atom source inside /app, use
-        adapt_install_file or adapt_reload_file to ask the host AgentM process
-        to read that source through the current operations backend and load it.
-        A native atom cannot see hidden evaluator files unless an existing
-        host-side tool exposes them.
+        Self-observation:
+        - Observe task state with workspace tools: files, logs, command output,
+          process status, test artifacts, and validation results.
+        - Observe your own tool-use behavior with runtime events. Event
+          observers are useful for tracking failed tool calls, repeated command
+          patterns, validation summaries, long-running checks, or extension
+          load/reload diagnostics across turns.
+        - Turn an observation into a reusable tool when repeated manual
+          inspection becomes expensive: write a small workspace script for
+          project data, or write a runtime atom that subscribes to events,
+          stores a compact state summary, and registers a tool you can call
+          later.
 
-        Terminal Bench validation commands can be slow. For xv6/qemu tests,
-        use generous timeouts, typically 1200 seconds or more, and do not wrap
-        validation commands in shorter shell-level timeout limits unless the
-        task explicitly requires it.
-        Prefer non-interactive validation commands such as make grade or the
-        task's run-tests.sh. Do not run bare interactive make qemu or
-        make qemu-gdb commands; if qemu is needed for debugging, pipe explicit
-        commands into it and terminate qemu afterwards.
-        For xv6 labs, make grade is the final validation command. Do not run
-        extra manual usertests/qemu loops after make grade or cowtest passes;
-        finish the task instead.
+        Feedback-loop contract:
+        Before risky task edits, establish the smallest useful feedback loop.
+        A feedback loop is valid only after you have run a smoke check and
+        confirmed what signal it gives. State the assumption behind the loop,
+        what command or tool checks it, and what result would change your plan.
+
+        Runtime-extension contract:
+        Runtime extensions are optional and must earn their complexity. If one
+        is useful, write its source in the task workspace, install or reload it
+        with the file-based adaptation tool, and verify that the install
+        returned ok before relying on it. If validation fails, inspect the
+        diagnostics, fix and reload it, or fall back to a workspace helper.
+
+        When information is missing, tools fail, or evidence contradicts an
+        earlier assumption, make the blocked assumption explicit and gather the
+        smallest additional evidence needed before continuing.
+
   - module: agentm.extensions.builtin.llm_compaction
     config:
       tool_result_max_tokens: 8000

@@ -281,7 +281,6 @@ def _run_and_eval_one(
     model: str, gateway: str,
     registry: str, prefix: str, tag: str,
     out: Path, eval_timeout: int, agent_timeout: int = 0,
-    agent_pool_replicas: int = 1,
     agent_env_create_timeout: int = 1200,
     api_key: str = "",
     scenario: str = DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
@@ -305,16 +304,7 @@ def _run_and_eval_one(
     )
 
     image = adapter.get_image(task, registry, prefix, tag)
-    pool_replicas = max(1, agent_pool_replicas)
-    max_replicas = max(
-        pool_replicas,
-        _env_int("AGENTM_AGENT_ENV_MAX_REPLICAS", pool_replicas),
-    )
-    min_replicas = max(0, _env_int("AGENTM_AGENT_ENV_MIN_REPLICAS", 0))
-    scale_up_step = max(
-        1,
-        _env_int("AGENTM_AGENT_ENV_SCALE_UP_STEP", pool_replicas),
-    )
+    profile = os.environ.get("AGENTM_AGENT_ENV_PROFILE")
 
     # --- Agent phase ---
     session_id = None
@@ -339,23 +329,10 @@ def _run_and_eval_one(
             "AGENTM_AGENT_ENV_IMAGE": image,
             "AGENTM_AGENT_ENV_GATEWAY_URL": gateway,
             "AGENTM_AGENT_ENV_EXPERIMENT_ID": agent_exp_id,
-            "AGENTM_AGENT_ENV_NAMESPACE": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
             "AGENTM_AGENT_ENV_CPU_REQUEST": "1",
             "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
             "AGENTM_AGENT_ENV_MEMORY_REQUEST": "2Gi",
             "AGENTM_AGENT_ENV_MEMORY_LIMIT": "16Gi",
-            "AGENTM_AGENT_ENV_MAX_REPLICAS": os.environ.get(
-                "AGENTM_AGENT_ENV_MAX_REPLICAS",
-                str(max_replicas),
-            ),
-            "AGENTM_AGENT_ENV_MIN_REPLICAS": os.environ.get(
-                "AGENTM_AGENT_ENV_MIN_REPLICAS",
-                str(min_replicas),
-            ),
-            "AGENTM_AGENT_ENV_SCALE_UP_STEP": os.environ.get(
-                "AGENTM_AGENT_ENV_SCALE_UP_STEP",
-                str(scale_up_step),
-            ),
             "AGENTM_AGENT_ENV_IDLE_TIMEOUT_SECONDS": os.environ.get(
                 "AGENTM_AGENT_ENV_IDLE_TIMEOUT_SECONDS",
                 str(idle_timeout),
@@ -372,6 +349,7 @@ def _run_and_eval_one(
                 "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN",
                 "false",
             ),
+            **({"AGENTM_AGENT_ENV_PROFILE": profile} if profile else {}),
             **({"AGENTM_AGENT_ENV_API_KEY": api_key} if api_key else {}),
         }
         cmd = [
@@ -448,10 +426,10 @@ def _run_and_eval_one(
     session_kwargs = {
         "image": image,
         "experiment_id": eval_exp_id,
-        "namespace": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
         "gateway_url": gateway,
         "workspace_dir": "/app",
         "api_key": api_key or None,
+        "profile": profile or "default",
         "timeout": max(600.0, eval_timeout * 2.0),
         "idle_timeout_seconds": eval_idle_timeout,
         "max_lifetime_seconds": eval_max_lifetime,
@@ -851,11 +829,15 @@ def run(
         "AGENTM_AGENT_ENV_IMAGE": image,
         "AGENTM_AGENT_ENV_GATEWAY_URL": gateway,
         "AGENTM_AGENT_ENV_EXPERIMENT_ID": f"{prefix}-{task}",
-        "AGENTM_AGENT_ENV_NAMESPACE": os.environ.get("AGENTM_AGENT_ENV_NAMESPACE", "arl"),
         "AGENTM_AGENT_ENV_CPU_REQUEST": "1",
         "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
         "AGENTM_AGENT_ENV_MEMORY_REQUEST": "2Gi",
         "AGENTM_AGENT_ENV_MEMORY_LIMIT": "16Gi",
+        **(
+            {"AGENTM_AGENT_ENV_PROFILE": os.environ["AGENTM_AGENT_ENV_PROFILE"]}
+            if os.environ.get("AGENTM_AGENT_ENV_PROFILE")
+            else {}
+        ),
     }
     result = subprocess.run([
         "uv", "run", "agentm", "--scenario", DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
@@ -1018,7 +1000,6 @@ def batch(
             jobs.append((attempt_idx, t))
 
     total_jobs = len(jobs)
-    agent_pool_replicas = max(1, min(concurrency, attempts))
     typer.echo(
         f"Batch: {len(tasks)} tasks × {attempts} attempt(s) = {total_jobs} jobs | "
         f"bench={bench} | model={model} | concurrency={concurrency}"
@@ -1045,7 +1026,6 @@ def batch(
                     model=model, gateway=gateway,
                     registry=registry, prefix=prefix, tag=tag,
                     out=out, eval_timeout=eval_timeout, agent_timeout=agent_timeout,
-                    agent_pool_replicas=agent_pool_replicas,
                     agent_env_create_timeout=agent_env_create_timeout,
                     api_key=api_key,
                     scenario=scenario,

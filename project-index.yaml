@@ -1014,6 +1014,28 @@ requirements:
     depends_on:
       - REQ-187-agent-env-pool-scaling
 
+  - id: REQ-195-swebench-pro-harbor-eval
+    title: Benchmark runner supports SWE-bench Pro Harbor exports
+    description: >
+      The generic Harbor benchmark adapter must support package-exported
+      SWE-bench Pro tasks from ``scale-ai/swe-bench-pro``. Tasks may declare
+      their upstream runtime image only in ``environment/Dockerfile`` rather
+      than ``task.toml``; the adapter must discover that source image so the
+      mirror command can retag it into the ARL-accessible registry. The adapter
+      must also read nested Harbor metadata fields such as difficulty and
+      category so swebench-pro subsets can be inspected before running
+      baseline/adapt experiments.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/evals/benchmarks/harbor.py
+    tests: []
+    docs:
+      - path: contrib/evals/README.md
+    depends_on:
+      - REQ-187-agent-env-pool-scaling
+
   - id: REQ-194-terminal-bench-adapt-scenario
     title: Terminal Bench ARL adapt scenario with online atom self-modification
     description: >

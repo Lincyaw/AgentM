@@ -1,11 +1,10 @@
 """Builtin ``adapt`` atom for online task self-modification.
 
 The atom is intentionally small: it gives a single agent enough control
-to discover AgentM event hook points, scaffold simple observer atoms,
+to discover runtime event hook points, scaffold simple observer atoms,
 install/reload its own helper atoms, see lifecycle diagnostics, and keep
-scenario-local atoms persistent when explicitly requested. In ARL-backed
-scenarios, these tools run in the host AgentM process; bash/file tools still
-operate in the remote sandbox.
+scenario-local atoms persistent when explicitly requested. Workspace helpers
+and runtime extension atoms are separate adaptation mechanisms.
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ class AdaptConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="adapt",
     description=(
-        "Online self-adaptation tools for task agents: discover AgentM event "
+        "Online self-adaptation tools for task agents: discover runtime event "
         "hooks, scaffold helper atoms, install/reload/unload agent-authored "
         "atoms, and inspect recent extension diagnostics."
     ),
@@ -80,7 +79,10 @@ class _EventsParams(_StrictParams):
         default=20,
         ge=1,
         le=100,
-        description="Maximum number of recent adapt events to return.",
+        description=(
+            "Maximum number of recent adaptation diagnostics/lifecycle records "
+            "to return."
+        ),
     )
 
 
@@ -88,8 +90,10 @@ class _ListEventsParams(_StrictParams):
     visibility: Literal["recommended", "advanced", "all"] = Field(
         default="recommended",
         description=(
-            "recommended: common self-adaptation hooks only; advanced: include "
-            "advanced hooks; all: include every discovered ABI event."
+            "recommended: start here for common self-observation hooks such as "
+            "tool calls, tool results, diagnostics, and extension lifecycle; "
+            "advanced: include lower-level hooks; all: include every discovered "
+            "runtime event."
         ),
     )
     include_observed: bool = Field(
@@ -99,7 +103,12 @@ class _ListEventsParams(_StrictParams):
 
 
 class _GetEventParams(_StrictParams):
-    channel: str = Field(description="Event channel to inspect, e.g. tool_result.")
+    channel: str = Field(
+        description=(
+            "Event channel to inspect after adapt_list_events, e.g. tool_result "
+            "for observing tool outputs and errors."
+        )
+    )
     include_observed: bool = Field(
         default=True,
         description="Include per-channel counts observed in the current session.",
@@ -108,10 +117,19 @@ class _GetEventParams(_StrictParams):
 
 class _EventScaffoldParams(_StrictParams):
     name: str = Field(
-        description="Atom name to put in MANIFEST.name; must be a Python identifier."
+        description=(
+            "Name for the new runtime atom; must be a Python identifier and "
+            "will be used as MANIFEST.name."
+        )
     )
-    channel: str = Field(description="Event channel to subscribe to.")
-    goal: str = Field(description="Short description of what the atom should do.")
+    channel: str = Field(
+        description="Event channel the generated observer atom should subscribe to."
+    )
+    goal: str = Field(
+        description=(
+            "Short description of the signal the atom should capture or summarize."
+        )
+    )
     tool_name: str | None = Field(
         default=None,
         description=(
@@ -123,15 +141,22 @@ class _EventScaffoldParams(_StrictParams):
 
 class _InstallParams(_StrictParams):
     name: str = Field(
-        description="Atom name; must be a valid identifier and match MANIFEST.name."
+        description=(
+            "Atom name to install; must be a valid identifier and match "
+            "MANIFEST.name in the source."
+        )
     )
     source: str = Field(
         description=(
             "Full Python source for the atom. Must define MANIFEST and "
-            "install(api, config), and pass the AgentM atom contract."
+            "install(api, config), and pass the runtime atom contract."
         )
     )
-    rationale: str = Field(description="Why this atom helps the current task.")
+    rationale: str = Field(
+        description=(
+            "Why this runtime atom is needed instead of a normal workspace helper."
+        )
+    )
     config: dict[str, Any] | None = Field(
         default=None,
         description="Optional config passed to install(api, config).",
@@ -155,22 +180,29 @@ class _InstallParams(_StrictParams):
 
 class _InstallFileParams(_StrictParams):
     name: str = Field(
-        description="Atom name; must be a valid identifier and match MANIFEST.name."
+        description=(
+            "Atom name to install; must be a valid identifier and match "
+            "MANIFEST.name in the source file."
+        )
     )
     source_path: str = Field(
         description=(
             "Path to the atom source file in the current operations backend. "
-            "Under ARL this is read from the remote sandbox, usually /app."
+            "The file is read through the same file access layer as workspace tools."
         )
     )
-    rationale: str = Field(description="Why this atom helps the current task.")
+    rationale: str = Field(
+        description=(
+            "Why this runtime atom is needed instead of a normal workspace helper."
+        )
+    )
     config: dict[str, Any] | None = Field(
         default=None,
         description="Optional config passed to install(api, config).",
     )
     scope: Literal["user", "scenario"] = Field(
         default="user",
-        description="Where to persist the installed host-side atom.",
+        description="Where to persist the installed runtime-side atom.",
     )
     pin_manifest: bool = Field(
         default=True,
@@ -179,25 +211,33 @@ class _InstallFileParams(_StrictParams):
 
 
 class _ReloadParams(_StrictParams):
-    name: str = Field(description="Loaded atom name to replace.")
+    name: str = Field(description="Name of the already-loaded atom to replace.")
     source: str = Field(description="Full replacement Python source for the atom.")
-    rationale: str = Field(description="Why this reload is needed.")
+    rationale: str = Field(
+        description="What bug, missing signal, or behavior change this reload fixes."
+    )
 
 
 class _ReloadFileParams(_StrictParams):
-    name: str = Field(description="Loaded atom name to replace.")
+    name: str = Field(description="Name of the already-loaded atom to replace.")
     source_path: str = Field(
         description=(
             "Path to replacement source in the current operations backend. "
-            "Under ARL this is read from the remote sandbox, usually /app."
+            "The file is read through the same file access layer as workspace tools."
         )
     )
-    rationale: str = Field(description="Why this reload is needed.")
+    rationale: str = Field(
+        description="What bug, missing signal, or behavior change this reload fixes."
+    )
 
 
 class _UnloadParams(_StrictParams):
-    name: str = Field(description="Loaded atom name to unload from the running session.")
-    rationale: str = Field(description="Why this atom should be unloaded.")
+    name: str = Field(
+        description="Loaded runtime atom name to remove from the running session."
+    )
+    rationale: str = Field(
+        description="Why this atom is no longer useful or is actively harmful."
+    )
     unpin_manifest: bool = Field(
         default=False,
         description=(
@@ -639,22 +679,44 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         lines = [
             "# Adapt",
             "",
-            "You may improve your task-specific feedback loop before and during "
-            "the task. Use normal file and bash tools for scripts/checks that "
-            "belong in the task workspace. Use adapt tools only for AgentM "
-            "native atoms that run in the host AgentM process.",
+            "Adapt tools let you observe and extend your own runtime when "
+            "workspace scripts are not enough. Ordinary task scripts and "
+            "project checks still belong in the task workspace.",
             "",
-            "In ARL scenarios, bash/file tools execute in the remote sandbox, "
-            "while adapt_install/adapt_reload affect host-side AgentM atoms. "
-            "Installing a native atom does not copy files into /app.",
+            "Runtime observation starts with adapt_status and adapt_events. "
+            "adapt_status reports loaded atoms and current diagnostics. "
+            "adapt_events reports recent adaptation failures, installs, and "
+            "reloads.",
             "",
-            "Before relying on a new helper atom or script, run a small smoke "
-            "check and inspect failures with adapt_events/adapt_status.",
+            "The event system is the way to observe yourself across turns. Use "
+            "adapt_list_events to discover event channels. Common observation "
+            "targets include tool calls, tool results, diagnostics, and "
+            "extension install/reload events. Then call adapt_get_event for a "
+            "chosen channel to see payload fields, observed counts, return "
+            "contract, mutation contract, import snippet, and subscription "
+            "example.",
             "",
-            "When writing an AgentM atom that hooks framework events, call "
-            "adapt_list_events first to choose a channel, then adapt_get_event "
-            "for the full handler contract. Use adapt_event_scaffold for a "
-            "minimal event-observer atom template.",
+            "To make your own runtime tool, write an atom that keeps compact "
+            "state, subscribes to the event you need, and registers a tool that "
+            "returns the state or performs a narrow diagnostic action. "
+            "adapt_event_scaffold can generate a minimal observer atom; edit "
+            "that source when you need custom filtering, summaries, or tool "
+            "parameters.",
+            "",
+            "A runtime atom source must define MANIFEST and install(api, "
+            "config). In install, use api.on(Event.CHANNEL, handler) to observe "
+            "events and api.register_tool(FunctionTool(...)) to expose a new "
+            "tool to yourself. Use Pydantic models for tool parameters.",
+            "",
+            "To activate an atom, write the source in the task workspace, then "
+            "call adapt_install_file or adapt_reload_file. Treat the atom as "
+            "unavailable until the install or reload result is ok and a small "
+            "smoke check shows the new behavior or tool is visible.",
+            "",
+            "Workspace helpers and runtime atoms are separate. Installing a "
+            "runtime atom does not copy files into the task workspace, and "
+            "editing workspace files does not automatically reload a runtime "
+            "atom.",
         ]
         recent = list(events)[-inject_events:]
         if recent:
@@ -676,16 +738,16 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
             return params
         payload = {
             "ok": True,
-            "scenario": api.scenario,
-            "scenario_dir": api.scenario_dir,
+            "workspace_root": api.cwd,
+            "scenario_local_extensions": api.scenario_dir is not None,
             "cwd": api.cwd,
-            "agent_env_session_id": api.get_service("agent_env.session_id"),
+            "operations_session_id": api.get_service("agent_env.session_id"),
             "loaded_atoms": [_atom_payload(atom) for atom in api.list_atoms()],
             "recent_events": list(events),
-            "arl_note": (
-                "When operations backend is agent_env, bash/file tools run in "
-                "the ARL sandbox; adapt native atoms run in the host AgentM "
-                "process and are installed through the atom reloader."
+            "runtime_note": (
+                "File and shell tools operate in the task workspace. Runtime "
+                "extension atoms are installed in the surrounding runtime and "
+                "do not copy files into the workspace."
             ),
         }
         return _json_tool(payload)
@@ -709,7 +771,7 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         return _json_tool(
             {
                 "ok": True,
-                "source": "agentm.core.abi Event subclasses",
+                "source": "runtime event catalog",
                 "count": len(catalog),
                 "events": [
                     _event_summary(
@@ -742,7 +804,7 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         return _json_tool(
             {
                 "ok": True,
-                "source": "agentm.core.abi Event subclasses",
+                "source": "runtime event catalog",
                 "event": event,
             }
         )
@@ -961,8 +1023,10 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         FunctionTool(
             name="adapt_status",
             description=(
-                "Inspect adapt state: current scenario, ARL session id when "
-                "available, loaded atoms, and recent self-modification diagnostics."
+                "Orientation tool for runtime adaptation. Call it to see the "
+                "workspace root, operations session id when available, currently "
+                "loaded atoms, and recent diagnostics before deciding whether to "
+                "install, reload, or debug a runtime atom."
             ),
             parameters=_EmptyParams,
             fn=_status,
@@ -971,7 +1035,12 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
     api.register_tool(
         FunctionTool(
             name="adapt_events",
-            description="Return recent adapt diagnostics and atom lifecycle events.",
+            description=(
+                "Inspect recent adaptation diagnostics and atom lifecycle records. "
+                "Use after adapt_install/adapt_reload fails, or after a custom "
+                "atom behaves unexpectedly, to see validation errors, install "
+                "errors, and reload outcomes."
+            ),
             parameters=_EventsParams,
             fn=_events,
         )
@@ -980,10 +1049,10 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         FunctionTool(
             name="adapt_list_events",
             description=(
-                "List AgentM ABI Event hook points as a compact catalog. "
-                "Returns channel names, event types, visibility, effects, "
-                "short summaries, and optionally observed counts. Call "
-                "adapt_get_event for full fields and handler contracts."
+                "Step 1 for observing yourself through runtime events. Lists "
+                "event hook channels as a compact catalog with event type, "
+                "visibility, allowed effects, short summaries, and optional "
+                "observed counts. Choose a channel here, then call adapt_get_event."
             ),
             parameters=_ListEventsParams,
             fn=_list_events,
@@ -993,10 +1062,11 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         FunctionTool(
             name="adapt_get_event",
             description=(
-                "Get the complete AgentM ABI Event hook contract for one "
-                "channel, including docstring-derived notes, payload fields, "
-                "return/mutation contract, import snippet, subscription "
-                "example, and optionally observed counts."
+                "Step 2 for event observation. Given one channel from "
+                "adapt_list_events, returns the exact event payload fields, "
+                "handler return/mutation contract, import snippet, subscription "
+                "example, notes, and observed counts so you can write a correct "
+                "observer atom."
             ),
             parameters=_GetEventParams,
             fn=_get_event,
@@ -1006,8 +1076,10 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         FunctionTool(
             name="adapt_event_scaffold",
             description=(
-                "Generate a minimal AgentM atom source template that subscribes "
-                "to a discovered Event channel and registers a summary tool."
+                "Generate starter source for a runtime observer atom. The source "
+                "subscribes to one event channel, stores recent event snapshots, "
+                "and registers a summary tool. This only returns source; edit it "
+                "as needed, then install it with adapt_install or adapt_install_file."
             ),
             parameters=_EventScaffoldParams,
             fn=_event_scaffold,
@@ -1017,12 +1089,11 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         FunctionTool(
             name="adapt_install",
             description=(
-                "Install a new agent-authored native AgentM atom and activate it "
-                "in the current session. Default scope='user' persists under "
-                "<cwd>/.agentm/atoms, which works for ARL sessions because the "
-                "host atom reloader writes it. scope='scenario' writes a "
-                "scenario-local atom and can pin `local: name` in the current "
-                "manifest."
+                "Install and activate a new runtime atom from inline source. Use "
+                "this when the full source is already in the tool arguments. "
+                "On ok=true, any tools registered by the atom are available in "
+                "the current session. Prefer adapt_install_file when you wrote "
+                "the source as a workspace file."
             ),
             parameters=_InstallParams,
             fn=_install,
@@ -1032,10 +1103,10 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         FunctionTool(
             name="adapt_install_file",
             description=(
-                "Install a new host-side AgentM atom from a source file in the "
-                "current operations backend. In ARL, write the source under /app "
-                "with file/bash tools, then call this tool to read it back and "
-                "install it through the host atom reloader."
+                "Install and activate a new runtime atom from a workspace source "
+                "file. Use this after writing or editing atom source with file/bash "
+                "tools. On ok=true, the runtime has validated and loaded it, and "
+                "any new tools it registers are available in the current session."
             ),
             parameters=_InstallFileParams,
             fn=_install_file,
@@ -1045,9 +1116,10 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         FunctionTool(
             name="adapt_reload",
             description=(
-                "Transactionally reload a loaded atom from full source. On "
-                "validation or install failure, AgentM restores the previous "
-                "live atom and returns structured error details."
+                "Replace an already-loaded runtime atom from inline source. Use "
+                "when you need to fix or improve a custom atom. Reload is "
+                "transactional: on validation or install failure, the previous "
+                "live atom remains active and structured error details are returned."
             ),
             parameters=_ReloadParams,
             fn=_reload,
@@ -1057,10 +1129,10 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         FunctionTool(
             name="adapt_reload_file",
             description=(
-                "Transactionally reload a loaded host-side AgentM atom from a "
-                "source file in the current operations backend. In ARL this "
-                "lets the agent edit source under /app and ask the host to load "
-                "that source without exposing evaluation files."
+                "Replace an already-loaded runtime atom from a workspace source "
+                "file. Use this after editing atom source with file/bash tools. "
+                "Reload is transactional: on failure, the previous live atom "
+                "remains active and diagnostics explain what to fix."
             ),
             parameters=_ReloadFileParams,
             fn=_reload_file,
@@ -1070,8 +1142,9 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         FunctionTool(
             name="adapt_unload",
             description=(
-                "Unload a live atom from the current session. The source file is "
-                "kept unless a scenario manifest pin is explicitly removed."
+                "Remove a loaded runtime atom from the current session when it is "
+                "misleading, noisy, or no longer useful. The source file is kept "
+                "unless a scenario manifest pin is explicitly removed."
             ),
             parameters=_UnloadParams,
             fn=_unload,
