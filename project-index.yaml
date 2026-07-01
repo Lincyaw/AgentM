@@ -1012,6 +1012,29 @@ requirements:
     depends_on:
       - REQ-187-agent-env-pool-scaling
 
+  - id: REQ-194-terminal-bench-adapt-scenario
+    title: Terminal Bench ARL adapt scenario with online atom self-modification
+    description: >
+      Terminal Bench ARL agents must have an opt-in adapt scenario that keeps
+      task execution in the ARL sandbox while exposing host-side
+      self-adaptation tools for installing, reloading, unloading, and
+      diagnosing agent-authored atoms. The scenario must support atom source
+      supplied inline or read through the current operations backend, so ARL
+      agents can write source in /app and ask the host AgentM process to load
+      it without making native atoms execute remotely.
+    priority: P1
+    status: implemented
+    confidence: inferred
+    code:
+      - path: contrib/scenarios/terminal_bench/adapt.py
+      - path: contrib/scenarios/terminal_bench/manifest.arl_adapt.yaml
+    tests: []
+    docs:
+      - path: .claude/designs/self-modifiable-architecture.md
+    depends_on:
+      - REQ-079-atom-reloader-fail-stop
+      - REQ-187-agent-env-pool-scaling
+
   - id: REQ-176-monitor-atom
     title: Builtin monitor atom — agent-defined wakeups + channel subscriptions
     description: >

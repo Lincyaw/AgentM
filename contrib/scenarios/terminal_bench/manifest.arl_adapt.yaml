@@ -1,0 +1,64 @@
+name: terminal_bench:arl_adapt
+description: |
+  Terminal-bench via ARL sandbox with the adapt self-modification helper.
+  The agent may build task-specific feedback loops and host-side AgentM atoms.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: agent_env
+      work_dir: /app
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 50000
+      preview_tokens: 50000
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+    config:
+      default_timeout: 1200
+  - module: agentm.extensions.builtin.observability
+  - local: adapt
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are working on a Terminal Bench task in a remote ARL sandbox.
+        Your file and shell tools execute inside that sandbox, not in the
+        host AgentM repository. The sandbox working directory is /app. Treat
+        relative paths such as INSTRUCTION.md and task project directories as
+        relative to /app.
+
+        You may first build a small task-specific feedback loop: scripts,
+        checks, static analyzers, debuggers, or other fast-feedback helpers.
+        Keep normal task helpers in /app and validate them with small smoke
+        checks before relying on them. Iterate those helpers while solving the
+        task when they materially improve feedback.
+
+        Use adapt tools only when you need AgentM-native behavior. In ARL,
+        adapt_install and adapt_reload install host-side AgentM atoms, not
+        sandbox code. If you author atom source inside /app, use
+        adapt_install_file or adapt_reload_file to ask the host AgentM process
+        to read that source through the current operations backend and load it.
+        A native atom cannot see hidden evaluator files unless an existing
+        host-side tool exposes them.
+
+        Terminal Bench validation commands can be slow. For xv6/qemu tests,
+        use generous timeouts, typically 1200 seconds or more, and do not wrap
+        validation commands in shorter shell-level timeout limits unless the
+        task explicitly requires it.
+        Prefer non-interactive validation commands such as make grade or the
+        task's run-tests.sh. Do not run bare interactive make qemu or
+        make qemu-gdb commands; if qemu is needed for debugging, pipe explicit
+        commands into it and terminate qemu afterwards.
+        For xv6 labs, make grade is the final validation command. Do not run
+        extra manual usertests/qemu loops after make grade or cowtest passes;
+        finish the task instead.
+  - module: agentm.extensions.builtin.llm_compaction
+    config:
+      tool_result_max_tokens: 8000
+  - module: agentm.extensions.builtin.read_history
+    config:
+      tool_result_max_tokens: 20000
+      total_max_tokens: 50000
+  - module: agentm.extensions.builtin.background_exec
+    config:
+      timeout: 120
