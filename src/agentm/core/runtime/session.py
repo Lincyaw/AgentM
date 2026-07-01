@@ -29,6 +29,7 @@ from agentm.core.abi import (
 from agentm.core.abi.events import (
     BeforeAgentStartEvent,
     ChildSessionEndEvent,
+    InputEvent,
     MessagePersistedEvent,
     SessionShutdownEvent,
 )
@@ -770,27 +771,34 @@ class AgentSession:
             self._last_round_turn = None
             messages = self._session_manager.build_session_context().messages
             system_prompt = ""
-            before_returns = await self._bus.emit(
-                BeforeAgentStartEvent.CHANNEL,
-                BeforeAgentStartEvent(messages=messages, system=system_prompt),
+            before_event = BeforeAgentStartEvent(
+                messages=messages, system=system_prompt,
             )
-            veto_cause = collect_start_veto(before_returns)
+            before_returns = await self._bus.emit(
+                BeforeAgentStartEvent.CHANNEL, before_event,
+            )
+            # --- Veto: prefer typed event field, fall back to return-dict ---
+            veto_cause = (
+                before_event.veto
+                if before_event.veto is not None
+                else collect_start_veto(before_returns)
+            )
             if veto_cause is not None:
                 await self._bus.emit(
                     AgentEndEvent.CHANNEL,
                     AgentEndEvent(messages=messages, cause=veto_cause),
                 )
-                # Pre-context-event early return: drain the originating
-                # push so the driver parks instead of tight-looping on the
-                # still-queued item (sibling of the exception-path drain
-                # in ``_driver``; both call ``_drain_inbox_on_early_return``).
                 self._drain_inbox_on_early_return(
                     f"before_agent_start veto: {type(veto_cause).__name__}"
                 )
                 return messages
+            # --- System prompt: prefer return-dict (back-compat), fall back
+            #     to event mutation ---
             replacement_system = collect_system_replacement(before_returns)
             if replacement_system is not None:
                 system_prompt = replacement_system
+            elif before_event.system:
+                system_prompt = before_event.system
 
             # NB: the kernel ``run`` itself emits ``agent_start`` at entry
             # (loop.py:412); we don't duplicate it here. The kernel also fires
@@ -877,18 +885,19 @@ class AgentSession:
     async def _preprocess_input(
         self, text: str
     ) -> tuple[str, list[AgentMessage] | None]:
-        event: dict[str, Any] = {"text": text}
-        returns = await self._bus.emit("input", event)
+        event = InputEvent(text=text)
+        returns = await self._bus.emit(InputEvent.CHANNEL, event)
+        # --- Typed event field path (preferred) ---
+        if event.handled and event.handled_messages is not None:
+            return text, event.handled_messages
+        # --- Return-dict fallback (deprecated) ---
         for value in returns:
             if isinstance(value, dict) and value.get("handled") is True:
                 messages = value.get("messages")
                 if isinstance(messages, list):
                     return text, messages
-        handled_messages = event.get("handled_messages")
-        if isinstance(handled_messages, list):
-            return text, handled_messages
-        new_text = event.get("text")
-        return (new_text if isinstance(new_text, str) else text), None
+        # --- Text rewrite (mutation path, always via event field) ---
+        return (event.text if isinstance(event.text, str) else text), None
 
     def _user_payload(
         self, *, text: str, images: list[ImageContent] | None

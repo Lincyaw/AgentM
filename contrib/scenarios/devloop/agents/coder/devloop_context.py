@@ -48,9 +48,11 @@ def install(api: ExtensionAPI, config: DevloopContextConfig) -> None:
     ]
     context = "\n\n".join(parts)
 
-    def before_agent_start(event: BeforeAgentStartEvent) -> None:
+    def before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str]:
         current = str(event.system or "")
-        event.system = f"{current}\n\n{context}" if current else context
+        updated = f"{current}\n\n{context}" if current else context
+        event.system = updated
+        return {"system": updated}
 
     api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)
 

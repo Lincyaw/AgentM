@@ -49,8 +49,10 @@ def install(api: ExtensionAPI, config: PreloadSkillsConfig) -> None:
 
     injected = "\n\n---\n\n".join(sections)
 
-    def _inject(event: BeforeAgentStartEvent) -> None:
+    def _inject(event: BeforeAgentStartEvent) -> dict[str, str]:
         current = event.system or ""
-        event.system = f"{current}\n\n{injected}"
+        updated = f"{current}\n\n{injected}"
+        event.system = updated
+        return {"system": updated}
 
     api.on(BeforeAgentStartEvent.CHANNEL, _inject)

@@ -74,7 +74,7 @@ def install(api: ExtensionAPI, config: ExtractorContextConfig) -> None:
         f"## JSON Schema\n\nYour output must conform to this schema:\n\n```json\n{schema}\n```"
     )
 
-    def _inject_system(event: BeforeAgentStartEvent) -> dict[str, str] | None:
-        return {"system": full_prompt}
+    def _inject_system(event: BeforeAgentStartEvent) -> None:
+        event.system = full_prompt
 
     api.on(BeforeAgentStartEvent.CHANNEL, _inject_system)

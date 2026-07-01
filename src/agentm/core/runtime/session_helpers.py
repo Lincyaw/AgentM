@@ -110,6 +110,15 @@ def now() -> float:
 
 
 def collect_system_replacement(returns: list[Any]) -> str | None:
+    """Extract system prompt from return-dict pattern.
+
+    .. deprecated::
+        Backward-compatibility fallback only. Handlers should mutate
+        ``event.system`` in place instead of returning
+        ``{"system": "..."}``. The runtime checks ``event.system`` first
+        and falls back to this helper only when no handler has set it via
+        mutation. Will be removed once all handlers are migrated.
+    """
     chosen: str | None = None
     for value in returns:
         if isinstance(value, dict) and value.get("system") is not None:
@@ -120,6 +129,16 @@ def collect_system_replacement(returns: list[Any]) -> str | None:
 
 
 def collect_start_veto(returns: list[Any]) -> TerminationCause | None:
+    """Extract veto cause from return-dict pattern.
+
+    .. deprecated::
+        Backward-compatibility fallback only. Handlers should set
+        ``event.veto = <TerminationCause>`` instead of returning
+        ``{"block": True, "cause": ...}``. The runtime checks
+        ``event.veto`` first and falls back to this helper only when no
+        handler has set it via the typed field. Will be removed once all
+        handlers are migrated.
+    """
     for value in returns:
         if not isinstance(value, dict) or value.get("block") is not True:
             continue

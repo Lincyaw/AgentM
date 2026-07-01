@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from agentm.core.abi import (
     ExtensionAPI,
+    InputEvent,
     PROMPT_REGISTRY,
     PromptRegistry,
     PromptTemplateRecord,
@@ -267,13 +268,13 @@ async def install(api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
             include_defaults=include_defaults,
         )
 
-    def _on_input(event: dict[str, Any]) -> None:
-        text = event.get("text")
+    def _on_input(event: InputEvent) -> None:
+        text = event.text
         if not isinstance(text, str) or not text.startswith("/"):
             return
         expanded = registry.expand_prompt_template(text, cache)
         if expanded is not None:
-            event["text"] = expanded
+            event.text = expanded
 
     api.on(SessionReadyEvent.CHANNEL, _populate)
-    api.on("input", _on_input)
+    api.on(InputEvent.CHANNEL, _on_input)

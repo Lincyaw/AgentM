@@ -56,19 +56,18 @@ def _build_block(data_dir: str) -> str:
 def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:
     data_dir_override = config.data_dir.strip() if config.data_dir else None
 
-    def _inject(event: BeforeAgentStartEvent) -> dict[str, str] | None:
+    def _inject(event: BeforeAgentStartEvent) -> None:
         data_dir = data_dir_override or os.environ.get("AGENTM_RCA_DATA_DIR", "").strip()
         if not data_dir:
             # No case dir bound — stay silent rather than print a placeholder.
-            return None
+            return
         block = _build_block(data_dir)
         existing = event.system or ""
         # Idempotent: don't double-append if some upstream handler already
         # produced a system prompt that contains our header.
         if _BLOCK_HEADER in existing:
-            return None
+            return
         merged = f"{existing}\n\n{block}" if existing else block
         event.system = merged
-        return {"system": merged}
 
     api.on(BeforeAgentStartEvent.CHANNEL, _inject)

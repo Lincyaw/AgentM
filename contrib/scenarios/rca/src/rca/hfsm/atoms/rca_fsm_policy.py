@@ -243,16 +243,15 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if isinstance(event, dict):
             _advance(event)
 
-    def _inject_prompt(event: BeforeAgentStartEvent) -> dict[str, str] | None:
+    def _inject_prompt(event: BeforeAgentStartEvent) -> None:
         fragment = _load_prompt(fsm.state)
         suggestion = _scheduler_suggestion()
         body = "\n\n".join(part for part in (fragment, suggestion) if part)
         if not body:
-            return None
+            return
         existing = event.system or ""
         merged = f"{body}\n\n{existing}" if existing else body
         event.system = merged
-        return {"system": merged}
 
     def _scheduler_suggestion() -> str:
         if fsm.state != "VERIFY" or fsm.current_prediction_id is None:

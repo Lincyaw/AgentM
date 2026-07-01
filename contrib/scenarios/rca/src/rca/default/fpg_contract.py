@@ -102,13 +102,12 @@ async def install(api: ExtensionAPI, config: _FpgContractConfig) -> None:
         nonlocal cached_contract
         cached_contract = await _load_agent_contract_block(api, config)
 
-    def _inject_prompt(event: BeforeAgentStartEvent) -> dict[str, str] | None:
+    def _inject_prompt(event: BeforeAgentStartEvent) -> None:
         if not cached_contract:
-            return None
+            return
         existing = event.system or ""
         merged = f"{existing}\n\n{cached_contract}" if existing else cached_contract
         event.system = merged
-        return {"system": merged}
 
     api.on(SessionReadyEvent.CHANNEL, _load)
     api.on(BeforeAgentStartEvent.CHANNEL, _inject_prompt)

@@ -464,9 +464,11 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
 
     if enable_reminders:
 
-        def _on_before_start(event: BeforeAgentStartEvent) -> None:
+        def _on_before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
             current = str(event.system or "")
-            event.system = f"{current}\n\n{_SYSTEM_PROMPT_BLOCK}" if current else _SYSTEM_PROMPT_BLOCK
+            updated = f"{current}\n\n{_SYSTEM_PROMPT_BLOCK}" if current else _SYSTEM_PROMPT_BLOCK
+            event.system = updated
+            return {"system": updated}
 
         api.on(BeforeAgentStartEvent.CHANNEL, _on_before_start)
 

@@ -116,9 +116,10 @@ def install(api: ExtensionAPI, config: CostBudgetConfig) -> None:
             ),
         )
 
-    def _before_agent_start(_: BeforeAgentStartEvent) -> dict[str, object] | None:
+    def _before_agent_start(event: BeforeAgentStartEvent) -> dict[str, object] | None:
         if not state["overflowed"]:
             return None
+        event.veto = BudgetExhausted(detail="cost")
         return {"block": True, "cause": BudgetExhausted(detail="cost")}
 
     async def _on_turn_end(event: TurnEndEvent) -> None:

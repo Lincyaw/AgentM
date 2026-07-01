@@ -53,6 +53,8 @@ def install(api: ExtensionAPI, _config: ToolIndexConfig) -> None:
         lines.append("</available_tools>")
         block = "\n".join(lines)
         current = event.system or ""
-        event.system = f"{current}\n\n{block}" if current else block
+        updated = f"{current}\n\n{block}" if current else block
+        event.system = updated
+        return {"system": updated}
 
     api.on(BeforeAgentStartEvent.CHANNEL, _inject)

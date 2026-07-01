@@ -93,11 +93,10 @@ async def install(api: ExtensionAPI, config: CCConfig) -> None:
 
         def _inject_startup_claude(
             event: BeforeAgentStartEvent,
-        ) -> dict[str, str]:
+        ) -> None:
             current = str(event.system or "")
             updated = f"{startup_claude}\n\n{current}" if current else startup_claude
             event.system = updated
-            return {"system": updated}
 
         api.on(BeforeAgentStartEvent.CHANNEL, _inject_startup_claude)
 

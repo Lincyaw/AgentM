@@ -165,12 +165,11 @@ async def install(api: ExtensionAPI, config: AgentsConfig) -> None:
                 agents.append(record)
         cached_block = _format_block(agents)
 
-    def _inject(event: BeforeAgentStartEvent) -> dict[str, str] | None:
+    def _inject(event: BeforeAgentStartEvent) -> None:
         if not cached_block:
-            return None
+            return
         updated = f"{event.system or ''}{cached_block}"
         event.system = updated
-        return {"system": updated}
 
     api.on(SessionReadyEvent.CHANNEL, _populate)
     api.on(BeforeAgentStartEvent.CHANNEL, _inject)

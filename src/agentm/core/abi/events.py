@@ -500,17 +500,53 @@ class DiagnosticEvent(Event):
 class BeforeAgentStartEvent(Event):
     """Fires at the top of ``AgentSession.prompt`` before the kernel loop runs.
 
-    Mutability: this event is intentionally **not frozen**. Handlers may mutate
-    ``system`` in place; alternatively they may return a ``dict[str, str]`` of
-    shape ``{"system": "..."}`` and the runtime will use the last non-None
-    replacement to overwrite the system prompt. ``messages`` is the live list
-    that will be passed to the loop — handlers should generally not rewrite it
-    here (use ``context`` / ``before_send_to_llm`` for that).
+    **System prompt** — two equivalent paths (both work, mutation preferred):
+
+    1. **Mutate** ``event.system`` in place — handlers see each other's
+       mutations, so chained appends work naturally. The runtime reads the
+       final ``event.system`` after all handlers run.
+    2. **Return** ``{"system": "<text>"}`` — *deprecated*; kept for backward
+       compatibility. The last non-None return value takes precedence over
+       ``event.system`` mutation. New code should use mutation only.
+
+    **Veto** — set ``event.veto = <TerminationCause>`` to abort the prompt
+    before the loop runs. The runtime checks after all handlers; first
+    non-None ``veto`` wins (but all handlers still run for observability).
+    Returning ``{"block": True, "cause": ...}`` is *deprecated* and supported
+    for backward compatibility.
+
+    ``messages`` is the live list that will be passed to the loop — handlers
+    should generally not rewrite it here (use ``context`` /
+    ``before_send_to_llm`` for that).
     """
 
     CHANNEL: ClassVar[Literal["before_agent_start"]] = "before_agent_start"
     messages: list[AgentMessage]
     system: str | None
+    veto: TerminationCause | None = None
+
+
+@dataclass(slots=True)
+class InputEvent(Event):
+    """Fires when user text arrives, before the LLM driver runs.
+
+    **Text rewriting**: mutate ``event.text`` in place to transform the
+    user prompt (e.g., expand ``/template`` invocations). The runtime
+    reads the final ``event.text`` after all handlers run.
+
+    **Full handling** (slash commands): set ``event.handled = True`` and
+    ``event.handled_messages = [...]`` to short-circuit the normal prompt
+    flow. The runtime returns ``handled_messages`` directly to the
+    ``prompt()`` caller without invoking the LLM.
+
+    Returning ``{"handled": True, "messages": ...}`` is *deprecated* and
+    supported for backward compatibility.
+    """
+
+    CHANNEL: ClassVar[Literal["input"]] = "input"
+    text: str
+    handled: bool = False
+    handled_messages: list[AgentMessage] | None = None
 
 
 @dataclass(slots=True)
@@ -973,6 +1009,7 @@ __all__ = [
     "ExtensionUnloadEvent",
     "Handler",
     "Inject",
+    "InputEvent",
     "LlmRequestEndEvent",
     "LlmRequestStartEvent",
     "LoopAction",

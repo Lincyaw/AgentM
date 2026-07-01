@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -12,6 +10,7 @@ from agentm.core.abi import (
     CommandDispatchedEvent,
     CommandDispatcher,
     ExtensionAPI,
+    InputEvent,
     SLASH_COMMAND_DISPATCHER_SERVICE,
 )
 from agentm.extensions import ExtensionManifest
@@ -35,26 +34,23 @@ def install(api: ExtensionAPI, config: SlashCommandsConfig) -> None:
     service = api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)
     dispatcher = service if isinstance(service, CommandDispatcher) else None
 
-    async def _on_input(event: dict[str, Any]) -> dict[str, Any] | None:
-        text = event.get("text")
-        if not isinstance(text, str):
-            return None
-
+    async def _on_input(event: InputEvent) -> None:
+        text = event.text
         stripped = text.lstrip()
         if stripped.startswith("//"):
-            event["text"] = text.replace("//", "/", 1)
-            return None
+            event.text = text.replace("//", "/", 1)
+            return
         if not stripped.startswith("/"):
-            return None
+            return
 
         head, _, rest = stripped[1:].partition(" ")
         if not head or dispatcher is None:
-            return None
+            return
 
         args = rest.strip()
         result = await dispatcher.dispatch(head, args)
         if not result.handled:
-            return None
+            return
         await api.events.emit(
             CommandDispatchedEvent.CHANNEL,
             CommandDispatchedEvent(
@@ -63,8 +59,7 @@ def install(api: ExtensionAPI, config: SlashCommandsConfig) -> None:
                 owner=result.owner or "<unknown>",
             ),
         )
-        messages = result.messages
-        event["handled_messages"] = messages
-        return {"handled": True, "messages": messages}
+        event.handled = True
+        event.handled_messages = result.messages
 
-    api.on("input", _on_input, priority=BusPriority.PRE)
+    api.on(InputEvent.CHANNEL, _on_input, priority=BusPriority.PRE)

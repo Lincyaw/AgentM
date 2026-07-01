@@ -210,8 +210,8 @@ def install(api: ExtensionAPI, config: AuditorContextConfig) -> None:
             context_index=context_index,
         )
 
-    def _before_start(event: BeforeAgentStartEvent) -> dict[str, str]:
-        return {"system": prompt_text}
+    def _before_start(event: BeforeAgentStartEvent) -> None:
+        event.system = prompt_text
 
     api.on(BeforeAgentStartEvent.CHANNEL, _before_start)
 
