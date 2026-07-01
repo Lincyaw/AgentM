@@ -111,8 +111,7 @@ def upload_file_to_sandbox(session: object, path: str, content: bytes) -> None:
     upload_rel = f".agentm_eval_uploads/{uuid.uuid4().hex}"
     session._client.upload_file(  # type: ignore[attr-defined]
         session._session_id, upload_rel,  # type: ignore[attr-defined]
-        base64.b64encode(content).decode(),
-        encoding="base64",
+        content,
     )
     source_candidates = [
         f"/workspace/{upload_rel}",
