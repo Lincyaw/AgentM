@@ -125,6 +125,7 @@ requirements:
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/core/runtime/resource_writer.py
       - path: src/agentm/core/runtime/session.py
+      - path: src/agentm/cli_validate.py
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/builtin/inherit_provider.py
     tests:
@@ -1026,8 +1027,10 @@ requirements:
     status: implemented
     confidence: inferred
     code:
+      - path: src/agentm/core/abi/events.py
+      - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/core/runtime/session_factory.py
-      - path: contrib/scenarios/terminal_bench/adapt.py
+      - path: src/agentm/extensions/builtin/adapt.py
       - path: contrib/scenarios/terminal_bench/manifest.arl_adapt.yaml
     tests: []
     docs:

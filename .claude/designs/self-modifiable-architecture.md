@@ -84,6 +84,14 @@ Concretely, this means an atom like `tool_edit` can `from agentm.core.lib import
 
 Pure data types that atoms exchange (e.g. `SkillRecord`, `PromptTemplateRecord`, `Operations` bundle, `CompactionSettings`) live in `core/abi/` so the atom can construct and pattern-match against them without traversing the API. Only behaviour (loaders, engines, fingerprint computation) hides behind the API.
 
+Event hook discovery follows the same rule. The Event dataclass is the
+mechanism and remains the source of truth for channel name and payload shape.
+`HookContract` is a small machine-readable annotation attached to selected
+Event classes so self-authored atoms can discover handler semantics (observe,
+mutate, replace, veto, inject) without reading runtime code. It does not create
+a second hook system: `hook = documented Event + handler contract`, and atoms
+still subscribe only through `api.on(Event.CHANNEL, handler)`.
+
 ### 2.2 Worked example: compaction prompts move out of constitution
 
 The split forces a useful question on every constitution module: "is this mechanism, or has policy leaked in?" Compaction is the canonical case.

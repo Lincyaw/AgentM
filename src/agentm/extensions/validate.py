@@ -779,6 +779,7 @@ def _check_peer_literal_requires(
     )
     peers = known_extension_names - {own}
     referenced: set[str] = set()
+    descriptive_keywords = frozenset({"description", "help", "message", "title"})
 
     class _Visitor(ast.NodeVisitor):
         def visit_Assign(self, node: ast.Assign) -> None:
@@ -793,6 +794,24 @@ def _check_peer_literal_requires(
             if isinstance(node.target, ast.Name) and node.target.id == "MANIFEST":
                 return
             self.generic_visit(node)
+
+        def visit_Dict(self, node: ast.Dict) -> None:
+            # Mapping keys are data-shape labels, not peer atom references.
+            for value in node.values:
+                if value is not None:
+                    self.visit(value)
+
+        def visit_Expr(self, node: ast.Expr) -> None:
+            if isinstance(node.value, ast.Constant) and isinstance(
+                node.value.value, str
+            ):
+                return
+            self.generic_visit(node)
+
+        def visit_keyword(self, node: ast.keyword) -> None:
+            if node.arg in descriptive_keywords:
+                return
+            self.visit(node.value)
 
         def visit_Constant(self, node: ast.Constant) -> None:
             if isinstance(node.value, str) and node.value in peers:

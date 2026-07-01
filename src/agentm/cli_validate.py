@@ -50,9 +50,22 @@ def _print_issues(issues: list[ValidationIssue]) -> int:
     return 1 if errors else 0
 
 
+def _configure_core_manifest() -> None:
+    """Bind repo ``core-manifest.yaml`` for validator helpers."""
+
+    from agentm.core._internal.catalog import manifest as core_manifest_mod
+    from agentm.extensions.discover import _agentm_repo_root
+
+    repo_root = _agentm_repo_root() or Path.cwd()
+    manifest_path = repo_root / "core-manifest.yaml"
+    if manifest_path.is_file():
+        core_manifest_mod.configure_manifest_path(manifest_path)
+
+
 @app.command(name="all")
 def validate_all() -> None:
     """Discover and validate all builtin + contrib atom packages."""
+    _configure_core_manifest()
     all_issues: list[ValidationIssue] = []
 
     # Builtin atoms (single-file).
@@ -92,6 +105,7 @@ def validate_file_cmd(
     ],
 ) -> None:
     """Validate specific atom files against the S11 contract."""
+    _configure_core_manifest()
     all_issues: list[ValidationIssue] = []
     for p in paths:
         resolved = p.resolve()
@@ -115,6 +129,7 @@ def validate_package_cmd(
     ],
 ) -> None:
     """Validate specific atom packages against the S11 contract."""
+    _configure_core_manifest()
     all_issues: list[ValidationIssue] = []
     for p in paths:
         resolved = p.resolve()

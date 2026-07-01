@@ -7,8 +7,6 @@ this green.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from agentm.extensions.discover import reset_cache
@@ -24,18 +22,9 @@ def setup_function() -> None:
 
 
 def test_builtin_catalog_passes_section_11_contract() -> None:
-    _D4_FALSE_POSITIVES = {
-        ("agentm.extensions.builtin.artifact_store", "11.4.D4-peer-requires"),
-        ("agentm.extensions.builtin.observability", "11.4.D4-peer-requires"),
-        ("agentm.extensions.builtin.sub_agent", "11.4.D4-peer-requires"),
-    }
-
     issues = validate_builtin()
-    real_issues = [
-        i for i in issues if (i.module_path, i.rule) not in _D4_FALSE_POSITIVES
-    ]
-    assert real_issues == [], "\n".join(
-        f"  - {i.module_path} [{i.rule}]: {i.message}" for i in real_issues
+    assert issues == [], "\n".join(
+        f"  - {i.module_path} [{i.rule}]: {i.message}" for i in issues
     )
 
 

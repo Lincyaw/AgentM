@@ -59,6 +59,24 @@ class BusPriority:
     POST: Final[int] = 900
 
 
+@dataclass(slots=True, frozen=True)
+class HookContract:
+    """Machine-readable handler contract for an event channel.
+
+    The event class remains the source of truth for channel name and payload.
+    ``HOOK`` only documents how atom handlers may use the event: whether it is
+    recommended for agent-authored atoms, whether payload mutation is supported,
+    and whether handler return values are consumed by the runtime.
+    """
+
+    visibility: Literal["recommended", "advanced", "internal"] = "advanced"
+    effects: tuple[str, ...] = ("observe",)
+    return_contract: str | None = None
+    mutation_contract: str | None = None
+    handler: Literal["sync_or_async", "sync_only"] = "sync_or_async"
+    notes: tuple[str, ...] = ()
+
+
 # --- Event types ------------------------------------------------------------
 
 
@@ -225,6 +243,10 @@ class AgentStartEvent(Event):
     """Emitted once at the start of ``AgentLoop.run``."""
 
     CHANNEL: ClassVar[Literal["agent_start"]] = "agent_start"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     messages: list[AgentMessage]
 
 
@@ -239,6 +261,10 @@ class AgentEndEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["agent_end"]] = "agent_end"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     messages: list[AgentMessage]
     cause: TerminationCause
 
@@ -278,6 +304,15 @@ class DecideTurnActionEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["decide_turn_action"]] = "decide_turn_action"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe", "override_loop_action", "inject_messages"),
+        return_contract="LoopAction | None",
+        notes=(
+            "Inject wins over Stop; Stop can override Step; final Stop causes "
+            "cannot be overridden.",
+        ),
+    )
     observation: TurnObservation
 
 
@@ -286,6 +321,10 @@ class TurnStartEvent(Event):
     """Emitted at the start of each loop turn (one LLM call)."""
 
     CHANNEL: ClassVar[Literal["turn_start"]] = "turn_start"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe",),
+    )
     turn_index: int
     turn_id: int = 0
 
@@ -304,6 +343,14 @@ class TurnEndEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["turn_end"]] = "turn_end"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe",),
+        notes=(
+            "Use this for per-turn summaries; messages includes the current "
+            "assistant message and prior tool results.",
+        ),
+    )
     turn_index: int
     message: AssistantMessage
     messages: tuple[AgentMessage, ...] = ()
@@ -323,6 +370,15 @@ class ToolCallEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["tool_call"]] = "tool_call"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe", "mutate_args", "block_tool_call"),
+        return_contract=(
+            "{\"block\": true, \"reason\": str, "
+            "\"kind\"?: \"user_rejected\"} | None"
+        ),
+        mutation_contract="event.args may be mutated in place before execution.",
+    )
     tool_call_id: str
     tool_name: str
     args: dict[str, Any]
@@ -338,6 +394,12 @@ class ToolResultEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["tool_result"]] = "tool_result"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe", "replace_result"),
+        return_contract="ToolResult | None",
+        notes=("The last non-None replacement wins.",),
+    )
     tool_call_id: str
     tool_name: str
     result: ToolResult
@@ -373,6 +435,14 @@ class ToolErrorEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["tool_error"]] = "tool_error"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe", "format_error_result"),
+        mutation_contract=(
+            "event.result.content may be mutated in place before it is "
+            "surfaced to the model."
+        ),
+    )
     kind: Literal["execution_failed", "unknown_tool", "blocked", "user_rejected"]
     tool_name: str
     reason: str
@@ -397,6 +467,14 @@ class BeforeSendToLlmEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["before_send_to_llm"]] = "before_send_to_llm"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe", "mutate_messages", "mutate_system"),
+        mutation_contract=(
+            "event.messages and event.system may be mutated immediately before "
+            "the provider request."
+        ),
+    )
     messages: list[AgentMessage]
     model: Model
     tools: list[Tool]
@@ -408,6 +486,10 @@ class LlmRequestStartEvent(Event):
     """Emitted right before the loop drains ``stream_fn``."""
 
     CHANNEL: ClassVar[Literal["llm_request_start"]] = "llm_request_start"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     turn_index: int
     message_count: int
     tool_count: int
@@ -429,6 +511,10 @@ class LlmRequestEndEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["llm_request_end"]] = "llm_request_end"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     turn_index: int
     chunk_count: int
     duration_ns: int
@@ -451,6 +537,11 @@ class StreamDeltaEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["stream_delta"]] = "stream_delta"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="internal",
+        effects=("observe",),
+        notes=("High-volume provider stream; prefer turn_end unless needed.",),
+    )
     turn_index: int
     delta: Any  # AssistantStreamEvent — typed Any here to avoid pulling
     # the ``stream`` module into the events surface for everyone.
@@ -467,6 +558,15 @@ class ContextEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["context"]] = "context"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe", "mutate_messages", "replace_messages"),
+        return_contract="list[AgentMessage] | None",
+        mutation_contract=(
+            "event.messages may be mutated in place; a returned list replaces "
+            "the current context."
+        ),
+    )
     messages: list[AgentMessage]
 
 
@@ -480,6 +580,10 @@ class DiagnosticEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["diagnostic"]] = "diagnostic"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe",),
+    )
     level: Literal["info", "warning", "error"]
     source: str
     message: str
@@ -521,6 +625,13 @@ class BeforeAgentStartEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["before_agent_start"]] = "before_agent_start"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe", "mutate_system", "veto_prompt"),
+        return_contract="{\"system\": str} | {\"block\": true, \"cause\": TerminationCause} | None",
+        mutation_contract="event.system may be mutated; event.veto may be set.",
+        notes=("Prefer mutation over deprecated return dictionaries.",),
+    )
     messages: list[AgentMessage]
     system: str | None
     veto: TerminationCause | None = None
@@ -544,6 +655,14 @@ class InputEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["input"]] = "input"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe", "rewrite_input", "handle_input"),
+        mutation_contract=(
+            "event.text may be mutated; set handled and handled_messages to "
+            "short-circuit normal prompt flow."
+        ),
+    )
     text: str
     handled: bool = False
     handled_messages: list[AgentMessage] | None = None
@@ -558,6 +677,10 @@ class SessionShutdownEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["session_shutdown"]] = "session_shutdown"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe", "cleanup"),
+    )
     cwd: str
 
 
@@ -575,6 +698,13 @@ class BeforeCompactEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["before_compact"]] = "before_compact"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe", "mutate_messages"),
+        mutation_contract=(
+            "event.messages may be adjusted before compaction consumes them."
+        ),
+    )
     messages: list[AgentMessage]
     reason: str  # e.g. "auto_overflow", "manual", "scenario_request"
 
@@ -584,6 +714,10 @@ class AfterCompactEvent(Event):
     """Fires after compaction is committed to the SessionManager."""
 
     CHANNEL: ClassVar[Literal["after_compact"]] = "after_compact"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     summary: str
     kept_message_count: int
     discarded_message_count: int
@@ -595,6 +729,10 @@ class ChildSessionStartEvent(Event):
     """Fires on the parent bus when a child AgentSession is created."""
 
     CHANNEL: ClassVar[Literal["child_session_start"]] = "child_session_start"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     child_session_id: str
     parent_session_id: str
     purpose: str  # e.g. "subagent:worker", caller-defined
@@ -629,6 +767,13 @@ class ChildSessionExtendingEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["child_session_extending"]] = "child_session_extending"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe", "extend_child_session"),
+        return_contract="list[tuple[str, dict[str, Any]]] | None",
+        handler="sync_only",
+        notes=("Return extension module/config tuples to append to the child.",),
+    )
     parent_session_id: str
     child_config: "AgentSessionConfig"
 
@@ -638,6 +783,10 @@ class ChildSessionEndEvent(Event):
     """Fires on the parent bus when a child AgentSession terminates."""
 
     CHANNEL: ClassVar[Literal["child_session_end"]] = "child_session_end"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     child_session_id: str
     parent_session_id: str
     final_message_count: int
@@ -656,6 +805,10 @@ class CostBudgetExceededEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["cost_budget_exceeded"]] = "cost_budget_exceeded"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     used: float
     limit: float
     currency: str = "usd"
@@ -671,6 +824,10 @@ class PlanSubmittedEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["plan_submitted"]] = "plan_submitted"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     plan_id: str
     plan_text: str
 
@@ -689,6 +846,11 @@ class MessagePersistedEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["message_persisted"]] = "message_persisted"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+        notes=("Durable message append; high volume in tool-heavy runs.",),
+    )
     message: AgentMessage
     source: Literal["assistant", "tool_result", "injected"]
     turn_index: int
@@ -714,6 +876,10 @@ class MessageAppendedEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["message_appended"]] = "message_appended"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     record: dict[str, Any]
 
 
@@ -730,6 +896,10 @@ class SessionHeaderEmittedEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["session_header_emitted"]] = "session_header_emitted"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     record: dict[str, Any]
 
 
@@ -756,6 +926,11 @@ class EntryAppendedEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["entry_appended"]] = "entry_appended"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+        handler="sync_only",
+    )
     session_id: str
     """The persisted session-manager header id (``ReadonlySession.get_session_id``),
     not the OTel span id. Distinct from the bus-owning session's
@@ -777,6 +952,11 @@ class SessionReadyEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["session_ready"]] = "session_ready"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe", "initialize_after_tools_ready"),
+        notes=("Best point to inspect the final tool list and model.",),
+    )
     cwd: str
     session_id: str
     tool_names: tuple[str, ...]
@@ -805,6 +985,11 @@ class ResolveSubagentEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["resolve_subagent"]] = "resolve_subagent"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe", "provide_subagent_metadata"),
+        return_contract="dict[str, Any] | None",
+    )
     name: str
 
 
@@ -822,6 +1007,10 @@ class ExtensionInstallEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["extension_install"]] = "extension_install"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe",),
+    )
     module_path: str
     config: dict[str, Any]
     phase: Literal["start", "end", "error"]
@@ -837,6 +1026,10 @@ class ExtensionReloadEvent(Event):
     """Fires after a transactional reload succeeds or hits rollback failure."""
 
     CHANNEL: ClassVar[Literal["extension_reload"]] = "extension_reload"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe",),
+    )
     name: str
     old_hash: str | None
     new_hash: str
@@ -855,6 +1048,12 @@ class BeforeInstallAtomEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["before_install_atom"]] = "before_install_atom"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe", "mutate_config", "block_install"),
+        return_contract="{\"block\": true, \"reason\": str} | None",
+        mutation_contract="event.config may be mutated before atom install.",
+    )
     name: str
     module_path: str
     target_path: str
@@ -872,6 +1071,11 @@ class BeforeUnloadAtomEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["before_unload_atom"]] = "before_unload_atom"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe", "block_unload"),
+        return_contract="{\"block\": true, \"reason\": str} | None",
+    )
     name: str
     module_path: str
     tier: int
@@ -892,6 +1096,10 @@ class CommandDispatchedEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["command_dispatched"]] = "command_dispatched"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     name: str
     args: str
     owner: str
@@ -907,6 +1115,10 @@ class ExtensionUnloadEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["extension_unload"]] = "extension_unload"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe",),
+    )
     name: str
     module_path: str
     trigger: Literal["agent", "human", "propose_change_approved"]
@@ -923,6 +1135,12 @@ class ApiRegisterEvent(Event):
     """
 
     CHANNEL: ClassVar[Literal["api_register"]] = "api_register"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="recommended",
+        effects=("observe",),
+        handler="sync_only",
+        notes=("Fires when atoms register tools, commands, providers, renderers.",),
+    )
     kind: Literal["tool", "command", "provider", "renderer"]
     name: str
     extension: str
@@ -934,6 +1152,10 @@ class ApiSendUserMessageEvent(Event):
     """Fires when an extension calls ``api.send_user_message``."""
 
     CHANNEL: ClassVar[Literal["api_send_user_message"]] = "api_send_user_message"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     extension: str
     content: Any
 
@@ -943,6 +1165,11 @@ class ResourcesDiscoverEvent(Event):
     """Fires when an extension wants peers to contribute resource paths."""
 
     CHANNEL: ClassVar[Literal["resources_discover"]] = "resources_discover"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe", "provide_resource_paths"),
+        return_contract="list[str] | None",
+    )
     cwd: str
     reason: Literal["startup", "reload"]
 
@@ -952,6 +1179,10 @@ class ResourceWriteEvent(Event):
     """Fires when a managed resource write lands as a git commit."""
 
     CHANNEL: ClassVar[Literal["resource_write"]] = "resource_write"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
     path: str
     pre_sha: str
     post_sha: str
@@ -1008,6 +1239,7 @@ __all__ = [
     "ExtensionReloadEvent",
     "ExtensionUnloadEvent",
     "Handler",
+    "HookContract",
     "Inject",
     "InputEvent",
     "LlmRequestEndEvent",
