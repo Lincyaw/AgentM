@@ -1026,7 +1026,7 @@ requirements:
       agents can write source in /app and ask the host AgentM process to load
       it without making native atoms execute remotely.
     priority: P1
-    status: implemented
+    status: tested
     confidence: inferred
     code:
       - path: src/agentm/core/abi/events.py
@@ -1034,7 +1034,8 @@ requirements:
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/extensions/builtin/adapt.py
       - path: contrib/scenarios/terminal_bench/manifest.arl_adapt.yaml
-    tests: []
+    tests:
+      - path: tests/integration/test_adapt_real_agent.py
     docs:
       - path: .claude/designs/self-modifiable-architecture.md
     depends_on:
