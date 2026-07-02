@@ -50,15 +50,13 @@ def _make_tool(
             return _err(f"{name} rejected: {exc}")
         return handler(parsed)
 
-    kw: dict[str, Any] = {
-        "name": name,
-        "description": description,
-        "parameters": params,
-        "fn": _fn,
-    }
-    if metadata is not None:
-        kw["metadata"] = metadata
-    return FunctionTool(**kw)
+    return FunctionTool(
+        name=name,
+        description=description,
+        parameters=params,
+        fn=_fn,
+        metadata=metadata,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,14 @@ Rules:
   schemas are the project convention — they stay in sync with
   validation, generate descriptions from ``Field()``, and avoid
   hand-maintained JSON Schema boilerplate.
+- **AM012** ``config-dict-splat``: ``**dict`` unpacking into a core typed
+  contract — ``AgentSessionConfig(...)``, ``FunctionTool(...)``, or
+  ``spawn_child_session(...)``. These are typed contracts — build them
+  with explicit fields so the type checker sees every knob. Genuine JSON
+  payloads (e.g. ``lineage=``/``experiment=``/``metadata=`` values) stay
+  dicts; only the typed *object itself* must not be assembled from an
+  untyped dict. Vendor SDK calls (``openai``/``anthropic``/``arl``) and
+  pydantic ``super().__init__(**data)`` are out of scope by design.
 
 Invocation::
 
@@ -467,13 +475,50 @@ def _check_hand_written_schema(
     return issues
 
 
+# Core typed contracts that must be constructed with explicit fields, never
+# assembled from an untyped ``**dict``. Deliberately excludes vendor SDK
+# constructors and pydantic ``super().__init__`` — those APIs are kwargs-based
+# by design and have no typed-field alternative.
+_CONFIG_DICT_SPLAT_CALLEES: Final[frozenset[str]] = frozenset(
+    {"AgentSessionConfig", "FunctionTool", "spawn_child_session"}
+)
+
+
+def _check_config_dict_splat(tree: ast.Module, path: str) -> list[Issue]:
+    """AM012: ``**dict`` splat into a core typed contract."""
+    issues: list[Issue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = ""
+        if isinstance(func, ast.Name):
+            name = func.id
+        elif isinstance(func, ast.Attribute):
+            name = func.attr
+        if name not in _CONFIG_DICT_SPLAT_CALLEES:
+            continue
+        # ``**x`` in a call is a keyword whose ``arg`` is None.
+        if any(kw.arg is None for kw in node.keywords):
+            issues.append(Issue(
+                path=path,
+                line=node.lineno,
+                rule="AM012",
+                message=(
+                    f"dict-splat into {name}() — pass explicit typed fields, "
+                    "not **dict"
+                ),
+            ))
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
 ALL_RULES: Final[tuple[str, ...]] = (
     "AM001", "AM002", "AM003", "AM004", "AM005", "AM006", "AM007",
-    "AM008", "AM009", "AM010", "AM011",
+    "AM008", "AM009", "AM010", "AM011", "AM012",
 )
 
 
@@ -504,6 +549,7 @@ def check_file(file_path: Path) -> list[Issue]:
     issues.extend(_check_god_class(tree, rel))
     issues.extend(_check_cross_layer_import(tree, rel, file_path))
     issues.extend(_check_hand_written_schema(tree, rel, file_path))
+    issues.extend(_check_config_dict_splat(tree, rel))
     return issues
 
 

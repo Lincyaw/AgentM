@@ -24,6 +24,7 @@ from typing import Any, Literal, cast
 from loguru import logger
 
 from agentm.core.abi import (
+    AgentSessionConfig,
     ChildSessionEndEvent,
     DecideTurnActionEvent,
     ExtensionAPI,
@@ -768,17 +769,17 @@ class _ChildTaskManager:
         child_extensions_combined = (
             persona_extensions + child_extensions + inherited_extensions
         )
-        child_config = {
-            "cwd": self._api.cwd,
-            "extensions": child_extensions_combined,
-            "scenario": self._api.scenario,
-            "provider": None,
-            "loop_config": child_loop_config,
-            "task_id": task_id,
-            "persona": persona_name,
-            "purpose": purpose,
-            "tool_allowlist": persona_tool_allowlist,
-            "lineage": {
+        child_config = AgentSessionConfig(
+            cwd=self._api.cwd,
+            extensions=child_extensions_combined,
+            scenario=self._api.scenario,
+            provider=None,
+            loop_config=child_loop_config,
+            task_id=task_id,
+            persona=persona_name,
+            purpose=purpose,
+            tool_allowlist=persona_tool_allowlist,
+            lineage={
                 "kind": "subagent",
                 "parent_session_id": self._api.session_id,
                 "root_session_id": self._api.root_session_id,
@@ -786,10 +787,10 @@ class _ChildTaskManager:
                 "persona": persona_name,
                 "purpose": purpose,
             },
-            "experiment": self._api.experiment,
-        }
+            experiment=self._api.experiment,
+        )
         try:
-            child = await self._api.spawn_child_session(**child_config)
+            child = await self._api.spawn_child_session(child_config)
         except Exception as exc:  # noqa: BLE001
             logger.warning("sub_agent spawn_child_session failed: {}", exc)
             await self._registry.release_slot()

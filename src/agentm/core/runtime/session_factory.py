@@ -8,7 +8,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -182,7 +182,7 @@ def _refresh_active_provider(
 
 
 async def _spawn_child_session(
-    child_config: Any,
+    child_config: AgentSessionConfig,
     *,
     bus: EventBus,
     session_id: str,
@@ -192,18 +192,21 @@ async def _spawn_child_session(
     session_cls: type[Any],
 ) -> Any:
     """Create a child session, inheriting trace identity and provider."""
-    if isinstance(child_config, dict):
-        child_config = AgentSessionConfig(**child_config)
     if not isinstance(child_config, AgentSessionConfig):
         raise TypeError(
-            "spawn_child_session expects an AgentSessionConfig or kwargs dict; "
+            "spawn_child_session expects an AgentSessionConfig; "
             f"got {type(child_config).__name__}"
         )
-    spec = AgentSessionConfig(**{**child_config.__dict__})
-    spec.bus = None  # force fresh EventBus — never inherit the parent's
-    spec.parent_bus = bus
-    spec.parent_session_id = session_id
-    spec.root_session_id = root_session_id
+    # Shallow-copy the caller's config so our mutations never leak back, and
+    # override the child-lifecycle fields in one pass. `replace` is slots-safe
+    # (unlike `__dict__`) and skips any future init=False fields.
+    spec = replace(
+        child_config,
+        bus=None,  # force fresh EventBus — never inherit the parent's
+        parent_bus=bus,
+        parent_session_id=session_id,
+        root_session_id=root_session_id,
+    )
     if spec.provider is None:
         parent_provider = provider_getter()
         if parent_provider is None:
@@ -663,7 +666,7 @@ async def _prime_contrib_discovery(config: AgentSessionConfig, bus: EventBus) ->
         try:
             discover_fn()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("session_factory: {} discovery failed: {}", role, exc)
+            logger.warning("session_factory: {} discovery failed: {}", label, exc)
             await bus.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(

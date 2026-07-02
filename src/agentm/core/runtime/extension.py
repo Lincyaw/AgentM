@@ -18,7 +18,7 @@ import inspect
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from agentm.core.abi import (
     EventBus,
@@ -66,6 +66,9 @@ from agentm.core.runtime.services import (
     default_catalog_service,
     default_project_layout,
 )
+
+if TYPE_CHECKING:
+    from agentm.core.abi.session_config import AgentSessionConfig
 
 
 class _OperationsHolder:
@@ -507,16 +510,8 @@ class _ExtensionAPIImpl:
             ),
         )
 
-    async def spawn_child_session(
-        self, config: Any | None = None, **kwargs: Any
-    ) -> Any:
+    async def spawn_child_session(self, config: AgentSessionConfig) -> Any:
         self._assert_active()
-        if config is not None and kwargs:
-            raise TypeError(
-                "spawn_child_session accepts either a config object or keyword args, not both"
-            )
-        if config is None:
-            config = kwargs
         return await self._child_session_factory(config)
 
     def set_service(self, name: str, obj: Any) -> None:

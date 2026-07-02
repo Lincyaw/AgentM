@@ -17,7 +17,13 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    # Sibling ABI module; imported under TYPE_CHECKING only because it is used
+    # solely in an annotation (``from __future__ import annotations`` keeps it
+    # a string), which sidesteps any import-order sensitivity in the package.
+    from agentm.core.abi.session_config import AgentSessionConfig
 
 from agentm.core.abi import (
     AgentMessage,
@@ -427,16 +433,13 @@ class ExtensionAPI(Protocol):
         ...
 
     def send_user_message(self, content: str | list[Any]) -> None: ...
-    async def spawn_child_session(
-        self, config: Any | None = None, **kwargs: Any
-    ) -> Any:
+    async def spawn_child_session(self, config: AgentSessionConfig) -> Any:
         """Create a nested ``AgentSession`` rooted at this one.
 
-        ``config`` is an ``AgentSessionConfig`` (typed ``Any`` here to avoid
-        pulling ``agentm.core.runtime.session`` into the import allow-list).
-        The runtime fills in ``parent_bus`` and ``parent_session_id`` from
-        the current session — caller-supplied values for those fields are
-        ignored. Returns the constructed child session.
+        ``config`` is a typed :class:`AgentSessionConfig`. The runtime fills
+        in ``parent_bus`` and ``parent_session_id`` from the current session
+        — caller-supplied values for those fields are ignored. Returns the
+        constructed child session.
         """
         ...
 
