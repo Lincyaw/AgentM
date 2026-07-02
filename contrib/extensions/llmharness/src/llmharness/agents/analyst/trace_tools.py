@@ -44,6 +44,7 @@ def _get_backend() -> tuple[Any, str] | None:
             return None
         return clickhouse, url
     except Exception:
+        logger.debug("analyst_trace_tools: failed to initialise ClickHouse backend", exc_info=True)
         return None
 
 

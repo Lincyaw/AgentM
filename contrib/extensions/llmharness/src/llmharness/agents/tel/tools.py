@@ -68,7 +68,7 @@ def _make_tool(
 _WS_RUN = re.compile(r"\s+")
 
 
-@dataclass
+@dataclass(slots=True)
 class SpanStore:
     """In-memory store of trajectory spans for one TELBench case."""
 
@@ -136,7 +136,7 @@ SPAN_STORE_SERVICE_KEY: Final = "llmharness.tel_span_store"
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class Notepad:
     notes: list[str] = field(default_factory=list)
     path: Path | None = None

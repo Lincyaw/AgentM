@@ -163,7 +163,7 @@ class _CloseSentinel:
 
 _CLOSE: _CloseSentinel = _CloseSentinel()
 
-@dataclass(eq=False)
+@dataclass(eq=False, slots=True)
 class _Client:
     # ``eq=False`` so instances stay hashable by identity — they live in
     # ``_Server.clients`` (a set). The default dataclass ``__eq__`` would
@@ -171,7 +171,7 @@ class _Client:
     queue: asyncio.Queue[Any]
     dropped: int = 0
 
-@dataclass
+@dataclass(slots=True)
 class _Server:
     """One WebSocket server bound to one root session.
 
@@ -492,6 +492,11 @@ class _BusObserver(EventBusObserver):
         try:
             payload = to_jsonable(event)
         except Exception:
+            logger.debug(
+                "live_inspector: to_jsonable failed for event on channel={}, "
+                "falling back to repr",
+                channel,
+            )
             payload = {"_repr": repr(event)}
         self._server.broadcast(
             {
@@ -562,6 +567,11 @@ def install(api: ExtensionAPI, config: LiveInspectorConfig) -> None:
         try:
             payload = to_jsonable(event.payload)
         except Exception:
+            logger.debug(
+                "live_inspector: to_jsonable failed for entry payload "
+                "(entry_id={}), falling back to repr",
+                event.entry_id,
+            )
             payload = {"_repr": repr(event.payload)}
         # Forward the event's session_id (the SessionManager header id
         # under which the entry was written) verbatim, rather than the
