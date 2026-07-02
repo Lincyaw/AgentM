@@ -234,17 +234,36 @@ uv sync
 uv run agentm -p "list files in src/"
 ```
 
-Installed as a tool, the same minimal invocation works from any repo:
+Installed as a tool, first run the setup command once. It reuses an existing
+`~/.agentm/config.toml` when present; otherwise it infers provider/model from
+env and only asks for missing credentials.
+
+```bash
+uv tool install agentm
+agentm setup
+```
+
+Then use it from any repo:
 
 ```bash
 agentm -p "summarize this repository"
 agentm --cwd /path/to/repo -p "run the relevant checks"
-agentm contrib sync --mode copy
+agentm trace messages --latest
 ```
 
-Model provider settings can be supplied through environment variables or
-profiles in `~/.agentm/config.toml` (`$AGENTM_HOME/config.toml` overrides
-the directory). A minimal config profile:
+For non-interactive bootstrap, pass the model details directly or provide the
+provider's API-key env var:
+
+```bash
+agentm setup --quick --provider openai --model gpt-4o --api-key "$OPENAI_API_KEY"
+agentm -p "Say hi"
+```
+
+To inspect the local setup without changing files, run `agentm setup --check`.
+To verify credentials with one real model request, run `agentm setup --test`.
+
+Model provider settings live in `~/.agentm/config.toml`
+(`$AGENTM_HOME/config.toml` overrides the directory). A minimal profile:
 
 ```toml
 default_model = "my-model"

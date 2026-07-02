@@ -1,4 +1,4 @@
-"""Interactive bootstrap for a fresh AgentM install (``agentm onboard``).
+"""Bootstrap helpers for a fresh AgentM install (``agentm setup`` / onboard).
 
 Walks the user through five sections and writes their answers to the exact
 files the runtime already reads:
@@ -24,14 +24,19 @@ contract does not apply) and it never touches ``core.runtime.*``.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import shutil
 import tomllib
+from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import tomli_w
 import typer
 
+from agentm.ai import DEFAULT_PROVIDER_REGISTRY
 from agentm.core.lib.user_config import agentm_home_dir
 
 # --- persona skeletons: mirror the ``defaults`` block in
@@ -128,6 +133,98 @@ def configure_model(
         tomli_w.dump(data, fh)
     path.chmod(0o600)
     return path
+
+
+def _default_profile_name() -> str:
+    data = _read_toml(_config_path())
+    current = data.get("default_model")
+    return current if isinstance(current, str) and current else "default"
+
+
+def _env_base_url(provider: str) -> str | None:
+    try:
+        descriptor = DEFAULT_PROVIDER_REGISTRY.resolve(provider)
+    except KeyError:
+        return None
+    if descriptor.base_url_env:
+        value = os.environ.get(descriptor.base_url_env)
+        if value:
+            return value
+    if descriptor.azure_endpoint_env:
+        value = os.environ.get(descriptor.azure_endpoint_env)
+        if value:
+            return value
+    return None
+
+
+def _first_env_provider() -> str | None:
+    for descriptor in DEFAULT_PROVIDER_REGISTRY.descriptors():
+        if DEFAULT_PROVIDER_REGISTRY.get_env_api_key(descriptor.id):
+            return descriptor.id
+    return None
+
+
+def _provider_default_model(provider: str) -> str:
+    try:
+        return DEFAULT_PROVIDER_REGISTRY.default_model(provider)
+    except KeyError:
+        return ""
+
+
+def _has_existing_default_model() -> bool:
+    data = _read_toml(_config_path())
+    default_model = data.get("default_model")
+    models = data.get("models")
+    return (
+        isinstance(default_model, str)
+        and isinstance(models, dict)
+        and isinstance(models.get(default_model), dict)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSetup:
+    profile: str
+    provider: str
+    model: str
+    api_key: str
+    base_url: str | None
+
+
+def _infer_model_setup(
+    *,
+    profile: str | None,
+    provider: str | None,
+    model: str | None,
+    api_key: str | None,
+    base_url: str | None,
+) -> ModelSetup:
+    resolved_provider = (
+        provider
+        or os.environ.get("AGENTM_PROVIDER")
+        or _first_env_provider()
+        or "openai"
+    )
+    resolved_model = (
+        model
+        or os.environ.get("AGENTM_MODEL")
+        or _provider_default_model(resolved_provider)
+    )
+    return ModelSetup(
+        profile=profile or _default_profile_name(),
+        provider=resolved_provider,
+        model=resolved_model,
+        api_key=api_key
+        if api_key is not None
+        else (DEFAULT_PROVIDER_REGISTRY.get_env_api_key(resolved_provider) or ""),
+        base_url=base_url if base_url is not None else _env_base_url(resolved_provider),
+    )
+
+
+def _redact_secret(value: str | None) -> str:
+    if not value:
+        return "missing"
+    return "set"
 
 
 # --------------------------------------------------------------------------
@@ -246,6 +343,37 @@ def _repo_root() -> Path | None:
     return None
 
 
+def _packaged_skills_root() -> Path | None:
+    """Locate skills bundled inside the installed ``agentm`` package."""
+    try:
+        root = resources.files("agentm.skills")
+    except (ModuleNotFoundError, TypeError):
+        return None
+    try:
+        concrete = Path(os.fspath(root))  # type: ignore[call-overload]
+    except TypeError:
+        return None
+    return concrete if concrete.is_dir() else None
+
+
+def _bundled_skill_sources() -> list[Path]:
+    root = _repo_root()
+    if root is not None:
+        return [
+            src
+            for rel in BUNDLED_SKILLS
+            if (src := root / rel).is_dir() and (src / "SKILL.md").is_file()
+        ]
+    packaged = _packaged_skills_root()
+    if packaged is None:
+        return []
+    return [
+        src
+        for src in sorted(packaged.iterdir())
+        if src.is_dir() and (src / "SKILL.md").is_file()
+    ]
+
+
 def _skills_dir() -> Path:
     """The ``~/.agentm/skills`` dir skill_loader treats as the user default."""
     return agentm_home_dir() / "skills"
@@ -258,17 +386,14 @@ def install_bundled_skills(*, overwrite: bool = False) -> list[Path]:
     Returns the destination dirs actually written. Returns ``[]`` (the caller
     reports it) when the source checkout can't be located.
     """
-    root = _repo_root()
-    if root is None:
+    sources = _bundled_skill_sources()
+    if not sources:
         return []
     dest_root = _skills_dir()
     dest_root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    for rel in BUNDLED_SKILLS:
-        src = root / rel
-        if not (src / "SKILL.md").is_file():
-            continue
-        dest = dest_root / Path(rel).name
+    for src in sources:
+        dest = dest_root / src.name
         if dest.exists():
             if not overwrite:
                 continue
@@ -308,6 +433,259 @@ def install_systemd_services(workspace: Path) -> int:
             "you can re-run `agentm gateway --install-systemd` later."
         )
     return result.returncode
+
+
+# --------------------------------------------------------------------------
+# Non-interactive setup / diagnostics
+# --------------------------------------------------------------------------
+
+
+def _count_manifest_dirs(root: Path) -> list[str]:
+    if not root.is_dir():
+        return []
+    return sorted(
+        path.parent.name
+        for path in root.glob("*/manifest.yaml")
+        if path.is_file()
+    )
+
+
+def _list_installed_skills() -> list[str]:
+    root = _skills_dir()
+    if not root.is_dir():
+        return []
+    return sorted(
+        path.parent.name
+        for path in root.glob("*/SKILL.md")
+        if path.is_file()
+    )
+
+
+def _print_status(workspace: Path) -> None:
+    config_path = _config_path()
+    data = _read_toml(config_path)
+    default_model = data.get("default_model")
+    models = data.get("models")
+    typer.echo("AgentM setup status")
+    typer.echo(f"  home:      {agentm_home_dir()}")
+    typer.echo(f"  config:    {config_path} ({'ok' if config_path.is_file() else 'missing'})")
+    if isinstance(default_model, str) and isinstance(models, dict):
+        raw_profile = models.get(default_model)
+        if isinstance(raw_profile, dict):
+            provider = raw_profile.get("provider", "?")
+            model = raw_profile.get("model", "?")
+            key = _redact_secret(raw_profile.get("api_key"))
+            typer.echo(
+                f"  model:     {default_model} -> {provider}/{model} "
+                f"(api_key={key})"
+            )
+        else:
+            typer.echo(f"  model:     default_model={default_model!r} (profile missing)")
+    else:
+        typer.echo("  model:     missing")
+
+    typer.echo(f"  workspace: {workspace}")
+    persona = [name for name in ("SOUL.md", "IDENTITY.md", "USER.md") if (workspace / name).is_file()]
+    typer.echo(f"  persona:   {', '.join(persona) if persona else 'missing'}")
+    skills = _list_installed_skills()
+    typer.echo(f"  skills:    {len(skills)} installed" + (f" ({', '.join(skills)})" if skills else ""))
+    contrib = agentm_home_dir() / "contrib"
+    scenarios = _count_manifest_dirs(contrib / "scenarios")
+    extensions_dir = contrib / "extensions"
+    typer.echo(
+        "  contrib:   "
+        f"{len(scenarios)} scenario(s)"
+        + (f" ({', '.join(scenarios)})" if scenarios else "")
+        + f"; extensions={'yes' if extensions_dir.exists() else 'no'}"
+    )
+    bins = ["agentm", "agentm-terminal", "agentm-feishu", "agentm-weixin"]
+    found = [name for name in bins if shutil.which(name)]
+    typer.echo(f"  binaries:  {', '.join(found) if found else 'agentm only / PATH not set'}")
+
+
+async def _test_model_request(
+    *,
+    workspace: Path,
+    model_name: str | None,
+    prompt: str,
+) -> int:
+    """Run one real AgentM turn using the resolved config.toml provider."""
+    from agentm.core.abi import EventBus, LoopConfig
+    from agentm.core.abi.session_config import AgentSessionConfig
+    from agentm.core.lib.render import final_summary
+    from agentm.core.lib.user_config import resolve_provider_model
+    from agentm.core.runtime.resource_loader import DefaultResourceLoader
+    from agentm.core.runtime.session import AgentSession
+    from agentm.env import autoload_dotenv
+
+    autoload_dotenv(workspace)
+    provider, resolved_model, profile = resolve_provider_model(
+        model_flag=model_name,
+        registry=DEFAULT_PROVIDER_REGISTRY,
+    )
+    build_config = profile.to_build_config() if profile is not None else {"model": resolved_model}
+    provider_spec = DEFAULT_PROVIDER_REGISTRY.build(provider, build_config)
+    session = await AgentSession.create(
+        AgentSessionConfig(
+            cwd=str(workspace),
+            provider=provider_spec,
+            scenario="chatbot",
+            resource_loader=DefaultResourceLoader(cwd=workspace),
+            loop_config=LoopConfig(max_turns=1),
+            bus=EventBus(),
+            auto_commit=False,
+        )
+    )
+    try:
+        await session.prompt(prompt)
+        await session.idle(timeout=30)
+        report = final_summary(session.session_manager.get_messages())
+        typer.echo("\n== Model test response ==")
+        typer.echo(report.text.strip() or "(empty assistant response)")
+        typer.echo(
+            f"  usage: input={report.usage.input_tokens}, "
+            f"output={report.usage.output_tokens}"
+        )
+    finally:
+        await session.shutdown()
+    return 0
+
+
+def run_setup(
+    *,
+    profile: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    context_window: int | None = None,
+    reasoning_effort: str | None = None,
+    workspace: Path | None = None,
+    bot_name: str = "Assistant",
+    voice: str = "",
+    quick: bool = False,
+    check: bool = False,
+    test_model: bool = False,
+    test_prompt: str = "Reply with exactly: agentm-ok",
+    sync_contrib_resources: bool = True,
+    install_skills: bool = True,
+    seed_persona_files: bool = True,
+    force_model: bool = False,
+) -> int:
+    """Fast setup path for tool-installed AgentM.
+
+    The default is intentionally low-friction: reuse an existing
+    ``config.toml`` when present; otherwise infer provider/model/key from env
+    and prompt only for missing credentials. ``quick`` makes the flow
+    non-interactive for scripts.
+    """
+
+    workspace_path = (workspace or Path.cwd()).expanduser()
+    if check:
+        _print_status(workspace_path)
+        if test_model:
+            return asyncio.run(
+                _test_model_request(
+                    workspace=workspace_path,
+                    model_name=model,
+                    prompt=test_prompt,
+                )
+            )
+        return 0
+
+    typer.echo("AgentM setup")
+
+    has_existing_model = _has_existing_default_model()
+    explicit_model_input = any(
+        value is not None
+        for value in (profile, provider, api_key, base_url, context_window, reasoning_effort)
+    ) or (model is not None and (force_model or not has_existing_model))
+    config_path: Path | None = None
+    if has_existing_model and not force_model and not explicit_model_input:
+        typer.echo(f"  model:     kept existing {_config_path()}")
+    else:
+        inferred = _infer_model_setup(
+            profile=profile,
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+        )
+        key = inferred.api_key
+        if not key and not quick:
+            key = typer.prompt(
+                f"API key for {inferred.provider}",
+                hide_input=True,
+            )
+        if not key:
+            typer.echo(
+                "  model:     missing API key. Re-run with --api-key, set the "
+                "provider API key env var, or omit --quick to enter it.",
+                err=True,
+            )
+            return 2
+        config_path = configure_model(
+            profile=inferred.profile,
+            provider=inferred.provider,
+            model=inferred.model,
+            api_key=key,
+            base_url=inferred.base_url,
+            context_window=context_window,
+            reasoning_effort=reasoning_effort,
+        )
+        typer.echo(
+            f"  model:     wrote {config_path} "
+            f"({inferred.profile} -> {inferred.provider}/{inferred.model})"
+        )
+
+    workspace_path = ensure_workspace(workspace_path)
+
+    persona_paths: list[Path] = []
+    if seed_persona_files:
+        persona_paths = seed_persona(workspace_path, name=bot_name, voice=voice)
+        if persona_paths:
+            typer.echo(
+                "  persona:   wrote "
+                + ", ".join(path.name for path in persona_paths)
+            )
+        else:
+            typer.echo("  persona:   already present")
+
+    skills_written: list[Path] = []
+    if install_skills:
+        skills_written = install_bundled_skills(overwrite=False)
+        if skills_written:
+            typer.echo(
+                "  skills:    installed "
+                + ", ".join(path.name for path in skills_written)
+            )
+        else:
+            typer.echo("  skills:    already present or unavailable")
+
+    if sync_contrib_resources:
+        from agentm.contrib_sync import SyncMode, sync_contrib
+
+        records = sync_contrib(mode=SyncMode.copy, overwrite=False)
+        summary = ", ".join(f"{r.kind}:{r.action}" for r in records)
+        typer.echo(f"  contrib:   {summary}")
+
+    typer.echo(f"  workspace: {workspace_path}")
+    typer.echo("\nNext commands:")
+    typer.echo(f'  agentm --cwd "{workspace_path}" -p "Say hi"')
+    typer.echo(f'  agentm setup --workspace "{workspace_path}" --check')
+    typer.echo(f'  agentm gateway --cwd "{workspace_path}" --bind unix:///tmp/agentm-gw.sock')
+    typer.echo("  agentm trace messages --latest")
+
+    if test_model:
+        return asyncio.run(
+            _test_model_request(
+                workspace=workspace_path,
+                model_name=model,
+                prompt=test_prompt,
+            )
+        )
+    _ = config_path
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -401,10 +779,10 @@ def run_onboard() -> None:
     # --- Section 4: bundled skills ---
     typer.echo("\n== 4. Skills ==")
     skills_written: list[Path] = []
-    if _repo_root() is None:
+    if not _bundled_skill_sources():
         typer.echo(
-            "  source checkout not found (pip-wheel install?) — skipping "
-            "bundled-skill copy. Drop SKILL.md dirs under "
+            "  bundled skills not found — skipping skill copy. Drop "
+            "SKILL.md dirs under "
             f"{_skills_dir()} manually if you want them."
         )
     elif typer.confirm(

@@ -455,6 +455,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/cli.py
+      - path: src/agentm/onboard.py
       - path: src/agentm/cli_trace.py
       - path: src/agentm/contrib_sync.py
       - path: src/agentm/env.py
@@ -464,6 +465,7 @@ requirements:
       - path: src/agentm/scenarios/chatbot/manifest.yaml
       - path: src/agentm/scenarios/local/manifest.yaml
       - path: src/agentm/scenarios/minimal/manifest.yaml
+      - path: src/agentm/skills
       - path: src/agentm/cli_workflow.py
       - path: src/agentm/gateway/cli.py
       - path: src/agentm/gateway/__init__.py
@@ -486,6 +488,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
     tests: []
     docs:
+      - path: README.md
       - path: .claude/designs/pluggable-architecture.md
     depends_on:
       - REQ-094-ai-provider-descriptor-registry
