@@ -14,14 +14,14 @@ from typing import Any
 
 from loguru import logger
 
-@dataclass
+@dataclass(slots=True)
 class DivergencePoint:
     turn_index: int
     description: str
     should_have_done: str
     category: str
 
-@dataclass
+@dataclass(slots=True)
 class DivergenceReport:
     case_id: str
     correct: bool

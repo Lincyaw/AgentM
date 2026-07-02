@@ -22,7 +22,7 @@ from loguru import logger
 from rca_evolution.distiller import DistilledSkill, distill_skill
 from rca_evolution.observer import DivergenceReport, observe_case
 
-@dataclass
+@dataclass(slots=True)
 class IterationResult:
     iteration: int
     skill: DistilledSkill | None
@@ -31,7 +31,7 @@ class IterationResult:
     accepted: bool
     reports: list[DivergenceReport] = field(default_factory=list)
 
-@dataclass
+@dataclass(slots=True)
 class EvolutionResult:
     iterations: list[IterationResult] = field(default_factory=list)
     accepted_skills: list[DistilledSkill] = field(default_factory=list)

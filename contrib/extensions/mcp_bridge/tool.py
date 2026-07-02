@@ -98,6 +98,7 @@ class MCPTool:
                     extras=dict(self._extras),
                 )
         except Exception as exc:
+            logger.debug("tool: caught exception: {}", exc)
             # Transport / protocol failure. Surface as is_error=True so
             # the loop continues; the loud raise-on-install contract only
             # applies to the snapshot phase.
@@ -146,7 +147,8 @@ def _translate_content_blocks(
 
                 try:
                     decoded = base64.b64decode(data)
-                except Exception:
+                except Exception as exc:
+                    logger.debug("tool: caught exception: {}", exc)
                     decoded = data.encode("utf-8", errors="replace")
             else:
                 decoded = bytes(data)

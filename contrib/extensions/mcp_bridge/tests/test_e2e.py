@@ -38,25 +38,25 @@ from contrib.extensions.mcp_bridge.client import (
 # ---- Stub MCP server ------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class _StubTool:
     name: str
     description: str
     inputSchema: dict[str, Any]
 
 
-@dataclass
+@dataclass(slots=True)
 class _StubToolsList:
     tools: list[_StubTool]
 
 
-@dataclass
+@dataclass(slots=True)
 class _StubTextBlock:
     type: str
     text: str
 
 
-@dataclass
+@dataclass(slots=True)
 class _StubCallResult:
     content: list[_StubTextBlock]
     isError: bool = False

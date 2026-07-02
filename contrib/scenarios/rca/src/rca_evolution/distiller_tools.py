@@ -1,6 +1,7 @@
 """Distiller agent tools: browse failure reports + manage skills."""
 
 from __future__ import annotations
+from loguru import logger
 
 import json
 from typing import Any, Literal
@@ -29,6 +30,7 @@ def build_browse_reports_tool(reports: list[dict[str, Any]]) -> FunctionTool:
         try:
             parsed = BrowseReportsArgs.model_validate(args)
         except Exception as exc:
+            logger.debug("distiller_tools: caught exception: {}", exc)
             return ToolResult(
                 content=[TextContent(type="text", text=f"browse_reports rejected: {exc}")],
                 is_error=True,
@@ -138,6 +140,7 @@ def build_submit_skill_tool() -> FunctionTool:
         try:
             parsed = SubmitSkillArgs.model_validate(args)
         except Exception as exc:
+            logger.debug("distiller_tools: caught exception: {}", exc)
             return ToolResult(  # type: ignore[return-value]
                 content=[TextContent(type="text", text=f"submit_skill rejected: {exc}")],
                 is_error=True,

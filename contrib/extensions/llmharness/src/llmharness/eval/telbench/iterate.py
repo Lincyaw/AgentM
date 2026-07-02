@@ -68,7 +68,7 @@ def _restore_prompts(src_dir: Path) -> None:
             shutil.copy2(src, _PROMPTS_DIR / name)
 
 
-@dataclass
+@dataclass(slots=True)
 class IterationRecord:
     iteration: int
     timestamp: str

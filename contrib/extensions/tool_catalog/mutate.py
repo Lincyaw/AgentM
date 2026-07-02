@@ -1,6 +1,7 @@
 """Self-modification tools for the git-backed tool catalog package."""
 
 from __future__ import annotations
+from loguru import logger
 
 import json
 from dataclasses import asdict
@@ -195,6 +196,7 @@ def install(api: ExtensionAPI, config: ToolCatalogMutateConfig) -> None:
         try:
             source_bytes = api.catalog.get_source_at(resolved.git_path, target_sha, root)
         except Exception as exc:
+            logger.debug("mutate: caught exception: {}", exc)
             return _error(
                 f"Failed to load rollback source for {resolved.git_path}@{target_sha}: {exc}"
             )
@@ -222,6 +224,7 @@ def install(api: ExtensionAPI, config: ToolCatalogMutateConfig) -> None:
                 if write_result.error is not None:
                     return _json_error(result_payload)
         except Exception as exc:
+            logger.debug("mutate: caught exception: {}", exc)
             return _error(f"Rollback failed for {resolved.display_path}: {exc}")
 
         _append_decision(

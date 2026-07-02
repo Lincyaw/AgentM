@@ -335,7 +335,7 @@ def _validate_vocabulary(result: ExtractionResult) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class GeneratedReference:
     symbol_name: str
     turn_id: str
@@ -344,7 +344,7 @@ class GeneratedReference:
     start: int
 
 
-@dataclass
+@dataclass(slots=True)
 class GeneratedRelation:
     from_symbol: str
     to_symbol: str
@@ -473,6 +473,7 @@ def _try_parse_response(messages: list[Any]) -> tuple[ExtractionResult | None, s
                 try:
                     result = ExtractionResult.model_validate(obj)
                 except Exception as exc:
+                    logger.debug("data: caught exception: {}", exc)
                     return None, f"JSON keys={list(obj.keys())}; validation error: {exc}"
                 vocab_error = _validate_vocabulary(result)
                 if vocab_error:
@@ -562,7 +563,7 @@ def _parse_chunk_size(value: str) -> tuple[int, int]:
     return n, n
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MessageChunk:
     start: int
     messages: list[dict[str, JsonValue]]
@@ -599,7 +600,7 @@ def _chunk_messages(
     return chunks
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ExtractedChunk:
     run_id: str
     prompt_input: dict[str, Any]

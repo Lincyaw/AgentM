@@ -1,6 +1,7 @@
 """Read-only git-backed catalog browsing tools for the agent."""
 
 from __future__ import annotations
+from loguru import logger
 
 import json
 from typing import Any, Final
@@ -128,6 +129,7 @@ def install(api: ExtensionAPI, config: ToolCatalogBrowseConfig) -> None:
         try:
             return _json_result(api.catalog.get_manifest_at(atom, version, root))
         except Exception as exc:
+            logger.debug("browse: caught exception: {}", exc)
             return _error(f"Failed to load manifest for {atom}@{version}: {exc}")
 
     async def _runs_for_tool(args: dict[str, Any]) -> ToolResult:
@@ -135,6 +137,7 @@ def install(api: ExtensionAPI, config: ToolCatalogBrowseConfig) -> None:
             trace_ids = api.catalog.runs_for(args["fingerprint"], root)
             return _json_result(trace_ids)
         except Exception as exc:
+            logger.debug("browse: caught exception: {}", exc)
             return _error(f"Failed to resolve catalog runs: {exc}")
 
     async def _get_source_at_tool(args: dict[str, Any]) -> ToolResult:
@@ -144,6 +147,7 @@ def install(api: ExtensionAPI, config: ToolCatalogBrowseConfig) -> None:
             source = api.catalog.get_source_at(resolved.git_path, sha, root)
             return _json_result(source.decode("utf-8"))
         except Exception as exc:
+            logger.debug("browse: caught exception: {}", exc)
             return _error(f"Failed to load source for {resolved.git_path}@{sha}: {exc}")
 
     async def _list_history_tool(args: dict[str, Any]) -> ToolResult:
@@ -153,6 +157,7 @@ def install(api: ExtensionAPI, config: ToolCatalogBrowseConfig) -> None:
             history = list_history(resolved.git_path, limit=limit, root=root)
             return _json_result(history)
         except Exception as exc:
+            logger.debug("browse: caught exception: {}", exc)
             return _error(f"Failed to list history for {resolved.git_path}: {exc}")
 
     async def _list_atoms_tool(args: dict[str, Any]) -> ToolResult:

@@ -7,6 +7,7 @@ Usage::
 """
 
 from __future__ import annotations
+from loguru import logger
 
 import asyncio
 import json
@@ -250,6 +251,7 @@ def telbench(
                 except asyncio.CancelledError:
                     return
                 except Exception as exc:
+                    logger.debug("cli: caught exception: {}", exc)
                     done_count += 1
                     typer.echo(f"  [{done_count}/{total}] {inst.id} ERROR: {exc}", err=True)
 
@@ -298,6 +300,7 @@ def telbench(
                     done_count += 1
                     typer.echo(f"  [{done_count}/{total_wrong}] {result.instance_id} → {out_path}")
                 except Exception as exc:
+                    logger.debug("cli: caught exception: {}", exc)
                     done_count += 1
                     typer.echo(f"  [{done_count}/{total_wrong}] {result.instance_id} ERROR: {exc}", err=True)
 

@@ -15,7 +15,7 @@ from loguru import logger
 
 from rca_evolution.observer import DivergenceReport
 
-@dataclass
+@dataclass(slots=True)
 class DistilledSkill:
     name: str
     content: str

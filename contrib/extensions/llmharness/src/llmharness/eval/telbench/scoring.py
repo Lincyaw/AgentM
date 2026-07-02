@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SpanScores:
     """Per-instance span-level scores."""
 
@@ -19,7 +19,7 @@ class SpanScores:
     first_error_accurate: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AggregateScores:
     """Macro-averaged scores across instances."""
 

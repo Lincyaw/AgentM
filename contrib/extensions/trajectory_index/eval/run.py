@@ -30,7 +30,7 @@ from trajectory_index.data import JsonValue, ProviderSpec, extract, resolve_prov
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class EvalCase:
     id: str
     description: str
@@ -55,7 +55,7 @@ class EvalCase:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class GradeResult:
     case_id: str
     expected_entity_count: int = 0
@@ -159,6 +159,7 @@ async def run_case(
         g.latency_s = time.monotonic() - t0
         return g
     except Exception as exc:
+        logger.debug("run: caught exception: {}", exc)
         g = GradeResult(case_id=case.id, error=str(exc))
         g.latency_s = time.monotonic() - t0
         return g

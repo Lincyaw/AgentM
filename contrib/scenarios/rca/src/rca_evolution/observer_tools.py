@@ -8,6 +8,8 @@ turns, ``get_gt_info`` to see the ground truth, and
 
 from __future__ import annotations
 
+from loguru import logger
+
 import json
 from typing import Any
 
@@ -35,6 +37,7 @@ def build_get_turn_tool(snapshot: list[dict[str, Any]]) -> FunctionTool:
         try:
             parsed = GetTurnArgs.model_validate(args)
         except Exception as exc:
+            logger.debug("observer_tools: get_turn rejected: {}", exc)
             return ToolResult(
                 content=[TextContent(type="text", text=f"get_turn rejected: {exc}")],
                 is_error=True,
@@ -146,6 +149,7 @@ def build_submit_divergence_report_tool() -> FunctionTool:
         try:
             parsed = SubmitDivergenceReportArgs.model_validate(args)
         except Exception as exc:
+            logger.debug("observer_tools: submit_divergence_report rejected: {}", exc)
             return ToolResult(  # type: ignore[return-value]
                 content=[TextContent(type="text", text=f"submit_divergence_report rejected: {exc}")],
                 is_error=True,

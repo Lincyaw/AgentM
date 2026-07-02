@@ -21,7 +21,7 @@ def _bool_safe_int(raw: Any) -> int | None:
     return None
 
 
-@dataclass
+@dataclass(slots=True)
 class CumulativeAuditState:
     """Auditor side-channel state across firings."""
 

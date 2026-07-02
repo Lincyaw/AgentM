@@ -29,7 +29,7 @@ from llmharness.state import CumulativeAuditState
 PhaseStatus = Literal["ok", "no_call", "spawn_error", "prompt_error"]
 
 
-@dataclass
+@dataclass(slots=True)
 class PhaseResult:
     """Outcome of one standalone auditor phase invocation."""
 
@@ -40,7 +40,7 @@ class PhaseResult:
     messages: list[AgentMessage]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AuditorSettings:
     """Minimal config needed for one offline auditor firing."""
 
@@ -54,7 +54,7 @@ class AuditorSettings:
         return cls(base_prompt=load_auditor_prompt("minimal_index"))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SurfaceFiring:
     """One auditor firing that surfaced a reminder during offline audit."""
 
@@ -63,7 +63,7 @@ class SurfaceFiring:
     cumulative_snapshot: CumulativeAuditState
 
 
-@dataclass
+@dataclass(slots=True)
 class OfflineRunResult:
     """Outcome of one offline audit invocation."""
 
@@ -210,6 +210,7 @@ async def run_phase_standalone(
     try:
         session = await AgentSession.create(config)
     except Exception as exc:
+        logger.debug("offline: caught exception: {}", exc)
         return PhaseResult(
             output=None,
             status="spawn_error",
@@ -225,6 +226,7 @@ async def run_phase_standalone(
             user_message = json.dumps(payload, ensure_ascii=False, default=str)
         messages = await session.prompt(user_message)
     except Exception as exc:
+        logger.debug("offline: caught exception: {}", exc)
         with contextlib.suppress(Exception):
             await session.shutdown()
         return PhaseResult(

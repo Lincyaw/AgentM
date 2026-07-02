@@ -36,7 +36,7 @@ class StepRole:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Location:
     run_id: str
     step_id: str
@@ -47,7 +47,7 @@ class Location:
         return self.start <= offset < self.end
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Step:
     run_id: str
     step_id: str
@@ -59,7 +59,7 @@ class Step:
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(slots=True)
 class Symbol:
     id: str
     canonical_name: str
@@ -74,7 +74,7 @@ class Symbol:
         return {self.canonical_name, *self.aliases}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Reference:
     id: str
     symbol_id: str
@@ -88,7 +88,7 @@ class Reference:
     metadata: Mapping[str, MetadataValue] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Relation:
     id: str
     from_symbol_id: str
@@ -106,7 +106,7 @@ class Relation:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IndexStats:
     run_id: str
     step_count: int = 0
@@ -115,7 +115,7 @@ class IndexStats:
     relation_count: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SearchResult:
     symbol: Symbol
     score: float
@@ -124,20 +124,20 @@ class SearchResult:
     related: tuple[RelatedSymbol, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RelatedSymbol:
     symbol: Symbol
     score: float
     relations: tuple[Relation, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TimelineItem:
     step: Step
     reference: Reference
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ContextSnippet:
     focus_step: Step
     focus_ref: Reference
@@ -145,7 +145,7 @@ class ContextSnippet:
     after: tuple[Step, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SymbolContext:
     symbol: Symbol
     definition: Reference | None

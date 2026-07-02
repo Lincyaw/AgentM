@@ -161,7 +161,7 @@ class _SessionLike(Protocol):
 # --- Manager that owns the AsyncExitStack lifetime -------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class _Connected:
     spec: ServerSpec
     session: _SessionLike

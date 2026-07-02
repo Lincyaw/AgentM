@@ -16,7 +16,7 @@ Phase = Literal["extractor", "auditor"]
 FiringStatus = Literal["ok", "no_call", "spawn_error", "prompt_error"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CaseMeta:
     """Summary metadata written to ``meta.json`` for each case."""
 
@@ -34,7 +34,7 @@ class CaseMeta:
     silent_verdicts: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FiringRecord:
     """One extractor or auditor invocation."""
 
@@ -53,7 +53,7 @@ class FiringRecord:
     produce Qwen/GLM-style ``<think>...</think>`` training targets."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IndexSnapshot:
     """Cumulative index state after one extractor firing."""
 
@@ -63,7 +63,7 @@ class IndexSnapshot:
     edges: list[dict[str, Any]]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CaseData:
     """Lossless in-memory view of one case, ready to serialise."""
 
@@ -75,7 +75,7 @@ class CaseData:
     verdicts: list[dict[str, Any]] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CaseLayout:
     """Canonical on-disk layout under a case directory."""
 

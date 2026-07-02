@@ -19,7 +19,7 @@ from typing import Any
 from agentm.core.abi.messages import AgentMessage, AssistantMessage, TextContent
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TelBenchInstance:
     """One TELBench evaluation instance."""
 

@@ -10,6 +10,10 @@ extensions:
     config:
       backend: agent_env
       work_dir: /app
+      cpu_request: "1"
+      cpu_limit: "2"
+      memory_request: 512Mi
+      memory_limit: 2Gi
   - module: agentm.extensions.builtin.tool_result_cap
     config:
       max_tokens: 50000

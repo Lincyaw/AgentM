@@ -41,7 +41,7 @@ ContractStatus = Literal["rejected", "empty", "malformed", "validation_failed", 
 LinkKind = Literal["mentions", "cites", "near", "follows", "same_entity", "derives_from"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TurnRef:
     turn_index: int
     role: str
@@ -57,7 +57,7 @@ class TurnRef:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EntityRef:
     id: str
     name: str
@@ -75,7 +75,7 @@ class EntityRef:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ObservationRef:
     id: str
     turns: tuple[int, ...]
@@ -99,7 +99,7 @@ class ObservationRef:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ClaimRef:
     id: str
     turns: tuple[int, ...]
@@ -119,7 +119,7 @@ class ClaimRef:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CandidateRef:
     entity_id: str
     first_seen_turn: int | None
@@ -143,7 +143,7 @@ class CandidateRef:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ObligationRef:
     id: str
     turns: tuple[int, ...]
@@ -163,7 +163,7 @@ class ObligationRef:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ContractEventRef:
     id: str
     turns: tuple[int, ...]
@@ -183,7 +183,7 @@ class ContractEventRef:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IndexLink:
     src: str
     dst: str
@@ -199,7 +199,7 @@ class IndexLink:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AttentionHint:
     id: str
     kind: AttentionKind
@@ -221,7 +221,7 @@ class AttentionHint:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ContextIndex:
     turns: tuple[TurnRef, ...]
     entities: tuple[EntityRef, ...]
@@ -247,7 +247,7 @@ class ContextIndex:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Verdict:
     """Auditor verdict. surface_reminder=True triggers reminder injection."""
 
@@ -274,7 +274,7 @@ class Verdict:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Reminder:
     """A pending reminder waiting to be injected on the next user prompt."""
 

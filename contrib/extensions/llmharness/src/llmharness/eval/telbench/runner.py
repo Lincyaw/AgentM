@@ -18,7 +18,7 @@ from .adapter import TelBenchInstance, spans_to_messages
 from .scoring import SpanScores, score_instance
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EvalResult:
     """Outcome of evaluating one TELBench instance."""
 
