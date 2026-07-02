@@ -25,7 +25,7 @@ registered set (see :meth:`_GatewayRuntime._run_command`)."""
 _EMPTY_REPLY = "Type `/help` to see available commands."
 
 
-@dataclass
+@dataclass(slots=True)
 class CommandRouter:
     """Routes inbound messages whose content starts with ``/``.
 

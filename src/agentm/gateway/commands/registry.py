@@ -34,7 +34,7 @@ def _key(handler: CommandHandler) -> _Key:
     return _Key(namespace=handler.namespace, name=handler.name)
 
 
-@dataclass
+@dataclass(slots=True)
 class CommandRegistry:
     """Snapshot of discovered handlers. Lookups are O(1); listings
     preserve discovery order so ``/help`` can group by source."""

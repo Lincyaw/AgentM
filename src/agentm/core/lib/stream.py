@@ -41,7 +41,7 @@ class ToolSpecAdapter(Protocol):
     def encode_tool_args(self, args: Mapping[str, Any]) -> str: ...
 
 
-@dataclass
+@dataclass(slots=True)
 class _ContentEntry:
     kind: str
     order: int
@@ -53,7 +53,7 @@ class _ContentEntry:
     args_json: str = ""
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamAccumulator:
     """Builds an ``AssistantMessage`` from provider-specific stream events."""
 

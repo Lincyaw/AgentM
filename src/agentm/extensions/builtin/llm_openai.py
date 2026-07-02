@@ -388,7 +388,7 @@ def _to_openai_tools(
 
 # --- Streaming bridge -------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class _StreamState:
     """Provider event mapping state for one OpenAI-compatible stream."""
 
@@ -454,7 +454,7 @@ def _flush_tool_call(state: _StreamState, index: int) -> None:
 
 # --- Public callable -------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class OpenAIStreamFn:
     """Kernel-compatible ``StreamFn`` backed by the OpenAI Chat Completions API.
 

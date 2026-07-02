@@ -87,7 +87,7 @@ def current_installing_extension() -> str:
 # --- Specs ------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class CommandSpec:
     """Slash-command registration record.
 

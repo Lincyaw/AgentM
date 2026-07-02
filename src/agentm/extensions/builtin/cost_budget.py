@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
+    COST_QUERY_SERVICE,
     BeforeAgentStartEvent,
     BudgetExhausted,
     CostBudgetExceededEvent,
@@ -81,7 +82,6 @@ def install(api: ExtensionAPI, config: CostBudgetConfig) -> None:
             )
             return CostBreakdown(amount=amount, currency=currency)
 
-    from agentm.core.abi import COST_QUERY_SERVICE
     api.set_service(COST_QUERY_SERVICE, _CostQueryService())
 
     async def _pricing_for(provider: str) -> tuple[float, float]:

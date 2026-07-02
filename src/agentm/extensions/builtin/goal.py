@@ -175,7 +175,7 @@ class _ConditionPayload(BaseModel):
     checklist: list[str] = []
 
 
-@dataclass
+@dataclass(slots=True)
 class _GoalState:
     condition: str
     started_at: float = field(default_factory=time.monotonic)

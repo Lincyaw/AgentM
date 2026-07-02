@@ -11,6 +11,7 @@ from typing import Any, Final, TypeVar
 from pydantic import BaseModel as PydanticBaseModel
 
 from agentm.core.abi import (
+    RETRY_POLICY_SERVICE,
     ApiRegisterEvent,
     AssistantStreamEvent,
     DiagnosticEvent,
@@ -169,7 +170,6 @@ def install(api: ExtensionAPI, config: RetryPolicyConfig) -> None:
         factor=max(1.0, config.factor),
         jitter=max(0.0, config.jitter),
     )
-    from agentm.core.abi import RETRY_POLICY_SERVICE
     api.set_service(RETRY_POLICY_SERVICE, policy)
 
     retry_streaming = config.retry_streaming

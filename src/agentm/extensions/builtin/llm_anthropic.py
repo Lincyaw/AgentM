@@ -264,7 +264,7 @@ def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
 
 # --- Streaming bridge -------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class _StreamState:
     """Provider event mapping state for one Anthropic stream."""
 
@@ -327,7 +327,7 @@ def _finalize_block(state: _StreamState, index: int) -> None:
 
 # --- Public callable -------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class AnthropicStreamFn:
     """Kernel-compatible ``StreamFn`` backed by the Anthropic Messages API.
 

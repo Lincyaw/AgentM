@@ -862,12 +862,6 @@ __all__ = [
     "UnloadAtomResult",
     "Unsubscribe",
     "SessionTelemetryFactory",
-    "_ExtensionAPIImpl",
-    "_NoopChildSessionFactory",
-    "_NoopSessionGateway",
-    "_OperationsHolder",
-    "_SessionGateway",
-    "_SessionTelemetryHolder",
     "build_extension_api_scope",
     "load_extension",
 ]

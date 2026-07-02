@@ -57,7 +57,7 @@ SessionPhase = Literal[
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class _SessionSnapshot:
     phase: SessionPhase = "idle"
     active_turn_id: str | None = None

@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 
 
-@dataclass
+@dataclass(slots=True)
 class AgentSessionConfig:
     """Knobs handed to :func:`AgentSession.create`. Only ``cwd`` is required.
 

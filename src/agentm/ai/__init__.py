@@ -6,7 +6,7 @@ types that the CLI and contrib channels use to enumerate available
 providers and resolve API keys from the environment.
 """
 
-from agentm.ai.env_api_keys import find_env_keys, get_env_api_key, resolve
+from agentm.ai.env_api_keys import find_env_keys, get_env_api_key
 from agentm.ai.types import (
     DEFAULT_PROVIDER_DESCRIPTORS,
     DEFAULT_PROVIDER_REGISTRY,
@@ -31,5 +31,4 @@ __all__ = [
     "StreamFunction",
     "find_env_keys",
     "get_env_api_key",
-    "resolve",
 ]

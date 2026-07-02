@@ -176,7 +176,6 @@ def _parse_extensions(values: list[str] | None) -> list[tuple[str, dict[str, Any
 
     if not values:
         return []
-    import json
 
     out: list[tuple[str, dict[str, Any]]] = []
     for raw in values:

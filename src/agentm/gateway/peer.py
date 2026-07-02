@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from agentm.gateway.send_queue import SendQueue
 
 
-@dataclass
+@dataclass(slots=True)
 class PeerSession:
     """One connected chat-client peer's bookkeeping.
 

@@ -17,9 +17,3 @@ def get_env_api_key(provider: str, env: Mapping[str, str] | None = None) -> str 
     """Return the API key for ``provider`` from the highest-priority env var."""
 
     return DEFAULT_PROVIDER_REGISTRY.get_env_api_key(provider, env)
-
-
-def resolve(provider: str, env: Mapping[str, str] | None = None) -> str | None:
-    """Compatibility alias for descriptor-backed API key resolution."""
-
-    return get_env_api_key(provider, env)
