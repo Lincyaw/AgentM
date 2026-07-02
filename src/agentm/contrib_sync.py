@@ -22,6 +22,7 @@ class SyncMode(str, Enum):
 
 
 VALID_KINDS = frozenset({"scenarios", "extensions"})
+DEMO_SCENARIOS = ("chatbot", "minimal", "local")
 COPY_IGNORE = shutil.ignore_patterns(
     "__pycache__",
     "*.pyc",
@@ -93,6 +94,14 @@ def _source_for_kind(kind: str, explicit_root: Path | None) -> Path | None:
     return None
 
 
+def _packaged_scenario_dir(name: str) -> Path | None:
+    root = _packaged_scenarios_root()
+    if root is None:
+        return None
+    candidate = root / name
+    return candidate if (candidate / "manifest.yaml").is_file() else None
+
+
 def _remove_existing(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()
@@ -158,6 +167,68 @@ def sync_contrib(
                 source=str(src),
                 destination=str(destination),
                 action=mode.value,
+            )
+        )
+
+    return records
+
+
+def sync_demo_scenarios(
+    *,
+    home: Path | None = None,
+    overwrite: bool = False,
+    names: list[str] | None = None,
+) -> list[SyncRecord]:
+    """Install the small packaged scenario demos into ``$AGENTM_HOME/contrib``.
+
+    ``agentm setup`` uses this instead of syncing the full source ``contrib``
+    tree so a first-run install exposes only simple examples users can edit:
+    ``chatbot`` for the default full stack, ``minimal`` for the smallest
+    runnable stack, and ``local`` for coding sessions.
+    """
+
+    selected = names or list(DEMO_SCENARIOS)
+    home_root = (home or agentm_home_dir()).expanduser()
+    scenarios_root = home_root / "contrib" / "scenarios"
+    records: list[SyncRecord] = []
+
+    for name in selected:
+        destination = scenarios_root / name
+        src = _packaged_scenario_dir(name)
+        if src is None:
+            records.append(
+                SyncRecord(
+                    kind="scenario",
+                    source=None,
+                    destination=str(destination),
+                    action="skipped",
+                    reason=f"demo scenario {name!r} not found",
+                )
+            )
+            continue
+
+        if destination.exists() or destination.is_symlink():
+            if not overwrite:
+                records.append(
+                    SyncRecord(
+                        kind="scenario",
+                        source=str(src),
+                        destination=str(destination),
+                        action="skipped",
+                        reason="destination exists",
+                    )
+                )
+                continue
+            _remove_existing(destination)
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, destination, symlinks=True, ignore=COPY_IGNORE)
+        records.append(
+            SyncRecord(
+                kind="scenario",
+                source=str(src),
+                destination=str(destination),
+                action="copy",
             )
         )
 
@@ -237,4 +308,11 @@ def sync_cmd(
         )
 
 
-__all__ = ["SyncMode", "SyncRecord", "sync_contrib", "app"]
+__all__ = [
+    "DEMO_SCENARIOS",
+    "SyncMode",
+    "SyncRecord",
+    "sync_contrib",
+    "sync_demo_scenarios",
+    "app",
+]

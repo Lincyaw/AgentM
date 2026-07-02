@@ -1374,7 +1374,7 @@ def setup_cmd(
         bool,
         typer.Option(
             "--no-contrib",
-            help="Skip materializing bundled contrib resources into AGENTM_HOME.",
+            help="Skip installing demo scenarios into AGENTM_HOME.",
         ),
     ] = False,
     no_skills: Annotated[
@@ -1418,7 +1418,7 @@ def setup_cmd(
             check=check,
             test_model=test_model,
             test_prompt=test_prompt,
-            sync_contrib_resources=not no_contrib,
+            install_demo_scenarios=not no_contrib,
             install_skills=not no_skills,
             seed_persona_files=not no_persona,
             force_model=force_model,

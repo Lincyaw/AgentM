@@ -243,10 +243,14 @@ uv tool install agentm
 agentm setup
 ```
 
-Then use it from any repo:
+`agentm setup` also places editable demo scenarios under
+`~/.agentm/contrib/scenarios/`: `chatbot` (the default full chat stack),
+`minimal` (the smallest runnable stack), and `local` (coding-oriented tools).
+Then use AgentM from any repo:
 
 ```bash
 agentm -p "summarize this repository"
+agentm --scenario minimal -p "Say hi"
 agentm --cwd /path/to/repo -p "run the relevant checks"
 agentm trace messages --latest
 ```
@@ -261,6 +265,8 @@ agentm -p "Say hi"
 
 To inspect the local setup without changing files, run `agentm setup --check`.
 To verify credentials with one real model request, run `agentm setup --test`.
+To install the full contrib tree for customization, run
+`agentm contrib sync --overwrite`.
 
 Model provider settings live in `~/.agentm/config.toml`
 (`$AGENTM_HOME/config.toml` overrides the directory). A minimal profile:

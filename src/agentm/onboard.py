@@ -567,7 +567,7 @@ def run_setup(
     check: bool = False,
     test_model: bool = False,
     test_prompt: str = "Reply with exactly: agentm-ok",
-    sync_contrib_resources: bool = True,
+    install_demo_scenarios: bool = True,
     install_skills: bool = True,
     seed_persona_files: bool = True,
     force_model: bool = False,
@@ -662,16 +662,28 @@ def run_setup(
         else:
             typer.echo("  skills:    already present or unavailable")
 
-    if sync_contrib_resources:
-        from agentm.contrib_sync import SyncMode, sync_contrib
+    if install_demo_scenarios:
+        from agentm.contrib_sync import sync_demo_scenarios
 
-        records = sync_contrib(mode=SyncMode.copy, overwrite=False)
-        summary = ", ".join(f"{r.kind}:{r.action}" for r in records)
-        typer.echo(f"  contrib:   {summary}")
+        records = sync_demo_scenarios(overwrite=False)
+        copied = [Path(record.destination).name for record in records if record.action == "copy"]
+        skipped = [
+            Path(record.destination).name
+            for record in records
+            if record.action == "skipped" and record.reason == "destination exists"
+        ]
+        if copied:
+            typer.echo("  demos:     installed scenarios " + ", ".join(copied))
+        elif skipped:
+            typer.echo("  demos:     already present " + ", ".join(skipped))
+        else:
+            summary = ", ".join(f"{Path(r.destination).name}:{r.reason or r.action}" for r in records)
+            typer.echo(f"  demos:     unavailable ({summary})")
 
     typer.echo(f"  workspace: {workspace_path}")
     typer.echo("\nNext commands:")
     typer.echo(f'  agentm --cwd "{workspace_path}" -p "Say hi"')
+    typer.echo(f'  agentm --cwd "{workspace_path}" --scenario minimal -p "Say hi"')
     typer.echo(f'  agentm setup --workspace "{workspace_path}" --check')
     typer.echo(f'  agentm gateway --cwd "{workspace_path}" --bind unix:///tmp/agentm-gw.sock')
     typer.echo("  agentm trace messages --latest")
