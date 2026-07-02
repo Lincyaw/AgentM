@@ -294,7 +294,6 @@ def install_systemd_services(workspace: Path) -> int:
     direct CLI invocation render identical units. Returns the subprocess exit
     code.
     """
-    import shutil
     import subprocess
 
     agentm_bin = shutil.which("agentm")

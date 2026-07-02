@@ -1193,8 +1193,6 @@ def list_extensions_cmd(
     ``--scenario``).
     """
 
-    import json
-
     from agentm.extensions.discover import (
         BuiltinEntry,
         discover_builtin,

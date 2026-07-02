@@ -102,4 +102,4 @@ def _force_strict(node: Any) -> Any:
     return node
 
 
-__all__ = ["_force_strict", "pydantic_to_openai_tool_schema", "pydantic_to_tool_schema"]
+__all__ = ["pydantic_to_openai_tool_schema", "pydantic_to_tool_schema"]
