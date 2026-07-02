@@ -65,6 +65,155 @@ app = typer.Typer(
     pretty_exceptions_enable=False
 )
 
+# -- Shared Typer option aliases ------------------------------------------------
+# Used by both ``run_cmd`` and ``fork_cmd`` so each option is defined once.
+# Pattern follows ``cli_trace.py`` (``SessionOpt``, ``FileOpt``, etc.).
+
+ScenarioOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--scenario",
+        help=(
+            "Opt-in curated extension list. Bare names resolve from "
+            "$AGENTM_PROJECT_ROOT, the process cwd, ~/.agentm/contrib, "
+            "the AgentM checkout, or packaged portable scenarios. An "
+            "absolute path is also accepted. When unset, falls back to "
+            "the ``chatbot`` scenario."
+        ),
+    ),
+]
+ExtensionOpt = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--extension",
+        "-e",
+        help=(
+            "Mount an extra atom on top of --scenario / auto-discovery. "
+            "Repeatable. Form: 'dotted.module.path' or "
+            '\'dotted.module.path:{"key":"value"}\' for inline JSON '
+            "config. Example: -e llmharness.atom "
+            "-e some.atom:'{\"k\":3}'. Use `agentm list-extensions` "
+            "to browse available atoms."
+        ),
+    ),
+]
+NoExtensionsOpt = Annotated[
+    bool,
+    typer.Option(
+        "--no-extensions",
+        help="Skip atom discovery and loading; agent runs with no tools.",
+    ),
+]
+NoSkillsOpt = Annotated[
+    bool,
+    typer.Option(
+        "--no-skills",
+        help="Skip skill discovery in the resource loader.",
+    ),
+]
+NoPromptTemplatesOpt = Annotated[
+    bool,
+    typer.Option(
+        "--no-prompt-templates",
+        help="Skip prompt-template discovery in the resource loader.",
+    ),
+]
+ToolsOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--tools",
+        help="Comma-separated allowlist applied to atom-registered tools.",
+    ),
+]
+ProviderOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--provider",
+        help=(
+            "LLM provider to register. Defaults via AGENTM_PROVIDER, "
+            "~/.agentm/config.toml profiles, or the provider registry. "
+            "Built-ins include 'anthropic' and 'openai'."
+        ),
+    ),
+]
+ModelOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--model",
+        help=(
+            "Model id or ~/.agentm/config.toml profile name. Defaults "
+            "via AGENTM_MODEL, config.toml default_model, or the "
+            "registry default_model for the resolved provider."
+        ),
+    ),
+]
+CwdOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--cwd",
+        help=(
+            "Working directory exposed to extensions. Defaults to "
+            "AGENTM_CWD when set, otherwise the process cwd at "
+            "invocation time."
+        ),
+    ),
+]
+QuietOpt = Annotated[
+    bool,
+    typer.Option("--quiet", help="Suppress final-output printout."),
+]
+MaxTurnsOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--max-turns",
+        min=1,
+        help=(
+            "Hard ceiling on agent-loop turns. Unset = no cap (the agent "
+            "runs until it stops on its own / hits --max-tool-calls / is "
+            "aborted). Overrides the scenario's `loop_budget` atom."
+        ),
+    ),
+]
+MaxToolCallsOpt = Annotated[
+    int | None,
+    typer.Option(
+        "--max-tool-calls",
+        min=1,
+        help=(
+            "Hard ceiling on total tool calls across the run. Unset = no "
+            "cap. Overrides the scenario's `loop_budget` atom."
+        ),
+    ),
+]
+ReasoningEffortOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--reasoning-effort",
+        envvar="AGENTM_REASONING_EFFORT",
+        help=(
+            "Provider reasoning-effort hint (e.g. 'high', 'max'). "
+            "Maps to the OpenAI 'reasoning_effort' param and the "
+            "Anthropic 'output_config.effort' slot. Precedence: this "
+            "flag > AGENTM_REASONING_EFFORT > config.toml profile."
+        ),
+    ),
+]
+SetConfigOpt = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--set",
+        "-S",
+        help=(
+            "Override one atom config key. Repeatable. Form: "
+            "'<atom>.<key>=<value>' where <atom> is the atom's "
+            "MANIFEST.name. The value is coerced to the key's declared "
+            "type from config_schema (JSON for array/object). Wins over "
+            "AGENTM_<ATOM>_<KEY> env and the scenario's config:. Example: "
+            "-S cost_budget.limit=5 -S permission.deny='[\"bash\"]'."
+        ),
+    ),
+]
+
 
 @dataclass
 class CliRunConfig:
@@ -715,99 +864,16 @@ def run_cmd(
             ),
         ),
     ] = "",
-    scenario: Annotated[
-        str | None,
-        typer.Option(
-            "--scenario",
-            help=(
-                "Opt-in curated extension list. Bare names resolve from "
-                "$AGENTM_PROJECT_ROOT, the process cwd, ~/.agentm/contrib, "
-                "the AgentM checkout, or packaged portable scenarios. An "
-                "absolute path is also accepted. When unset, falls back to "
-                "the ``chatbot`` scenario."
-            ),
-        ),
-    ] = None,
-    extension: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--extension",
-            "-e",
-            help=(
-                "Mount an extra atom on top of --scenario / auto-discovery. "
-                "Repeatable. Form: 'dotted.module.path' or "
-                '\'dotted.module.path:{"key":"value"}\' for inline JSON '
-                "config. Example: -e llmharness.atom "
-                "-e some.atom:'{\"k\":3}'. Use `agentm list-extensions` "
-                "to browse available atoms."
-            ),
-        ),
-    ] = None,
-    no_extensions: Annotated[
-        bool,
-        typer.Option(
-            "--no-extensions",
-            help="Skip atom discovery and loading; agent runs with no tools.",
-        ),
-    ] = False,
-    no_skills: Annotated[
-        bool,
-        typer.Option(
-            "--no-skills",
-            help="Skip skill discovery in the resource loader.",
-        ),
-    ] = False,
-    no_prompt_templates: Annotated[
-        bool,
-        typer.Option(
-            "--no-prompt-templates",
-            help="Skip prompt-template discovery in the resource loader.",
-        ),
-    ] = False,
-    tools: Annotated[
-        str | None,
-        typer.Option(
-            "--tools",
-            help="Comma-separated allowlist applied to atom-registered tools.",
-        ),
-    ] = None,
-    provider: Annotated[
-        str | None,
-        typer.Option(
-            "--provider",
-            help=(
-                "LLM provider to register. Defaults via AGENTM_PROVIDER, "
-                "~/.agentm/config.toml profiles, or the provider registry. "
-                "Built-ins include 'anthropic' and 'openai'."
-            ),
-        ),
-    ] = None,
-    model: Annotated[
-        str | None,
-        typer.Option(
-            "--model",
-            help=(
-                "Model id or ~/.agentm/config.toml profile name. Defaults "
-                "via AGENTM_MODEL, config.toml default_model, or the "
-                "registry default_model for the resolved provider."
-            ),
-        ),
-    ] = None,
-    cwd: Annotated[
-        str | None,
-        typer.Option(
-            "--cwd",
-            help=(
-                "Working directory exposed to extensions. Defaults to "
-                "AGENTM_CWD when set, otherwise the process cwd at "
-                "invocation time."
-            ),
-        ),
-    ] = None,
-    quiet: Annotated[
-        bool,
-        typer.Option("--quiet", help="Suppress final-output printout."),
-    ] = False,
+    scenario: ScenarioOpt = None,
+    extension: ExtensionOpt = None,
+    no_extensions: NoExtensionsOpt = False,
+    no_skills: NoSkillsOpt = False,
+    no_prompt_templates: NoPromptTemplatesOpt = False,
+    tools: ToolsOpt = None,
+    provider: ProviderOpt = None,
+    model: ModelOpt = None,
+    cwd: CwdOpt = None,
+    quiet: QuietOpt = False,
     resume: Annotated[
         str | None,
         typer.Option(
@@ -883,57 +949,10 @@ def run_cmd(
             ),
         ),
     ] = None,
-    max_turns: Annotated[
-        int | None,
-        typer.Option(
-            "--max-turns",
-            min=1,
-            help=(
-                "Hard ceiling on agent-loop turns. Unset = no cap (the agent "
-                "runs until it stops on its own / hits --max-tool-calls / is "
-                "aborted). Overrides the scenario's `loop_budget` atom."
-            ),
-        ),
-    ] = None,
-    max_tool_calls: Annotated[
-        int | None,
-        typer.Option(
-            "--max-tool-calls",
-            min=1,
-            help=(
-                "Hard ceiling on total tool calls across the run. Unset = no "
-                "cap. Overrides the scenario's `loop_budget` atom."
-            ),
-        ),
-    ] = None,
-    reasoning_effort: Annotated[
-        str | None,
-        typer.Option(
-            "--reasoning-effort",
-            envvar="AGENTM_REASONING_EFFORT",
-            help=(
-                "Provider reasoning-effort hint (e.g. 'high', 'max'). "
-                "Maps to the OpenAI 'reasoning_effort' param and the "
-                "Anthropic 'output_config.effort' slot. Precedence: this "
-                "flag > AGENTM_REASONING_EFFORT > config.toml profile."
-            ),
-        ),
-    ] = None,
-    set_config: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--set",
-            "-S",
-            help=(
-                "Override one atom config key. Repeatable. Form: "
-                "'<atom>.<key>=<value>' where <atom> is the atom's "
-                "MANIFEST.name. The value is coerced to the key's declared "
-                "type from config_schema (JSON for array/object). Wins over "
-                "AGENTM_<ATOM>_<KEY> env and the scenario's config:. Example: "
-                "-S cost_budget.limit=5 -S permission.deny='[\"bash\"]'."
-            ),
-        ),
-    ] = None,
+    max_turns: MaxTurnsOpt = None,
+    max_tool_calls: MaxToolCallsOpt = None,
+    reasoning_effort: ReasoningEffortOpt = None,
+    set_config: SetConfigOpt = None,
 ) -> None:
     """Send a single prompt and print the agent's final text."""
 
@@ -1060,105 +1079,20 @@ def fork_cmd(
             help="Fork at a unique trace turn_index.",
         ),
     ] = None,
-    scenario: Annotated[
-        str | None,
-        typer.Option(
-            "--scenario",
-            help="Override the source session's inherited scenario.",
-        ),
-    ] = None,
-    extension: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--extension",
-            "-e",
-            help=(
-                "Mount an extra atom on top of the inherited scenario. "
-                "Repeatable; same format as root `agentm -e`."
-            ),
-        ),
-    ] = None,
-    no_extensions: Annotated[
-        bool,
-        typer.Option(
-            "--no-extensions",
-            help="Skip atom discovery and loading; agent runs with no tools.",
-        ),
-    ] = False,
-    no_skills: Annotated[
-        bool,
-        typer.Option(
-            "--no-skills",
-            help="Skip skill discovery in the resource loader.",
-        ),
-    ] = False,
-    no_prompt_templates: Annotated[
-        bool,
-        typer.Option(
-            "--no-prompt-templates",
-            help="Skip prompt-template discovery in the resource loader.",
-        ),
-    ] = False,
-    tools: Annotated[
-        str | None,
-        typer.Option(
-            "--tools",
-            help="Comma-separated allowlist applied to atom-registered tools.",
-        ),
-    ] = None,
-    provider: Annotated[
-        str | None,
-        typer.Option(
-            "--provider",
-            help="Override the source session's inherited provider.",
-        ),
-    ] = None,
-    model: Annotated[
-        str | None,
-        typer.Option(
-            "--model",
-            help="Override the source session's inherited model/profile.",
-        ),
-    ] = None,
-    cwd: Annotated[
-        str | None,
-        typer.Option(
-            "--cwd",
-            help="Working directory exposed to extensions.",
-        ),
-    ] = None,
-    quiet: Annotated[
-        bool,
-        typer.Option("--quiet", help="Suppress final-output printout."),
-    ] = False,
-    max_turns: Annotated[
-        int | None,
-        typer.Option("--max-turns", min=1, help="Hard ceiling on loop turns."),
-    ] = None,
-    max_tool_calls: Annotated[
-        int | None,
-        typer.Option(
-            "--max-tool-calls",
-            min=1,
-            help="Hard ceiling on total tool calls across the run.",
-        ),
-    ] = None,
-    reasoning_effort: Annotated[
-        str | None,
-        typer.Option(
-            "--reasoning-effort",
-            envvar="AGENTM_REASONING_EFFORT",
-            help="Provider reasoning-effort hint.",
-        ),
-    ] = None,
-    set_config: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--set",
-            "-S",
-            help="Override one atom config key; same format as root `agentm -S`.",
-        ),
-    ] = None,
+    scenario: ScenarioOpt = None,
+    extension: ExtensionOpt = None,
+    no_extensions: NoExtensionsOpt = False,
+    no_skills: NoSkillsOpt = False,
+    no_prompt_templates: NoPromptTemplatesOpt = False,
+    tools: ToolsOpt = None,
+    provider: ProviderOpt = None,
+    model: ModelOpt = None,
+    cwd: CwdOpt = None,
+    quiet: QuietOpt = False,
+    max_turns: MaxTurnsOpt = None,
+    max_tool_calls: MaxToolCallsOpt = None,
+    reasoning_effort: ReasoningEffortOpt = None,
+    set_config: SetConfigOpt = None,
 ) -> None:
     """Fork a session at a message/turn boundary and continue with a prompt."""
 
