@@ -494,6 +494,21 @@ async def create_agent_session(
     if config.tool_allowlist is not None:
         tools[:] = [t for t in tools if t.name in config.tool_allowlist]
 
+    if config.extra_tools:
+        existing_names = {t.name for t in tools}
+        for tool in config.extra_tools:
+            if tool.name in existing_names:
+                raise ExtensionLoadError(
+                    "<extra_tools>",
+                    ValueError(
+                        f"Tool name conflict: '{tool.name}' is already "
+                        f"registered by an atom. Each tool must have a "
+                        f"unique name."
+                    ),
+                )
+            tools.append(tool)
+            existing_names.add(tool.name)
+
     active_provider = resolve_provider_config(
         providers, provider_resolver, provider_path=provider_path
     )

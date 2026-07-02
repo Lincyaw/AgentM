@@ -57,6 +57,13 @@ class AgentSessionConfig:
     user to copy the entire base list into a custom manifest. Ignored when
     ``no_extensions`` is set or when ``extensions`` is supplied explicitly
     (in which case the caller already controls the full list)."""
+    extra_tools: list[Any] = field(default_factory=list)
+    """FunctionTool instances registered after atom install.
+
+    Lets a parent atom pass tools directly to a child session without
+    creating a dedicated atom module. Registered after all extensions
+    install, so they win on name conflicts (and the conflict check
+    will catch duplicates)."""
     atom_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Per-atom config overrides keyed by ``MANIFEST.name``.
 

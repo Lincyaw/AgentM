@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 
 from loguru import logger
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from agentm.core.abi import (
     AgentMessage,
@@ -39,12 +39,15 @@ from agentm.core.abi import (
     CommandSpec,
     DecideTurnActionEvent,
     ExtensionAPI,
+    FunctionTool,
     Inject,
     LoopConfig,
     ModelEndTurn,
     Stop,
     TextContent,
     ToolCallBlock,
+    ToolResult,
+    ToolTerminate,
     ToolTerminated,
     UserMessage,
     text_message,
@@ -113,30 +116,43 @@ _TRACE_QUERY_EXT: Final[tuple[str, dict[str, Any]]] = (
     "agentm.extensions.builtin.trace_query", {},
 )
 
-_CONDITION_SCHEMA: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "goal": {
-            "type": "string",
-            "description": "The final acceptance criterion.",
-        },
-        "invariants": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Correctness constraints the implementation must satisfy. Focus on tricky edge cases: init paths, concurrency, API surface, build system.",
-        },
-        "checklist": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Yes/no verification questions the reviewer should check against the code.",
-        },
-    },
-    "required": ["goal", "invariants", "checklist"],
-}
+
+class _CheckerVerdictArgs(BaseModel):
+    met: bool
+    reason: str
+    unexplained: list[str] = []
+
+
+async def _checker_submit_verdict(args: dict[str, Any]) -> ToolTerminate:
+    parsed = _CheckerVerdictArgs.model_validate(args)
+    return ToolTerminate(
+        result=ToolResult(content=[TextContent(
+            type="text",
+            text=parsed.model_dump_json(),
+        )]),
+        reason="goal_checker:verdict_submitted",
+    )
+
+
+_CHECKER_VERDICT_TOOL: Final = FunctionTool(
+    name="submit_verdict",
+    description=(
+        "Submit your final verdict on whether the goal condition is met. "
+        "This terminates the checker session."
+    ),
+    parameters=_CheckerVerdictArgs,
+    fn=_checker_submit_verdict,
+)
+
+class _ConditionSchema(BaseModel):
+    goal: str = Field(description="The final acceptance criterion.")
+    invariants: list[str] = Field(description="Correctness constraints the implementation must satisfy. Focus on tricky edge cases: init paths, concurrency, API surface, build system.")
+    checklist: list[str] = Field(description="Yes/no verification questions the reviewer should check against the code.")
+
 
 _STRUCTURED_OUTPUT_EXT: Final[tuple[str, dict[str, Any]]] = (
     "agentm.extensions.builtin.structured_output",
-    {"result_schema": _CONDITION_SCHEMA},
+    {"result_schema": _ConditionSchema.model_json_schema()},
 )
 _AGENT_ENV_SESSION_SERVICE: Final[str] = "agent_env.session_id"
 _OPERATIONS_ATOM: Final[str] = "".join(("oper", "ations"))
@@ -197,12 +213,14 @@ async def _prompt_child_session_messages(
     prompt: str,
     purpose: str,
     extra_extensions: list[tuple[str, dict[str, Any]]] | None = None,
+    extra_tools: list[Any] | None = None,
     atom_config_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> list[AgentMessage] | None:
     config = AgentSessionConfig(
         cwd=api.cwd,
         scenario=scenario,
         extra_extensions=extra_extensions or [],
+        extra_tools=extra_tools or [],
         atom_config_overrides=atom_config_overrides or {},
         purpose=purpose,
         lineage={
@@ -256,6 +274,7 @@ async def _evaluate_checker(
     messages = await _prompt_child_session_messages(
         api, scenario, max_turns, prompt, "goal_checker",
         extra_extensions=[_TRACE_QUERY_EXT],
+        extra_tools=[_CHECKER_VERDICT_TOOL],
     )
     if messages is None:
         return False, "checker produced no response"

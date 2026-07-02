@@ -30,10 +30,10 @@ MANIFEST = ExtensionManifest(
 
 
 def install(api: ExtensionAPI, _config: ToolIndexConfig) -> None:
-    def _inject(event: BeforeAgentStartEvent) -> None:
+    def _inject(event: BeforeAgentStartEvent) -> dict[str, str] | None:
         tools = api.tools
         if not tools:
-            return
+            return None
         lines = [
             "# Tools",
             "",

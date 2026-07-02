@@ -20,7 +20,7 @@ from typing import Any, Final
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from agentm.core.abi import ExtensionAPI, FunctionTool, TextContent, ToolResult, ToolTerminate
+from agentm.core.abi import ExtensionAPI, FunctionTool, TextContent, ToolResult
 from agentm.extensions import ExtensionManifest
 
 MANIFEST = ExtensionManifest(
@@ -34,7 +34,6 @@ MANIFEST = ExtensionManifest(
         "tool:list_turns",
         "tool:read_turn",
         "tool:get_tool_calls",
-        "tool:submit_verdict",
     ),
     requires=(),
 )
@@ -210,38 +209,6 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         fn=_get_tool_calls,
     ))
 
-    # -- submit_verdict (terminates checker session) -----------------------
-
-    class SubmitVerdictArgs(BaseModel):
-        met: bool = Field(description="True if the goal condition is met, False otherwise")
-        reason: str = Field(description="One-line explanation of why the condition is or is not met")
-        unexplained: list[str] = Field(
-            default_factory=list,
-            description="List of specific items not covered (empty if met)",
-        )
-
-    async def _submit_verdict(args: dict[str, Any]) -> ToolTerminate:
-        parsed = SubmitVerdictArgs.model_validate(args)
-        return ToolTerminate(
-            result=ToolResult(content=[TextContent(
-                type="text",
-                text=json.dumps({"met": parsed.met, "reason": parsed.reason,
-                                 "unexplained": parsed.unexplained},
-                                ensure_ascii=False),
-            )]),
-            reason="goal_checker:verdict_submitted",
-        )
-
-    api.register_tool(FunctionTool(
-        name="submit_verdict",
-        description=(
-            "Submit your final verdict on whether the goal condition is met. "
-            "This terminates the checker session. Call this ONLY after you "
-            "have completed all verification steps."
-        ),
-        parameters=SubmitVerdictArgs,
-        fn=_submit_verdict,
-    ))
 
 
 __all__: Final = ["MANIFEST", "install"]

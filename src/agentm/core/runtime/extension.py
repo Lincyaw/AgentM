@@ -414,6 +414,12 @@ class _ExtensionAPIImpl:
 
     def register_tool(self, tool: Tool) -> None:
         self._assert_active()
+        existing = {t.name for t in self._tools}
+        if tool.name in existing:
+            raise ValueError(
+                f"Tool name conflict: '{tool.name}' is already registered. "
+                f"Each tool must have a unique name across all loaded atoms."
+            )
         self._tools.append(tool)
         self._emit_register("tool", tool.name, tool)
 
