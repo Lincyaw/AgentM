@@ -67,8 +67,9 @@ from agentm.core.lib import (
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
     to_jsonable,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from agentm.core.lib.tool_schema import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
 _RUNNING: Literal["running"] = "running"
@@ -745,6 +746,25 @@ class _BgManager:
         for state in states:
             self._exit_work_tracking(state)
 
+# Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
+# ---------------------------------------------------------------------------
+
+class _CheckBackgroundParams(BaseModel):
+    pass
+
+class _WaitBackgroundParams(BaseModel):
+    task_id: str
+    timeout_s: float | None = Field(
+        default=None,
+        description=(
+            "Requested maximum seconds to wait before returning current "
+            "status; capped by the background_exec timeout."
+        ),
+    )
+
+class _CancelBackgroundParams(BaseModel):
+    task_id: str
+
 def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
     manager = _BgManager(
         api=api,
@@ -766,11 +786,7 @@ def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
             description=(
                 "List background tasks (state + elapsed) without waiting."
             ),
-            parameters={
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_CheckBackgroundParams),
             fn=manager.check_background,
         )
     )
@@ -781,21 +797,7 @@ def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
                 "Wait briefly for one background task to reach a terminal state; "
                 "returns the current running status if timeout_s elapses."
             ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string"},
-                    "timeout_s": {
-                        "type": "number",
-                        "description": (
-                            "Requested maximum seconds to wait before returning current "
-                            "status; capped by the background_exec timeout."
-                        ),
-                    },
-                },
-                "required": ["task_id"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_WaitBackgroundParams),
             fn=manager.wait_background,
         )
     )
@@ -803,12 +805,7 @@ def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
         FunctionTool(
             name="cancel_background",
             description="Request cancellation of a running background task.",
-            parameters={
-                "type": "object",
-                "properties": {"task_id": {"type": "string"}},
-                "required": ["task_id"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_CancelBackgroundParams),
             fn=manager.cancel_background,
         )
     )

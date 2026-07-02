@@ -64,6 +64,7 @@ from agentm.core.abi import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
+from agentm.core.lib.tool_schema import pydantic_to_tool_schema
 from agentm.core.lib import (
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
     to_jsonable,
@@ -640,6 +641,35 @@ class _MonitorManager:
         # (no "Task exception was never retrieved" past shutdown).
         await asyncio.gather(*wakeup_tasks, return_exceptions=True)
 
+# Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
+# ---------------------------------------------------------------------------
+
+class _ScheduleWakeupParams(BaseModel):
+    delay: float = Field(ge=0, description="Seconds to wait before firing.")
+    note: str | None = Field(
+        default=None,
+        description="Free-form note delivered with the wake.",
+    )
+
+class _CreateMonitorParams(BaseModel):
+    watch: str | None = Field(
+        default=None,
+        description=(
+            "Bus channel name to subscribe to "
+            "(e.g. 'tool_call', 'agent_end')."
+        ),
+    )
+    note: str | None = Field(
+        default=None,
+        description="Free-form note delivered with each fire.",
+    )
+
+class _ListMonitorsParams(BaseModel):
+    pass
+
+class _CancelMonitorParams(BaseModel):
+    monitor_id: str
+
 def install(api: ExtensionAPI, config: MonitorConfig) -> None:
     manager = _MonitorManager(
         api=api,
@@ -655,22 +685,7 @@ def install(api: ExtensionAPI, config: MonitorConfig) -> None:
                 "Schedule a one-shot wakeup that posts to the session inbox "
                 "after `delay` seconds. Returns a monitor_id."
             ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "delay": {
-                        "type": "number",
-                        "minimum": 0,
-                        "description": "Seconds to wait before firing.",
-                    },
-                    "note": {
-                        "type": "string",
-                        "description": "Free-form note delivered with the wake.",
-                    },
-                },
-                "required": ["delay"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_ScheduleWakeupParams),
             fn=manager.schedule_wakeup,
         )
     )
@@ -683,24 +698,7 @@ def install(api: ExtensionAPI, config: MonitorConfig) -> None:
                 "dedup_key (latest fire replaces the prior undrained one). "
                 "Condition-polling is not yet supported."
             ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "watch": {
-                        "type": "string",
-                        "description": (
-                            "Bus channel name to subscribe to "
-                            "(e.g. 'tool_call', 'agent_end')."
-                        ),
-                    },
-                    "note": {
-                        "type": "string",
-                        "description": "Free-form note delivered with each fire.",
-                    },
-                },
-                "required": ["watch"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_CreateMonitorParams),
             fn=manager.create_monitor,
         )
     )
@@ -708,11 +706,7 @@ def install(api: ExtensionAPI, config: MonitorConfig) -> None:
         FunctionTool(
             name="list_monitors",
             description="List every live monitor (id, kind, watch, status).",
-            parameters={
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_ListMonitorsParams),
             fn=manager.list_monitors,
         )
     )
@@ -724,12 +718,7 @@ def install(api: ExtensionAPI, config: MonitorConfig) -> None:
                 "unsubscribes the channel handler — never touches any shared "
                 "session signal. Idempotent."
             ),
-            parameters={
-                "type": "object",
-                "properties": {"monitor_id": {"type": "string"}},
-                "required": ["monitor_id"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_CancelMonitorParams),
             fn=manager.cancel_monitor,
         )
     )

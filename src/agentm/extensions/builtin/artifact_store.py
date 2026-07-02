@@ -13,7 +13,7 @@ import time
 from typing import Any, Final
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agentm.core.abi import (
     ExtensionAPI,
@@ -31,6 +31,7 @@ from agentm.core.lib import (
     scan_artifact_metadata,
     to_jsonable,
 )
+from agentm.core.lib.tool_schema import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
 _DEFAULT_INLINE_BYTES = 8 * 1024
@@ -324,6 +325,39 @@ class ArtifactStore:
     def _scan_metadata(self) -> list[ArtifactMetadata]:
         return scan_artifact_metadata(self._ctx.artifacts_dir)
 
+# Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
+# ---------------------------------------------------------------------------
+
+class _ArtifactReadRange(BaseModel):
+    mode: str = Field(description="Range mode: 'bytes' or 'lines'.")
+    start: int = Field(ge=0, description="Start offset (byte or line).")
+    end: int = Field(ge=0, description="End offset (byte or line).")
+
+class _ArtifactWriteParams(BaseModel):
+    kind: str
+    title: str
+    body: str
+    tags: list[str] | None = None
+    parent_artifact_ids: list[str] | None = None
+
+class _ArtifactReadParams(BaseModel):
+    artifact_id: str
+    range: _ArtifactReadRange | None = None
+
+class _ArtifactListParams(BaseModel):
+    kind: str | None = None
+    tags: list[str] | None = None
+    created_by_task: str | None = None
+    since: str | None = None
+    limit: int | None = Field(default=None, ge=1)
+
+class _ArtifactGrepParams(BaseModel):
+    pattern: str
+    kind: str | None = None
+    tags: list[str] | None = None
+    max_hits: int | None = Field(default=None, ge=1)
+    snippet_lines: int | None = Field(default=None, ge=0)
+
 def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
     from agentm.core.abi import ARTIFACT_STORE_SERVICE
     store = ArtifactStore(api, config)
@@ -352,21 +386,7 @@ def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
         FunctionTool(
             name="artifact_write",
             description="Append a new shared artifact to the session-tree store.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string"},
-                    "title": {"type": "string"},
-                    "body": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "parent_artifact_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                },
-                "required": ["kind", "title", "body"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_ArtifactWriteParams),
             fn=_write,
         )
     )
@@ -374,24 +394,7 @@ def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
         FunctionTool(
             name="artifact_read",
             description="Read one artifact by id, optionally with a byte/line range.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "artifact_id": {"type": "string"},
-                    "range": {
-                        "type": "object",
-                        "properties": {
-                            "mode": {"type": "string", "enum": ["bytes", "lines"]},
-                            "start": {"type": "integer", "minimum": 0},
-                            "end": {"type": "integer", "minimum": 0},
-                        },
-                        "required": ["mode", "start", "end"],
-                        "additionalProperties": False,
-                    },
-                },
-                "required": ["artifact_id"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_ArtifactReadParams),
             fn=_read,
         )
     )
@@ -399,17 +402,7 @@ def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
         FunctionTool(
             name="artifact_list",
             description="List artifact metadata with simple filters.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "kind": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "created_by_task": {"type": "string"},
-                    "since": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1},
-                },
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_ArtifactListParams),
             fn=_list_artifacts,
         )
     )
@@ -417,18 +410,7 @@ def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
         FunctionTool(
             name="artifact_grep",
             description="Regex-search text artifacts and return snippets.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string"},
-                    "kind": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "max_hits": {"type": "integer", "minimum": 1},
-                    "snippet_lines": {"type": "integer", "minimum": 0},
-                },
-                "required": ["pattern"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_ArtifactGrepParams),
             fn=_grep,
         )
     )

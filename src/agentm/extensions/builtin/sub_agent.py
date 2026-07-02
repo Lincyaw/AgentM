@@ -56,8 +56,10 @@ from agentm.core.lib import (
     to_jsonable,
 )
 from pydantic import BaseModel as PydanticBaseModel
+from pydantic import Field as PydanticField
 from pydantic import ValidationError as PydanticValidationError
 
+from agentm.core.lib.tool_schema import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 
@@ -1039,6 +1041,36 @@ class _ChildTaskManager:
             if child_sid:
                 self._child_registry.deregister(str(child_sid))
 
+# Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
+# ---------------------------------------------------------------------------
+
+class _DispatchBudget(PydanticBaseModel):
+    max_tool_calls: int | None = None
+    max_turns: int | None = None
+
+class _DispatchAgentParams(PydanticBaseModel):
+    purpose: str
+    prompt: str
+    subagent_type: str | None = None
+    budget: _DispatchBudget | None = None
+    extensions: list[list[Any]] | None = PydanticField(
+        default=None,
+        description="Each element is a [module_path, config] pair.",
+    )
+
+class _CheckTasksParams(PydanticBaseModel):
+    pass
+
+class _WaitSubagentParams(PydanticBaseModel):
+    task_id: str
+
+class _InjectInstructionParams(PydanticBaseModel):
+    task_id: str
+    message: str
+
+class _AbortTaskParams(PydanticBaseModel):
+    task_id: str
+
 def _validate_available_inherited_configs(
     available_inherited: dict[str, Any],
 ) -> None:
@@ -1164,30 +1196,7 @@ async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
                 "persona's system prompt, tool allowlist, and advisory budget "
                 "defaults are applied to the child."
             ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "purpose": {"type": "string"},
-                    "prompt": {"type": "string"},
-                    "subagent_type": {"type": "string"},
-                    "budget": {
-                        "type": "object",
-                        "properties": {
-                            "max_tool_calls": {"type": "integer"},
-                            "max_turns": {"type": "integer"},
-                        },
-                    },
-                    "extensions": {
-                        "type": "array",
-                        "description": "Each element is a [module_path, config] pair.",
-                        "items": {
-                            "type": "array",
-                        },
-                    },
-                },
-                "required": ["purpose", "prompt"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_DispatchAgentParams),
             fn=manager.dispatch,
         )
     )
@@ -1195,11 +1204,7 @@ async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
         FunctionTool(
             name="check_tasks",
             description="List active and completed child tasks.",
-            parameters={
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_CheckTasksParams),
             fn=manager.check_tasks,
         )
     )
@@ -1207,12 +1212,7 @@ async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
         FunctionTool(
             name="wait_subagent",
             description="Wait for one child task to reach a terminal state.",
-            parameters={
-                "type": "object",
-                "properties": {"task_id": {"type": "string"}},
-                "required": ["task_id"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_WaitSubagentParams),
             fn=manager.wait_subagent,
         )
     )
@@ -1220,15 +1220,7 @@ async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
         FunctionTool(
             name="inject_instruction",
             description="Queue an instruction for the child's next prompt turn.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "task_id": {"type": "string"},
-                    "message": {"type": "string"},
-                },
-                "required": ["task_id", "message"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_InjectInstructionParams),
             fn=manager.inject_instruction,
         )
     )
@@ -1236,12 +1228,7 @@ async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
         FunctionTool(
             name="abort_task",
             description="Abort a running child session.",
-            parameters={
-                "type": "object",
-                "properties": {"task_id": {"type": "string"}},
-                "required": ["task_id"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_AbortTaskParams),
             fn=manager.abort,
         )
     )

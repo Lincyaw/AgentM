@@ -31,9 +31,10 @@ from agentm.core.abi import (
     TextContent,
     ToolResult,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agentm.core.lib import parse_frontmatter
+from agentm.core.lib.tool_schema import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
 class SkillLoaderConfig(BaseModel):
@@ -361,6 +362,12 @@ def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
     lines.append("</available_skills>")
     return "\n".join(lines)
 
+# Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
+# ---------------------------------------------------------------------------
+
+class _LoadSkillParams(BaseModel):
+    name: str = Field(description="Skill name from <available_skills>.")
+
 # === Atom install ==========================================================
 
 async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
@@ -541,17 +548,7 @@ async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
                 "Load the full content of a skill by name. "
                 "Use this to read detailed instructions from <available_skills>."
             ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Skill name from <available_skills>.",
-                    },
-                },
-                "required": ["name"],
-                "additionalProperties": False,
-            },
+            parameters=pydantic_to_tool_schema(_LoadSkillParams),
             fn=_load_skill,
         )
     )
