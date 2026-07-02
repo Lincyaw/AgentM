@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Final
 
+from loguru import logger
 from pydantic import ConfigDict
 
 from agentm.core.abi import (
@@ -86,7 +87,7 @@ _DEFAULT_INSTRUCTION = (
     "(path B)."
 )
 
-@dataclass
+@dataclass(slots=True)
 class _State:
     submitted: bool = False
 
@@ -115,6 +116,7 @@ def install(api: ExtensionAPI, config: FinalizeConfig) -> None:
         try:
             output = output_model.model_validate(args)
         except Exception as exc:  # pydantic ValidationError + anything weird
+            logger.warning("fpg model output validation failed: {}", exc)
             return ToolResult(
                 content=[
                     TextContent(

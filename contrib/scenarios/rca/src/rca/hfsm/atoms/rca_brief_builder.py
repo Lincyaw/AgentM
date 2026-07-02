@@ -57,7 +57,7 @@ _ADVERSARIAL_PREFIX = (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class _BriefBuilder:
     read: Any  # rca.hgraph.read service
 

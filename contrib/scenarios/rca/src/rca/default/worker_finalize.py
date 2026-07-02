@@ -69,7 +69,7 @@ MANIFEST = ExtensionManifest(
     config_schema=WorkerFinalizeConfig,
 )
 
-@dataclass
+@dataclass(slots=True)
 class _State:
     submitted: bool = False
     warned: bool = False

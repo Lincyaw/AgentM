@@ -130,7 +130,7 @@ _PER_STATE_TOOLS: Final[dict[str, frozenset[str]]] = {
 }
 
 
-@dataclass
+@dataclass(slots=True)
 class FSMStateContainer:
     """Per-session FSM state.
 

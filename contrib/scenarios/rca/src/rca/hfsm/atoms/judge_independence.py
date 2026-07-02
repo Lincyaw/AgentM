@@ -31,6 +31,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -217,6 +218,7 @@ class _LlmJudge:
             try:
                 return await self._call_provider(context)
             except Exception as exc:  # noqa: BLE001 — design §3.4 catch-all
+                logger.debug("judge_independence attempt {} failed: {}", attempt, exc)
                 last_err = f"{type(exc).__name__}: {exc}"
                 if attempt == 1:
                     break

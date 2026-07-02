@@ -62,7 +62,7 @@ MANIFEST = ExtensionManifest(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class _StoreState:
     symptoms: dict[str, Symptom] = field(default_factory=dict)
     hypotheses: dict[str, Hypothesis] = field(default_factory=dict)

@@ -38,6 +38,8 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from loguru import logger
+
 from agentm.core.abi import (
     ExtensionAPI,
     FunctionTool,
@@ -122,7 +124,8 @@ def _hypothesis_summary(read_handle: Any) -> list[dict[str, Any]]:
         if callable(getter):
             try:
                 sources.append(list(getter()))
-            except Exception:  # noqa: BLE001 — defensive on store quirks
+            except Exception as exc:  # noqa: BLE001 — defensive on store quirks
+                logger.warning("rca_finalize: {} raised: {}", getter_name, exc)
                 sources.append([])
     for batch in sources:
         for h in batch:

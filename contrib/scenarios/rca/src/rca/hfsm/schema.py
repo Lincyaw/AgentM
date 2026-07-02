@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-@dataclass
+@dataclass(slots=True)
 class Observation:
     """A raw, citable fact recorded into the ObservationLog (design §3.2).
 
@@ -37,7 +37,7 @@ class Observation:
     ts: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class Interpretation:
     """Worker-supplied advisory accompanying a ``CheckResult`` (design §6).
 
@@ -53,7 +53,7 @@ class Interpretation:
     confidence: str
 
 
-@dataclass
+@dataclass(slots=True)
 class CheckResult:
     """A single worker session's structured output for one prediction
     (design §3.1 / §6).
@@ -72,7 +72,7 @@ class CheckResult:
     ts: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class Prediction:
     """An observable consequence the FSM will dispatch a worker to test
     (design §3.1).
@@ -90,7 +90,7 @@ class Prediction:
     checks: list[CheckResult] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class Hypothesis:
     """A node in the hypothesis DAG (design §3.1).
 
@@ -109,7 +109,7 @@ class Hypothesis:
     rationale: str = ""
 
 
-@dataclass
+@dataclass(slots=True)
 class Symptom:
     """An observed problem reported during INTAKE (design §3.1).
 
@@ -124,7 +124,7 @@ class Symptom:
     ts: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class WorkerReturn:
     """The two-column worker → orchestrator contract (design §6).
 

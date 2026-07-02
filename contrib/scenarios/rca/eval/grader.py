@@ -31,6 +31,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from agentm.core.abi import TraceReader
 from agentm.core.lib.observability_dir import resolve_observability_dir
 
@@ -401,7 +403,8 @@ def _compare_fpg_graph(
         model_output = ModelRCAOutput.model_validate(payload)
         scenario = Scenario.model_validate_json(graph_path.read_text(encoding="utf-8"))
         comparison = compare_model_to_ground_truth(model_output, scenario)
-    except Exception:
+    except Exception as exc:
+        logger.warning("fpg graph comparison failed: {}", exc)
         return None
     return comparison.model_dump(mode="json")
 
@@ -517,6 +520,7 @@ def _evaluate_fpg_sql_evidence(
         _install_sql_eval_macros(conn)
         _register_case_parquets(conn, case_dir)
     except Exception as exc:  # noqa: BLE001 - setup failure is grader feedback
+        logger.warning("SQL eval setup failed: {}", exc)
         return {
             "total": len(statements),
             "executable": 0,

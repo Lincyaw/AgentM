@@ -30,7 +30,7 @@ from rescue_window.harness import (
 _FINAL_TOOL = "submit_final_report"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RcaRescueAdapter:
     """Scenario adapter scoring RCA rollouts against ops-lite-clean ground truth."""
 

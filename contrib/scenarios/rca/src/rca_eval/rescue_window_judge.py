@@ -26,7 +26,7 @@ from loguru import logger
 __all__ = ["JudgeOutcome", "LeafJudge", "RcabenchJudge"]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class JudgeOutcome:
     """Result of judging one submission against ground truth."""
 

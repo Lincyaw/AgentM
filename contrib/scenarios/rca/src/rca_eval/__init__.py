@@ -19,6 +19,8 @@ Configure both from the eval YAML — no in-process monkey-patches.
 
 from __future__ import annotations
 
+from loguru import logger
+
 from rca_eval.agent import AgentMAgent
 
 
@@ -38,7 +40,8 @@ def _register_processer_aliases() -> None:
             PROCESSER_FACTORY,
             RCABenchProcesser,
         )
-    except Exception:  # noqa: BLE001 — optional dep at import time
+    except Exception as exc:  # noqa: BLE001 — optional dep at import time
+        logger.debug("rcabench_platform processer registration skipped: {}", exc)
         return
     for alias in ("ops-lite", "opslite", "ops-lite-clean"):
         PROCESSER_FACTORY.register(alias, RCABenchProcesser)

@@ -34,7 +34,7 @@ from typing import Any, Protocol, runtime_checkable
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class JudgeContext:
     """Structured slice of L1 graph state passed to ``Judge.judge``.
 
@@ -52,7 +52,7 @@ class JudgeContext:
     operands: dict[str, Any]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Verdict:
     """The judgment a ``Judge`` returns.
 
@@ -67,7 +67,7 @@ class Verdict:
     confidence: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class JudgeToolSchema:
     """JSON Schema fragment for the ``submit_verdict`` tool.
 

@@ -115,7 +115,7 @@ _GENUINE_ATTEMPT = "genuine_attempt"
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class _JudgeBundle:
     """The four judges the gate consults, looked up once at install."""
 
@@ -125,7 +125,7 @@ class _JudgeBundle:
     falsified_genuinely: Judge
 
 
-@dataclass
+@dataclass(slots=True)
 class _Gate:
     write_handle: Any  # _WriteHandle from the store; opaque here by design
     graph: GraphView

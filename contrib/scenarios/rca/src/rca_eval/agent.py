@@ -96,7 +96,8 @@ def _try_resolve_profile(model: str) -> tuple[str, dict[str, Any]] | None:
         return DEFAULT_PROVIDER_REGISTRY.build(
             profile.provider, profile.to_build_config()
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("failed to resolve model profile {!r}: {}", model, exc)
         return None
 
 
@@ -160,7 +161,7 @@ def _coerce_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _SessionRun:
     result: AgentResult
     final_messages: list[Any]
@@ -338,8 +339,8 @@ class AgentMAgent(BaseAgent):
             )
             try:
                 output = ModelRCAOutput.model_validate_json(text)
-            except Exception:
-                # Tool returned a non-conforming payload; treat as missing.
+            except Exception as exc:
+                logger.warning("submit_final_report payload not conforming: {}", exc)
                 return
             captured["submission"] = output
             if ctx is not None:

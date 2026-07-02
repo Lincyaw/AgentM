@@ -84,7 +84,7 @@ class GraphView(Protocol):
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class UpdateProposal:
     """A request to mutate the hypothesis graph.
 
@@ -134,7 +134,7 @@ class UpdateProposal:
 ResultKind = Literal["applied", "downgraded", "rejected"]
 
 
-@dataclass
+@dataclass(slots=True)
 class UpdateResult:
     """Outcome of ``gate.apply``.
 

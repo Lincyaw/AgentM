@@ -22,6 +22,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 
 def _fpg_graph_score(
     response_json: dict[str, Any],
@@ -50,6 +52,7 @@ def _fpg_graph_score(
         )
         comparison = compare_model_to_ground_truth(model_output, scenario)
     except Exception as exc:
+        logger.warning("fpg graph comparison failed: {}", exc)
         return {"score": 0.0, "_error": str(exc)}
     return comparison.model_dump(mode="json")
 
@@ -91,7 +94,8 @@ def _gt_services_from_injection(case_dir: Path) -> list[str]:
         return []
     try:
         inj = json.loads(inj_path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as exc:
+        logger.warning("failed to read injection.json from {}: {}", case_dir, exc)
         return []
     services: list[str] = []
     for ec in inj.get("engine_config_summary", []):
@@ -157,6 +161,7 @@ def _sql_evidence_replay(
                 f"SELECT * FROM read_parquet('{pq}')"
             )
     except Exception as exc:
+        logger.warning("SQL evidence replay setup failed: {}", exc)
         return {
             "total": len(statements),
             "executable": 0,
@@ -173,8 +178,8 @@ def _sql_evidence_replay(
         try:
             conn.execute(f"SELECT * FROM ({sql}) LIMIT 1").fetchone()
             executable += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("SQL statement not executable: {}", exc)
     conn.close()
 
     total = len(statements)

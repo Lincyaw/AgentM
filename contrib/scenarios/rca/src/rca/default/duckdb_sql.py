@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import duckdb  # type: ignore[import-not-found,import-untyped]
+from loguru import logger
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -694,6 +695,7 @@ def _post_query(
     try:
         resp = _invoke_blob_query(state, request_body)
     except Exception as exc:  # noqa: BLE001 - server/transport error → tool error
+        logger.warning("remote query failed: {}", exc)
         msg, hint = _remote_error(exc)
         extra: dict[str, Any] = {"sql": err_sql} if err_sql else {}
         if hint:
