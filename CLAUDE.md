@@ -289,6 +289,7 @@ serving five.
 | Type check peers | `cd contrib/gateway-peers/feishu && uv run mypy src/agentm_feishu`; `cd contrib/gateway-peers/weixin && uv run mypy src/agentm_weixin`; `cd contrib/extensions/llmharness && uv run mypy src/llmharness`; `cd contrib/scenarios/rca && uv run mypy src/rca src/rca_eval` | Run from each workspace member root so package-local config applies. |
 | Python tests | `uv run pytest --tb=short` | Default excludes `ui`; slow/real-provider tests are opt-in. |
 | Terminal peer tests | `cd contrib/gateway-peers/terminal-go && go test ./...` | Go peer is separate from the Python workspace. |
+| Code health | `uv run agentm lint src/agentm/` | Project-specific AST checks (AM001–AM007): silent exceptions, missing slots, atom raw I/O, etc. AM001 errors must stay at zero. |
 | Index validation | `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/validate_index.py project-index.yaml` | Must stay clean; stale path references are regressions. |
 
 ## Observation setup

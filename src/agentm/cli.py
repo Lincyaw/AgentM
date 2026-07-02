@@ -25,6 +25,7 @@ from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
 from agentm.cli_trace import app as _trace_app
 from agentm.cli_validate import app as _validate_app
 from agentm.cli_workflow import app as _workflow_app
+from agentm.code_health import app as _lint_app
 from agentm.contrib_sync import app as _contrib_app
 from agentm.env import autoload_dotenv
 from agentm.core.abi import LoopConfig
@@ -1356,6 +1357,7 @@ app.add_typer(_workflow_app, name="workflow")
 app.add_typer(_validate_app, name="validate")
 app.add_typer(_gateway_app, name="gateway")
 app.add_typer(_contrib_app, name="contrib")
+app.add_typer(_lint_app, name="lint")
 
 
 def main() -> None:
