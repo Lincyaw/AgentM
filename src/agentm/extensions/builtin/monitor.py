@@ -64,7 +64,7 @@ from agentm.core.abi import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.core.lib.tool_schema import pydantic_to_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 from agentm.core.lib import (
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
     to_jsonable,

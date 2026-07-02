@@ -59,7 +59,7 @@ from pydantic import BaseModel as PydanticBaseModel
 from pydantic import Field as PydanticField
 from pydantic import ValidationError as PydanticValidationError
 
-from agentm.core.lib.tool_schema import pydantic_to_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.discover import discover_builtin
 

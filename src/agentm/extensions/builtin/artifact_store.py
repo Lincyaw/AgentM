@@ -31,7 +31,7 @@ from agentm.core.lib import (
     scan_artifact_metadata,
     to_jsonable,
 )
-from agentm.core.lib.tool_schema import pydantic_to_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
 _DEFAULT_INLINE_BYTES = 8 * 1024

@@ -34,7 +34,7 @@ from agentm.core.abi import (
 from pydantic import BaseModel, Field
 
 from agentm.core.lib import parse_frontmatter
-from agentm.core.lib.tool_schema import pydantic_to_tool_schema
+from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
 class SkillLoaderConfig(BaseModel):
