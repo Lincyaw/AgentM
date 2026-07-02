@@ -245,7 +245,7 @@ agentm setup
 
 `agentm setup` also places editable demo scenarios under
 `~/.agentm/contrib/scenarios/`: `chatbot` (the default full chat stack),
-`minimal` (the smallest runnable stack), and `local` (coding-oriented tools).
+and `minimal` (the smallest runnable stack).
 Then use AgentM from any repo:
 
 ```bash

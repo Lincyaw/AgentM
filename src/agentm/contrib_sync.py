@@ -22,7 +22,7 @@ class SyncMode(str, Enum):
 
 
 VALID_KINDS = frozenset({"scenarios", "extensions"})
-DEMO_SCENARIOS = ("chatbot", "minimal", "local")
+DEMO_SCENARIOS = ("chatbot", "minimal")
 COPY_IGNORE = shutil.ignore_patterns(
     "__pycache__",
     "*.pyc",
@@ -183,8 +183,8 @@ def sync_demo_scenarios(
 
     ``agentm setup`` uses this instead of syncing the full source ``contrib``
     tree so a first-run install exposes only simple examples users can edit:
-    ``chatbot`` for the default full stack, ``minimal`` for the smallest
-    runnable stack, and ``local`` for coding sessions.
+    ``chatbot`` for the default full stack and ``minimal`` for the smallest
+    runnable stack.
     """
 
     selected = names or list(DEMO_SCENARIOS)
