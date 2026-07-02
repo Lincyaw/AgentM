@@ -24,7 +24,7 @@ SIDE_EFFECT_TOOLS = frozenset({
 })
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReplayAction:
     """One side-effect action to replay."""
 
@@ -108,7 +108,7 @@ async def replay_actions(
     return executed
 
 
-@dataclass
+@dataclass(slots=True)
 class DockerReplayTarget:
     """Replay actions inside a Docker container via docker exec."""
 

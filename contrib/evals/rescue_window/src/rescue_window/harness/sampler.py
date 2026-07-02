@@ -22,7 +22,7 @@ from ..model import ForkPoint, PrefixPoint
 from .corpus import TrajectoryRef
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SamplingPolicy:
     """Which strata to draw per trajectory."""
 

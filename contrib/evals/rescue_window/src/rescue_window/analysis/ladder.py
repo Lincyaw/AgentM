@@ -27,7 +27,7 @@ def _rung_for(level: ContentLevel) -> LadderRung:
     return _RUNG_OF.get(level, LadderRung.CHANNEL)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PrefixLadder:
     prefix_id: str
     rung_best: dict[str, float]

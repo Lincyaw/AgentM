@@ -242,7 +242,7 @@ def _render_message(action: ActionType, level: ContentLevel, gt: GroundTruth) ->
 # --- oracle implementations -------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class StrongModelOracle:
     """ORACLE_GROUNDED via a strong model that knows GT but must stay prefix-grounded.
 

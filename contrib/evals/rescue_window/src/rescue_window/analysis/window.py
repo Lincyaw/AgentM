@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from .aggregate import AggregateResult, PrefixStat
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WindowMetrics:
     trajectory_id: str
     case_id: str

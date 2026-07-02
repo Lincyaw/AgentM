@@ -6,6 +6,8 @@ import shlex
 import tomllib
 from pathlib import Path
 
+from loguru import logger
+
 from .base import TaskSpec, image_name, upload_file_to_sandbox
 
 
@@ -138,8 +140,8 @@ class HarborAdapter:
             txt = r2.results[0].output.stdout.strip()
             if txt:
                 reward = float(txt)
-        except Exception:  # noqa: S110
-            pass
+        except Exception as exc:  # noqa: S110
+            logger.debug("Failed to read reward.txt: {}", exc)
 
         return {
             "reward": reward,

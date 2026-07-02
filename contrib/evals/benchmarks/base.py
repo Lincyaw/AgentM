@@ -13,12 +13,14 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Iterator, Protocol
 
+from loguru import logger
+
 
 # ---------------------------------------------------------------------------
 # Task spec -- uniform representation across all bench formats
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(slots=True)
 class TaskSpec:
     """Format-neutral description of a benchmark task."""
 
@@ -297,8 +299,8 @@ def replay_tools_to_sandbox(
                         "work_dir": "/app",
                     }])
                     replayed += 1
-        except Exception:  # noqa: S110
-            pass
+        except Exception as exc:  # noqa: S110
+            logger.debug("Replay step {} failed: {}", tool, exc)
     return replayed
 
 

@@ -39,7 +39,7 @@ class LadderRung(StrEnum):
     REALIZED = "realized"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PrefixPoint:
     """A sampled fork point on one trajectory (doc §6.4)."""
 
@@ -90,7 +90,7 @@ class PrefixPoint:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Treatment:
     """One branch condition: a typed intervention at a content level + rung."""
 
@@ -127,7 +127,7 @@ class Treatment:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EvalUnit:
     """One rollout outcome — the doc §6.2 evaluation unit ``z``."""
 

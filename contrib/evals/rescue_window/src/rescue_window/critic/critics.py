@@ -55,7 +55,7 @@ def _content_level(value: str) -> ContentLevel:
         return ContentLevel.TYPE
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AbstainCritic:
     """Never intervenes — the abstention floor for coverage analysis."""
 
@@ -68,7 +68,7 @@ class AbstainCritic:
         return None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AlwaysVerifyCritic:
     """Fires a generic typed VERIFY at every prefix — the high-coverage baseline."""
 

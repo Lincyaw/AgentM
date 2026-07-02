@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from loguru import logger
+
 from agentm.core.abi import AgentMessage, AgentSessionConfig
 from agentm.core.abi.loop import LoopConfig
 from agentm.core.abi.session_store import SessionStore
@@ -36,7 +38,7 @@ _ENV_SESSION_LOCK = asyncio.Lock()
 _ENV_SESSION_HELD: ContextVar[bool] = ContextVar("rescue_window_env_session_held", default=False)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RolloutConfig:
     """Runtime knobs shared by every branch at a prefix (budget fairness)."""
 
@@ -132,6 +134,7 @@ async def run_intervention_rollout(
             base, outcome, status="succeeded", fork_session_id=fork_id, n_messages=len(messages)
         )
     except Exception as exc:  # noqa: BLE001 -- one rollout must not sink the batch
+        logger.debug("Rollout failed for {}: {}", ref.trajectory_id, exc)
         return _with_error(base, f"{type(exc).__name__}: {exc}")
 
 
@@ -151,7 +154,8 @@ def _source_messages_for_env(store: SessionStore, ref: TrajectoryRef) -> list[Ag
     """Load source messages for environment setup (best-effort)."""
     try:
         return load_trajectory_messages(ref, store=store)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to load source messages for {}: {}", ref.trajectory_id, exc)
         return []
 
 

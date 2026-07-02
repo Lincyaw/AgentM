@@ -38,7 +38,7 @@ _VALID_UNTIL_KEYS = {"state_hash", "step_ttl"}
 _STRENGTH_VALUES = {"advisory", "blocking"}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ForkPoint:
     """A source-session fork selector."""
 
@@ -73,7 +73,7 @@ class ForkPoint:
         return {"turn_index": self.turn_index}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Intervention:
     """A typed intervention plus its actor-visible channel message."""
 

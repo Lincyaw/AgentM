@@ -29,7 +29,7 @@ _DEFAULT_CRITIC_LEVELS = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CellStat:
     """Q_t(u) for one (prefix, treatment) cell."""
 
@@ -43,7 +43,7 @@ class CellStat:
     p_delta_gt_eps: float | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PrefixStat:
     """Per-prefix opportunity / realization summary."""
 
@@ -65,7 +65,7 @@ class PrefixStat:
     harm_sensitive: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AggregateResult:
     epsilon: float
     prefixes: list[PrefixStat]

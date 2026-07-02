@@ -18,7 +18,7 @@ from agentm.core.abi import AgentMessage
 from agentm.core.abi.session_store import SessionState, SessionStore
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TrajectoryRef:
     """One baseline trajectory + its GT case directory."""
 

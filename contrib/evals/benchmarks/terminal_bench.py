@@ -7,6 +7,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from loguru import logger
+
 from .base import TaskSpec, eval_image_name, image_name, upload_file_to_sandbox
 
 try:
@@ -397,8 +399,8 @@ def _parse_scores(session: object, eval_out: str) -> dict:
             session._session_id, "test_output/f2p_score.json"  # type: ignore[attr-defined]
         )
         f2p = json.loads(data)
-    except Exception:  # noqa: S110
-        pass
+    except Exception as exc:  # noqa: S110
+        logger.debug("Failed to download f2p_score.json: {}", exc)
     if f2p is None:
         m = re.search(r"Score:\s*(\d+)\s*/\s*(\d+)", eval_out)
         if m:
@@ -421,8 +423,8 @@ def _parse_scores(session: object, eval_out: str) -> dict:
                 if passed + failed > 0:
                     f2p = {"is_pass": 1 if failed == 0 else 0,
                            "step_score": passed / (passed + failed)}
-        except Exception:  # noqa: S110
-            pass
+        except Exception as exc:  # noqa: S110
+            logger.debug("Failed to parse f2p_output.txt: {}", exc)
 
     p2p = None
     try:
@@ -434,7 +436,7 @@ def _parse_scores(session: object, eval_out: str) -> dict:
         failed = len(re.findall(r"FAILED", text))
         if passed + failed > 0:
             p2p = {"passed": passed, "total": passed + failed}
-    except Exception:  # noqa: S110
-        pass
+    except Exception as exc:  # noqa: S110
+        logger.debug("Failed to parse p2p_output.txt: {}", exc)
 
     return {"f2p": f2p, "p2p": p2p}

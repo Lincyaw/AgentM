@@ -19,7 +19,7 @@ from agentm.core.abi import AgentMessage, AssistantMessage, ToolCallBlock
 from .corpus import TrajectoryRef
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ScoredOutcome:
     """One judged rollout: continuous score primary, binary secondary (DESIGN §6)."""
 
@@ -29,7 +29,7 @@ class ScoredOutcome:
     error: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GroundTruth:
     """Scenario-opaque ground truth for a case.
 

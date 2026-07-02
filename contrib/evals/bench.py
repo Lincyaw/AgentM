@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Annotated, Any, Callable, cast
 
 import typer
+from loguru import logger
 
 from benchmarks import get_adapter
 from benchmarks.base import TaskSpec, eval_image_name, image_name, replay_trajectory
@@ -889,7 +890,6 @@ def batch(
 
     Ctrl-C stops submitting new tasks and waits for in-flight ones to finish.
     """
-    import signal
     from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
     from benchmarks.swebench import write_predictions
@@ -1045,6 +1045,7 @@ def batch(
                     line = adapter.format_score_line(r)
                     typer.echo(f"  {attempt_label}{line.strip()} ({completed}/{total_jobs})")
                 except Exception as e:
+                    logger.debug("Task {} failed: {}", name, e)
                     typer.echo(f"  {attempt_label}[ERROR] {name}: {e} ({completed}/{total_jobs})")
     finally:
         signal.signal(signal.SIGINT, prev_handler)
