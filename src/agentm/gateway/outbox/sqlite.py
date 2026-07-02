@@ -28,6 +28,8 @@ import sqlite3
 import threading
 from typing import Any
 
+from loguru import logger
+
 from agentm.gateway.wire import Envelope
 
 from .errors import OutboxClosed
@@ -215,6 +217,7 @@ class SqliteOutbox:
                 c.execute("DELETE FROM outbox WHERE id = ?", (record_id,))
                 c.execute("COMMIT")
             except Exception:
+                logger.warning("dead_letter transaction failed for record_id={}, rolling back", record_id)
                 c.execute("ROLLBACK")
                 raise
 

@@ -12,8 +12,7 @@ at-most-once-with-ack inbound, dead-letter on retry exhaustion).
 
 Mechanism only — the retry schedule lives in the caller (the server),
 which decides when to nack vs dead_letter and what ``next_retry_at`` to
-pass; :mod:`agentm.gateway.outbox.policy` offers an ``exponential_backoff``
-helper a backend may use, but the Protocol does not mandate one.
+pass. The Protocol does not mandate a specific retry policy.
 """
 
 from __future__ import annotations
@@ -73,8 +72,7 @@ class OutboxStore(Protocol):
     def nack(self, record_ids: list[int], next_retry_at: float) -> None:
         """Release the lease and reschedule for later retry.
 
-        ``next_retry_at`` is computed by the caller (see
-        :mod:`agentm.gateway.outbox.policy`).
+        ``next_retry_at`` is computed by the caller.
         """
         ...
 

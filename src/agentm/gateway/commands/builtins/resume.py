@@ -173,7 +173,8 @@ def _discover_sessions(
         from agentm.core.observability.clickhouse import get_url
 
         ch_url = get_url()
-    except Exception:
+    except Exception:  # noqa: BLE001
+        logger.debug("ClickHouse URL unavailable, will fall back to JSONL")
         ch_url = None
     if ch_url:
         try:
@@ -226,7 +227,8 @@ def _parse_timestamp(raw: str) -> float:
 
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         return dt.replace(tzinfo=timezone.utc).timestamp()
-    except Exception:
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to parse timestamp: {!r}", raw)
         return 0.0
 
 

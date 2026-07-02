@@ -46,6 +46,7 @@ def _available_model_names() -> list[str]:
 
         return list(load_user_config().models.keys())
     except Exception:  # noqa: BLE001
+        logger.debug("failed to load model profiles for wire service seeding")
         return []
 
 # (cwd, session_key, scenario, resume_session_id, wire_services) -> AgentSession
@@ -251,7 +252,8 @@ def _extract_session_id(session: Any) -> str | None:
         return None
     try:
         sid = getter()
-    except Exception:
+    except Exception:  # noqa: BLE001
+        logger.debug("get_session_id() raised for session object")
         return None
     return str(sid) if sid else None
 

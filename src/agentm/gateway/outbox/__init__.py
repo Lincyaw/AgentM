@@ -8,7 +8,6 @@ surface; default implementations are SQLite-backed.
 from __future__ import annotations
 
 from .errors import OutboxClosed, OutboxError
-from .policy import exponential_backoff
 from .protocol import InboxLog, OutboxRecord, OutboxStore
 from .sqlite import LEASE_TTL_SECONDS, SqliteInbox, SqliteOutbox
 
@@ -21,5 +20,4 @@ __all__ = [
     "OutboxStore",
     "SqliteInbox",
     "SqliteOutbox",
-    "exponential_backoff",
 ]

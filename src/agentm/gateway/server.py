@@ -212,6 +212,7 @@ class WireServer:
             body = hello.body if isinstance(hello.body, dict) else {}
             peer_name = str(body.get("peer_name") or body.get("peer_id") or "")
             peer_id = peer_name
+            # "auth" is canonical (what WireClient sends); "token" is a legacy alias.
             auth_raw = body.get("auth")
             token_raw = body.get("token") or (
                 auth_raw if isinstance(auth_raw, str) else None
