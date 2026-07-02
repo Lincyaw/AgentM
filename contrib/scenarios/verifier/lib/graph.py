@@ -129,6 +129,7 @@ def get_infra_nodes(data_dir: Path) -> set[str]:
             if r[0]
         }
     except Exception:  # noqa: BLE001
+        logger.debug("Failed to query normal_metrics for infra nodes")
         conn.close()
         return set()
     infra = {

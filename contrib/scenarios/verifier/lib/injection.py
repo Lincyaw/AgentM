@@ -119,6 +119,7 @@ def get_injections(data_dir: Path) -> list[dict[str, str]]:
         try:
             display = json.loads(display)
         except Exception:
+            logger.debug("Failed to parse display_config JSON")
             display = {}
     if not isinstance(display, dict):
         display = {}

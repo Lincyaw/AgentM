@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from loguru import logger
+
 
 def _annotate_sql_failure(failure: dict[str, str]) -> dict[str, str]:
     annotated = dict(failure)
@@ -171,6 +173,7 @@ def sql_statement_shape_failure(location: str, sql: str) -> dict[str, str] | Non
     try:
         parsed = duckdb.extract_statements(sql)
     except Exception as exc:  # noqa: BLE001
+        logger.debug("SQL parse failed at {}: {}", location, exc)
         return {
             "location": location,
             "error": str(exc).splitlines()[0][:300],

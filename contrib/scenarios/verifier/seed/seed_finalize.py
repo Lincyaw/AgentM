@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
+from loguru import logger
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -193,6 +194,7 @@ def _validate_sqls(data_dir: Path, verdict: SeedVerdict) -> list[dict[str, str]]
                     "error": "0 rows", "sql": ev.query.statement,
                 })
         except Exception as exc:  # noqa: BLE001
+            logger.debug("Evidence SQL failed at evidence[{}]: {}", i, exc)
             failures.append({
                 "location": f"evidence[{i}]",
                 "error": str(exc).splitlines()[0][:300],

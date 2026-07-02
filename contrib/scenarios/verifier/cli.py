@@ -249,6 +249,7 @@ def _read_cached(out_dir: Path, case_name: str) -> dict | None:
         try:
             scenario = json.loads(scenario_path.read_text())
         except Exception:  # noqa: BLE001
+            logger.debug("Failed to parse {}", scenario_path)
             return None
         seeds = [i["node_id"] for i in scenario.get("injections", [])]
         confirmed = [n["id"] for n in scenario.get("graph", {}).get("nodes", [])]
@@ -263,6 +264,7 @@ def _read_cached(out_dir: Path, case_name: str) -> dict | None:
         try:
             meta = json.loads(meta_path.read_text())
         except Exception:  # noqa: BLE001
+            logger.debug("Failed to parse {}", meta_path)
             return None
         if meta.get("error"):
             return {"case": case_name, "error": meta["error"], "cached": True}

@@ -24,7 +24,7 @@ from .lib.fpg import (
 FAULT_KINDS_DIR = Path(__file__).parent / "fault_kinds"
 
 
-@dataclass
+@dataclass(slots=True)
 class CaseContext:
     """Everything the propagation workflow needs for one case."""
 

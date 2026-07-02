@@ -16,6 +16,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from agentm.core.abi import (
@@ -189,6 +190,7 @@ def _validate_sqls(data_dir: Path, verdict: HopVerdict) -> list[dict[str, str]]:
                     "error": "0 rows", "sql": ev.query.statement,
                 })
         except Exception as exc:  # noqa: BLE001
+            logger.debug("Evidence SQL failed at {}: {}", location, exc)
             failures.append({
                 "location": location,
                 "error": str(exc).splitlines()[0][:300],

@@ -6,6 +6,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from .injection import get_injections
 
 
@@ -16,6 +18,7 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text())
     except Exception:  # noqa: BLE001
+        logger.debug("Failed to load JSON from {}", path)
         return None
     return value if isinstance(value, dict) else None
 
@@ -48,6 +51,7 @@ def _case_faults(dataset_dir: Path | None, case_name: str) -> list[dict[str, Any
     try:
         injections = get_injections(case_data_dir)
     except Exception:  # noqa: BLE001
+        logger.debug("Failed to get injections for case {}", case_name)
         return []
     return [
         {

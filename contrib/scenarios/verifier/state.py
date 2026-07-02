@@ -62,7 +62,7 @@ def _entry_services_from_graph(graph: dict[str, list[list[str]]]) -> set[str]:
     return explicit_entries or (callers - callees)
 
 
-@dataclass
+@dataclass(slots=True)
 class Case:
     """Immutable per-case inputs assembled from the workflow args."""
 
