@@ -27,8 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import json
 from collections.abc import Awaitable, Sequence
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.extensions.builtin.workflow import WorkflowContext
 
@@ -58,6 +61,7 @@ from .lib.schema import (
     HopResult,
     Injection,
     CandidateEdge,
+    FinalCheckIssue,
     FinalCheckReport,
     PropagationResult,
     ReworkRequest,
@@ -503,6 +507,11 @@ async def final_check_loop(
             }
         )
         if not requests:
+            # No hop rework available — try agent-based anomaly verification
+            # for remaining frontend_anomaly_explained issues.
+            fe_changed = await _verify_frontend_anomalies(ctx, case, state, report)
+            if fe_changed:
+                continue
             ctx.log("final checks found gaps but no direct recheck is available")
             return
         ctx.phase(
@@ -526,8 +535,146 @@ async def final_check_loop(
             changed = True
         graph_after = graph_progress_signature(state)
         if not changed or (graph_after == graph_before and not resolution_changed):
+            # Try agent-based anomaly verification for remaining issues
+            fe_report = state.evaluate_final_checks()
+            fe_changed = await _verify_frontend_anomalies(ctx, case, state, fe_report)
+            if fe_changed:
+                continue
             ctx.log("final-check rework made no graph progress; stopping")
             return
+
+    # After all rounds, one final anomaly verification pass
+    report = state.evaluate_final_checks()
+    if not report["passed"]:
+        await _verify_frontend_anomalies(ctx, case, state, report)
+
+
+class _AnomalyVerification(BaseModel):
+    """Structured result from a frontend anomaly verification agent."""
+
+    model_config = ConfigDict(extra="forbid")
+    resolution: Literal["explained", "unrelated"] = Field(
+        description="explained = the confirmed FPG path explains this "
+        "frontend endpoint anomaly; unrelated = the anomaly is not "
+        "connected to the confirmed path (background noise, different "
+        "fault, or workload shift)."
+    )
+    rationale: str = Field(
+        description="One paragraph: what SQL you ran and why the result "
+        "supports this resolution."
+    )
+    evidence_sql: str = Field(
+        default="",
+        description="The key SQL query that determined the resolution.",
+    )
+
+
+async def _verify_frontend_anomalies(
+    ctx: WorkflowContext,
+    case: Case,
+    state: GraphState,
+    report: FinalCheckReport,
+) -> bool:
+    """Launch lightweight agents to check if confirmed FPG paths explain
+    specific frontend endpoint anomalies.
+
+    This handles the granularity gap: the FPG has service-level paths but
+    ``frontend_anomaly_explained`` checks endpoint-level alarms. Instead of
+    brittle string matching, an agent queries the trace data to determine
+    whether a confirmed path actually carries the anomaly.
+    """
+    fe_issues = [
+        issue for issue in report["issues"]
+        if issue["check"] == "frontend_anomaly_explained"
+        and issue["item"] not in state.final_anomaly_resolutions
+    ]
+    if not fe_issues:
+        return False
+
+    ctx.phase("frontend-anomaly-verify")
+    ctx.log(f"Verifying {len(fe_issues)} frontend anomalies against confirmed paths")
+
+    graph_snapshot = state.graph_snapshot()
+
+    async def _verify_one(
+        issue: FinalCheckIssue,
+    ) -> tuple[FinalCheckIssue, _AnomalyVerification | None]:
+        details = issue.get("details", {})
+        anomaly_id = issue["item"]
+        component = details.get("component", anomaly_id)
+        service = details.get("service", "")
+        matched_services = details.get("matched_services", [])
+
+        prompt = (
+            "## Task\n"
+            "Determine whether a specific frontend endpoint anomaly is "
+            "explained by the confirmed FPG propagation paths.\n\n"
+            f"**Anomaly**: `{component}` on `{service}`\n"
+            f"**Path-aligned upstream services**: {matched_services}\n\n"
+            "## Confirmed FPG paths\n"
+            "```json\n"
+            + json.dumps(graph_snapshot, indent=2, ensure_ascii=False, default=str)[:3000]
+            + "\n```\n\n"
+            "## Instructions\n"
+            "1. Query the abnormal traces to check whether the anomaly "
+            f"endpoint `{component}` shows degradation (latency increase, "
+            "error increase, or vanishing) compared to normal.\n"
+            "2. If degraded, trace the call chain: does the endpoint's "
+            "trace contain spans from services on the confirmed FPG path? "
+            "Use parent_span_id joins to verify the causal chain.\n"
+            "3. If the degradation is explained by the confirmed path, "
+            "resolve as `explained`. If it is unrelated or background noise, "
+            "resolve as `unrelated`."
+        )
+
+        label = f"fe-verify-{anomaly_id[:40]}"
+        try:
+            result = await ctx.agent(
+                prompt,
+                scenario="verifier/gate",
+                schema=_AnomalyVerification,
+                tool_allowlist=["submit_result", "duckdb_sql"],
+                atom_config={
+                    "duckdb_sql": {"data_dir": case.data_dir},
+                },
+                retry=case.agent_retries,
+                trace_label=label,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ctx.log(f"  anomaly verify {anomaly_id[:40]}: error {exc}")
+            return issue, None
+
+        if isinstance(result, _AnomalyVerification):
+            return issue, result
+        return issue, None
+
+    results = await parallel_limited(
+        ctx,
+        [_verify_one(issue) for issue in fe_issues],
+        case.max_parallel_tasks,
+    )
+
+    changed = False
+    for pair in results:
+        if pair is None:
+            continue
+        issue, result = pair
+        if result is None:
+            ctx.log(f"  {issue['item'][:50]}: agent returned no structured result")
+            continue
+        anomaly_id = issue["item"]
+        resolved = state.resolve_frontend_anomaly(
+            anomaly_id,
+            resolution=result.resolution,
+            rationale=result.rationale,
+            evidence=[{"sql": result.evidence_sql}] if result.evidence_sql else [],
+            source="frontend-anomaly-verify",
+        )
+        if resolved:
+            changed = True
+            ctx.log(f"  {anomaly_id[:50]}: {result.resolution}")
+
+    return changed
 
 
 def graph_progress_signature(state: GraphState) -> tuple[
