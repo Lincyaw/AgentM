@@ -252,6 +252,7 @@ class GitBackedResourceWriter:
         try:
             current = await asyncio.to_thread(resolved.read_bytes)
         except Exception as exc:  # noqa: BLE001
+            logger.debug("resource_writer: read_bytes failed for {}: {}", path, exc)
             return WriteResult._error(path, path_class, str(exc))
         if current != old:
             return WriteResult._error(
@@ -263,6 +264,7 @@ class GitBackedResourceWriter:
             try:
                 await asyncio.to_thread(self._write_bytes, resolved, new)
             except Exception as exc:  # noqa: BLE001
+                logger.debug("resource_writer: write_bytes failed for {}: {}", path, exc)
                 return WriteResult._error(path, path_class, str(exc))
             return WriteResult._uncommitted(path, path_class)
 
@@ -429,7 +431,8 @@ class GitBackedResourceWriter:
 
             await asyncio.to_thread(self._commit, rationale, author)
             post_sha = await asyncio.to_thread(self._head_sha)
-        except Exception:
+        except Exception as exc:
+            logger.warning("resource_writer: batch commit failed, restoring: {}", exc)
             await asyncio.to_thread(
                 self._restore_after_failure_batch,
                 managed_restore,
@@ -478,6 +481,7 @@ class GitBackedResourceWriter:
             try:
                 await asyncio.to_thread(raw_op, resolved)
             except Exception as exc:  # noqa: BLE001
+                logger.debug("resource_writer: raw_op failed for {}: {}", path, exc)
                 return WriteResult._error(path, path_class, str(exc))
             return WriteResult._uncommitted(path, path_class)
 
@@ -521,6 +525,7 @@ class GitBackedResourceWriter:
             await asyncio.to_thread(self._commit, rationale, author)
             post_sha = await asyncio.to_thread(self._head_sha)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("resource_writer: commit failed for {}, restoring: {}", path, exc)
             await asyncio.to_thread(
                 self._restore_after_failure,
                 resolved,

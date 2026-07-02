@@ -570,6 +570,7 @@ class AtomReloader:
         try:
             manifest = self._validate_reload_source(name, atom.module_path, new_source)
         except Exception as exc:  # noqa: BLE001
+            logger.debug("atom_reloader: reload validation failed for {}: {}", name, exc)
             return ReloadResult(
                 ok=False,
                 name=name,
@@ -639,6 +640,7 @@ class AtomReloader:
                 new_hash=new_hash,
             )
         except Exception as exc:  # noqa: BLE001
+            logger.warning("atom_reloader: reload apply failed for {}, rolling back: {}", name, exc)
             try:
                 if advisory_mode:
                     rollback_fd, rollback_tmp_name = tempfile.mkstemp(
@@ -837,6 +839,7 @@ class AtomReloader:
         try:
             manifest = self._validate_install_source(name, module_path, source)
         except Exception as exc:  # noqa: BLE001
+            logger.debug("atom_reloader: install validation failed for {}: {}", name, exc)
             return InstallAtomResult(
                 ok=False,
                 name=name,
@@ -913,6 +916,7 @@ class AtomReloader:
         try:
             self._import_synthetic_module(module_path, target_file)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("atom_reloader: synthetic import failed for {}: {}", module_path, exc)
             self._cleanup_failed_install(target_file, file_existed, write_result)
             return InstallAtomResult(
                 ok=False,
@@ -938,6 +942,7 @@ class AtomReloader:
             api = self._api_factory(module_path)
             await self._finish_install(module_path, api, ext_cfg)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("atom_reloader: install() failed for {}: {}", module_path, exc)
             self._remove_handlers(module_path)
             self._remove_registrations(module_path)
             sys.modules.pop(module_path, None)

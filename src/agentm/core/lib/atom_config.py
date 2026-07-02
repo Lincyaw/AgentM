@@ -33,6 +33,8 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from loguru import logger
+
 from agentm.core.abi import ExtensionManifest
 
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
@@ -98,7 +100,8 @@ def resolve_atom_configs(
 def _load_manifest(module_path: str) -> ExtensionManifest | None:
     try:
         module = importlib.import_module(module_path)
-    except Exception:  # noqa: BLE001 — unimportable atoms pass through untouched.
+    except Exception as exc:  # noqa: BLE001 — unimportable atoms pass through untouched.
+        logger.debug("atom_config: could not import {}: {}", module_path, exc)
         return None
     manifest = getattr(module, "MANIFEST", None)
     return manifest if isinstance(manifest, ExtensionManifest) else None

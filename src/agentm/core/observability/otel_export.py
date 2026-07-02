@@ -213,7 +213,8 @@ class _FileOtlpExporter:
                 preserving_proto_field_name=False,
                 use_integers_for_enums=False,
             )
-        except Exception:  # pragma: no cover — encoder bugs are unexpected
+        except Exception as exc:  # pragma: no cover — encoder bugs are unexpected
+            logger.warning("otel_export: batch encode failed: {}", exc)
             return failure
         if not payload.get(self._payload_key):
             return success

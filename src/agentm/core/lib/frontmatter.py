@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 import frontmatter  # type: ignore[import-untyped]
+from loguru import logger
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -21,7 +22,8 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
 
     try:
         post = frontmatter.loads(text)
-    except Exception:
+    except Exception as exc:
+        logger.debug("frontmatter: parse failed, returning raw text: {}", exc)
         return {}, text
 
     metadata = post.metadata
