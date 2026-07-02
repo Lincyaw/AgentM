@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -159,6 +160,7 @@ def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
                 agent_initiated=True,
             )
         except Exception as exc:  # noqa: BLE001 — surface to the model.
+            logger.debug("atom_management: install_atom raised: {}", exc)
             return _error(f"install_atom raised: {exc}")
         if not result.ok:
             return _error(
@@ -198,6 +200,7 @@ def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
         try:
             result = api.unload_atom(name, agent_initiated=True)
         except Exception as exc:  # noqa: BLE001
+            logger.debug("atom_management: unload_atom raised: {}", exc)
             return _error(f"unload_atom raised: {exc}")
         if not result.ok:
             return _error(
@@ -231,6 +234,7 @@ def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
         try:
             atoms = api.list_atoms()
         except Exception as exc:  # noqa: BLE001
+            logger.debug("atom_management: list_atoms raised: {}", exc)
             return _error(f"list_atoms raised: {exc}")
         if not atoms:
             return _ok("(no atoms loaded)")

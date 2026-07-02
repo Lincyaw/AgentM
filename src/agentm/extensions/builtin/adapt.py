@@ -18,6 +18,7 @@ from typing import Any, Literal, TypeVar
 
 import agentm.core.abi as abi
 import yaml
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentm.core.abi import (
@@ -571,6 +572,7 @@ def _pin_manifest(api: ExtensionAPI, name: str) -> dict[str, Any]:
     try:
         loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
+        logger.debug("adapt: pin manifest read failed: {}", exc)
         return {"ok": False, "path": str(manifest_path), "error": str(exc)}
     if not isinstance(loaded, dict):
         return {"ok": False, "path": str(manifest_path), "error": "manifest root is not a mapping"}
@@ -594,6 +596,7 @@ def _unpin_manifest(api: ExtensionAPI, name: str) -> dict[str, Any]:
     try:
         loaded = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
+        logger.debug("adapt: unpin manifest read failed: {}", exc)
         return {"ok": False, "path": str(manifest_path), "error": str(exc)}
     if not isinstance(loaded, dict):
         return {"ok": False, "path": str(manifest_path), "error": "manifest root is not a mapping"}
@@ -896,6 +899,7 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
                 agent_initiated=True,
             )
         except Exception as exc:  # noqa: BLE001
+            logger.debug("adapt: install_atom raised: {}", exc)
             return _json_tool({"ok": False, "error": f"install_atom raised: {exc}"}, is_error=True)
 
         payload = _result_payload(result)
@@ -940,6 +944,7 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
                 is_error=True,
             )
         except Exception as exc:  # noqa: BLE001
+            logger.debug("adapt: read source failed: {}", exc)
             return _json_tool(
                 {"ok": False, "source_path": source_path, "error": f"read source failed: {exc}"},
                 is_error=True,
@@ -966,6 +971,7 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
                 agent_initiated=True,
             )
         except Exception as exc:  # noqa: BLE001
+            logger.debug("adapt: reload_atom raised: {}", exc)
             return _json_tool({"ok": False, "error": f"reload_atom raised: {exc}"}, is_error=True)
         payload = _result_payload(result)
         return _json_tool(payload, is_error=not bool(payload.get("ok", False)))
@@ -983,6 +989,7 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
                 is_error=True,
             )
         except Exception as exc:  # noqa: BLE001
+            logger.debug("adapt: read source failed: {}", exc)
             return _json_tool(
                 {"ok": False, "source_path": source_path, "error": f"read source failed: {exc}"},
                 is_error=True,
@@ -995,6 +1002,7 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
                 agent_initiated=True,
             )
         except Exception as exc:  # noqa: BLE001
+            logger.debug("adapt: reload_atom raised: {}", exc)
             return _json_tool({"ok": False, "error": f"reload_atom raised: {exc}"}, is_error=True)
         payload = _result_payload(result)
         payload["source_origin"] = source_path
@@ -1007,6 +1015,7 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         try:
             result = api.unload_atom(params.name, agent_initiated=True)
         except Exception as exc:  # noqa: BLE001
+            logger.debug("adapt: unload_atom raised: {}", exc)
             return _json_tool({"ok": False, "error": f"unload_atom raised: {exc}"}, is_error=True)
         payload = _result_payload(result)
         if params.unpin_manifest:

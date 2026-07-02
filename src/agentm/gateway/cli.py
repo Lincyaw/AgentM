@@ -88,7 +88,7 @@ class _InterceptHandler(_stdlib_logging.Handler):
 # -------- bind resolution ---------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BindSpec:
     """Resolved ``--bind`` configuration."""
 

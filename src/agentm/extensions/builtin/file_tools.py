@@ -479,6 +479,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         try:
             data = await _get_file_ops().read_file(path)
         except Exception as exc:
+            logger.debug("file_tools: read failed for {}: {}", path, exc)
             return _error(f"Failed to read {path!r}: {exc}")
 
         # --- max-size gate (checked on raw bytes, before decode) ---
@@ -535,6 +536,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
 
             return _ok(header + "\n" + "\n".join(numbered))
         except Exception as exc:
+            logger.debug("file_tools: read decode failed for {}: {}", path, exc)
             return _error(f"Failed to read {path!r}: {exc}")
 
     if "read" in enabled_tools:
@@ -653,6 +655,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             byte_count = len(content.encode("utf-8"))
             return _ok(f"{action} {path!r} ({byte_count} bytes)")
         except Exception as exc:
+            logger.debug("file_tools: write failed for {}: {}", path, exc)
             return _error(f"Failed to write {path!r}: {exc}")
 
     if "write" in enabled_tools:

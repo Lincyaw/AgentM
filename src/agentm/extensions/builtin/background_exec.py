@@ -43,6 +43,8 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from loguru import logger
+
 from agentm.core.abi import (
     AgentStartEvent,
     ExtensionAPI,
@@ -478,6 +480,7 @@ class _BgManager:
                 self._finalize(state)
                 return
             except Exception as exc:  # noqa: BLE001
+                logger.warning("background_exec: tool {} raised: {}", state.tool_name, exc)
                 state.status = _ERROR
                 state.error = str(exc) or exc.__class__.__name__
                 self._finalize(state)

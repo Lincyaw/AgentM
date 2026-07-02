@@ -244,7 +244,7 @@ def _to_anthropic_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]
             raise TypeError(f"unsupported message type: {type(msg)!r}")
     return out
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AnthropicToolSpecAdapter(ToolSpecAdapter):
     """Convert AgentM tools to Anthropic Messages API tool specs."""
 

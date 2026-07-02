@@ -19,7 +19,7 @@ GATEWAY_UNIT = "agentm-gateway"
 FEISHU_UNIT = "agentm-feishu"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SystemdPlan:
     """Everything the render/install steps need, fully resolved up front.
 

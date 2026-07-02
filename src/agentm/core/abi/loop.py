@@ -886,7 +886,7 @@ class AgentLoop:
                         # any events — see the docstring above.
                         raise
                     except Exception as exc:  # noqa: BLE001
-                        # Uniform exception → error-result conversion.
+                        logger.debug("loop: tool {} raised: {}", tc.name, exc)
                         outcome = ToolContinue(
                             result=await self._make_error_result(
                                 kind="execution_failed",

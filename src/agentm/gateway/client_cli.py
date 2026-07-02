@@ -19,7 +19,7 @@ class ConnectError(ValueError):
     incompatible flags (e.g. ``--tls-ca`` on a unix:// URL)."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ConnectSpec:
     """Resolved client-side endpoint."""
 
@@ -28,7 +28,7 @@ class ConnectSpec:
     uri: str = ""  # ws/wss
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ConnectOptions:
     """Raw client-side ``--connect`` typer arguments before resolution.
 

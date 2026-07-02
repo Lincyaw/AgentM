@@ -911,6 +911,7 @@ async def _write_cross_session(
         new_hash = result.commit_sha_after or hashlib.sha256(new_bytes).hexdigest()[:12]
         return True, old_hash, new_hash, None
     except Exception as exc:  # noqa: BLE001
+        logger.debug("propose_change: write through resource_writer failed: {}", exc)
         return False, None, None, str(exc)
 
 def _git_head_sha_for_path(source_path: str | None) -> str | None:

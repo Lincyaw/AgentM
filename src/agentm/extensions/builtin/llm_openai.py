@@ -349,7 +349,7 @@ def _to_openai_messages(
             raise TypeError(f"unsupported message type: {type(msg)!r}")
     return out
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class OpenAIToolSpecAdapter(ToolSpecAdapter):
     """Convert AgentM tools to OpenAI function-tool specs.
 

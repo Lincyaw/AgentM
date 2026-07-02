@@ -663,6 +663,7 @@ async def _prime_contrib_discovery(config: AgentSessionConfig, bus: EventBus) ->
         try:
             discover_fn()
         except Exception as exc:  # noqa: BLE001
+            logger.warning("session_factory: {} discovery failed: {}", role, exc)
             await bus.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(

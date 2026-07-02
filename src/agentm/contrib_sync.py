@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from loguru import logger
 
 from agentm.core.lib.user_config import agentm_home_dir
 
@@ -33,7 +34,7 @@ COPY_IGNORE = shutil.ignore_patterns(
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SyncRecord:
     kind: str
     source: str | None
@@ -62,7 +63,8 @@ def _repo_contrib_root() -> Path | None:
 def _packaged_scenarios_root() -> Path | None:
     try:
         from importlib.resources import files
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("contrib_sync: importlib.resources unavailable: {}", exc)
         return None
     try:
         root = files("agentm.scenarios")

@@ -28,7 +28,7 @@ class ModelBuildConfig(TypedDict, total=False):
     api_version: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ModelProfile:
     """A named model profile from ``[models.<name>]``."""
 
@@ -68,7 +68,7 @@ class ModelProfile:
         return config
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UserConfig:
     """Top-level user config parsed from ``config.toml``."""
 

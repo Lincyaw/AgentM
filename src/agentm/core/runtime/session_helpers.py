@@ -8,6 +8,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from loguru import logger
+
 from agentm.core.abi import AgentMessage, EventBus, LoopConfig, TerminationCause
 from agentm.core.abi.events import DiagnosticEvent, EntryAppendedEvent
 from agentm.core.runtime.extension import ExtensionLoadError, ProviderConfig, ReadonlySession
@@ -162,6 +164,7 @@ async def collect_auto_discovered_atoms(
         try:
             discovered = source.discover()
         except Exception as exc:  # noqa: BLE001
+            logger.warning("session_helpers: discovery source raised: {}", exc)
             await bus.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(

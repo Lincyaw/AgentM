@@ -215,7 +215,7 @@ SetConfigOpt = Annotated[
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class CliRunConfig:
     """Resolved CLI flags for session construction.
 

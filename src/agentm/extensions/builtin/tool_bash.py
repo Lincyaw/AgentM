@@ -6,6 +6,7 @@ import asyncio
 import time
 from typing import Any, Final
 
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -95,6 +96,7 @@ class _BashTool:
                 cmd, cwd=self._api.cwd, timeout=timeout, signal=signal
             )
         except Exception as exc:
+            logger.debug("tool_bash: exec failed for {!r}: {}", cmd, exc)
             return _error(f"Failed to run command {cmd!r}: {exc}")
         wall_time = round(time.monotonic() - t0, 1)
 
