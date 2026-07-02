@@ -212,6 +212,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             if getattr(write_result, "error", None) is not None:
                 return _error(f"write failed: {write_result.error}")
         except Exception as exc:
+            logger.warning("memory save write failed: {}", exc)
             return _error(f"write failed: {exc}")
 
         index_error = await _rewrite_index(file_ops, writer, base_path, api.cwd)
@@ -227,6 +228,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         try:
             data = await file_ops.read_file(str(path))
         except Exception as exc:
+            logger.warning("memory read failed for {}: {}", name, exc)
             return _error(f"read failed: {exc}")
         text = data.decode("utf-8", errors="replace")
         await _record_access(file_ops, writer, base_path, name, api.cwd)
@@ -281,6 +283,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         try:
             await writer.delete(rel, rationale="memory_delete")
         except Exception as exc:
+            logger.warning("memory delete failed for {}: {}", name, exc)
             return _error(f"delete failed: {exc}")
         index_error = await _rewrite_index(file_ops, writer, base_path, api.cwd)
         if index_error is not None:
@@ -452,6 +455,7 @@ async def _rewrite_index(
         if getattr(result, "error", None) is not None:
             return f"index rebuild failed: {result.error}"
     except Exception as exc:
+        logger.warning("memory index rebuild failed: {}", exc)
         return f"index rebuild failed: {exc}"
     return None
 
@@ -473,7 +477,8 @@ async def _record_access(
             stats = json.loads(raw.decode("utf-8", errors="replace"))
             if not isinstance(stats, dict):
                 stats = {}
-    except Exception:
+    except Exception as exc:
+        logger.debug("memory access stats read failed: {}", exc)
         stats = {}
 
     prev = stats.get(name)
@@ -486,7 +491,8 @@ async def _record_access(
     payload = json.dumps(stats, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     try:
         await writer.write(rel, payload.encode("utf-8"), rationale="memory_access_stats")
-    except Exception:
+    except Exception as exc:
+        logger.debug("memory access stats write failed: {}", exc)
         return
 
 def _ok(text: str) -> ToolResult:

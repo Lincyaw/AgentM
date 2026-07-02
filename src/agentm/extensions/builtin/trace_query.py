@@ -51,7 +51,8 @@ def _get_backend() -> tuple[Any, str] | None:
         if url is None:
             return None
         return clickhouse, url
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("trace_query: clickhouse backend unavailable: {}", exc)
         return None
 
 

@@ -661,6 +661,7 @@ class _ChildTaskManager:
             )
             return state.final_messages
         except Exception as exc:  # noqa: BLE001
+            logger.warning("sub_agent child session error: {}", exc)
             await self._finalize_state(
                 state,
                 status=_ERROR,
@@ -788,6 +789,7 @@ class _ChildTaskManager:
         try:
             child = await self._api.spawn_child_session(**child_config)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("sub_agent spawn_child_session failed: {}", exc)
             await self._registry.release_slot()
             return _tool_result(
                 {

@@ -397,11 +397,13 @@ def discover_entrypoint_atoms() -> dict[str, BuiltinEntry]:
 
     try:
         from importlib.metadata import entry_points
-    except Exception:  # noqa: BLE001 — defensive; importlib.metadata is stdlib
+    except Exception as exc:  # noqa: BLE001 — defensive; importlib.metadata is stdlib
+        logger.debug("entry-point discovery: importlib.metadata import failed: {}", exc)
         return {}
     try:
         eps = entry_points(group="agentm.atoms")
-    except Exception:  # noqa: BLE001 — a broken EP table must not deny the catalog
+    except Exception as exc:  # noqa: BLE001 — a broken EP table must not deny the catalog
+        logger.debug("entry-point discovery: entry_points() call failed: {}", exc)
         return {}
 
     entries: dict[str, BuiltinEntry] = {}

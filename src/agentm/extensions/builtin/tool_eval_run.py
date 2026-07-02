@@ -431,7 +431,8 @@ def _load_grader(grader_path: Path) -> Any:
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("grader module load failed for {}: {}", grader_path, exc)
         sys.modules.pop(module_name, None)
         return None
     fn = getattr(module, "grade", None)
@@ -485,6 +486,7 @@ async def _run_single_sample(
     try:
         child = await api.spawn_child_session(child_config)
     except Exception as exc:  # noqa: BLE001
+        logger.warning("eval child session spawn failed: {}", exc)
         return {
             "final_text": f"<spawn-failed: {exc}>",
             "tool_errors": 1,
@@ -497,6 +499,7 @@ async def _run_single_sample(
         try:
             messages = await child.prompt(user_message)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("eval child session prompt failed: {}", exc)
             return {
                 "final_text": f"<prompt-failed: {exc}>",
                 "tool_errors": 1,

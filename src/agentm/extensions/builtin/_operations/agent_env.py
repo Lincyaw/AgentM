@@ -270,6 +270,7 @@ class _AgentEnvBashOperations:
             else:
                 response = await execute_task
         except Exception as exc:  # noqa: BLE001
+            logger.warning("agent-env execute failed: {}", exc)
             stderr = f"agent-env execute failed: {exc}".encode()
             timed_out = effective_timeout is not None and "timeout" in str(exc).lower()
             return ExecResult(stdout=b"", stderr=stderr, exit_code=124, timed_out=timed_out)
@@ -521,6 +522,7 @@ class _AgentEnvResourceWriter:
         try:
             self._session.upload_file(upload_rel, content)
         except Exception as exc:
+            logger.warning("agent-env file upload failed: {}", exc)
             return False, str(exc)
         candidate_tests = " ".join(_sh_quote(path) for path in upload_candidates)
         copy_script = f"""
@@ -687,7 +689,8 @@ rm -f "$src"
                     }
                 ]
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("agent-env mtime token fetch failed: {}", exc)
             return None
         if not response.results:
             return None

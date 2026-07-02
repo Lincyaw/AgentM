@@ -153,12 +153,14 @@ def _resolve_scenario_entrypoint(name: str) -> Path | None:
     try:
         from importlib.metadata import entry_points
         from importlib.resources import files
-    except Exception:  # noqa: BLE001 — importlib always present on 3.12; defensive
+    except Exception as exc:  # noqa: BLE001 — importlib always present on 3.12; defensive
+        logger.debug("scenario EP lookup: importlib import failed: {}", exc)
         return None
 
     try:
         eps = entry_points(group="agentm.scenarios")
-    except Exception:  # noqa: BLE001 — never let discovery break loading
+    except Exception as exc:  # noqa: BLE001 — never let discovery break loading
+        logger.debug("scenario EP lookup: entry_points() call failed: {}", exc)
         return None
 
     for ep in eps:
@@ -201,7 +203,8 @@ def _resolve_packaged_scenario(name: str) -> Path | None:
         return None
     try:
         from importlib.resources import files
-    except Exception:  # noqa: BLE001 — importlib.resources is stdlib; defensive
+    except Exception as exc:  # noqa: BLE001 — importlib.resources is stdlib; defensive
+        logger.debug("packaged scenario lookup: importlib.resources import failed: {}", exc)
         return None
     try:
         manifest = files(f"agentm.scenarios.{name}") / "manifest.yaml"
@@ -290,7 +293,8 @@ def load_scenario(
     extensions = _load_from_path(manifest_path)
     try:
         payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("manifest YAML parse failed for {}: {}", manifest_path, exc)
         payload = None
     meta: dict[str, Any] = {"scenario_dir": str(manifest_path.parent)}
     if isinstance(payload, dict):

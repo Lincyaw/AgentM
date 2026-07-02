@@ -76,7 +76,8 @@ async def _read_file(
         if not await file_ops.access(str(path)):
             return None
         raw = await file_ops.read_file(str(path))
-    except Exception:
+    except Exception as exc:
+        logger.debug("persona: failed to read {}: {}", path, exc)
         return None
     text = raw.decode("utf-8", errors="replace").strip()
     if not text:

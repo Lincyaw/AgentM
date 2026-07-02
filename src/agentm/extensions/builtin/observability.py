@@ -362,7 +362,8 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
                 return
             try:
                 before = to_jsonable(event)
-            except Exception:
+            except Exception as exc:
+                logger.debug("observability: pre-handler snapshot serialization failed: {}", exc)
                 return
             pending_diff_snapshots.append((channel, handler, before, event))
 
@@ -417,7 +418,8 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
             payload: Any = None
             try:
                 payload = to_jsonable(event)
-            except Exception:
+            except Exception as exc:
+                logger.debug("observability: event payload serialization failed: {}", exc)
                 payload = None
             if channel == BeforeSendToLlmEvent.CHANNEL and isinstance(payload, dict):
                 payload.pop("messages", None)
@@ -455,7 +457,8 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
             try:
                 after = to_jsonable(snapshot_event)
                 diff = _deep_diff(before, after)
-            except Exception:
+            except Exception as exc:
+                logger.debug("observability: post-handler diff computation failed: {}", exc)
                 return
             if not diff:
                 return

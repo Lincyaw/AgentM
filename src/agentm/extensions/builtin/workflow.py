@@ -2062,6 +2062,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
                 f"workflow: script exceeded wall-clock budget ({wall_clock_timeout}s)"
             )
         except Exception as exc:
+            logger.warning("workflow script error: {}: {}", type(exc).__name__, exc)
             return _error(f"workflow script error: {type(exc).__name__}: {exc}")
 
         return ToolResult(
