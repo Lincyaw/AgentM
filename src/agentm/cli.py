@@ -28,7 +28,7 @@ from agentm.cli_validate import app as _validate_app
 from agentm.cli_workflow import app as _workflow_app
 from agentm.code_health import app as _lint_app
 from agentm.contrib_sync import app as _contrib_app
-from agentm.env import autoload_dotenv
+from agentm.env import autoload_dotenv, resolve_cli_cwd
 from agentm.core.abi import LoopConfig
 from agentm.core.abi.events import (
     DiagnosticEvent,
@@ -435,11 +435,6 @@ def _parse_set_overrides(values: list[str] | None) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _resolve_cwd_arg(cwd: str | None) -> str:
-    raw = cwd or os.environ.get("AGENTM_CWD") or os.getcwd()
-    return str(Path(raw).expanduser())
-
-
 def _resolve_provider_model_cwd(
     *,
     provider_flag: str | None,
@@ -458,7 +453,7 @@ def _resolve_provider_model_cwd(
         model_flag=model_flag,
         registry=registry,
     )
-    cwd = _resolve_cwd_arg(cwd_flag)
+    cwd = str(resolve_cli_cwd(cwd_flag))
     return provider, model, cwd, profile
 
 
@@ -981,8 +976,8 @@ def run_cmd(
     # silently picking the wrong backend. Compute cwd inline using the
     # same precedence ``_resolve_provider_model_cwd`` will apply, so
     # ``--cwd /b`` still consults ``/b/.env`` not the process cwd.
-    pre_cwd = _resolve_cwd_arg(cwd)
-    autoload_dotenv(Path(pre_cwd))
+    pre_cwd = resolve_cli_cwd(cwd)
+    autoload_dotenv(pre_cwd)
 
     # When a subcommand (``trace`` / ``daemon`` / ``gateway`` /
     # ``list-extensions`` / ``list-scenarios``) is
@@ -1125,8 +1120,8 @@ def fork_cmd(
             "specify exactly one of --message-id, --turn-id, or --turn-index"
         )
 
-    pre_cwd = _resolve_cwd_arg(cwd)
-    autoload_dotenv(Path(pre_cwd))
+    pre_cwd = resolve_cli_cwd(cwd)
+    autoload_dotenv(pre_cwd)
     provider_was_explicit = provider is not None
     model_was_explicit = model is not None
     provider, model, cwd, profile = _resolve_provider_model_cwd(
@@ -1195,12 +1190,12 @@ def list_extensions_cmd(
         ),
     ] = None,
     cwd: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--cwd",
             help="Working directory used for 'user' source discovery.",
         ),
-    ] = os.getcwd(),
+    ] = None,
 ) -> None:
     """List discoverable extensions (atoms) by source.
 
@@ -1239,7 +1234,7 @@ def list_extensions_cmd(
         if source in {"all", "home"}:
             buckets.append(("home", discover_home_atoms()))
         if source in {"all", "user"}:
-            buckets.append(("user", discover_user_atoms(Path(cwd).expanduser())))
+            buckets.append(("user", discover_user_atoms(resolve_cli_cwd(cwd))))
     except Exception as exc:
         logger.error("discovery failed: {exc}", exc=exc)
         raise typer.Exit(code=1) from exc
@@ -1496,7 +1491,7 @@ def terminal_cmd(
         run_terminal,
     )
 
-    resolved_cwd = Path(_resolve_cwd_arg(cwd))
+    resolved_cwd = resolve_cli_cwd(cwd)
     autoload_dotenv(resolved_cwd)
     resolved_scenario = (
         scenario if scenario is not None else os.environ.get("AGENTM_SCENARIO")

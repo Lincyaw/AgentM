@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from agentm.env import autoload_dotenv
+from agentm.env import autoload_dotenv, resolve_cli_cwd
 from agentm.gateway_daemon import (
     GatewayDaemonConfig,
     GatewayDaemonError,
@@ -30,7 +29,7 @@ app = typer.Typer(
 
 
 def _resolve_cwd(cwd: str | None) -> Path:
-    return Path(cwd or os.environ.get("AGENTM_CWD") or os.getcwd()).expanduser()
+    return resolve_cli_cwd(cwd)
 
 
 def _autoload_daemon_env(cwd: str | None) -> Path:

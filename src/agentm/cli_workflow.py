@@ -11,12 +11,13 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from loguru import logger
+
+from agentm.env import resolve_cli_cwd
 
 app = typer.Typer(
     name="workflow",
@@ -85,9 +86,7 @@ def run(
             raise typer.BadParameter("--args must be a JSON object")
         workflow_args = parsed
 
-    resolved_cwd = str(
-        Path(cwd or os.environ.get("AGENTM_CWD") or os.getcwd()).expanduser()
-    )
+    resolved_cwd = str(resolve_cli_cwd(cwd))
     script_path = script.resolve()
 
     exit_code = asyncio.run(

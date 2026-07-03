@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 import typer
 from loguru import logger
 
+from agentm.env import resolve_cli_cwd
 from agentm.gateway import autoload_dotenv, default_socket_url, load_token_file
 from agentm.gateway.auth import (
     Authenticator,
@@ -440,7 +441,7 @@ def cli(
     # A prior process (e.g. a TUI that crashed) may have left the PTY in
     # raw mode where intr is disabled; without this, Ctrl-C is swallowed.
     _restore_terminal()
-    resolved_cwd = str(Path(cwd or str(Path.cwd())).expanduser())
+    resolved_cwd = str(resolve_cli_cwd(cwd))
     autoload_dotenv(Path(resolved_cwd))
     try:
         rc = asyncio.run(

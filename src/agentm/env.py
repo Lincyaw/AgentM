@@ -15,6 +15,17 @@ _external_env_keys: set[str] | None = None
 _loaded_dotenv_values: dict[str, str] = {}
 
 
+def resolve_cli_cwd(cwd: str | Path | None = None) -> Path:
+    """Resolve a CLI working directory without following symlinks.
+
+    Precedence is explicit ``--cwd`` value, then ``AGENTM_CWD``, then the
+    process cwd. ``~`` is expanded so later path users see the same directory
+    that ``autoload_dotenv`` would inspect.
+    """
+    raw = cwd or os.environ.get("AGENTM_CWD") or Path.cwd()
+    return Path(raw).expanduser()
+
+
 def autoload_dotenv(cwd: Path | None = None) -> None:
     """Load AgentM ``.env`` files without overriding existing environment.
 
