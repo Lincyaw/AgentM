@@ -2,7 +2,7 @@
 
 Status: implemented (branch `workflow-python`)
 Owner: builtin atom `workflow`; reuses `spawn_child_session`, `artifact_store`,
-`operations_agent_env`, the event bus.
+`operations` with `backend: agent_env`, the event bus.
 
 Reaches into: `extensions/builtin/workflow.py`, `ExtensionAPI.spawn_child_session`,
 `artifact_store` service, event bus (`emit(channel, event)` generic overload).
@@ -57,11 +57,12 @@ loop** in a **curated namespace**. The namespace is a *guardrail, not a
 sandbox*: `__builtins__` is data-ops only (no `open`/`__import__`/`eval`), and
 `time`/`random` are simply **not injected** (keeping the resume key
 deterministic). It is not escape-proof — hard isolation, when actually needed
-(multi-tenant), is the worker `operations_agent_env` sandbox or a process
-boundary, the same answer as for `bash`.
+(multi-tenant), is the worker `operations` atom's `agent_env` backend sandbox
+or a process boundary, the same answer as for `bash`.
 
 Two non-overlapping concerns: the **curated namespace** shapes the orchestration
-script; **`operations_agent_env`** confines a *worker's* bash/file ops.
+script; the **`operations` atom's `agent_env` backend** confines a *worker's*
+bash/file ops.
 
 ## Primitive → existing-API mapping
 
@@ -73,7 +74,7 @@ script; **`operations_agent_env`** confines a *worker's* bash/file ops.
 | `pipeline(items, *stages)` → list | per-item `_chain` (await each stage, sync or async) under `asyncio.gather`; **no cross-item barrier** | **implemented** (native async) |
 | `budget` (`.total`/`.spent()`/`.remaining()`) | `_BudgetService` summing child `TurnEndEvent.message.usage`; ceiling from `budget_tokens` config | new aggregation |
 | `args` (dict) / `log(msg)` / `phase(name)` | caller payload / fire-and-forget `WorkflowPhaseEvent` on the parent bus | reuse |
-| worker isolation (`isolation="agent_env"`) | include `operations_agent_env` in the child `extensions`, guarded by a runtime `list_atoms()` check | reuse + soft-dep guard |
+| worker isolation (`isolation="agent_env"`) | include `agentm.extensions.builtin.operations` in the child `extensions`, guarded by a runtime `list_atoms()` check | reuse + soft-dep guard |
 | mock workers (`agent_mock="mock"` / CLI `--mock-agents`) | bypass `spawn_child_session`, emit each `agent()` call's prompt/options as `workflow_phase` logs, return synthetic Markdown or schema-shaped JSON | debug aid |
 
 `agent()` takes **real kwargs** (not a JS opts object); `parallel`/`pipeline`
@@ -180,9 +181,10 @@ model in the tool's reference surface, not encoded in the runtime.
   `api.get_service`, workers via `api.spawn_child_session`.
 - The curated namespace is handed nothing from `core.runtime.*`; the SDK closures
   close over `api` but the script only sees the injected names + safe builtins.
-- Worker isolation (`operations_agent_env`) is selected by composition (listing
-  the atom in the child's `extensions`), not a privileged config field.
-- **`operations_agent_env` is a *soft* dependency, by design.** NOT in
+- Worker isolation (`operations` atom with `backend: agent_env`) is selected by
+  composition (listing the atom in the child's `extensions`), not a privileged
+  config field.
+- **`operations`/`agent_env` is a *soft* dependency, by design.** NOT in
   `MANIFEST.requires` (that would force every workflow user to pull the agent-env
   extra + a K8s gateway). Enforcement is a **runtime availability guard**
   (`list_atoms()` → clear error if the script asks for agent-env isolation but
@@ -275,7 +277,7 @@ outcome = await runner.run_file(
   (the old `os.environ` route is racy under parallel runs). The one change that
   would touch the substrate; deferred until a real need.
 - **Multi-tenant hard isolation** of a shared gateway running other users'
-  scripts — out of this layer; reuse `operations_agent_env` / a process
-  boundary, the same answer as for `bash`.
+  scripts — out of this layer; reuse the `operations` atom's `agent_env`
+  backend / a process boundary, the same answer as for `bash`.
 - Cross-session (non-tree) resume, nested workflows beyond one level, binary
   artifacts — deferred.

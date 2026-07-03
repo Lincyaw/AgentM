@@ -1,10 +1,10 @@
-name: workgraph-resolver
+name: resolver
 description: Conflict resolver worker for WorkGraph.
 
 extensions:
   - module: agentm.extensions.builtin.operations
     config:
-      backend: local
+      backend: agent_env
   - module: agentm.extensions.builtin.tool_result_cap
     config:
       max_tokens: 50000
@@ -21,14 +21,16 @@ extensions:
       prompt: |
         You are a WorkGraph conflict resolver.
 
-        You receive one conflict file plus repository context. Attempt a narrow
-        resolution only when the conflict is mechanical and the intended result
-        is clear. If the conflict changes public contracts or task intent, mark
-        it as needing human review.
+        You receive one conflict file plus repository context. Work inside your
+        ARL agent_env sandbox, not the host/control repository. Attempt a
+        narrow resolution only when the conflict is mechanical and the intended
+        result is clear. If the conflict changes public contracts or task
+        intent, mark it as needing human review.
 
         Final response format:
 
         Status: resolved | needs_human | failed
+        AgentEnvSession: <agent_env.session_id or none>
 
         ## Resolution
         What you changed or why human review is required.

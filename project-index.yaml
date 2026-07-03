@@ -964,31 +964,35 @@ requirements:
       - REQ-176-background-tasks-registry
 
   - id: REQ-187-agent-env-pool-scaling
-    title: ARL agent-env sessions pass pool scaling hints for concurrent benchmarks
+    title: ARL agent-env sessions use managed warm-pool lifecycle controls
     description: >
       The agent-env operations backend must require an ARL SDK version that
-      accepts managed-session pool scaling fields, expose those fields through
-      the operations manifest config, and have the benchmark runner pass
-      scale_up_step, max_replicas as a hard ceiling, min_replicas defaulting to
-      0, and longer create/session TTLs so pass@k attempts do not fail just
-      because the managed pool defaulted to fewer ready pods than the requested
-      benchmark concurrency. Benchmark agent sandboxes must also survive until
-      replay/evaluation completes; the runner, not the agent session shutdown
-      hook, owns experiment cleanup so agent timeouts do not turn into
-      missing-source-session eval failures.
+      uses managed-session image/profile selection, resource requirements, SDK
+      file transfer, typed replay responses, and long create/session TTLs while
+      keeping pool scaling policy in gateway/pool configuration rather than atom
+      config. Benchmark agent sandboxes must also survive until replay/evaluation
+      completes; the runner, not the agent session shutdown hook, owns experiment
+      cleanup so agent timeouts do not turn into missing-source-session eval
+      failures.
     priority: P1
-    status: implemented
+    status: tested
     confidence: confirmed
     code:
       - path: pyproject.toml
       - path: uv.lock
       - path: src/agentm/extensions/builtin/operations.py
       - path: src/agentm/extensions/builtin/_operations/agent_env.py
+      - path: contrib/scenarios/sandbox/manifest.yaml
       - path: contrib/evals/bench.py
       - path: contrib/evals/benchmarks/base.py
       - path: contrib/evals/benchmarks/terminal_bench.py
-    tests: []
-    docs: []
+    tests:
+      - path: tests/integration/test_agent_env_real_session.py
+      - path: tests/unit/extensions/test_agent_env_operations.py
+    docs:
+      - path: .claude/designs/dynamic-workflow.md
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/designs/control-loop-harness.md
     depends_on:
       - REQ-089-file-tool-io-seams
 
@@ -1205,15 +1209,20 @@ requirements:
       The contrib workgraph scenario must provide a long-lived main
       orchestrator agent that talks with the user, maintains a lightweight
       filesystem task bus under ``.agentm/workgraph/``, and launches
-      short-lived development workflows for individual ready tasks. The task
-      bus must use Markdown task files and simple directories for ready,
-      running, done, failed, conflicts, locks, and results state instead of a
-      rigid database schema. The development workflow must claim dependency-
+      short-lived ARL-backed development workflows for individual ready tasks.
+      The task bus must use Markdown task files and simple directories for
+      ready, running, done, failed, conflicts, locks, and results state instead
+      of a rigid database schema. The development workflow must claim dependency-
       satisfied tasks, honor file/resource locks so parallel work does not
       trample shared areas, launch coder and verifier child agents with only
-      per-task context, let those workers own git clone/branch/rebase/push/PR
-      operations, and persist each worker's final free-text report as the
-      delivery artifact. Conflicted work must be routed to a conflict queue so
+      per-task context in isolated ``agent_env`` sandboxes, let those workers
+      own git clone/branch/rebase/push/PR operations, forward controller git
+      token variables through the agent-env ``config_env`` interface when
+      present, reuse a task's reported ARL session for verifier and follow-up
+      worker calls within the same workflow pass, require a visible remote
+      branch or PR before accepting a coder success, and persist each worker's
+      final free-text report as the delivery artifact. Conflicted work must be
+      routed to a conflict queue so
       the main orchestrator can decide whether to launch a resolver or ask for
       human intervention.
     priority: P1

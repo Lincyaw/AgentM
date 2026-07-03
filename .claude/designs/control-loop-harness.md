@@ -316,7 +316,7 @@ while the round cap governs within-dispatch resume iterations.
 | Current mechanism | Why it exists | Replacement |
 |---|---|---|
 | `autoSubmitAgentChanges` in workbuddy bridge | Harness pushes/PRs on agent's behalf | Agent does it; observer verifies |
-| `_on_shutdown` auto-submit in `operations_agent_env` | Same, at SDK level | Same |
+| `_on_shutdown` auto-submit in `operations`/`agent_env` | Same, at SDK level | Same |
 | `RESULT:` line structured output contract | Harness parses agent self-report | Observer checks ground truth |
 | Step-by-step bash templates in agent prompts | Procedural execution script | Goal-oriented prompt (section 8) |
 
@@ -426,7 +426,7 @@ without any new core surface.)
    `agentm --resume <session_id> -p "<error signal>"` instead of
    spawning a new session.
 4. **Remove `autoSubmitAgentChanges`** from the bridge and
-   `_on_shutdown` from `operations_agent_env`.
+   `_on_shutdown` from `operations`/`agent_env`.
 5. **Remove `RESULT:` parsing** from the coordinator.
 6. **Extend sandbox lifecycle** to span multiple resume rounds within
    one dispatch.

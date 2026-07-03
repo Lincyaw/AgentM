@@ -35,8 +35,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Pulls in the ARL agent-env SDK so the builtin ``operations_agent_env`` atom
-# can create sandbox sessions. Install with ``uv sync --extra agent-env``
+# Pulls in the ARL agent-env SDK so the builtin ``operations`` atom can use its
+# ``agent_env`` backend. Install with ``uv sync --extra agent-env``
 # (workspace) or ``pip install agentm[agent-env]``.
 agent-env = [
     "arl-env>=0.18.2",

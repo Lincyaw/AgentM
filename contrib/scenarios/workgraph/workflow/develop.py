@@ -9,6 +9,7 @@ those responses under the local state directory.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -237,6 +238,37 @@ def _status(text: object) -> str:
     return "unknown"
 
 
+def _report_field(text: str, name: str) -> str:
+    pattern = re.compile(rf"^\s*{re.escape(name)}\s*:\s*(.*?)\s*$", re.I | re.M)
+    match = pattern.search(text)
+    return match.group(1).strip() if match else ""
+
+
+def _is_noneish(value: str) -> bool:
+    return not value.strip() or value.strip().lower() in {"none", "null", "n/a", "-"}
+
+
+def _remote_delivery_present(text: str) -> bool:
+    return not (
+        _is_noneish(_report_field(text, "remote"))
+        and _is_noneish(_report_field(text, "pr"))
+    )
+
+
+def _coerce_coder_status(coder_status: str, coder_text: str) -> tuple[str, str | None]:
+    if coder_status != "success":
+        return coder_status, None
+    if _remote_delivery_present(coder_text):
+        return coder_status, None
+    return (
+        "failed",
+        (
+            "Coder reported success without a remote branch or PR. "
+            "Sandbox-local commits are not a WorkGraph delivery."
+        ),
+    )
+
+
 def _result_dir(root: Path, task: TaskFile) -> Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", task.task_id).strip("-")
     path = root / "results" / (safe or task.path.stem)
@@ -244,11 +276,25 @@ def _result_dir(root: Path, task: TaskFile) -> Path:
     return path
 
 
-def _write_result(root: Path, task: TaskFile, coder: str, verifier: str) -> None:
+def _write_result(
+    root: Path,
+    task: TaskFile,
+    coder: str,
+    verifier: str,
+    agent_env_session: str = "",
+) -> None:
     path = _result_dir(root, task)
     (path / "task.md").write_text(task.text, encoding="utf-8")
     (path / "result.md").write_text(coder, encoding="utf-8")
     (path / "validation.md").write_text(verifier, encoding="utf-8")
+    session_file = path / "agent_env_session.txt"
+    if agent_env_session:
+        session_file.write_text(
+            f"{agent_env_session}\n",
+            encoding="utf-8",
+        )
+    else:
+        session_file.unlink(missing_ok=True)
 
 
 def _move_finished(root: Path, claim: ClaimedTask, status: str) -> Path:
@@ -265,13 +311,110 @@ def _move_finished(root: Path, claim: ClaimedTask, status: str) -> Path:
     return target
 
 
+def _config_env_var_names(config_env: dict[str, object]) -> set[str]:
+    raw = config_env.get("envVars") or config_env.get("env_vars")
+    if not isinstance(raw, list):
+        return set()
+    names: set[str] = set()
+    for item in raw:
+        if isinstance(item, dict):
+            name = item.get("name")
+            if isinstance(name, str) and name:
+                names.add(name)
+    return names
+
+
+def _forward_git_env(config: dict[str, object]) -> None:
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        return
+
+    raw_config_env = config.get("config_env")
+    if raw_config_env is None:
+        config_env: dict[str, object] = {}
+    elif isinstance(raw_config_env, dict):
+        config_env = dict(raw_config_env)
+    else:
+        raise ValueError("WorkGraph args.agent_env.config_env must be an object")
+
+    raw_vars = config_env.get("vars")
+    if raw_vars is None:
+        vars_map: dict[str, object] = {}
+    elif isinstance(raw_vars, dict):
+        vars_map = dict(raw_vars)
+    else:
+        raise ValueError("WorkGraph args.agent_env.config_env.vars must be an object")
+
+    existing = {str(name) for name in vars_map} | _config_env_var_names(config_env)
+    for name, value in {
+        "GH_TOKEN": os.environ.get("GH_TOKEN") or token,
+        "GITHUB_TOKEN": os.environ.get("GITHUB_TOKEN") or token,
+    }.items():
+        if name not in existing:
+            vars_map[name] = value
+
+    config_env["vars"] = vars_map
+    config["config_env"] = config_env
+
+
 def _operations_config(args: dict[str, object]) -> dict[str, object]:
     raw = args.get("agent_env")
-    if isinstance(raw, dict) and raw:
-        config = dict(raw)
-        config.setdefault("backend", "agent_env")
-        return config
-    return {}
+    if raw is not None and not isinstance(raw, dict):
+        raise ValueError("WorkGraph args.agent_env must be an object")
+    config = dict(raw or {})
+    backend = config.get("backend", "agent_env")
+    if backend != "agent_env":
+        raise ValueError("WorkGraph development workers require operations backend 'agent_env'")
+    config["backend"] = "agent_env"
+    config["delete_on_shutdown"] = False
+    _forward_git_env(config)
+    return config
+
+
+def _agent_env_target_configured(operations: dict[str, object]) -> bool:
+    return any(
+        isinstance(value, str) and value.strip()
+        for value in (
+            operations.get("image"),
+            os.environ.get("AGENTM_AGENT_ENV_IMAGE"),
+        )
+    )
+
+
+def _shared_attach_session_configured(operations: dict[str, object]) -> bool:
+    return any(
+        isinstance(value, str) and value.strip()
+        for value in (
+            operations.get("attach_session"),
+            os.environ.get("AGENTM_AGENT_ENV_ATTACH_SESSION"),
+        )
+    )
+
+
+def _agent_env_session_from_report(text: str) -> str:
+    value = _report_field(text, "AgentEnvSession")
+    return "" if _is_noneish(value) else value
+
+
+def _agent_env_session_file(root: Path, task: TaskFile) -> Path:
+    return _result_dir(root, task) / "agent_env_session.txt"
+
+
+def _read_agent_env_session(root: Path, task: TaskFile) -> str:
+    path = _agent_env_session_file(root, task)
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace").strip()
+
+
+def _operations_for_session(
+    operations: dict[str, object],
+    agent_env_session: str,
+) -> dict[str, object]:
+    config = dict(operations)
+    if agent_env_session:
+        config["attach_session"] = agent_env_session
+    return config
 
 
 def _context_for_task(
@@ -288,6 +431,16 @@ def _context_for_task(
         "base": task.base,
         "locks": task.locks,
         "validation": task.validation,
+        "execution": (
+            "Run inside the ARL agent_env sandbox. Do not use the host/control "
+            "repository as the worktree. Include AgentEnvSession in the final "
+            "response so this workflow can reuse the sandbox for follow-up "
+            "agent calls in the same task. Use repository credentials only "
+            "when the scenario, image, or ARL config_env provides them inside "
+            "the sandbox. A coder success requires Remote or PR to be "
+            "non-empty; a sandbox-local commit without a pushed branch is a "
+            "failed delivery."
+        ),
     }
     if extra:
         context.update(extra)
@@ -317,6 +470,7 @@ async def _run_one(
         DEFAULT_VERIFIER_SCENARIO,
     )
     timeout = _as_float(ctx.args.get("agent_timeout_seconds"), 3600.0)
+    agent_env_session = ""
 
     try:
         ctx.log(f"coding {task.task_id}")
@@ -324,7 +478,7 @@ async def _run_one(
             f"Implement WorkGraph task {task.task_id}.",
             scenario=coder_scenario,
             atom_config=_atom_config(
-                operations,
+                _operations_for_session(operations, agent_env_session),
                 _context_for_task(task, "coder"),
             ),
             timeout=timeout,
@@ -332,6 +486,13 @@ async def _run_one(
         )
         coder_text = str(coder_result)
         coder_status = _status(coder_text)
+        coder_status, delivery_error = _coerce_coder_status(
+            coder_status,
+            coder_text,
+        )
+        agent_env_session = (
+            _agent_env_session_from_report(coder_text) or agent_env_session
+        )
 
         if coder_status == "conflict":
             verifier_text = (
@@ -339,7 +500,8 @@ async def _run_one(
             )
             final_status = "conflict"
         elif coder_status == "failed":
-            verifier_text = "Status: failed\n\nCoder reported failure before verification."
+            reason = delivery_error or "Coder reported failure before verification."
+            verifier_text = f"Status: failed\n\n{reason}"
             final_status = "failed"
         else:
             ctx.log(f"verifying {task.task_id}")
@@ -347,20 +509,27 @@ async def _run_one(
                 f"Verify WorkGraph task {task.task_id}.",
                 scenario=verifier_scenario,
                 atom_config=_atom_config(
-                    operations,
+                    _operations_for_session(operations, agent_env_session),
                     _context_for_task(
                         task,
                         "verifier",
-                        {"coder_result": coder_text},
+                        {
+                            "coder_result": coder_text,
+                            "agent_env_session": agent_env_session,
+                        },
                     ),
                 ),
                 timeout=timeout,
                 trace_label=f"{task.task_id}:verifier",
             )
             verifier_text = str(verifier_result)
+            agent_env_session = (
+                _agent_env_session_from_report(verifier_text)
+                or agent_env_session
+            )
             final_status = "passed" if _status(verifier_text) == "passed" else "failed"
 
-        _write_result(root, task, coder_text, verifier_text)
+        _write_result(root, task, coder_text, verifier_text, agent_env_session)
         target = _move_finished(root, claim, final_status)
         return {
             "task_id": task.task_id,
@@ -368,12 +537,13 @@ async def _run_one(
             "from": str(claim.running_path),
             "to": str(target),
             "coder_status": coder_status,
+            "agent_env_session": agent_env_session or None,
             "result_dir": str(_result_dir(root, task)),
         }
     except Exception as exc:
         coder_text = f"Status: failed\n\nWorkflow exception: {type(exc).__name__}: {exc}"
         verifier_text = "Status: failed\n\nVerifier was not completed."
-        _write_result(root, task, coder_text, verifier_text)
+        _write_result(root, task, coder_text, verifier_text, agent_env_session)
         target = _move_finished(root, claim, "failed")
         return {
             "task_id": task.task_id,
@@ -381,6 +551,7 @@ async def _run_one(
             "from": str(claim.running_path),
             "to": str(target),
             "error": f"{type(exc).__name__}: {exc}",
+            "agent_env_session": agent_env_session or None,
             "result_dir": str(_result_dir(root, task)),
         }
 
@@ -392,6 +563,19 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
     default_repo = _as_str(ctx.args.get("repo"))
     default_base = _as_str(ctx.args.get("base"), "main")
     operations = _operations_config(ctx.args)
+    if _shared_attach_session_configured(operations):
+        raise RuntimeError(
+            "WorkGraph develop does not accept a shared agent_env attach_session "
+            "for automatic task claiming. Use args.agent_env.image or "
+            "AGENTM_AGENT_ENV_IMAGE so each claimed task gets its own ARL "
+            "sandbox; the workflow only attaches follow-up agents to a "
+            "per-task sandbox recorded under results/<task-id>/."
+        )
+    if not _agent_env_target_configured(operations):
+        raise RuntimeError(
+            "WorkGraph development workers require an ARL agent_env target. "
+            "Pass args.agent_env.image or set AGENTM_AGENT_ENV_IMAGE."
+        )
 
     ctx.phase("claim")
     claimed = _claim_tasks(root, max_parallel, default_repo, default_base)

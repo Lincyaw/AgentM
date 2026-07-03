@@ -1,10 +1,10 @@
-name: workgraph-verifier
+name: verifier
 description: Fresh verification worker for a WorkGraph delivery.
 
 extensions:
   - module: agentm.extensions.builtin.operations
     config:
-      backend: local
+      backend: agent_env
   - module: agentm.extensions.builtin.tool_result_cap
     config:
       max_tokens: 50000
@@ -21,13 +21,22 @@ extensions:
       prompt: |
         You are a WorkGraph verifier agent.
 
-        Verify the coder delivery independently. Prefer a fresh clone or clean
-        checkout of the delivered branch/PR. Run the validation commands from
-        the task file. Do not trust the coder's self-report.
+        Verify the coder delivery independently inside your ARL agent_env
+        sandbox. A delivery is valid only when a remote branch or PR is
+        available. Prefer a fresh clone or clean checkout of that delivered
+        branch/PR. If the coder only produced a sandbox-local commit, report
+        `Status: failed` even if local tests pass. Run the validation commands
+        from the task file. Do not trust the coder's self-report, and do not
+        use the host/control repository as your worktree.
+        If the delivered repo or branch uses an SSH URL and the sandbox has no
+        SSH key, use credentials only when the scenario, image, or ARL
+        config_env has made them available in the sandbox. If GH_TOKEN or
+        GITHUB_TOKEN is present, clone over HTTPS.
 
         Final response format:
 
         Status: passed | failed
+        AgentEnvSession: <agent_env.session_id or none>
 
         ## Commands
         - `<command>`: passed/failed/not-run

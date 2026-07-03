@@ -5,8 +5,9 @@ Moved from the former ``operations_agent_env`` builtin atom. Provides
 
 Lifecycle: ``install_agent_env`` creates one sandbox per AgentM session; the sandbox
 is deleted on ``SessionShutdownEvent``. Each ``BashOperations.exec`` maps to one
-``session.execute`` call; ``FileOperations`` are expressed as ``cat`` / ``test``
-/ ``ls`` steps so semantics stay aligned with the sandbox's view of the world.
+``session.execute`` call. ``FileOperations`` use the SDK file-transfer API for
+workspace files and shell steps for sandbox-external reads/stats, so semantics
+stay aligned with the sandbox's view of the world.
 
 The function *also* replaces the session's :class:`ResourceWriter` (via
 ``api.register_resource_writer``) with a sandbox-backed implementation so
@@ -34,6 +35,8 @@ session, or ``attach_session`` to reuse an existing sandbox:
 - ``profile``       — ARL pool-selection profile (env:
                       ``AGENTM_AGENT_ENV_PROFILE``). The gateway is scoped to
                       one namespace, so namespace is no longer passed by the SDK.
+- ``config_env``    — ARL ``ConfigEnvSpec`` payload as a plain mapping. This is
+                      passed through to the SDK without AgentM-specific policy.
 - ``work_dir``      — Default cwd inside the sandbox (default ``/workspace``)
 - ``timeout``       — Per-step timeout seconds; ``None`` means no timeout
 - ``idle_timeout_seconds`` — Sandbox idle TTL on the gateway (env:
@@ -53,10 +56,12 @@ import asyncio
 import base64
 import inspect
 import os
+import posixpath
 import shlex
+import time
 import uuid
-from collections.abc import Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +80,11 @@ from agentm.core.abi import (
 )
 
 _AGENT_ENV_SESSION_SERVICE = "agent_env.session_id"
+_OPERATION_POLL_INTERVAL_SECONDS = 2.0
+_OPERATION_TIMEOUT_GRACE_SECONDS = 30.0
+_OPERATION_STATUS_DONE = "done"
+_OPERATION_STATUS_ERROR = "error"
+
 
 class AgentEnvConfig(BaseModel):
     image: str | None = None
@@ -82,8 +92,8 @@ class AgentEnvConfig(BaseModel):
     attach_session: str | None = None
     gateway_url: str | None = None
     api_key: str | None = None
-    namespace: str | None = None
     profile: str | None = None
+    config_env: dict[str, Any] | None = None
     work_dir: str | None = None
     timeout: float | None = None
     idle_timeout_seconds: int | None = None
@@ -93,10 +103,8 @@ class AgentEnvConfig(BaseModel):
     cpu_limit: str | None = None
     memory_request: str | None = None
     memory_limit: str | None = None
-    max_replicas: int | None = None
-    min_replicas: int | None = None
-    scale_up_step: int | None = None
     delete_on_shutdown: bool | None = None
+
 
 def _resolve_str(value: str | None, env_var: str, default: str | None) -> str | None:
     if isinstance(value, str) and value:
@@ -106,11 +114,37 @@ def _resolve_str(value: str | None, env_var: str, default: str | None) -> str | 
         return env_value
     return default
 
+
 def _resolve_int(value: int | None, env_var: str) -> int | None:
     if value is not None:
         return value
     env_value = os.environ.get(env_var)
     return int(env_value) if env_value else None
+
+
+def _resolve_float(value: float | None, env_var: str, default: float) -> float:
+    if value is not None:
+        return float(value)
+    env_value = os.environ.get(env_var)
+    return float(env_value) if env_value else default
+
+
+@contextmanager
+def _suppress_global_arl_api_key(enabled: bool) -> Iterator[None]:
+    if not enabled:
+        yield
+        return
+
+    had_previous = "ARL_API_KEY" in os.environ
+    previous = os.environ.pop("ARL_API_KEY", None)
+    try:
+        yield
+    finally:
+        if had_previous and previous is not None:
+            os.environ["ARL_API_KEY"] = previous
+        else:
+            os.environ.pop("ARL_API_KEY", None)
+
 
 def _resolve_bool(value: bool | None, env_var: str, default: bool) -> bool:
     if value is not None:
@@ -120,6 +154,7 @@ def _resolve_bool(value: bool | None, env_var: str, default: bool) -> bool:
         return default
     return env_value.strip().lower() not in {"", "0", "false", "no", "off"}
 
+
 def _filter_supported_kwargs(target: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     try:
         signature = inspect.signature(target)
@@ -127,7 +162,9 @@ def _filter_supported_kwargs(target: Any, kwargs: dict[str, Any]) -> dict[str, A
         return kwargs
 
     parameters = signature.parameters
-    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+    if any(
+        param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+    ):
         return kwargs
 
     supported: dict[str, Any] = {}
@@ -141,6 +178,130 @@ def _filter_supported_kwargs(target: Any, kwargs: dict[str, Any]) -> dict[str, A
                 name,
             )
     return supported
+
+
+def _normalize_work_dir(work_dir: str) -> str:
+    normalized = posixpath.normpath(work_dir)
+    if not normalized.startswith("/"):
+        raise ValueError(f"agent_env work_dir must be absolute, got {work_dir!r}")
+    return normalized.rstrip("/") or "/"
+
+
+def _sandbox_abs(work_dir: str, path: str) -> str:
+    if path.startswith("/"):
+        return posixpath.normpath(path)
+    return posixpath.normpath(posixpath.join(work_dir, path))
+
+
+def _is_in_work_dir(work_dir: str, path: str) -> bool:
+    abs_path = _sandbox_abs(work_dir, path)
+    if work_dir == "/":
+        return abs_path.startswith("/")
+    return abs_path == work_dir or abs_path.startswith(work_dir + "/")
+
+
+def _workspace_relative_path(work_dir: str, path: str) -> str | None:
+    abs_path = _sandbox_abs(work_dir, path)
+    if work_dir == "/":
+        rel_path = abs_path.lstrip("/")
+    elif abs_path.startswith(work_dir + "/"):
+        rel_path = abs_path[len(work_dir) + 1 :]
+    else:
+        return None
+    return rel_path or None
+
+
+def _step_timeout_budget(steps: list[dict[str, Any]]) -> float | None:
+    values: list[float] = []
+    for step in steps:
+        raw = step.get("timeoutSeconds", step.get("timeout"))
+        if not isinstance(raw, bool) and isinstance(raw, (int, float)) and raw > 0:
+            values.append(float(raw))
+    if not values:
+        return None
+    return max(values) + _OPERATION_TIMEOUT_GRACE_SECONDS
+
+
+def _recover_execute_operation(
+    session: Any,
+    steps: list[dict[str, Any]],
+    operation_id: str,
+    started_at: float,
+) -> Any:
+    client = getattr(session, "_client", None)
+    session_id = getattr(session, "session_id", None) or getattr(
+        session, "_session_id", None
+    )
+    if client is None or not session_id:
+        raise RuntimeError(
+            "cannot recover ARL execute operation without client/session id"
+        )
+
+    budget = _step_timeout_budget(steps)
+    deadline = started_at + budget if budget is not None else None
+    last_error = ""
+
+    while True:
+        operation = client.get_execute_operation(session_id, operation_id)
+        result = getattr(operation, "result", None)
+        if result is not None:
+            return result
+
+        status = str(getattr(operation, "status", "")).lower()
+        last_error = str(getattr(operation, "error", "") or last_error)
+        if status == _OPERATION_STATUS_ERROR:
+            raise RuntimeError(
+                last_error or f"ARL execute operation {operation_id} failed"
+            )
+        if status == _OPERATION_STATUS_DONE:
+            raise RuntimeError(
+                f"ARL execute operation {operation_id} finished without result"
+            )
+
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"ARL execute operation {operation_id} still pending after "
+                    f"{budget:.0f}s"
+                )
+            sleep_for = min(_OPERATION_POLL_INTERVAL_SECONDS, remaining)
+        else:
+            sleep_for = _OPERATION_POLL_INTERVAL_SECONDS
+        time.sleep(sleep_for)
+
+
+def _execute_session_sync(
+    session: Any,
+    steps: list[dict[str, Any]],
+    *,
+    on_output: Callable[[str, str], None] | None = None,
+) -> Any:
+    started_at = time.monotonic()
+    try:
+        if on_output is None:
+            return session.execute(steps)
+        return session.execute(steps, on_output=on_output)
+    except Exception as exc:
+        operation_id = getattr(exc, "operation_id", None)
+        if not operation_id:
+            raise
+        return _recover_execute_operation(session, steps, operation_id, started_at)
+
+
+async def _execute_session(
+    session: Any,
+    steps: list[dict[str, Any]],
+    *,
+    on_output: Callable[[str, str], None] | None = None,
+) -> Any:
+    return await asyncio.to_thread(
+        _execute_session_sync,
+        session,
+        steps,
+        on_output=on_output,
+    )
+
 
 # Versioning-token script. Emits ``<mtime_ns>-<sha16>`` for files up to
 # ``_MTIME_TOKEN_SIZE_CAP`` bytes, ``<mtime_ns>-size<size>`` for larger
@@ -162,6 +323,7 @@ _MTIME_TOKEN_SCRIPT = (
     '  printf "%s-size%s" "$MNS" "$SZ"; '
     "fi"
 )
+
 
 class _AgentEnvBashOperations:
     """``BashOperations`` impl that executes commands inside an ARL sandbox.
@@ -198,9 +360,7 @@ class _AgentEnvBashOperations:
         effective_timeout = timeout if timeout is not None else self._default_timeout
         work_dir = cwd or self._default_work_dir
         timeout_seconds = (
-            max(1, int(effective_timeout))
-            if effective_timeout is not None
-            else None
+            max(1, int(effective_timeout)) if effective_timeout is not None else None
         )
         exec_id = f"agentm-{uuid.uuid4().hex}"
         quoted_cmd = shlex.quote(cmd)
@@ -239,8 +399,20 @@ class _AgentEnvBashOperations:
             step["timeout"] = timeout_seconds + 15
 
         timed_out = False
+        streamed_stdout = False
+
+        def _stream_output(stdout: str, _stderr: str) -> None:
+            nonlocal streamed_stdout
+            if on_data is not None and stdout:
+                streamed_stdout = True
+                on_data(stdout.encode("utf-8"))
+
         execute_task = asyncio.create_task(
-            asyncio.to_thread(self._session.execute, [step])
+            _execute_session(
+                self._session,
+                [step],
+                on_output=_stream_output if on_data is not None else None,
+            )
         )
         signal_task: asyncio.Task[bool] | None = None
         if signal is not None:
@@ -252,7 +424,11 @@ class _AgentEnvBashOperations:
             done, _pending = await asyncio.wait(
                 wait_set, return_when=asyncio.FIRST_COMPLETED
             )
-            if signal_task is not None and signal_task in done and not execute_task.done():
+            if (
+                signal_task is not None
+                and signal_task in done
+                and not execute_task.done()
+            ):
                 await self._cancel_remote_exec(exec_id, work_dir)
                 try:
                     response = await asyncio.wait_for(
@@ -273,19 +449,26 @@ class _AgentEnvBashOperations:
             logger.warning("agent-env execute failed: {}", exc)
             stderr = f"agent-env execute failed: {exc}".encode()
             timed_out = effective_timeout is not None and "timeout" in str(exc).lower()
-            return ExecResult(stdout=b"", stderr=stderr, exit_code=124, timed_out=timed_out)
+            return ExecResult(
+                stdout=b"", stderr=stderr, exit_code=124, timed_out=timed_out
+            )
         finally:
             if signal_task is not None and not signal_task.done():
                 signal_task.cancel()
                 await asyncio.gather(signal_task, return_exceptions=True)
 
         if not response.results:
-            return ExecResult(stdout=b"", stderr=b"agent-env returned no results", exit_code=1, timed_out=False)
+            return ExecResult(
+                stdout=b"",
+                stderr=b"agent-env returned no results",
+                exit_code=1,
+                timed_out=False,
+            )
 
         result = response.results[0]
         stdout_bytes = result.output.stdout.encode("utf-8")
         stderr_bytes = result.output.stderr.encode("utf-8")
-        if on_data is not None and stdout_bytes:
+        if on_data is not None and stdout_bytes and not streamed_stdout:
             on_data(stdout_bytes)
         if timeout_seconds is not None and result.output.exit_code in {124, 137}:
             timed_out = True
@@ -330,7 +513,9 @@ printf 'cancelled %s pids:%s\\n' "$marker" "$targets"
         try:
             await asyncio.to_thread(self._session.execute, [step])
         except Exception as exc:  # noqa: BLE001
-            logger.warning("agent_env: failed to cancel remote exec {}: {}", exec_id, exc)
+            logger.warning(
+                "agent_env: failed to cancel remote exec {}: {}", exec_id, exc
+            )
 
 
 def _consume_task_result(task: asyncio.Task[Any]) -> None:
@@ -339,20 +524,24 @@ def _consume_task_result(task: asyncio.Task[Any]) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.debug("agent_env: cancelled execute task finished late: {}", exc)
 
+
 class _AgentEnvFileOperations:
-    """``FileOperations`` impl that reads through the sandbox's shell.
+    """``FileOperations`` impl backed by the ARL sandbox.
 
     Files live inside the sandbox, so the local FS is the wrong source of
-    truth — every read is expressed as a ``cat`` / ``test`` / ``ls -1A`` step
-    and the stdout is decoded back into the Protocol's expected shape.
+    truth. Workspace file content goes through the SDK file-transfer API;
+    metadata and sandbox-external paths use shell steps.
     """
 
     def __init__(self, session: Any, *, default_work_dir: str) -> None:
         self._session = session
-        self._default_work_dir = default_work_dir
+        self._default_work_dir = _normalize_work_dir(default_work_dir)
 
     def _abs(self, path: str) -> str:
-        return path if path.startswith("/") else f"{self._default_work_dir}/{path}"
+        return _sandbox_abs(self._default_work_dir, path)
+
+    def _relative(self, path: str) -> str | None:
+        return _workspace_relative_path(self._default_work_dir, path)
 
     async def _run(self, command: list[str]) -> tuple[bytes, bytes, int]:
         step = {
@@ -360,15 +549,22 @@ class _AgentEnvFileOperations:
             "command": command,
             "work_dir": self._default_work_dir,
         }
-        response = await asyncio.to_thread(self._session.execute, [step])
+        response = await _execute_session(self._session, [step])
         if not response.results:
             return b"", b"no result", 1
         out = response.results[0].output
         return out.stdout.encode("utf-8"), out.stderr.encode("utf-8"), out.exit_code
 
     async def read_file(self, path: str) -> bytes:
-        # ARL gateway truncates raw `cat` stdout for files > ~8KB.
-        # base64 output (ASCII) is NOT truncated, so we use that.
+        rel_path = self._relative(path)
+        if rel_path is not None:
+            try:
+                return await asyncio.to_thread(self._session.download_file, rel_path)
+            except Exception as exc:
+                raise FileNotFoundError(str(exc)) from exc
+
+        # Workspace-external reads keep the original shell semantics. Use
+        # base64 because raw `cat` stdout can be truncated by older gateways.
         abs_path = self._abs(path)
         stdout, stderr, code = await self._run(
             ["bash", "-c", f"base64 -w0 -- {shlex.quote(abs_path)}"],
@@ -421,10 +617,22 @@ class _AgentEnvFileOperations:
         )
 
     async def write_file(self, path: str, data: bytes) -> None:
+        rel_path = self._relative(path)
+        if rel_path is not None:
+            try:
+                await asyncio.to_thread(self._session.upload_file, rel_path, data)
+                return
+            except Exception as exc:
+                raise OSError(f"write_file failed: {exc}") from exc
+
         abs_path = self._abs(path)
         encoded = base64.b64encode(data).decode("ascii")
         _, stderr, code = await self._run(
-            ["bash", "-c", f"echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(abs_path)}"]
+            [
+                "bash",
+                "-c",
+                f"echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(abs_path)}",
+            ]
         )
         if code != 0:
             raise OSError(f"write_file failed: {stderr.decode('utf-8', 'replace')}")
@@ -436,6 +644,7 @@ class _AgentEnvFileOperations:
         _, stderr, code = await self._run(cmd)
         if code != 0 and not exist_ok:
             raise OSError(f"makedirs failed: {stderr.decode('utf-8', 'replace')}")
+
 
 class _AgentEnvResourceWriter:
     """``ResourceWriter`` impl whose writes land inside the ARL sandbox.
@@ -458,17 +667,18 @@ class _AgentEnvResourceWriter:
         work_dir: str,
     ) -> None:
         self._session = session
-        self._work_dir = work_dir.rstrip("/") or "/"
+        self._work_dir = _normalize_work_dir(work_dir)
 
     # --- path classification ---------------------------------------------
 
     def _resolve(self, path: str) -> str:
-        return path if path.startswith("/") else f"{self._work_dir}/{path}"
+        return _sandbox_abs(self._work_dir, path)
+
+    def _relative(self, path: str) -> str | None:
+        return _workspace_relative_path(self._work_dir, path)
 
     def _in_sandbox(self, path: str) -> bool:
-        resolved = self._resolve(path)
-        prefix = self._work_dir
-        return resolved == prefix or resolved.startswith(prefix + "/")
+        return _is_in_work_dir(self._work_dir, path)
 
     def classify(self, path: str) -> PathClass:
         # In-sandbox paths are managed (we track an mtime-token version);
@@ -483,7 +693,7 @@ class _AgentEnvResourceWriter:
             "command": command,
             "work_dir": self._work_dir,
         }
-        response = await asyncio.to_thread(self._session.execute, [step])
+        response = await _execute_session(self._session, [step])
         if not response.results:
             return b"", b"no result", 1
         out = response.results[0].output
@@ -512,60 +722,26 @@ class _AgentEnvResourceWriter:
             ),
         )
 
-    async def _write_bytes(self, abs_path: str, content: bytes) -> tuple[bool, str]:
-        await self._run(["bash", "-lc", f"mkdir -p \"$(dirname -- {_sh_quote(abs_path)})\""])
-        upload_rel = f".agentm_uploads/{uuid.uuid4().hex}"
-        upload_candidates = [
-            f"/workspace/{upload_rel}",
-            f"{self._work_dir.rstrip('/')}/{upload_rel}",
-        ]
+    async def _write_bytes(self, rel_path: str, content: bytes) -> tuple[bool, str]:
         try:
-            self._session.upload_file(upload_rel, content)
+            await asyncio.to_thread(self._session.upload_file, rel_path, content)
         except Exception as exc:
             logger.warning("agent-env file upload failed: {}", exc)
             return False, str(exc)
-        candidate_tests = " ".join(_sh_quote(path) for path in upload_candidates)
-        copy_script = f"""
-set -e
-src=""
-for candidate in {candidate_tests}; do
-  if [ -f "$candidate" ]; then
-    src="$candidate"
-    break
-  fi
-done
-if [ -z "$src" ]; then
-  echo "uploaded file not found in sandbox workspace" >&2
-  exit 1
-fi
-mkdir -p "$(dirname -- {_sh_quote(abs_path)})"
-cat "$src" > {_sh_quote(abs_path)}
-rm -f "$src"
-"""
-        _stdout, stderr, code = await self._run(["bash", "-lc", copy_script])
-        if code != 0:
-            return False, stderr.decode("utf-8", "replace")
         return True, ""
 
     # --- ResourceWriter API ----------------------------------------------
 
     async def read(self, path: str) -> bytes:
-        abs_path = self._resolve(path)
-        if not self._in_sandbox(path):
+        rel_path = self._relative(path)
+        if rel_path is None:
             raise FileNotFoundError(
                 f"agent-env writer cannot read {path!r}: outside {self._work_dir!r}"
             )
-        # ARL gateway truncates raw `cat` stdout for files > ~8KB.
-        # base64 output (ASCII) is NOT truncated, so we use that.
-        stdout, stderr, code = await self._run(
-            ["bash", "-c", f"base64 -w0 -- {shlex.quote(abs_path)}"],
-        )
-        if code != 0:
-            raise FileNotFoundError(stderr.decode("utf-8", "replace") or path)
-        encoded = stdout.strip()
-        if not encoded:
-            return b""
-        return base64.b64decode(encoded)
+        try:
+            return await asyncio.to_thread(self._session.download_file, rel_path)
+        except Exception as exc:
+            raise FileNotFoundError(str(exc)) from exc
 
     async def write(
         self,
@@ -576,11 +752,12 @@ rm -f "$src"
         author: WriterAuthor = "agent",
     ) -> WriteResult:
         del rationale, author  # accepted for protocol parity; sandbox has no audit log
-        if not self._in_sandbox(path):
+        rel_path = self._relative(path)
+        if rel_path is None:
             return self._refuse(path)
         abs_path = self._resolve(path)
         before = await self._mtime_token(abs_path)
-        ok, err = await self._write_bytes(abs_path, content)
+        ok, err = await self._write_bytes(rel_path, content)
         if not ok:
             return WriteResult(
                 path=path,
@@ -609,7 +786,7 @@ rm -f "$src"
         author: WriterAuthor = "agent",
     ) -> WriteResult:
         del rationale
-        if not self._in_sandbox(path):
+        if self._relative(path) is None:
             return self._refuse(path)
         try:
             current = await self.read(path)
@@ -644,7 +821,7 @@ rm -f "$src"
         author: WriterAuthor = "agent",
     ) -> WriteResult:
         del rationale, author
-        if not self._in_sandbox(path):
+        if self._relative(path) is None:
             return self._refuse(path)
         abs_path = self._resolve(path)
         before = await self._mtime_token(abs_path)
@@ -674,7 +851,8 @@ rm -f "$src"
 
     def current_version_for_path(self, path: str) -> str | None:
         try:
-            response = self._session.execute(
+            response = _execute_session_sync(
+                self._session,
                 [
                     {
                         "name": "agentm_stat",
@@ -687,7 +865,7 @@ rm -f "$src"
                         ],
                         "work_dir": self._work_dir,
                     }
-                ]
+                ],
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("agent-env mtime token fetch failed: {}", exc)
@@ -757,97 +935,6 @@ rm -f "$src"
 
         return _ctx()
 
-def _sh_quote(value: str) -> str:
-    """POSIX-safe single-quote escape for a string interpolated into a shell command."""
-    return "'" + value.replace("'", "'\"'\"'") + "'"
-
-def _pod_exec(session: Any, cmd: str, work_dir: str) -> tuple[str, str, int]:
-    """Run ``bash -lc cmd`` in the sandbox; return (stdout, stderr, exit_code)."""
-    resp = session.execute([{"name": "wb_workspace_sync", "command": ["bash", "-lc", cmd], "work_dir": work_dir}])
-    if not getattr(resp, "results", None):
-        return "", "agent-env returned no results", 1
-    out = resp.results[0].output
-    return out.stdout, out.stderr, out.exit_code
-
-
-def _clone_repo_into_sandbox(session: Any, work_dir: str) -> None:
-    """Clone the target repo into the sandbox and checkout the issue branch."""
-    repo = os.environ.get("WORKBUDDY_REPO")
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    issue_num = os.environ.get("WORKBUDDY_ISSUE_NUM")
-    if not repo or not token:
-        logger.warning("[agent_env_sync] WORKBUDDY_REPO or GH_TOKEN not set, skipping clone")
-        return
-    clone_url = f"https://x-access-token:{token}@github.com/{repo}.git"
-    branch = f"workbuddy/issue-{issue_num}" if issue_num else ""
-    clone_cmd = (
-        f"set -e; "
-        f"git clone --quiet {shlex.quote(clone_url)} {work_dir} 2>/dev/null || "
-        f"  (rm -rf {work_dir} && git clone --quiet {shlex.quote(clone_url)} {work_dir}); "
-        f"cd {work_dir}; "
-        "git config user.email 'workbuddy@local'; "
-        "git config user.name 'workbuddy'; "
-    )
-    if branch:
-        clone_cmd += (
-            f"git fetch origin {shlex.quote(branch)} 2>/dev/null && "
-            f"git checkout {shlex.quote(branch)} 2>/dev/null || true"
-        )
-    out, err, code = _pod_exec(session, clone_cmd, "/")
-    if code != 0:
-        raise RuntimeError(
-            f"operations agent_env: git clone failed (exit {code}): {err or out}"
-        )
-    _pod_exec(
-        session,
-        f"echo '.agentm/' >> {work_dir}/.gitignore",
-        work_dir,
-    )
-    logger.info("[agent_env_sync] cloned {repo} into {work_dir}", repo=repo, work_dir=work_dir)
-
-def _inject_gh_token(session: Any, work_dir: str) -> None:
-    """Make GH_TOKEN available in the sandbox so agents can use `gh` CLI."""
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    if not token:
-        return
-    setup_cmd = (
-        f"echo 'export GH_TOKEN={shlex.quote(token)}' > /etc/profile.d/gh_token.sh; "
-        f"echo 'export GITHUB_TOKEN={shlex.quote(token)}' >> /etc/profile.d/gh_token.sh; "
-        "chmod 644 /etc/profile.d/gh_token.sh"
-    )
-    _pod_exec(session, setup_cmd, work_dir)
-    logger.info("[agent_env_sync] injected GH_TOKEN into sandbox")
-
-def _upload_skills_to_sandbox(session: Any, work_dir: str) -> None:
-    """Upload SKILL.md files from ``AGENTM_SKILLS_DIR`` into the sandbox."""
-    skills_dir = os.environ.get("AGENTM_SKILLS_DIR")
-    if not skills_dir or not os.path.isdir(skills_dir):
-        return
-    target_base = ".agentm/skills"
-    _pod_exec(session, f"mkdir -p {work_dir}/{target_base}", work_dir)
-    count = 0
-    for entry in sorted(os.listdir(skills_dir)):
-        entry_path = os.path.join(skills_dir, entry)
-        if os.path.isdir(entry_path):
-            skill_file = os.path.join(entry_path, "SKILL.md")
-            if os.path.isfile(skill_file):
-                target = f"{target_base}/{entry}/SKILL.md"
-                _pod_exec(session, f"mkdir -p {work_dir}/{target_base}/{entry}", work_dir)
-                try:
-                    with open(skill_file, "rb") as fh:
-                        session.upload_file(target, fh.read())
-                    count += 1
-                except Exception as exc:
-                    logger.warning("[agent_env_sync] skill upload failed for {entry}: {exc}", entry=entry, exc=exc)
-        elif entry.endswith(".md") and os.path.isfile(entry_path):
-            try:
-                with open(entry_path, "rb") as fh:
-                    session.upload_file(f"{target_base}/{entry}", fh.read())
-                count += 1
-            except Exception as exc:
-                logger.warning("[agent_env_sync] skill upload failed for {entry}: {exc}", entry=entry, exc=exc)
-    if count:
-        logger.info("[agent_env_sync] uploaded {count} skill(s) to {target_base}/", count=count, target_base=target_base)
 
 def _replay_fork_environment(api: ExtensionAPI, arl_session: Any) -> None:
     """If this session is a fork, replay the source session's side-effect
@@ -876,17 +963,22 @@ def _replay_fork_environment(api: ExtensionAPI, arl_session: Any) -> None:
         if not arl_sessions:
             logger.warning(
                 "agent_env: no ARL session found for experiment {} — "
-                "cannot replay (was the source run with agent_env?)", source_id,
+                "cannot replay (was the source run with agent_env?)",
+                source_id,
             )
             return
         source_arl_session = arl_sessions[0].id
     except Exception as exc:  # noqa: BLE001
-        logger.warning("agent_env: could not query ARL for source {}: {}", source_id, exc)
+        logger.warning(
+            "agent_env: could not query ARL for source {}: {}", source_id, exc
+        )
         return
 
     logger.info(
         "agent_env: replaying ARL session {} to turn {} into {}",
-        source_arl_session, turn_index, arl_session._session_id,
+        source_arl_session,
+        turn_index,
+        arl_session._session_id,
     )
 
     try:
@@ -898,7 +990,8 @@ def _replay_fork_environment(api: ExtensionAPI, arl_session: Any) -> None:
         )
         logger.info(
             "agent_env: replay complete — {} steps replayed, {} errors",
-            result.get("stepsReplayed", 0), result.get("errors", 0),
+            getattr(result, "steps_replayed", 0),
+            getattr(result, "errors", 0),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("agent_env: ARL replay failed: {}", exc)
@@ -919,9 +1012,12 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     attach_session = _resolve_str(
         config.attach_session, "AGENTM_AGENT_ENV_ATTACH_SESSION", None
     )
-    gateway_url = _resolve_str(
-        config.gateway_url, "AGENTM_AGENT_ENV_GATEWAY_URL", "http://localhost:8080"
-    ) or "http://localhost:8080"
+    gateway_url = (
+        _resolve_str(
+            config.gateway_url, "AGENTM_AGENT_ENV_GATEWAY_URL", "http://localhost:8080"
+        )
+        or "http://localhost:8080"
+    )
     profile = _resolve_str(config.profile, "AGENTM_AGENT_ENV_PROFILE", None)
     work_dir = config.work_dir or "/workspace"
     timeout_value: float | None = config.timeout
@@ -934,22 +1030,28 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         "AGENTM_AGENT_ENV_MAX_LIFETIME_SECONDS",
     )
     api_key = _resolve_str(config.api_key, "AGENTM_AGENT_ENV_API_KEY", None)
+    suppress_global_arl_api_key = api_key is None
     delete_on_shutdown = _resolve_bool(
         config.delete_on_shutdown,
         "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN",
         True,
     )
-    create_timeout = float(
-        _resolve_str(None, "AGENTM_AGENT_ENV_CREATE_TIMEOUT", None) or "0"
-    ) or config.create_timeout or 600.0
+    create_timeout = _resolve_float(
+        config.create_timeout,
+        "AGENTM_AGENT_ENV_CREATE_TIMEOUT",
+        600.0,
+    )
 
     cpu_req = _resolve_str(config.cpu_request, "AGENTM_AGENT_ENV_CPU_REQUEST", None)
     cpu_lim = _resolve_str(config.cpu_limit, "AGENTM_AGENT_ENV_CPU_LIMIT", None)
-    mem_req = _resolve_str(config.memory_request, "AGENTM_AGENT_ENV_MEMORY_REQUEST", None)
+    mem_req = _resolve_str(
+        config.memory_request, "AGENTM_AGENT_ENV_MEMORY_REQUEST", None
+    )
     mem_lim = _resolve_str(config.memory_limit, "AGENTM_AGENT_ENV_MEMORY_LIMIT", None)
     resources = None
     if any((cpu_req, cpu_lim, mem_req, mem_lim)):
         from arl.session import ResourceRequirements  # type: ignore[import-not-found]
+
         req: dict[str, str] = {}
         lim: dict[str, str] = {}
         if cpu_req:
@@ -965,19 +1067,26 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     owned = True
     session: Any
     if attach_session:
-        session = arl.SandboxSession.attach(
-            attach_session, gateway_url=gateway_url, api_key=api_key,
-        )
+        with _suppress_global_arl_api_key(suppress_global_arl_api_key):
+            session = arl.SandboxSession.attach(
+                attach_session,
+                gateway_url=gateway_url,
+                api_key=api_key,
+                timeout=create_timeout,
+            )
         owned = False
         logger.info("agent_env: attached to existing sandbox {}", attach_session)
     elif image:
         # Default experiment_id to agentm session_id so fork can look up
         # the source ARL session by experiment_id == source agentm session_id.
-        experiment_id = _resolve_str(
-            config.experiment_id,
-            "AGENTM_AGENT_ENV_EXPERIMENT_ID",
-            None,
-        ) or api.session_id
+        experiment_id = (
+            _resolve_str(
+                config.experiment_id,
+                "AGENTM_AGENT_ENV_EXPERIMENT_ID",
+                None,
+            )
+            or api.session_id
+        )
         session_kwargs = _filter_supported_kwargs(
             arl.ManagedSession,
             {
@@ -989,11 +1098,13 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
                 "timeout": create_timeout,
                 "resources": resources,
                 "profile": profile,
+                "config_env": config.config_env,
                 "idle_timeout_seconds": idle_value,
                 "max_lifetime_seconds": max_lifetime,
             },
         )
-        session = arl.ManagedSession(**session_kwargs)
+        with _suppress_global_arl_api_key(suppress_global_arl_api_key):
+            session = arl.ManagedSession(**session_kwargs)
     else:
         raise RuntimeError(
             "operations backend 'agent_env': either 'image' or 'attach_session' "
@@ -1001,24 +1112,30 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             "AGENTM_AGENT_ENV_IMAGE / AGENTM_AGENT_ENV_ATTACH_SESSION."
         )
 
-    session_id = getattr(session, "session_id", None) or getattr(session, "_session_id", None)
+    session_id = getattr(session, "session_id", None) or getattr(
+        session, "_session_id", None
+    )
     if isinstance(session_id, str) and session_id:
         try:
             api.set_service(_AGENT_ENV_SESSION_SERVICE, session_id)
         except KeyError:
-            logger.debug("agent_env: service {} already registered", _AGENT_ENV_SESSION_SERVICE)
+            logger.debug(
+                "agent_env: service {} already registered", _AGENT_ENV_SESSION_SERVICE
+            )
 
     if owned:
         session.create_sandbox()
-        session_id = getattr(session, "session_id", None) or getattr(session, "_session_id", None)
+        session_id = getattr(session, "session_id", None) or getattr(
+            session, "_session_id", None
+        )
         if isinstance(session_id, str) and session_id:
             try:
                 api.set_service(_AGENT_ENV_SESSION_SERVICE, session_id)
             except KeyError:
-                logger.debug("agent_env: service {} already registered", _AGENT_ENV_SESSION_SERVICE)
-        _inject_gh_token(session, work_dir)
-        _clone_repo_into_sandbox(session, work_dir)
-        _upload_skills_to_sandbox(session, work_dir)
+                logger.debug(
+                    "agent_env: service {} already registered",
+                    _AGENT_ENV_SESSION_SERVICE,
+                )
 
     file_ops = _AgentEnvFileOperations(session, default_work_dir=work_dir)
     bash_ops = _AgentEnvBashOperations(
@@ -1044,7 +1161,9 @@ def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             try:
                 session.delete_sandbox()
             except Exception as exc:  # noqa: BLE001
-                logger.warning("agent_env: sandbox deletion failed on shutdown: {}", exc)
+                logger.warning(
+                    "agent_env: sandbox deletion failed on shutdown: {}", exc
+                )
         else:
             logger.info(
                 "agent_env: keeping sandbox {} for external cleanup",

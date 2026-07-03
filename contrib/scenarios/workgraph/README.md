@@ -10,6 +10,7 @@ The design intentionally keeps the control plane small:
 - files are messages;
 - directories are queues;
 - lock files are leases;
+- development workers run in ARL `agent_env` sandboxes;
 - worker agents own git operations;
 - verifier agents independently check worker branches.
 
@@ -97,29 +98,52 @@ agentm workflow run contrib/scenarios/workgraph/workflow/develop.py \
   }'
 ```
 
-When `agent_env` is omitted, workers use their manifest's local operations
-backend. For real repository automation, pass an `agent_env` block and inject
-git credentials into the sandbox environment through the ARL deployment.
+`agent_env` is required for development workers. The worker manifests install
+the `operations` atom with `backend: agent_env`, and the workflow fails before
+claiming tasks unless `args.agent_env.image` or `AGENTM_AGENT_ENV_IMAGE` is
+set. When the controller process has `GH_TOKEN` or `GITHUB_TOKEN`, the workflow
+forwards both common names into the sandbox through the operations atom's
+`agent_env.config_env.vars` interface. Explicit `args.agent_env.config_env`
+values win when they provide the same variable name.
+For automatic task claiming, pass an image so each claimed task gets its own
+sandbox. Do not pass a shared `attach_session` to the develop workflow; the
+only supported attach path is the workflow's own per-task session reuse.
+
+Within one workflow task pipeline, WorkGraph reuses the same ARL sandbox across
+follow-up worker calls. The coder reports `AgentEnvSession`, the workflow stores
+it in `results/<task-id>/agent_env_session.txt`, and the verifier in that same
+pipeline attaches to that session instead of creating a fresh sandbox.
 
 ## Worker Contract
 
-The workflow does not perform git operations for the worker. The coder is
-expected to clone, branch, commit, push, and open a PR. Its final response must
-begin with one of:
+The workflow does not perform git operations for the worker. The coder runs in
+its own ARL sandbox and is expected to clone, branch, commit, push, and open a
+PR. A sandbox-local commit is not a delivery: `Status: success` requires a
+remote branch or PR visible to the verifier. Its final response must begin with
+one of:
 
 ```text
 Status: success
 Status: failed
 Status: conflict
+AgentEnvSession: <agent_env.session_id or none>
+Branch: <branch or none>
+Commit: <commit or none>
+Remote: <remote branch name/url or none>
+PR: <url or none>
 ```
 
-The verifier receives the task and the coder's result, performs a fresh clone
-or checkout, runs the validation commands, and reports:
+The workflow coerces a coder `Status: success` with empty `Remote:` and `PR:`
+to failed before verification. The verifier receives the task and the coder's
+result, performs a fresh clone or checkout of the remote branch/PR, runs the
+validation commands, and reports:
 
 ```text
 Status: passed
 Status: failed
+AgentEnvSession: <agent_env.session_id or none>
 ```
 
 The workflow moves the task file based on the verifier result and writes
-`result.md`, `validation.md`, and `task.md` under `results/<task-id>/`.
+`result.md`, `validation.md`, `task.md`, and `agent_env_session.txt` under
+`results/<task-id>/`.

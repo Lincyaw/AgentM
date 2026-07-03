@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from agentm.core.abi import ExtensionAPI
 from agentm.extensions import ExtensionManifest
 
+
 class OperationsConfig(BaseModel):
     backend: Literal["local", "agent_env"] = "local"
     # agent_env-specific properties (ignored when backend=local)
@@ -29,7 +30,8 @@ class OperationsConfig(BaseModel):
     attach_session: str | None = None
     gateway_url: str | None = None
     api_key: str | None = None
-    namespace: str | None = None
+    profile: str | None = None
+    config_env: dict[str, object] | None = None
     work_dir: str | None = None
     timeout: float | None = None
     idle_timeout_seconds: int | None = None
@@ -39,10 +41,8 @@ class OperationsConfig(BaseModel):
     cpu_limit: str | None = None
     memory_request: str | None = None
     memory_limit: str | None = None
-    max_replicas: int | None = None
-    min_replicas: int | None = None
-    scale_up_step: int | None = None
     delete_on_shutdown: bool | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="operations",
@@ -54,6 +54,7 @@ MANIFEST = ExtensionManifest(
     config_schema=OperationsConfig,
     requires=(),
 )
+
 
 async def install(api: ExtensionAPI, config: OperationsConfig) -> None:
     # Sub-installers expect a plain dict; forward the full model dump.

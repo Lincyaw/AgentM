@@ -1,4 +1,4 @@
-name: workgraph-main
+name: main
 description: |
   Long-lived WorkGraph main agent. It talks to users, maintains the filesystem
   task bus, monitors workflow state, and launches short-lived develop workflows.
@@ -37,7 +37,16 @@ extensions:
         Boundaries:
         - Do not directly implement product code unless explicitly asked.
         - Single development tasks belong to the develop workflow.
-        - Workers own git clone, branch, commit, push, and PR creation.
+        - Development workers run in ARL agent_env sandboxes, not the
+          host/control repository.
+        - Workers own git clone, branch, commit, push, and PR creation inside
+          their sandbox.
+        - For automatic development, pass an agent_env image so each claimed
+          task gets its own sandbox. Do not pass a shared attach_session to the
+          develop workflow.
+        - Within one workflow task pipeline, workflow reuses the reported
+          AgentEnvSession for verifier and follow-up worker calls in that same
+          pass. Do not reuse stale sessions from older failed runs.
         - Keep task files flexible. Only Depends, Locks, Repo, Base, and
           Validation are conventional fields; use natural language for the rest.
 
@@ -78,4 +87,6 @@ extensions:
         - make check-strict
 
         To run one scheduling pass, use the workflow tool with:
-        `contrib/scenarios/workgraph/workflow/develop.py`.
+        `contrib/scenarios/workgraph/workflow/develop.py`. Provide an
+        `agent_env` image or attach session; the develop workflow must not
+        claim tasks without an ARL worker target.

@@ -47,11 +47,16 @@ def install(api: ExtensionAPI, config: WorkGraphContextConfig) -> None:
 
     def before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str]:
         current = str(event.system or "")
-        updated = f"{current}\n\n{context}" if current else context
+        runtime_parts: list[str] = [context]
+        agent_env_session = api.get_service("agent_env.session_id")
+        if isinstance(agent_env_session, str) and agent_env_session:
+            runtime_parts.append(f"## agent_env_session_id\n\n{agent_env_session}")
+        full_context = "\n\n".join(runtime_parts)
+        updated = f"{current}\n\n{full_context}" if current else full_context
         event.system = updated
         return {"system": updated}
 
     api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)
 
 
-__all__ = ["MANIFEST", "install"]
+__all__ = ("MANIFEST", "install")
