@@ -1765,6 +1765,7 @@ func (m *appModel) handleReorderTab(msg messages.ReorderTabMsg) (tea.Model, tea.
 // handleCloseTab closes a session tab.
 func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	wasActive := sessionID == m.supervisor.ActiveID()
+	prevBottomSurfaceHeight := m.bottomSurfaceHeight(m.width)
 
 	// Capture the working dir before closing so we can reuse it if this is the last tab.
 	var closedWorkingDir string
@@ -1793,6 +1794,7 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	delete(m.workflowTranscripts, sessionID)
 	delete(m.workflowVisible, sessionID)
 	m.removeBackgroundActivitiesForSession(sessionID)
+	bottomSurfaceHeightChanged := prevBottomSurfaceHeight != m.bottomSurfaceHeight(m.width)
 
 	var cmds []tea.Cmd
 	// Remove from persistent store using the persisted session-store ID.
@@ -1822,6 +1824,9 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	// If the closed tab was active, switch to the next one
 	if wasActive && nextActiveID != "" {
 		return m.handleSwitchTab(nextActiveID)
+	}
+	if bottomSurfaceHeightChanged {
+		cmds = append(cmds, m.resizeAll())
 	}
 
 	return m, tea.Batch(cmds...)
