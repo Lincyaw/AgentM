@@ -16,6 +16,8 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
 )
 
+const maxVisibleBackgroundActivities = 4
+
 type workflowRow struct {
 	sessionID      string
 	title          string
@@ -427,7 +429,7 @@ func (m *appModel) renderWorkflowRows(width int) string {
 		return ""
 	}
 	workflowRows := m.workflowRows()
-	activityRows := m.backgroundActivityRows()
+	activityRows, hiddenActivityCount := m.backgroundActivityRows()
 	if len(workflowRows) == 0 && len(activityRows) == 0 {
 		return ""
 	}
@@ -436,9 +438,12 @@ func (m *appModel) renderWorkflowRows(width int) string {
 		selected = 0
 	}
 	innerWidth := max(20, width-appPaddingHorizontal)
-	lines := make([]string, 0, len(workflowRows)+len(activityRows))
+	lines := make([]string, 0, len(workflowRows)+len(activityRows)+1)
 	for i, row := range workflowRows {
 		lines = append(lines, m.renderWorkflowRow(row, i == selected && m.workflowPickerOpen, innerWidth))
+	}
+	if hiddenActivityCount > 0 {
+		lines = append(lines, renderHiddenBackgroundActivitiesRow(hiddenActivityCount, innerWidth))
 	}
 	for _, row := range activityRows {
 		lines = append(lines, m.renderBackgroundActivityRow(row, innerWidth))
@@ -574,18 +579,25 @@ func (m *appModel) clearBottomActivitiesForSession(sessionID string) {
 	m.statusBar.SetActivity(m.backgroundActivityText())
 }
 
-func (m *appModel) backgroundActivityRows() []backgroundActivity {
+func (m *appModel) backgroundActivityRows() ([]backgroundActivity, int) {
 	if len(m.backgroundActivities) == 0 {
-		return nil
+		return nil, 0
 	}
 	rows := make([]backgroundActivity, 0, len(m.backgroundActivities))
 	for _, activity := range m.backgroundActivities {
 		rows = append(rows, activity)
 	}
 	slices.SortFunc(rows, func(a, b backgroundActivity) int {
-		return a.updatedAt.Compare(b.updatedAt)
+		if cmp := a.updatedAt.Compare(b.updatedAt); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.id, b.id)
 	})
-	return rows
+	if len(rows) <= maxVisibleBackgroundActivities {
+		return rows, 0
+	}
+	hidden := len(rows) - maxVisibleBackgroundActivities
+	return rows[hidden:], hidden
 }
 
 func (m *appModel) renderBackgroundActivityRow(row backgroundActivity, width int) string {
@@ -611,6 +623,18 @@ func (m *appModel) renderBackgroundActivityRow(row backgroundActivity, width int
 	}
 	if row.terminal {
 		return styles.SecondaryStyle.Render(line)
+	}
+	return styles.MutedStyle.Render(line)
+}
+
+func renderHiddenBackgroundActivitiesRow(count, width int) string {
+	noun := "activity"
+	if count != 1 {
+		noun = "activities"
+	}
+	line := fmt.Sprintf("  + %d older background %s", count, noun)
+	if lipgloss.Width(line) > width {
+		line = ansi.Truncate(line, width, "…")
 	}
 	return styles.MutedStyle.Render(line)
 }
