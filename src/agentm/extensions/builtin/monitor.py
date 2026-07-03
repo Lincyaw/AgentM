@@ -352,6 +352,7 @@ class _MonitorManager:
                     activity_id=_activity_id(state.monitor_id),
                     label=_monitor_label(state),
                     status=state.status,
+                    session_id=self._api.session_id,
                     note=note if note is not None else _monitor_note(state),
                     terminal=terminal,
                 ),

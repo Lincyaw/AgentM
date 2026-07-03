@@ -411,6 +411,7 @@ class _BgManager:
                     activity_id=_activity_id(state.task_id),
                     label=state.label,
                     status=state.status,
+                    session_id=self._api.session_id,
                     note=note,
                     terminal=terminal,
                 ),

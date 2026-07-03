@@ -601,6 +601,7 @@ class BackgroundActivityEvent(Event):
     activity_id: str
     label: str
     status: str
+    session_id: str | None = None
     note: str | None = None
     terminal: bool = False
 

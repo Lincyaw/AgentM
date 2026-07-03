@@ -328,6 +328,7 @@ def _p_background_activity(ev: BackgroundActivityEvent) -> ProjectorResult:
         "activity_id": ev.activity_id,
         "label": ev.label,
         "status": ev.status,
+        "session_id": ev.session_id,
         "note": ev.note,
         "terminal": ev.terminal,
     }
