@@ -407,7 +407,6 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/ai/types.py
-      - path: src/agentm/ai/env_api_keys.py
       - path: src/agentm/ai/__init__.py
     tests: []
     docs:
