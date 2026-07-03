@@ -512,9 +512,9 @@ func (m *appModel) handleBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 	if ev == nil {
 		return m, nil
 	}
-	changed := m.updateBackgroundActivity(ev)
+	layoutChanged := m.updateBackgroundActivity(ev)
 	m.statusBar.SetActivity(m.backgroundActivityText())
-	if !changed {
+	if !layoutChanged {
 		return m, nil
 	}
 	return m, m.resizeAll()
@@ -550,12 +550,10 @@ func (m *appModel) updateBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 		updatedAt: time.Now(),
 		terminal:  ev.Terminal,
 	}
-	prev, existed := m.backgroundActivities[id]
-	if existed && prev == next {
-		return false
-	}
+	_, existed := m.backgroundActivities[id]
 	m.backgroundActivities[id] = next
-	return true
+	// Existing activity rows keep the same bottom-surface height; repaint is enough.
+	return !existed
 }
 
 func (m *appModel) removeBackgroundActivitiesForSession(sessionID string) {
