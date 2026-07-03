@@ -628,7 +628,7 @@ def _find_core_manifest(cwd: str) -> Path | None:
     candidates = [Path(cwd) / "core-manifest.yaml"]
     project_root = os.environ.get("AGENTM_PROJECT_ROOT")
     if project_root:
-        candidates.append(Path(project_root) / "core-manifest.yaml")
+        candidates.append(Path(project_root).expanduser() / "core-manifest.yaml")
 
     try:
         import agentm
