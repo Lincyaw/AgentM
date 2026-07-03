@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -354,7 +353,7 @@ type SQLiteSessionStore struct {
 // sessionSelectColumns is the canonical SELECT list for the sessions table.
 // The column order matches what scanSession expects; all read paths use this
 // constant so that adding a column requires updating exactly one place.
-const sessionSelectColumns = `id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id`
+const sessionSelectColumns = `id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, attached_files, thinking, parent_id`
 
 // sessionPersistedFields holds the encoded form of a Session's JSON-bearing
 // columns plus the SQL representation of parent_id (nil for the empty
@@ -363,6 +362,7 @@ type sessionPersistedFields struct {
 	PermissionsJSON         string
 	AgentModelOverridesJSON string
 	CustomModelsUsedJSON    string
+	AttachedFilesJSON       string
 	ParentID                any // string or nil
 }
 
@@ -397,6 +397,15 @@ func sessionPersistedFieldsOf(session *Session) (sessionPersistedFields, error) 
 			return f, err
 		}
 		f.CustomModelsUsedJSON = string(customBytes)
+	}
+
+	f.AttachedFilesJSON = "[]"
+	if len(session.AttachedFiles) > 0 {
+		attachedBytes, err := json.Marshal(session.AttachedFiles)
+		if err != nil {
+			return f, err
+		}
+		f.AttachedFilesJSON = string(attachedBytes)
 	}
 
 	// Use NULL for empty parent_id to avoid foreign key constraint issues.
@@ -441,44 +450,13 @@ func (s *InMemorySessionStore) Close() error {
 }
 
 // NewSQLiteSessionStore creates a new SQLite session store backed by a file
-// at path. If migrations fail (other than a version mismatch or a filesystem
-// open failure) the existing database is moved aside to <path>.bak and a
-// fresh one is created.
+// at path. Migration failures are returned to the caller instead of
+// automatically moving the existing database aside; startup should fail
+// visibly rather than silently presenting an empty history.
 func NewSQLiteSessionStore(path string) (Store, error) {
 	store, err := openAndMigrateSQLiteStore(path)
 	if err != nil {
-		// Don't attempt recovery for version mismatch - the user needs to upgrade,
-		// not silently lose their data by starting fresh.
-		if errors.Is(err, ErrNewerDatabase) {
-			return nil, err
-		}
-
-		// Don't attempt recovery if we couldn't even open/create the database file
-		// (e.g., permission denied, read-only filesystem, missing directory).
-		// The backup+retry dance can't fix a filesystem-level problem, and would just
-		// wrap the real error in a confusing "migration failed even after database reset"
-		// message.
-		if sqliteutil.IsCantOpenError(err) {
-			return nil, err
-		}
-
-		// If migrations failed, try to recover by backing up the database and starting fresh
-		slog.Warn("Failed to open session store, attempting recovery", "error", err)
-
-		backupErr := backupDatabase(path)
-		if backupErr != nil {
-			// Return the original error if backup failed
-			slog.Error("Failed to backup database for recovery", "error", backupErr)
-			return nil, fmt.Errorf("migration failed: %w (backup also failed: %w)", err, backupErr)
-		}
-
-		// Try again with a fresh database
-		store, err = openAndMigrateSQLiteStore(path)
-		if err != nil {
-			return nil, fmt.Errorf("migration failed even after database reset: %w", err)
-		}
-
-		slog.Info("Successfully recovered session store with fresh database")
+		return nil, err
 	}
 
 	return store, nil
@@ -540,48 +518,10 @@ func setupAndMigrate(db *sql.DB) error {
 	return migrationManager.InitializeMigrations(context.Background())
 }
 
-// backupDatabase moves the database file (and related WAL files) to a backup
-func backupDatabase(path string) error {
-	backupPath := path + ".bak"
-
-	slog.Info("Backing up database", "from", path, "to", backupPath)
-
-	// Move the main database file
-	if err := os.Rename(path, backupPath); err != nil {
-		if os.IsNotExist(err) {
-			// No database file to backup, that's fine
-			return nil
-		}
-		return fmt.Errorf("failed to move database file: %w", err)
-	}
-
-	// Also move WAL and SHM files if they exist (SQLite WAL mode artifacts)
-	walPath := path + "-wal"
-	if _, err := os.Stat(walPath); err == nil {
-		if err := os.Rename(walPath, backupPath+"-wal"); err != nil {
-			slog.Warn("Failed to move WAL file", "error", err)
-		}
-	}
-
-	shmPath := path + "-shm"
-	if _, err := os.Stat(shmPath); err == nil {
-		if err := os.Rename(shmPath, backupPath+"-shm"); err != nil {
-			slog.Warn("Failed to move SHM file", "error", err)
-		}
-	}
-
-	return nil
-}
-
 // AddSession adds a new session to the store, including any messages
 func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) error {
 	if session.ID == "" {
 		return ErrEmptyID
-	}
-
-	fields, err := sessionPersistedFieldsOf(session)
-	if err != nil {
-		return err
 	}
 
 	// Use a transaction to insert session and its items
@@ -591,18 +531,8 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO sessions (
-			id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message,
-			max_iterations, working_dir, created_at, permissions, agent_model_overrides,
-			custom_models_used, thinking, parent_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.ID, session.ToolsApproved, session.InputTokens, session.OutputTokens, session.Title,
-		session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
-		session.CreatedAt.Format(time.RFC3339), fields.PermissionsJSON, fields.AgentModelOverridesJSON,
-		fields.CustomModelsUsedJSON, false, fields.ParentID)
-	if err != nil {
-		return err
+	if err := s.addSessionTx(ctx, tx, session); err != nil {
+		return fmt.Errorf("adding session metadata: %w", err)
 	}
 
 	// Insert all messages into session_items
@@ -630,6 +560,7 @@ func scanSession(scanner interface {
 		parentID                sql.NullString
 		agentModelOverridesJSON string
 		customModelsUsedJSON    string
+		attachedFilesJSON       string
 		createdAtStr            string
 		thinking                bool // discarded
 	)
@@ -638,7 +569,7 @@ func scanSession(scanner interface {
 		&sess.ID, &sess.ToolsApproved, &sess.InputTokens, &sess.OutputTokens,
 		&sess.Title, &sess.Cost, &sess.SendUserMessage, &sess.MaxIterations,
 		&workingDir, &createdAtStr, &sess.Starred, &permissionsJSON,
-		&agentModelOverridesJSON, &customModelsUsedJSON, &thinking, &parentID,
+		&agentModelOverridesJSON, &customModelsUsedJSON, &attachedFilesJSON, &thinking, &parentID,
 	)
 	if err != nil {
 		return nil, err
@@ -667,6 +598,12 @@ func scanSession(scanner interface {
 
 	if customModelsUsedJSON != "" && customModelsUsedJSON != "[]" {
 		if err := json.Unmarshal([]byte(customModelsUsedJSON), &sess.CustomModelsUsed); err != nil {
+			return nil, err
+		}
+	}
+
+	if attachedFilesJSON != "" && attachedFilesJSON != "[]" {
+		if err := json.Unmarshal([]byte(attachedFilesJSON), &sess.AttachedFiles); err != nil {
 			return nil, err
 		}
 	}
@@ -908,9 +845,9 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		`INSERT INTO sessions (
 			id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
-			custom_models_used, thinking, parent_id
+			custom_models_used, attached_files, thinking, parent_id
 		)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   title = excluded.title,
 		   tools_approved = excluded.tools_approved,
@@ -924,12 +861,13 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		   permissions = excluded.permissions,
 		   agent_model_overrides = excluded.agent_model_overrides,
 		   custom_models_used = excluded.custom_models_used,
+		   attached_files = excluded.attached_files,
 		   thinking = excluded.thinking,
 		   parent_id = excluded.parent_id`,
 		session.ID, session.ToolsApproved, session.InputTokens, session.OutputTokens,
 		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
 		session.CreatedAt.Format(time.RFC3339), session.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
-		fields.CustomModelsUsedJSON, false, fields.ParentID)
+		fields.CustomModelsUsedJSON, fields.AttachedFilesJSON, false, fields.ParentID)
 	if err != nil {
 		return err
 	}
@@ -1076,14 +1014,14 @@ func (s *SQLiteSessionStore) addSessionTx(ctx context.Context, tx *sql.Tx, sessi
 		`INSERT INTO sessions (
 			id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
-			custom_models_used, thinking, parent_id
+			custom_models_used, attached_files, thinking, parent_id
 		)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID, session.ToolsApproved, session.InputTokens, session.OutputTokens,
 		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations,
 		session.WorkingDir, session.CreatedAt.Format(time.RFC3339), session.Starred,
-		fields.PermissionsJSON, fields.AgentModelOverridesJSON, fields.CustomModelsUsedJSON, false,
-		fields.ParentID)
+		fields.PermissionsJSON, fields.AgentModelOverridesJSON, fields.CustomModelsUsedJSON,
+		fields.AttachedFilesJSON, false, fields.ParentID)
 	return err
 }
 
