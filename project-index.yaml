@@ -1024,6 +1024,7 @@ requirements:
       - path: src/agentm/extensions/builtin/prompt_templates.py
       - path: src/agentm/gateway/commands/skill_command.py
       - path: src/agentm/onboard.py
+      - path: contrib/gateway-peers/terminal-go/internal/wire/resolve.go
       - path: contrib/gateway-peers/feishu/src/agentm_feishu/cli.py
       - path: contrib/gateway-peers/feishu/src/agentm_feishu/bot_config.py
       - path: contrib/gateway-peers/weixin/src/agentm_weixin/cli.py

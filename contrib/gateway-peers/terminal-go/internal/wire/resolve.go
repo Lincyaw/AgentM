@@ -15,19 +15,37 @@ import (
 func DefaultSocketURL() string {
 	runtime := os.Getenv("AGENTM_RUNTIME_DIR")
 	if runtime == "" {
-		home := os.Getenv("AGENTM_HOME")
-		if home == "" {
-			if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
-				home = filepath.Join(userHome, ".agentm")
-			} else {
-				home = ".agentm"
-			}
-		}
+		home := defaultAgentMHome()
 		sum := sha1.Sum([]byte(home))
 		digest := hex.EncodeToString(sum[:])[:8]
 		runtime = filepath.Join(os.TempDir(), fmt.Sprintf("agentm-%d-%s", os.Getuid(), digest))
 	}
 	return "unix://" + filepath.Join(runtime, "gateway.sock")
+}
+
+func defaultAgentMHome() string {
+	home := os.Getenv("AGENTM_HOME")
+	if home == "" {
+		if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
+			return filepath.Join(userHome, ".agentm")
+		}
+		return ".agentm"
+	}
+	return expandUser(home)
+}
+
+func expandUser(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") && !strings.HasPrefix(path, "~\\") {
+		return path
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil || userHome == "" {
+		return path
+	}
+	if path == "~" {
+		return userHome
+	}
+	return filepath.Join(userHome, path[2:])
 }
 
 // ResolveTransport parses a URL string into a Transport.
