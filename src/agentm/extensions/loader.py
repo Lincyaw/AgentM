@@ -252,11 +252,12 @@ def validate_scenario(name_or_path: str) -> None:
 
 
 def list_scenarios() -> list[ScenarioInfo]:
-    """List scenario manifests discoverable from the current process.
+    """List installed home-contrib scenario manifests.
 
-    Listing intentionally performs only cheap manifest summary reads. Full
-    dependency/import validation remains the job of :func:`load_scenario` when a
-    scenario is actually selected.
+    Discovery is intentionally scoped to ``$AGENTM_HOME/contrib/scenarios`` so a
+    source checkout does not flood the user-facing picker with repo-internal
+    demos or worker manifests. Full dependency/import validation remains the job
+    of :func:`load_scenario` when a scenario is actually selected.
     """
 
     discovered: list[ScenarioInfo] = []
@@ -278,23 +279,21 @@ def list_scenarios() -> list[ScenarioInfo]:
         )
         seen.add(name)
 
-    for ep_name in sorted(_scenario_entrypoint_names()):
-        add(
-            _resolve_scenario_entrypoint(ep_name),
-            source="entry_point",
-            name_hint=ep_name,
-        )
-
-    for source, root in _candidate_root_entries():
+    for source, root in _home_contrib_root_entries():
         for manifest_path, name_hint in _iter_contrib_scenario_manifests(root):
             add(manifest_path, source=source, name_hint=name_hint)
 
-    packaged_root = _packaged_scenario_root()
-    if packaged_root is not None:
-        for manifest_path, name_hint in _iter_packaged_scenario_manifests(packaged_root):
-            add(manifest_path, source="packaged", name_hint=name_hint)
-
     return sorted(discovered, key=lambda item: item.name)
+
+
+def _home_contrib_root_entries() -> list[tuple[str, Path]]:
+    try:
+        from agentm.core.lib import agentm_home_dir
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("scenario list: home discovery unavailable: {}", exc)
+        return []
+    home = agentm_home_dir()
+    return [("home", home)] if (home / "contrib" / "scenarios").is_dir() else []
 
 
 def _scenario_entrypoint_names() -> list[str]:

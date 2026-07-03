@@ -665,13 +665,15 @@ class ExtensionManifest:
 Scenario/session loading topologically sorts manifest-bearing extensions by `requires` before installation and fails fast when a declared dependency is absent. Built-in atoms with no peer dependency still spell `requires=()` with an inline rationale so the absence is auditable.
 
 Named scenarios are discoverable through `list_scenarios()`, which reads only
-manifest summaries from the configured search roots (entry points, project cwd /
-`AGENTM_PROJECT_ROOT`, home contrib, editable checkout contrib, and packaged
-portable scenarios). Discovery is deliberately cheap and tolerant; selecting a
-scenario still calls `load_scenario()` / `validate_scenario()` so missing
-manifests, invalid YAML, duplicate atoms, absent dependencies, or unimportable
-modules fail before the session starts. CLI and gateway entrypoints must not
-fall back to an empty extension list when scenario validation fails.
+manifest summaries from `$AGENTM_HOME/contrib/scenarios` (default:
+`~/.agentm/contrib/scenarios`). Source-checkout, packaged, and entry-point
+roots remain explicit loading concerns, not user-facing picker noise; use an
+absolute path when selecting a scenario outside home contrib. Discovery is
+deliberately cheap and tolerant; selecting a scenario still calls
+`load_scenario()` / `validate_scenario()` so missing manifests, invalid YAML,
+duplicate atoms, absent dependencies, or unimportable modules fail before the
+session starts. CLI and gateway entrypoints must not fall back to an empty
+extension list when scenario validation fails.
 
 ### 11.3 Auto-discovery
 

@@ -1306,7 +1306,7 @@ def list_scenarios_cmd(
         ),
     ] = None,
 ) -> None:
-    """List discoverable scenarios usable with ``--scenario``."""
+    """List installed home-contrib scenarios usable with ``--scenario``."""
 
     from agentm.extensions.loader import list_scenarios
 
@@ -1349,13 +1349,18 @@ def list_scenarios_cmd(
     print(f"# scenarios ({len(filtered)})")
     if not filtered:
         print("  (none)")
+        print("\nInstalled scenarios live under `$AGENTM_HOME/contrib/scenarios`.")
         return
     name_width = min(max(32, max(len(entry.name) for entry in filtered)), 48)
     for entry in filtered:
         summary = _compact_text(entry.description, 96)
         suffix = f"  {summary}" if summary else ""
         print(f"  {entry.name:{name_width}s} {entry.source:12s}{suffix}")
-    print("\nUse with `--scenario <name>` or `/scenario <name>` in terminal.")
+    print(
+        "\nInstalled scenarios live under `$AGENTM_HOME/contrib/scenarios` "
+        "(default: `~/.agentm/contrib/scenarios`). Use with `--scenario <name>` "
+        "or `/scenario <name>` in terminal."
+    )
 
 
 def _compact_text(value: str, limit: int) -> str:

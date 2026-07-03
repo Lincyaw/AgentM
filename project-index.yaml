@@ -449,10 +449,10 @@ requirements:
       duplicated presenter wiring, dotenv loading is centralized, local JSONL
       fallback lives under AGENTM_HOME, and Textual must clone AgentSessionConfig
       through a public with_bus helper instead of reflecting on __dict__.
-      Scenario discovery is exposed through the CLI/gateway, explicit scenario
-      selection fails fast, and gateway `/model` / `/scenario` switches are
-      scoped to the current chat/session key rather than mutating global
-      gateway state.
+      Scenario discovery is exposed through the CLI/gateway from home contrib,
+      explicit scenario selection fails fast, and gateway `/model` /
+      `/scenario` switches are scoped to the current chat/session key rather
+      than mutating global gateway state.
     priority: P1
     status: implemented
     confidence: confirmed
