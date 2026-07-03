@@ -36,13 +36,15 @@ workflow; the remaining body is passed verbatim to the worker.
 Prefer domain-sized tasks: one bounded context, domain capability, or coherent
 cross-service capability with one owner and one validation gate. Do not split a
 feature into many helper-sized tasks unless the dependencies, ownership, or
-conflict risk justify it.
+conflict risk justify it. Use service/domain locks for normal parallel work;
+avoid broad locks such as `project-index` unless the orchestrator intentionally
+wants to serialize a high-risk shared edit.
 
 ```md
 # REQ-005 Service Plan domain foundation
 
 Depends: REQ-004
-Locks: services/service-plan, project-index
+Locks: services/service-plan
 Repo: git@github.com:OperationsPAI/train-ticket.git
 Base: refactor/greenfield-ddd
 

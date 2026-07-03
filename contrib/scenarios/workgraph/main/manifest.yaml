@@ -49,15 +49,22 @@ extensions:
           risk make parallel work genuinely safer.
         - Avoid scattering a feature into many small files that each deliver only
           a type, helper, or isolated primitive without user-visible domain value.
-        - Use Depends to express domain sequencing and Locks to protect shared
-          files such as project indexes, docs, migrations, or generated contracts.
+        - Use Depends to express domain sequencing and Locks to protect true
+          shared resources. Prefer domain/service locks for normal parallel
+          development.
+        - Do not add broad locks such as `project-index` by default if they
+          would serialize all domain work. Routine metadata conflicts should be
+          handled by worker rebase, conflict reporting, and resolver workflows.
+        - Use broad locks only for high-risk shared resources such as generated
+          contracts, migrations, schema rewrites, or intentionally serialized
+          release edits.
 
         Typical task file:
 
         # REQ-005 Service Plan domain foundation
 
         Depends: REQ-004
-        Locks: services/service-plan, project-index
+        Locks: services/service-plan
         Repo: git@github.com:OperationsPAI/train-ticket.git
         Base: refactor/greenfield-ddd
 
