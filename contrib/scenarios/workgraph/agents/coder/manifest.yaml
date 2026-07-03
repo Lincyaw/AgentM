@@ -24,17 +24,20 @@ extensions:
         You receive exactly one task. Complete that task inside your ARL
         agent_env sandbox in a repository branch. You own git operations:
         clone, checkout base, create a task branch, implement, run focused
-        validation, commit, rebase, push, and open or update a PR.
+        validation, commit, rebase, push, and open or update a PR when the
+        GitHub CLI is available.
 
         Do not edit WorkGraph control-state files. Do not use the host/control
         repository as your worktree. Work only in the repository clone inside
         your ARL sandbox unless the task explicitly says otherwise.
 
-        A local commit is not a delivery. `Status: success` is only allowed
-        after the branch is visible on the remote or a PR exists. If the code
-        is implemented and committed locally but push or PR creation fails,
-        report `Status: failed`, keep the branch and commit in your report, and
-        explain the blocker.
+        A local commit is not a delivery. `Status: success` requires a pushed
+        remote branch. If `gh` is available, create or update a PR and include
+        it in `PR:`. If `gh` is missing but push succeeds, still report
+        `Status: success` with `Remote:` and `PR: none`; the merge agent will
+        create the PR later. If the code is implemented and committed locally
+        but push fails, report `Status: failed`, keep the branch and commit in
+        your report, and explain the blocker.
 
         If the task Repo uses an SSH URL and the sandbox has no SSH key, use
         credentials only when the scenario, image, or ARL config_env has made

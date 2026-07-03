@@ -19,6 +19,7 @@ from agentm.extensions.builtin.workflow import WorkflowContext
 
 DEFAULT_STATE_DIR = ".agentm/workgraph"
 DEFAULT_MERGER_SCENARIO = "workgraph/agents/merger"
+TASK_HEADER_FIELDS = {"depends", "locks", "repo", "base"}
 
 
 @dataclass
@@ -100,10 +101,25 @@ def _ensure_dirs(root: Path) -> None:
         (root / name).mkdir(parents=True, exist_ok=True)
 
 
+def _task_metadata(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("## "):
+            break
+        if not stripped or stripped.startswith("# "):
+            continue
+        key, separator, value = raw_line.partition(":")
+        if not separator:
+            continue
+        normalized = key.strip().lower()
+        if normalized in TASK_HEADER_FIELDS and normalized not in fields:
+            fields[normalized] = value.strip()
+    return fields
+
+
 def _field(text: str, name: str) -> str:
-    pattern = re.compile(rf"^\s*{re.escape(name)}\s*:\s*(.*?)\s*$", re.I | re.M)
-    match = pattern.search(text)
-    return match.group(1).strip() if match else ""
+    return _task_metadata(text).get(name.lower(), "")
 
 
 def _csv_field(text: str, name: str) -> list[str]:
@@ -248,9 +264,12 @@ def _merge_status(text: object) -> str:
 
 
 def _report_field(text: str, name: str) -> str:
-    pattern = re.compile(rf"^\s*{re.escape(name)}\s*:\s*(.*?)\s*$", re.I | re.M)
-    match = pattern.search(text)
-    return match.group(1).strip() if match else ""
+    target = name.lower()
+    for raw_line in text.splitlines():
+        key, separator, value = raw_line.partition(":")
+        if separator and key.strip().lower() == target:
+            return value.strip()
+    return ""
 
 
 def _is_noneish(value: str) -> bool:
@@ -399,6 +418,7 @@ def _context_for_task(
     task = claim.task
     coder_result = _read_result_file(root, task, "result.md")
     verifier_result = _read_result_file(root, task, "validation.md")
+    branch = _report_field(coder_result, "Branch")
     pr = _report_field(coder_result, "PR") or _report_field(verifier_result, "PR")
     remote = _report_field(coder_result, "Remote")
     context: dict[str, object] = {
@@ -413,17 +433,20 @@ def _context_for_task(
         "validation": task.validation,
         "coder_result": coder_result,
         "verifier_result": verifier_result,
+        "branch": "" if _is_noneish(branch) else branch,
         "pr": "" if _is_noneish(pr) else pr,
         "remote": "" if _is_noneish(remote) else remote,
         "execution": (
             "Run inside the ARL agent_env sandbox. Do not use the host/control "
             "repository as the worktree. Perform GitHub and git operations for "
-            "exactly one verified PR. Rebase onto the latest base, push only "
-            "the worker PR branch with --force-with-lease after a successful "
-            "rebase, run validation, and merge through gh. If source_queue is "
-            "merge_pending, first check whether the PR is already merged; if "
-            "it is still waiting on checks or branch protection, report "
-            "Status: auto_merge again. Never print credentials."
+            "exactly one verified delivery branch or PR. If no PR exists yet, "
+            "create it from the delivery branch before merge operations. "
+            "Rebase onto the latest base, push only the worker delivery branch "
+            "with --force-with-lease after a successful rebase, run validation, "
+            "and merge through gh. If source_queue is merge_pending, first "
+            "check whether the PR is already merged; if it is still waiting on "
+            "checks or branch protection, report Status: auto_merge again. "
+            "Never print credentials."
         ),
     }
     if extra:

@@ -38,10 +38,10 @@ Task files are Markdown. Only a few header fields are interpreted by the
 workflow; the remaining body is passed verbatim to the worker.
 
 `done/` means the task has landed in the base branch. A task that only has a
-verified PR lives in `verified/`, and a PR with GitHub auto-merge enabled but
-not yet landed lives in `merge_pending/`. `Depends` is evaluated against
-`done/` so downstream work only starts after upstream changes are actually in
-the base branch.
+verified remote branch or PR lives in `verified/`, and a PR with GitHub
+auto-merge enabled but not yet landed lives in `merge_pending/`. `Depends` is
+evaluated against `done/` so downstream work only starts after upstream changes
+are actually in the base branch.
 
 Prefer domain-sized tasks: one bounded context, domain capability, or coherent
 cross-service capability with one owner and one validation gate. Do not split a
@@ -98,7 +98,7 @@ agentm workflow run contrib/scenarios/workgraph/workflow/develop.py \
     "max_parallel": 1,
     "agent_env": {
       "backend": "agent_env",
-      "image": "train-ticket-dev:local",
+      "image": "train-ticket-agent-env:local",
       "gateway_url": "http://localhost:8080",
       "work_dir": "/workspace",
       "create_timeout": 1200,
@@ -130,10 +130,11 @@ pipeline attaches to that session instead of creating a fresh sandbox.
 ## Worker Contract
 
 The workflow does not perform git operations for the worker. The coder runs in
-its own ARL sandbox and is expected to clone, branch, commit, push, and open a
-PR. A sandbox-local commit is not a delivery: `Status: success` requires a
-remote branch or PR visible to the verifier. Its final response must begin with
-one of:
+its own ARL sandbox and is expected to clone, branch, commit, push, and open or
+update a PR when `gh` is available. A sandbox-local commit is not a delivery:
+`Status: success` requires a remote branch visible to the verifier. `PR:` may
+be `none`; the merge agent creates the PR later when needed. Its final response
+must begin with one of:
 
 ```text
 Status: success
@@ -148,7 +149,7 @@ PR: <url or none>
 
 The workflow coerces a coder `Status: success` with empty `Remote:` and `PR:`
 to failed before verification. The verifier receives the task and the coder's
-result, performs a fresh clone or checkout of the remote branch/PR, runs the
+result, performs a fresh clone or checkout of the remote branch or PR, runs the
 validation commands, and reports:
 
 ```text
@@ -176,7 +177,7 @@ agentm workflow run contrib/scenarios/workgraph/workflow/merge.py \
     "max_parallel": 1,
     "agent_env": {
       "backend": "agent_env",
-      "image": "train-ticket-dev:local",
+      "image": "train-ticket-agent-env:local",
       "gateway_url": "http://localhost:8080",
       "work_dir": "/workspace",
       "create_timeout": 1200,
@@ -192,11 +193,12 @@ rebased and merged serially. Different repos or base branches may still run in
 parallel when `max_parallel` allows it.
 
 The merge agent runs in ARL `agent_env` and owns all `git` and `gh` operations:
-inspect the PR, fetch the latest base, rebase the PR branch, push the rebased
-branch with `--force-with-lease`, run validation, and merge through GitHub with
-`gh pr merge --rebase --delete-branch`. If branch protection requires waiting,
-it may enable auto-merge with `gh pr merge --auto --rebase --delete-branch` and
-report `Status: auto_merge`; the workflow then parks the task in
-`merge_pending/` for a later pass. A successful merge moves the task to
-`done/`; non-mechanical conflicts move to `conflicts/`; validation or tooling
-failures move to `failed/`.
+identify the delivery branch, create a PR when the coder only pushed a remote
+branch, inspect the PR, fetch the latest base, rebase the delivery branch, push
+the rebased branch with `--force-with-lease`, run validation, and merge through
+GitHub with `gh pr merge --rebase --delete-branch`. If branch protection
+requires waiting, it may enable auto-merge with
+`gh pr merge --auto --rebase --delete-branch` and report `Status: auto_merge`;
+the workflow then parks the task in `merge_pending/` for a later pass. A
+successful merge moves the task to `done/`; non-mechanical conflicts move to
+`conflicts/`; validation or tooling failures move to `failed/`.

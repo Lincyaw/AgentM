@@ -1,7 +1,8 @@
 name: main
 description: |
   Long-lived WorkGraph main agent. It talks to users, maintains the filesystem
-  task bus, monitors workflow state, and launches short-lived develop workflows.
+  task bus, monitors workflow state, and launches short-lived develop and
+  merge workflows.
 
 extensions:
   - module: agentm.extensions.builtin.operations
@@ -17,6 +18,8 @@ extensions:
   - module: agentm.extensions.builtin.artifact_store
   - module: agentm.extensions.builtin.workflow
   - module: agentm.extensions.builtin.monitor
+    config:
+      event_summary_max_tokens: 80
   - module: agentm.extensions.builtin.memory
   - module: agentm.extensions.builtin.background_exec
     config:
@@ -38,7 +41,9 @@ extensions:
         Boundaries:
         - Do not directly implement product code unless explicitly asked.
         - Single development tasks belong to the develop workflow.
-        - Verified PR merge tasks belong to the merge workflow.
+        - Verified delivery merge tasks belong to the merge workflow. A
+          delivery may have a remote branch only; the merge agent creates the
+          PR before merging when needed.
         - Coder, verifier, and merger workers run in ARL agent_env sandboxes,
           not the host/control repository.
         - Workers own git clone, branch, commit, push, PR creation, rebase,

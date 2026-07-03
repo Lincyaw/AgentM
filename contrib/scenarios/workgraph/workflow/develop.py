@@ -23,6 +23,7 @@ from agentm.extensions.builtin.workflow import WorkflowContext
 DEFAULT_STATE_DIR = ".agentm/workgraph"
 DEFAULT_CODER_SCENARIO = "workgraph/agents/coder"
 DEFAULT_VERIFIER_SCENARIO = "workgraph/agents/verifier"
+TASK_HEADER_FIELDS = {"depends", "locks", "repo", "base"}
 
 
 @dataclass
@@ -103,10 +104,25 @@ def _ensure_dirs(root: Path) -> None:
         (root / name).mkdir(parents=True, exist_ok=True)
 
 
+def _task_metadata(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("## "):
+            break
+        if not stripped or stripped.startswith("# "):
+            continue
+        key, separator, value = raw_line.partition(":")
+        if not separator:
+            continue
+        normalized = key.strip().lower()
+        if normalized in TASK_HEADER_FIELDS and normalized not in fields:
+            fields[normalized] = value.strip()
+    return fields
+
+
 def _field(text: str, name: str) -> str:
-    pattern = re.compile(rf"^\s*{re.escape(name)}\s*:\s*(.*?)\s*$", re.I | re.M)
-    match = pattern.search(text)
-    return match.group(1).strip() if match else ""
+    return _task_metadata(text).get(name.lower(), "")
 
 
 def _csv_field(text: str, name: str) -> list[str]:
@@ -244,9 +260,12 @@ def _status(text: object) -> str:
 
 
 def _report_field(text: str, name: str) -> str:
-    pattern = re.compile(rf"^\s*{re.escape(name)}\s*:\s*(.*?)\s*$", re.I | re.M)
-    match = pattern.search(text)
-    return match.group(1).strip() if match else ""
+    target = name.lower()
+    for raw_line in text.splitlines():
+        key, separator, value = raw_line.partition(":")
+        if separator and key.strip().lower() == target:
+            return value.strip()
+    return ""
 
 
 def _is_noneish(value: str) -> bool:

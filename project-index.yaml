@@ -1222,12 +1222,14 @@ requirements:
       present, reuse a task's reported ARL session for verifier and follow-up
       worker calls within the same workflow pass, require a visible remote
       branch or PR before accepting a coder success, and persist each worker's
-      final free-text report as the delivery artifact. Verifier-passed PRs must
-      move to a verified queue instead of done; a separate ARL-backed merge
+      final free-text report as the delivery artifact. Verifier-passed remote
+      branches or PRs must move to a verified queue instead of done; a separate
+      ARL-backed merge
       workflow must serialize merges by repo/base, delegate rebase and GitHub
-      merge operations to a merge agent, move merged tasks to done, park
-      GitHub auto-merge tasks in merge_pending, and route non-mechanical merge
-      conflicts to conflicts. Conflicted work must be
+      merge operations to a merge agent, accept a verified remote branch even
+      when no PR exists yet, create the PR before merging when needed, move
+      merged tasks to done, park GitHub auto-merge tasks in merge_pending, and
+      route non-mechanical merge conflicts to conflicts. Conflicted work must be
       routed to a conflict queue so
       the main orchestrator can decide whether to launch a resolver or ask for
       human intervention.
