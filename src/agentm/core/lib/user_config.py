@@ -78,6 +78,7 @@ class UserConfig:
 
 _EMPTY = UserConfig()
 _cached: UserConfig | None = None
+_cached_path: Path | None = None
 
 
 def agentm_home_dir() -> Path:
@@ -133,13 +134,14 @@ def load_user_config() -> UserConfig:
 
     Returns :data:`_EMPTY` when the file does not exist or cannot be parsed.
     """
-    global _cached
-    if _cached is not None:
+    global _cached, _cached_path
+    path = _config_path()
+    if _cached is not None and _cached_path == path:
         return _cached
 
-    path = _config_path()
     if not path.is_file():
         _cached = _EMPTY
+        _cached_path = path
         return _cached
 
     try:
@@ -148,6 +150,7 @@ def load_user_config() -> UserConfig:
     except Exception:
         logger.opt(exception=True).warning(f"config.toml: failed to parse {path}; using defaults")
         _cached = _EMPTY
+        _cached_path = path
         return _cached
 
     default_model = data.get("default_model")
@@ -168,6 +171,7 @@ def load_user_config() -> UserConfig:
                 models[key.lower()] = profile
 
     _cached = UserConfig(default_model=default_model, models=models)
+    _cached_path = path
     return _cached
 
 
@@ -244,5 +248,6 @@ def apply_reasoning_effort(
 
 def _reset_cache() -> None:
     """Clear the cached config. For testing only."""
-    global _cached
+    global _cached, _cached_path
     _cached = None
+    _cached_path = None
