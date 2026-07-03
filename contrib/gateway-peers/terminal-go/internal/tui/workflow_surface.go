@@ -191,6 +191,17 @@ func (m *appModel) syncWorkflowPickerIndex() {
 	m.workflowPickerIndex = min(max(m.workflowPickerIndex, 0), len(rows)-1)
 }
 
+func (m *appModel) syncWorkflowPickerState() {
+	if !m.workflowPickerOpen {
+		return
+	}
+	if !m.hasWorkflowTasks() {
+		m.closeWorkflowPicker()
+		return
+	}
+	m.syncWorkflowPickerIndex()
+}
+
 func (m *appModel) moveWorkflowSelection(delta int) {
 	rows := m.workflowRows()
 	if len(rows) == 0 {
@@ -224,7 +235,9 @@ func (m *appModel) stopWorkflowSelection() (tea.Model, tea.Cmd) {
 	if row.isMain || row.sessionID == "" {
 		return m, nil
 	}
-	return m.handleCloseTab(row.sessionID)
+	model, cmd := m.handleCloseTab(row.sessionID)
+	m.syncWorkflowPickerState()
+	return model, cmd
 }
 
 func (m *appModel) recordWorkflowTranscript(sessionID string, msg tea.Msg) {
@@ -428,7 +441,10 @@ func (m *appModel) renderWorkflowRows(width int) string {
 	if !m.hasBottomActivities() || (m.workflowRowsHidden && !m.workflowPickerOpen) {
 		return ""
 	}
-	workflowRows := m.workflowRows()
+	var workflowRows []workflowRow
+	if m.hasWorkflowTasks() {
+		workflowRows = m.workflowRows()
+	}
 	activityRows, hiddenActivityCount := m.backgroundActivityRows()
 	if len(workflowRows) == 0 && len(activityRows) == 0 {
 		return ""

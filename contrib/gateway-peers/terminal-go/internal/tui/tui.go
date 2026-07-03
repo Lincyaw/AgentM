@@ -734,6 +734,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.TabsUpdatedMsg:
 		tabChromeChanged := m.syncTabChrome(msg.Tabs, msg.ActiveIdx)
+		m.syncWorkflowPickerState()
 		bottomSurfaceHeightChanged := m.bottomSurfaceHeight(m.width) != m.bottomSurfaceLayoutHeight
 		if tabChromeChanged || bottomSurfaceHeightChanged {
 			cmd := m.resizeAll()
