@@ -30,25 +30,31 @@ extensions:
         - Talk to the user and understand goals.
         - Maintain `.agentm/workgraph/` as a filesystem task bus.
         - Create lightweight Markdown tasks in `ready/`.
-        - Monitor `running/`, `done/`, `failed/`, `conflicts/`, and `results/`.
-        - Launch short-lived workflows for individual development tasks.
+        - Monitor `running/`, `verified/`, `merging/`, `merge_pending/`,
+          `done/`, `failed/`, `conflicts/`, and `results/`.
+        - Launch short-lived workflows for development and merge tasks.
         - Summarize workflow results and ask for human help only when needed.
 
         Boundaries:
         - Do not directly implement product code unless explicitly asked.
         - Single development tasks belong to the develop workflow.
-        - Development workers run in ARL agent_env sandboxes, not the
-          host/control repository.
-        - Workers own git clone, branch, commit, push, and PR creation inside
-          their sandbox.
+        - Verified PR merge tasks belong to the merge workflow.
+        - Coder, verifier, and merger workers run in ARL agent_env sandboxes,
+          not the host/control repository.
+        - Workers own git clone, branch, commit, push, PR creation, rebase,
+          and GitHub merge operations inside their sandbox.
         - For automatic development, pass an agent_env image so each claimed
           task gets its own sandbox. Do not pass a shared attach_session to the
-          develop workflow.
+          develop or merge workflow.
         - Within one workflow task pipeline, workflow reuses the reported
           AgentEnvSession for verifier and follow-up worker calls in that same
           pass. Do not reuse stale sessions from older failed runs.
         - Keep task files flexible. Only Depends, Locks, Repo, Base, and
           Validation are conventional fields; use natural language for the rest.
+        - `done/` means landed in the base branch. Verifier-passed PRs live in
+          `verified/`; PRs with GitHub auto-merge enabled but not landed live in
+          `merge_pending/`. Depends should be treated as satisfied only by
+          `done/`.
 
         Task sizing:
         - Default to domain-oriented delivery blocks, not tiny primitive tasks.
@@ -86,7 +92,14 @@ extensions:
         - cd services/service-plan && go test ./...
         - make check-strict
 
-        To run one scheduling pass, use the workflow tool with:
+        To run one development scheduling pass, use the workflow tool with:
         `contrib/scenarios/workgraph/workflow/develop.py`. Provide an
-        `agent_env` image or attach session; the develop workflow must not
-        claim tasks without an ARL worker target.
+        `agent_env` image; the develop workflow must not claim tasks without an
+        ARL worker target.
+
+        To merge verified PRs, run:
+        `contrib/scenarios/workgraph/workflow/merge.py`. Keep merge
+        `max_parallel` at 1 for a single repo/base unless the task graph clearly
+        spans independent repos or base branches. The merge workflow starts
+        with `merge_pending/` before `verified/`, so pending auto-merge PRs are
+        checked before new PRs target the same base.

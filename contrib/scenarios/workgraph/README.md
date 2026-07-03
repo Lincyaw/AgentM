@@ -11,7 +11,7 @@ The design intentionally keeps the control plane small:
 - directories are queues;
 - lock files are leases;
 - development workers run in ARL `agent_env` sandboxes;
-- worker agents own git operations;
+- coder/verifier/merger agents own git and GitHub operations;
 - verifier agents independently check worker branches.
 
 ## State Layout
@@ -24,6 +24,9 @@ By default the state directory is `.agentm/workgraph/` under the workflow cwd:
   decisions.md
   ready/
   running/
+  verified/
+  merging/
+  merge_pending/
   done/
   failed/
   conflicts/
@@ -33,6 +36,12 @@ By default the state directory is `.agentm/workgraph/` under the workflow cwd:
 
 Task files are Markdown. Only a few header fields are interpreted by the
 workflow; the remaining body is passed verbatim to the worker.
+
+`done/` means the task has landed in the base branch. A task that only has a
+verified PR lives in `verified/`, and a PR with GitHub auto-merge enabled but
+not yet landed lives in `merge_pending/`. `Depends` is evaluated against
+`done/` so downstream work only starts after upstream changes are actually in
+the base branch.
 
 Prefer domain-sized tasks: one bounded context, domain capability, or coherent
 cross-service capability with one owner and one validation gate. Do not split a
@@ -73,7 +82,7 @@ agentm --scenario workgraph/main --cwd /path/to/control-repo
 ```
 
 The main agent should create or edit task files, monitor state directories, and
-invoke the develop workflow when work is ready.
+invoke the develop and merge workflows when work is ready.
 
 ## Develop Workflow
 
@@ -105,6 +114,10 @@ set. When the controller process has `GH_TOKEN` or `GITHUB_TOKEN`, the workflow
 forwards both common names into the sandbox through the operations atom's
 `agent_env.config_env.vars` interface. Explicit `args.agent_env.config_env`
 values win when they provide the same variable name.
+Worker prompts require agents to avoid printing credentials. For GitHub
+git-over-HTTPS, use a token URL or a Basic extraheader generated from
+`x-access-token:${GH_TOKEN}`; Bearer headers are not reliable for git clone or
+push.
 For automatic task claiming, pass an image so each claimed task gets its own
 sandbox. Do not pass a shared `attach_session` to the develop workflow; the
 only supported attach path is the workflow's own per-task session reuse.
@@ -144,6 +157,46 @@ Status: failed
 AgentEnvSession: <agent_env.session_id or none>
 ```
 
-The workflow moves the task file based on the verifier result and writes
-`result.md`, `validation.md`, `task.md`, and `agent_env_session.txt` under
+The workflow moves verifier-passed task files to `verified/`; failed or
+conflicted tasks move to `failed/` or `conflicts/`. It writes `result.md`,
+`validation.md`, `task.md`, and `agent_env_session.txt` under
 `results/<task-id>/`.
+
+## Merge Workflow
+
+Run one merge scheduling pass manually:
+
+```bash
+agentm workflow run contrib/scenarios/workgraph/workflow/merge.py \
+  --cwd /path/to/control-repo \
+  --args '{
+    "state_dir": ".agentm/workgraph",
+    "repo": "git@github.com:OperationsPAI/train-ticket.git",
+    "base": "refactor/greenfield-ddd",
+    "max_parallel": 1,
+    "agent_env": {
+      "backend": "agent_env",
+      "image": "train-ticket-dev:local",
+      "gateway_url": "http://localhost:8080",
+      "work_dir": "/workspace",
+      "create_timeout": 1200,
+      "delete_on_shutdown": false
+    }
+  }'
+```
+
+The merge workflow claims `merge_pending/` before `verified/`, then moves the
+task to `merging/` while the merge agent runs. It uses a filesystem lock derived
+from the task's repo/base pair so multiple PRs targeting the same base are
+rebased and merged serially. Different repos or base branches may still run in
+parallel when `max_parallel` allows it.
+
+The merge agent runs in ARL `agent_env` and owns all `git` and `gh` operations:
+inspect the PR, fetch the latest base, rebase the PR branch, push the rebased
+branch with `--force-with-lease`, run validation, and merge through GitHub with
+`gh pr merge --rebase --delete-branch`. If branch protection requires waiting,
+it may enable auto-merge with `gh pr merge --auto --rebase --delete-branch` and
+report `Status: auto_merge`; the workflow then parks the task in
+`merge_pending/` for a later pass. A successful merge moves the task to
+`done/`; non-mechanical conflicts move to `conflicts/`; validation or tooling
+failures move to `failed/`.

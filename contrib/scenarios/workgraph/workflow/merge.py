@@ -1,16 +1,13 @@
-"""WorkGraph development workflow.
+"""WorkGraph merge workflow.
 
-This module-mode workflow implements one scheduling pass over a lightweight
-filesystem task bus. The durable contract is intentionally small: task files
-are Markdown, and only ``Depends``, ``Locks``, ``Repo``, ``Base``, and the
-``## Validation`` section are interpreted by the scheduler. Worker agents own
-git operations and report through their final response; the workflow records
-those responses under the local state directory. Verified tasks move to
-``verified/``; only the merge workflow moves tasks to ``done/`` after they
-land in the base branch.
+This module-mode workflow implements one merge scheduling pass over the
+WorkGraph filesystem task bus. It claims verified tasks, serializes merges for
+the same repo/base through a filesystem lock, and delegates all git/GitHub
+operations to a short-lived merger agent running in ARL agent_env.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -21,8 +18,7 @@ from typing import Any
 from agentm.extensions.builtin.workflow import WorkflowContext
 
 DEFAULT_STATE_DIR = ".agentm/workgraph"
-DEFAULT_CODER_SCENARIO = "workgraph/agents/coder"
-DEFAULT_VERIFIER_SCENARIO = "workgraph/agents/verifier"
+DEFAULT_MERGER_SCENARIO = "workgraph/agents/merger"
 
 
 @dataclass
@@ -38,9 +34,10 @@ class TaskFile:
 
 
 @dataclass
-class ClaimedTask:
+class ClaimedMergeTask:
     task: TaskFile
-    running_path: Path
+    merging_path: Path
+    source_queue: str
     lock_paths: list[Path]
 
 
@@ -177,19 +174,20 @@ def _safe_lock_name(lock: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", lock).strip("_") or "global"
 
 
-def _acquire_locks(root: Path, task: TaskFile) -> list[Path] | None:
-    acquired: list[Path] = []
-    for lock in task.locks:
-        path = root / "locks" / _safe_lock_name(lock)
-        try:
-            with path.open("x", encoding="utf-8") as handle:
-                handle.write(f"{task.task_id}\n{task.path.name}\n")
-        except FileExistsError:
-            for held in acquired:
-                held.unlink(missing_ok=True)
-            return None
-        acquired.append(path)
-    return acquired
+def _merge_lock_name(task: TaskFile) -> str:
+    digest = hashlib.sha256(f"{task.repo}\n{task.base}".encode()).hexdigest()[:16]
+    base = _safe_lock_name(task.base)[:60] or "base"
+    return f"merge_{base}_{digest}"
+
+
+def _acquire_merge_lock(root: Path, task: TaskFile) -> list[Path] | None:
+    path = root / "locks" / _merge_lock_name(task)
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(f"{task.task_id}\n{task.path.name}\n")
+    except FileExistsError:
+        return None
+    return [path]
 
 
 def _release_locks(paths: list[Path]) -> None:
@@ -202,44 +200,50 @@ def _claim_tasks(
     max_parallel: int,
     default_repo: str,
     default_base: str,
-) -> list[ClaimedTask]:
+) -> list[ClaimedMergeTask]:
     done = _done_ids(root)
-    claimed: list[ClaimedTask] = []
+    claimed: list[ClaimedMergeTask] = []
     held_names: set[str] = set()
-    for path in sorted((root / "ready").glob("*.md")):
+    for queue_name in ("merge_pending", "verified"):
+        for path in sorted((root / queue_name).glob("*.md")):
+            if len(claimed) >= max_parallel:
+                break
+            task = _read_task(path, default_repo, default_base)
+            if not _deps_satisfied(task, done):
+                continue
+            lock_name = _merge_lock_name(task)
+            if lock_name in held_names:
+                continue
+            lock_paths = _acquire_merge_lock(root, task)
+            if lock_paths is None:
+                continue
+            merging_path = root / "merging" / path.name
+            if merging_path.exists():
+                _release_locks(lock_paths)
+                continue
+            path.rename(merging_path)
+            task.path = merging_path
+            claimed.append(
+                ClaimedMergeTask(
+                    task=task,
+                    merging_path=merging_path,
+                    source_queue=queue_name,
+                    lock_paths=lock_paths,
+                )
+            )
+            held_names.add(lock_name)
         if len(claimed) >= max_parallel:
             break
-        task = _read_task(path, default_repo, default_base)
-        if not _deps_satisfied(task, done):
-            continue
-        lock_names = {_safe_lock_name(lock) for lock in task.locks}
-        if held_names & lock_names:
-            continue
-        lock_paths = _acquire_locks(root, task)
-        if lock_paths is None:
-            continue
-        running_path = root / "running" / path.name
-        if running_path.exists():
-            _release_locks(lock_paths)
-            continue
-        path.rename(running_path)
-        task.path = running_path
-        claimed.append(
-            ClaimedTask(task=task, running_path=running_path, lock_paths=lock_paths)
-        )
-        held_names.update(lock_names)
     return claimed
 
 
-def _status(text: object) -> str:
+def _merge_status(text: object) -> str:
     lower = str(text or "").lower()
-    for status in ("conflict", "failed", "passed", "success", "resolved"):
+    for status in ("merged", "failed", "conflict", "needs_human", "pending"):
         if f"status: {status}" in lower:
             return status
-    if "status: needs_human" in lower:
-        return "needs_human"
-    if "pull request" in lower or "\npr:" in lower:
-        return "success"
+    if "status: auto_merge" in lower or "status: auto-merge" in lower:
+        return "auto_merge"
     return "unknown"
 
 
@@ -253,27 +257,6 @@ def _is_noneish(value: str) -> bool:
     return not value.strip() or value.strip().lower() in {"none", "null", "n/a", "-"}
 
 
-def _remote_delivery_present(text: str) -> bool:
-    return not (
-        _is_noneish(_report_field(text, "remote"))
-        and _is_noneish(_report_field(text, "pr"))
-    )
-
-
-def _coerce_coder_status(coder_status: str, coder_text: str) -> tuple[str, str | None]:
-    if coder_status != "success":
-        return coder_status, None
-    if _remote_delivery_present(coder_text):
-        return coder_status, None
-    return (
-        "failed",
-        (
-            "Coder reported success without a remote branch or PR. "
-            "Sandbox-local commits are not a WorkGraph delivery."
-        ),
-    )
-
-
 def _result_dir(root: Path, task: TaskFile) -> Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", task.task_id).strip("-")
     path = root / "results" / (safe or task.path.stem)
@@ -281,18 +264,28 @@ def _result_dir(root: Path, task: TaskFile) -> Path:
     return path
 
 
-def _write_result(
+def _read_result_file(root: Path, task: TaskFile, name: str) -> str:
+    path = _result_dir(root, task) / name
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _agent_env_session_from_report(text: str) -> str:
+    value = _report_field(text, "AgentEnvSession")
+    return "" if _is_noneish(value) else value
+
+
+def _write_merge_result(
     root: Path,
     task: TaskFile,
-    coder: str,
-    verifier: str,
+    merger: str,
     agent_env_session: str = "",
 ) -> None:
     path = _result_dir(root, task)
     (path / "task.md").write_text(task.text, encoding="utf-8")
-    (path / "result.md").write_text(coder, encoding="utf-8")
-    (path / "validation.md").write_text(verifier, encoding="utf-8")
-    session_file = path / "agent_env_session.txt"
+    (path / "merge.md").write_text(merger, encoding="utf-8")
+    session_file = path / "merge_agent_env_session.txt"
     if agent_env_session:
         session_file.write_text(
             f"{agent_env_session}\n",
@@ -302,17 +295,19 @@ def _write_result(
         session_file.unlink(missing_ok=True)
 
 
-def _move_finished(root: Path, claim: ClaimedTask, status: str) -> Path:
-    if status in {"verified", "passed"}:
-        target_dir = root / "verified"
-    elif status == "conflict":
+def _move_finished(root: Path, claim: ClaimedMergeTask, status: str) -> Path:
+    if status == "merged":
+        target_dir = root / "done"
+    elif status in {"auto_merge", "pending"}:
+        target_dir = root / "merge_pending"
+    elif status in {"conflict", "needs_human"}:
         target_dir = root / "conflicts"
     else:
         target_dir = root / "failed"
-    target = target_dir / claim.running_path.name
+    target = target_dir / claim.merging_path.name
     if target.exists():
         target.unlink()
-    shutil.move(str(claim.running_path), str(target))
+    shutil.move(str(claim.merging_path), str(target))
     return target
 
 
@@ -369,7 +364,7 @@ def _operations_config(args: dict[str, object]) -> dict[str, object]:
     config = dict(raw or {})
     backend = config.get("backend", "agent_env")
     if backend != "agent_env":
-        raise ValueError("WorkGraph development workers require operations backend 'agent_env'")
+        raise ValueError("WorkGraph merge agents require operations backend 'agent_env'")
     config["backend"] = "agent_env"
     config["delete_on_shutdown"] = False
     _forward_git_env(config)
@@ -396,55 +391,39 @@ def _shared_attach_session_configured(operations: dict[str, object]) -> bool:
     )
 
 
-def _agent_env_session_from_report(text: str) -> str:
-    value = _report_field(text, "AgentEnvSession")
-    return "" if _is_noneish(value) else value
-
-
-def _agent_env_session_file(root: Path, task: TaskFile) -> Path:
-    return _result_dir(root, task) / "agent_env_session.txt"
-
-
-def _read_agent_env_session(root: Path, task: TaskFile) -> str:
-    path = _agent_env_session_file(root, task)
-    if not path.is_file():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace").strip()
-
-
-def _operations_for_session(
-    operations: dict[str, object],
-    agent_env_session: str,
-) -> dict[str, object]:
-    config = dict(operations)
-    if agent_env_session:
-        config["attach_session"] = agent_env_session
-    return config
-
-
 def _context_for_task(
-    task: TaskFile,
-    role: str,
+    root: Path,
+    claim: ClaimedMergeTask,
     extra: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    task = claim.task
+    coder_result = _read_result_file(root, task, "result.md")
+    verifier_result = _read_result_file(root, task, "validation.md")
+    pr = _report_field(coder_result, "PR") or _report_field(verifier_result, "PR")
+    remote = _report_field(coder_result, "Remote")
     context: dict[str, object] = {
-        "role": role,
+        "role": "merger",
         "task_id": task.task_id,
         "task_file": task.path.name,
+        "source_queue": claim.source_queue,
         "task": task.text,
         "repo": task.repo,
         "base": task.base,
         "locks": task.locks,
         "validation": task.validation,
+        "coder_result": coder_result,
+        "verifier_result": verifier_result,
+        "pr": "" if _is_noneish(pr) else pr,
+        "remote": "" if _is_noneish(remote) else remote,
         "execution": (
             "Run inside the ARL agent_env sandbox. Do not use the host/control "
-            "repository as the worktree. Include AgentEnvSession in the final "
-            "response so this workflow can reuse the sandbox for follow-up "
-            "agent calls in the same task. Use repository credentials only "
-            "when the scenario, image, or ARL config_env provides them inside "
-            "the sandbox, and never print those credentials. A coder success "
-            "requires Remote or PR to be non-empty; a sandbox-local commit "
-            "without a pushed branch is a failed delivery."
+            "repository as the worktree. Perform GitHub and git operations for "
+            "exactly one verified PR. Rebase onto the latest base, push only "
+            "the worker PR branch with --force-with-lease after a successful "
+            "rebase, run validation, and merge through gh. If source_queue is "
+            "merge_pending, first check whether the PR is already merged; if "
+            "it is still waiting on checks or branch protection, report "
+            "Status: auto_merge again. Never print credentials."
         ),
     }
     if extra:
@@ -465,98 +444,51 @@ def _atom_config(
 async def _run_one(
     ctx: WorkflowContext,
     root: Path,
-    claim: ClaimedTask,
+    claim: ClaimedMergeTask,
     operations: dict[str, object],
 ) -> dict[str, object]:
     task = claim.task
-    coder_scenario = _as_str(ctx.args.get("coder_scenario"), DEFAULT_CODER_SCENARIO)
-    verifier_scenario = _as_str(
-        ctx.args.get("verifier_scenario"),
-        DEFAULT_VERIFIER_SCENARIO,
-    )
+    merger_scenario = _as_str(ctx.args.get("merger_scenario"), DEFAULT_MERGER_SCENARIO)
     timeout = _as_float(ctx.args.get("agent_timeout_seconds"), 3600.0)
     agent_env_session = ""
 
     try:
-        ctx.log(f"coding {task.task_id}")
-        coder_result = await ctx.agent(
-            f"Implement WorkGraph task {task.task_id}.",
-            scenario=coder_scenario,
+        ctx.log(f"merging {task.task_id}")
+        merger_result = await ctx.agent(
+            f"Merge WorkGraph task {task.task_id}.",
+            scenario=merger_scenario,
             atom_config=_atom_config(
-                _operations_for_session(operations, agent_env_session),
-                _context_for_task(task, "coder"),
+                operations,
+                _context_for_task(root, claim),
             ),
             timeout=timeout,
-            trace_label=f"{task.task_id}:coder",
+            trace_label=f"{task.task_id}:merger",
         )
-        coder_text = str(coder_result)
-        coder_status = _status(coder_text)
-        coder_status, delivery_error = _coerce_coder_status(
-            coder_status,
-            coder_text,
-        )
-        agent_env_session = (
-            _agent_env_session_from_report(coder_text) or agent_env_session
-        )
+        merger_text = str(merger_result)
+        merge_status = _merge_status(merger_text)
+        agent_env_session = _agent_env_session_from_report(merger_text)
 
-        if coder_status == "conflict":
-            verifier_text = (
-                "Status: failed\n\nCoder reported a conflict before verification."
-            )
-            final_status = "conflict"
-        elif coder_status == "failed":
-            reason = delivery_error or "Coder reported failure before verification."
-            verifier_text = f"Status: failed\n\n{reason}"
-            final_status = "failed"
-        else:
-            ctx.log(f"verifying {task.task_id}")
-            verifier_result = await ctx.agent(
-                f"Verify WorkGraph task {task.task_id}.",
-                scenario=verifier_scenario,
-                atom_config=_atom_config(
-                    _operations_for_session(operations, agent_env_session),
-                    _context_for_task(
-                        task,
-                        "verifier",
-                        {
-                            "coder_result": coder_text,
-                            "agent_env_session": agent_env_session,
-                        },
-                    ),
-                ),
-                timeout=timeout,
-                trace_label=f"{task.task_id}:verifier",
-            )
-            verifier_text = str(verifier_result)
-            agent_env_session = (
-                _agent_env_session_from_report(verifier_text)
-                or agent_env_session
-            )
-            final_status = (
-                "verified" if _status(verifier_text) == "passed" else "failed"
-            )
-
-        _write_result(root, task, coder_text, verifier_text, agent_env_session)
-        target = _move_finished(root, claim, final_status)
+        _write_merge_result(root, task, merger_text, agent_env_session)
+        target = _move_finished(root, claim, merge_status)
         return {
             "task_id": task.task_id,
-            "status": final_status,
-            "from": str(claim.running_path),
+            "status": merge_status,
+            "from": str(claim.merging_path),
             "to": str(target),
-            "coder_status": coder_status,
+            "source_queue": claim.source_queue,
             "agent_env_session": agent_env_session or None,
             "result_dir": str(_result_dir(root, task)),
         }
     except Exception as exc:
-        coder_text = f"Status: failed\n\nWorkflow exception: {type(exc).__name__}: {exc}"
-        verifier_text = "Status: failed\n\nVerifier was not completed."
-        _write_result(root, task, coder_text, verifier_text, agent_env_session)
+        merger_text = f"Status: failed\n\nWorkflow exception: {type(exc).__name__}: {exc}"
+        _write_merge_result(root, task, merger_text, agent_env_session)
         target = _move_finished(root, claim, "failed")
         return {
             "task_id": task.task_id,
             "status": "failed",
-            "from": str(claim.running_path),
+            "from": str(claim.merging_path),
             "to": str(target),
+            "source_queue": claim.source_queue,
             "error": f"{type(exc).__name__}: {exc}",
             "agent_env_session": agent_env_session or None,
             "result_dir": str(_result_dir(root, task)),
@@ -572,15 +504,14 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
     operations = _operations_config(ctx.args)
     if _shared_attach_session_configured(operations):
         raise RuntimeError(
-            "WorkGraph develop does not accept a shared agent_env attach_session "
+            "WorkGraph merge does not accept a shared agent_env attach_session "
             "for automatic task claiming. Use args.agent_env.image or "
-            "AGENTM_AGENT_ENV_IMAGE so each claimed task gets its own ARL "
-            "sandbox; the workflow only attaches follow-up agents to a "
-            "per-task sandbox recorded under results/<task-id>/."
+            "AGENTM_AGENT_ENV_IMAGE so each claimed merge gets its own ARL "
+            "sandbox."
         )
     if not _agent_env_target_configured(operations):
         raise RuntimeError(
-            "WorkGraph development workers require an ARL agent_env target. "
+            "WorkGraph merge agents require an ARL agent_env target. "
             "Pass args.agent_env.image or set AGENTM_AGENT_ENV_IMAGE."
         )
 
@@ -594,8 +525,8 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             "results": [],
         }
 
-    ctx.log(f"claimed {len(claimed)} task(s)")
-    ctx.phase("develop")
+    ctx.log(f"claimed {len(claimed)} merge task(s)")
+    ctx.phase("merge")
     try:
         raw_results = await ctx.parallel(
             [_run_one(ctx, root, claim, operations) for claim in claimed]
@@ -611,15 +542,16 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             continue
         target = (
             _move_finished(root, claim, "failed")
-            if claim.running_path.exists()
-            else root / "failed" / claim.running_path.name
+            if claim.merging_path.exists()
+            else root / "failed" / claim.merging_path.name
         )
         results.append(
             {
                 "task_id": claim.task.task_id,
                 "status": "failed",
-                "from": str(claim.running_path),
+                "from": str(claim.merging_path),
                 "to": str(target),
+                "source_queue": claim.source_queue,
                 "error": "workflow parallel item failed",
             }
         )

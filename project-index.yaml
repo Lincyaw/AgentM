@@ -1211,8 +1211,9 @@ requirements:
       filesystem task bus under ``.agentm/workgraph/``, and launches
       short-lived ARL-backed development workflows for individual ready tasks.
       The task bus must use Markdown task files and simple directories for
-      ready, running, done, failed, conflicts, locks, and results state instead
-      of a rigid database schema. The development workflow must claim dependency-
+      ready, running, verified, merging, merge_pending, done, failed,
+      conflicts, locks, and results state instead of a rigid database schema.
+      The development workflow must claim dependency-
       satisfied tasks, honor file/resource locks so parallel work does not
       trample shared areas, launch coder and verifier child agents with only
       per-task context in isolated ``agent_env`` sandboxes, let those workers
@@ -1221,7 +1222,12 @@ requirements:
       present, reuse a task's reported ARL session for verifier and follow-up
       worker calls within the same workflow pass, require a visible remote
       branch or PR before accepting a coder success, and persist each worker's
-      final free-text report as the delivery artifact. Conflicted work must be
+      final free-text report as the delivery artifact. Verifier-passed PRs must
+      move to a verified queue instead of done; a separate ARL-backed merge
+      workflow must serialize merges by repo/base, delegate rebase and GitHub
+      merge operations to a merge agent, move merged tasks to done, park
+      GitHub auto-merge tasks in merge_pending, and route non-mechanical merge
+      conflicts to conflicts. Conflicted work must be
       routed to a conflict queue so
       the main orchestrator can decide whether to launch a resolver or ask for
       human intervention.
@@ -1236,7 +1242,10 @@ requirements:
       - path: contrib/scenarios/workgraph/agents/verifier/workgraph_context.py
       - path: contrib/scenarios/workgraph/agents/resolver/manifest.yaml
       - path: contrib/scenarios/workgraph/agents/resolver/workgraph_context.py
+      - path: contrib/scenarios/workgraph/agents/merger/manifest.yaml
+      - path: contrib/scenarios/workgraph/agents/merger/workgraph_context.py
       - path: contrib/scenarios/workgraph/workflow/develop.py
+      - path: contrib/scenarios/workgraph/workflow/merge.py
     tests: []
     docs:
       - path: contrib/scenarios/workgraph/README.md

@@ -31,7 +31,10 @@ extensions:
         If the delivered repo or branch uses an SSH URL and the sandbox has no
         SSH key, use credentials only when the scenario, image, or ARL
         config_env has made them available in the sandbox. If GH_TOKEN or
-        GITHUB_TOKEN is present, clone over HTTPS.
+        GITHUB_TOKEN is present, clone over HTTPS. Never print credentials or
+        dump raw environment variables. GitHub git-over-HTTPS does not reliably
+        accept a Bearer header; use either a token URL or a Basic extraheader
+        built from `x-access-token:${GH_TOKEN}`.
 
         Final response format:
 
