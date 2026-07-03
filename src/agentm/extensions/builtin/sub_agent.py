@@ -284,8 +284,12 @@ def _notification_message(
     )
 
 def _task_payload(state: _ChildTask) -> dict[str, Any]:
+    child_session_id = getattr(state.session, "session_id", None)
     return {
         "task_id": state.task_id,
+        "child_session_id": (
+            child_session_id if isinstance(child_session_id, str) else None
+        ),
         "purpose": state.purpose,
         "status": state.status,
         "error": state.error,
@@ -294,7 +298,6 @@ def _task_payload(state: _ChildTask) -> dict[str, Any]:
         ),
         "final_text": _summary_text(state),
         "artifact_ids": list(state.artifact_ids),
-        "budget": dict(state.applied_budget),
     }
 
 def _last_assistant_text(messages: list[Any]) -> str:
@@ -403,16 +406,9 @@ def _resolve_child_loop_config(
     *,
     parent: LoopConfig,
     persona_budget: dict[str, int],
-    dispatch_budget: dict[str, int],
 ) -> tuple[LoopConfig, dict[str, int]]:
-    max_turns = dispatch_budget.get(
-        "max_turns",
-        persona_budget.get("max_turns", parent.max_turns),
-    )
-    max_tool_calls = dispatch_budget.get(
-        "max_tool_calls",
-        persona_budget.get("max_tool_calls", parent.max_tool_calls),
-    )
+    max_turns = persona_budget.get("max_turns", parent.max_turns)
+    max_tool_calls = persona_budget.get("max_tool_calls", parent.max_tool_calls)
     # Only advertise caps that are actually enforced. An unbounded
     # ``max_turns`` (None — inherited from an uncapped parent) must not leak
     # into the worker's ``<budget>`` block as a fake "max_turns: None" limit.
@@ -677,7 +673,12 @@ class _ChildTaskManager:
         purpose = str(args.get("purpose", "subagent"))
         prompt = str(args.get("prompt", ""))
         subagent_type = args.get("subagent_type")
-        dispatch_budget = _coerce_budget(args.get("budget"))
+        if "budget" in args:
+            logger.debug(
+                "sub_agent: ignoring caller-supplied budget for purpose {!r}; "
+                "worker loop limits are controlled by persona/scenario/runtime config",
+                purpose,
+            )
         child_extensions = _coerce_extension_specs(args.get("extensions"))
         inherited_extensions = _resolve_inherited_extensions(
             self._inherit_extensions,
@@ -720,7 +721,6 @@ class _ChildTaskManager:
         child_loop_config, applied_budget = _resolve_child_loop_config(
             parent=parent_loop_config,
             persona_budget=persona_budget,
-            dispatch_budget=dispatch_budget,
         )
         if persona is not None:
             # Tell the worker how much runway it has so it can pace itself.
@@ -833,9 +833,9 @@ class _ChildTaskManager:
         return _tool_result(
             {
                 "task_id": task_id,
+                "child_session_id": child.session_id,
                 "status": _RUNNING,
                 "purpose": purpose,
-                "budget": dict(applied_budget),
             }
         )
 
@@ -1045,15 +1045,10 @@ class _ChildTaskManager:
 # Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
 # ---------------------------------------------------------------------------
 
-class _DispatchBudget(PydanticBaseModel):
-    max_tool_calls: int | None = None
-    max_turns: int | None = None
-
 class _DispatchAgentParams(PydanticBaseModel):
     purpose: str
     prompt: str
     subagent_type: str | None = None
-    budget: _DispatchBudget | None = None
     extensions: list[list[Any]] | None = PydanticField(
         default=None,
         description="Each element is a [module_path, config] pair.",
@@ -1194,8 +1189,8 @@ async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
                 "Spawn a child AgentSession and return its task id immediately. "
                 "Pass ``subagent_type`` to launch a named persona (resolved by "
                 "peer extensions via the ``resolve_subagent`` event); the "
-                "persona's system prompt, tool allowlist, and advisory budget "
-                "defaults are applied to the child."
+                "persona's system prompt and tool allowlist are applied to the "
+                "child."
             ),
             parameters=pydantic_to_tool_schema(_DispatchAgentParams),
             fn=manager.dispatch,

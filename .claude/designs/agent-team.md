@@ -108,7 +108,7 @@ A scenario is operating in "team mode" when all four hold:
 | A. Lifecycle floor | `decide_turn_action` + sub_agent `Inject` handler | implemented; see [sub-agent-lifecycle.md](sub-agent-lifecycle.md) |
 | B. Shared memory tier | `artifact_store` extension + sub_agent integration | designed in `artifact-system.md` |
 | C. Brief contract | persona `input_schema` advisory + persona-body self-rejection | this doc |
-| D. Budget awareness | persona `budget_defaults` + per-dispatch `budget` override | this doc |
+| D. Budget awareness | persona `budget_defaults` + runtime/scenario caps | this doc |
 
 Pillars A and B are full designs in their own right; this doc references
 them. Pillars C and D are smaller additions that live entirely in the
@@ -118,7 +118,8 @@ sub_agent extension and the persona file format.
 
 See `sub_agent_lifecycle.md`. Summary of the contract for a team scenario:
 
-- `dispatch_agent` is async; returns task_id immediately.
+- `dispatch_agent` is async; returns `task_id` and `child_session_id`
+  immediately.
 - Parent's loop will not declare `agent_end` while completed-but-unread
   child findings exist; runtime injects a notification user-message and
   re-enters the loop.
@@ -252,7 +253,7 @@ Today, every dispatched worker inherits the parent's `LoopConfig.max_turns`
 
 ### Mechanism
 
-Three layers, **all opt-in, no scenario-wide complexity tier**:
+Two layers, **all opt-in, no parent tool-call override**:
 
 A scenario-level `task_complexity` knob was considered and rejected: a
 single rca scenario routinely handles both "list tables" (cheap lookup)
@@ -270,45 +271,36 @@ budget_defaults:
   max_turns: 10
 ```
 
-These apply to every dispatch of that persona unless the orchestrator
-overrides at call time. A `verify` persona might default to 5 tool
-calls; a `deep_analyze` persona to 25. Default-safe per role.
+These apply to every dispatch of that persona. A `verify` persona might
+default to 5 tool calls; a `deep_analyze` persona to 25. Default-safe per
+role.
 
-**Layer 2 — per-dispatch budget on the tool call**
+**Layer 2 — runtime/scenario caps**
 
-`dispatch_agent` accepts an optional `budget` object:
+`dispatch_agent` intentionally has no `budget`, `max_turns`, or
+`max_tool_calls` parameter. Numeric loop limits are runtime policy,
+controlled by persona `budget_defaults`, the parent/scenario
+`LoopConfig`, and normal scenario atoms such as `loop_budget` /
+`cost_budget`. The worker may be told its effective caps in its own
+system prompt so it can leave room for a final response, but the
+orchestrating model cannot tune those caps per tool call.
 
-```json
-{
-  "subagent_type": "scout",
-  "purpose": "...",
-  "prompt": "...",
-  "budget": {"max_tool_calls": 15, "max_turns": 10}
-}
-```
-
-When set, overrides persona defaults for that dispatch only. The
-orchestrator scales depth per query: a quick scout pass gets
-`max_tool_calls: 6`; a forensic deep-dive gets `30`.
-
-**Layer 3 — `sub_agent.max_workers` (already exists)**
-
-Caps parallel concurrency at the manifest level. Already in production.
+`sub_agent.max_workers` caps parallel concurrency at the manifest level.
+Already in production.
 
 The composition: `max_workers` bounds parallelism, `budget_defaults`
-bounds per-persona depth, per-dispatch `budget` lets the orchestrator
-adjust per query. No fourth scenario-wide knob is needed; adding one
-would mis-locate complexity at the manifest tier.
+bounds per-persona depth, and scenario/runtime loop/cost atoms bound the
+session. If the orchestrator needs deeper work, it should choose or brief
+an appropriately deep persona, not mutate numeric caps in the tool call.
 
 ### What this buys
 
-- Default-safe: a scenario author who declares `task_complexity: simple`
-  cannot accidentally have their orchestrator fan out 10 workers.
-- Observability: trajectory records the budget that was applied,
-  per-dispatch, alongside actual usage. Post-hoc analysis (which scenarios
-  are over- or under-spending) becomes mechanical.
-- Cost control: a single line in a manifest is the difference between a
-  $0.05 query and a $0.75 query.
+- Default-safe: cheap personas stay cheap even when the orchestrator
+  delegates aggressively.
+- Clear authority: budget policy stays in persona/scenario/runtime config,
+  not in a model-authored tool argument.
+- Cost control: a persona frontmatter or manifest/runtime cap is the
+  difference between a $0.05 query and a $0.75 query.
 
 ### What it does not enforce
 
@@ -316,8 +308,9 @@ would mis-locate complexity at the manifest tier.
   belongs in `cost_budget` (existing Tier-2 atom). The two compose: a
   worker can be both tool-call-capped and dollar-capped.
 - Adaptive scaling. We do not auto-detect "this query needs deeper
-  research" and bump the budget. The orchestrator may dispatch with a
-  larger explicit `budget`; the cap is still bounded by `team_profile`.
+  research" and bump the budget. The orchestrator can choose a deeper
+  persona or ask the user/operator to change scenario policy; it cannot
+  request a larger numeric cap through `dispatch_agent`.
 
 ## Failure-mode mapping
 
@@ -333,8 +326,8 @@ This is the explicit checklist that justifies the design.
 | Inconsistent shared state | B | Append-only model with provenance |
 | Subagent misinterpreted scope | C | Persona body self-rejects vacuous briefs via `brief_rejection` artifact |
 | Duplicate work between subagents | C | Persona's `<expected_brief>` requires `scope_services` and refuses without it |
-| Token over-spend on simple queries | D | Persona `budget_defaults` keep cheap personas cheap; per-dispatch override |
-| Token under-spend on complex queries | D | Per-dispatch `budget` override scales the right query, not the whole scenario |
+| Token over-spend on simple queries | D | Persona `budget_defaults` keep cheap personas cheap |
+| Token under-spend on complex queries | D | Scenario authors define deeper personas / runtime caps for deeper work |
 | Cascade context poisoning | A + B | Each worker has private tier-1; tier-2 immutable |
 | Open mesh routing (no clear authority) | scenario layout | Orchestrator-only dispatch is the default convention |
 
@@ -392,7 +385,7 @@ extensions:
 ```
 
 No new top-level manifest keys. The four pillars are pure composition of
-existing primitives plus per-persona / per-dispatch fields.
+existing primitives plus per-persona fields and `sub_agent` config.
 
 ## What is not in scope
 
@@ -411,20 +404,18 @@ existing primitives plus per-persona / per-dispatch fields.
   final text matches a schema. Persona prompt body is responsible.
   Future work could add this; tracked in `artifact-system.md` open
   questions.
-- **Adaptive budget escalation** — orchestrator can request more budget
-  per-dispatch but cannot exceed `team_profile` defaults without
-  changing the manifest. No runtime "promote complexity" path.
+- **Adaptive budget escalation by parent tool argument** — the
+  orchestrator cannot request more numeric budget per dispatch. Budget
+  changes are persona/scenario/runtime policy.
 
 ## Compatibility and migration
 
 - All four pillars are opt-in. A scenario that uses `dispatch_agent`
   today (rca) continues to work without `artifact_store`,
-  `team_profile`, or `input_schema`.
+  budget defaults, or `input_schema`.
 - Adding `input_schema: required: []` (empty) to a persona is a no-op.
-- The `team_profile` key is read by an optional builtin; absent =
-  no defaults applied.
 - New persona frontmatter fields are additive; old personas valid.
-- `dispatch_agent` `budget` argument is optional.
+- `dispatch_agent` does not accept budget overrides.
 
 ## Effort estimate
 
@@ -432,7 +423,6 @@ This doc on top of `sub_agent_lifecycle.md` and `artifact-system.md`:
 
 - Persona `input_schema` advisory parsing + surface in `<available_agents>`: ~15 lines
 - Persona `budget_defaults` parsing + apply to child LoopConfig: ~20 lines
-- `dispatch_agent` optional `budget` argument override: ~20 lines
 - rca scenario migration (add `<expected_brief>` blocks to personas,
   switch hypothesis tools to artifact_write): ~40 lines
 
@@ -440,9 +430,9 @@ Combined with the dependent designs:
 
 - `sub_agent_lifecycle`: 100–150 lines
 - `artifact_system`: 250–300 lines
-- This design's additions: ~95 lines
+- This design's additions: ~75 lines
 
-Grand total for full team-mode capability: roughly 460–550 lines of
+Grand total for full team-mode capability: roughly 440–525 lines of
 code across three coordinated PRs. No data migration. Each PR ships
 independently and provides incremental value:
 

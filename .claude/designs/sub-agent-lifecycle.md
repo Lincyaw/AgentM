@@ -156,8 +156,8 @@ answer to make the next move. Distinct from the `decide_turn_action` floor,
 which fires unconditionally on every voluntary `Stop(ModelEndTurn)`.
 
 - `check_tasks()` blocks until at least one running child changes state (already
-  implemented as part of (2)). Returns the full table with `final_text` for
-  completed entries; flips their `read` flag.
+  implemented as part of (2)). Returns the full table with `child_session_id`
+  and `final_text` for completed entries; flips their `read` flag.
 - `wait_subagent(task_id)` blocks until that specific child reaches a terminal
   state. Returns the same shape as one row of `check_tasks`. Flips `read`.
 
@@ -165,12 +165,19 @@ There is no separate "pop result" tool. Reading via `check_tasks` /
 `wait_subagent` consumes the read flag the same way the lifecycle floor does;
 findings cannot be delivered twice.
 
-### `dispatch_agent` is unchanged
+### `dispatch_agent` describes work, not budgets
 
-It remains async and returns `{task_id, status: running, purpose}` immediately.
-Already supports `subagent_type` resolution against persona files. The contract
-"dispatch and forget — runtime delivers" is the new capability; the tool itself
-needs no signature change.
+It remains async and returns `{task_id, child_session_id, status: running,
+purpose}` immediately. Already supports `subagent_type` resolution against
+persona files. The contract "dispatch and forget — runtime delivers" is the
+new capability.
+
+The parent-visible tool schema intentionally has no `budget`, `max_turns`, or
+`max_tool_calls` argument. Worker loop limits are runtime policy: persona
+`budget_defaults` and the parent/scenario `LoopConfig` determine the child
+session's caps. The worker may see those caps in its own system prompt so it
+can leave room for a summary, but the orchestrating model cannot tune them per
+tool call.
 
 ## Three usage patterns, one mechanism
 
@@ -272,9 +279,10 @@ findings have been delivered to the parent, they will not be redelivered.
 
 ## Compatibility and migration
 
-- `dispatch_agent` signature unchanged.
-- `check_tasks` payload gains `final_text` (already shipping); blocking
-  semantics now load-bearing rather than optional. Tests that asserted
+- `dispatch_agent` returns `child_session_id` and no longer accepts
+  parent-supplied budget overrides.
+- `check_tasks` payload includes `child_session_id` and `final_text`; blocking
+  semantics are load-bearing rather than optional. Tests that asserted
   immediate return must adapt.
 - `inject_instruction`, `abort_task` unchanged.
 - The `decide_turn_action` channel is additive at the kernel level —
