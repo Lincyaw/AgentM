@@ -767,18 +767,19 @@ class _MonitorManager:
             # so we do not propagate into the kernel dispatch path.
             if state.status == _CANCELLED:
                 return
+            event_summary = _event_summary(
+                event,
+                max_tokens=self._event_summary_max_tokens,
+                model_name=(
+                    self._api.model.id if self._api.model is not None else None
+                ),
+            )
             payload = {
                 "kind": _KIND_CHANNEL,
                 "monitor_id": state.monitor_id,
                 "channel": watch,
                 "note": state.note,
-                "event_summary": _event_summary(
-                    event,
-                    max_tokens=self._event_summary_max_tokens,
-                    model_name=(
-                        self._api.model.id if self._api.model is not None else None
-                    ),
-                ),
+                "event_summary": event_summary,
             }
             try:
                 self._api.post_inbox(
@@ -786,6 +787,7 @@ class _MonitorManager:
                     payload=payload,
                     dedup_key=f"monitor-chan-{state.monitor_id}",
                 )
+                self._emit_activity(state, note=event_summary)
             except ExtensionStaleError:
                 return
 
