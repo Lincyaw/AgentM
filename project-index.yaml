@@ -1217,9 +1217,12 @@ requirements:
       satisfied tasks, honor file/resource locks so parallel work does not
       trample shared areas, launch coder and verifier child agents with only
       per-task context in isolated ``agent_env`` sandboxes, let those workers
-      own git clone/branch/rebase/push/PR operations, forward controller git
-      token variables through the agent-env ``config_env`` interface when
-      present, reuse a task's reported ARL session for verifier and follow-up
+      own git clone/branch/rebase/push/PR operations, load durable workflow
+      defaults such as repo, base, parallelism, and agent_env settings from
+      the task bus config file, forward controller git token variables or a
+      runtime ``gh auth token`` result through the agent-env ``config_env``
+      interface when present, reuse a task's reported ARL session for verifier
+      and follow-up
       worker calls within the same workflow pass, require a visible remote
       branch or PR before accepting a coder success, and persist each worker's
       final free-text report as the delivery artifact. Verifier-passed remote

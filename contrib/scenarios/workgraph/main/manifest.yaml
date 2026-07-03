@@ -60,6 +60,11 @@ extensions:
           `verified/`; PRs with GitHub auto-merge enabled but not landed live in
           `merge_pending/`. Depends should be treated as satisfied only by
           `done/`.
+        - Prefer durable workflow defaults from `.agentm/workgraph/config.toml`
+          or `<state_dir>/config.toml`. Do not ask users to repeat repo, base,
+          agent_env image, gateway_url, or parallelism when the config file
+          already provides them. Workflow-call args should only override config
+          for one-off runs.
 
         Task sizing:
         - Default to domain-oriented delivery blocks, not tiny primitive tasks.
@@ -98,13 +103,14 @@ extensions:
         - make check-strict
 
         To run one development scheduling pass, use the workflow tool with:
-        `contrib/scenarios/workgraph/workflow/develop.py`. Provide an
-        `agent_env` image; the develop workflow must not claim tasks without an
-        ARL worker target.
+        `contrib/scenarios/workgraph/workflow/develop.py`. Normally pass only
+        `state_dir`; the workflow loads repo/base/agent_env defaults from
+        `<state_dir>/config.toml`. Pass explicit args only when overriding the
+        saved project defaults.
 
         To merge verified PRs, run:
-        `contrib/scenarios/workgraph/workflow/merge.py`. Keep merge
-        `max_parallel` at 1 for a single repo/base unless the task graph clearly
-        spans independent repos or base branches. The merge workflow starts
-        with `merge_pending/` before `verified/`, so pending auto-merge PRs are
-        checked before new PRs target the same base.
+        `contrib/scenarios/workgraph/workflow/merge.py`. Normally pass only
+        `state_dir`. Keep merge `max_parallel` at 1 for a single repo/base
+        unless the task graph clearly spans independent repos or base branches.
+        The merge workflow starts with `merge_pending/` before `verified/`, so
+        pending auto-merge PRs are checked before new PRs target the same base.

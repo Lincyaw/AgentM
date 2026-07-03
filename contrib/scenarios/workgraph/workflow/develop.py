@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ DEFAULT_STATE_DIR = ".agentm/workgraph"
 DEFAULT_CODER_SCENARIO = "workgraph/agents/coder"
 DEFAULT_VERIFIER_SCENARIO = "workgraph/agents/verifier"
 TASK_HEADER_FIELDS = {"depends", "locks", "repo", "base"}
+CONFIG_FILENAMES = ("config.toml", "workgraph.toml")
 
 
 @dataclass
@@ -86,6 +89,64 @@ def _state_root(ctx: WorkflowContext) -> Path:
     if not root.is_absolute():
         root = Path(_workflow_cwd(ctx)) / root
     return root
+
+
+def _config_path(ctx: WorkflowContext, root: Path) -> Path | None:
+    raw = ctx.args.get("config") or ctx.args.get("config_path")
+    if isinstance(raw, str) and raw.strip():
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = Path(_workflow_cwd(ctx)) / path
+        return path
+    for name in CONFIG_FILENAMES:
+        path = root / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _load_config(ctx: WorkflowContext, root: Path) -> dict[str, object]:
+    path = _config_path(ctx, root)
+    if path is None:
+        return {}
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"WorkGraph config {path} is not valid TOML: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"WorkGraph config {path} must be a TOML table")
+    return data
+
+
+def _config_str(
+    args: dict[str, object],
+    config: dict[str, object],
+    key: str,
+    default: str = "",
+) -> str:
+    arg_value = args.get(key)
+    if isinstance(arg_value, str) and arg_value.strip():
+        return arg_value
+    config_value = config.get(key)
+    if isinstance(config_value, str) and config_value.strip():
+        return config_value
+    return default
+
+
+def _config_int(
+    args: dict[str, object],
+    config: dict[str, object],
+    keys: tuple[str, ...],
+    default: int,
+) -> int:
+    for key in keys:
+        if key in args:
+            return _as_int(args.get(key), default)
+    for key in keys:
+        if key in config:
+            return _as_int(config.get(key), default)
+    return default
 
 
 def _ensure_dirs(root: Path) -> None:
@@ -348,8 +409,29 @@ def _config_env_var_names(config_env: dict[str, object]) -> set[str]:
     return names
 
 
-def _forward_git_env(config: dict[str, object]) -> None:
+def _github_token() -> str:
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token
+    if not shutil.which("gh"):
+        return ""
+    try:
+        completed = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
+def _forward_git_env(config: dict[str, object]) -> None:
+    token = _github_token()
     if not token:
         return
 
@@ -382,10 +464,25 @@ def _forward_git_env(config: dict[str, object]) -> None:
 
 
 def _operations_config(args: dict[str, object]) -> dict[str, object]:
+    return _operations_config_from_config(args, {})
+
+
+def _operations_config_from_config(
+    args: dict[str, object],
+    config_root: dict[str, object],
+) -> dict[str, object]:
+    config: dict[str, object] = {}
+    raw_default = config_root.get("agent_env")
+    if raw_default is not None and not isinstance(raw_default, dict):
+        raise ValueError("WorkGraph config [agent_env] must be an object")
+    if isinstance(raw_default, dict):
+        config.update(raw_default)
+
     raw = args.get("agent_env")
     if raw is not None and not isinstance(raw, dict):
         raise ValueError("WorkGraph args.agent_env must be an object")
-    config = dict(raw or {})
+    if isinstance(raw, dict):
+        config.update(raw)
     backend = config.get("backend", "agent_env")
     if backend != "agent_env":
         raise ValueError("WorkGraph development workers require operations backend 'agent_env'")
@@ -585,10 +682,14 @@ async def _run_one(
 async def run(ctx: WorkflowContext) -> dict[str, Any]:
     root = _state_root(ctx)
     _ensure_dirs(root)
-    max_parallel = max(1, _as_int(ctx.args.get("max_parallel"), 1))
-    default_repo = _as_str(ctx.args.get("repo"))
-    default_base = _as_str(ctx.args.get("base"), "main")
-    operations = _operations_config(ctx.args)
+    config_root = _load_config(ctx, root)
+    max_parallel = max(
+        1,
+        _config_int(ctx.args, config_root, ("develop_max_parallel", "max_parallel"), 1),
+    )
+    default_repo = _config_str(ctx.args, config_root, "repo")
+    default_base = _config_str(ctx.args, config_root, "base", "main")
+    operations = _operations_config_from_config(ctx.args, config_root)
     if _shared_attach_session_configured(operations):
         raise RuntimeError(
             "WorkGraph develop does not accept a shared agent_env attach_session "
