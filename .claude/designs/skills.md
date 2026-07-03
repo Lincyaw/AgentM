@@ -16,7 +16,7 @@ AgentM's `ResourceLoader` already returns `Skill` records (see [pluggable-archit
 
 ### Discovery layout
 
-The default `ResourceLoader` already walks two roots (`<agent_dir>/skills/` and `<cwd>/.agentm/skills/`). This design adds:
+The default `ResourceLoader` already walks two roots (`$AGENTM_HOME/skills/` and project skill dirs supplied by `ProjectLayout`). This design adds:
 
 1. **Standardized layout per skill**:
    ```
@@ -140,7 +140,7 @@ def install(api: ExtensionAPI, config: dict) -> None:
         # 2. Run loader.
         skills, diags = load_skills(
             cwd=api.cwd,
-            agent_dir=str(Path.home() / ".agentm"),
+            agent_dir=str(agentm_home_dir()),
             skill_paths=tuple(extra_paths),
             include_defaults=include_defaults,
         )

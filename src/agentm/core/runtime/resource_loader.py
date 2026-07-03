@@ -3,7 +3,7 @@
 Implements §6 (ResourceLoader) of ``.claude/designs/extension-as-scenario.md``
 and §3.4 (Resource Discovery) of ``.claude/designs/pluggable-architecture.md``.
 
-The default loader walks ``cwd``, its ancestors, and ``~/.agentm/`` to find:
+The default loader walks ``cwd``, its ancestors, and ``$AGENTM_HOME`` to find:
 - ``SKILL.md`` files inside ``skills/<name>/`` directories — YAML frontmatter
   declares ``name`` and ``description``; the rest is the skill body.
 - Prompt templates under ``prompts/*.md`` — filename (sans ``.md``) is the
@@ -14,7 +14,7 @@ The default loader walks ``cwd``, its ancestors, and ``~/.agentm/`` to find:
 
 Embedded SDK callers who lack a filesystem can use ``InMemoryResourceLoader``.
 
-Hard rule: this module imports only stdlib + shared frontmatter parsing.
+Hard rule: this module imports only stdlib + shared core-lib helpers.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from agentm.core.lib.frontmatter import parse_frontmatter
+from agentm.core.lib.user_config import agentm_home_dir
 
 
 # --- Records ----------------------------------------------------------------
@@ -110,7 +111,7 @@ class DefaultResourceLoader:
     ) -> None:
         self._cwd = Path(cwd)
         self._agent_dir = (
-            Path(agent_dir) if agent_dir is not None else Path.home() / ".agentm"
+            Path(agent_dir) if agent_dir is not None else agentm_home_dir()
         )
         self._no_skills = no_skills
         self._no_prompt_templates = no_prompt_templates

@@ -182,7 +182,7 @@ class SessionManager(Protocol):
 - Single JSONL file, append-only, tree-structured via `parent_id`.
 - `payload: Any` (or extensible `details` field per entry type) lets extensions persist structured data without forking the format.
 - Branching, forking, compaction, navigation are **operations on the entry tree**, not separate features.
-- Default impl writes to `~/.agentm/sessions/`; SDK callers can pass `InMemorySessionManager` or `SqliteSessionManager`.
+- Default impl writes to `$AGENTM_HOME/observability/`; SDK callers can pass `InMemorySessionManager` or `SqliteSessionManager`.
 - Presenters depend on `SessionStore` (`open`, `most_recent`, `create`) rather than globbing JSONL files directly. `JsonlSessionStore` wraps the current `SessionManager` format, while tests and future backends can provide in-memory, sqlite, or remote implementations without changing CLI/TUI construction.
 
 ### 3.4 Resource Discovery (the project-context boundary)

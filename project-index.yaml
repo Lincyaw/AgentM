@@ -1001,27 +1001,39 @@ requirements:
       - REQ-180-terminal-gateway-feedback
       - REQ-189-terminal-wire-only-tool-surface
 
-  - id: REQ-200-gateway-peer-agentm-home
-    title: Gateway chat peers share AgentM home resolution
+  - id: REQ-200-agentm-home-resolution
+    title: Runtime resources and gateway peers share AgentM home resolution
     description: >
-      Python gateway chat peers must resolve user configuration, persistent
-      state, logs, and runtime files through the shared AgentM home directory:
+      Runtime resource loading and Python gateway chat peers must resolve user
+      configuration, persistent state, skills, prompts, global AGENTS.md, logs,
+      and runtime files through the shared AgentM home directory:
       ``$AGENTM_HOME`` when set, otherwise ``~/.agentm``. The behavior must
       match core AgentM semantics, including ``~`` expansion inside
-      ``AGENTM_HOME``, so Feishu/Weixin peer processes do not write peer state
-      under the source checkout or treat a tilde override as a literal relative
-      path.
+      ``AGENTM_HOME``, so AgentM does not write user-scoped state under the
+      source checkout or treat a tilde override as a literal relative path.
     priority: P1
     status: implemented
     confidence: confirmed
     code:
       - path: src/agentm/core/lib/user_config.py
+      - path: src/agentm/core/runtime/resource_loader.py
+      - path: src/agentm/extensions/builtin/skill_loader.py
+      - path: src/agentm/extensions/builtin/prompt_templates.py
+      - path: src/agentm/gateway/commands/skill_command.py
+      - path: src/agentm/onboard.py
       - path: contrib/gateway-peers/feishu/src/agentm_feishu/bot_config.py
       - path: contrib/gateway-peers/weixin/src/agentm_weixin/state.py
       - path: contrib/gateway-peers/weixin/src/agentm_weixin/supervisor.py
     tests: []
     docs:
       - path: AGENTS.md
+      - path: .claude/designs/extension-as-scenario.md
+      - path: .claude/designs/command-routing.md
+      - path: .claude/designs/skills.md
+      - path: .claude/designs/prompt-templates.md
+      - path: .claude/designs/pluggable-architecture.md
+      - path: .claude/designs/single-event-log.md
+      - path: .claude/index.yaml
     depends_on:
       - REQ-096-cli-provider-session-seams
 

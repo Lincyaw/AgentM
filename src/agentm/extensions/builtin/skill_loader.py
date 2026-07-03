@@ -33,7 +33,7 @@ from agentm.core.abi import (
 )
 from pydantic import BaseModel, Field
 
-from agentm.core.lib import parse_frontmatter
+from agentm.core.lib import agentm_home_dir, parse_frontmatter
 from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
@@ -476,7 +476,7 @@ async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
 
         skills, _diagnostics = load_skills(
             cwd=api.cwd,
-            agent_dir=str(Path.home() / ".agentm"),
+            agent_dir=str(agentm_home_dir()),
             skill_paths=tuple(discovered_paths),
             include_defaults=include_defaults,
             project_skill_dirs=project_dirs,

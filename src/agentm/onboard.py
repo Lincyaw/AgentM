@@ -9,7 +9,7 @@ files the runtime already reads:
 2. Workspace path          -> created with its ``.agentm/`` subdir.
 3. Persona                 -> ``<workspace>/SOUL.md`` + ``IDENTITY.md`` in the
    same markdown skeleton the ``persona`` contrib atom seeds.
-4. Bundled skills          -> ``~/.agentm/skills/`` (self-awareness / self-debug
+4. Bundled skills          -> ``$AGENTM_HOME/skills/`` (self-awareness / self-debug
    skills discoverable by every scenario and deploy form).
 5. Feishu credentials      -> ``<workspace>/.env`` with ``LARK_APP_ID`` /
    ``LARK_APP_SECRET`` / ``LARK_ALLOW_FROM`` (read by the Feishu client process
@@ -312,10 +312,10 @@ def configure_feishu(
 
 
 # --------------------------------------------------------------------------
-# Section: bundled skills -> ~/.agentm/skills
+# Section: bundled skills -> $AGENTM_HOME/skills
 # --------------------------------------------------------------------------
 
-# Curated repo skills copied into ~/.agentm/skills so skill_loader discovers
+# Curated repo skills copied into $AGENTM_HOME/skills so skill_loader discovers
 # them in every scenario and every deploy form. Each entry is a repo-relative
 # skill directory; its basename is the skill name (skill_loader requires
 # name == parent dir). Source of truth for what onboard installs — keep in
@@ -375,12 +375,12 @@ def _bundled_skill_sources() -> list[Path]:
 
 
 def _skills_dir() -> Path:
-    """The ``~/.agentm/skills`` dir skill_loader treats as the user default."""
+    """The ``$AGENTM_HOME/skills`` dir skill_loader treats as user default."""
     return agentm_home_dir() / "skills"
 
 
 def install_bundled_skills(*, overwrite: bool = False) -> list[Path]:
-    """Copy curated repo skills into ``~/.agentm/skills/<name>``.
+    """Copy curated repo skills into ``$AGENTM_HOME/skills/<name>``.
 
     Idempotent: an existing ``<name>`` dir is kept intact unless *overwrite*.
     Returns the destination dirs actually written. Returns ``[]`` (the caller
@@ -799,7 +799,7 @@ def run_onboard() -> None:
             f"{_skills_dir()} manually if you want them."
         )
     elif typer.confirm(
-        f"Copy {len(BUNDLED_SKILLS)} self-debug skills into ~/.agentm/skills "
+        f"Copy {len(BUNDLED_SKILLS)} self-debug skills into {_skills_dir()} "
         "so they're discoverable everywhere?",
         default=True,
     ):

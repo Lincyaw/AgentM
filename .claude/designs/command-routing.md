@@ -150,7 +150,7 @@ the registry:
 3. **Skill** — `api.skills.load_skills(...)` would be ideal but is not
    reachable from outside the session; instead the router walks explicit
    gateway-configured paths first, then the project/user AgentM skill
-   directories (`<cwd>/.agentm/skills/`, `~/.agentm/skills/`) and
+   directories (`<cwd>/.agentm/skills/`, `$AGENTM_HOME/skills/`) and
    Claude-compatible directories (`<cwd>/.claude/skills/`,
    `~/.claude/skills/`). Each skill becomes one `SkillCommand` in namespace
    `skill`.

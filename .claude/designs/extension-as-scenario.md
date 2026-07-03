@@ -236,7 +236,7 @@ class SessionManager(Protocol):
     def navigate_to(self, leaf_id: str) -> None: ...
     def find(self, entry_id: str) -> SessionEntry | None: ...
 
-class JsonlSessionManager(SessionManager): ...      # default, ~/.agentm/sessions/<id>.jsonl
+class JsonlSessionManager(SessionManager): ...      # default, $AGENTM_HOME/observability/<id>.jsonl
 class InMemorySessionManager(SessionManager): ...   # for tests / embedding
 ```
 
@@ -272,7 +272,7 @@ class ResourceLoader(Protocol):
     def reload(self) -> None: ...
 ```
 
-Default impl walks `~/.agentm/{skills,prompts}/` and `cwd → parent dirs` for `AGENTS.md`. Embedded SDK callers pass an in-memory or DB-backed loader.
+Default impl walks `$AGENTM_HOME/{skills,prompts}/`, `$AGENTM_HOME/AGENTS.md`, and `cwd → parent dirs` for project `AGENTS.md`. Embedded SDK callers pass an in-memory or DB-backed loader.
 
 ---
 

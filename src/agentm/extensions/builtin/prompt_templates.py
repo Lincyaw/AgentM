@@ -25,7 +25,7 @@ from agentm.core.abi import (
     ResourcesDiscoverEvent,
     SessionReadyEvent,
 )
-from agentm.core.lib import parse_frontmatter
+from agentm.core.lib import agentm_home_dir, parse_frontmatter
 from agentm.extensions import ExtensionManifest
 
 # --- Module-level helpers (private) ----------------------------------------
@@ -265,7 +265,7 @@ async def install(api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
             prompt_paths.extend(str(path) for path in extra_paths)
         cache[:] = registry.load_prompt_templates(
             cwd=api.cwd,
-            agent_dir=str(Path.home() / ".agentm"),
+            agent_dir=str(agentm_home_dir()),
             prompt_paths=tuple(prompt_paths),
             include_defaults=include_defaults,
         )

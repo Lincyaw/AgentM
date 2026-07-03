@@ -19,7 +19,7 @@ AgentM has slash-command dispatch (`api.register_command`) but only for code-dri
 Same precedent as skills (and the existing `DefaultResourceLoader`):
 
 ```
-<agent_dir>/prompts/<name>.md      # global, per-user
+$AGENTM_HOME/prompts/<name>.md     # global, per-user
 <cwd>/.agentm/prompts/<name>.md    # project-local
 ```
 
@@ -108,7 +108,7 @@ def install(api: ExtensionAPI, config: dict) -> None:
             if isinstance(r, dict):
                 extra_paths.extend(r.get("prompt_paths") or [])
         cache[:] = load_prompt_templates(
-            cwd=api.cwd, agent_dir=str(Path.home() / ".agentm"),
+            cwd=api.cwd, agent_dir=str(agentm_home_dir()),
             prompt_paths=tuple(extra_paths), include_defaults=include_defaults,
         )
 

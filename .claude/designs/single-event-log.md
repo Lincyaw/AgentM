@@ -35,7 +35,7 @@ Before the merge, a single session produced **two parallel JSONL streams**:
 
 | Path | Content | Write path |
 |---|---|---|
-| `~/.agentm/sessions/--<cwd>--/<ts>_<id>.jsonl` | trajectory — one entry per `AgentMessage` | `SessionManager._append_record`: synchronous `open("a") + write + close` per message |
+| `$AGENTM_HOME/sessions/--<cwd>--/<ts>_<id>.jsonl` | trajectory — one entry per `AgentMessage` | `SessionManager._append_record`: synchronous `open("a") + write + close` per message |
 | `$AGENTM_HOME/observability/<session_id>.jsonl` | OTel-shaped events — spans, dispatches, handler invocations, llm.request.start/end | observability builtin: bounded async queue, drops on full, `flush()` per record |
 
 The two streams were largely **overlapping**: every trajectory entry was

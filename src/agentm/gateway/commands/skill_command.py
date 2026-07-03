@@ -9,7 +9,7 @@ selected the right skill (or any skill at all), the user types
 We do not reach into the ``skill_loader`` atom's loader directly — its
 discovery pipeline is session-internal. The router walks the same
 canonical project/user skill directories that the skill_loader atom uses
-(``<cwd>/.agentm/skills/``, ``~/.agentm/skills/``) plus the existing
+(``<cwd>/.agentm/skills/``, ``$AGENTM_HOME/skills``) plus the existing
 Claude-compatible directories (``<cwd>/.claude/skills/``,
 ``~/.claude/skills/``). Discovery is shallow: each ``<dir>/SKILL.md``
 becomes one skill named after the parent directory.
@@ -21,6 +21,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentm.core.lib import agentm_home_dir
 from loguru import logger
 
 from .protocol import (
@@ -113,7 +114,7 @@ def walk_skill_dirs(
     if include_defaults:
         sources.append(cwd / ".agentm" / "skills")
         sources.append(cwd / ".claude" / "skills")
-        sources.append(Path.home() / ".agentm" / "skills")
+        sources.append(agentm_home_dir() / "skills")
         sources.append(Path.home() / ".claude" / "skills")
     for root in sources:
         try:
