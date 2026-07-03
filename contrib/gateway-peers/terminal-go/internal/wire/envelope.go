@@ -18,6 +18,9 @@ type Envelope struct {
 	Body       map[string]any `json:"body"`
 }
 
+// WireVersion is the current AgentM gateway wire protocol version.
+const WireVersion = 2
+
 // Kind constants for the v2 wire protocol.
 const (
 	KindHello    = "hello"

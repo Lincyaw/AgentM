@@ -20,6 +20,8 @@ const reconnectBaseDelay = 100 * time.Millisecond
 // reconnectMaxDelay caps the exponential backoff.
 const reconnectMaxDelay = 30 * time.Second
 
+const peerVersion = "0.1.0"
+
 // WireClient manages a connection to the AgentM gateway.
 type WireClient struct {
 	transport Transport
@@ -90,6 +92,27 @@ func WithCwd(cwd string) ClientOption {
 	return func(c *WireClient) { c.cwd = cwd }
 }
 
+func (c *WireClient) helloEnvelope() *Envelope {
+	body := map[string]any{
+		"peer_name":    c.peerName,
+		"peer_version": peerVersion,
+		"capabilities": map[string]any{},
+	}
+	if c.cwd != "" {
+		body["cwd"] = c.cwd
+	}
+	if c.token != "" {
+		body["auth"] = c.token
+	}
+	return &Envelope{
+		V:    WireVersion,
+		ID:   NewID(),
+		Kind: KindHello,
+		TS:   Now(),
+		Body: body,
+	}
+}
+
 // Connect establishes the connection and performs the hello/welcome handshake.
 func (c *WireClient) Connect(ctx context.Context) error {
 	conn, err := c.transport.Connect(ctx)
@@ -98,26 +121,7 @@ func (c *WireClient) Connect(ctx context.Context) error {
 	}
 	c.conn = conn
 
-	helloBody := map[string]any{
-		"peer_name":    c.peerName,
-		"peer_version": "0.1.0",
-		"capabilities": map[string]any{},
-	}
-	if c.cwd != "" {
-		helloBody["cwd"] = c.cwd
-	}
-	hello := &Envelope{
-		V:    2,
-		ID:   NewID(),
-		Kind: KindHello,
-		TS:   Now(),
-		Body: helloBody,
-	}
-	if c.token != "" {
-		hello.Body["auth"] = c.token
-	}
-
-	if err := WriteFrame(c.conn, hello); err != nil {
+	if err := WriteFrame(c.conn, c.helloEnvelope()); err != nil {
 		conn.Close()
 		return fmt.Errorf("hello failed: %w", err)
 	}
@@ -234,26 +238,7 @@ func (c *WireClient) reconnect() bool {
 		}
 
 		// Send hello.
-		reconnectBody := map[string]any{
-			"peer_name":    c.peerName,
-			"peer_version": "0.1.0",
-			"capabilities": map[string]any{},
-		}
-		if c.cwd != "" {
-			reconnectBody["cwd"] = c.cwd
-		}
-		hello := &Envelope{
-			V:    2,
-			ID:   NewID(),
-			Kind: KindHello,
-			TS:   Now(),
-			Body: reconnectBody,
-		}
-		if c.token != "" {
-			hello.Body["auth"] = c.token
-		}
-
-		if err := WriteFrame(conn, hello); err != nil {
+		if err := WriteFrame(conn, c.helloEnvelope()); err != nil {
 			log.Printf("[wire] reconnect hello failed: %v", err)
 			conn.Close()
 			delay *= 2
@@ -350,7 +335,7 @@ func (c *WireClient) reconnect() bool {
 // SendInbound sends a user message to the gateway.
 func (c *WireClient) SendInbound(body map[string]any, sessionKey, scenario string) error {
 	env := &Envelope{
-		V:          2,
+		V:          WireVersion,
 		ID:         NewID(),
 		Kind:       KindInbound,
 		TS:         Now(),
@@ -369,7 +354,7 @@ func (c *WireClient) SendInbound(body map[string]any, sessionKey, scenario strin
 // SendAck acknowledges a received envelope.
 func (c *WireClient) SendAck(envelopeID string) error {
 	env := &Envelope{
-		V:    2,
+		V:    WireVersion,
 		ID:   NewID(),
 		Kind: KindAck,
 		TS:   Now(),
@@ -382,7 +367,7 @@ func (c *WireClient) SendAck(envelopeID string) error {
 
 func (c *WireClient) sendPong(pingID string) {
 	env := &Envelope{
-		V:    2,
+		V:    WireVersion,
 		ID:   NewID(),
 		Kind: KindPong,
 		TS:   Now(),
