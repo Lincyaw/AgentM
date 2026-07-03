@@ -1018,17 +1018,23 @@ requirements:
       - path: src/agentm/core/lib/user_config.py
       - path: src/agentm/env.py
       - path: src/agentm/cli.py
+      - path: src/agentm/gateway/workspace.py
       - path: src/agentm/core/runtime/resource_loader.py
       - path: src/agentm/extensions/builtin/skill_loader.py
       - path: src/agentm/extensions/builtin/prompt_templates.py
       - path: src/agentm/gateway/commands/skill_command.py
       - path: src/agentm/onboard.py
+      - path: contrib/gateway-peers/feishu/src/agentm_feishu/cli.py
       - path: contrib/gateway-peers/feishu/src/agentm_feishu/bot_config.py
+      - path: contrib/gateway-peers/weixin/src/agentm_weixin/cli.py
       - path: contrib/gateway-peers/weixin/src/agentm_weixin/state.py
       - path: contrib/gateway-peers/weixin/src/agentm_weixin/supervisor.py
     tests: []
     docs:
       - path: AGENTS.md
+      - path: config.toml.example
+      - path: .claude/skills/deployment-awareness/SKILL.md
+      - path: contrib/gateway-peers/feishu/README.md
       - path: src/agentm/skills/deployment-awareness/SKILL.md
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/command-routing.md

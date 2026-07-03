@@ -25,7 +25,7 @@ agentm gateway --bind unix:///tmp/gw.sock &
 agentm-feishu --connect unix:///tmp/gw.sock --verbose
 ```
 
-Secrets come from `~/.agentm/config.toml`, `<workspace>/.env`, a secret file,
+Secrets come from `$AGENTM_HOME/config.toml`, `<workspace>/.env`, a secret file,
 or env vars. Do not put secrets in argv.
 
 Exit codes (per `cli-design` rule group 3):

@@ -368,7 +368,7 @@ def cli(
 
     Multi-bot mode (config.toml, no --app-id):
 
-      # ~/.agentm/config.toml
+      # $AGENTM_HOME/config.toml
       [feishu.bots.ops]
       app_id = "cli_ops"
       app_secret_file = "/run/secrets/ops"
@@ -455,7 +455,7 @@ def cli(
                 "no bot configured (no --app-id / LARK_APP_ID and no "
                 "[feishu.bots] in config.toml)",
                 "pass --app-id or add [feishu.bots.<name>] to "
-                "~/.agentm/config.toml",
+                "$AGENTM_HOME/config.toml",
             )
             raise typer.Exit(code=EXIT_USAGE)
 

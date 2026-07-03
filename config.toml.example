@@ -1,4 +1,4 @@
-# AgentM config — place at ~/.agentm/config.toml (or $AGENTM_HOME/config.toml)
+# AgentM config — place at $AGENTM_HOME/config.toml (default: ~/.agentm/config.toml)
 #
 # Three sections:
 #   [models.*]          Model profiles (used by agentm / agentm gateway)
@@ -28,7 +28,8 @@ thinking = { type = "enabled" }
 # Without this section, all channels share the gateway's --cwd.
 
 [gateway]
-workspace_root = "~/.agentm/workspaces"
+# $AGENTM_HOME is expanded by the gateway even when the shell env is unset.
+workspace_root = "$AGENTM_HOME/workspaces"
 
 # Optional: override the convention path for specific channels.
 # [gateway.workspaces]
@@ -70,23 +71,23 @@ scenario = "rca"
 # Local development only: run both processes manually with matching URLs.
 # Direct ws/wss gateway binds require a token file unless you explicitly pass
 # --bind-allow-anonymous:
-#   mkdir -p ~/.agentm/gateway
-#   python3 - <<'PY' > ~/.agentm/gateway/token
+#   mkdir -p "${AGENTM_HOME:-$HOME/.agentm}/gateway"
+#   python3 - <<'PY' > "${AGENTM_HOME:-$HOME/.agentm}/gateway/token"
 #   import secrets
 #   print("agm_" + secrets.token_urlsafe(32))
 #   PY
-#   chmod 600 ~/.agentm/gateway/token
-#   agentm gateway --bind ws://127.0.0.1:8765 --bind-token-file ~/.agentm/gateway/token
-#   agentm-feishu --connect ws://127.0.0.1:8765 --token-file ~/.agentm/gateway/token --verbose
+#   chmod 600 "${AGENTM_HOME:-$HOME/.agentm}/gateway/token"
+#   agentm gateway --bind ws://127.0.0.1:8765 --bind-token-file "${AGENTM_HOME:-$HOME/.agentm}/gateway/token"
+#   agentm-feishu --connect ws://127.0.0.1:8765 --token-file "${AGENTM_HOME:-$HOME/.agentm}/gateway/token" --verbose
 #
 # The reloadable daemon can also expose ws for remote terminal clients. It
 # generates $AGENTM_HOME/gateway/token automatically when omitted:
 #   agentm daemon start --bind ws://0.0.0.0:8765
-#   agentm-terminal --connect ws://<host>:8765 --token "$(cat ~/.agentm/gateway/token)"
+#   agentm-terminal --connect ws://<host>:8765 --token "$(cat "${AGENTM_HOME:-$HOME/.agentm}/gateway/token")"
 #
 # Result:
-#   @assistant in Feishu  -->  session in ~/.agentm/workspaces/assistant/
-#   @investigator         -->  session in ~/.agentm/workspaces/investigator/
+#   @assistant in Feishu  -->  session in $AGENTM_HOME/workspaces/assistant/
+#   @investigator         -->  session in $AGENTM_HOME/workspaces/investigator/
 #
 # Single-bot mode (backward compat, ignores [feishu.bots]):
 #   agentm-feishu --app-id cli_xxx --app-secret /path --scenario chatbot

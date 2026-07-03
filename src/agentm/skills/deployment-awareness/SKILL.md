@@ -48,7 +48,7 @@ ls "${AGENTM_HOME:-$HOME/.agentm}/workspaces/" 2>/dev/null
        │                                        │
        │ Feishu WS                              │ session cwd
        ▼                                        ▼
-  Feishu servers                         ~/.agentm/workspaces/{channel}/
+  Feishu servers                         $AGENTM_HOME/workspaces/{channel}/
 ```
 
 - **Gateway** holds sessions in memory, routes outbound by `channel_name`.
@@ -139,10 +139,10 @@ When `--app-id` is on the CLI or `LARK_APP_ID` is in env, the
 
 ```toml
 [gateway]
-workspace_root = "~/.agentm/workspaces"
+workspace_root = "$AGENTM_HOME/workspaces"
 ```
 
-Channel `"assistant"` → `~/.agentm/workspaces/assistant/` (auto-created).
+Channel `"assistant"` → `$AGENTM_HOME/workspaces/assistant/` (auto-created).
 Each workspace has its own session store, `.agentm/` state, and traces.
 
 Explicit overrides when the convention path doesn't fit:
@@ -237,7 +237,7 @@ vim "${AGENTM_HOME:-$HOME/.agentm}/config.toml"
 
 # 2. Install managed user services
 uv sync --all-packages
-agentm gateway --cwd ~/.agentm/workspaces --install-systemd
+agentm gateway --cwd "${AGENTM_HOME:-$HOME/.agentm}/workspaces" --install-systemd
 loginctl enable-linger "$(whoami)"
 
 # 3. Validate bot config and inspect services

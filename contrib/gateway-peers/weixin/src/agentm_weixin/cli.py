@@ -523,8 +523,8 @@ def serve(
 
     Uses supervisord under the hood:
       - Auto-restarts either process on crash
-      - Log rotation under ~/.agentm/weixin/logs/
-      - Use `supervisorctl -c ~/.agentm/weixin/supervisord.conf` to manage
+      - Log rotation under $AGENTM_HOME/weixin/logs/
+      - Use `supervisorctl -c $AGENTM_HOME/weixin/supervisord.conf` to manage
       - Ctrl-C stops both gracefully
 
     The gateway starts first (priority=10), the adapter connects with

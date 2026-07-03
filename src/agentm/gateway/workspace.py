@@ -9,12 +9,30 @@ channels use the gateway's ``--cwd`` (full backward compat).
 
 from __future__ import annotations
 
+import re
 import tomllib
+from os.path import expandvars
 from pathlib import Path
 
 from loguru import logger
 
 from agentm.core.lib.user_config import agentm_home_dir
+
+_AGENTM_HOME_ENV = re.compile(r"\$AGENTM_HOME\b")
+
+
+def _expand_config_path(path: str) -> Path:
+    """Expand user-configured workspace paths.
+
+    ``$AGENTM_HOME`` is AgentM's own directory knob, so resolve it through the
+    shared helper rather than depending on shell environment interpolation.
+    Other environment variables use normal ``expandvars`` semantics.
+    """
+
+    home = str(agentm_home_dir())
+    expanded = path.replace("${AGENTM_HOME}", home)
+    expanded = _AGENTM_HOME_ENV.sub(home, expanded)
+    return Path(expandvars(expanded)).expanduser().resolve()
 
 
 class WorkspaceResolver:
@@ -28,7 +46,7 @@ class WorkspaceResolver:
     ) -> None:
         self._default_cwd = default_cwd
         self._root = (
-            Path(workspace_root).expanduser().resolve()
+            _expand_config_path(workspace_root)
             if workspace_root
             else None
         )
@@ -51,7 +69,7 @@ class WorkspaceResolver:
 
         # Explicit override wins
         if channel in self._overrides:
-            ws_path = Path(self._overrides[channel]).expanduser().resolve()
+            ws_path = _expand_config_path(self._overrides[channel])
         elif self._root is not None:
             # ``channel`` is attacker-controlled (a remote peer stamps it on
             # its inbound), so a ``../`` or absolute path would otherwise

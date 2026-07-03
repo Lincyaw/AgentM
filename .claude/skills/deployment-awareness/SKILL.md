@@ -30,10 +30,10 @@ systemctl --user status agentm-feishu 2>/dev/null || pgrep -af agentm-feishu
 agentm-feishu --check-config 2>&1    # lists resolved bots
 
 # Is workspace routing active?
-grep 'workspace_root' ~/.agentm/config.toml 2>/dev/null
+grep 'workspace_root' "${AGENTM_HOME:-$HOME/.agentm}/config.toml" 2>/dev/null
 
 # What workspaces exist?
-ls ~/.agentm/workspaces/ 2>/dev/null
+ls "${AGENTM_HOME:-$HOME/.agentm}/workspaces/" 2>/dev/null
 ```
 
 ## Architecture
@@ -48,7 +48,7 @@ ls ~/.agentm/workspaces/ 2>/dev/null
        │                                        │
        │ Feishu WS                              │ session cwd
        ▼                                        ▼
-  Feishu servers                         ~/.agentm/workspaces/{channel}/
+  Feishu servers                         $AGENTM_HOME/workspaces/{channel}/
 ```
 
 - **Gateway** holds sessions in memory, routes outbound by `channel_name`.
@@ -73,8 +73,8 @@ gateway restarts.
 
 ## Configuration
 
-All long-lived config lives in `~/.agentm/config.toml`
-(`$AGENTM_HOME/config.toml`). See `config.toml.example` at repo root for
+All long-lived config lives in `$AGENTM_HOME/config.toml`
+(default `~/.agentm/config.toml`). See `config.toml.example` at repo root for
 the full annotated reference.
 
 | Section | What it controls | Read by |
@@ -91,8 +91,8 @@ process (`systemctl --user restart agentm-feishu` / `agentm-gateway`).
 
 | Thing | Path |
 |-------|------|
-| Central config | `~/.agentm/config.toml` |
-| Per-bot workspaces | `~/.agentm/workspaces/{channel_name}/` |
+| Central config | `$AGENTM_HOME/config.toml` |
+| Per-bot workspaces | `$AGENTM_HOME/workspaces/{channel_name}/` |
 | Persona / character files | `<workspace>/persona.md` |
 | Observability trace | `$AGENTM_HOME/observability/<session_id>.jsonl` |
 | Example config | `config.toml.example` at repo root |
@@ -139,10 +139,10 @@ When `--app-id` is on the CLI or `LARK_APP_ID` is in env, the
 
 ```toml
 [gateway]
-workspace_root = "~/.agentm/workspaces"
+workspace_root = "$AGENTM_HOME/workspaces"
 ```
 
-Channel `"assistant"` → `~/.agentm/workspaces/assistant/` (auto-created).
+Channel `"assistant"` → `$AGENTM_HOME/workspaces/assistant/` (auto-created).
 Each workspace has its own session store, `.agentm/` state, and traces.
 
 Explicit overrides when the convention path doesn't fit:
@@ -163,8 +163,8 @@ the bot who it should be, the bot writes `persona.md` in its workspace.
 ### Listing bots and workspaces
 
 ```bash
-grep -A3 '\[feishu\.bots\.' ~/.agentm/config.toml
-ls ~/.agentm/workspaces/
+grep -A3 '\[feishu\.bots\.' "${AGENTM_HOME:-$HOME/.agentm}/config.toml"
+ls "${AGENTM_HOME:-$HOME/.agentm}/workspaces/"
 ```
 
 ## Observability
@@ -231,12 +231,13 @@ it mid-task.
 
 ```bash
 # 1. Copy example and fill in credentials
-cp config.toml.example ~/.agentm/config.toml
-vim ~/.agentm/config.toml
+mkdir -p "${AGENTM_HOME:-$HOME/.agentm}"
+cp config.toml.example "${AGENTM_HOME:-$HOME/.agentm}/config.toml"
+vim "${AGENTM_HOME:-$HOME/.agentm}/config.toml"
 
 # 2. Install managed user services
 uv sync --all-packages
-agentm gateway --cwd ~/.agentm/workspaces --install-systemd
+agentm gateway --cwd "${AGENTM_HOME:-$HOME/.agentm}/workspaces" --install-systemd
 loginctl enable-linger "$(whoami)"
 
 # 3. Validate bot config and inspect services
