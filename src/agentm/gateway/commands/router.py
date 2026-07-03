@@ -51,10 +51,10 @@ class CommandRouter:
           session and are dispatched there by the ``slash_commands`` floor
           atom — the gateway registry never contains those names. Returning
           ``None`` lets :meth:`_GatewayRuntime._run_command` forward the raw
-          ``/...`` text to the session prompt path, whose ``input``-event
-          seam then runs it. A name unknown to *both* layers reaches the
-          model as text unless the gateway surfaces an "unknown command"
-          diagnostic — that decision belongs to the gateway, which holds the
+          ``/...`` text to the session prompt path when the live session
+          advertises that command as user-invokable. A name unknown to *both*
+          layers is rejected by the gateway before it can reach the model as
+          plain text. That decision belongs to the gateway, which holds the
           per-session known-command set; the router is stateless.
 
         A bare ``/`` still returns a "type /help" hint (not ``None``) so it

@@ -1456,11 +1456,14 @@ def terminal_cmd(
             help="Start a gateway only for this terminal and stop it when the TUI exits.",
         ),
     ] = False,
-    no_reload: Annotated[
+    reload: Annotated[
         bool,
         typer.Option(
-            "--no-reload",
-            help="Disable daemon supervisor source watching and worker restarts.",
+            "--reload/--no-reload",
+            help=(
+                "Enable daemon supervisor source watching and worker restarts. "
+                "Default: disabled."
+            ),
         ),
     ] = False,
     gateway_command: Annotated[
@@ -1500,11 +1503,11 @@ def terminal_cmd(
         state_dir is not None
         or gateway_log is not None
         or private_gateway
-        or no_reload
+        or reload
         or gateway_command != "agentm"
     ):
         raise typer.BadParameter(
-            "--state-dir, --gateway-log, --private-gateway, --no-reload, and "
+            "--state-dir, --gateway-log, --private-gateway, --reload, and "
             "--gateway-command only apply when agentm terminal starts the local gateway"
         )
 
@@ -1525,7 +1528,7 @@ def terminal_cmd(
                 terminal_args=list(ctx.args),
                 startup_timeout=startup_timeout,
                 use_daemon=not private_gateway,
-                reload=not no_reload,
+                reload=reload,
             )
         )
     except TerminalLaunchError as exc:

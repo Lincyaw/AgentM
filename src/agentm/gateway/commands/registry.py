@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
+import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,13 +91,54 @@ def discover_commands(
     _load_skills(
         registry,
         Path(cwd),
-        extra=skill_paths,
+        extra=tuple(skill_paths) + tuple(_configured_skill_paths()),
         include_defaults=include_default_skill_paths,
     )
     if atom_commands_enabled:
         _load_atom_commands(registry, allow=atom_allow)
     _load_entry_points(registry)
     return registry
+
+
+def _configured_skill_paths() -> list[str]:
+    """Read optional gateway skill-command paths from config.toml.
+
+    Supported shape:
+
+    ``[gateway.commands.skills]``
+    ``paths = ["~/some/skills"]``
+    """
+    try:
+        from agentm.core.lib.user_config import agentm_home_dir
+    except Exception:
+        logger.debug("command registry: cannot resolve AGENTM_HOME for config")
+        return []
+
+    path = agentm_home_dir() / "config.toml"
+    if not path.is_file():
+        return []
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except Exception:
+        logger.opt(exception=True).warning(
+            f"command registry: failed to parse {path}; ignoring skill paths"
+        )
+        return []
+
+    gateway = data.get("gateway")
+    if not isinstance(gateway, dict):
+        return []
+    commands = gateway.get("commands")
+    if not isinstance(commands, dict):
+        return []
+    skills = commands.get("skills")
+    if not isinstance(skills, dict):
+        return []
+    paths = skills.get("paths")
+    if not isinstance(paths, list):
+        return []
+    return [value for value in paths if isinstance(value, str) and value.strip()]
 
 
 def _load_atom_commands(

@@ -646,13 +646,23 @@ class GatewayRuntime:
     def _remember_session_commands(
         self, session_key: str, meta: dict[str, Any]
     ) -> None:
-        """Cache the bare command names a session_ready frame carries."""
+        """Cache command names a session_ready frame carries."""
         names = meta.get("command_names")
         if not isinstance(names, list):
             return
         self._session_commands[session_key] = {
-            n for n in names if isinstance(n, str) and ":" not in n
+            n for n in names if isinstance(n, str)
         }
+
+    def _remember_live_session_commands(
+        self, session_key: str, sess: Any
+    ) -> set[str] | None:
+        names = getattr(sess, "command_names", None)
+        if not isinstance(names, list):
+            return None
+        known = {name for name in names if isinstance(name, str)}
+        self._session_commands[session_key] = known
+        return known
 
     def _merge_gateway_commands(self, meta: dict[str, Any]) -> None:
         """Fold the gateway's own builtin commands into a session_ready frame."""
@@ -798,7 +808,7 @@ class GatewayRuntime:
     ) -> None:
         try:
             if action is RouterAction.RUN_COMMAND:
-                await self._run_command(session_key, body)
+                await self._run_command(session_key, scenario, body)
             elif action in {RouterAction.SUBMIT, RouterAction.PROMPT_SESSION}:
                 await self._submit_session_input(session_key, scenario, body)
             else:
@@ -870,7 +880,9 @@ class GatewayRuntime:
             return
         loop.create_task(self._emit_session_snapshot(session_key))
 
-    async def _run_command(self, session_key: str, body: InboundBody) -> None:
+    async def _run_command(
+        self, session_key: str, scenario: str | None, body: InboundBody
+    ) -> None:
         ctx = self._command_context(session_key, body)
         msg = CommandInbound(
             session_key=session_key,
@@ -883,12 +895,26 @@ class GatewayRuntime:
         result = await self._command_router.try_dispatch(msg, ctx)
         if result is None:
             inv = parse_invocation(msg)
-            if inv is not None and inv.name and inv.namespace is None:
-                known = self._session_commands.get(session_key)
-                if known is not None and inv.name not in known:
+            if inv is not None and inv.name:
+                command_key = (
+                    inv.name
+                    if inv.namespace is None
+                    else f"{inv.namespace}:{inv.name}"
+                )
+                sess = await self._get_or_create_session_for_input(
+                    session_key, scenario, body
+                )
+                known = self._remember_live_session_commands(session_key, sess)
+                if known is None:
+                    known = self._session_commands.get(session_key)
+                if known is not None and command_key in known:
+                    await sess.prompt(body.content)
+                    await self._emit_session_snapshot(session_key)
+                    return
+                if known is not None:
                     await self._emit_unknown_command(session_key, body, inv.raw)
                     return
-            await self._submit_session_input(session_key, None, body)
+            await self._submit_session_input(session_key, scenario, body)
             return
         for out in result.outbound:
             out_body = out.to_dict()
@@ -903,7 +929,7 @@ class GatewayRuntime:
             from dataclasses import replace
 
             await self._prompt_session(
-                session_key, None, replace(body, content=result.expanded_prompt)
+                session_key, scenario, replace(body, content=result.expanded_prompt)
             )
 
     def _push_user_input(
@@ -937,11 +963,9 @@ class GatewayRuntime:
         """Resolve the cwd from the peer's hello for this session."""
         return self._peer_cwds.get(session_key)
 
-    async def _submit_session_input(
+    async def _get_or_create_session_for_input(
         self, session_key: str, scenario: str | None, body: InboundBody
-    ) -> None:
-        if body.policy is not None and body.policy.lower() == "interrupt_first":
-            self._interrupt_session(session_key)
+    ) -> Any:
         peer_cwd = self._resolve_peer_cwd(session_key)
         if scenario:
             from agentm.extensions.loader import validate_scenario
@@ -953,7 +977,6 @@ class GatewayRuntime:
             session_key, self._active_scenario_name(session_key), body, cwd=peer_cwd
         )
         self._sessions.set_turn_context(session_key, body)
-        self._turn_counts[session_key] = self._turn_counts.get(session_key, 0) + 1
         # Route context may be required before we can send a session snapshot.
         self._record_session_route(
             session_key,
@@ -964,6 +987,17 @@ class GatewayRuntime:
             },
         )
         self._snapshot_for(session_key)
+        return sess
+
+    async def _submit_session_input(
+        self, session_key: str, scenario: str | None, body: InboundBody
+    ) -> None:
+        if body.policy is not None and body.policy.lower() == "interrupt_first":
+            self._interrupt_session(session_key)
+        sess = await self._get_or_create_session_for_input(
+            session_key, scenario, body
+        )
+        self._turn_counts[session_key] = self._turn_counts.get(session_key, 0) + 1
         if body.content == "":
             return
         self._push_user_input(sess.inbox, body, body.content)

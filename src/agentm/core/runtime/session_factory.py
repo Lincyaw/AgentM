@@ -574,7 +574,9 @@ async def create_agent_session(
             cwd=config.cwd,
             session_id=session_id,
             tool_names=tuple(t.name for t in tools),
-            command_names=tuple(commands.keys()),
+            command_names=tuple(
+                name for name, spec in commands.items() if spec.user_invokable
+            ),
             extension_module_paths=tuple(module_path for module_path, _ in to_load),
             model=active_provider.model,
             root_session_id=root_session_id,

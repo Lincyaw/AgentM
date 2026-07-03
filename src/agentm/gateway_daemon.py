@@ -3,7 +3,8 @@
 This module owns the small single-host supervisor lifecycle used by
 ``agentm daemon`` and the convenience ``agentm terminal`` command.  It does
 not host AgentSession objects; the supervisor starts the normal
-``agentm gateway`` worker and restarts it when watched files change.
+``agentm gateway`` worker and can restart it when watched files change if
+explicitly asked to do so.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ class GatewayDaemonConfig:
     state_dir: Path | None = None
     gateway_log: Path | None = None
     startup_timeout: float = 10.0
-    reload: bool = True
+    reload: bool = False
     poll_interval: float = 1.0
 
 
@@ -57,6 +58,7 @@ class GatewayDaemonStatus:
     log_path: Path
     token_file: Path | None
     auth_required: bool
+    reload: bool
     pid: int | None
     pid_alive: bool
     socket_ready: bool
@@ -78,6 +80,7 @@ class GatewayDaemonStatus:
             "log_path": str(self.log_path),
             "token_file": str(self.token_file) if self.token_file else None,
             "auth_required": self.auth_required,
+            "reload": self.reload,
         }
 
 
@@ -201,6 +204,7 @@ def gateway_daemon_status() -> GatewayDaemonStatus:
         log_path=Path(str(log_path_raw)) if log_path_raw else default_gateway_log(),
         token_file=token_file,
         auth_required=bool(metadata.get("auth_required", False)),
+        reload=bool(metadata.get("reload", False)),
         pid=pid,
         pid_alive=pid is not None and pid_file_is_live(pid_file),
         socket_ready=gateway_accepts_connections(connect_url),
@@ -217,12 +221,18 @@ def ensure_gateway_daemon(config: GatewayDaemonConfig) -> str:
     pid_file = default_daemon_pid_file(create_runtime_dir=True)
     active_metadata = _read_daemon_metadata()
     active_url = active_metadata.get("connect_url")
+    active_reload = bool(active_metadata.get("reload", False))
     if pid_file_is_live(pid_file):
         connect_url = str(config.bind or active_url or default_daemon_connect_url())
         if active_url and str(active_url) != connect_url:
             raise GatewayDaemonError(
                 f"gateway daemon is already running at {active_url}; "
                 "stop or restart it to change --bind"
+            )
+        if config.reload and not active_reload:
+            raise GatewayDaemonError(
+                "gateway daemon is already running without supervisor reload; "
+                "use `agentm daemon restart --reload` to enable it"
             )
         log_path = config.gateway_log or default_gateway_log()
         if gateway_accepts_connections(connect_url):
@@ -251,6 +261,7 @@ def ensure_gateway_daemon(config: GatewayDaemonConfig) -> str:
         "log_path": str(log_path),
         "token_file": str(token_file) if token_file else None,
         "auth_required": token_file is not None,
+        "reload": config.reload,
     }
     if gateway_accepts_connections(connect_url):
         _write_daemon_metadata(metadata)
@@ -284,8 +295,8 @@ def ensure_gateway_daemon(config: GatewayDaemonConfig) -> str:
         args.extend(["--tls-key", str(config.tls_key)])
     if config.scenario:
         args.extend(["--scenario", config.scenario])
-    if not config.reload:
-        args.append("--no-reload")
+    if config.reload:
+        args.append("--reload")
 
     try:
         process = subprocess.Popen(

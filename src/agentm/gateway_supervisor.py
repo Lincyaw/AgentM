@@ -1,9 +1,9 @@
 """Development supervisor for the gateway worker.
 
 The supervisor intentionally does not host AgentSession objects.  It keeps a
-stable daemon process around, watches source/config files, and restarts a fresh
-``agentm gateway`` worker when those files change so the worker imports current
-code on every restart.
+stable daemon process around and can watch source/config files when requested.
+When reload is enabled, it restarts a fresh ``agentm gateway`` worker after
+changes so the worker imports current code on every restart.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ class SupervisorConfig:
     bind_allow_anonymous: bool = False
     tls_cert: Path | None = None
     tls_key: Path | None = None
-    reload: bool = True
+    reload: bool = False
     poll_interval: float = 1.0
     pid_file: Path | None = None
     watch_paths: list[Path] = field(default_factory=list)
@@ -59,7 +59,7 @@ class GatewaySupervisor:
     def run(self) -> int:
         self._install_signal_handlers()
         self._write_pid_file()
-        fingerprint = self._snapshot()
+        fingerprint = self._snapshot() if self._config.reload else {}
         try:
             self._start_worker()
             while not self._stopping:
@@ -67,7 +67,8 @@ class GatewaySupervisor:
                 if worker is not None and worker.poll() is not None:
                     self._log(f"gateway worker exited with {worker.returncode}; restarting")
                     self._start_worker()
-                    fingerprint = self._snapshot()
+                    if self._config.reload:
+                        fingerprint = self._snapshot()
 
                 if self._config.reload:
                     current = self._snapshot()
@@ -241,7 +242,19 @@ def _parse_args(argv: list[str] | None) -> SupervisorConfig:
     parser.add_argument("--tls-key")
     parser.add_argument("--scenario")
     parser.add_argument("--pid-file")
-    parser.add_argument("--no-reload", action="store_true")
+    parser.add_argument(
+        "--reload",
+        dest="reload",
+        action="store_true",
+        help="watch source/config files and restart the gateway worker on changes",
+    )
+    parser.add_argument(
+        "--no-reload",
+        dest="reload",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(reload=False)
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--watch", action="append", default=[])
     ns = parser.parse_args(argv)
@@ -257,7 +270,7 @@ def _parse_args(argv: list[str] | None) -> SupervisorConfig:
         bind_allow_anonymous=bool(ns.bind_allow_anonymous),
         tls_cert=Path(ns.tls_cert) if ns.tls_cert else None,
         tls_key=Path(ns.tls_key) if ns.tls_key else None,
-        reload=not ns.no_reload,
+        reload=bool(ns.reload),
         poll_interval=max(float(ns.poll_interval), 0.2),
         pid_file=Path(ns.pid_file) if ns.pid_file else None,
         watch_paths=watch_paths,

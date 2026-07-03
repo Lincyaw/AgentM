@@ -92,6 +92,7 @@ requirements:
       - path: src/agentm/core/runtime/session_manager.py
       - path: src/agentm/core/abi/provider.py
       - path: src/agentm/extensions/builtin/cost_budget.py
+      - path: src/agentm/extensions/builtin/loop_budget.py
       - path: src/agentm/extensions/builtin/slash_commands.py
     tests:
       - path: tests/unit/extensions/test_extension_contract.py
@@ -493,6 +494,9 @@ requirements:
       - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway/runtime.py
       - path: src/agentm/gateway/commands/protocol.py
+      - path: src/agentm/gateway/commands/registry.py
+      - path: src/agentm/gateway/commands/router.py
+      - path: src/agentm/gateway/commands/skill_command.py
       - path: src/agentm/gateway/commands/builtins/model.py
       - path: src/agentm/gateway/commands/builtins/scenario.py
       - path: src/agentm/ai/types.py
@@ -814,9 +818,11 @@ requirements:
       wait for its gateway endpoint, connect the `agentm-terminal` TUI to it, and
       write gateway/supervisor logs to a deterministic file. The daemon is a
       lightweight Python supervisor around a gateway worker: it keeps the client
-      endpoint stable and restarts the worker when watched source/config files
-      change, so SDK/session code updates apply without manually restarting the
-      TUI. Each `agentm terminal` launch must get a fresh terminal session
+      endpoint stable and keeps the worker fixed by default so in-memory
+      sessions survive source edits. When `--reload` is explicit, it restarts
+      the worker when watched source/config files change so SDK/session code
+      updates apply without manually restarting the TUI. Each `agentm terminal`
+      launch must get a fresh terminal session
       by default, so multiple TUI windows attached to the same daemon do not
       share a `terminal:<session-id>` session unless the user explicitly passes a
       session id. `--private-gateway` preserves the old one-terminal-one-gateway

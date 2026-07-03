@@ -398,6 +398,15 @@ class AgentSession:
     def root_session_id(self) -> str:
         return self._root_session_id
 
+    @property
+    def command_names(self) -> list[str]:
+        """User-invokable slash commands registered in this session."""
+        return [
+            name
+            for name, spec in self._commands.items()
+            if getattr(spec, "user_invokable", True)
+        ]
+
     # --- prompt -----------------------------------------------------------
 
     async def prompt(
@@ -667,6 +676,7 @@ class AgentSession:
             "phase": phase,
             "session_id": self._session_id,
             "tool_names": [t.name for t in self._tools],
+            "command_names": self.command_names,
         }
 
     def send_user_message(self, text: str) -> None:

@@ -21,31 +21,57 @@ substrate default (``LoopConfig()`` — no cap) applies.
 
 from __future__ import annotations
 
-
 from pydantic import BaseModel
 
-from agentm.core.abi import ExtensionAPI, LOOP_BUDGET_SERVICE, LoopConfig
+from agentm.core.abi import CommandSpec, ExtensionAPI, LOOP_BUDGET_SERVICE, LoopConfig
 from agentm.extensions import ExtensionManifest
+
 
 class LoopBudgetConfig(BaseModel):
     max_turns: int | None = None
     max_tool_calls: int | None = None
 
+
 MANIFEST = ExtensionManifest(
     name="loop_budget",
     description="Sets the agent-loop turn / tool-call budget for the session.",
-    registers=(),  # Registers a service, not a tool/event/role — empty by design.
+    registers=("command:loop",),
     config_schema=LoopBudgetConfig,
     requires=(),
 )
 
+
 def install(api: ExtensionAPI, config: LoopBudgetConfig) -> None:
     max_turns = _positive_int_or_none_from_model(config.max_turns, "max_turns")
-    max_tool_calls = _positive_int_or_none_from_model(config.max_tool_calls, "max_tool_calls")
+    max_tool_calls = _positive_int_or_none_from_model(
+        config.max_tool_calls, "max_tool_calls"
+    )
     api.set_service(
         LOOP_BUDGET_SERVICE,
         LoopConfig(max_turns=max_turns, max_tool_calls=max_tool_calls),
     )
+
+    async def _loop_command(_args: str, cmd_api: ExtensionAPI) -> None:
+        cfg = cmd_api.session.get_loop_config()
+        cmd_api.send_user_message(
+            "Loop budget: "
+            f"max_turns={_render_limit(cfg.max_turns)}, "
+            f"max_tool_calls={_render_limit(cfg.max_tool_calls)}, "
+            f"max_tool_calls_per_turn={_render_limit(cfg.max_tool_calls_per_turn)}."
+        )
+
+    api.register_command(
+        "loop",
+        CommandSpec(
+            description="Show this session's agent-loop turn/tool budget.",
+            handler=_loop_command,
+        ),
+    )
+
+
+def _render_limit(value: int | None) -> str:
+    return str(value) if value is not None else "unlimited"
+
 
 def _positive_int_or_none_from_model(value: int | None, key: str) -> int | None:
     """Validate a value as a positive int (``None`` ⇒ no cap).

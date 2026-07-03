@@ -26,13 +26,14 @@ fresh conversation — they should type `/new`.
 ## 2. First Principles
 
 1. **Slash commands never reach the LLM as commands.** A command the
-   *gateway* registry doesn't own is forwarded to the session, where the
-   in-session `slash_commands` atom dispatches session-registered commands
-   (`/compact` etc). Only a name unknown to *both* layers is rejected with a
-   user-visible reply rather than forwarded — the gateway makes that call
-   using a per-session known-command set learned from the `session_ready`
-   frame. The cost of "user typo accidentally sends private prompt to model"
-   is too high to forward a name nobody owns; but a real session command
+   *gateway* registry doesn't own is routed to a live session before the
+   gateway decides whether it is unknown. The gateway reads that session's
+   user-invokable command set and calls `AgentSession.prompt(raw_slash_text)`
+   when the name is present, so the in-session `slash_commands` atom dispatches
+   session-registered commands (`/compact`, `/goal`, `/loop`, etc). Only a
+   name unknown to *both* layers is rejected with a user-visible reply rather
+   than forwarded. The cost of "user typo accidentally sends private prompt to
+   model" is too high to forward a name nobody owns; but a real session command
    must reach its dispatcher, not be rejected at the gateway.
 2. **One protocol, four handler kinds.** Commands come from four
    sources (builtin control, markdown prompt, skill, atom), but the
@@ -54,7 +55,7 @@ fresh conversation — they should type `/new`.
 |---|---|---|---|---|
 | `BuiltinControl` | `None` | `control` | Python file in `commands/builtins/` | Mutates gateway/session state, may emit `OutboundMessage`s. **No LLM call.** |
 | `MarkdownPrompt` | `None` | `prompt` | `<cwd>/.agentm/commands/*.md` | Expands frontmatter+body with `$ARGUMENTS` substitution. Falls through to `session.prompt(expanded)`. |
-| `SkillCommand` | `"skill"` | `prompt` | Skill directories (cwd + `~/.claude/skills`) | Reads `SKILL.md`, expands into a templated prompt that injects the body for the current turn. |
+| `SkillCommand` | `"skill"` | `prompt` | Skill directories (gateway config + `.agentm/skills` + `.claude/skills`) | Reads `SKILL.md`, expands into a templated prompt that injects the body for the current turn. |
 | `AtomCommand` | `"atom"` | `control` | Atoms with `mountable_via_command: true` | Calls `api.extensions.install/uninstall` against the running session's runtime scenario overlay (see §7). |
 
 All four implement the same Protocol:
@@ -105,6 +106,13 @@ class CommandContext:
     approval_bridge: ApprovalBridge                        # for /approve, /deny
 ```
 
+Session-owned commands use the SDK's `CommandSpec`, not gateway
+`CommandHandler`. `CommandSpec.user_invokable` defaults to `True` and is a
+catalog/UX contract: session snapshots and `session_ready` advertise only
+those commands, and the gateway only auto-routes unknown gateway commands to
+session command dispatch when the slash name is in that advertised set. The
+flag is not a security boundary inside the session runtime.
+
 ---
 
 ## 4. Parsing
@@ -119,10 +127,10 @@ Edge cases:
 
 - `/` alone → invalid; reply with "Type `/help` for commands."
 - `/unknown` → if the gateway registry doesn't own the name, the router
-  returns `None` and the gateway forwards the raw text to the session so a
-  session-registered command can run. Only if the name is unknown to the
-  session too does the gateway reply "no such command" — **no fallback to
-  the LLM for a name nobody owns.**
+  returns `None` and the gateway ensures a session exists, reads its
+  user-invokable command set, and calls `session.prompt(raw)` only when that
+  name is present. Otherwise the gateway replies "no such command" — **no
+  fallback to the LLM for a name nobody owns.**
 - `//literal/path` → not a command (first character is `/` but second
   is `/`; treated as user text). Cheap to disambiguate without
   surprising file-path users.
@@ -140,10 +148,11 @@ the registry:
 2. **Markdown prompt** — `<cwd>/.agentm/commands/*.md`, frontmatter
    `name` / `summary` / optional `args` field.
 3. **Skill** — `api.skills.load_skills(...)` would be ideal but is not
-   reachable from outside the session; instead the router walks the
-   same directories the `skill_loader` atom walks
-   (`<cwd>/.claude/skills/`, `~/.claude/skills/`, gateway-config
-   `skill_paths`). Each skill becomes one `SkillCommand` in namespace
+   reachable from outside the session; instead the router walks explicit
+   gateway-configured paths first, then the project/user AgentM skill
+   directories (`<cwd>/.agentm/skills/`, `~/.agentm/skills/`) and
+   Claude-compatible directories (`<cwd>/.claude/skills/`,
+   `~/.claude/skills/`). Each skill becomes one `SkillCommand` in namespace
    `skill`.
 4. **Atom** — at session-construction time, the runtime scenario
    overlay (see §7) lists mountable atoms. Their MANIFEST entries
@@ -160,6 +169,17 @@ under their effective source plus a `(also: skill)` note.
 up new markdown files / skills. This is a deliberate trade-off — live
 filesystem watching is more code than it earns at this stage.
 
+Gateway-level skill-command paths are configured in
+`$AGENTM_HOME/config.toml`:
+
+```toml
+[gateway.commands.skills]
+paths = ["~/.codex/skills", "~/.agents/skills"]
+```
+
+Those paths are opt-in because they may expose personal command surfaces to
+every gateway peer attached to the daemon.
+
 ---
 
 ## 6. Dispatch flow inside `Gateway._dispatch`
@@ -173,13 +193,12 @@ async def _dispatch(self, msg: InboundMessage) -> None:
     if msg.content.startswith("/") and not msg.content.startswith("//"):
         result = await self._command_router.try_dispatch(msg, ctx=...)
         if result is None:
-            # No GATEWAY handler owns this name. If it is a known SESSION
-            # command (per-session set learned from session_ready) — or we
-            # have no session knowledge yet — forward the raw /... text to
-            # the session so its slash_commands atom can dispatch it. Only a
-            # name unknown to BOTH layers gets the "unknown command" reply.
-            if known_to_session_or_unknown_set(msg):
-                await self._prompt_session(msg)        # session dispatches it
+            # No GATEWAY handler owns this name. Ensure the route has a live
+            # session, read its user-invokable CommandSpec names, and forward
+            # only if the slash name is a known session command.
+            sess = await self._get_or_create_session_for_input(msg)
+            if slash_name(msg) in sess.command_names:
+                await sess.prompt(msg.content)         # session dispatches it
             else:
                 await self._publish_unknown_command(msg)
             return
@@ -199,10 +218,10 @@ async def _dispatch(self, msg: InboundMessage) -> None:
 Two invariants:
 
 1. `result is None` means no gateway handler owns the name. The gateway
-   forwards it to the session (so a session-registered command runs) unless
-   the name is unknown to the session too, in which case it terminates with
-   a user-visible "unknown command" reply. A name nobody owns never reaches
-   the LLM silently as a command.
+   resolves a live session and forwards the raw slash text only when that
+   session advertises the command as user-invokable, so a session-registered
+   command runs through `slash_commands`. A name nobody owns never reaches the
+   LLM silently as a command.
 2. `result.expanded_prompt is not None` means it is a prompt command;
    the gateway re-enters the normal path with rewritten content. The
    session sees the expanded text as if the user had typed it.

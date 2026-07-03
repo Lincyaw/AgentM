@@ -560,8 +560,8 @@ Keep / write (target invariants):
 
 The `agentm` console script gains `gateway` and `daemon` subcommands alongside
 the existing prompt and trace surfaces. `agentm gateway` is the foreground
-server. `agentm daemon` manages the local reloadable supervisor used by
-single-host clients by default, and can bind `ws://` / `wss://` for remote
+server. `agentm daemon` manages the local supervisor used by single-host
+clients by default, and can bind `ws://` / `wss://` for remote
 clients with token auth enabled unless `--bind-allow-anonymous` is explicit.
 `agentm terminal` is a convenience wrapper around `agentm daemon start` plus
 `agentm-terminal`.
@@ -586,10 +586,11 @@ clients with token auth enabled unless `--bind-allow-anonymous` is explicit.
   daemon paths, authenticated ws/unix status, start/stop/restart/socket CLI.
 * `src/agentm/gateway_supervisor.py` — local-development process supervisor
   used by `agentm daemon`: keeps a stable endpoint, starts the ordinary
-  `agentm gateway` worker, and restarts that worker when watched source/config
-  files change. This is not a distributed worker pool and does not execute
-  sessions outside the single gateway process; it exists so code changes apply
-  without manually restarting the TUI client.
+  `agentm gateway` worker, and keeps it fixed by default so in-memory sessions
+  survive source edits. When `--reload` is explicit, it restarts that worker
+  when watched source/config files change so code changes apply without
+  manually restarting the TUI client. This is not a distributed worker pool and
+  does not execute sessions outside the single gateway process.
 
 No new third-party deps.
 

@@ -199,13 +199,13 @@ and future peers connect to the same gateway URL (`agentm daemon socket`). Norma
 terminal use can be either `agentm terminal` for one-command startup or
 `agentm daemon start && agentm-terminal` when you want to manage the server
 separately. In local daemon mode, a lightweight Python supervisor keeps the
-gateway endpoint stable and restarts the gateway worker when source/config files
-change, so SDK/session code updates apply without manually restarting the
-terminal client. Each launch gets a fresh terminal session by default, even
-from the same cwd; pass `--session-id workbench` only when intentionally
-reconnecting to a known terminal session. Use `--private-gateway` for the old
-one-terminal-one-gateway lifecycle, or `--no-reload` to keep the daemon worker
-fixed. Common TUI flags are available directly, for example
+gateway endpoint stable. By default it keeps the gateway worker fixed so
+in-memory sessions survive source edits; pass `--reload` when you want the
+supervisor to restart the worker after source/config changes. Each launch gets
+a fresh terminal session by default, even from the same cwd; pass
+`--session-id workbench` only when intentionally reconnecting to a known
+terminal session. Use `--private-gateway` for the old
+one-terminal-one-gateway lifecycle. Common TUI flags are available directly, for example
 `agentm terminal --simple --theme light`; uncommon peer flags can still be
 passed after `--`. Workflow and sub-agent sessions open as background task rows
 so the parent conversation stays focused; `↓` opens the task picker, `Enter`

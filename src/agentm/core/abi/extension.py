@@ -99,10 +99,16 @@ class CommandSpec:
     The ``handler`` receives the rest-of-line argument string and the
     ``ExtensionAPI`` (so the command may register more things, send messages,
     etc.). It may be sync or async; async handlers are awaited by the runner.
+
+    ``user_invokable`` controls whether presenter/gateway surfaces advertise the
+    command for direct human slash-command use. Dispatch still looks up the
+    command by name once a host has routed it to the session; the flag is a
+    catalog/UX contract, not an execution guard.
     """
 
     description: str
     handler: Callable[[str, "ExtensionAPI"], Awaitable[None] | None]
+    user_invokable: bool = True
 
 
 @dataclass(frozen=True, slots=True)

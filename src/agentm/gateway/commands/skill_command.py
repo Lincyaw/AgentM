@@ -8,10 +8,11 @@ selected the right skill (or any skill at all), the user types
 
 We do not reach into the ``skill_loader`` atom's loader directly — its
 discovery pipeline is session-internal. The router walks the same
-canonical skill directories (``<cwd>/.claude/skills/``,
-``~/.claude/skills/``) the skill_loader atom walks. Discovery is
-shallow: each ``<dir>/SKILL.md`` becomes one skill named after the
-parent directory.
+canonical project/user skill directories that the skill_loader atom uses
+(``<cwd>/.agentm/skills/``, ``~/.agentm/skills/``) plus the existing
+Claude-compatible directories (``<cwd>/.claude/skills/``,
+``~/.claude/skills/``). Discovery is shallow: each ``<dir>/SKILL.md``
+becomes one skill named after the parent directory.
 """
 
 from __future__ import annotations
@@ -103,14 +104,16 @@ def walk_skill_dirs(
 ) -> Iterator[tuple[Path, str]]:
     """Yield ``(skill_dir, name)`` for each ``<dir>/SKILL.md`` found.
 
-    Order: configured extras first, then ``<cwd>/.claude/skills``,
-    then ``~/.claude/skills``. The registry dedups by name so the
+    Order: configured extras first, then AgentM project/user dirs, then
+    Claude-compatible project/user dirs. The registry dedups by name so the
     extras win on collision.
     """
     seen_dirs: set[Path] = set()
     sources: list[Path] = [Path(p) for p in extra]
     if include_defaults:
+        sources.append(cwd / ".agentm" / "skills")
         sources.append(cwd / ".claude" / "skills")
+        sources.append(Path.home() / ".agentm" / "skills")
         sources.append(Path.home() / ".claude" / "skills")
     for root in sources:
         try:

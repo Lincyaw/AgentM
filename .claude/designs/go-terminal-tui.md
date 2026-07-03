@@ -2,7 +2,7 @@
 
 **Status**: IMPLEMENTED, evolving
 **Created**: 2026-05-31
-**Updated**: 2026-07-03
+**Updated**: 2026-07-04
 
 ## 0. Purpose
 
@@ -16,14 +16,14 @@ The TUI is a **dumb adapter** (single-process-gateway.md §5.1) — it sends
 atom knowledge.
 
 The recommended user entrypoints are split by responsibility:
-`agentm daemon start/status/stop/restart/socket` manages the local reloadable
-gateway daemon, `agentm-terminal` is a pure wire client that defaults to the
-daemon socket, and `agentm terminal` is a convenience wrapper that ensures the
-daemon is running before opening the TUI. A lightweight Python supervisor owns
-the daemon process and restarts the gateway worker when source/config files
-change, so SDK/session code updates apply without manually restarting the
-terminal. Advanced users can still run the foreground `agentm gateway` and
-connect peers with `--connect ...` or `AGENTM_SOCKET`.
+`agentm daemon start/status/stop/restart/socket` manages the local gateway
+daemon, `agentm-terminal` is a pure wire client that defaults to the daemon
+socket, and `agentm terminal` is a convenience wrapper that ensures the daemon
+is running before opening the TUI. A lightweight Python supervisor owns the
+daemon process and keeps the gateway worker fixed by default; pass `--reload`
+when source/config edits should restart the worker automatically. Advanced
+users can still run the foreground `agentm gateway` and connect peers with
+`--connect ...` or `AGENTM_SOCKET`.
 Each terminal client launch gets a fresh terminal session id by default;
 explicit `-session-id` is the opt-in mechanism for reconnecting multiple
 clients to the same gateway session.

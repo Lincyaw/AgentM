@@ -47,7 +47,7 @@ class TerminalLaunchConfig:
     terminal_args: list[str] = field(default_factory=list)
     startup_timeout: float = 10.0
     use_daemon: bool = True
-    reload: bool = True
+    reload: bool = False
 
 
 @dataclass(slots=True)

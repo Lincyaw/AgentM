@@ -22,7 +22,7 @@ from agentm.gateway_daemon import (
 
 app = typer.Typer(
     name="daemon",
-    help="Manage the local reloadable gateway daemon used by terminal clients.",
+    help="Manage the local gateway daemon used by terminal clients.",
     no_args_is_help=True,
     add_completion=False,
     context_settings={"help_option_names": ["-h", "--help"]},
@@ -46,6 +46,7 @@ def _print_status(*, json_output: bool) -> None:
         typer.echo(f"token_file: {status.token_file}")
     elif status.connect_url.startswith(("ws://", "wss://")):
         typer.echo("auth: anonymous")
+    typer.echo(f"reload: {'enabled' if status.reload else 'disabled'}")
     if status.pid is not None:
         typer.echo(f"pid: {status.pid}")
     typer.echo(f"log: {status.log_path}")
@@ -141,11 +142,14 @@ def start_cmd(
             help="Gateway supervisor log file. Default: $AGENTM_HOME/logs/terminal-gateway.log.",
         ),
     ] = None,
-    no_reload: Annotated[
+    reload: Annotated[
         bool,
         typer.Option(
-            "--no-reload",
-            help="Disable supervisor source watching and worker restarts.",
+            "--reload/--no-reload",
+            help=(
+                "Enable supervisor source watching and worker restarts. "
+                "Default: disabled."
+            ),
         ),
     ] = False,
     startup_timeout: Annotated[
@@ -178,7 +182,7 @@ def start_cmd(
                 state_dir=state_dir,
                 gateway_log=gateway_log,
                 startup_timeout=startup_timeout,
-                reload=not no_reload,
+                reload=reload,
             )
         )
     except GatewayDaemonError as exc:
@@ -271,11 +275,14 @@ def restart_cmd(
             help="Gateway supervisor log file. Default: $AGENTM_HOME/logs/terminal-gateway.log.",
         ),
     ] = None,
-    no_reload: Annotated[
+    reload: Annotated[
         bool,
         typer.Option(
-            "--no-reload",
-            help="Disable supervisor source watching and worker restarts.",
+            "--reload/--no-reload",
+            help=(
+                "Enable supervisor source watching and worker restarts. "
+                "Default: disabled."
+            ),
         ),
     ] = False,
     startup_timeout: Annotated[
@@ -304,7 +311,7 @@ def restart_cmd(
         tls_key=tls_key,
         state_dir=state_dir,
         gateway_log=gateway_log,
-        no_reload=no_reload,
+        reload=reload,
         startup_timeout=startup_timeout,
         json_output=json_output,
     )
