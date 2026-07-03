@@ -11,7 +11,8 @@ Scenario-agnostic core; RCA is the first adapter.
 # from repo root — installs rescue_window + rca_eval + agentm SDK
 uv sync --extra eval
 
-# actor model profile in ~/.agentm/config.toml, e.g.:
+# actor model profile in $AGENTM_HOME/config.toml
+# (default ~/.agentm/config.toml), e.g.:
 # [models.litellm]
 # provider = "openai"
 # model = "doubao-seed-2-0-pro-260215"

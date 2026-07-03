@@ -44,7 +44,10 @@ def _resolve_provider(model_profile: str) -> tuple[str, dict[str, Any]]:
 
     profile = resolve_model_profile(model_profile)
     if profile is None:
-        raise ValueError(f"no ~/.agentm/config.toml profile: {model_profile!r}")
+        raise ValueError(
+            f"no $AGENTM_HOME/config.toml profile (default ~/.agentm/config.toml): "
+            f"{model_profile!r}"
+        )
     return DEFAULT_PROVIDER_REGISTRY.build(profile.provider, profile.to_build_config())
 
 def _run_eval(

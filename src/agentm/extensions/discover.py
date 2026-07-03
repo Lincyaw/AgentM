@@ -36,10 +36,10 @@ tier-1 atoms."""
 
 HOME_ATOM_MODULE_PREFIX = "_agentm_home__"
 """Synthetic module-name prefix for atoms discovered under
-``~/.agentm/contrib/extensions/<name>.py`` (or ``$AGENTM_HOME/contrib/
-extensions/``). Distinct from the contrib prefix (source-checkout) and
-the user-atom prefix (agent-installed) so reload paths can distinguish
-home-installed extensions from both."""
+``$AGENTM_HOME/contrib/extensions/<name>.py`` (default
+``~/.agentm/contrib/extensions/<name>.py``). Distinct from the contrib prefix
+(source-checkout) and the user-atom prefix (agent-installed) so reload paths
+can distinguish home-installed extensions from both."""
 
 USER_ATOM_MODULE_PREFIX = "_agentm_user_atom__"
 """Synthetic module-name prefix shared with :class:`AtomReloader`. Atoms
@@ -281,9 +281,10 @@ def discover_by_role() -> dict[str, BuiltinEntry]:
     unambiguous resolution at session start, and a silent last-wins would
     let a contrib atom hijack a floor slot without anyone noticing.
 
-    Home atoms (``~/.agentm/contrib/extensions/``) participate in role
-    resolution alongside repo-contrib and entrypoint atoms — the user
-    explicitly installed them, so they are trusted at the same level.
+    Home atoms (``$AGENTM_HOME/contrib/extensions/``, default
+    ``~/.agentm/contrib/extensions/``) participate in role resolution alongside
+    repo-contrib and entrypoint atoms — the user explicitly installed them, so
+    they are trusted at the same level.
 
     User-discovered atoms (``.agentm/atoms/``) are intentionally excluded:
     a user atom hijacking the floor would mean session boot for that cwd
@@ -363,12 +364,13 @@ def discover_contrib_atoms() -> dict[str, BuiltinEntry]:
 
 
 def discover_home_atoms() -> dict[str, BuiltinEntry]:
-    """Extensions installed by the user into ``~/.agentm/contrib/extensions/``.
+    """Extensions installed by the user into ``$AGENTM_HOME/contrib/extensions/``.
 
     Works like :func:`discover_contrib_atoms` but reads from the global home
     directory instead of the source checkout, so it works from pip-installed
     wheels. Users drop ``<name>.py`` files (each exporting ``MANIFEST`` +
-    ``install``) into ``~/.agentm/contrib/extensions/`` and they auto-discover.
+    ``install``) into that directory and they auto-discover. ``AGENTM_HOME``
+    defaults to ``~/.agentm``.
     """
 
     from agentm.core.lib import agentm_home_dir

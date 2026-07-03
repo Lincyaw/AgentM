@@ -11,7 +11,9 @@ The SDK wraps LLM providers (`llm_openai`, `llm_anthropic`). Never import
 - `reasoning_effort` mapping across providers
 - `config.toml` model profiles
 
-### Model profiles (`~/.agentm/config.toml`)
+### Model profiles (`$AGENTM_HOME/config.toml`)
+
+`AGENTM_HOME` defaults to `~/.agentm`.
 
 ```toml
 default_model = "doubao"

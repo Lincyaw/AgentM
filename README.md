@@ -304,8 +304,8 @@ To verify credentials with one real model request, run `agentm setup --test`.
 To install the full contrib tree for customization, run
 `agentm contrib sync --overwrite`.
 
-Model provider settings live in `~/.agentm/config.toml`
-(`$AGENTM_HOME/config.toml` overrides the directory). A minimal profile:
+Model provider settings live in `$AGENTM_HOME/config.toml`
+(default `~/.agentm/config.toml`). A minimal profile:
 
 ```toml
 default_model = "my-model"

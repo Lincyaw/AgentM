@@ -9,9 +9,9 @@ See `.claude/designs/mcp-integration.md` for the design.
 ## Prerequisites
 
 - `uvx` on PATH (ships with `uv`).
-- An LLM provider configured through `~/.agentm/config.toml` (preferred for
-  long-lived profiles) or env vars such as `AGENTM_PROVIDER` plus the
-  matching API key.
+- An LLM provider configured through `$AGENTM_HOME/config.toml` (default
+  `~/.agentm/config.toml`, preferred for long-lived profiles) or env vars such
+  as `AGENTM_PROVIDER` plus the matching API key.
 - First run downloads `mcp-server-fetch` (~5s); subsequent runs are warm.
 
 ## Run the agent

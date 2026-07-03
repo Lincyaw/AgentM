@@ -482,6 +482,7 @@ requirements:
       - path: src/agentm/cli_trace.py
       - path: src/agentm/contrib_sync.py
       - path: src/agentm/env.py
+      - path: src/agentm/extensions/discover.py
       - path: src/agentm/extensions/loader.py
       - path: contrib/scenarios/chatbot/manifest.yaml
       - path: contrib/scenarios/local/manifest.yaml
@@ -513,12 +514,18 @@ requirements:
       - path: contrib/extensions/llmharness/src/llmharness/eval/telbench/cli.py
       - path: contrib/extensions/llmharness/src/llmharness/eval/telbench/evolve.py
       - path: contrib/extensions/llmharness/src/llmharness/eval/telbench/iterate.py
+      - path: contrib/scenarios/rca/src/rca_evolution/cli.py
+      - path: contrib/scenarios/rca/src/rca_evolution/loop.py
+      - path: contrib/scenarios/rca/src/rca_eval/agent.py
       - path: contrib/scenarios/rca/src/rca_eval/seed_dataset.py
       - path: contrib/scenarios/verifier/cli.py
       - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
     tests: []
     docs:
       - path: README.md
+      - path: .claude/skills/agentm-sdk/references/provider-and-cli.md
+      - path: contrib/evals/rescue_window/README.md
+      - path: contrib/scenarios/mcp_demo/README.md
       - path: .claude/designs/pluggable-architecture.md
     depends_on:
       - REQ-094-ai-provider-descriptor-registry
@@ -1031,6 +1038,8 @@ requirements:
       - path: src/agentm/gateway/systemd.py
       - path: src/agentm/gateway/workspace.py
       - path: src/agentm/core/runtime/resource_loader.py
+      - path: src/agentm/extensions/discover.py
+      - path: src/agentm/extensions/loader.py
       - path: src/agentm/extensions/builtin/skill_loader.py
       - path: src/agentm/extensions/builtin/prompt_templates.py
       - path: src/agentm/gateway/commands/skill_command.py
@@ -1043,6 +1052,7 @@ requirements:
       - path: contrib/gateway-peers/weixin/src/agentm_weixin/supervisor.py
     tests: []
     docs:
+      - path: README.md
       - path: AGENTS.md
       - path: config.toml.example
       - path: .claude/skills/deployment-awareness/SKILL.md

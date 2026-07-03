@@ -8,7 +8,8 @@ Usage::
         --train-limit 20 --test-limit 10
 
 Uses ``rca llm-eval run`` for case execution and ``eval.db`` for results.
-Model is a ``~/.agentm/config.toml`` profile name.
+Model is a ``$AGENTM_HOME/config.toml`` profile name (default
+``~/.agentm/config.toml``).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import logging as _stdlib_logging
 import os
 import sys
 from pathlib import Path
+from types import FrameType
 from typing import Annotated
 
 from loguru import logger
@@ -39,7 +41,7 @@ def run(
         Path, typer.Option("--eval-config", help="Eval config YAML (e.g. config.ops-lite-fixed-50.yaml)")
     ],
     model: Annotated[
-        str, typer.Option(help="~/.agentm/config.toml profile name")
+        str, typer.Option(help="$AGENTM_HOME/config.toml profile name")
     ] = "litellm-dsv4flash-nothink",
     scenario: Annotated[
         str, typer.Option(help="Scenario variant for eval runs")
@@ -65,11 +67,13 @@ def run(
     """Run the self-evolution loop."""
     class _InterceptHandler(_stdlib_logging.Handler):
         def emit(self, record: _stdlib_logging.LogRecord) -> None:
+            level: str | int
             try:
                 level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
-            frame, depth = _stdlib_logging.currentframe(), 2
+            frame: FrameType | None = _stdlib_logging.currentframe()
+            depth = 2
             while frame and frame.f_code.co_filename == _stdlib_logging.__file__:
                 frame = frame.f_back
                 depth += 1

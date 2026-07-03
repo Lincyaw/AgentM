@@ -85,7 +85,7 @@ def _env_bool(name: str, *, default: bool) -> bool:
 
 
 def _try_resolve_profile(model: str) -> tuple[str, dict[str, Any]] | None:
-    """Attempt to resolve ``model`` as a ``~/.agentm/config.toml`` profile."""
+    """Attempt to resolve ``model`` as a ``$AGENTM_HOME/config.toml`` profile."""
     try:
         from agentm.ai import DEFAULT_PROVIDER_REGISTRY
         from agentm.core.lib import resolve_model_profile

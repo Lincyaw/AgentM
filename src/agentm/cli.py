@@ -76,11 +76,11 @@ ScenarioOpt = Annotated[
         "--scenario",
         help=(
             "Opt-in curated extension list. Bare names resolve from "
-            "$AGENTM_PROJECT_ROOT, the process cwd, ~/.agentm/contrib, "
-            "the AgentM checkout, or packaged portable scenarios. An "
-            "absolute path is also accepted. When unset, falls back to "
-            "the ``chatbot`` scenario. Use `agentm list-scenarios` to "
-            "browse available scenarios."
+            "$AGENTM_PROJECT_ROOT, the process cwd, $AGENTM_HOME/contrib "
+            "(default ~/.agentm/contrib), the AgentM checkout, or packaged "
+            "portable scenarios. An absolute path is also accepted. When "
+            "unset, falls back to the ``chatbot`` scenario. Use "
+            "`agentm list-scenarios` to browse available scenarios."
         ),
     ),
 ]
@@ -1202,7 +1202,7 @@ def list_extensions_cmd(
 
     Builtins ship under ``src/agentm/extensions/builtin/``; contrib atoms
     live at ``<repo>/contrib/extensions/<name>.py``; home atoms are
-    user-installed at ``$AGENTM_HOME/contrib/extensions/<name>.py`` (default:
+    user-installed at ``$AGENTM_HOME/contrib/extensions/<name>.py`` (default
     ``~/.agentm/contrib/extensions/<name>.py``); user atoms are committed by
     ``api.install_atom`` to ``<cwd>/.agentm/atoms/``.
     Mount any of them via ``agentm -e <module.path>`` (or stack on top of a
