@@ -392,6 +392,14 @@ func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		p.messages = model.(messages.Model)
 		return p, cmd
 
+	case msgtypes.SetTranscriptDetailMsg:
+		model, cmd := p.messages.Update(messages.SetTranscriptDetailMsg{
+			Detailed: msg.Detailed,
+			Verbose:  msg.Verbose,
+		})
+		p.messages = model.(messages.Model)
+		return p, cmd
+
 	case msgtypes.ClearQueueMsg:
 		return p.handleClearQueue()
 

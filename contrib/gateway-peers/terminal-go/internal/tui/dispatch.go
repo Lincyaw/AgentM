@@ -28,6 +28,12 @@ import (
 func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
 	updated, cmd := m.chatPage.Update(msg)
 	m.chatPage = updated.(chat.Page)
+	activeID := ""
+	if m.supervisor != nil {
+		if activeID = m.supervisor.ActiveID(); activeID != "" {
+			m.chatPages[activeID] = m.chatPage
+		}
+	}
 	return cmd
 }
 

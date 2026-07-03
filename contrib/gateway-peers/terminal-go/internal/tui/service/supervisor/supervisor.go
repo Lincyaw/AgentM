@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -23,9 +24,10 @@ type SessionRunner struct {
 	App          *app.App
 	WorkingDir   string
 	Title        string
-	IsRunning    bool    // True when stream is active
-	NeedsAttn    bool    // True when user attention is needed
-	Background   bool    // True for workflow tabs that should not dominate chrome
+	IsRunning    bool // True when stream is active
+	NeedsAttn    bool // True when user attention is needed
+	Background   bool // True for workflow tabs that should not dominate chrome
+	CreatedAt    time.Time
 	PendingEvent tea.Msg // Event that triggered attention (for replay on tab switch)
 	cancel       context.CancelFunc
 	cleanup      func()
@@ -80,6 +82,7 @@ func (s *Supervisor) AddSession(ctx context.Context, a *app.App, sess *session.S
 		App:        a,
 		WorkingDir: workingDir,
 		Title:      sess.Title,
+		CreatedAt:  time.Now(),
 		cleanup:    cleanup,
 	}
 
@@ -228,6 +231,7 @@ func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 			IsRunning:      runner.IsRunning,
 			NeedsAttention: runner.NeedsAttn,
 			Background:     runner.Background,
+			CreatedAt:      runner.CreatedAt.Unix(),
 		})
 	}
 	return tabs
@@ -250,7 +254,6 @@ func (s *Supervisor) SwitchTo(sessionID string) *SessionRunner {
 
 	s.activeID = sessionID
 	runner.NeedsAttn = false // Clear attention flag when switching to this tab
-	runner.Background = false
 	s.notifyTabsUpdated()
 
 	return runner

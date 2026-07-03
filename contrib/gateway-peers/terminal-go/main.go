@@ -34,7 +34,7 @@ func main() {
 	mockMode := flag.Bool("mock", false, "Run with mock data (no gateway)")
 	simpleMode := flag.Bool("simple", false, "Run a simplified chat layout for narrow terminals")
 	leanMode := flag.Bool("lean", false, "Alias for --simple")
-	hideSidebar := flag.Bool("hide-sidebar", false, "Hide the right sidebar in the full layout")
+	hideSidebar := flag.Bool("hide-sidebar", false, "Keep the Claude-style full layout without the legacy right sidebar")
 	logFile := flag.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
 	flag.Parse()
 

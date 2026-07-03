@@ -122,6 +122,18 @@ type appModel struct {
 	lastExitRequest     time.Time
 	lastEscClearRequest time.Time
 
+	// Claude Code-style workflow surface state. Background sessions remain
+	// routed by supervisor, but the visible model is main + task rows/picker
+	// instead of one visible tab per worker.
+	mainSessionID       string
+	workflowRowsHidden  bool
+	workflowPickerOpen  bool
+	workflowPickerIndex int
+	workflowTranscripts map[string]string
+	shortcutSheetOpen   bool
+	transcriptDetailed  bool
+	transcriptVerbose   bool
+
 	// keyboardEnhancements stores the last keyboard enhancements message
 	keyboardEnhancements *tea.KeyboardEnhancementsMsg
 
@@ -348,6 +360,8 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		sessionStates:                 map[string]*service.SessionState{sessID: initialSessionState},
 		application:                   initialApp,
 		sessionState:                  initialSessionState,
+		mainSessionID:                 sessID,
+		workflowTranscripts:           map[string]string{},
 		history:                       historyStore,
 		pendingRestores:               make(map[string]string),
 		pendingSidebarCollapsed:       make(map[string]bool),
@@ -363,6 +377,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
 		appName:                       "AgentM Terminal",
 		appVersion:                    version.Version,
+		hideSidebar:                   true,
 	}
 
 	// Apply options
@@ -381,7 +396,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	m.chatPage = initialChatPage
 
 	// Initialize status bar (pass m as help provider)
-	m.statusBar = statusbar.New(m, statusbar.WithTitle(m.appName+" "+m.appVersion))
+	m.statusBar = statusbar.New(m, statusbar.WithTitle(""))
 
 	// Add the initial session to the supervisor
 	sv.AddSession(ctx, initialApp, initialApp.Session(), initialWorkingDir, cleanup)
@@ -476,7 +491,7 @@ func (m *appModel) refreshCommandInputs() tea.Cmd {
 	if m.editor != nil {
 		return m.editor.SetCompletions(
 			completions.NewCommandCompletion(categories),
-			completions.NewFileCompletion(),
+			completions.NewResourceCompletion(m.availableAgentDetails),
 		)
 	}
 
@@ -504,7 +519,7 @@ func (m *appModel) editorOpts() []editor.Option {
 	opts := []editor.Option{
 		editor.WithCompletions(
 			completions.NewCommandCompletion(m.commandCategories()),
-			completions.NewFileCompletion(),
+			completions.NewResourceCompletion(m.availableAgentDetails),
 		),
 	}
 	if m.application.IsReadOnly() {
@@ -513,19 +528,37 @@ func (m *appModel) editorOpts() []editor.Option {
 	return opts
 }
 
+func (m *appModel) availableAgentDetails() []runtime.AgentDetails {
+	if m == nil || m.sessionState == nil {
+		return nil
+	}
+	return m.sessionState.AvailableAgents()
+}
+
 func (m *appModel) tabBarHeight() int {
-	if m.tabBar.HasOnlyInactiveBackgroundTabs() {
+	if m.tabBar.HasOnlyMainAndBackgroundTabs(m.mainSessionID) || m.tabBar.HasOnlyInactiveBackgroundTabs() {
 		return 0
 	}
 	return m.tabBar.Height()
+}
+
+func (m *appModel) statusBarHeight() int {
+	if m.completions.Open() {
+		return 0
+	}
+	return m.statusBar.Height()
 }
 
 func (m *appModel) syncTabChrome(tabs []messages.TabInfo, activeIdx int) bool {
 	prevHeight := m.tabBarHeight()
 	m.tabBar.SetTabs(tabs, activeIdx)
 	nextHeight := m.tabBarHeight()
-	m.statusBar.SetShowNewTab(nextHeight == 0)
-	m.statusBar.SetActivity(m.backgroundActivityText())
+	m.statusBar.SetShowNewTab(false)
+	if m.tabBar.HasBackgroundTasks(m.mainSessionID) {
+		m.statusBar.SetActivity("")
+	} else {
+		m.statusBar.SetActivity(m.backgroundActivityText())
+	}
 	return nextHeight != prevHeight
 }
 
@@ -688,7 +721,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- Tab management ---
 
 	case messages.TabsUpdatedMsg:
-		if m.syncTabChrome(msg.Tabs, msg.ActiveIdx) {
+		if m.syncTabChrome(msg.Tabs, msg.ActiveIdx) || m.hasWorkflowTasks() {
 			cmd := m.resizeAll()
 			return m, cmd
 		}
@@ -760,6 +793,17 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.InvalidateStatusBarMsg:
 		m.statusBar.InvalidateCache()
 		return m, nil
+
+	case completion.OpenMsg, completion.CloseMsg:
+		cmd := m.updateCompletionsCmd(msg)
+		return m, tea.Batch(cmd, m.resizeAll())
+
+	case completion.OpenedMsg:
+		return m, m.resizeAll()
+
+	case completion.ClosedMsg:
+		cmd := m.updateEditorCmd(msg)
+		return m, tea.Batch(cmd, m.resizeAll())
 
 	// --- Window / Terminal ---
 
@@ -1136,6 +1180,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleRoutedMsg processes messages routed to specific sessions.
 func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) {
 	activeID := m.supervisor.ActiveID()
+	m.recordWorkflowTranscript(msg.SessionID, msg.Inner)
 
 	if msg.SessionID == activeID {
 		// Active session: forward through Update for full processing (spinners, cmds, etc.)
@@ -1145,8 +1190,15 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 	// Background session: update its chat page directly so streaming content accumulates.
 	// UI-only cmds (spinners, scroll) are discarded since the page isn't visible.
 	chatPage, ok := m.chatPages[msg.SessionID]
+	var initCmd tea.Cmd
 	if !ok {
-		return m, nil
+		runner := m.supervisor.GetRunner(msg.SessionID)
+		if runner == nil || runner.App == nil {
+			return m, nil
+		}
+		var ed editor.Editor
+		chatPage, _, ed = m.createSessionComponents(msg.SessionID, runner.App, runner.App.Session())
+		initCmd = tea.Batch(chatPage.Init(), ed.Init())
 	}
 
 	// Update session state for inactive sessions
@@ -1161,7 +1213,7 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 	// Update the inactive chat page (discard cmds — UI effects aren't needed for hidden pages)
 	updated, _ := chatPage.Update(msg.Inner)
 	m.chatPages[msg.SessionID] = updated.(chat.Page)
-	return m, nil
+	return m, initCmd
 }
 
 // handleWorkingStateChanged updates the editor working indicator and resize handle spinner.
@@ -1493,6 +1545,9 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	if runner == nil {
 		return m, notification.ErrorCmd("Session not found")
 	}
+	if !runner.Background {
+		m.mainSessionID = sessionID
+	}
 
 	// Now that the switch is committed, finalize the dialog hand-off.
 	var closeBackgroundDialogCmd tea.Cmd
@@ -1687,6 +1742,9 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	persistedID := m.persistedSessionID(sessionID)
 
 	nextActiveID := m.supervisor.CloseSession(sessionID)
+	if sessionID == m.mainSessionID {
+		m.mainSessionID = m.chooseMainSessionID(nextActiveID)
+	}
 
 	// Clean up per-session state
 	delete(m.chatPages, sessionID)
@@ -1698,6 +1756,7 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	delete(m.pendingRestores, sessionID)
 	delete(m.pendingSidebarCollapsed, sessionID)
 	delete(m.stashedDialogs, sessionID)
+	delete(m.workflowTranscripts, sessionID)
 
 	var cmds []tea.Cmd
 	// Remove from persistent store using the persisted session-store ID.
@@ -1758,12 +1817,14 @@ func (m *appModel) resizeAll() tea.Cmd {
 
 	// Calculate chrome height (everything that isn't content or editor)
 	chromeHeight := 0
+	bottomSurfaceHeight := 0
 	if m.leanMode {
 		if m.chatPage.IsWorking() {
 			chromeHeight = 1 // working indicator line
 		}
 	} else {
-		chromeHeight = m.tabBarHeight() + m.statusBar.Height() + 1 // +1 for resize handle
+		bottomSurfaceHeight = m.bottomSurfaceHeight(width)
+		chromeHeight = m.tabBarHeight() + m.statusBarHeight() + bottomSurfaceHeight + 1 // +1 for resize handle
 	}
 
 	// Calculate editor height
@@ -1789,7 +1850,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 	// Full mode: update overlay components
 	cmds = append(cmds, m.updateDialogCmd(tea.WindowSizeMsg{Width: width, Height: height}))
 
-	m.completions.SetEditorBottom(editorHeight + m.tabBarHeight())
+	m.completions.SetEditorBottom(editorRenderedHeight + m.statusBarHeight() + bottomSurfaceHeight)
 	m.completions.Update(tea.WindowSizeMsg{Width: width, Height: height})
 
 	m.notification.SetSize(width, height)
@@ -1822,7 +1883,7 @@ func (m *appModel) AllBindings() []key.Binding {
 	)
 	filesBinding := key.NewBinding(
 		key.WithKeys("@"),
-		key.WithHelp("@", "files"),
+		key.WithHelp("@", "resources"),
 	)
 	agentsBinding := key.NewBinding(
 		key.WithKeys("left"),
@@ -1865,6 +1926,10 @@ func (m *appModel) AllBindings() []key.Binding {
 	// Additional global shortcuts
 	bindings = append(bindings,
 		key.NewBinding(
+			key.WithKeys("ctrl+t"),
+			key.WithHelp("Ctrl+t", "toggle tasks"),
+		),
+		key.NewBinding(
 			key.WithKeys("ctrl+k"),
 			key.WithHelp("Ctrl+k", "commands"),
 		),
@@ -1878,7 +1943,11 @@ func (m *appModel) AllBindings() []key.Binding {
 		),
 		key.NewBinding(
 			key.WithKeys("ctrl+o"),
-			key.WithHelp("Ctrl+o", "toggle tool details"),
+			key.WithHelp("Ctrl+o", "detailed transcript"),
+		),
+		key.NewBinding(
+			key.WithKeys("ctrl+e"),
+			key.WithHelp("Ctrl+e", "verbose transcript"),
 		),
 		key.NewBinding(
 			key.WithKeys("ctrl+s"),
@@ -1956,7 +2025,9 @@ func (m *appModel) Bindings() []key.Binding {
 		"left":        true, // agents
 		"ctrl+c":      true, // quit
 		"ctrl+k":      true, // commands
-		"ctrl+o":      true, // toggle tool details
+		"ctrl+t":      true, // toggle tasks
+		"ctrl+o":      true, // detailed transcript
+		"ctrl+e":      true, // verbose transcript
 		"shift+enter": true, // newline
 		"ctrl+j":      true, // newline fallback
 		"ctrl+g":      true, // edit in external editor (editor context)
@@ -2024,7 +2095,8 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.lastExitRequest = now
-		return m, notification.InfoCmd("Press Ctrl-C again to exit")
+		m.statusBar.InvalidateCache()
+		return m, nil
 	}
 
 	// Dialog gets priority when open, EXCEPT for background dialogs, which
@@ -2038,6 +2110,39 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m.forwardDialog(msg)
+	}
+
+	if m.workflowPickerOpen {
+		switch msg.String() {
+		case "up":
+			m.moveWorkflowSelection(-1)
+			return m, nil
+		case "down":
+			m.moveWorkflowSelection(1)
+			return m, nil
+		case "enter":
+			return m.activateWorkflowSelection()
+		case "esc":
+			m.closeWorkflowPicker()
+			return m, m.resizeAll()
+		case "x":
+			return m.stopWorkflowSelection()
+		}
+	}
+
+	if msg.String() == "ctrl+t" && !m.leanMode {
+		return m, m.toggleWorkflowRows()
+	}
+
+	if m.shortcutSheetOpen {
+		switch msg.String() {
+		case "?", "esc":
+			return m, m.closeInlineSurfaces()
+		case "/", "@":
+			if cmd := m.closeInlineSurfaces(); cmd != nil {
+				return m, tea.Batch(cmd, m.updateEditorCmd(msg))
+			}
+		}
 	}
 
 	// Tab bar keys (Ctrl+t, Ctrl+p, Ctrl+n, Ctrl+w) are suppressed during
@@ -2063,9 +2168,11 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Global keyboard shortcuts (active even during history search)
 	switch {
 	case msg.String() == "?" && m.focusedPanel == PanelEditor && m.editor.Value() == "":
-		return m, core.CmdHandler(dialog.OpenDialogMsg{
-			Model: dialog.NewHelpDialog(m.AllBindings()),
-		})
+		return m, m.toggleShortcutSheet()
+
+	case msg.String() == "down" && m.focusedPanel == PanelEditor && m.editor.Value() == "" && m.hasWorkflowTasks():
+		m.openWorkflowPicker()
+		return m, m.resizeAll()
 
 	case msg.String() == "left" && m.focusedPanel == PanelEditor && m.editor.Value() == "":
 		return m.handleCycleAgent()
@@ -2083,7 +2190,10 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, core.CmdHandler(messages.ToggleYoloMsg{})
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+o"))):
-		return m, core.CmdHandler(messages.ToggleHideToolResultsMsg{})
+		return m, m.toggleTranscriptDetailed()
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+e"))):
+		return m, m.toggleTranscriptVerbose()
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+s"))):
 		return m.handleCycleAgent()
@@ -2095,10 +2205,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, core.CmdHandler(messages.ClearQueueMsg{})
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+h", "f1", "ctrl+?"))):
-		// Show contextual help dialog with ALL available key bindings
-		return m, core.CmdHandler(dialog.OpenDialogMsg{
-			Model: dialog.NewHelpDialog(m.AllBindings()),
-		})
+		return m, m.toggleShortcutSheet()
 	}
 
 	// History search is a modal state — capture all remaining keys before normal routing
@@ -2135,6 +2242,9 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Esc: interrupt/cancel. Sending while the agent is busy is handled by
 	// Enter via QueueIfBusy, so Esc never silently submits editor content.
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+		if cmd := m.closeInlineSurfaces(); cmd != nil {
+			return m, cmd
+		}
 		if m.focusedPanel == PanelEditor && m.editor.Value() != "" && !m.chatPage.IsWorking() {
 			now := time.Now()
 			if now.Sub(m.lastEscClearRequest) <= 2*time.Second {
@@ -2143,7 +2253,8 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.lastEscClearRequest = now
-			return m, notification.InfoCmd("Press Esc again to clear input")
+			m.statusBar.InvalidateCache()
+			return m, nil
 		}
 		m.lastEscClearRequest = time.Time{}
 		return m.forwardChat(msg)
@@ -2441,7 +2552,7 @@ func (m *appModel) editorTop() int {
 func (m *appModel) handleEditorResize(y int) tea.Cmd {
 	// Calculate target lines from drag position
 	editorPadding := styles.EditorStyle.GetVerticalFrameSize()
-	targetLines := m.height - y - 1 - editorPadding - m.tabBarHeight()
+	targetLines := m.height - y - 1 - editorPadding - m.tabBarHeight() - m.bottomSurfaceHeight(m.width)
 	minLines := minEditorLines
 	maxLines := max(minLines, (m.height-6)/2)
 	newLines := max(minLines, min(targetLines, maxLines))
@@ -2537,6 +2648,11 @@ func (m *appModel) View() tea.View {
 
 	// Content area (messages + sidebar) -- swaps per tab
 	contentView := m.chatPage.View()
+	if m.activeIsWorkflowTask() {
+		if taskDetail := m.renderWorkflowDetail(m.width, m.contentHeight); taskDetail != "" {
+			contentView = taskDetail
+		}
+	}
 
 	// Lean mode: editor appears right after the last message, with empty
 	// space pushed to the top via bottom-alignment.
@@ -2565,7 +2681,13 @@ func (m *appModel) View() tea.View {
 	editorView := m.editor.View()
 
 	// Status bar
-	statusBarView := m.statusBar.View()
+	m.statusBar.SetModeLine(m.footerText())
+	m.statusBar.SetModeLineRight(m.footerRightText())
+	statusBarView := ""
+	if m.statusBarHeight() > 0 {
+		statusBarView = m.statusBar.View()
+	}
+	bottomSurfaceView := m.renderBottomSurface(m.width)
 
 	// Combine: content | resize handle | [tab bar] | editor | status bar
 	viewParts := []string{
@@ -2581,10 +2703,13 @@ func (m *appModel) View() tea.View {
 	if statusBarView != "" {
 		viewParts = append(viewParts, statusBarView)
 	}
+	if bottomSurfaceView != "" {
+		viewParts = append(viewParts, bottomSurfaceView)
+	}
 	baseView := lipgloss.JoinVertical(lipgloss.Top, viewParts...)
 
 	// Handle overlays
-	hasOverlays := m.dialogMgr.Open() || m.notification.Open() || m.completions.Open()
+	hasOverlays := m.dialogMgr.Open() || m.notification.Open()
 
 	if hasOverlays {
 		baseLayer := lipgloss.NewLayer(baseView)
@@ -2598,10 +2723,6 @@ func (m *appModel) View() tea.View {
 
 		if m.notification.Open() {
 			allLayers = append(allLayers, m.notification.GetLayer())
-		}
-
-		if m.completions.Open() {
-			allLayers = append(allLayers, m.completions.GetLayers()...)
 		}
 
 		compositor := lipgloss.NewCompositor(allLayers...)

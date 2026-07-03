@@ -664,26 +664,31 @@ Implication for AgentM: workflow UX should distinguish three surfaces:
 
 ### 10.5 Current AgentM terminal direction
 
-The implemented AgentM terminal changes should continue in this direction:
+The current AgentM terminal implementation follows this direction:
 
 1. Keep the parent conversation primary. Child workflow sessions open as
    background activity and do not steal focus.
-2. Collapse background-only child sessions out of tab chrome and summarize them
-   in the status line.
+2. Collapse background-only child sessions out of tab chrome and render them as
+   inline task rows below the composer/status surface. `↓` opens an inline
+   picker, `Enter` views a selected task, `x` stops it, and `Ctrl+T`
+   hides/shows the task rows.
 3. Make the composer the control surface:
    `Enter` sends, busy `Enter` queues cooperatively, `Shift+Enter`/`Ctrl+J`
    inserts newline, `?` opens shortcuts, `/` opens commands, `@` opens files,
    `Esc` interrupts or double-clears input, and `Ctrl+C` exits on second press.
-4. Build a future agents/tasks manager for WorkGraph and sub-agent sessions:
-   state counts, grouped rows, row age/status, open/reply/delete/pin actions,
-   and a bottom composer for launching a new workflow task.
-5. Add a task-detail expansion model:
+4. Preserve child output for explicit inspection. Routed workflow child streams
+   are buffered per session, so selecting a completed task shows its final text
+   and completion note instead of a blank promoted tab.
+5. Keep transcript detail controls:
    `Ctrl+O` toggles detailed transcript blocks, while `Ctrl+E` toggles fully
    verbose output within detailed mode.
 6. Preserve raw TTY captures for significant UX investigations in
    `.agentm/artifacts/<topic>/` and summarize only the decisions in tracked
    design docs.
 
-Near-term implementation target: keep the current tab-based plumbing for opened
-sessions, but add a first-class task-manager view so hidden background sessions
-are reachable without turning the whole interface into tab management.
+The implementation still reuses tab/supervisor plumbing internally; the user
+surface is main chat plus workflow rows/picker/detail. The 2026-07-03
+terminal-go verification captures under `.agent/tui-dev/captures/` exercised a
+real gateway workflow with two parallel child agents. The parent remained on
+the main transcript, and the two selected task details rendered `ALPHA` and
+`BETA` respectively after completion.

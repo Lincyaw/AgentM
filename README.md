@@ -193,15 +193,15 @@ Beyond the one-shot prompt, notable subcommands include `agentm gateway`
 (query the OTLP/JSON session log), and `agentm contrib sync` (materialize
 configurable contrib resources under `~/.agentm`). The chat-client peers ship
 as **separate binaries** for vendor-SDK isolation only — `agentm-terminal` and
-`agentm-feishu`. Use `agentm-terminal --simple` for a minimal chat layout, or
-`agentm-terminal --hide-sidebar` to keep the full chrome without the right
-sidebar. In the default terminal UI, workflow/sub-agent tabs open as background
-activity so the parent conversation stays focused; `Ctrl+n` opens the next
-background workflow when needed. `Enter` sends (or queues while the agent is
-busy), `Shift+Enter`/`Ctrl+j` inserts a newline, `?` opens shortcuts from an
-empty editor, `/` and `@` open inline command/file completions, `Esc`
-interrupts or double-press clears input, and `Ctrl+c` exits on the second
-press. Run `agentm <sub> --help` or `<binary> --help` for flags.
+`agentm-feishu`. The default terminal UI keeps the legacy right sidebar hidden;
+use `agentm-terminal --simple` for an even smaller chat layout. Workflow and
+sub-agent sessions open as background task rows so the parent conversation stays
+focused; `↓` opens the task picker, `Enter` views the selected task, `x` stops a
+selected task, and `Ctrl+t` hides/shows the rows. `Enter` sends (or queues while
+the agent is busy), `Shift+Enter`/`Ctrl+j` inserts a newline, `?` opens
+shortcuts from an empty editor, `/` and `@` open inline command/resource
+completions, `Esc` interrupts or double-press clears input, and `Ctrl+c` exits
+on the second press. Run `agentm <sub> --help` or `<binary> --help` for flags.
 
 ## Five pluggability axes
 

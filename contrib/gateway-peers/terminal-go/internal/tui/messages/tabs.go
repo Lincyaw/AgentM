@@ -40,6 +40,7 @@ type TabInfo struct {
 	IsRunning      bool   // Whether the session is currently streaming
 	NeedsAttention bool   // Whether the tab needs user attention (e.g., tool confirmation)
 	Background     bool   // Whether this tab was spawned as background workflow activity
+	CreatedAt      int64  // Unix timestamp when this runtime tab was created
 }
 
 // TabsUpdatedMsg is sent when the tab list has changed.

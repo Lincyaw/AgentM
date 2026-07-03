@@ -32,7 +32,7 @@ func (c *commandCompletion) Items() []completion.Item {
 	for _, cmd := range c.categories {
 		for _, command := range cmd.Commands {
 			items = append(items, completion.Item{
-				Label:       command.Label,
+				Label:       command.SlashCommand,
 				Description: command.Description,
 				Value:       command.SlashCommand,
 			})

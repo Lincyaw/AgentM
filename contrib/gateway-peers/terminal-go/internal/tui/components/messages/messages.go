@@ -38,6 +38,12 @@ import (
 // ToggleHideToolResultsMsg triggers hiding/showing verbose tool details.
 type ToggleHideToolResultsMsg struct{}
 
+// SetTranscriptDetailMsg sets Claude-style transcript disclosure state.
+type SetTranscriptDetailMsg struct {
+	Detailed bool
+	Verbose  bool
+}
+
 type toggleableView interface {
 	IsToggleLine(lineIdx int) bool
 	Toggle()
@@ -243,6 +249,17 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	case ToggleHideToolResultsMsg:
 		m.sessionState.ToggleHideToolResults()
+		m.invalidateAllItems()
+		return m, nil
+
+	case SetTranscriptDetailMsg:
+		m.sessionState.SetHideToolResults(!msg.Verbose)
+		m.sessionState.SetExpandThinking(msg.Detailed)
+		for _, view := range m.views {
+			if block, ok := view.(*reasoningblock.Model); ok {
+				block.SetExpanded(msg.Detailed)
+			}
+		}
 		m.invalidateAllItems()
 		return m, nil
 

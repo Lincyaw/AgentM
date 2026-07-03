@@ -13,6 +13,13 @@ type (
 	// ToggleHideToolResultsMsg toggles hiding of verbose tool details.
 	ToggleHideToolResultsMsg struct{}
 
+	// SetTranscriptDetailMsg applies Claude-style transcript disclosure state:
+	// compact, detailed, or detailed+verbose.
+	SetTranscriptDetailMsg struct {
+		Detailed bool
+		Verbose  bool
+	}
+
 	// ToggleSidebarMsg toggles sidebar visibility.
 	// The top-level model also handles this to persist the collapsed state.
 	ToggleSidebarMsg struct{}

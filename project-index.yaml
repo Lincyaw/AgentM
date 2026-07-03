@@ -823,12 +823,21 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/completion/completion.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/editor/completions/command.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/editor/completions/file.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/editor/editor.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/messages/messages.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/statusbar/statusbar.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/tabbar/tabbar.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/dispatch.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/messages/tabs.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/messages/toggle.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/chat.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/service/supervisor/supervisor.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/tui.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/workflow_surface.go
+      - path: contrib/gateway-peers/terminal-go/main.go
     tests: []
     docs:
       - path: README.md

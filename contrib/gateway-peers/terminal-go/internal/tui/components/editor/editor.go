@@ -768,7 +768,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 		// Track valid file references
 		if atCompletion {
-			if err := e.addFileAttachment(msg.Value); err != nil {
+			if err := e.addFileAttachmentIfRegularFile(msg.Value); err != nil {
 				slog.Warn("failed to add file attachment from completion", "value", msg.Value, "error", err)
 			}
 		}
@@ -810,15 +810,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			itemsCmd,
 		)
 	case completion.SelectionChangedMsg:
-		// Show the selected completion item as a suggestion in the editor.
 		e.clearSuggestion()
-		if msg.Value != "" && e.currentCompletion != nil {
-			currentText := e.textarea.Value()
-			if strings.HasPrefix(msg.Value, currentText) {
-				e.suggestion = msg.Value[len(currentText):]
-				e.hasSuggestion = e.suggestion != ""
-			}
-		}
 		return e, nil
 	case tea.KeyPressMsg:
 		if e.historySearch.active {
@@ -1105,29 +1097,15 @@ func (e *editor) startFullFileLoad() tea.Cmd {
 func (e *editor) startCompletion(c completions.Completion) tea.Cmd {
 	e.currentCompletion = c
 
-	// For @ trigger, open instantly with paste items + "Browse files…" and start async file loading
+	// For @ trigger, open the unified resource list immediately.
 	if c.Trigger() == "@" {
 		items := e.getPasteCompletionItems()
-		// Add "Browse files…" action that opens the file picker dialog
-		items = append(items, completion.Item{
-			Label:       "Browse files…",
-			Description: "Open file picker",
-			Value:       "", // No value to insert
-			Execute: func() tea.Cmd {
-				return core.CmdHandler(messages.AttachFileMsg{FilePath: ""})
-			},
-			Pinned: true,
-		})
 
 		openCmd := core.CmdHandler(completion.OpenMsg{
 			Items:     items,
 			MatchMode: c.MatchMode(),
 		})
-
-		// Start initial shallow file loading immediately
-		loadCmd := e.startInitialFileLoad()
-
-		return tea.Batch(openCmd, loadCmd)
+		return tea.Batch(openCmd, e.startInitialFileLoad())
 	}
 
 	items := c.Items()
@@ -1405,6 +1383,22 @@ func (e *editor) addFileAttachment(placeholder string) error {
 		isTemp:      false,
 	})
 	return nil
+}
+
+func (e *editor) addFileAttachmentIfRegularFile(placeholder string) error {
+	path := strings.TrimPrefix(placeholder, "@")
+	if path == "" || strings.HasPrefix(path, "agent:") {
+		return nil
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil
+	}
+	info, err := os.Stat(absPath)
+	if err != nil || info.IsDir() {
+		return nil
+	}
+	return e.addFileAttachment(placeholder)
 }
 
 // collectAttachments returns structured attachments for all items referenced in

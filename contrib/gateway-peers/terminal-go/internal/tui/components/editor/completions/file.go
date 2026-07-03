@@ -2,10 +2,16 @@ package completions
 
 import (
 	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/fsx"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/completion"
 )
 
@@ -19,10 +25,15 @@ type fileCompletion struct {
 	mu     sync.Mutex
 	items  []completion.Item
 	loaded bool
+	agents func() []runtime.AgentDetails
 }
 
 func NewFileCompletion() Completion {
 	return &fileCompletion{}
+}
+
+func NewResourceCompletion(agents func() []runtime.AgentDetails) Completion {
+	return &fileCompletion{agents: agents}
 }
 
 func (c *fileCompletion) AutoSubmit() bool {
@@ -46,33 +57,10 @@ func (c *fileCompletion) Items() []completion.Item {
 		return c.items
 	}
 
-	// Try to create VCS matcher for current directory
-	vcsMatcher, _ := fsx.NewVCSMatcher(".")
-
-	// Prepare shouldIgnore function
-	var shouldIgnore func(string) bool
-	if vcsMatcher != nil {
-		shouldIgnore = vcsMatcher.ShouldIgnore
-	}
-
-	// Use bounded walker to avoid scanning huge directories
-	files, err := fsx.WalkFiles(context.Background(), ".", fsx.WalkFilesOptions{
-		ShouldIgnore: shouldIgnore,
-	})
+	items, err := c.loadResourceItems(context.Background(), fsx.WalkFilesOptions{})
 	if err != nil {
 		// Do not mark as loaded on error, allow retry
 		return nil
-	}
-
-	// Sort files by name
-	slices.Sort(files)
-
-	items := make([]completion.Item, len(files))
-	for i, f := range files {
-		items[i] = completion.Item{
-			Label: f,
-			Value: "@" + f,
-		}
 	}
 
 	c.items = items
@@ -102,19 +90,9 @@ func (c *fileCompletion) LoadInitialItemsAsync(ctx context.Context) <-chan []com
 		}
 		c.mu.Unlock()
 
-		// Try to create VCS matcher for current directory
-		vcsMatcher, _ := fsx.NewVCSMatcher(".")
-
-		var shouldIgnore func(string) bool
-		if vcsMatcher != nil {
-			shouldIgnore = vcsMatcher.ShouldIgnore
-		}
-
-		// Shallow scan: 2 levels deep, max 100 files
-		files, err := fsx.WalkFiles(ctx, ".", fsx.WalkFilesOptions{
-			MaxFiles:     initialMaxFiles,
-			MaxDepth:     initialMaxDepth,
-			ShouldIgnore: shouldIgnore,
+		items, err := c.loadResourceItems(ctx, fsx.WalkFilesOptions{
+			MaxFiles: initialMaxFiles,
+			MaxDepth: initialMaxDepth,
 		})
 		if err != nil || ctx.Err() != nil {
 			select {
@@ -122,17 +100,6 @@ func (c *fileCompletion) LoadInitialItemsAsync(ctx context.Context) <-chan []com
 			case <-ctx.Done():
 			}
 			return
-		}
-
-		// Sort files by name
-		slices.Sort(files)
-
-		items := make([]completion.Item, len(files))
-		for i, f := range files {
-			items[i] = completion.Item{
-				Label: f,
-				Value: "@" + f,
-			}
 		}
 
 		// Don't cache initial items - we'll cache full items later
@@ -166,19 +133,8 @@ func (c *fileCompletion) LoadItemsAsync(ctx context.Context) <-chan []completion
 		}
 		c.mu.Unlock()
 
-		// Try to create VCS matcher for current directory
-		vcsMatcher, _ := fsx.NewVCSMatcher(".")
-
-		// Prepare shouldIgnore function
-		var shouldIgnore func(string) bool
-		if vcsMatcher != nil {
-			shouldIgnore = vcsMatcher.ShouldIgnore
-		}
-
 		// Full scan with default limits
-		files, err := fsx.WalkFiles(ctx, ".", fsx.WalkFilesOptions{
-			ShouldIgnore: shouldIgnore,
-		})
+		items, err := c.loadResourceItems(ctx, fsx.WalkFilesOptions{})
 		if err != nil || ctx.Err() != nil {
 			// Return nil on error or cancellation
 			select {
@@ -186,17 +142,6 @@ func (c *fileCompletion) LoadItemsAsync(ctx context.Context) <-chan []completion
 			case <-ctx.Done():
 			}
 			return
-		}
-
-		// Sort files by name
-		slices.Sort(files)
-
-		items := make([]completion.Item, len(files))
-		for i, f := range files {
-			items[i] = completion.Item{
-				Label: f,
-				Value: "@" + f,
-			}
 		}
 
 		// Cache the results
@@ -216,4 +161,109 @@ func (c *fileCompletion) LoadItemsAsync(ctx context.Context) <-chan []completion
 
 func (c *fileCompletion) MatchMode() completion.MatchMode {
 	return completion.MatchFuzzy
+}
+
+func (c *fileCompletion) loadResourceItems(ctx context.Context, opts fsx.WalkFilesOptions) ([]completion.Item, error) {
+	vcsMatcher, _ := fsx.NewVCSMatcher(".")
+	var shouldIgnore func(string) bool
+	if vcsMatcher != nil {
+		shouldIgnore = vcsMatcher.ShouldIgnore
+	}
+	opts.ShouldIgnore = shouldIgnore
+
+	files, err := fsx.WalkFiles(ctx, ".", opts)
+	if err != nil {
+		return nil, err
+	}
+
+	dirs := walkDirectories(ctx, opts.MaxDepth, opts.MaxFiles, shouldIgnore)
+	slices.Sort(dirs)
+	slices.Sort(files)
+
+	items := make([]completion.Item, 0, len(dirs)+len(files)+len(c.agentItems()))
+	for _, f := range files {
+		items = append(items, completion.Item{
+			Label:       "+ " + f,
+			Description: "file",
+			Value:       "@" + f,
+		})
+	}
+	for _, dir := range dirs {
+		items = append(items, completion.Item{
+			Label:       "+ " + dir,
+			Description: "directory",
+			Value:       "@" + dir,
+		})
+	}
+	items = append(items, c.agentItems()...)
+	return items, nil
+}
+
+func (c *fileCompletion) agentItems() []completion.Item {
+	if c.agents == nil {
+		return nil
+	}
+	agents := c.agents()
+	items := make([]completion.Item, 0, len(agents))
+	for _, agent := range agents {
+		if agent.Name == "" {
+			continue
+		}
+		desc := strings.TrimSpace(agent.Description)
+		if desc == "" {
+			desc = "agent"
+		}
+		items = append(items, completion.Item{
+			Label:       "* " + agent.Name + " (agent)",
+			Description: desc,
+			Value:       "@agent:" + agent.Name,
+		})
+	}
+	return items
+}
+
+func walkDirectories(ctx context.Context, maxDepth, maxDirs int, shouldIgnore func(string) bool) []string {
+	var dirs []string
+	errStop := errors.New("stop directory walk")
+	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || ctx.Err() != nil {
+			return errStop
+		}
+		if path == "." || !entry.IsDir() {
+			return nil
+		}
+
+		rel := filepath.ToSlash(path)
+		name := entry.Name()
+		if shouldSkipResourceDir(name) {
+			return filepath.SkipDir
+		}
+		if shouldIgnore != nil && shouldIgnore(rel) {
+			return filepath.SkipDir
+		}
+		depth := strings.Count(rel, "/") + 1
+		if maxDepth > 0 && depth > maxDepth {
+			return filepath.SkipDir
+		}
+
+		dirs = append(dirs, rel+"/")
+		if maxDirs > 0 && len(dirs) >= maxDirs {
+			return errStop
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errStop) && !errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return dirs
+}
+
+func shouldSkipResourceDir(name string) bool {
+	switch name {
+	case ".git", ".github", ".gitlab", ".agents", ".claude":
+		return false
+	case "node_modules", "vendor", "__pycache__", ".venv", "venv", ".tox", "dist", "build", ".cache":
+		return true
+	}
+	return strings.HasPrefix(name, ".")
 }

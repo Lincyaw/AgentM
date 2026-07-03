@@ -17,10 +17,12 @@ type StatusBar struct {
 	help  core.KeyMapHelp
 	title string
 
-	showNewTab   bool
-	newTabStartX int
-	newTabEndX   int
-	activity     string
+	showNewTab    bool
+	newTabStartX  int
+	newTabEndX    int
+	activity      string
+	modeLine      string
+	modeLineRight string
 
 	cached     string
 	cacheDirty bool
@@ -84,6 +86,23 @@ func (s *StatusBar) SetActivity(activity string) {
 	}
 }
 
+// SetModeLine overrides the left help area with a context-specific status
+// phrase. This supports Claude Code-style mode footers such as workflow picker
+// controls and transcript detail state.
+func (s *StatusBar) SetModeLine(modeLine string) {
+	if s.modeLine != modeLine {
+		s.modeLine = modeLine
+		s.cacheDirty = true
+	}
+}
+
+func (s *StatusBar) SetModeLineRight(modeLineRight string) {
+	if s.modeLineRight != modeLineRight {
+		s.modeLineRight = modeLineRight
+		s.cacheDirty = true
+	}
+}
+
 // ClickedNewTab returns true if the given X coordinate hits the "+" button.
 func (s *StatusBar) ClickedNewTab(x int) bool {
 	return s.showNewTab && x >= s.newTabStartX && x < s.newTabEndX
@@ -105,26 +124,31 @@ func (s *StatusBar) rebuild() {
 	s.newTabStartX = 0
 	s.newTabEndX = 0
 
-	// Build the styled right side: optional new-tab button + title.
+	// Build the styled right side: optional new-tab button, transient status,
+	// activity, and title.
 	const pad = 1
 	var rightW, newTabW int
-	right := styles.MutedStyle.Render(s.title)
+	var rightParts []string
 
 	if s.showNewTab {
 		newTab := styles.MutedStyle.Render(" \u2502 ") +
 			styles.HighlightWhiteStyle.Render("+") +
 			styles.SecondaryStyle.Render(" new tab")
 		newTabW = lipgloss.Width(newTab)
-		right = newTab + "  " + right
-		rightW = lipgloss.Width(right)
-	} else {
-		rightW = lipgloss.Width(right)
+		rightParts = append(rightParts, newTab)
 	}
 
-	if s.activity != "" {
-		right = right + "  " + styles.MutedStyle.Render(s.activity)
-		rightW = lipgloss.Width(right)
+	if s.modeLineRight != "" {
+		rightParts = append(rightParts, styles.SecondaryStyle.Render(s.modeLineRight))
 	}
+	if s.activity != "" {
+		rightParts = append(rightParts, styles.MutedStyle.Render(s.activity))
+	}
+	if s.title != "" {
+		rightParts = append(rightParts, styles.MutedStyle.Render(s.title))
+	}
+	right := strings.Join(rightParts, "  ")
+	rightW = lipgloss.Width(right)
 
 	maxRightW := max(0, s.width-pad)
 	if rightW > maxRightW {
@@ -137,7 +161,10 @@ func (s *StatusBar) rebuild() {
 
 	var left string
 	var leftW int
-	if s.help != nil {
+	if s.modeLine != "" {
+		left = " " + styles.SecondaryStyle.Render(s.modeLine)
+		leftW = pad + lipgloss.Width(left) - pad
+	} else if s.help != nil {
 		if help := s.help.Help(); help != nil {
 			var parts []string
 			for _, b := range help.ShortHelp() {

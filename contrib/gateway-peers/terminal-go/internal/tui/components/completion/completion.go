@@ -351,12 +351,11 @@ func (c *manager) View() string {
 				text += " " + descStyle.Render(item.Description)
 			}
 
-			lines = append(lines, itemStyle.Width(c.width-6).Render(text))
+			lines = append(lines, itemStyle.Width(max(1, c.width-2)).Render(text))
 		}
 	}
 
-	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
-	return styles.CompletionBoxStyle.Render(content)
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
 func (c *manager) GetLayers() []*lipgloss.Layer {

@@ -201,6 +201,38 @@ func (t *TabBar) HasOnlyInactiveBackgroundTabs() bool {
 	return true
 }
 
+// HasOnlyMainAndBackgroundTabs reports whether the visible chrome can be
+// replaced by the workflow task surface: one main conversation plus any number
+// of background task sessions.
+func (t *TabBar) HasOnlyMainAndBackgroundTabs(mainSessionID string) bool {
+	if len(t.tabs) <= 1 || mainSessionID == "" {
+		return false
+	}
+	for _, tab := range t.tabs {
+		if tab.SessionID == mainSessionID {
+			continue
+		}
+		if !tab.Background {
+			return false
+		}
+	}
+	return true
+}
+
+// HasBackgroundTasks reports whether any workflow/background task sessions are
+// currently tracked.
+func (t *TabBar) HasBackgroundTasks(mainSessionID string) bool {
+	for _, tab := range t.tabs {
+		if tab.SessionID == mainSessionID {
+			continue
+		}
+		if tab.Background {
+			return true
+		}
+	}
+	return false
+}
+
 // BackgroundStats returns inactive background workflow counts.
 func (t *TabBar) BackgroundStats() (total, running, needsAttention int) {
 	for _, tab := range t.tabs {
@@ -227,8 +259,8 @@ func (t *TabBar) IsDragging() bool {
 func (t *TabBar) Bindings() []key.Binding {
 	return []key.Binding{
 		key.NewBinding(
-			key.WithKeys("ctrl+t", "ctrl+w"),
-			key.WithHelp("Ctrl+t/w", "new/close tab"),
+			key.WithKeys("ctrl+w"),
+			key.WithHelp("Ctrl+w", "close tab"),
 		),
 		key.NewBinding(
 			key.WithKeys("ctrl+p", "ctrl+n"),
