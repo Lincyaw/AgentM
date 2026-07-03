@@ -753,7 +753,11 @@ requirements:
       can still connect it to an external gateway explicitly. Stale
       chat-to-session mappings must be discarded automatically when their target
       session file no longer exists, so a terminal can recover by starting a
-      fresh session instead of surfacing a raw FileNotFoundError.
+      fresh session instead of surfacing a raw FileNotFoundError. The standalone
+      `ag` terminal binary exposes a compact long-option CLI, including
+      `--scenario <name>` for scenario selection, and intentionally stays an
+      interactive TUI surface rather than adding structured output modes that
+      belong to the Python CLI/SDK.
     priority: P1
     status: implemented
     confidence: confirmed
@@ -857,10 +861,11 @@ requirements:
       follow chat-first terminal semantics:
       Enter sends, Enter queues cooperatively while the active agent is busy,
       Shift+Enter/Ctrl+j inserts a newline, `?` opens shortcuts from an empty
-      editor, `/` and `@` expose inline command/file completions, left arrow
-      cycles agents from an empty editor, Esc interrupts or asks for a second
-      press before clearing input, and Ctrl+C uses a second-press exit
-      confirmation instead of a focus-stealing modal.
+      editor, `/` and `@` expose inline command/file completions that keep
+      filtering candidates as the user types, left arrow cycles agents from an
+      empty editor, Esc interrupts or asks for a second press before clearing
+      input, and Ctrl+C uses a second-press exit confirmation instead of a
+      focus-stealing modal.
       The legacy right-side session sidebar is removed from the primary terminal
       layout, and transient notifications should render as compact Claude-style
       status hints rather than large bottom-right cards.

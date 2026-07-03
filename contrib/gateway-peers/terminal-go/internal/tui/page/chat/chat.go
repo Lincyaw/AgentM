@@ -139,7 +139,6 @@ type chatPage struct {
 
 	// State
 	working     bool
-	leanMode    bool
 	hideSidebar bool
 
 	msgCancel       context.CancelFunc
@@ -175,16 +174,16 @@ type chatPage struct {
 }
 
 // sidebarHidden reports whether the sidebar should be omitted entirely from
-// layout and rendering (lean mode or explicit --sidebar=false).
+// layout and rendering.
 func (p *chatPage) sidebarHidden() bool {
-	return p.leanMode || p.hideSidebar
+	return p.hideSidebar
 }
 
 // computeSidebarLayout calculates the layout based on current state.
 func (p *chatPage) computeSidebarLayout() sidebarLayout {
 	innerWidth := p.width - appPaddingHorizontal
 
-	// No sidebar at all (lean mode or hideSidebar): chat fills the area.
+	// No sidebar at all: chat fills the area.
 	if p.sidebarHidden() {
 		return sidebarLayout{
 			mode:       sidebarCollapsedNarrow,
@@ -285,14 +284,7 @@ func New(a *app.App, sessionState *service.SessionState, opts ...PageOption) Pag
 // PageOption configures a chat page.
 type PageOption func(*chatPage)
 
-// WithLeanMode creates a lean chat page with no sidebar.
-func WithLeanMode() PageOption {
-	return func(p *chatPage) {
-		p.leanMode = true
-	}
-}
-
-// WithHideSidebar hides the sidebar without enabling lean mode.
+// WithHideSidebar hides the sidebar.
 // The sidebar cannot be re-shown via the TUI.
 func WithHideSidebar() PageOption {
 	return func(p *chatPage) {
@@ -523,11 +515,6 @@ func (p *chatPage) View() string {
 
 	case sidebarCollapsed, sidebarCollapsedNarrow:
 		switch {
-		case p.leanMode:
-			// Lean mode: no sidebar header, no fixed height
-			bodyContent = styles.ChatStyle.
-				Width(sl.innerWidth).
-				Render(messagesView)
 		case p.hideSidebar:
 			// Sidebar hidden: chat fills the full height, no sidebar header.
 			bodyContent = styles.ChatStyle.
@@ -545,9 +532,7 @@ func (p *chatPage) View() string {
 	}
 
 	appStyle := styles.AppStyle
-	if !p.leanMode {
-		appStyle = appStyle.Height(p.height)
-	}
+	appStyle = appStyle.Height(p.height)
 	return appStyle.Render(bodyContent)
 }
 

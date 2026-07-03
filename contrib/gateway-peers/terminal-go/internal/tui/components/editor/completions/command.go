@@ -50,5 +50,5 @@ func sortItemsByLabel(items []completion.Item) []completion.Item {
 }
 
 func (c *commandCompletion) MatchMode() completion.MatchMode {
-	return completion.MatchPrefix
+	return completion.MatchFuzzy
 }

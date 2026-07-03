@@ -342,9 +342,6 @@ func (m *appModel) bottomSurfaceHeight(width int) int {
 }
 
 func (m *appModel) renderBottomSurface(width int) string {
-	if m.leanMode {
-		return ""
-	}
 	if m.completions.Open() {
 		return lipgloss.NewStyle().Padding(0, styles.AppPadding).Render(m.completions.View())
 	}

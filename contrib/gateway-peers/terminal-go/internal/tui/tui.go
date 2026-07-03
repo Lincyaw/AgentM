@@ -198,9 +198,6 @@ type appModel struct {
 	ready bool
 	err   error
 
-	// leanMode enables a simplified TUI with minimal chrome.
-	leanMode bool
-
 	// hideSidebar hides the sidebar and disables the ctrl+b toggle.
 	hideSidebar bool
 
@@ -229,17 +226,9 @@ type Transcriber interface {
 // Option configures the TUI.
 type Option func(*appModel)
 
-// WithLeanMode enables a simplified TUI with minimal chrome:
-// no sidebar, no tab bar, no overlays, no resize handle.
-func WithLeanMode() Option {
-	return func(m *appModel) {
-		m.leanMode = true
-	}
-}
-
-// WithHideSidebar hides the chat sidebar. Unlike lean mode, the rest of
-// the chrome (tab bar, status bar, dialogs) remains visible. The user
-// cannot bring the sidebar back via the TUI.
+// WithHideSidebar hides the chat sidebar. The rest of the chrome (tab bar,
+// status bar, dialogs) remains visible. The user cannot bring the sidebar
+// back via the TUI.
 func WithHideSidebar() Option {
 	return func(m *appModel) {
 		m.hideSidebar = true
@@ -392,7 +381,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	m.editors[sessID] = initialEditor
 	m.editor = initialEditor
 
-	// Create initial chat page (after options are applied so leanMode is set)
+	// Create initial chat page after options are applied.
 	initialChatPage := chat.New(initialApp, initialSessionState, m.chatPageOpts()...)
 	m.chatPages[sessID] = initialChatPage
 	m.chatPage = initialChatPage
@@ -501,15 +490,12 @@ func (m *appModel) refreshCommandInputs() tea.Cmd {
 }
 
 // chatPageOpts returns the chat.PageOption slice derived from the current
-// appModel configuration (e.g. lean mode).
+// appModel configuration.
 func (m *appModel) chatPageOpts() []chat.PageOption {
 	opts := []chat.PageOption{
 		chat.WithCommandParser(commands.NewParser(m.commandCategories()...)),
 	}
 
-	if m.leanMode {
-		opts = append(opts, chat.WithLeanMode())
-	}
 	if m.hideSidebar {
 		opts = append(opts, chat.WithHideSidebar())
 	}
@@ -681,16 +667,6 @@ func (m *appModel) Init() tea.Cmd {
 
 // Update handles messages.
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// In lean mode, silently drop messages for features that don't exist.
-	if m.leanMode {
-		switch msg.(type) {
-		case messages.SpawnSessionMsg, messages.SwitchTabMsg,
-			messages.CloseTabMsg, messages.ReorderTabMsg,
-			messages.ToggleSidebarMsg:
-			return m, nil
-		}
-	}
-
 	switch msg := msg.(type) {
 	// --- Routing & Animation ---
 
@@ -1819,17 +1795,9 @@ func (m *appModel) resizeAll() tea.Cmd {
 	width, height := m.width, m.height
 	innerWidth := width - appPaddingHorizontal
 
-	// Calculate chrome height (everything that isn't content or editor)
-	chromeHeight := 0
-	bottomSurfaceHeight := 0
-	if m.leanMode {
-		if m.chatPage.IsWorking() {
-			chromeHeight = 1 // working indicator line
-		}
-	} else {
-		bottomSurfaceHeight = m.bottomSurfaceHeight(width)
-		chromeHeight = m.tabBarHeight() + m.statusBarHeight() + bottomSurfaceHeight + 1 // +1 for resize handle
-	}
+	// Calculate chrome height (everything that isn't content or editor).
+	bottomSurfaceHeight := m.bottomSurfaceHeight(width)
+	chromeHeight := m.tabBarHeight() + m.statusBarHeight() + bottomSurfaceHeight + 1 // +1 for resize handle
 
 	// Calculate editor height
 	minLines := minEditorLines
@@ -1847,11 +1815,6 @@ func (m *appModel) resizeAll() tea.Cmd {
 	m.contentHeight = max(1, height-chromeHeight-editorRenderedHeight)
 	cmds = append(cmds, m.chatPage.SetSize(width, m.contentHeight))
 
-	if m.leanMode {
-		return tea.Batch(cmds...)
-	}
-
-	// Full mode: update overlay components
 	cmds = append(cmds, m.updateDialogCmd(tea.WindowSizeMsg{Width: width, Height: height}))
 
 	m.completions.SetEditorBottom(editorRenderedHeight + m.statusBarHeight() + bottomSurfaceHeight)
@@ -1897,18 +1860,6 @@ func (m *appModel) AllBindings() []key.Binding {
 		key.WithKeys("ctrl+c"),
 		key.WithHelp("Ctrl+c", "quit"),
 	)
-
-	if m.leanMode {
-		return []key.Binding{
-			sendBinding,
-			interruptBinding,
-			shortcutsBinding,
-			commandsBinding,
-			filesBinding,
-			agentsBinding,
-			quitBinding,
-		}
-	}
 
 	tabBinding := key.NewBinding(
 		key.WithKeys("tab"),
@@ -1975,7 +1926,6 @@ func (m *appModel) AllBindings() []key.Binding {
 		),
 	)
 
-	// leanMode already returned above, so only hideSidebar matters here.
 	if !m.hideSidebar {
 		bindings = append(bindings, key.NewBinding(
 			key.WithKeys("ctrl+b"),
@@ -2081,10 +2031,6 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	//     the original modal state is not discarded by accident.
 	//   - With the exit confirmation already on top: forward the key.
 	if msg.String() == "ctrl+c" {
-		if m.leanMode {
-			m.cleanupAll()
-			return m, tea.Quit
-		}
 		if m.dialogMgr.TopIsExitConfirmation() {
 			return m.forwardDialog(msg)
 		}
@@ -2107,7 +2053,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// let tab-navigation keys keep working so
 	// the user can switch to another conversation while the prompt waits.
 	if m.dialogMgr.Open() {
-		if m.dialogMgr.TopIsBackground() && !m.leanMode && !m.editor.IsHistorySearchActive() {
+		if m.dialogMgr.TopIsBackground() && !m.editor.IsHistorySearchActive() {
 			m.tabBar.SetCloseTabEnabled(true)
 			if cmd := m.tabBar.Update(msg); cmd != nil {
 				return m, cmd
@@ -2134,7 +2080,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if msg.String() == "ctrl+t" && !m.leanMode {
+	if msg.String() == "ctrl+t" {
 		return m, m.toggleWorkflowRows()
 	}
 
@@ -2153,7 +2099,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// history search so that ctrl+n/ctrl+p cycle through matches instead.
 	// Ctrl+w (close tab) is disabled when the editor is focused so that the
 	// standard "delete word" shortcut works while typing.
-	if !m.leanMode && !m.editor.IsHistorySearchActive() {
+	if !m.editor.IsHistorySearchActive() {
 		m.tabBar.SetCloseTabEnabled(m.focusedPanel != PanelEditor)
 		if cmd := m.tabBar.Update(msg); cmd != nil {
 			return m, cmd
@@ -2230,7 +2176,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Toggle sidebar (propagates to content view regardless of focus)
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+b"))):
-		if m.leanMode || m.hideSidebar {
+		if m.hideSidebar {
 			return m, nil
 		}
 		return m.forwardChat(msg)
@@ -2325,7 +2271,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 	if m.dialogMgr.Open() {
 		// Background dialogs let tab-bar clicks pass through so the user can
 		// keep navigating between tabs.
-		if m.dialogMgr.TopIsBackground() && !m.leanMode && m.hitTestRegion(msg.Y) == regionTabBar {
+		if m.dialogMgr.TopIsBackground() && m.hitTestRegion(msg.Y) == regionTabBar {
 			adjustedMsg := msg
 			adjustedMsg.X = msg.X - styles.AppPadding
 			adjustedMsg.Y = msg.Y - m.contentHeight - 1
@@ -2391,12 +2337,10 @@ func (m *appModel) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd
 		return tea.Batch(cmds...)
 	}
 
-	if !m.leanMode {
-		updated, cmd := m.notification.HandleMouseMotion(msg.X, msg.Y)
-		m.notification = updated
-		if cmd != nil {
-			cmds = append(cmds, cmd)
-		}
+	updated, cmd := m.notification.HandleMouseMotion(msg.X, msg.Y)
+	m.notification = updated
+	if cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 
 	if m.isDragging {
@@ -2507,20 +2451,8 @@ const (
 
 // hitTestRegion determines which layout region a Y coordinate falls in.
 func (m *appModel) hitTestRegion(y int) layoutRegion {
-	if m.leanMode {
-		return hitTestLeanRegion(y, m.contentHeight)
-	}
 	_, editorHeight := m.editor.GetSize()
 	return hitTestFullRegion(y, m.contentHeight, m.tabBarHeight(), editorHeight)
-}
-
-// hitTestLeanRegion is the pure layout calculation used in lean mode where
-// the screen is split between content and editor only.
-func hitTestLeanRegion(y, contentHeight int) layoutRegion {
-	if y < contentHeight {
-		return regionContent
-	}
-	return regionEditor
 }
 
 // hitTestFullRegion is the pure layout calculation used in full mode where the
@@ -2565,17 +2497,6 @@ func (m *appModel) handleEditorResize(y int) tea.Cmd {
 		return m.resizeAll()
 	}
 	return nil
-}
-
-// renderLeanWorkingIndicator renders a single-line working indicator for lean mode.
-func (m *appModel) renderLeanWorkingIndicator() string {
-	innerWidth := m.width - appPaddingHorizontal
-	workingText := "Working\u2026"
-	if queueLen := m.chatPage.QueueLength(); queueLen > 0 {
-		workingText = fmt.Sprintf("Working\u2026 (%d queued)", queueLen)
-	}
-	line := m.workingSpinner.View() + " " + styles.SpinnerDotsHighlightStyle.Render(workingText)
-	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Width(innerWidth + appPaddingHorizontal).Render(line)
 }
 
 // renderResizeHandle renders the draggable separator between content and bottom panel.
@@ -2635,7 +2556,7 @@ func (m *appModel) View() tea.View {
 	windowTitle := m.windowTitle()
 
 	if m.err != nil {
-		return toFullscreenView(styles.ErrorStyle.Render(m.err.Error()), windowTitle, false, m.leanMode)
+		return toFullscreenView(styles.ErrorStyle.Render(m.err.Error()), windowTitle, false)
 	}
 
 	if !m.ready {
@@ -2646,7 +2567,6 @@ func (m *appModel) View() tea.View {
 				Render(styles.MutedStyle.Render("Loading…")),
 			windowTitle,
 			false,
-			m.leanMode,
 		)
 	}
 
@@ -2656,19 +2576,6 @@ func (m *appModel) View() tea.View {
 		if taskDetail := m.renderWorkflowDetail(m.width, m.contentHeight); taskDetail != "" {
 			contentView = taskDetail
 		}
-	}
-
-	// Lean mode: editor appears right after the last message, with empty
-	// space pushed to the top via bottom-alignment.
-	if m.leanMode {
-		viewParts := []string{contentView}
-		if m.chatPage.IsWorking() {
-			viewParts = append(viewParts, m.renderLeanWorkingIndicator())
-		}
-		viewParts = append(viewParts, m.editor.View())
-		inner := lipgloss.JoinVertical(lipgloss.Top, viewParts...)
-		baseView := lipgloss.PlaceVertical(m.height, lipgloss.Bottom, inner)
-		return toFullscreenView(baseView, windowTitle, m.chatPage.IsWorking(), m.leanMode)
 	}
 
 	// Resize handle (between content and bottom panel)
@@ -2730,10 +2637,10 @@ func (m *appModel) View() tea.View {
 		}
 
 		compositor := lipgloss.NewCompositor(allLayers...)
-		return toFullscreenView(compositor.Render(), windowTitle, m.chatPage.IsWorking(), m.leanMode)
+		return toFullscreenView(compositor.Render(), windowTitle, m.chatPage.IsWorking())
 	}
 
-	return toFullscreenView(baseView, windowTitle, m.chatPage.IsWorking(), m.leanMode)
+	return toFullscreenView(baseView, windowTitle, m.chatPage.IsWorking())
 }
 
 // windowTitle returns the terminal window title for the current model state.
@@ -2867,9 +2774,9 @@ func (m *appModel) openExternalEditor() (tea.Model, tea.Cmd) {
 	})
 }
 
-func toFullscreenView(content, windowTitle string, working, leanMode bool) tea.View {
+func toFullscreenView(content, windowTitle string, working bool) tea.View {
 	view := tea.NewView(content)
-	view.AltScreen = !leanMode
+	view.AltScreen = true
 	view.MouseMode = tea.MouseModeAllMotion
 	view.BackgroundColor = styles.Background
 	view.WindowTitle = windowTitle

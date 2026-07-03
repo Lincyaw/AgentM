@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/adapter"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/version"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui"
 	tuiinput "github.com/AoyangSpace/agentm-terminal/internal/tui/input"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
@@ -25,18 +27,32 @@ import (
 )
 
 func main() {
-	connectURL := flag.String("connect", "", "Gateway URL (unix:///path or ws://host:port)")
-	token := flag.String("token", "", "Bearer token for ws/wss")
-	sessionID := flag.String("session-id", "", "Session ID (default: new session per terminal)")
-	senderID := flag.String("sender-id", "local", "Sender ID")
-	scenario := flag.String("scenario", "", "Scenario name (first message only)")
-	themeName := flag.String("theme", "dark", "Theme: dark or light")
-	mockMode := flag.Bool("mock", false, "Run with mock data (no gateway)")
-	simpleMode := flag.Bool("simple", false, "Run a simplified chat layout for narrow terminals")
-	leanMode := flag.Bool("lean", false, "Alias for --simple")
-	logFile := flag.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
-	if err := flag.CommandLine.Parse(stripDeprecatedBoolFlag(os.Args[1:], "hide-sidebar")); err != nil {
+	flags := flag.NewFlagSet("ag", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.Usage = func() {}
+
+	connectURL := flags.String("connect", "", "Gateway URL (unix:///path or ws://host:port)")
+	token := flags.String("token", "", "Bearer token for ws/wss")
+	sessionID := flags.String("session-id", "", "Session ID (default: new session per terminal)")
+	senderID := flags.String("sender-id", "local", "Sender ID")
+	scenario := flags.String("scenario", "", "Scenario name (first message only)")
+	themeName := flags.String("theme", "dark", "Theme: dark or light")
+	mockMode := flags.Bool("mock", false, "Run with mock data (no gateway)")
+	logFile := flags.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
+	showVersion := flags.Bool("version", false, "Print version and exit")
+	rawArgs := os.Args[1:]
+	if wantsHelp(rawArgs) {
+		printUsage(os.Stdout)
+		return
+	}
+	if err := flags.Parse(stripDeprecatedBoolFlag(rawArgs, "hide-sidebar")); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n\n", formatFlagError(err, rawArgs))
+		printUsage(os.Stderr)
 		os.Exit(2)
+	}
+	if *showVersion {
+		fmt.Printf("ag %s (%s)\n", version.Version, version.Commit)
+		return
 	}
 
 	// Default session-id to a per-process value so multiple terminal windows in
@@ -139,13 +155,7 @@ func main() {
 		return msg
 	}
 
-	var tuiOpts []tui.Option
-	if *simpleMode || *leanMode {
-		tuiOpts = append(tuiOpts, tui.WithLeanMode())
-	}
-	tuiOpts = append(tuiOpts, tui.WithHideSidebar())
-
-	model := tui.New(ctx, spawner, initialApp, wd, func() {}, tuiOpts...)
+	model := tui.New(ctx, spawner, initialApp, wd, func() {}, tui.WithHideSidebar())
 
 	p := tea.NewProgram(model, tea.WithContext(ctx), tea.WithFilter(filter))
 	coalescer.SetSender(p.Send)
@@ -179,6 +189,66 @@ func defaultSessionID(wd string) string {
 		return base + "-" + hex.EncodeToString(buf)
 	}
 	return fmt.Sprintf("%s-%d-%d", base, os.Getpid(), time.Now().UnixNano())
+}
+
+func printUsage(out io.Writer) {
+	fmt.Fprintln(out, "Usage: ag [--scenario <name>] [options]")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "AgentM terminal client. Starts one interactive gateway-backed chat session.")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Options:")
+	fmt.Fprintln(out, "  --scenario <name>     Scenario for the first message, e.g. trainticket")
+	fmt.Fprintln(out, "  --session-id <id>     Reconnect to a known terminal session id")
+	fmt.Fprintln(out, "  --connect <url>       Gateway URL (unix:///path or ws://host:port)")
+	fmt.Fprintln(out, "  --token <token>       Bearer token for ws/wss gateways")
+	fmt.Fprintln(out, "  --sender-id <id>      Sender id for gateway routing (default: local)")
+	fmt.Fprintln(out, "  --theme <dark|light>  Terminal theme (default: dark)")
+	fmt.Fprintln(out, "  --log <path>          Log file path (default: /tmp/agentm-terminal.log)")
+	fmt.Fprintln(out, "  --mock                Run the TUI without a gateway, for layout inspection")
+	fmt.Fprintln(out, "  --version             Print version and exit")
+	fmt.Fprintln(out, "  --help                Show this help")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Examples:")
+	fmt.Fprintln(out, "  ag")
+	fmt.Fprintln(out, "  ag --scenario trainticket")
+	fmt.Fprintln(out, "  ag --connect unix:///tmp/agentm-gateway.sock --scenario chatbot")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "For non-interactive or structured use, call the Python agentm CLI or SDK.")
+}
+
+func wantsHelp(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help", "-help":
+			return true
+		}
+	}
+	return false
+}
+
+func formatFlagError(err error, args []string) string {
+	text := err.Error()
+	const unknownPrefix = "flag provided but not defined: -"
+	if name, ok := strings.CutPrefix(text, unknownPrefix); ok {
+		if usedLongFlag(args, name) {
+			return "unknown option --" + name
+		}
+		return "unknown option -" + name
+	}
+	const missingPrefix = "flag needs an argument: -"
+	if name, ok := strings.CutPrefix(text, missingPrefix); ok {
+		return "missing value for --" + name
+	}
+	return strings.ReplaceAll(text, " -", " --")
+}
+
+func usedLongFlag(args []string, name string) bool {
+	for _, arg := range args {
+		if arg == "--"+name || strings.HasPrefix(arg, "--"+name+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func stripDeprecatedBoolFlag(args []string, name string) []string {
