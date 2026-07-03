@@ -1018,6 +1018,8 @@ requirements:
       - path: src/agentm/core/lib/user_config.py
       - path: src/agentm/env.py
       - path: src/agentm/cli.py
+      - path: src/agentm/gateway/__init__.py
+      - path: src/agentm/gateway/cli.py
       - path: src/agentm/gateway/workspace.py
       - path: src/agentm/core/runtime/resource_loader.py
       - path: src/agentm/extensions/builtin/skill_loader.py

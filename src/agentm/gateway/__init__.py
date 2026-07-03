@@ -11,7 +11,7 @@ chat-client peers):
 * :class:`WireServer` / :class:`WireClient` — wire transport endpoints.
 * :class:`Router` / :class:`SessionManager` / :class:`ApprovalManager` —
   gateway components.
-* ``DEFAULT_SOCKET_URL`` / ``resolve_token`` — connect-side helpers shared
+* ``default_socket_url`` / ``resolve_token`` — connect-side helpers shared
   by every chat-client CLI.
 """
 
@@ -26,7 +26,7 @@ from agentm.gateway_daemon import default_daemon_connect_url
 __version__ = "0.2.0"
 
 
-def default_socket_url() -> str:
+def default_socket_url(*, create_runtime_dir: bool = False) -> str:
     """Conventional ``unix://`` URL shared by gateway and clients.
 
     Uses the same per-user, per-``AGENTM_HOME`` runtime path as
@@ -34,7 +34,7 @@ def default_socket_url() -> str:
     ``$AGENTM_RUNTIME_DIR/gateway.sock`` when set, otherwise
     ``$TMPDIR/agentm-<uid>-<home-hash>/gateway.sock``.
     """
-    return default_daemon_connect_url(create_runtime_dir=True)
+    return default_daemon_connect_url(create_runtime_dir=create_runtime_dir)
 
 
 DEFAULT_SOCKET_URL = default_socket_url()

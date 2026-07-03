@@ -37,7 +37,7 @@ from typing import Annotated
 
 import typer
 
-from agentm.gateway import DEFAULT_SOCKET_URL, autoload_dotenv
+from agentm.gateway import autoload_dotenv, default_socket_url
 from agentm.gateway.client import AuthError, WireClient
 from agentm.gateway.client_cli import ConnectError, ConnectOptions, resolve_connect
 from agentm.gateway.wire import (
@@ -167,7 +167,7 @@ def login(
 @app.command()
 def run(
     connect: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--connect",
             envvar="AGENTM_SOCKET",
@@ -177,7 +177,7 @@ def run(
                 "wss://host:port. Env: AGENTM_SOCKET."
             ),
         ),
-    ] = DEFAULT_SOCKET_URL,
+    ] = None,
     token: Annotated[
         str | None,
         typer.Option(
@@ -248,6 +248,7 @@ def run(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
+    resolved_connect = connect or default_socket_url()
     _setup_logging(verbose)
 
     # Resolve account
@@ -282,7 +283,9 @@ def run(
         rc = asyncio.run(
             _arun(
                 connect_opts=ConnectOptions(
-                    connect=connect, token=effective_token, tls_ca=tls_ca
+                    connect=resolved_connect,
+                    token=effective_token,
+                    tls_ca=tls_ca,
                 ),
                 account_id=resolved_account_id,
                 bot_token=acct.token,
@@ -465,15 +468,15 @@ async def _arun(
 @app.command()
 def serve(
     bind: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--bind",
             metavar="URL",
             help=(
-                "Gateway bind address. Default: unix socket under XDG_RUNTIME_DIR."
+                "Gateway bind address. Default: shared AgentM local socket."
             ),
         ),
-    ] = DEFAULT_SOCKET_URL,
+    ] = None,
     model: Annotated[
         str | None,
         typer.Option(
@@ -531,6 +534,7 @@ def serve(
     built-in reconnect logic so it tolerates a brief startup delay.
     """
     _setup_logging(verbose)
+    resolved_bind = bind or default_socket_url(create_runtime_dir=True)
 
     from .state import list_account_ids, load_account  # noqa: PLC0415
 
@@ -558,7 +562,7 @@ def serve(
     from .supervisor import generate_config, launch_supervisord, write_config  # noqa: PLC0415
 
     config_text = generate_config(
-        bind_url=bind,
+        bind_url=resolved_bind,
         model=model,
         gateway_scenario=scenario,
         account_id=resolved_account_id,

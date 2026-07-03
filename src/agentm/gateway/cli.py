@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 import typer
 from loguru import logger
 
-from agentm.gateway import DEFAULT_SOCKET_URL, autoload_dotenv, load_token_file
+from agentm.gateway import autoload_dotenv, default_socket_url, load_token_file
 from agentm.gateway.auth import (
     Authenticator,
     TokenAuthenticator,
@@ -123,7 +123,7 @@ def _resolve_bind(
     tls_key: str | None,
 ) -> BindSpec:
     """Merge CLI flags > shared default into a :class:`BindSpec`."""
-    url = bind or DEFAULT_SOCKET_URL
+    url = bind or default_socket_url(create_runtime_dir=True)
     parsed = urlparse(str(url))
     scheme = parsed.scheme
 

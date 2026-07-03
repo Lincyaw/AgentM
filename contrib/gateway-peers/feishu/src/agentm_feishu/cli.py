@@ -42,7 +42,7 @@ from typing import Annotated
 
 import typer
 
-from agentm.gateway import DEFAULT_SOCKET_URL, autoload_dotenv
+from agentm.gateway import autoload_dotenv, default_socket_url
 from agentm.gateway.client import AuthError, WireClient
 from agentm.gateway.client_cli import ConnectError, ConnectOptions, resolve_connect
 from agentm.gateway.wire import (
@@ -213,7 +213,7 @@ app = typer.Typer(
 @app.command()
 def cli(
     connect: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--connect",
             envvar="AGENTM_SOCKET",
@@ -224,7 +224,7 @@ def cli(
                 "with `agentm-gateway`. Env: AGENTM_SOCKET."
             ),
         ),
-    ] = DEFAULT_SOCKET_URL,
+    ] = None,
     token: Annotated[
         str | None,
         typer.Option(
@@ -381,6 +381,8 @@ def cli(
     """
     from agentm.gateway import resolve_token
 
+    resolved_connect = connect or default_socket_url()
+
     try:
         effective_token = resolve_token(token, token_file)
     except ValueError as exc:
@@ -431,7 +433,9 @@ def cli(
             rc = asyncio.run(
                 _arun(
                     connect_opts=ConnectOptions(
-                        connect=connect, token=effective_token, tls_ca=tls_ca
+                        connect=resolved_connect,
+                        token=effective_token,
+                        tls_ca=tls_ca,
                     ),
                     app_id=app_id,
                     app_secret_path=app_secret,
@@ -470,7 +474,7 @@ def cli(
         try:
             rc = asyncio.run(
                 _arun_multi(
-                    connect=connect,
+                    connect=resolved_connect,
                     token=effective_token,
                     tls_ca=tls_ca,
                     bot_configs=bot_configs,
