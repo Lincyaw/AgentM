@@ -32,8 +32,8 @@ def autoload_dotenv(cwd: Path | None = None) -> None:
     Precedence follows candidate order within one call: cwd-local,
     workspace-root, then ``$AGENTM_HOME/.env`` as machine/user defaults. Across
     multiple calls in the same process, a later call may replace values loaded
-    by an earlier call, but never values that came from the real process
-    environment.
+    by an earlier call, but never values owned by the surrounding process or
+    code that mutated ``os.environ`` after the first load.
     """
     if os.environ.get("AGENTM_SKIP_DOTENV"):
         return
@@ -72,17 +72,12 @@ def autoload_dotenv(cwd: Path | None = None) -> None:
         candidates.append(home_env)
         values = _dotenv_values(candidates)
 
-    external_keys = _external_env_keys or set()
     for key, value in values.items():
         if value is None:
             continue
         current = os.environ.get(key)
         loaded_value = _loaded_dotenv_values.get(key)
-        if (
-            current is not None
-            and key in external_keys
-            and loaded_value is None
-        ):
+        if current is not None and loaded_value is None:
             continue
         if current is not None and loaded_value is not None and current != loaded_value:
             continue
