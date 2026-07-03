@@ -15,7 +15,7 @@ The yaml lists extensions in declaration order; each entry is one of:
 Path resolution:
 
 - An absolute path argument loads that file directly (or its
-  ``manifest.yaml`` if a directory).
+  ``manifest.yaml`` if a directory). Path-like arguments may use ``~``.
 - A bare name is searched in this order:
     1. ``$AGENTM_PROJECT_ROOT/contrib/scenarios/<name>/manifest.yaml``
        when the env var is set (with ``~`` expanded; gives long-running
@@ -374,7 +374,7 @@ def load_scenario(
     ``promotion``, etc.
     """
 
-    candidate = Path(name_or_path)
+    candidate = Path(name_or_path).expanduser()
     if candidate.is_absolute():
         manifest_path = (
             candidate / "manifest.yaml" if candidate.is_dir() else candidate
