@@ -71,6 +71,16 @@ type (
 	// DeleteSessionMsg deletes a session by ID.
 	DeleteSessionMsg struct{ SessionID string }
 
+	// SessionStarChangedMsg reports that a session's starred state was
+	// persisted successfully.
+	SessionStarChangedMsg struct {
+		SessionID string
+		Starred   bool
+	}
+
+	// SessionDeletedMsg reports that a session was deleted successfully.
+	SessionDeletedMsg struct{ SessionID string }
+
 	// SetSessionTitleMsg sets the session title to specified value.
 	SetSessionTitleMsg struct{ Title string }
 

@@ -573,7 +573,15 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/cagent/app/app.go
       - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
       - path: contrib/gateway-peers/terminal-go/internal/cagent/runtime/event.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/clipboardutil/clipboard.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/messages/clipboard.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/dialog/cost.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/dialog/session_browser.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/handlers.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/messages/session.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/notification_clipboard.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/chat.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/input_handlers.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/runtime_events.go
     tests: []
     docs:
@@ -776,6 +784,7 @@ requirements:
       - path: src/agentm/cli_daemon.py
       - path: src/agentm/cli.py
       - path: src/agentm/gateway/__init__.py
+      - path: src/agentm/gateway/cli.py
       - path: src/agentm/gateway/session_manager.py
       - path: src/agentm/gateway_daemon.py
       - path: src/agentm/gateway_supervisor.py
@@ -889,6 +898,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/statusbar/statusbar.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/tabbar/tabbar.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/notification/notification.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/dialog/working_dir_picker.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/styles/styles.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/styles/theme.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/dispatch.go
@@ -896,6 +906,8 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/tui/messages/toggle.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/chat.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/service/supervisor/supervisor.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/service/tuistate/store.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/tabs.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/tui.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/workflow_surface.go
       - path: contrib/gateway-peers/terminal-go/main.go

@@ -4,6 +4,7 @@ package tuistate
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -63,26 +64,72 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	// Add sidebar_collapsed column if it doesn't exist (migration for existing databases).
-	_, _ = s.db.ExecContext(ctx, `ALTER TABLE tabs ADD COLUMN sidebar_collapsed BOOLEAN NOT NULL DEFAULT 0`)
+	if err := s.addTabsColumnIfMissing(ctx, "sidebar_collapsed", "BOOLEAN NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 
-	// Add position column for explicit tab ordering.
-	_, _ = s.db.ExecContext(ctx, `ALTER TABLE tabs ADD COLUMN position INTEGER NOT NULL DEFAULT 0`)
+	if err := s.addTabsColumnIfMissing(ctx, "position", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 
 	// Backfill position for databases that predate the column: assign positions
 	// based on existing created_at order so the visible order is preserved.
 	// Only runs when all positions are 0 (i.e. column was just added).
 	var maxPos int
-	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(position), 0) FROM tabs`).Scan(&maxPos)
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(position), 0) FROM tabs`).Scan(&maxPos); err != nil {
+		return fmt.Errorf("checking tab positions: %w", err)
+	}
 	if maxPos == 0 {
-		_, _ = s.db.ExecContext(ctx, `
+		if _, err := s.db.ExecContext(ctx, `
 			UPDATE tabs SET position = (
 				SELECT COUNT(*) FROM tabs t2 WHERE t2.created_at < tabs.created_at
 			)
-		`)
+		`); err != nil {
+			return fmt.Errorf("backfilling tab positions: %w", err)
+		}
 	}
 
 	return nil
+}
+
+func (s *Store) addTabsColumnIfMissing(ctx context.Context, column, definition string) error {
+	exists, err := s.tabsColumnExists(ctx, column)
+	if err != nil {
+		return fmt.Errorf("checking tabs.%s column: %w", column, err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE tabs ADD COLUMN %s %s`, column, definition)); err != nil {
+		return fmt.Errorf("adding tabs.%s column: %w", column, err)
+	}
+	return nil
+}
+
+func (s *Store) tabsColumnExists(ctx context.Context, column string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(tabs)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid          int
+			name         string
+			columnType   string
+			notNull      int
+			defaultValue sql.NullString
+			primaryKey   int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // Close closes the database connection.
@@ -118,12 +165,12 @@ func (s *Store) RemoveTab(ctx context.Context, sessionID string) error {
 		return err
 	}
 	// Compact positions so they stay contiguous (0, 1, 2, …).
-	_, _ = s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		UPDATE tabs SET position = (
 			SELECT COUNT(*) FROM tabs t2 WHERE t2.position < tabs.position
 		)
 	`)
-	return nil
+	return err
 }
 
 // UpdateTabSessionID replaces the session ID for a tab entry.
@@ -228,7 +275,10 @@ func (s *Store) GetTabs(ctx context.Context) ([]TabEntry, string, error) {
 	}
 
 	var activeID string
-	_ = s.db.QueryRowContext(ctx, `SELECT session_id FROM active_tab WHERE id = 1`).Scan(&activeID)
+	err = s.db.QueryRowContext(ctx, `SELECT session_id FROM active_tab WHERE id = 1`).Scan(&activeID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, "", err
+	}
 
 	return tabs, activeID, nil
 }
@@ -239,7 +289,11 @@ func (s *Store) ToggleSidebarCollapsed(ctx context.Context, sessionID string) er
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking sidebar collapse update: %w", err)
+	}
+	if n == 0 {
 		return fmt.Errorf("no tab found with session_id %q", sessionID)
 	}
 	return nil

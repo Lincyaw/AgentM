@@ -15,6 +15,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/fsx"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/notification"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/scrollview"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
@@ -366,7 +367,7 @@ func (d *workingDirPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+p"))):
 			if d.pinHelpLabel() != "" {
-				d.toggleFavorite()
+				return d, d.toggleFavorite()
 			}
 			return d, nil
 
@@ -471,18 +472,18 @@ func (d *workingDirPickerDialog) handleSelection() tea.Cmd {
 	)
 }
 
-func (d *workingDirPickerDialog) toggleFavorite() {
+func (d *workingDirPickerDialog) toggleFavorite() tea.Cmd {
 	if d.tuiStore == nil {
-		return
+		return nil
 	}
 	togglePath, ok := d.selectedTogglePath()
 	if !ok {
-		return
+		return nil
 	}
 
 	isFav, err := d.tuiStore.ToggleFavoriteDir(context.Background(), togglePath)
 	if err != nil {
-		return
+		return notification.ErrorCmd("Failed to update favorite directory: " + err.Error())
 	}
 
 	if isFav {
@@ -511,6 +512,7 @@ func (d *workingDirPickerDialog) toggleFavorite() {
 			}
 		}
 	}
+	return nil
 }
 
 // selectedTogglePath returns the currently selected entry's path if it can
@@ -558,7 +560,7 @@ func (d *workingDirPickerDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 	if d.isStarClick(msg.X, entryIdx) {
 		d.setSelected(entryIdx)
 		if d.pinHelpLabel() != "" {
-			d.toggleFavorite()
+			return d, d.toggleFavorite()
 		}
 		return d, nil
 	}

@@ -7,9 +7,9 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
-	"github.com/atotto/clipboard"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/clipboardutil"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/notification"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/sidebar"
@@ -92,14 +92,7 @@ func (p *chatPage) persistSessionTitle(newTitle string) tea.Cmd {
 
 // copyWorkingDirToClipboard copies the working directory path to the system clipboard.
 func copyWorkingDirToClipboard(wd string) tea.Cmd {
-	return tea.Sequence(
-		func() tea.Msg {
-			_ = clipboard.WriteAll(wd)
-			return nil
-		},
-		tea.SetClipboard(wd),
-		notification.SuccessCmd("Working directory copied to clipboard."),
-	)
+	return clipboardutil.Copy(wd, clipboardutil.WithSuccess("Working directory copied to clipboard."))
 }
 
 // handleMouseClick handles mouse click events.

@@ -5,9 +5,9 @@ import (
 	"log/slog"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/userconfig"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service/supervisor"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/service/tuistate"
-	"github.com/AoyangSpace/agentm-terminal/internal/cagent/userconfig"
 )
 
 // This file contains the persistence and lookup logic for the multi-tab
@@ -66,7 +66,12 @@ func (m *appModel) restoreTabs(
 	var savedTabs []tuistate.TabEntry
 	var savedActiveID string
 	if *userconfig.Get().RestoreTabs {
-		savedTabs, savedActiveID, _ = ts.GetTabs(ctx)
+		var err error
+		savedTabs, savedActiveID, err = ts.GetTabs(ctx)
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to restore persisted tabs", "error", err)
+			m.startupWarnings = append(m.startupWarnings, "Saved tabs unavailable; starting a fresh tab.")
+		}
 	}
 
 	if len(savedTabs) == 0 {
@@ -83,7 +88,10 @@ func (m *appModel) restoreTabs(
 			if _, err := sessionStore.GetSession(ctx, saved.SessionID); err != nil {
 				slog.WarnContext(ctx, "Saved session no longer exists, removing stale tab",
 					"session_id", saved.SessionID, "error", err)
-				_ = ts.RemoveTab(ctx, saved.SessionID)
+				if err := ts.RemoveTab(ctx, saved.SessionID); err != nil {
+					slog.WarnContext(ctx, "Failed to remove stale tab",
+						"session_id", saved.SessionID, "error", err)
+				}
 				continue
 			}
 		}
@@ -97,7 +105,10 @@ func (m *appModel) restoreTabs(
 			a, newSess, spawnCleanup, err := spawner(ctx, saved.WorkingDir)
 			if err != nil {
 				slog.WarnContext(ctx, "Failed to restore tab", "working_dir", saved.WorkingDir, "error", err)
-				_ = ts.RemoveTab(ctx, saved.SessionID)
+				if err := ts.RemoveTab(ctx, saved.SessionID); err != nil {
+					slog.WarnContext(ctx, "Failed to remove unrestorable tab",
+						"session_id", saved.SessionID, "error", err)
+				}
 				continue
 			}
 			runtimeID = sv.AddSession(ctx, a, newSess, saved.WorkingDir, spawnCleanup)
@@ -112,7 +123,10 @@ func (m *appModel) restoreTabs(
 		// If this was the active tab, queue a switch on Init().
 		if saved.SessionID == savedActiveID {
 			if restoredFirst && runtimeID == initialTabID {
-				_ = ts.SetActiveTab(ctx, saved.SessionID)
+				if err := ts.SetActiveTab(ctx, saved.SessionID); err != nil {
+					slog.WarnContext(ctx, "Failed to refresh active restored tab",
+						"session_id", saved.SessionID, "error", err)
+				}
 			} else {
 				m.pendingActiveTab = runtimeID
 			}

@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/atotto/clipboard"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/browser"
@@ -19,6 +18,7 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/shellpath"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/userconfig"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/clipboardutil"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/notification"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/tool/editfile"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
@@ -146,22 +146,27 @@ func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd
 	}
 
 	currentSess := m.application.Session()
+	var starred bool
 	if currentSess != nil && currentSess.ID == sessionID {
-		currentSess.Starred = !currentSess.Starred
-		m.chatPage.SetSessionStarred(currentSess.Starred)
+		previous := currentSess.Starred
+		currentSess.Starred = !previous
 		if err := store.UpdateSession(context.Background(), currentSess); err != nil {
+			currentSess.Starred = previous
 			return m, notification.ErrorCmd(fmt.Sprintf("Failed to save session: %v", err))
 		}
+		starred = currentSess.Starred
+		m.chatPage.SetSessionStarred(currentSess.Starred)
 	} else {
 		sess, err := store.GetSession(context.Background(), sessionID)
 		if err != nil {
 			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
 		}
-		if err := store.SetSessionStarred(context.Background(), sessionID, !sess.Starred); err != nil {
+		starred = !sess.Starred
+		if err := store.SetSessionStarred(context.Background(), sessionID, starred); err != nil {
 			return m, notification.ErrorCmd(fmt.Sprintf("Failed to update session: %v", err))
 		}
 	}
-	return m, nil
+	return m, core.CmdHandler(messages.SessionStarChangedMsg{SessionID: sessionID, Starred: starred})
 }
 
 func (m *appModel) handleSetSessionTitle(title string) (tea.Model, tea.Cmd) {
@@ -202,7 +207,10 @@ func (m *appModel) handleDeleteSession(sessionID string) (tea.Model, tea.Cmd) {
 		return m, notification.ErrorCmd("Failed to delete session: " + err.Error())
 	}
 
-	return m, notification.SuccessCmd("Session deleted.")
+	return m, tea.Batch(
+		notification.SuccessCmd("Session deleted."),
+		core.CmdHandler(messages.SessionDeletedMsg{SessionID: sessionID}),
+	)
 }
 
 // --- Export / Compact / Copy ---
@@ -289,18 +297,11 @@ func plural(n int) string {
 	return "s"
 }
 
-// copyToClipboard returns a sequenced command that copies text to the system
-// clipboard using both the OSC 52 escape sequence (for SSH/tmux compatibility)
-// and the platform-native clipboard API, then shows a success notification.
+// copyToClipboard returns a sequenced command that copies text through both the
+// OSC 52 escape sequence (for SSH/tmux compatibility) and the platform-native
+// clipboard API, then reports the resulting status to the user.
 func copyToClipboard(text, successMsg string) tea.Cmd {
-	return tea.Sequence(
-		tea.SetClipboard(text),
-		func() tea.Msg {
-			_ = clipboard.WriteAll(text)
-			return nil
-		},
-		notification.SuccessCmd(successMsg),
-	)
+	return clipboardutil.Copy(text, clipboardutil.WithSuccess(successMsg))
 }
 
 // --- Agent management ---

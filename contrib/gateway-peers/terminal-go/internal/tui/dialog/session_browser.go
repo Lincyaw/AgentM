@@ -2,7 +2,6 @@ package dialog
 
 import (
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -11,10 +10,9 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/atotto/clipboard"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
-	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/notification"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/clipboardutil"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/scrollview"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
@@ -90,7 +88,7 @@ func NewSessionBrowserDialog(sessions []session.Summary) Dialog {
 		openedAt: time.Now(),
 	}
 	// Initialize filtered list
-	d.filterSessions()
+	d.filterSessions(true)
 	return d
 }
 
@@ -109,10 +107,18 @@ func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case messages.SessionStarChangedMsg:
+		d.setSessionStarred(msg.SessionID, msg.Starred)
+		return d, nil
+
+	case messages.SessionDeletedMsg:
+		d.removeSession(msg.SessionID)
+		return d, nil
+
 	case tea.PasteMsg:
 		var cmd tea.Cmd
 		d.textInput, cmd = d.textInput.Update(msg)
-		d.filterSessions()
+		d.filterSessions(true)
 		return d, cmd
 
 	case tea.MouseClickMsg:
@@ -123,10 +129,7 @@ func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				if idx == d.lastClickIndex && now.Sub(d.lastClickTime) < styles.DoubleClickThreshold {
 					d.selected = idx
 					d.lastClickTime = time.Time{}
-					return d, tea.Sequence(
-						core.CmdHandler(CloseDialogMsg{}),
-						core.CmdHandler(messages.LoadSessionMsg{SessionID: d.filtered[d.selected].ID}),
-					)
+					return d, d.loadSelectedSessionCmd()
 				}
 				d.selected = idx
 				d.lastClickTime = now
@@ -159,61 +162,38 @@ func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return d, nil
 
 		case key.Matches(msg, d.keyMap.Enter):
-			if d.selected >= 0 && d.selected < len(d.filtered) {
-				return d, tea.Sequence(
-					core.CmdHandler(CloseDialogMsg{}),
-					core.CmdHandler(messages.LoadSessionMsg{SessionID: d.filtered[d.selected].ID}),
-				)
-			}
-			return d, nil
+			return d, d.loadSelectedSessionCmd()
 
 		case key.Matches(msg, d.keyMap.Star):
-			if d.selected >= 0 && d.selected < len(d.filtered) {
-				sessionID := d.filtered[d.selected].ID
-				for i := range d.sessions {
-					if d.sessions[i].ID == sessionID {
-						d.sessions[i].Starred = !d.sessions[i].Starred
-						break
-					}
-				}
-				for i := range d.filtered {
-					if d.filtered[i].ID == sessionID {
-						d.filtered[i].Starred = !d.filtered[i].Starred
-						break
-					}
-				}
-				return d, core.CmdHandler(messages.ToggleSessionStarMsg{SessionID: sessionID})
+			if sess, ok := d.selectedSession(); ok {
+				return d, core.CmdHandler(messages.ToggleSessionStarMsg{SessionID: sess.ID})
 			}
 			return d, nil
 
 		case key.Matches(msg, d.keyMap.FilterStar):
 			d.starFilter = (d.starFilter + 1) % 3
-			d.filterSessions()
+			d.filterSessions(true)
 			return d, nil
 
 		case key.Matches(msg, d.keyMap.CopyID):
-			if d.selected >= 0 && d.selected < len(d.filtered) {
-				sessionID := d.filtered[d.selected].ID
-				_ = clipboard.WriteAll(sessionID)
-				return d, notification.SuccessCmd("Session ID copied to clipboard.")
+			if sess, ok := d.selectedSession(); ok {
+				return d, clipboardutil.CopyNative(
+					sess.ID,
+					clipboardutil.WithSuccess("Session ID copied to clipboard."),
+				)
 			}
 			return d, nil
 
 		case key.Matches(msg, d.keyMap.Delete):
-			if d.selected >= 0 && d.selected < len(d.filtered) {
-				sessionID := d.filtered[d.selected].ID
-				d.sessions = slices.DeleteFunc(d.sessions, func(s session.Summary) bool {
-					return s.ID == sessionID
-				})
-				d.filterSessions()
-				return d, core.CmdHandler(messages.DeleteSessionMsg{SessionID: sessionID})
+			if sess, ok := d.selectedSession(); ok {
+				return d, core.CmdHandler(messages.DeleteSessionMsg{SessionID: sess.ID})
 			}
 			return d, nil
 
 		default:
 			var cmd tea.Cmd
 			d.textInput, cmd = d.textInput.Update(msg)
-			d.filterSessions()
+			d.filterSessions(true)
 			return d, cmd
 		}
 	}
@@ -221,7 +201,67 @@ func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, nil
 }
 
-func (d *sessionBrowserDialog) filterSessions() {
+func (d *sessionBrowserDialog) selectedSession() (session.Summary, bool) {
+	if d.selected < 0 || d.selected >= len(d.filtered) {
+		return session.Summary{}, false
+	}
+	return d.filtered[d.selected], true
+}
+
+func (d *sessionBrowserDialog) loadSelectedSessionCmd() tea.Cmd {
+	sess, ok := d.selectedSession()
+	if !ok {
+		return nil
+	}
+	return tea.Sequence(
+		core.CmdHandler(CloseDialogMsg{}),
+		core.CmdHandler(messages.LoadSessionMsg{SessionID: sess.ID}),
+	)
+}
+
+func (d *sessionBrowserDialog) setSessionStarred(sessionID string, starred bool) {
+	var found bool
+	for i := range d.sessions {
+		if d.sessions[i].ID == sessionID {
+			d.sessions[i].Starred = starred
+			found = true
+			break
+		}
+	}
+	if !found {
+		return
+	}
+
+	if d.starFilter != 0 {
+		d.filterSessions(false)
+		return
+	}
+	for i := range d.filtered {
+		if d.filtered[i].ID == sessionID {
+			d.filtered[i].Starred = starred
+			return
+		}
+	}
+}
+
+func (d *sessionBrowserDialog) removeSession(sessionID string) {
+	for i := range d.sessions {
+		if d.sessions[i].ID == sessionID {
+			d.sessions = append(d.sessions[:i], d.sessions[i+1:]...)
+			d.filterSessions(false)
+			return
+		}
+	}
+}
+
+func (d *sessionBrowserDialog) filterSessions(resetScroll bool) {
+	selectedID := ""
+	if !resetScroll {
+		if sess, ok := d.selectedSession(); ok {
+			selectedID = sess.ID
+		}
+	}
+
 	query := strings.ToLower(strings.TrimSpace(d.textInput.Value()))
 
 	d.filtered = nil
@@ -250,13 +290,43 @@ func (d *sessionBrowserDialog) filterSessions() {
 		d.filtered = append(d.filtered, sess)
 	}
 
-	if d.selected >= len(d.filtered) {
-		d.selected = max(0, len(d.filtered)-1)
+	switch {
+	case len(d.filtered) == 0:
+		d.selected = -1
+	case resetScroll:
+		d.selected = 0
+	case selectedID != "":
+		if idx := indexSessionSummary(d.filtered, selectedID); idx >= 0 {
+			d.selected = idx
+		} else if d.selected >= len(d.filtered) {
+			d.selected = len(d.filtered) - 1
+		}
+	case d.selected < 0:
+		d.selected = 0
+	case d.selected >= len(d.filtered):
+		d.selected = len(d.filtered) - 1
 	}
+
 	// Keep the scrollview's totalHeight in sync so EnsureLineVisible and the
 	// scrollbar clamp correctly even before View() runs.
 	d.scrollview.SetContent(nil, len(d.filtered))
-	d.scrollview.SetScrollOffset(0)
+	if resetScroll {
+		d.scrollview.SetScrollOffset(0)
+	} else {
+		d.scrollview.SetScrollOffset(d.scrollview.ScrollOffset())
+		if d.selected >= 0 {
+			d.scrollview.EnsureLineVisible(d.selected)
+		}
+	}
+}
+
+func indexSessionSummary(sessions []session.Summary, sessionID string) int {
+	for i, sess := range sessions {
+		if sess.ID == sessionID {
+			return i
+		}
+	}
+	return -1
 }
 
 // mouseYToSessionIndex converts a mouse Y position to a session index in the filtered list.

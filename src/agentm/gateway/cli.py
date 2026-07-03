@@ -357,7 +357,7 @@ def cli(
         typer.Option(
             "--state-dir",
             envvar="AGENTM_STATE_DIR",
-            help="Persistent state (outbox/inbox/session_map). Default: <cwd>/.agentm/gateway.",
+            help="Persistent state (outbox/inbox/session_map). Default: $AGENTM_HOME/gateway.",
         ),
     ] = None,
     provider: Annotated[
@@ -500,7 +500,11 @@ async def _arun(
     atoms_allow: list[str] | None,
     check: bool,
 ) -> int:
-    from agentm.core.lib.user_config import resolve_model_profile, resolve_provider_model
+    from agentm.core.lib.user_config import (
+        agentm_home_dir,
+        resolve_model_profile,
+        resolve_provider_model,
+    )
 
     bind_spec = _resolve_bind(
         bind=bind,
@@ -518,7 +522,7 @@ async def _arun(
     )
     raw_model = model_flag
 
-    resolved_state_dir = state_dir or (Path(cwd) / ".agentm" / "gateway")
+    resolved_state_dir = state_dir or (agentm_home_dir() / "gateway")
     _validate_scenario(scenario)
 
     if check:

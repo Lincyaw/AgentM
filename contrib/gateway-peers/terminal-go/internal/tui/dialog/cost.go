@@ -11,11 +11,10 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/atotto/clipboard"
 
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/chat"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
-	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/notification"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/clipboardutil"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/scrollview"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/core/layout"
@@ -29,7 +28,7 @@ import (
 type costDialog struct {
 	BaseDialog
 
-	session    *session.Session
+	data       costData
 	keyMap     costDialogKeyMap
 	scrollview *scrollview.Model
 }
@@ -40,7 +39,7 @@ type costDialogKeyMap struct {
 
 func NewCostDialog(sess *session.Session) Dialog {
 	return &costDialog{
-		session: sess,
+		data: gatherCostData(sess),
 		scrollview: scrollview.New(
 			scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
 			scrollview.WithReserveScrollbarSpace(true),
@@ -67,8 +66,10 @@ func (d *costDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		case key.Matches(msg, d.keyMap.Close):
 			return d, core.CmdHandler(CloseDialogMsg{})
 		case key.Matches(msg, d.keyMap.Copy):
-			_ = clipboard.WriteAll(d.renderPlainText())
-			return d, notification.SuccessCmd("Cost details copied to clipboard.")
+			return d, clipboardutil.CopyNative(
+				d.renderPlainText(),
+				clipboardutil.WithSuccess("Cost details copied to clipboard."),
+			)
 		}
 	}
 	return d, nil
@@ -196,10 +197,14 @@ func (d *costData) totalStats() []stat {
 // Data gathering
 // ---------------------------------------------------------------------------
 
-func (d *costDialog) gatherCostData() costData {
+func gatherCostData(sess *session.Session) costData {
 	var data costData
-	data.duration = d.session.Duration()
-	data.messageCount = d.session.MessageCount()
+	if sess == nil {
+		return data
+	}
+
+	data.duration = sess.Duration()
+	data.messageCount = sess.MessageCount()
 	modelMap := make(map[string]*totalUsage)
 	msgCounter := 0
 
@@ -260,11 +265,11 @@ func (d *costDialog) gatherCostData() costData {
 		}
 	}
 
-	walkSession(d.session)
+	walkSession(sess)
 
 	// Fall back to remote mode if no per-message data was found.
 	if !data.hasPerMessageData {
-		for _, record := range d.session.MessageUsageHistory {
+		for _, record := range sess.MessageUsageHistory {
 			addRecord(record.AgentName, record.Model, record.Cost, &record.Usage)
 		}
 	}
@@ -279,10 +284,10 @@ func (d *costDialog) gatherCostData() costData {
 	// Fall back to session-level totals (e.g. past sessions without per-message data).
 	if !data.hasPerMessageData {
 		data.total = totalUsage{
-			cost: d.session.TotalCost(),
+			cost: sess.TotalCost(),
 			Usage: chat.Usage{
-				InputTokens:  d.session.InputTokens,
-				OutputTokens: d.session.OutputTokens,
+				InputTokens:  sess.InputTokens,
+				OutputTokens: sess.OutputTokens,
 			},
 		}
 	}
@@ -295,7 +300,7 @@ func (d *costDialog) gatherCostData() costData {
 // ---------------------------------------------------------------------------
 
 func (d *costDialog) renderContent(contentWidth, maxHeight int) string {
-	data := d.gatherCostData()
+	data := d.data
 
 	// Header
 	header := RenderTitle("Session Cost Details", contentWidth, styles.DialogTitleStyle)
@@ -427,7 +432,7 @@ func (d *costDialog) applyScrolling(allLines []string, contentWidth, maxHeight i
 // ---------------------------------------------------------------------------
 
 func (d *costDialog) renderPlainText() string {
-	data := d.gatherCostData()
+	data := d.data
 	var lines []string
 
 	// Total section

@@ -93,6 +93,10 @@ type appModel struct {
 	statusBar    statusbar.StatusBar
 	completions  completion.Manager
 
+	// startupWarnings are surfaced once from Init after construction-time
+	// recovery paths have finished.
+	startupWarnings []string
+
 	// Speech-to-text
 	transcriber  Transcriber
 	transcriptCh chan string // bridges transcriber goroutine → Bubble Tea event loop
@@ -319,15 +323,18 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	// Initialize tab store
 	var ts *tuistate.Store
 	var tsErr error
+	startupWarnings := []string{}
 	ts, tsErr = tuistate.New()
 	if tsErr != nil {
 		slog.WarnContext(ctx, "Failed to open TUI state store, tabs won't persist", "error", tsErr)
+		startupWarnings = append(startupWarnings, "TUI state unavailable; tabs won't persist.")
 	}
 
 	// Initialize shared command history
 	historyStore, err := history.New("")
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to initialize command history", "error", err)
+		startupWarnings = append(startupWarnings, "Command history unavailable.")
 	}
 
 	initialSessionState := service.NewSessionState(initialApp.Session())
@@ -360,6 +367,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		notification:                  notification.New(),
 		dialogMgr:                     dialog.New(),
 		completions:                   completion.New(),
+		startupWarnings:               startupWarnings,
 		transcriber:                   transcribe.New(os.Getenv("OPENAI_API_KEY")),
 		workingSpinner:                spinner.New(spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
 		focusedPanel:                  PanelEditor,
@@ -620,6 +628,17 @@ func (m *appModel) initAndFocusComponents() tea.Cmd {
 	)
 }
 
+func (m *appModel) withStartupWarnings(cmds ...tea.Cmd) tea.Cmd {
+	if len(m.startupWarnings) == 0 {
+		return tea.Batch(cmds...)
+	}
+	for _, warning := range m.startupWarnings {
+		cmds = append(cmds, notification.WarningCmd(warning))
+	}
+	m.startupWarnings = nil
+	return tea.Batch(cmds...)
+}
+
 // Init initializes the model.
 func (m *appModel) Init() tea.Cmd {
 	// If a different tab should be active on startup, switch to it directly.
@@ -630,7 +649,7 @@ func (m *appModel) Init() tea.Cmd {
 		tabID := m.pendingActiveTab
 		m.pendingActiveTab = ""
 		_, switchCmd := m.handleSwitchTab(tabID)
-		return tea.Batch(m.dialogMgr.Init(), switchCmd)
+		return m.withStartupWarnings(m.dialogMgr.Init(), switchCmd)
 	}
 
 	// If the initial tab has a pending session restore, go through
@@ -651,12 +670,12 @@ func (m *appModel) Init() tea.Cmd {
 				cmd = tea.Batch(cmd, m.applySidebarCollapsed(activeID))
 				m.persistActiveTab(sess.ID)
 
-				return tea.Batch(m.dialogMgr.Init(), cmd)
+				return m.withStartupWarnings(m.dialogMgr.Init(), cmd)
 			}
 		}
 	}
 
-	return tea.Batch(
+	return m.withStartupWarnings(
 		m.dialogMgr.Init(),
 		m.chatPage.Init(),
 		m.editor.Init(),
@@ -1468,9 +1487,19 @@ func (m *appModel) handleSpawnSession(workingDir string, background bool) (tea.M
 // openWorkingDirPicker opens the working directory picker dialog.
 func (m *appModel) openWorkingDirPicker() (tea.Model, tea.Cmd) {
 	var recentDirs, favoriteDirs []string
+	var warningCmds []tea.Cmd
 	if m.tuiStore != nil {
-		recentDirs, _ = m.tuiStore.GetRecentDirs(context.Background(), 10)
-		favoriteDirs, _ = m.tuiStore.GetFavoriteDirs(context.Background())
+		var err error
+		recentDirs, err = m.tuiStore.GetRecentDirs(context.Background(), 10)
+		if err != nil {
+			slog.Warn("Failed to load recent working directories", "error", err)
+			warningCmds = append(warningCmds, notification.WarningCmd("Recent working dirs unavailable."))
+		}
+		favoriteDirs, err = m.tuiStore.GetFavoriteDirs(context.Background())
+		if err != nil {
+			slog.Warn("Failed to load favorite working directories", "error", err)
+			warningCmds = append(warningCmds, notification.WarningCmd("Favorite working dirs unavailable."))
+		}
 	}
 
 	// Use the active session's working directory so the picker reflects it
@@ -1480,9 +1509,13 @@ func (m *appModel) openWorkingDirPicker() (tea.Model, tea.Cmd) {
 		sessionWorkingDir = runner.WorkingDir
 	}
 
-	return m, core.CmdHandler(dialog.OpenDialogMsg{
+	openCmd := core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewWorkingDirPickerDialog(recentDirs, favoriteDirs, m.tuiStore, sessionWorkingDir),
 	})
+	if len(warningCmds) == 0 {
+		return m, openCmd
+	}
+	return m, tea.Batch(append(warningCmds, openCmd)...)
 }
 
 // stashedDialog holds a background dialog instance that was on screen when

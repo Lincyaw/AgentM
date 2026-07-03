@@ -2,7 +2,8 @@ package tui
 
 import (
 	tea "charm.land/bubbletea/v2"
-	"github.com/atotto/clipboard"
+
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/clipboardutil"
 )
 
 // notificationCopiedMsg marks an existing notification as copied after its text
@@ -14,11 +15,5 @@ type notificationCopiedMsg struct {
 // copyNotificationToClipboard copies notification text using the same OSC 52 +
 // best-effort platform clipboard pattern as the conversation copy handlers.
 func copyNotificationToClipboard(id uint64, text string) tea.Cmd {
-	return tea.Sequence(
-		tea.SetClipboard(text),
-		func() tea.Msg {
-			_ = clipboard.WriteAll(text)
-			return notificationCopiedMsg{ID: id}
-		},
-	)
+	return clipboardutil.Copy(text, clipboardutil.WithCompletion(notificationCopiedMsg{ID: id}))
 }

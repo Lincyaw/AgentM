@@ -22,14 +22,25 @@ type Migration struct {
 	UpSQL       string
 	DownSQL     string
 	AppliedAt   time.Time
-	// UpFunc is an optional Go function to run after UpSQL (for data migrations)
-	UpFunc func(ctx context.Context, db *sql.DB) error
+	// UpFunc is an optional Go function to run after UpSQL in the same
+	// transaction, before the migration is recorded as applied.
+	UpFunc func(ctx context.Context, db MigrationExecutor) error
 }
 
 // MigrationManager handles database migrations
 type MigrationManager struct {
 	db         *sql.DB
 	migrations []Migration
+}
+
+// MigrationExecutor is the database surface available to Go data migrations.
+// It is satisfied by both *sql.DB and *sql.Tx; the migration manager passes a
+// transaction so schema changes, data writes, and the migration record commit
+// atomically.
+type MigrationExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // NewMigrationManager creates a migration manager that runs the production
@@ -146,35 +157,32 @@ func (m *MigrationManager) applyMigration(ctx context.Context, migration *Migrat
 		return err
 	}
 	defer func() {
-		// TODO: handle error
-		_ = tx.Rollback()
+		_ = tx.Rollback() // rollback after commit is a no-op
 	}()
 
 	// Execute SQL migration if present
 	if migration.UpSQL != "" {
-		_, err = tx.ExecContext(ctx, migration.UpSQL)
-		if err != nil {
+		if _, err := tx.ExecContext(ctx, migration.UpSQL); err != nil {
 			return fmt.Errorf("failed to execute migration SQL: %w", err)
 		}
 	}
 
-	_, err = tx.ExecContext(ctx,
+	// Execute Go function migration before recording the migration so data
+	// migrations cannot be marked applied when their data writes fail.
+	if migration.UpFunc != nil {
+		if err := migration.UpFunc(ctx, tx); err != nil {
+			return fmt.Errorf("failed to execute migration function: %w", err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
 		"INSERT INTO migrations (id, name, description, applied_at) VALUES (?, ?, ?, ?)",
-		migration.ID, migration.Name, migration.Description, time.Now().Format(time.RFC3339))
-	if err != nil {
+		migration.ID, migration.Name, migration.Description, time.Now().Format(time.RFC3339)); err != nil {
 		return fmt.Errorf("failed to record migration: %w", err)
 	}
 
-	err = tx.Commit()
-	if err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit migration transaction: %w", err)
-	}
-
-	// Execute Go function migration if present (after SQL is committed)
-	if migration.UpFunc != nil {
-		if err := migration.UpFunc(ctx, m.db); err != nil {
-			return fmt.Errorf("failed to execute migration function: %w", err)
-		}
 	}
 
 	return nil
@@ -392,7 +400,7 @@ func getAllMigrations() []Migration {
 			ID:          20,
 			Name:        "020_drop_messages_column",
 			Description: "Drop the legacy messages JSON column now that all data lives in session_items",
-			UpSQL:       `ALTER TABLE sessions DROP COLUMN messages`,
+			UpFunc:      dropLegacyMessagesColumn,
 		},
 		{
 			ID:          21,
@@ -403,8 +411,65 @@ func getAllMigrations() []Migration {
 	}
 }
 
+func dropLegacyMessagesColumn(ctx context.Context, db MigrationExecutor) error {
+	hasMessages, err := sessionColumnExists(ctx, db, "messages")
+	if err != nil {
+		return fmt.Errorf("checking legacy messages column: %w", err)
+	}
+	if !hasMessages {
+		return nil
+	}
+
+	var unmigrated int
+	err = db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM sessions s
+		WHERE s.messages IS NOT NULL
+		  AND s.messages != ''
+		  AND s.messages != '[]'
+		  AND NOT EXISTS (SELECT 1 FROM session_items si WHERE si.session_id = s.id)
+	`).Scan(&unmigrated)
+	if err != nil {
+		return fmt.Errorf("checking unmigrated legacy messages: %w", err)
+	}
+	if unmigrated > 0 {
+		return fmt.Errorf("cannot drop legacy messages column: %d sessions still have unmigrated messages", unmigrated)
+	}
+
+	if _, err := db.ExecContext(ctx, `ALTER TABLE sessions DROP COLUMN messages`); err != nil {
+		return fmt.Errorf("dropping legacy messages column: %w", err)
+	}
+	return nil
+}
+
+func sessionColumnExists(ctx context.Context, db MigrationExecutor, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(sessions)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid          int
+			name         string
+			columnType   string
+			notNull      int
+			defaultValue sql.NullString
+			primaryKey   int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 // migrateMessagesToSessionItems migrates data from the messages JSON column to the session_items table
-func migrateMessagesToSessionItems(ctx context.Context, db *sql.DB) error {
+func migrateMessagesToSessionItems(ctx context.Context, db MigrationExecutor) error {
 	slog.InfoContext(ctx, "Starting migration of messages to session_items")
 
 	// Get all sessions that have messages but no items yet
@@ -445,8 +510,7 @@ func migrateMessagesToSessionItems(ctx context.Context, db *sql.DB) error {
 	// Migrate each session
 	for _, sess := range sessionsToMigrate {
 		if err := migrateSessionMessages(ctx, db, sess.id, sess.messages, ""); err != nil {
-			slog.WarnContext(ctx, "Failed to migrate session, skipping", "session_id", sess.id, "error", err)
-			continue
+			return fmt.Errorf("migrating session %s: %w", sess.id, err)
 		}
 	}
 
@@ -455,7 +519,7 @@ func migrateMessagesToSessionItems(ctx context.Context, db *sql.DB) error {
 }
 
 // migrateSessionMessages migrates a single session's messages to session_items
-func migrateSessionMessages(ctx context.Context, db *sql.DB, sessionID, messagesJSON, parentID string) error {
+func migrateSessionMessages(ctx context.Context, db MigrationExecutor, sessionID, messagesJSON, parentID string) error {
 	var items []Item
 	if err := json.Unmarshal([]byte(messagesJSON), &items); err != nil {
 		return fmt.Errorf("unmarshaling messages: %w", err)
@@ -479,7 +543,7 @@ func migrateSessionMessages(ctx context.Context, db *sql.DB, sessionID, messages
 }
 
 // migrateItem migrates a single Item to session_items
-func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int, item *Item) error {
+func migrateItem(ctx context.Context, db MigrationExecutor, sessionID string, position int, item *Item) error {
 	switch {
 	case item.Message != nil:
 		// Migrate message

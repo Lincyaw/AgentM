@@ -872,7 +872,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		switch msg.String() {
 		case "up":
 			// Only navigate history if the user hasn't manually typed content
-			if !e.userTyped {
+			if !e.userTyped && e.historyAvailable() {
 				e.textarea.SetValue(e.hist.Previous())
 				e.textarea.MoveToEnd()
 				e.refreshSuggestion()
@@ -881,7 +881,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			// Otherwise, let the textarea handle cursor navigation
 		case "down":
 			// Only navigate history if the user hasn't manually typed content
-			if !e.userTyped {
+			if !e.userTyped && e.historyAvailable() {
 				e.textarea.SetValue(e.hist.Next())
 				e.textarea.MoveToEnd()
 				e.refreshSuggestion()
@@ -1636,7 +1636,14 @@ func randomPasteDisplayName() (string, error) {
 	return "paste-" + hex.EncodeToString(b[:]), nil
 }
 
+func (e *editor) historyAvailable() bool {
+	return e.hist != nil
+}
+
 func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
+	if !e.historyAvailable() {
+		return e, nil
+	}
 	e.historySearch = historySearchState{
 		active:                   true,
 		origTextValue:            e.textarea.Value(),
@@ -1656,6 +1663,12 @@ func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
 }
 
 func (e *editor) handleHistorySearchKey(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
+	if !e.historyAvailable() {
+		cmd := e.exitHistorySearch()
+		e.refreshSuggestion()
+		return e, tea.Batch(cmd, core.CmdHandler(completion.CloseMsg{}))
+	}
+
 	switch {
 	case key.Matches(msg, e.searchInput.KeyMap.PrevSuggestion):
 		e.cycleMatch(e.hist.FindPrevContains, len(e.hist.Messages))

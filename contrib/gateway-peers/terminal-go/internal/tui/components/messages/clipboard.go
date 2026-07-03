@@ -5,11 +5,10 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 
-	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/notification"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/clipboardutil"
 )
 
 // boxDrawingChars contains Unicode box-drawing characters used by lipgloss borders.
@@ -219,14 +218,7 @@ func (m *model) copySelectedMessageToClipboard() tea.Cmd {
 
 // copyTextToClipboard copies text to the system clipboard
 func copyTextToClipboard(text string) tea.Cmd {
-	return tea.Sequence(
-		func() tea.Msg {
-			_ = clipboard.WriteAll(text)
-			return nil
-		},
-		tea.SetClipboard(text),
-		notification.SuccessCmd("Text copied to clipboard."),
-	)
+	return clipboardutil.Copy(text, clipboardutil.WithSuccess("Text copied to clipboard."))
 }
 
 // scheduleDebouncedCopy schedules a copy after a delay, allowing triple-click to cancel it.

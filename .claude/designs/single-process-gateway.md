@@ -77,6 +77,11 @@ Process-launch contract:
 | Gateway | `agentm gateway --bind <url>` | Long-lived. Holds all sessions. |
 | Chat client | `agentm-feishu --connect <same-url>` / `agentm-terminal --connect <same-url>` | One per platform. |
 
+Gateway persistent state (`wire-outbox.sqlite`, `wire-inbox.sqlite`, and
+`session_map.json`) defaults to `$AGENTM_HOME/gateway` for both the direct
+`agentm gateway` process and the local daemon/supervisor path. `--state-dir`
+is the explicit override when an operator wants an alternate location.
+
 Deployment contract: do not hand-write service files. Use
 `agentm gateway --cwd <workspace> --install-systemd`, which writes managed
 user units for the gateway and Feishu peer, pins both to
