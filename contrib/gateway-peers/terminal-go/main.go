@@ -109,7 +109,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		client := wire.NewWireClient(transport, "terminal-go", *token, wire.WithCwd(wd))
+		client := wire.NewWireClient(
+			transport,
+			"terminal-go",
+			*token,
+			wire.WithCwd(wd),
+			wire.WithPeerVersion(version.Version),
+		)
 
 		// The timeout covers only the dial + handshake, not the long-lived
 		// connection.

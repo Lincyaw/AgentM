@@ -20,12 +20,13 @@ const reconnectBaseDelay = 100 * time.Millisecond
 // reconnectMaxDelay caps the exponential backoff.
 const reconnectMaxDelay = 30 * time.Second
 
-const peerVersion = "0.1.0"
+const defaultPeerVersion = "0.1.0"
 
 // WireClient manages a connection to the AgentM gateway.
 type WireClient struct {
 	transport Transport
 	peerName  string
+	version   string
 	token     string
 	cwd       string // working directory stamped on hello
 
@@ -71,6 +72,7 @@ func NewWireClient(transport Transport, peerName string, token string, opts ...C
 	c := &WireClient{
 		transport:     transport,
 		peerName:      peerName,
+		version:       defaultPeerVersion,
 		token:         token,
 		outbound:      make(chan *Envelope, 64),
 		done:          make(chan struct{}),
@@ -92,10 +94,19 @@ func WithCwd(cwd string) ClientOption {
 	return func(c *WireClient) { c.cwd = cwd }
 }
 
+// WithPeerVersion stamps the terminal binary version on the hello frame.
+func WithPeerVersion(version string) ClientOption {
+	return func(c *WireClient) {
+		if version != "" {
+			c.version = version
+		}
+	}
+}
+
 func (c *WireClient) helloEnvelope() *Envelope {
 	body := map[string]any{
 		"peer_name":    c.peerName,
-		"peer_version": peerVersion,
+		"peer_version": c.version,
 		"capabilities": map[string]any{},
 	}
 	if c.cwd != "" {
