@@ -87,6 +87,7 @@ _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_HEARTBEAT = 120.0
 _DEFAULT_SILENCE_WARNING = 300.0
 _MAX_WAIT_BACKGROUND_SECONDS = 30.0
+_MAX_ACTIVITY_LABEL_CHARS = 96
 
 class BackgroundExecConfig(BaseModel):
     timeout: float = _DEFAULT_TIMEOUT
@@ -122,6 +123,7 @@ class _BgTask(BackgroundTask):
     """
 
     tool_name: str
+    label: str
     status: _Status = _RUNNING
     started_at: float = field(default_factory=time.monotonic)
     last_milestone_at: float = field(default_factory=time.monotonic)
@@ -169,6 +171,32 @@ def _result_text(result: ToolResult) -> str:
     ]
     return "\n".join(chunks).strip()
 
+def _single_line(value: str) -> str:
+    return " ".join(value.split())
+
+def _truncate_label(value: str) -> str:
+    if len(value) <= _MAX_ACTIVITY_LABEL_CHARS:
+        return value
+    return value[: _MAX_ACTIVITY_LABEL_CHARS - 3].rstrip() + "..."
+
+def _activity_label(tool_name: str, args: dict[str, Any]) -> str:
+    """Presenter-facing label for a detached tool task.
+
+    Keep the generic tool name as the stable fallback, but make shell work
+    identifiable in terminal chrome. The full arguments still live in the
+    regular tool call transcript; this label is intentionally compact.
+    """
+
+    if tool_name in {"bash", "shell"}:
+        raw_command = args.get("cmd")
+        if raw_command is None:
+            raw_command = args.get("command")
+        if isinstance(raw_command, str):
+            command = _single_line(raw_command)
+            if command:
+                return _truncate_label(f"{tool_name}: {command}")
+    return tool_name
+
 def _completion_note(state: _BgTask) -> str:
     """Human-readable completion / error note for the background inbox item."""
 
@@ -176,24 +204,25 @@ def _completion_note(state: _BgTask) -> str:
         result = _outcome_result(state.outcome) if state.outcome is not None else None
         body = _result_text(result) if result is not None else ""
         head = (
-            f"Background task {state.task_id} ({state.tool_name}) finished."
+            f"Background task {state.task_id} ({state.label}) finished."
         )
         return f"{head}\n\nResult:\n{body}" if body else head
     if state.status == _ERROR:
         return (
-            f"Background task {state.task_id} ({state.tool_name}) failed: "
+            f"Background task {state.task_id} ({state.label}) failed: "
             f"{state.error}"
         )
     if state.status == _CANCELLED:
         return (
-            f"Background task {state.task_id} ({state.tool_name}) was cancelled."
+            f"Background task {state.task_id} ({state.label}) was cancelled."
         )
-    return f"Background task {state.task_id} ({state.tool_name}): {state.status}."
+    return f"Background task {state.task_id} ({state.label}): {state.status}."
 
 def _task_payload(state: _BgTask) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "task_id": state.task_id,
         "tool_name": state.tool_name,
+        "label": state.label,
         "status": state.status,
         "elapsed_s": round(time.monotonic() - state.started_at, 1),
     }
@@ -285,6 +314,7 @@ class _BgTool:
         # tears it down on the task's terminal transition.
         return await self._manager.background(
             tool_name=self.name,
+            args=args,
             task=task,
             abort_signal=abort,
             forwarder=forwarder,
@@ -379,7 +409,7 @@ class _BgManager:
                 BackgroundActivityEvent(
                     source="background",
                     activity_id=_activity_id(state.task_id),
-                    label=state.tool_name,
+                    label=state.label,
                     status=state.status,
                     note=note,
                     terminal=terminal,
@@ -414,6 +444,7 @@ class _BgManager:
         self,
         *,
         tool_name: str,
+        args: dict[str, Any],
         task: asyncio.Task[ToolResult | ToolOutcome],
         abort_signal: asyncio.Event,
         forwarder: asyncio.Task[None] | None = None,
@@ -447,6 +478,7 @@ class _BgManager:
         state = _BgTask(
             task_id=task_id,
             tool_name=tool_name,
+            label=_activity_label(tool_name, args=args),
             task=task,
             abort_signal=abort_signal,
             forwarder=forwarder,
@@ -635,13 +667,13 @@ class _BgManager:
                 ):
                     warned_silence = True
                     note = (
-                        f"Background task {state.task_id} ({state.tool_name}) "
+                        f"Background task {state.task_id} ({state.label}) "
                         f"has produced no output for {silent_for:.0f}s — it may "
                         f"be stuck."
                     )
                 else:
                     note = (
-                        f"Background task {state.task_id} ({state.tool_name}) "
+                        f"Background task {state.task_id} ({state.label}) "
                         f"still running ({time.monotonic() - state.started_at:.0f}s)."
                     )
                 self._emit_activity(state, note=note)
