@@ -19,6 +19,8 @@ func DefaultSocketURL() string {
 		sum := sha1.Sum([]byte(home))
 		digest := hex.EncodeToString(sum[:])[:8]
 		runtime = filepath.Join(os.TempDir(), fmt.Sprintf("agentm-%d-%s", os.Getuid(), digest))
+	} else {
+		runtime = expandUser(runtime)
 	}
 	return "unix://" + filepath.Join(runtime, "gateway.sock")
 }

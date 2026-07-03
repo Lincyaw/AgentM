@@ -1011,6 +1011,8 @@ requirements:
       match core AgentM semantics, including ``~`` expansion inside
       ``AGENTM_HOME``, so AgentM does not write user-scoped state under the
       source checkout or treat a tilde override as a literal relative path.
+      Gateway daemon socket paths must also honor ``AGENTM_RUNTIME_DIR`` with
+      the same ``~`` expansion in Python and terminal-go clients.
     priority: P1
     status: implemented
     confidence: confirmed
@@ -1021,6 +1023,7 @@ requirements:
       - path: src/agentm/cli_trace.py
       - path: src/agentm/cli_daemon.py
       - path: src/agentm/gateway/__init__.py
+      - path: src/agentm/gateway_daemon.py
       - path: src/agentm/gateway/cli.py
       - path: src/agentm/gateway/systemd.py
       - path: src/agentm/gateway/workspace.py

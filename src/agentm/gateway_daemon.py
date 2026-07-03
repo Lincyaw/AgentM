@@ -105,7 +105,7 @@ def default_daemon_token_file() -> Path:
 def default_daemon_runtime_dir(*, create: bool = False) -> Path:
     root = os.environ.get("AGENTM_RUNTIME_DIR")
     if root:
-        path = Path(root)
+        path = Path(root).expanduser()
     else:
         uid = os.getuid() if hasattr(os, "getuid") else os.getpid()
         home = str(default_agentm_home())

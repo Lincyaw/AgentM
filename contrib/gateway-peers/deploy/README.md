@@ -119,10 +119,11 @@ That's why:
 
 ## Why the socket path is pinned
 
-The local default socket is scoped by `$AGENTM_RUNTIME_DIR` when set, otherwise
-by a per-user temp directory whose name includes a hash of `$AGENTM_HOME`.
-That is the right default for ad hoc local CLIs, but managed user units should
-not depend on whichever environment systemd happened to provide. So
+The local default socket is scoped by `$AGENTM_RUNTIME_DIR` when set (with `~`
+expanded by both the Python gateway and terminal-go), otherwise by a per-user
+temp directory whose name includes a hash of `$AGENTM_HOME`. That is the right
+default for ad hoc local CLIs, but managed user units should not depend on
+whichever environment systemd happened to provide. So
 `--install-systemd` **pins** the socket and writes the same value into both
 units (gateway `--bind` == feishu `--connect`):
 `unix://%t/agentm/gw.sock`, where `%t` expands to the per-user runtime dir
