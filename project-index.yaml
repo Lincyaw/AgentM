@@ -851,9 +851,10 @@ requirements:
       activity until the user explicitly opens them, keeping the parent
       conversation focused instead of exposing a tab-management surface for
       every spawned worker. Background workflow tabs must be summarized in the
-      status bar with a discoverable next-tab shortcut, become normal tabs once
-      the user switches to them, and preserve their routed transcript for later
-      inspection. The composer should follow chat-first terminal semantics:
+      status bar with a discoverable next-tab shortcut while they are new,
+      running, or waiting for input, and completed workflow rows must disappear
+      from the bottom task surface instead of accumulating. The composer should
+      follow chat-first terminal semantics:
       Enter sends, Enter queues cooperatively while the active agent is busy,
       Shift+Enter/Ctrl+j inserts a newline, `?` opens shortcuts from an empty
       editor, `/` and `@` expose inline command/file completions, left arrow

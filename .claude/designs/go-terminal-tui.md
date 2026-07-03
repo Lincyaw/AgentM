@@ -682,16 +682,18 @@ The current AgentM terminal implementation follows this direction:
 1. Keep the parent conversation primary. Child workflow sessions open as
    background activity and do not steal focus.
 2. Collapse background-only child sessions out of tab chrome and render them as
-   inline task rows below the composer/status surface. `↓` opens an inline
-   picker, `Enter` views a selected task, `x` stops it, and `Ctrl+T`
-   hides/shows the task rows.
+   inline task rows below the composer/status surface only while they are
+   actionable (new, running, or waiting for input). `↓` opens an inline picker,
+   `Enter` views a selected task, `x` stops it, and `Ctrl+T` hides/shows the
+   task rows.
 3. Make the composer the control surface:
    `Enter` sends, busy `Enter` queues cooperatively, `Shift+Enter`/`Ctrl+J`
    inserts newline, `?` opens shortcuts, `/` opens commands, `@` opens files,
    `Esc` interrupts or double-clears input, and `Ctrl+C` exits on second press.
-4. Preserve child output for explicit inspection. Routed workflow child streams
-   are buffered per session, so selecting a completed task shows its final text
-   and completion note instead of a blank promoted tab.
+4. Preserve child output without letting completed task rows accumulate.
+   Completed task output lands in the parent transcript / task-output summary;
+   the bottom task surface follows Claude Code by dropping completed rows once
+   they no longer need attention.
 5. Keep transcript detail controls:
    `Ctrl+O` toggles detailed transcript blocks, while `Ctrl+E` toggles fully
    verbose output within detailed mode.

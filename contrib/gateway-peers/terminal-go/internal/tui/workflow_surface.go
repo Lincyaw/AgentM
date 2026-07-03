@@ -53,11 +53,29 @@ func (m *appModel) workflowTaskTabs() []messages.TabInfo {
 		if tab.SessionID == m.mainSessionID {
 			continue
 		}
-		if tab.Background {
+		if tab.Background && m.workflowTaskVisible(tab) {
 			tasks = append(tasks, tab)
 		}
 	}
 	return tasks
+}
+
+func (m *appModel) workflowTaskVisible(tab messages.TabInfo) bool {
+	return tab.IsRunning || tab.NeedsAttention || m.workflowVisible[tab.SessionID]
+}
+
+func (m *appModel) setWorkflowVisible(sessionID string, visible bool) {
+	if sessionID == "" {
+		return
+	}
+	if visible {
+		if m.workflowVisible == nil {
+			m.workflowVisible = map[string]bool{}
+		}
+		m.workflowVisible[sessionID] = true
+		return
+	}
+	delete(m.workflowVisible, sessionID)
 }
 
 func (m *appModel) chooseMainSessionID(fallback string) string {
@@ -191,6 +209,7 @@ func (m *appModel) recordWorkflowTranscript(sessionID string, msg tea.Msg) {
 	if sessionID == "" || sessionID == m.mainSessionID {
 		return
 	}
+	m.trackWorkflowVisibility(sessionID, msg)
 	switch ev := msg.(type) {
 	case *runtime.AgentChoiceEvent:
 		m.appendWorkflowTranscript(sessionID, ev.Content)
@@ -198,6 +217,17 @@ func (m *appModel) recordWorkflowTranscript(sessionID string, msg tea.Msg) {
 		if m.transcriptDetailed {
 			m.appendWorkflowTranscript(sessionID, ev.Content)
 		}
+	}
+}
+
+func (m *appModel) trackWorkflowVisibility(sessionID string, msg tea.Msg) {
+	switch msg.(type) {
+	case *runtime.StreamStartedEvent,
+		*runtime.ToolCallConfirmationEvent,
+		*runtime.MaxIterationsReachedEvent:
+		m.setWorkflowVisible(sessionID, true)
+	case *runtime.StreamStoppedEvent:
+		m.setWorkflowVisible(sessionID, false)
 	}
 }
 

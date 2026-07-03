@@ -130,6 +130,7 @@ type appModel struct {
 	workflowPickerOpen  bool
 	workflowPickerIndex int
 	workflowTranscripts map[string]string
+	workflowVisible     map[string]bool
 	shortcutSheetOpen   bool
 	transcriptDetailed  bool
 	transcriptVerbose   bool
@@ -362,6 +363,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		sessionState:                  initialSessionState,
 		mainSessionID:                 sessID,
 		workflowTranscripts:           map[string]string{},
+		workflowVisible:               map[string]bool{},
 		history:                       historyStore,
 		pendingRestores:               make(map[string]string),
 		pendingSidebarCollapsed:       make(map[string]bool),
@@ -1461,6 +1463,7 @@ func (m *appModel) handleSpawnSession(workingDir string, background bool) (tea.M
 
 	if background {
 		m.supervisor.SetBackground(sessionID, true)
+		m.setWorkflowVisible(sessionID, true)
 
 		var cmds []tea.Cmd
 		if _, exists := m.chatPages[sessionID]; !exists {
@@ -1757,6 +1760,7 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	delete(m.pendingSidebarCollapsed, sessionID)
 	delete(m.stashedDialogs, sessionID)
 	delete(m.workflowTranscripts, sessionID)
+	delete(m.workflowVisible, sessionID)
 
 	var cmds []tea.Cmd
 	// Remove from persistent store using the persisted session-store ID.
