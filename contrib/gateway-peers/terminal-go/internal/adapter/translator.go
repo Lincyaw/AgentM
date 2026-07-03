@@ -770,6 +770,10 @@ func (t *Translator) backgroundActivityEvent(meta map[string]any) runtime.Event 
 	status, _ := meta["status"].(string)
 	note, _ := meta["note"].(string)
 	terminal, _ := meta["terminal"].(bool)
+	sessionID := t.sessionID()
+	if sid, _ := meta["session_id"].(string); strings.TrimSpace(sid) != "" {
+		sessionID = strings.TrimSpace(sid)
+	}
 	if source == "" {
 		source = "background"
 	}
@@ -783,7 +787,7 @@ func (t *Translator) backgroundActivityEvent(meta map[string]any) runtime.Event 
 		status = "running"
 	}
 	return runtime.BackgroundActivity(
-		t.sessionID(),
+		sessionID,
 		source,
 		activityID,
 		label,
