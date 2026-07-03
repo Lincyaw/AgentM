@@ -11,7 +11,6 @@ from loguru import logger
 from agentm.core.lib.user_config import agentm_home_dir
 
 _PACKAGE_WALK_DEPTH = 8
-_external_env_keys: set[str] | None = None
 _loaded_dotenv_values: dict[str, str] = {}
 
 
@@ -37,9 +36,6 @@ def autoload_dotenv(cwd: Path | None = None) -> None:
     """
     if os.environ.get("AGENTM_SKIP_DOTENV"):
         return
-    global _external_env_keys
-    if _external_env_keys is None:
-        _external_env_keys = set(os.environ)
 
     base = cwd if cwd is not None else Path.cwd()
     try:
@@ -95,8 +91,9 @@ def _dotenv_values(candidates: list[Path]) -> dict[str, str | None]:
 
 
 def _effective_agentm_home(dotenv_values_by_key: dict[str, str | None]) -> Path:
-    external_keys = _external_env_keys or set()
-    if "AGENTM_HOME" in external_keys and "AGENTM_HOME" not in _loaded_dotenv_values:
+    current = os.environ.get("AGENTM_HOME")
+    loaded = _loaded_dotenv_values.get("AGENTM_HOME")
+    if current is not None and current != loaded:
         return agentm_home_dir()
     home = dotenv_values_by_key.get("AGENTM_HOME")
     if home:
