@@ -33,6 +33,12 @@ def _resolve_cwd(cwd: str | None) -> Path:
     return Path(cwd or os.environ.get("AGENTM_CWD") or os.getcwd())
 
 
+def _autoload_daemon_env(cwd: str | None) -> Path:
+    resolved_cwd = _resolve_cwd(cwd)
+    autoload_dotenv(resolved_cwd)
+    return resolved_cwd
+
+
 def _print_status(*, json_output: bool) -> None:
     status = gateway_daemon_status()
     if json_output:
@@ -53,9 +59,15 @@ def _print_status(*, json_output: bool) -> None:
 
 
 @app.command(name="socket")
-def socket_cmd() -> None:
+def socket_cmd(
+    cwd: Annotated[
+        str | None,
+        typer.Option("--cwd", help="Working directory used for .env discovery."),
+    ] = None,
+) -> None:
     """Print the active/default local daemon connect URL."""
 
+    _autoload_daemon_env(cwd)
     status = gateway_daemon_status()
     if status.running:
         typer.echo(status.connect_url)
@@ -65,6 +77,10 @@ def socket_cmd() -> None:
 
 @app.command(name="status")
 def status_cmd(
+    cwd: Annotated[
+        str | None,
+        typer.Option("--cwd", help="Working directory used for .env discovery."),
+    ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Print a machine-readable status object."),
@@ -72,6 +88,7 @@ def status_cmd(
 ) -> None:
     """Show whether the local gateway daemon is running."""
 
+    _autoload_daemon_env(cwd)
     _print_status(json_output=json_output)
 
 
@@ -167,8 +184,7 @@ def start_cmd(
 ) -> None:
     """Start or reuse the local gateway daemon."""
 
-    resolved_cwd = _resolve_cwd(cwd)
-    autoload_dotenv(resolved_cwd)
+    resolved_cwd = _autoload_daemon_env(cwd)
     try:
         ensure_gateway_daemon(
             GatewayDaemonConfig(
@@ -194,6 +210,10 @@ def start_cmd(
 
 @app.command(name="stop")
 def stop_cmd(
+    cwd: Annotated[
+        str | None,
+        typer.Option("--cwd", help="Working directory used for .env discovery."),
+    ] = None,
     timeout: Annotated[
         float,
         typer.Option("--timeout", min=0.1, help="Seconds to wait before SIGKILL."),
@@ -201,6 +221,7 @@ def stop_cmd(
 ) -> None:
     """Stop the local gateway daemon if it is running."""
 
+    _autoload_daemon_env(cwd)
     stopped = stop_gateway_daemon(timeout_seconds=timeout)
     if stopped:
         typer.echo("stopped")
@@ -300,6 +321,7 @@ def restart_cmd(
 ) -> None:
     """Restart the local gateway daemon."""
 
+    _autoload_daemon_env(cwd)
     stop_gateway_daemon()
     start_cmd(
         cwd=cwd,
