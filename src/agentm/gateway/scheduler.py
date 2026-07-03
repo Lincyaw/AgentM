@@ -183,6 +183,8 @@ class ScheduledJob:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScheduledJob:
+        recurring = _load_bool(data, "recurring", default=True)
+        enabled = _load_bool(data, "enabled", default=True)
         return cls(
             id=str(data["id"]),
             session_key=str(data["session_key"]),
@@ -197,8 +199,8 @@ class ScheduledJob:
             ),
             sender_id=str(data.get("sender_id") or ""),
             scenario=str(data["scenario"]) if data.get("scenario") is not None else None,
-            recurring=bool(data.get("recurring", True)),
-            enabled=bool(data.get("enabled", True)),
+            recurring=recurring,
+            enabled=enabled,
             fire_count=int(data.get("fire_count", 0)),
             last_fire_at=(
                 float(data["last_fire_at"])
@@ -209,6 +211,13 @@ class ScheduledJob:
                 str(data["last_error"]) if data.get("last_error") is not None else None
             ),
         )
+
+
+def _load_bool(data: dict[str, Any], key: str, *, default: bool) -> bool:
+    raw = data.get(key, default)
+    if isinstance(raw, bool):
+        return raw
+    raise ValueError(f"{key} must be boolean")
 
 
 class GatewayScheduleStore:
@@ -252,16 +261,27 @@ class GatewayScheduleStore:
                 self._jobs[job_id].to_dict() for job_id in sorted(self._jobs)
             ],
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=self._path.parent,
-            delete=False,
-            suffix=".tmp",
-            encoding="utf-8",
-        ) as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
-            tmp = fh.name
-        os.replace(tmp, self._path)
+        tmp: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=self._path.parent,
+                delete=False,
+                suffix=".tmp",
+                encoding="utf-8",
+            ) as fh:
+                tmp = fh.name
+                json.dump(payload, fh, indent=2, sort_keys=True)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self._path)
+            tmp = None
+        finally:
+            if tmp is not None:
+                try:
+                    Path(tmp).unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.debug("schedule store: failed to remove temp file {}: {}", tmp, exc)
 
     def create(
         self,
