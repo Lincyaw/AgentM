@@ -77,7 +77,7 @@ def run_terminal(config: TerminalLaunchConfig) -> int:
         return _run_terminal_peer(
             config,
             connect_url=connect_url,
-            token=_daemon_token_for_connect(connect_url),
+            token_file=_daemon_token_file_for_connect(connect_url),
         )
 
     gateway = _start_gateway(config)
@@ -139,13 +139,13 @@ def _run_terminal_peer(
     config: TerminalLaunchConfig,
     *,
     connect_url: str,
-    token: str | None = None,
+    token_file: Path | None = None,
 ) -> int:
     executable = _find_executable(config.terminal_bin)
     args = [executable, "--connect", connect_url]
     terminal_args = config.terminal_args
-    if token and not _has_token_arg(terminal_args):
-        args.extend(["--token", token])
+    if token_file is not None and not _has_token_arg(terminal_args):
+        args.extend(["--token-file", str(token_file)])
     if config.session_id:
         args.extend(["--session-id", config.session_id])
     elif not _has_session_id_arg(terminal_args):
@@ -178,16 +178,17 @@ def _ensure_daemon_gateway(config: TerminalLaunchConfig) -> str:
         raise TerminalLaunchError(str(exc)) from exc
 
 
-def _daemon_token_for_connect(connect_url: str) -> str | None:
+def _daemon_token_file_for_connect(connect_url: str) -> Path | None:
     status = gateway_daemon_status()
     if status.connect_url != connect_url or not status.auth_required:
         return None
     if status.token_file is None:
         raise TerminalLaunchError("daemon requires auth but has no token file")
     try:
-        return load_token_file(str(status.token_file))[0]
+        load_token_file(str(status.token_file))
     except ValueError as exc:
         raise TerminalLaunchError(str(exc)) from exc
+    return status.token_file
 
 
 def _validate_local_scenario(scenario: str) -> None:
@@ -301,9 +302,14 @@ def _has_session_id_arg(args: list[str]) -> bool:
 
 def _has_token_arg(args: list[str]) -> bool:
     for arg in args:
-        if arg in {"-token", "--token"}:
+        if arg in {"-token", "--token", "-token-file", "--token-file"}:
             return True
-        if arg.startswith("-token=") or arg.startswith("--token="):
+        if (
+            arg.startswith("-token=")
+            or arg.startswith("--token=")
+            or arg.startswith("-token-file=")
+            or arg.startswith("--token-file=")
+        ):
             return True
     return False
 

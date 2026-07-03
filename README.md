@@ -224,7 +224,7 @@ line; blank lines and `#` comments are ignored.
 ```bash
 agentm daemon start --bind ws://0.0.0.0:8765
 agentm daemon status
-agentm-terminal --connect ws://<host>:8765 --token "$(cat ~/.agentm/gateway/token)"
+agentm-terminal --connect ws://<host>:8765 --token-file ~/.agentm/gateway/token
 ```
 
 ## Five pluggability axes

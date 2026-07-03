@@ -33,6 +33,7 @@ func main() {
 
 	connectURL := flags.String("connect", "", "Gateway URL (unix:///path or ws://host:port)")
 	token := flags.String("token", "", "Bearer token for ws/wss")
+	tokenFile := flags.String("token-file", "", "Read bearer token from PATH")
 	sessionID := flags.String("session-id", "", "Session ID (default: new session per terminal)")
 	senderID := flags.String("sender-id", "local", "Sender ID")
 	scenario := flags.String("scenario", "", "Scenario name (first message only)")
@@ -53,6 +54,19 @@ func main() {
 	if *showVersion {
 		fmt.Printf("ag %s (%s)\n", version.Version, version.Commit)
 		return
+	}
+	effectiveToken := *token
+	if *tokenFile != "" {
+		if *token != "" {
+			fmt.Fprintln(os.Stderr, "error: --token and --token-file are mutually exclusive")
+			os.Exit(2)
+		}
+		loadedToken, err := loadTokenFile(*tokenFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		effectiveToken = loadedToken
 	}
 
 	// Default session-id to a per-process value so multiple terminal windows in
@@ -112,7 +126,7 @@ func main() {
 		client := wire.NewWireClient(
 			transport,
 			"terminal-go",
-			*token,
+			effectiveToken,
 			wire.WithCwd(wd),
 			wire.WithPeerVersion(version.Version),
 		)
@@ -207,6 +221,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  --session-id <id>     Reconnect to a known terminal session id")
 	fmt.Fprintln(out, "  --connect <url>       Gateway URL (unix:///path or ws://host:port)")
 	fmt.Fprintln(out, "  --token <token>       Bearer token for ws/wss gateways")
+	fmt.Fprintln(out, "  --token-file <path>   Read bearer token from file")
 	fmt.Fprintln(out, "  --sender-id <id>      Sender id for gateway routing (default: local)")
 	fmt.Fprintln(out, "  --theme <dark|light>  Terminal theme (default: dark)")
 	fmt.Fprintln(out, "  --log <path>          Log file path (default: /tmp/agentm-terminal.log)")
@@ -220,6 +235,21 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  ag --connect unix:///tmp/agentm-gateway.sock --scenario chatbot")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "For non-interactive or structured use, call the Python agentm CLI or SDK.")
+}
+
+func loadTokenFile(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("--token-file %q: cannot read: %w", path, err)
+	}
+	for _, raw := range strings.Split(string(content), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		return line, nil
+	}
+	return "", fmt.Errorf("--token-file %q: file is empty", path)
 }
 
 func wantsHelp(args []string) bool {
