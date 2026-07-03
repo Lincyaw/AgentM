@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	pathx "github.com/AoyangSpace/agentm-terminal/internal/cagent/path"
 )
 
 // DefaultSocketURL mirrors the Python gateway daemon default:
@@ -37,17 +39,11 @@ func defaultAgentMHome() string {
 }
 
 func expandUser(path string) string {
-	if path != "~" && !strings.HasPrefix(path, "~/") && !strings.HasPrefix(path, "~\\") {
+	expanded, err := pathx.ExpandHomeDir(path)
+	if err != nil {
 		return path
 	}
-	userHome, err := os.UserHomeDir()
-	if err != nil || userHome == "" {
-		return path
-	}
-	if path == "~" {
-		return userHome
-	}
-	return filepath.Join(userHome, path[2:])
+	return expanded
 }
 
 // ResolveTransport parses a URL string into a Transport.
