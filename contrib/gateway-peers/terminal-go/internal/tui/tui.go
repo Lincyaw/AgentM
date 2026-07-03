@@ -114,6 +114,8 @@ type appModel struct {
 
 	// Content area height (height minus editor, tab bar, resize handle, status bar)
 	contentHeight int
+	// Bottom-surface height from the last layout pass.
+	bottomSurfaceLayoutHeight int
 
 	// Editor resize state
 	editorLines      int
@@ -731,7 +733,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- Tab management ---
 
 	case messages.TabsUpdatedMsg:
-		if m.syncTabChrome(msg.Tabs, msg.ActiveIdx) || m.hasWorkflowTasks() {
+		tabChromeChanged := m.syncTabChrome(msg.Tabs, msg.ActiveIdx)
+		bottomSurfaceHeightChanged := m.bottomSurfaceHeight(m.width) != m.bottomSurfaceLayoutHeight
+		if tabChromeChanged || bottomSurfaceHeightChanged {
 			cmd := m.resizeAll()
 			return m, cmd
 		}
@@ -1857,6 +1861,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 
 	// Calculate chrome height (everything that isn't content or editor).
 	bottomSurfaceHeight := m.bottomSurfaceHeight(width)
+	m.bottomSurfaceLayoutHeight = bottomSurfaceHeight
 	chromeHeight := m.tabBarHeight() + m.statusBarHeight() + bottomSurfaceHeight + 1 // +1 for resize handle
 
 	// Calculate editor height
