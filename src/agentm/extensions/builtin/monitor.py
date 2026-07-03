@@ -5,7 +5,7 @@ third producer atom on the inbox spine after ``background_exec`` (whose
 lifecycle / cancel / stale wiring this atom mirrors so we don't relearn
 step-3's hard lessons).
 
-What it exposes (all four are tools the agent calls):
+Agent-facing tool surface:
 
 * :func:`schedule_wakeup(delay, note=None)` — one-shot timer. ``await
   asyncio.sleep(delay)`` then post a ``source="monitor"`` inbox item with
@@ -14,7 +14,7 @@ What it exposes (all four are tools the agent calls):
   each fire post a ``source="monitor"`` item with ``payload.kind="channel"``
   under a stable ``dedup_key`` so repeated fires REPLACE the prior undrained
   item rather than stacking (same discipline as the step-3 ticker).
-* :func:`create_monitor(condition, poll_interval=…, note=None)` — recurring
+* :func:`create_monitor(condition, poll_interval=..., note=None)` — recurring
   condition poll (#178). Every ``poll_interval`` seconds it posts a
   ``source="monitor"`` item with ``payload.kind="condition"`` carrying the
   free-text ``condition`` so the AGENT re-evaluates it at the turn boundary
@@ -22,15 +22,21 @@ What it exposes (all four are tools the agent calls):
   no LLM); it is the metronome that keeps re-surfacing the predicate. Same
   ``dedup_key`` replace + per-monitor cancel + stale-guard discipline as the
   channel form.
+* :func:`create_monitor(cron, note, recurring=True)` — persistent gateway cron
+  monitor when the host injected ``gateway_scheduler``. The atom remains the
+  agent-facing control surface; the gateway owns persistence, route metadata,
+  and waking a finished session by posting back through the normal inbox path.
 * :func:`list_monitors` — every live monitor's id / kind / watch / status.
 * :func:`cancel_monitor(monitor_id)` — cancels the wakeup task or unsubscribes
-  the channel handler. Idempotent (unknown id → tool-error result).
+  the channel handler; for ``schedule:<job_id>`` it deletes the durable gateway
+  schedule. Idempotent (unknown id -> tool-error result).
 
-**Scope.** ``create_monitor`` supports two mutually-exclusive forms: a
+**Scope.** ``create_monitor`` supports three mutually-exclusive forms: a
 bus-channel subscription (``watch``) and a recurring condition poll
-(``condition``). Passing both, or neither, returns a tool-error ``ToolResult``
-so the agent sees the misuse explicitly (no ``NotImplementedError`` reaches the
-tool surface).
+(``condition``), plus a persistent gateway cron schedule (``cron``) when the
+host provides the optional scheduler service. Passing more than one form, or no
+form, returns a tool-error ``ToolResult`` so the agent sees the misuse
+explicitly (no ``NotImplementedError`` reaches the tool surface).
 
 Architecture: a single :class:`_MonitorManager` owns the per-session in-memory
 state (the registry of live monitors, the asyncio tasks, the channel
@@ -39,8 +45,9 @@ unsubscribe callables) so ``install`` stays a thin wire-up, mirroring
 
 §11: single file; module-level ``MANIFEST`` + ``install(api, config)``; no
 atom→atom imports; ``core.lib`` / ``core.abi`` only; no ``core.runtime.*`` /
-``core._internal``. State is per-session and in-memory only (no persistence —
-step-1 decision #5: a restart regenerates monitors via re-prompting).
+``core._internal``. Non-cron state is per-session and in-memory only; cron
+state is optional host state accessed only through the injected scheduler
+service.
 """
 
 from __future__ import annotations
@@ -49,6 +56,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass
+from inspect import isawaitable
 from typing import Any, Literal
 
 from loguru import logger
@@ -58,6 +66,7 @@ from agentm.core.abi import (
     ExtensionAPI,
     ExtensionStaleError,
     FunctionTool,
+    GATEWAY_SCHEDULER_SERVICE,
     SessionShutdownEvent,
     TextContent,
     ToolResult,
@@ -82,7 +91,9 @@ _Status = Literal["pending", "fired", "active", "cancelled"]
 _KIND_WAKEUP: Literal["wakeup"] = "wakeup"
 _KIND_CHANNEL: Literal["channel"] = "channel"
 _KIND_CONDITION: Literal["condition"] = "condition"
-_Kind = Literal["wakeup", "channel", "condition"]
+_KIND_CRON: Literal["cron"] = "cron"
+_Kind = Literal["wakeup", "channel", "condition", "cron"]
+_GATEWAY_SCHEDULE_PREFIX = "schedule:"
 
 # Default seconds between condition-poll fires (#178). A scenario can widen the
 # floor via ``condition_poll_min_seconds``; the per-call ``poll_interval`` is
@@ -155,8 +166,9 @@ MANIFEST = ExtensionManifest(
     name="monitor",
     description=(
         "Agent-defined wakeups (schedule_wakeup) and bus-channel subscriptions "
-        "(create_monitor) that push to the session inbox. Per-session, "
-        "in-memory state only."
+        "(create_monitor) that push to the session inbox. Cron monitors use "
+        "the optional gateway scheduler service for durable host-level "
+        "wakeups; other monitors are per-session, in-memory state only."
     ),
     registers=(
         "tool:schedule_wakeup",
@@ -236,6 +248,41 @@ def _monitor_view(state: _Monitor) -> dict[str, Any]:
         view["note"] = state.note
     return view
 
+def _schedule_monitor_id(job_id: Any) -> str:
+    return f"{_GATEWAY_SCHEDULE_PREFIX}{job_id}"
+
+def _schedule_job_id(monitor_id: str) -> str | None:
+    if not monitor_id.startswith(_GATEWAY_SCHEDULE_PREFIX):
+        return None
+    job_id = monitor_id.removeprefix(_GATEWAY_SCHEDULE_PREFIX)
+    return job_id or None
+
+def _schedule_view(job: dict[str, Any]) -> dict[str, Any]:
+    job_id = str(job.get("id") or "")
+    view: dict[str, Any] = {
+        "monitor_id": _schedule_monitor_id(job_id),
+        "kind": _KIND_CRON,
+        "status": _ACTIVE if job.get("enabled", True) else _CANCELLED,
+        "persistent": True,
+    }
+    if job_id:
+        view["schedule_id"] = job_id
+    if job.get("cron") is not None:
+        view["cron"] = str(job["cron"])
+    if job.get("prompt") is not None:
+        view["note"] = str(job["prompt"])
+    if job.get("next_fire_at") is not None:
+        view["next_fire_at"] = job["next_fire_at"]
+    if job.get("recurring") is not None:
+        view["recurring"] = bool(job["recurring"])
+    if job.get("fire_count") is not None:
+        view["fire_count"] = int(job["fire_count"])
+    if job.get("last_fire_at") is not None:
+        view["last_fire_at"] = job["last_fire_at"]
+    if job.get("last_error") is not None:
+        view["last_error"] = str(job["last_error"])
+    return view
+
 def _activity_id(monitor_id: str) -> str:
     return f"monitor:{monitor_id}"
 
@@ -244,6 +291,8 @@ def _monitor_label(state: _Monitor) -> str:
         return "wakeup"
     if state.kind == _KIND_CONDITION:
         return "monitor condition"
+    if state.kind == _KIND_CRON:
+        return "scheduled monitor"
     if state.watch:
         return f"monitor {state.watch}"
     return "monitor"
@@ -309,6 +358,144 @@ class _MonitorManager:
             )
         except ExtensionStaleError:
             return
+
+    def _gateway_scheduler(self) -> Any | None:
+        try:
+            return self._api.get_service(GATEWAY_SCHEDULER_SERVICE)
+        except ExtensionStaleError:
+            return None
+
+    async def _create_cron_monitor(self, args: dict[str, Any], cron: Any) -> ToolResult:
+        """Create a durable gateway schedule bound to this session."""
+
+        if not isinstance(cron, str) or not cron.strip():
+            return _tool_result(
+                {"error": "cron must be a non-empty 5-field cron expression"},
+                is_error=True,
+            )
+        if args.get("poll_interval") is not None:
+            return _tool_result(
+                {"error": "poll_interval only applies to condition monitors"},
+                is_error=True,
+            )
+        note = args.get("note")
+        if not isinstance(note, str) or not note.strip():
+            return _tool_result(
+                {"error": "cron monitors require a non-empty note"},
+                is_error=True,
+            )
+        raw_recurring = args.get("recurring", True)
+        if not isinstance(raw_recurring, bool):
+            return _tool_result(
+                {"error": "recurring must be a boolean"},
+                is_error=True,
+            )
+        service = self._gateway_scheduler()
+        create = getattr(service, "create", None) if service is not None else None
+        if not callable(create):
+            return _tool_result(
+                {
+                    "error": (
+                        "persistent cron monitors require the gateway scheduler "
+                        "service"
+                    )
+                },
+                is_error=True,
+            )
+        try:
+            result = create(
+                cron=cron.strip(),
+                prompt=note.strip(),
+                recurring=raw_recurring,
+            )
+            if isawaitable(result):
+                result = await result
+        except Exception as exc:  # noqa: BLE001
+            return _tool_result({"error": str(exc)}, is_error=True)
+        if not isinstance(result, dict):
+            return _tool_result(
+                {"error": "gateway scheduler returned an invalid response"},
+                is_error=True,
+            )
+        if result.get("error"):
+            return _tool_result({"error": str(result["error"])}, is_error=True)
+        job_id = str(result.get("id") or "")
+        if not job_id:
+            return _tool_result(
+                {"error": "gateway scheduler returned a job without an id"},
+                is_error=True,
+            )
+        state = _Monitor(
+            monitor_id=_schedule_monitor_id(job_id),
+            kind=_KIND_CRON,
+            status=_ACTIVE,
+            note=note.strip(),
+        )
+        self._emit_activity(state)
+        view = _schedule_view(result)
+        return _tool_result(view)
+
+    async def _list_gateway_monitors(self) -> list[dict[str, Any]]:
+        service = self._gateway_scheduler()
+        list_jobs = getattr(service, "list", None) if service is not None else None
+        if not callable(list_jobs):
+            return []
+        try:
+            result = list_jobs()
+            if isawaitable(result):
+                result = await result
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("monitor: gateway schedule list failed: {}", exc)
+            return []
+        if not isinstance(result, list):
+            return []
+        views: list[dict[str, Any]] = []
+        for row in result:
+            if isinstance(row, dict):
+                views.append(_schedule_view(row))
+        return views
+
+    async def _cancel_gateway_monitor(self, monitor_id: str) -> ToolResult | None:
+        job_id = _schedule_job_id(monitor_id)
+        if job_id is None:
+            return None
+        service = self._gateway_scheduler()
+        delete = getattr(service, "delete", None) if service is not None else None
+        if not callable(delete):
+            return _tool_result(
+                {
+                    "error": (
+                        "persistent cron monitors require the gateway scheduler "
+                        "service"
+                    )
+                },
+                is_error=True,
+            )
+        try:
+            result = delete(job_id)
+            if isawaitable(result):
+                result = await result
+        except Exception as exc:  # noqa: BLE001
+            return _tool_result({"error": str(exc)}, is_error=True)
+        if bool(result):
+            state = _Monitor(
+                monitor_id=monitor_id,
+                kind=_KIND_CRON,
+                status=_CANCELLED,
+            )
+            self._emit_activity(state, terminal=True)
+            return _tool_result(
+                {
+                    "monitor_id": monitor_id,
+                    "kind": _KIND_CRON,
+                    "status": _CANCELLED,
+                    "persistent": True,
+                }
+            )
+        return _tool_result(
+            {"error": f"unknown monitor_id: {monitor_id}"},
+            is_error=True,
+        )
 
     # --- producers ---------------------------------------------------------
 
@@ -492,43 +679,48 @@ class _MonitorManager:
             return
 
     async def create_monitor(self, args: dict[str, Any]) -> ToolResult:
-        """Subscribe to a bus channel, OR start a recurring condition poll.
+        """Subscribe to a bus channel, start a condition poll, OR create cron.
 
-        Two mutually-exclusive forms:
+        Three mutually-exclusive forms:
 
         * ``watch`` — subscribe to a bus channel; each fire posts to the inbox.
         * ``condition`` — recurring poll (#178): every ``poll_interval`` seconds
           re-post the free-text predicate so the AGENT re-evaluates it and
           cancels the monitor once satisfied. The atom is the metronome, not the
           evaluator.
+        * ``cron`` — persistent gateway schedule. Requires the host-injected
+          ``gateway_scheduler`` service and a non-empty ``note`` to deliver.
 
-        Passing both or neither is a misuse and returns a tool-error.
+        Passing more than one form, or none, is a misuse and returns a
+        tool-error.
         """
 
         watch = args.get("watch")
         condition = args.get("condition")
-        if watch is not None and condition is not None:
+        cron = args.get("cron")
+        selected = sum(
+            value is not None
+            for value in (
+                watch,
+                condition,
+                cron,
+            )
+        )
+        if selected != 1:
             return _tool_result(
                 {
                     "error": (
-                        "create_monitor takes EITHER 'watch' (bus channel) OR "
-                        "'condition' (recurring poll), not both"
+                        "create_monitor takes exactly one of 'watch' (bus "
+                        "channel), 'condition' (recurring poll), or 'cron' "
+                        "(persistent gateway schedule)"
                     )
                 },
                 is_error=True,
             )
         if condition is not None:
             return await self._create_condition_monitor(args, condition)
-        if watch is None:
-            return _tool_result(
-                {
-                    "error": (
-                        "create_monitor needs a 'watch' (bus channel name) or a "
-                        "'condition' (free-text predicate to poll)"
-                    )
-                },
-                is_error=True,
-            )
+        if cron is not None:
+            return await self._create_cron_monitor(args, cron)
         if not isinstance(watch, str) or not watch:
             return _tool_result(
                 {"error": "watch must be a non-empty bus channel name (str)"},
@@ -610,22 +802,28 @@ class _MonitorManager:
         )
 
     async def list_monitors(self, _args: dict[str, Any]) -> ToolResult:
+        monitors = [_monitor_view(state) for state in self._monitors.values()]
+        monitors.extend(await self._list_gateway_monitors())
         return _tool_result(
-            {"monitors": [_monitor_view(state) for state in self._monitors.values()]}
+            {"monitors": monitors}
         )
 
     async def cancel_monitor(self, args: dict[str, Any]) -> ToolResult:
         """Cancel one monitor — and ONLY that monitor.
 
         Wakeups: cancel the per-monitor ``asyncio.Task``. Channels: call the
-        per-subscription ``Unsubscribe``. Neither path touches the shared
-        session/kernel signal — that conflation was step-3 Major 2 and we do
-        not repeat it here.
+        per-subscription ``Unsubscribe``. Cron jobs: delete the session-scoped
+        gateway schedule. None of these paths touches the shared session/kernel
+        signal — that conflation was step-3 Major 2 and we do not repeat it
+        here.
         """
 
         monitor_id = str(args.get("monitor_id", ""))
         state = self._monitors.get(monitor_id)
         if state is None:
+            gateway_result = await self._cancel_gateway_monitor(monitor_id)
+            if gateway_result is not None:
+                return gateway_result
             return _tool_result(
                 {"error": f"unknown monitor_id: {monitor_id}"}, is_error=True
             )
@@ -721,13 +919,31 @@ class _CreateMonitorParams(BaseModel):
             "until the agent decides it is satisfied and cancels the monitor."
         ),
     )
+    cron: str | None = Field(
+        default=None,
+        description=(
+            "Standard 5-field cron expression for a persistent gateway "
+            "schedule. Requires note; mutually exclusive with watch and "
+            "condition."
+        ),
+    )
     poll_interval: float | None = Field(
         default=None,
         description="Seconds between condition monitor fires.",
     )
+    recurring: bool | None = Field(
+        default=True,
+        description=(
+            "For cron monitors, keep firing on every matching cron tick. If "
+            "false, fire once at the next matching tick."
+        ),
+    )
     note: str | None = Field(
         default=None,
-        description="Free-form note delivered with each fire.",
+        description=(
+            "Free-form note delivered with each fire. Required for cron "
+            "monitors."
+        ),
     )
 
 class _ListMonitorsParams(BaseModel):
@@ -763,7 +979,8 @@ def install(api: ExtensionAPI, config: MonitorConfig) -> None:
                 "source='monitor' item to the session inbox under a stable "
                 "dedup_key (latest fire replaces the prior undrained one). "
                 "Alternatively pass condition + optional poll_interval for a "
-                "recurring condition-poll monitor."
+                "recurring condition-poll monitor, or cron + note for a "
+                "persistent gateway-backed monitor."
             ),
             parameters=pydantic_to_tool_schema(_CreateMonitorParams),
             fn=manager.create_monitor,

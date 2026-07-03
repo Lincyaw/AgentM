@@ -98,6 +98,15 @@ resolves a ``config.toml`` profile name to a provider tuple suitable for
 ``workflow`` for its ``model=`` parameter) use this service instead of
 importing presenter-layer modules directly."""
 
+GATEWAY_SCHEDULER_SERVICE: Final = "gateway_scheduler"
+"""Gateway-injected, session-bound durable schedule service.
+
+Atoms use this optional service for persistent host-level wakeups while keeping
+gateway implementation details out of the atom boundary. The gateway binds the
+service to the current ``session_key`` and route metadata before atom install,
+so consumers cannot target arbitrary sessions.
+"""
+
 PROMPT_TEMPLATES_SERVICE: Final = "prompt_templates"
 """In-memory :class:`PromptRegistry` published by ``prompt_templates`` atom."""
 
@@ -131,6 +140,7 @@ __all__ = [
     "COMMAND_PARSER",
     "COMPACTION_PROMPTS",
     "COST_QUERY_SERVICE",
+    "GATEWAY_SCHEDULER_SERVICE",
     "LOOP_BUDGET_SERVICE",
     "MODEL_RESOLVER_SERVICE",
     "PARENT_PROVIDER_CONFIG_KEY",

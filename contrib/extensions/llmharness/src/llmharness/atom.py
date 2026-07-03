@@ -344,9 +344,12 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
                         user_prompt = text
                         break
             if isinstance(msg, ToolResultMessage):
-                for block in msg.content:
-                    if isinstance(block, ToolResultBlock) and not block.is_error:
-                        for sub in block.content:
+                for result_block in msg.content:
+                    if (
+                        isinstance(result_block, ToolResultBlock)
+                        and not result_block.is_error
+                    ):
+                        for sub in result_block.content:
                             text = getattr(sub, "text", None)
                             if isinstance(text, str) and len(text) > 200 and (
                                 "instruction" in text.lower()[:100]

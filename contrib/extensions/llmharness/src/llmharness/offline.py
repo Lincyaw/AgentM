@@ -21,6 +21,7 @@ from agentm.core.abi import (
     ToolCallBlock,
 )
 from agentm.core.runtime import AgentSession
+from loguru import logger
 
 from llmharness.agents.auditor.tools import SUBMIT_VERDICT_TOOL_NAME
 from llmharness.schema import Reminder, Verdict

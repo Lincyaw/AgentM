@@ -343,6 +343,25 @@ requirements:
       - REQ-096-cli-provider-session-seams
       - REQ-103-rca-reminder-case-study-export
 
+  - id: REQ-105-llmharness-auditor-atom
+    title: LLMHarness auditor atom surfaces trajectory reminders
+    description: >
+      The llmharness contrib atom installs turn-end and loop-decision hooks
+      that periodically run an auditor over the live trajectory, maintain
+      cumulative audit state, and inject system-reminder guidance without
+      owning the main session driver. Optional methodology generation extracts
+      task-spec text from user and tool-result messages while staying type
+      clean under the llmharness workspace checks.
+    priority: P2
+    status: implemented
+    confidence: inferred
+    code:
+      - path: contrib/extensions/llmharness/src/llmharness/atom.py
+    tests: []
+    docs: []
+    depends_on:
+      - REQ-087-builtin-atoms-extension-api
+
   - id: REQ-089-file-tool-io-seams
     title: File tool atoms use documented read and write seams
     description: >
@@ -670,6 +689,7 @@ requirements:
     tests: []
     docs:
       - path: .claude/designs/single-process-gateway.md
+      - path: .claude/designs/session-inbox.md
       - path: .claude/designs/textual-tui.md
     depends_on:
       - REQ-096-cli-provider-session-seams
@@ -737,12 +757,19 @@ requirements:
       session's inbox through the same path as external inbound messages.
       If the target session is not live, the gateway resumes it via
       ``ChatSessionMap``; if the session is already running, the prompt waits
-      for the normal inbox turn boundary. Session-local ``monitor`` timers stay
-      in-memory and do not manage host crontab state.
+      for the normal inbox turn boundary. Users can manage jobs through
+      gateway `/schedule`, and agents can create session-bound durable cron
+      monitors through ``create_monitor(cron=..., note=...)`` when the gateway
+      injects the scheduler service. Session-local ``monitor`` wakeups,
+      condition polls, and channel subscriptions stay in-memory and do not
+      manage host crontab state.
     priority: P1
     status: implemented
     confidence: inferred
     code:
+      - path: src/agentm/core/abi/roles.py
+      - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/extensions/builtin/monitor.py
       - path: src/agentm/gateway/scheduler.py
       - path: src/agentm/gateway/runtime.py
       - path: src/agentm/gateway/cli.py
@@ -1244,22 +1271,28 @@ requirements:
     title: Builtin monitor atom — agent-defined wakeups + channel subscriptions
     description: >
       The ``monitor`` atom exposes ``schedule_wakeup`` (one-shot timer →
-      inbox push at now+delay) and ``create_monitor`` in two
+      inbox push at now+delay) and ``create_monitor`` in three
       mutually-exclusive forms: a bus channel subscription (``watch`` →
       inbox push on each fire) and a recurring condition poll (``condition``
       → re-post the free-text predicate every ``poll_interval`` seconds so
-      the agent re-evaluates and cancels when satisfied; #178). Both fire
+      the agent re-evaluates and cancels when satisfied; #178), plus a
+      persistent gateway cron schedule (``cron`` + required ``note``) when the
+      host injects the optional scheduler service. Non-cron monitors fire
       under a stable dedup_key. ``create_monitor`` refuses kernel-control
       channels at the call site (denylist of channels like ``context`` /
       ``decide_turn_action`` that would create an unbreakable inbox/loop
       spin) and clamps a condition ``poll_interval`` up to a configured floor
-      so the agent cannot wedge a tight re-poll spin. Per-session in-memory
-      state only; a restart regenerates monitors via re-prompting.
+      so the agent cannot wedge a tight re-poll spin. Non-cron state is
+      per-session and in-memory; cron state is durable gateway state and can be
+      deleted through ``cancel_monitor(schedule:<job_id>)``.
     priority: P0
     status: implemented
     confidence: confirmed
     code:
+      - path: src/agentm/core/abi/roles.py
+      - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/extensions/builtin/monitor.py
+      - path: src/agentm/gateway/runtime.py
     tests: []
     docs:
       - path: .claude/designs/session-inbox.md

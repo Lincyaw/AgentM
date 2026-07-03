@@ -21,7 +21,7 @@ What survives, on first principles:
 | `chat_client` peer kind | Three (feishu, terminal, future slack/discord) ship; vendor SDK isolation. |
 | Per-session AgentSession in memory | The session IS its in-memory state; persistence is for crash recovery. |
 | `ChatSessionMap` (session_key → session_id) | Long-lived; survives daemon restart so resume-from-history works. |
-| Gateway schedule store (`schedules.json`) | Durable host-level wakeups belong to the long-lived gateway, not to per-session monitor atoms. |
+| Gateway schedule store (`schedules.json`) | Durable host-level wakeups belong to the long-lived gateway. The `monitor` atom can request them only through a session-bound gateway service. |
 
 What is deleted, with prejudice:
 
@@ -336,7 +336,7 @@ Single concern: intercept `inbound` whose `body.content` starts with `/`.
 | `/end` | `SessionManager.shutdown_session(session_key)`; **also** clear `ChatSessionMap[session_key]`; reply confirmation. Next message starts a fresh session. |
 | `/model [name]` | With no args, list configured model profiles and mark the current `session_key`'s active profile. With a name, validate the profile, store a per-`session_key` factory override, shut down the current session, clear the chat mapping, and let the next user message create a fresh session under the selected model. |
 | `/scenario [name]` | With no args, list discoverable scenarios and mark the current `session_key`'s active scenario. With a name, validate via `validate_scenario(name)`, store a per-`session_key` scenario override, shut down the current session, clear the chat mapping, and let the next user message create a fresh session under the selected scenario. |
-| `/schedule ...` | Manage durable gateway-owned scheduled prompts for the current `session_key`. Jobs are persisted in `schedules.json`, carry the route metadata needed to reconstruct an inbound, and fire by enqueueing a synthetic prompt through the same SessionManager path as external messages. This is distinct from the `monitor` atom's in-memory per-session wakeups. |
+| `/schedule ...` | Manage durable gateway-owned scheduled prompts for the current `session_key`. Jobs are persisted in `schedules.json`, carry the route metadata needed to reconstruct an inbound, and fire by enqueueing a synthetic prompt through the same SessionManager path as external messages. The same store is exposed to the `monitor` atom through a session-bound `gateway_scheduler` service, while non-cron monitor timers remain in-memory per-session state. |
 | `/skill:X`, `/<markdown_cmd>` | Look up handler, expand body, replace `env.body.content` with expanded text, mark `metadata.expanded_from = "/skill:X"`, fall through to `PROMPT_SESSION` as a normal inbound. |
 | `/atom:install X`, `/atom:uninstall X` | `sess.install_atom(X)` / `sess.uninstall_atom(X)` directly. Reply confirmation. |
 | Unknown `/foo` | Reply `diagnostic_error{"Unknown command: /foo"}`. Never propagate to LLM. |

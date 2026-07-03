@@ -21,6 +21,7 @@ from typing import Any, Literal
 
 from loguru import logger
 
+from agentm.core.abi import GATEWAY_SCHEDULER_SERVICE
 from agentm.gateway.approval import ApprovalManager
 from agentm.gateway.chat_session_map import ChatSessionMap
 from agentm.gateway.child_registry import ChildSessionRegistry
@@ -116,6 +117,61 @@ def route_targets(
             return session_matching
     matching = [p for p in peers if peer_channels.get(p.peer_id) == target_channel]
     return matching if matching else peers
+
+
+@dataclass(slots=True)
+class _BoundGatewaySchedulerService:
+    """Session-scoped schedule service exposed to atoms.
+
+    The monitor atom sees only this narrow service, not gateway internals. Route
+    metadata comes from the mutable turn context that SessionManager updates on
+    each inbound, so schedules created by the model target the same chat/thread
+    that is currently driving the session.
+    """
+
+    scheduler: GatewayScheduler
+    session_key: str
+    turn_context: dict[str, Any]
+    active_scenario: Callable[[], str]
+
+    def create(
+        self,
+        *,
+        cron: str,
+        prompt: str,
+        recurring: bool = True,
+    ) -> dict[str, Any]:
+        channel = str(self.turn_context.get("channel") or "")
+        chat_id = str(self.turn_context.get("chat_id") or "")
+        if not channel or not chat_id:
+            return {"error": "gateway scheduler route context is unavailable"}
+        thread_id_raw = self.turn_context.get("thread_id")
+        sender_id = str(self.turn_context.get("sender_id") or "")
+        scenario = self.active_scenario() or None
+        try:
+            job = self.scheduler.create(
+                session_key=self.session_key,
+                channel=channel,
+                chat_id=chat_id,
+                thread_id=str(thread_id_raw) if thread_id_raw is not None else None,
+                sender_id=sender_id,
+                scenario=scenario,
+                cron=cron,
+                prompt=prompt,
+                recurring=recurring,
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return job.to_dict()
+
+    def list(self) -> list[dict[str, Any]]:
+        return [
+            job.to_dict()
+            for job in self.scheduler.list(session_key=self.session_key)
+        ]
+
+    def delete(self, job_id: str) -> bool:
+        return self.scheduler.delete(job_id, session_key=self.session_key)
 
 
 class GatewayRuntime:
@@ -214,6 +270,20 @@ class GatewayRuntime:
         resume: str | None,
         wire_services: dict[str, Any],
     ) -> Any:
+        if self._scheduler is not None:
+            turn_context = wire_services.get("turn_context")
+            if isinstance(turn_context, dict):
+                def active_scenario_for_session() -> str:
+                    return self._active_scenario_name(session_key)
+
+                wire_services[GATEWAY_SCHEDULER_SERVICE] = (
+                    _BoundGatewaySchedulerService(
+                        scheduler=self._scheduler,
+                        session_key=session_key,
+                        turn_context=turn_context,
+                        active_scenario=active_scenario_for_session,
+                    )
+                )
         factory = self._session_model_factories.get(session_key)
         if factory is None:
             model_name = self._session_model_names.get(

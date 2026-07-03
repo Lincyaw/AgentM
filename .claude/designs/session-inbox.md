@@ -252,10 +252,15 @@ long-turn agent never finds a pile of stale status lines.
 
 ### `monitor` — agent-defined subscriptions and wakeups
 
-Tools `schedule_wakeup(delay)` (one-shot timer → inbox push), `create_monitor(watch=…)`
-(subscribe a bus channel or poll a condition, push on fire), `list_monitors`,
-`cancel_monitor`. Each monitor is just another inbox producer. Maps to `ScheduleWakeup`
-/ `Monitor` / `CronCreate`.
+Tools `schedule_wakeup(delay)` (one-shot timer -> inbox push),
+`create_monitor(watch=...)` (subscribe a bus channel),
+`create_monitor(condition=...)` (poll a condition), `create_monitor(cron=...,
+note=...)` (persistent gateway cron schedule when the host injected
+`gateway_scheduler`), `list_monitors`, `cancel_monitor`. Each monitor is just
+another inbox producer from the agent's point of view. Non-cron monitors are
+per-session in-memory state; cron monitors are stored by the gateway and
+identified to the agent as `schedule:<job_id>`, so the same `cancel_monitor`
+tool can delete durable schedules.
 
 ### `sub_agent` refactor — sit on the shared substrate
 
@@ -320,6 +325,7 @@ loading the same atoms, so `background_exec` + `monitor` apply recursively.
    **Done** — the persistent driver + `prompt`/`tick` sugar + interrupt landed
    with #176. Follow-ups closed: terminate-from-background routes through
    `Stop(ToolTerminated)` via `InboxItem.terminal` (#177); `create_monitor`
-   gained the condition-polling form (#178); the one-shot `agentm -p` CLI waits
+   gained the condition-polling form (#178) and later a gateway-backed
+   persistent cron form; the one-shot `agentm -p` CLI waits
    `AgentSession.idle()` (driver parked + inbox empty + no tracked background
    unit) before exiting so late completions are delivered, not dropped (#179).
