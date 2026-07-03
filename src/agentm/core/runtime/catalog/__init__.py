@@ -71,10 +71,14 @@ def list_atoms(*, root: Path | None = None) -> list[CatalogAtomRow]:
 
 @dataclass(frozen=True, slots=True)
 class DefaultProjectLayout:
-    """Default :class:`ProjectLayout` — mirrors today's ``<cwd>/.agentm/...``.
+    """Default :class:`ProjectLayout` for workspace-scoped state.
 
-    A single value object derived from ``cwd``. Constructing one does not
-    touch the filesystem; callers ``mkdir`` lazily as they write.
+    Catalog, project skills, prompt templates, and shared artifacts are rooted
+    under ``<cwd>/.agentm/...``. Observability is deliberately user-scoped via
+    ``resolve_observability_dir`` (normally ``$AGENTM_HOME/observability``) so
+    ordinary session traces do not get written into the source checkout.
+    Constructing the layout does not touch the filesystem; callers ``mkdir``
+    lazily as they write.
     """
 
     cwd: Path

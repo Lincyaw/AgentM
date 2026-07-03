@@ -1096,6 +1096,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/core/abi/project_layout.py
+      - path: src/agentm/core/runtime/catalog/__init__.py
       - path: src/agentm/extensions/builtin/prompt_templates.py
       - path: src/agentm/core/abi/loop.py
       - path: src/agentm/core/abi/tool.py

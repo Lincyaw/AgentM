@@ -58,6 +58,11 @@ We adopt the same shape. Artifacts are files under
 grep them. Provenance lives in a small `.meta.json` sidecar per artifact.
 There is no SQLite, no FTS, no ORM.
 
+This is intentionally different from session trace / observability storage:
+conversation trajectories and runtime logs use `$AGENTM_HOME/observability`
+by default, while artifacts are explicit workspace deliverables that agents
+and operators inspect alongside the repository under analysis.
+
 This is also a hybrid memory architecture in the literature's vocabulary:
 
 - **Tier 1 — private**: each session's own message history (already exists).
@@ -271,7 +276,8 @@ What this design does **not** address:
 - Binary artifacts: out of scope (text only).
 - ACL / privacy: every session in the tree sees every artifact. Use a
   separate root session for confidential work.
-- Garbage collection: operator-driven `rm -rf .agentm/artifacts/<old_root>/`.
+- Garbage collection: operator-driven `rm -rf .agentm/artifacts/<old_root>/`
+  from the workspace that owns those artifacts.
   Optional time-based sweep can be a follow-up.
 - Concurrent writers from multiple processes: today's `sub_agent` runs
   children in-process, so an asyncio.Lock around id allocation suffices.
@@ -286,8 +292,8 @@ What this design does **not** address:
   sessions.
 - Persona files without `artifact_kinds` frontmatter remain valid.
 - No data migration; the directory is created on first write.
-- Operator post-mortem: `cd .agentm/artifacts/<root>; ls; cat art_003*.md`
-  works without any tooling.
+- Operator post-mortem: `cd <workspace>/.agentm/artifacts/<root>; ls; cat
+  art_003*.md` works without any tooling.
 
 ## Effort estimate
 
