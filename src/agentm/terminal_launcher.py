@@ -111,8 +111,6 @@ def _start_gateway(config: TerminalLaunchConfig) -> _GatewayProcess:
 def _run_terminal_peer(config: TerminalLaunchConfig, *, connect_url: str) -> int:
     executable = _find_executable(config.terminal_bin)
     args = [executable, "--connect", connect_url]
-    if not _has_sidebar_flag(config.terminal_args):
-        args.append("--hide-sidebar")
     if config.scenario:
         args.extend(["--scenario", config.scenario])
     if config.terminal_log is not None:
@@ -228,7 +226,3 @@ def _find_executable(value: str) -> str:
     if found:
         return found
     raise TerminalLaunchError(f"executable not found on PATH: {value}")
-
-
-def _has_sidebar_flag(args: list[str]) -> bool:
-    return "--hide-sidebar" in args
