@@ -550,7 +550,8 @@ def _find_manifest_path(api: ExtensionAPI) -> Path | None:
     for path in candidates:
         try:
             loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
+        except (OSError, yaml.YAMLError) as exc:
+            logger.debug("adapt: failed to parse manifest {}: {}", path, exc)
             loaded = None
         if isinstance(loaded, dict) and loaded.get("name") == wanted:
             return path
@@ -860,7 +861,7 @@ def install(api: ExtensionAPI, config: AdaptConfig) -> None:
         )
 
     async def _read_operations_text(path: str) -> str:
-        data = await api.get_operations().file.read_file(path)
+        data = await api.get_resource_writer().read(path)
         return data.decode("utf-8")
 
     def _install_source(

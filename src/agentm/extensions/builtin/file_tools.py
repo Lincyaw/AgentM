@@ -28,7 +28,6 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from agentm.core.abi import (
     ExtensionAPI,
-    FileOperations,
     FunctionTool,
     TOOL_RESULT_FORMAT_METADATA_KEY,
     TextContent,
@@ -52,7 +51,6 @@ _ALL_TOOLS: Final[frozenset[str]] = frozenset({"read", "write", "edit"})
 class FileToolsConfig(BaseModel):
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
-    file_ops: Any = None
     tools: list[str] | None = None
     allow_globs: list[str] | None = None
     deny_globs: list[str] | None = None
@@ -178,8 +176,6 @@ def _check_binary(path: str) -> str | None:
         )
     return None
 
-def _coerce_file_ops(api: ExtensionAPI, candidate: Any) -> FileOperations:
-    return candidate if candidate is not None else api.get_operations().file
 
 def _coerce_globs(value: Any, cwd: str) -> tuple[str, ...]:
     """Anchor relative glob patterns against the session ``cwd``."""
@@ -326,28 +322,23 @@ def _snippet_around(content: str, start_line: int, end_line: int) -> str:
     return "\n".join(numbered)
 
 async def _update_read_state_after_edit(
-    normalized_path: str, file_ops: FileOperations
+    normalized_path: str, writer: Any,
 ) -> None:
     """Refresh read_state for *normalized_path* after a successful edit."""
     old = get_read_state(normalized_path)
     total_lines = old.total_lines if old else 0
     is_partial = old.is_partial if old else False
+    chash = old.content_hash if old else ""
     try:
-        fs = await file_ops.stat(normalized_path)
-        mtime_ns = fs.mtime_ns
-    except OSError:
-        mtime_ns = 0
-    try:
-        raw = await file_ops.read_file(normalized_path)
+        raw = await writer.read(normalized_path)
         chash = content_hash_for(raw)
         total_lines = raw.decode("utf-8", errors="replace").count("\n") + 1
-    except OSError:
-        chash = ""
+    except (OSError, FileNotFoundError) as exc:
+        logger.warning("file_tools: post-edit read({}) failed: {}", normalized_path, exc)
     record_read(
         normalized_path,
         total_lines=total_lines,
         is_partial=is_partial,
-        mtime_ns=mtime_ns,
         content_hash=chash,
     )
 
@@ -416,19 +407,6 @@ _WRITE_PARAMETERS: Final = {
 # ---------------------------------------------------------------------------
 
 def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
-    # Lazy-resolve file_ops and writer: at install time, the Operations
-    # bundle or ResourceWriter may not be registered yet (depends on atom
-    # load order). Deferring to first tool invocation avoids an install-time
-    # ordering dependency while keeping requires=() (any Operations
-    # provider is acceptable, not just the local backend).
-    _file_ops_cfg = config.file_ops
-    _file_ops_cache: list[FileOperations] = []
-
-    def _get_file_ops() -> FileOperations:
-        if not _file_ops_cache:
-            _file_ops_cache.append(_coerce_file_ops(api, _file_ops_cfg))
-        return _file_ops_cache[0]
-
     _writer_cache: list[Any] = []
 
     def _get_writer() -> Any:
@@ -477,7 +455,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             return _error(binary_error)
 
         try:
-            data = await _get_file_ops().read_file(path)
+            data = await _get_writer().read(path)
         except Exception as exc:
             logger.debug("file_tools: read failed for {}: {}", path, exc)
             return _error(f"Failed to read {path!r}: {exc}")
@@ -511,17 +489,12 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
                 or (limit is not None and limit > 0 and offset + limit < total)
             )
 
-            record_kwargs: dict[str, Any] = {
-                "total_lines": total,
-                "is_partial": is_partial,
-                "content_hash": content_hash_for(data),
-            }
-            try:
-                fs = await _get_file_ops().stat(path)
-                record_kwargs["mtime_ns"] = fs.mtime_ns
-            except OSError as exc:
-                logger.debug("file_tools: read stat({}) failed: {}", path, exc)
-            record_read(_read_state_path(path, api.cwd), **record_kwargs)
+            record_read(
+                _read_state_path(path, api.cwd),
+                total_lines=total,
+                is_partial=is_partial,
+                content_hash=content_hash_for(data),
+            )
 
             numbered = [
                 f"{offset + i + 1}\t{line}"
@@ -612,44 +585,34 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
                     "Read the full file before overwriting."
                 )
 
-            # Gate 3: mtime must not have changed since the read.
-            recorded_mtime = getattr(rs, "mtime_ns", None)
-            if recorded_mtime:
+            # Gate 3: content must not have changed since the read.
+            if rs.content_hash:
                 try:
-                    fs = await _get_file_ops().stat(path)
-                    current_mtime: int | None = fs.mtime_ns
-                except OSError:
-                    current_mtime = None
-                if current_mtime is not None and current_mtime != recorded_mtime:
+                    current_data = await writer.read(path)
+                    current_hash = content_hash_for(current_data)
+                except (OSError, FileNotFoundError):
+                    current_hash = None
+                if current_hash is not None and current_hash != rs.content_hash:
                     return _error(
                         "File has been modified since you read it. "
                         "Read it again before writing."
                     )
 
         try:
+            content_bytes = content.encode("utf-8")
             result = await writer.write(
-                path,
-                content.encode("utf-8"),
-                rationale=rationale,
+                path, content_bytes, rationale=rationale,
             )
             if result.error is not None:
                 return _error(result.error)
 
-            # Post-write: update read_state so subsequent edit calls
-            # see the file as freshly read (full content, not partial).
             total_lines = content.count("\n") + (1 if content else 0)
-            record_kwargs: dict[str, Any] = {
-                "total_lines": total_lines,
-                "is_partial": False,
-            }
-            try:
-                disk_stat = await _get_file_ops().stat(path)
-                record_kwargs["mtime_ns"] = disk_stat.mtime_ns
-            except OSError as exc:
-                # mtime is an optimisation for read-state tracking; omit it if
-                # the post-write stat fails rather than failing the write.
-                logger.debug("file_tools: post-write stat({}) failed: {}", path, exc)
-            record_read(read_state_path, **record_kwargs)
+            record_read(
+                read_state_path,
+                total_lines=total_lines,
+                is_partial=False,
+                content_hash=content_hash_for(content_bytes),
+            )
 
             action = "Updated" if file_exists else "Created"
             byte_count = len(content.encode("utf-8"))
@@ -812,7 +775,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             # Post-edit: update read_state so subsequent edits don't
             # false-positive on "modified since read".
             if not result.is_error:
-                await _update_read_state_after_edit(read_state_path, _get_file_ops())
+                await _update_read_state_after_edit(read_state_path, _get_writer())
 
             return result
         except Exception as exc:

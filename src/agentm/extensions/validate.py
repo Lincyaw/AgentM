@@ -96,7 +96,6 @@ _FORBIDDEN_PREFIXES: tuple[tuple[str, str], ...] = (
 _FORBIDDEN_SERVICE_ISINSTANCE_NAMES: frozenset[str] = frozenset(
     {
         "BashOperations",
-        "FileOperations",
         "GitBackedResourceWriter",
     }
 )

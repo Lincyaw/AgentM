@@ -30,7 +30,7 @@ context trick — keep only relevance hints in prompt, let the agent decide
 what to expand.
 
 The atom is self-contained and §11-compliant: file reads go through
-``api.get_operations().file``; writes go through ``api.get_resource_writer()``.
+``api.get_resource_writer()``.
 Access bookkeeping is intentionally write-through to disk so it survives
 restarts and can be mined by future evolution/query atoms.
 """
@@ -166,7 +166,6 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
     index_in_prompt = config.index_in_system_prompt
     max_index_lines = config.max_index_lines
 
-    file_ops = api.get_operations().file
     writer = api.get_resource_writer()
 
     if index_in_prompt:
@@ -174,7 +173,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         async def _before_agent_start(
             event: BeforeAgentStartEvent,
         ) -> dict[str, str] | None:
-            block = await _build_index_block(file_ops, base_path, max_index_lines)
+            block = await _build_index_block(writer, base_path, max_index_lines)
             if not block:
                 return None
             current = str(event.system or "")
@@ -215,23 +214,23 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
             logger.warning("memory save write failed: {}", exc)
             return _error(f"write failed: {exc}")
 
-        index_error = await _rewrite_index(file_ops, writer, base_path, api.cwd)
+        index_error = await _rewrite_index(writer, base_path, api.cwd)
         if index_error is not None:
             return _error(index_error)
         return _ok(f"saved memory {mem_type}/{name}")
 
     async def _read(args: dict[str, Any]) -> ToolResult:
         name = str(args["name"])
-        path = await _resolve_memory_path(file_ops, base_path, name)
+        path = await _resolve_memory_path(writer, base_path, name)
         if path is None:
             return _error(f"memory {name!r} not found in {base_path}")
         try:
-            data = await file_ops.read_file(str(path))
+            data = await writer.read(str(path))
         except Exception as exc:
             logger.warning("memory read failed for {}: {}", name, exc)
             return _error(f"read failed: {exc}")
         text = data.decode("utf-8", errors="replace")
-        await _record_access(file_ops, writer, base_path, name, api.cwd)
+        await _record_access(writer, base_path, name, api.cwd)
         return _ok(text)
 
     async def _search(args: dict[str, Any]) -> ToolResult:
@@ -242,9 +241,9 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
 
         entries: list[tuple[str, str, str]] = []
         skipped: list[str] = []
-        for path in await _list_memory_files(file_ops, base_path):
+        for path in await _list_memory_files(writer, base_path):
             try:
-                data = await file_ops.read_file(str(path))
+                data = await writer.read(str(path))
             except Exception as exc:  # noqa: BLE001
                 # Skip an unreadable memory file rather than failing the search,
                 # but record it so the model learns recall may be incomplete.
@@ -276,7 +275,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
 
     async def _delete(args: dict[str, Any]) -> ToolResult:
         name = str(args["name"])
-        path = await _resolve_memory_path(file_ops, base_path, name)
+        path = await _resolve_memory_path(writer, base_path, name)
         if path is None:
             return _error(f"memory {name!r} not found in {base_path}")
         rel = _to_cwd_relative(path, api.cwd)
@@ -285,7 +284,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         except Exception as exc:
             logger.warning("memory delete failed for {}: {}", name, exc)
             return _error(f"delete failed: {exc}")
-        index_error = await _rewrite_index(file_ops, writer, base_path, api.cwd)
+        index_error = await _rewrite_index(writer, base_path, api.cwd)
         if index_error is not None:
             return _error(index_error)
         return _ok(f"deleted memory {name}")
@@ -362,9 +361,9 @@ def _serialize_memory(mem_type: str, name: str, description: str, content: str) 
         f"{body}"
     )
 
-async def _list_memory_files(file_ops: Any, base: Path) -> list[Path]:
+async def _list_memory_files(writer: Any, base: Path) -> list[Path]:
     try:
-        names = await file_ops.list_dir(str(base))
+        names = await writer.list_dir(str(base))
     except Exception as exc:
         logger.warning(f"memory: failed to list {base}: {exc}")
         return []
@@ -375,13 +374,13 @@ async def _list_memory_files(file_ops: Any, base: Path) -> list[Path]:
         out.append(base / entry)
     return sorted(out)
 
-async def _resolve_memory_path(file_ops: Any, base: Path, name: str) -> Path | None:
+async def _resolve_memory_path(writer: Any, base: Path, name: str) -> Path | None:
     """Find ``<type>_<name>.md`` without forcing the caller to know the type."""
 
     for mem_type in _VALID_TYPES:
         candidate = base / f"{mem_type}_{name}.md"
         try:
-            if await file_ops.access(str(candidate)):
+            if await writer.exists(str(candidate)):
                 return candidate
         except Exception as exc:  # noqa: BLE001
             # Access check failed for this type variant — try the next one.
@@ -389,12 +388,12 @@ async def _resolve_memory_path(file_ops: Any, base: Path, name: str) -> Path | N
             continue
     return None
 
-async def _build_index_block(file_ops: Any, base: Path, max_lines: int) -> str:
+async def _build_index_block(writer: Any, base: Path, max_lines: int) -> str:
     index_path = base / "MEMORY.md"
     try:
-        if not await file_ops.access(str(index_path)):
+        if not await writer.exists(str(index_path)):
             return ""
-        raw = await file_ops.read_file(str(index_path))
+        raw = await writer.read(str(index_path))
     except Exception as exc:
         logger.warning(f"memory: failed to read index {index_path}: {exc}")
         return ""
@@ -425,7 +424,6 @@ async def _build_index_block(file_ops: Any, base: Path, max_lines: int) -> str:
     )
 
 async def _rewrite_index(
-    file_ops: Any,
     writer: Any,
     base: Path,
     cwd: str,
@@ -433,9 +431,9 @@ async def _rewrite_index(
     """Regenerate MEMORY.md from current files. Returns error string or None."""
 
     entries: list[tuple[str, str, str]] = []
-    for path in await _list_memory_files(file_ops, base):
+    for path in await _list_memory_files(writer, base):
         try:
-            data = await file_ops.read_file(str(path))
+            data = await writer.read(str(path))
         except Exception as exc:  # noqa: BLE001
             # Skip an unreadable memory file when rebuilding the index.
             logger.debug("memory: skipping unreadable file {} during reindex: {}", path, exc)
@@ -460,7 +458,6 @@ async def _rewrite_index(
     return None
 
 async def _record_access(
-    file_ops: Any,
     writer: Any,
     base: Path,
     name: str,
@@ -472,8 +469,8 @@ async def _record_access(
     stats_path = base / "access_stats.json"
     stats: dict[str, Any] = {}
     try:
-        if await file_ops.access(str(stats_path)):
-            raw = await file_ops.read_file(str(stats_path))
+        if await writer.exists(str(stats_path)):
+            raw = await writer.read(str(stats_path))
             stats = json.loads(raw.decode("utf-8", errors="replace"))
             if not isinstance(stats, dict):
                 stats = {}

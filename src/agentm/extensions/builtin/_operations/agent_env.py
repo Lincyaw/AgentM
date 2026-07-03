@@ -1,4 +1,4 @@
-"""ARL agent-env sandbox: ``FileOperations``, ``BashOperations``, ``ResourceWriter``.
+"""ARL agent-env sandbox: ``BashOperations`` and ``ResourceWriter``.
 
 One sandbox per AgentM session. All config comes from :class:`AgentEnvConfig`
 (scenario manifest). Connection parameters (``gateway_url``, ``api_key``) fall

@@ -51,8 +51,7 @@ MANIFEST = ExtensionManifest(
     ),
     registers=("event:before_agent_start",),
     config_schema=PersonaConfig,
-    # Leaf atom: reads via api.get_operations().file, seeds via
-    # api.get_resource_writer(); no atom-to-atom dependency.
+    # Leaf atom: reads and seeds via api.get_resource_writer().
     requires=(),
 )
 
@@ -66,16 +65,16 @@ def _heading(filename: str) -> str:
     return f"## {stem.title()}" if stem else f"## {filename}"
 
 async def _read_file(
-    file_ops: Any,
+    writer: Any,
     path: Path,
     max_tokens: int,
     model_name: str | None,
 ) -> str | None:
     """Return trimmed file text, or ``None`` when absent / empty / unreadable."""
     try:
-        if not await file_ops.access(str(path)):
+        if not await writer.exists(str(path)):
             return None
-        raw = await file_ops.read_file(str(path))
+        raw = await writer.read(str(path))
     except Exception as exc:
         logger.debug("persona: failed to read {}: {}", path, exc)
         return None
@@ -91,7 +90,7 @@ async def _read_file(
     )
 
 async def _build_block(
-    file_ops: Any,
+    writer: Any,
     base: Path,
     files: tuple[str, ...],
     max_tokens: int,
@@ -99,7 +98,7 @@ async def _build_block(
 ) -> str:
     sections: list[str] = []
     for name in files:
-        body = await _read_file(file_ops, base / name, max_tokens, model_name)
+        body = await _read_file(writer, base / name, max_tokens, model_name)
         if body is None:
             continue
         sections.append(f"{_heading(name)}\n\n{body}")
@@ -120,27 +119,19 @@ def _cwd_relative(path: Path, cwd: str) -> str:
         return str(path)
 
 async def _seed_defaults(
-    file_ops: Any,
     writer: Any,
     base: Path,
     cwd: str,
     files: tuple[str, ...],
     defaults: dict[str, str],
 ) -> None:
-    """Write preset content for any listed file that is absent on disk.
-
-    Idempotent and gated on absence: the operator's (or the agent's own)
-    edits are never clobbered, and a deliberately removed file is only
-    re-seeded if it ships a default. Best-effort — a write failure leaves
-    that file unseeded rather than aborting startup.
-    """
     for name in files:
         text = defaults.get(name)
         if not text:
             continue
         path = base / name
         try:
-            if await file_ops.access(str(path)):
+            if await writer.exists(str(path)):
                 continue
             await writer.write(
                 _cwd_relative(path, cwd),
@@ -158,21 +149,16 @@ def install(api: ExtensionAPI, config: PersonaConfig) -> None:
     files = tuple(config.files) if config.files is not None else _DEFAULT_FILES
     max_tokens = config.max_tokens
     defaults = dict(config.defaults) if config.defaults is not None else {}
-    file_ops = api.get_operations().file
-    writer = api.get_resource_writer() if defaults else None
+    writer = api.get_resource_writer()
     seeded = {"done": False}
 
     async def _before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str] | None:
-        # Seed preset files once, before composing — so a fresh workspace
-        # has an identity from the very first reply. The agent may then
-        # edit them with its own tools; the next turn re-reads from disk,
-        # which is how persona changes "reload" without a restart.
-        if writer is not None and not seeded["done"]:
+        if defaults and not seeded["done"]:
             seeded["done"] = True
-            await _seed_defaults(file_ops, writer, base, api.cwd, files, defaults)
+            await _seed_defaults(writer, base, api.cwd, files, defaults)
 
         model_name = api.model.id if api.model is not None else None
-        block = await _build_block(file_ops, base, files, max_tokens, model_name)
+        block = await _build_block(writer, base, files, max_tokens, model_name)
         if not block:
             return None
         current = str(event.system or "")

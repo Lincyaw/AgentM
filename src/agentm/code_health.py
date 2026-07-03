@@ -223,7 +223,7 @@ def _check_atom_raw_io(
                     path=path,
                     line=node.lineno,
                     rule="AM004",
-                    message="raw open() in atom — use api.get_operations().file instead",
+                    message="raw open() in atom — use api.get_resource_writer() instead",
                     severity="warning",
                 ))
         if isinstance(node, ast.Attribute):

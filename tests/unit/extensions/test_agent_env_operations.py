@@ -27,8 +27,8 @@ class _FakeOperationsAPI:
     def set_service(self, name: str, value: str) -> None:
         self.services[name] = value
 
-    def register_operations(self, *, file: Any, bash: Any) -> None:
-        self.operations = {"file": file, "bash": bash}
+    def register_operations(self, *, bash: Any) -> None:
+        self.operations = {"bash": bash}
 
     def register_resource_writer(self, writer: Any) -> None:
         self.resource_writer = writer
@@ -99,7 +99,7 @@ async def test_install_attach_passes_timeout_and_registers_operations(
         "timeout": 123.0,
     }
     assert api.services["agent_env.session_id"] == "sandbox-session"
-    assert set(api.operations) == {"file", "bash"}
+    assert set(api.operations) == {"bash"}
     assert api.resource_writer is not None
 
 
