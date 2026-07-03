@@ -134,6 +134,11 @@ Use .agentm/workgraph. Create domain-sized tasks for this request, then run
 develop and merge until the queue is stable.
 ```
 
+The main agent has skill discovery, prompt templates, history compaction,
+explicit history recall, and terminal TUI snapshot tools. It should load
+relevant skills before unfamiliar workflow, debugging, GitHub, ARL, or
+domain-planning work.
+
 ## Develop Workflow
 
 Run one scheduling pass manually with the saved config:

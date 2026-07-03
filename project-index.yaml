@@ -1210,6 +1210,10 @@ requirements:
       orchestrator agent that talks with the user, maintains a lightweight
       filesystem task bus under ``.agentm/workgraph/``, and launches
       short-lived ARL-backed development workflows for individual ready tasks.
+      The main orchestrator must have skill discovery, prompt templates,
+      history compaction, explicit history recall, and terminal TUI snapshot
+      support so it can operate as a durable chat-facing controller rather than
+      a one-shot worker.
       The task bus must use Markdown task files and simple directories for
       ready, running, verified, merging, merge_pending, done, failed,
       conflicts, locks, and results state instead of a rigid database schema.
