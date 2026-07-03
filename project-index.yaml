@@ -803,6 +803,42 @@ requirements:
     depends_on:
       - REQ-180-terminal-gateway-feedback
 
+  - id: REQ-197-terminal-mainline-workflow-ux
+    title: Terminal TUI keeps parent conversation primary during workflows
+    description: >
+      The Go terminal peer must treat workflow/sub-agent sessions as background
+      activity until the user explicitly opens them, keeping the parent
+      conversation focused instead of exposing a tab-management surface for
+      every spawned worker. Background workflow tabs must be summarized in the
+      status bar with a discoverable next-tab shortcut, become normal tabs once
+      the user switches to them, and preserve their routed transcript for later
+      inspection. The composer should follow chat-first terminal semantics:
+      Enter sends, Enter queues cooperatively while the active agent is busy,
+      Shift+Enter/Ctrl+j inserts a newline, `?` opens shortcuts from an empty
+      editor, `/` and `@` expose inline command/file completions, left arrow
+      cycles agents from an empty editor, Esc interrupts or asks for a second
+      press before clearing input, and Ctrl+C uses a second-press exit
+      confirmation instead of a focus-stealing modal.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/editor/editor.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/statusbar/statusbar.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/tabbar/tabbar.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/messages/tabs.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/service/supervisor/supervisor.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/tui.go
+    tests: []
+    docs:
+      - path: README.md
+      - path: docs/claude-code-tui-observations.md
+      - path: .claude/designs/go-terminal-tui.md
+      - path: .claude/index.yaml
+    depends_on:
+      - REQ-180-terminal-gateway-feedback
+      - REQ-189-terminal-wire-only-tool-surface
+
   - id: REQ-119-core-kernel-residuals
     title: Core kernel removes hard-coded layout literals and dead Tool surface
     description: >

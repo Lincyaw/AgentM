@@ -182,6 +182,42 @@ func (t *TabBar) Height() int {
 	return tabBarHeight
 }
 
+// HasOnlyInactiveBackgroundTabs reports whether all non-active tabs are
+// background workflow tabs. In that state the main conversation is still the
+// primary surface, so the parent TUI can collapse the tab bar into a compact
+// status indicator.
+func (t *TabBar) HasOnlyInactiveBackgroundTabs() bool {
+	if len(t.tabs) <= 1 {
+		return false
+	}
+	for _, tab := range t.tabs {
+		if tab.IsActive {
+			continue
+		}
+		if !tab.Background {
+			return false
+		}
+	}
+	return true
+}
+
+// BackgroundStats returns inactive background workflow counts.
+func (t *TabBar) BackgroundStats() (total, running, needsAttention int) {
+	for _, tab := range t.tabs {
+		if tab.IsActive || !tab.Background {
+			continue
+		}
+		total++
+		if tab.IsRunning {
+			running++
+		}
+		if tab.NeedsAttention {
+			needsAttention++
+		}
+	}
+	return total, running, needsAttention
+}
+
 // IsDragging returns true when a tab drag is in progress.
 func (t *TabBar) IsDragging() bool {
 	return t.drag.active

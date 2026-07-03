@@ -195,7 +195,13 @@ configurable contrib resources under `~/.agentm`). The chat-client peers ship
 as **separate binaries** for vendor-SDK isolation only — `agentm-terminal` and
 `agentm-feishu`. Use `agentm-terminal --simple` for a minimal chat layout, or
 `agentm-terminal --hide-sidebar` to keep the full chrome without the right
-sidebar. Run `agentm <sub> --help` or `<binary> --help` for flags.
+sidebar. In the default terminal UI, workflow/sub-agent tabs open as background
+activity so the parent conversation stays focused; `Ctrl+n` opens the next
+background workflow when needed. `Enter` sends (or queues while the agent is
+busy), `Shift+Enter`/`Ctrl+j` inserts a newline, `?` opens shortcuts from an
+empty editor, `/` and `@` open inline command/file completions, `Esc`
+interrupts or double-press clears input, and `Ctrl+c` exits on the second
+press. Run `agentm <sub> --help` or `<binary> --help` for flags.
 
 ## Five pluggability axes
 

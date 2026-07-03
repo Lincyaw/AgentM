@@ -1,7 +1,8 @@
 # Design: Go Terminal TUI (bubbletea)
 
-**Status**: PLANNED
+**Status**: IMPLEMENTED, evolving
 **Created**: 2026-05-31
+**Updated**: 2026-07-03
 
 ## 0. Purpose
 
@@ -476,3 +477,210 @@ nhooyr.io/websocket                    (WebSocket transport)
 ```
 
 No CGo. Single static binary.
+
+## 10. Claude Code TUI observation log (2026-07-03)
+
+This section summarizes direct TTY observations of Claude Code/CCR behavior so
+future terminal UX changes have a concrete reference instead of relying on
+memory. The complete structured observation log lives at
+`docs/claude-code-tui-observations.md`. Raw ANSI captures are stored under the
+gitignored directory `.agentm/artifacts/ccr-tui/`:
+
+- `.agentm/artifacts/ccr-tui/ccr-main-20260703-171453.typescript`
+- `.agentm/artifacts/ccr-tui/real-dev-flow.typescript`
+- `.agentm/artifacts/ccr-tui/agent-team-flow-command.typescript`
+
+Reproduction commands used:
+
+```bash
+mkdir -p /tmp/agentm-ccr-ui
+git init /tmp/agentm-ccr-ui
+script -q .agentm/artifacts/ccr-tui/ccr-main-$(date +%Y%m%d-%H%M%S).typescript \
+  ccr code --dangerously-skip-permissions --name agentm-ccr-logged
+```
+
+The sessions were driven by sending real keypresses through a PTY, including
+`?`, `/`, `Esc`, `Ctrl+C`, `←`, `↓`, `Enter`, `Ctrl+T`, `Ctrl+O`, `Ctrl+E`,
+and agents-panel task creation. Later captures exercised real tool/edit/test
+work and a successful three-agent workflow, not only login-boundary states.
+
+### 10.1 Main conversation surface
+
+Claude Code keeps the default chat surface simple:
+
+- A welcome/context card appears at the top on a fresh session.
+- The composer is anchored at the bottom and remains the primary control.
+- The status/help line is intentionally sparse. Idle mode shows entries like
+  `? for shortcuts`, `← for agents`, and the model/effort indicator.
+- Permission state has higher priority than generic help. With bypass mode
+  enabled, the bottom line leads with `⏵⏵ bypass permissions on
+  (shift+tab to cycle)` and only then shows secondary affordances.
+- `--dangerously-skip-permissions` does not skip workspace trust. Trust is a
+  separate one-time gate with `Yes, I trust this folder` / `No, exit`.
+
+Implication for AgentM: status chrome should be priority-based, not a static
+list of every available shortcut. Runtime safety/mode state outranks generic
+navigation hints.
+
+### 10.2 Inline discovery instead of modal-first UI
+
+Claude Code uses inline affordances near the composer:
+
+- `?` expands a compact shortcut cheat sheet in-place. It is not a modal and
+  does not take the user away from the transcript.
+- `/` opens an inline command/skill list below the composer and filters as the
+  user types.
+- `@` opens file path completion from the composer.
+- `Esc` and `Ctrl+C` use second-press confirmation:
+  - `Esc` on non-empty input shows an "again to clear" style prompt before
+    clearing.
+  - `Ctrl+C` first shows "Press Ctrl-C again to exit"; the second press exits.
+- `←` uses the same pattern for context switch: first press hints "again for
+  agents", second press opens the agents manager.
+
+Observed shortcut sheet entries included:
+
+| Key | Observed meaning |
+|---|---|
+| `!` | shell mode |
+| `/` | commands |
+| `@` | file paths |
+| `/btw` | side question |
+| `Shift+Enter` | newline |
+| `Shift+Tab` | auto-accept edits / cycle mode depending on state |
+| `Ctrl+O` | verbose output |
+| `Ctrl+T` | tasks / agents view |
+| `Alt+P` | switch model |
+| `Ctrl+S` | stash prompt |
+| `Ctrl+G` | edit in `$EDITOR` |
+| `Ctrl+Z` | suspend |
+| `/keybindings` | customize shortcuts |
+
+Implication for AgentM: the default path should be composer-first. Help,
+commands, files, and agent/session switching should be discoverable inline;
+full dialogs remain useful for dense detail views but should not be the first
+interaction for common commands.
+
+### 10.3 Background agents/task manager
+
+Claude Code's background model is not "one tab per worker" by default.
+Opening agents/tasks presents a full-screen manager with a task list:
+
+```text
+Claude Code v2.1.195
+Opus 4.8 (1M context) · /private/tmp/agentm-ccr-ui
+3 awaiting input · 0 working · 0 completed
+
+Needs input
+✻ ?Create bg-panel.txt wit… login required — run /login 25s
+✻ new session              send a prompt to start        52s
+✻ bg-ui-sample             send a prompt to start         1m
+
+Each row is its own Claude session. Open one to see its work.
+Sessions keep running if you close the terminal.
+
+❯ describe a task for a new session
+```
+
+Important behaviors:
+
+- The manager is a separate view from the main chat, not persistent tab chrome.
+- It summarizes counts by state: awaiting input, working, completed.
+- Rows are grouped by state (`Needs input`, `Working`, etc.).
+- Each row has a short title, status/error text, and age.
+- The bottom composer creates a new background session from a task description.
+- Opening a row switches to that session's normal chat transcript. Returning to
+  the manager is done through the same `←` agents affordance.
+- The agents-panel help is inline. Observed entries included `alt+1-2 to open`,
+  `space to reply`, `ctrl+x to delete`, `ctrl+s to switch views`,
+  `ctrl+t to pin to top`, `ctrl+r to rename`, `@ to mention`, `? to close`,
+  and `esc to quit`.
+- Starting a background session from CLI returns a compact receipt:
+
+```text
+backgrounded · 31a4aabe · bg-ui-sample (idle — send a prompt to start)
+  claude agents             list sessions
+  claude attach 31a4aabe    open in this terminal
+  claude logs 31a4aabe      show recent output
+  claude stop 31a4aabe      stop this session
+```
+
+Implication for AgentM: workflow/sub-agent sessions should be a task manager
+concept, not ordinary tab proliferation. Tabs are still useful when the user
+explicitly opens a background session, but spawned work should first appear as
+compact status plus an agents/tasks view.
+
+### 10.4 Real multi-agent workflow behavior
+
+A later CCR capture forced a real workflow with three agents: planner,
+implementer, and QA reviewer. The main session acted as orchestrator. It
+spawned three background agents, waited for their results, integrated the
+implementer's worktree output, ran tests and the CLI example, and summarized the
+agents used.
+
+Observed live UI:
+
+```text
+Running 3 agents…
+ ├ Plan workflow planner
+ ├ Implement workflow planner · 0 tool uses
+ │  ⎿  Initializing…
+ └ QA review requirements
+
+3 background agents launched (↓ to manage)
+```
+
+Opening the picker with `↓` did not create tabs. It exposed an inline task
+selector:
+
+```text
+↑/↓ to select · Enter to view
+Enter to view · x to stop
+```
+
+Pressing `Enter` on the implementer switched into that agent's normal
+transcript view. The implementer worked in an isolated git worktree under
+`.claude/worktrees/agent-.../`; the main session later copied the result into
+the primary temp repository and removed the worktree. The first cleanup attempt
+failed because the worktree still had modified/untracked files; Claude retried
+with forced worktree removal. This is the concrete git edge case AgentM should
+handle in workflow cleanup.
+
+The detailed transcript controls are two-level:
+
+```text
+Showing detailed transcript · ctrl+o to toggle · ctrl+e to show all verbose
+Showing detailed transcript · ctrl+o to toggle · ctrl+e to collapse verbose
+```
+
+Implication for AgentM: workflow UX should distinguish three surfaces:
+
+1. Main orchestrator transcript.
+2. Inline task picker/status rows for spawned work.
+3. Promoted child transcript view only after explicit selection.
+
+### 10.5 Current AgentM terminal direction
+
+The implemented AgentM terminal changes should continue in this direction:
+
+1. Keep the parent conversation primary. Child workflow sessions open as
+   background activity and do not steal focus.
+2. Collapse background-only child sessions out of tab chrome and summarize them
+   in the status line.
+3. Make the composer the control surface:
+   `Enter` sends, busy `Enter` queues cooperatively, `Shift+Enter`/`Ctrl+J`
+   inserts newline, `?` opens shortcuts, `/` opens commands, `@` opens files,
+   `Esc` interrupts or double-clears input, and `Ctrl+C` exits on second press.
+4. Build a future agents/tasks manager for WorkGraph and sub-agent sessions:
+   state counts, grouped rows, row age/status, open/reply/delete/pin actions,
+   and a bottom composer for launching a new workflow task.
+5. Add a task-detail expansion model:
+   `Ctrl+O` toggles detailed transcript blocks, while `Ctrl+E` toggles fully
+   verbose output within detailed mode.
+6. Preserve raw TTY captures for significant UX investigations in
+   `.agentm/artifacts/<topic>/` and summarize only the decisions in tracked
+   design docs.
+
+Near-term implementation target: keep the current tab-based plumbing for opened
+sessions, but add a first-class task-manager view so hidden background sessions
+are reachable without turning the whole interface into tab management.

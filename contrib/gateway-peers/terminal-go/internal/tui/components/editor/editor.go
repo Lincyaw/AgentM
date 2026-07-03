@@ -662,6 +662,13 @@ func (e *editor) resetAndSendQueued(content string) tea.Cmd {
 	})
 }
 
+func (e *editor) resetAndSendDefault(content string) tea.Cmd {
+	if e.working {
+		return e.resetAndSendQueued(content)
+	}
+	return e.resetAndSend(content)
+}
+
 // configureNewlineKeybinding sets up the appropriate newline keybinding
 // based on terminal keyboard enhancement support.
 func (e *editor) configureNewlineKeybinding() {
@@ -854,7 +861,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				if prev != "" {
 					e.textarea.SetValue(prev)
 					e.textarea.MoveToEnd()
-					cmd := e.resetAndSend(prev)
+					cmd := e.resetAndSendDefault(prev)
 					return e, cmd
 				}
 				return e, nil
@@ -862,7 +869,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 			// Normal enter submit: send current value
 			if value != "" {
-				cmd := e.resetAndSend(value)
+				cmd := e.resetAndSendDefault(value)
 				return e, cmd
 			}
 
@@ -1493,7 +1500,7 @@ func (e *editor) SendContent() tea.Cmd {
 	if value == "" {
 		return nil
 	}
-	return e.resetAndSend(value)
+	return e.resetAndSendDefault(value)
 }
 
 // SendContentQueued triggers sending the current editor content with

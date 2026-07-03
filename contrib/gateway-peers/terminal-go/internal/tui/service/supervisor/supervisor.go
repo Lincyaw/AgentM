@@ -25,6 +25,7 @@ type SessionRunner struct {
 	Title        string
 	IsRunning    bool    // True when stream is active
 	NeedsAttn    bool    // True when user attention is needed
+	Background   bool    // True for workflow tabs that should not dominate chrome
 	PendingEvent tea.Msg // Event that triggered attention (for replay on tab switch)
 	cancel       context.CancelFunc
 	cleanup      func()
@@ -226,6 +227,7 @@ func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 			IsActive:       id == s.activeID,
 			IsRunning:      runner.IsRunning,
 			NeedsAttention: runner.NeedsAttn,
+			Background:     runner.Background,
 		})
 	}
 	return tabs
@@ -248,9 +250,25 @@ func (s *Supervisor) SwitchTo(sessionID string) *SessionRunner {
 
 	s.activeID = sessionID
 	runner.NeedsAttn = false // Clear attention flag when switching to this tab
+	runner.Background = false
 	s.notifyTabsUpdated()
 
 	return runner
+}
+
+// SetBackground marks whether a runner should be treated as background
+// workflow activity in the TUI chrome.
+func (s *Supervisor) SetBackground(sessionID string, background bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	runner, ok := s.runners[sessionID]
+	if !ok || runner.Background == background {
+		return
+	}
+
+	runner.Background = background
+	s.notifyTabsUpdated()
 }
 
 // ConsumePendingEvent returns and clears the pending event for the given session.

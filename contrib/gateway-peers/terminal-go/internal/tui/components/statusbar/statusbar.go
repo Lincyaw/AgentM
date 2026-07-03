@@ -20,6 +20,7 @@ type StatusBar struct {
 	showNewTab   bool
 	newTabStartX int
 	newTabEndX   int
+	activity     string
 
 	cached     string
 	cacheDirty bool
@@ -74,6 +75,15 @@ func (s *StatusBar) SetShowNewTab(show bool) {
 	}
 }
 
+// SetActivity sets the compact background activity label rendered on the
+// right side of the bar.
+func (s *StatusBar) SetActivity(activity string) {
+	if s.activity != activity {
+		s.activity = activity
+		s.cacheDirty = true
+	}
+}
+
 // ClickedNewTab returns true if the given X coordinate hits the "+" button.
 func (s *StatusBar) ClickedNewTab(x int) bool {
 	return s.showNewTab && x >= s.newTabStartX && x < s.newTabEndX
@@ -96,6 +106,7 @@ func (s *StatusBar) rebuild() {
 	s.newTabEndX = 0
 
 	// Build the styled right side: optional new-tab button + title.
+	const pad = 1
 	var rightW, newTabW int
 	right := styles.MutedStyle.Render(s.title)
 
@@ -110,8 +121,18 @@ func (s *StatusBar) rebuild() {
 		rightW = lipgloss.Width(right)
 	}
 
+	if s.activity != "" {
+		right = right + "  " + styles.MutedStyle.Render(s.activity)
+		rightW = lipgloss.Width(right)
+	}
+
+	maxRightW := max(0, s.width-pad)
+	if rightW > maxRightW {
+		right = ansi.Truncate(right, maxRightW, "...")
+		rightW = lipgloss.Width(right)
+	}
+
 	// Build the styled left side: help bindings (possibly truncated).
-	const pad = 1
 	maxHelpW := s.width - rightW - 2*pad - 1
 
 	var left string
@@ -142,7 +163,7 @@ func (s *StatusBar) rebuild() {
 
 	gap := max(1, s.width-leftW-rightW-pad)
 
-	if s.showNewTab {
+	if s.showNewTab && rightW >= newTabW {
 		s.newTabStartX = leftW + gap
 		s.newTabEndX = s.newTabStartX + newTabW
 	}
