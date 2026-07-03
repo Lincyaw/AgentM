@@ -114,7 +114,7 @@ func (c *WireClient) Connect(ctx context.Context) error {
 		Body: helloBody,
 	}
 	if c.token != "" {
-		hello.Body["auth"] = map[string]any{"token": c.token}
+		hello.Body["auth"] = c.token
 	}
 
 	if err := WriteFrame(c.conn, hello); err != nil {
@@ -250,7 +250,7 @@ func (c *WireClient) reconnect() bool {
 			Body: reconnectBody,
 		}
 		if c.token != "" {
-			hello.Body["auth"] = map[string]any{"token": c.token}
+			hello.Body["auth"] = c.token
 		}
 
 		if err := WriteFrame(conn, hello); err != nil {

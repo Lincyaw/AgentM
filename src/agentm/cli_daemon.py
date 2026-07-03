@@ -40,7 +40,12 @@ def _print_status(*, json_output: bool) -> None:
         return
     state = "running" if status.running else "stopped"
     typer.echo(state)
-    typer.echo(f"socket: {status.connect_url}")
+    label = "socket" if status.connect_url.startswith("unix://") else "connect"
+    typer.echo(f"{label}: {status.connect_url}")
+    if status.auth_required and status.token_file is not None:
+        typer.echo(f"token_file: {status.token_file}")
+    elif status.connect_url.startswith(("ws://", "wss://")):
+        typer.echo("auth: anonymous")
     if status.pid is not None:
         typer.echo(f"pid: {status.pid}")
     typer.echo(f"log: {status.log_path}")
@@ -48,8 +53,12 @@ def _print_status(*, json_output: bool) -> None:
 
 @app.command(name="socket")
 def socket_cmd() -> None:
-    """Print the default local daemon socket URL."""
+    """Print the active/default local daemon connect URL."""
 
+    status = gateway_daemon_status()
+    if status.running:
+        typer.echo(status.connect_url)
+        return
     typer.echo(default_daemon_connect_url())
 
 
@@ -79,6 +88,43 @@ def start_cmd(
             help="Default scenario for new gateway sessions.",
         ),
     ] = "chatbot",
+    bind: Annotated[
+        str | None,
+        typer.Option(
+            "--bind",
+            envvar="AGENTM_DAEMON_BIND",
+            help=(
+                "Gateway URL for the daemon worker. Default: per-user unix:// socket. "
+                "Use ws://0.0.0.0:8765 for remote clients."
+            ),
+        ),
+    ] = None,
+    bind_token_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--bind-token-file",
+            envvar="AGENTM_DAEMON_TOKEN_FILE",
+            help=(
+                "Token file for ws/wss daemon auth. Generated with mode 0600 "
+                "when omitted."
+            ),
+        ),
+    ] = None,
+    bind_allow_anonymous: Annotated[
+        bool,
+        typer.Option(
+            "--bind-allow-anonymous",
+            help="Allow unauthenticated ws/wss daemon clients. Not recommended.",
+        ),
+    ] = False,
+    tls_cert: Annotated[
+        Path | None,
+        typer.Option("--tls-cert", help="TLS certificate for wss:// daemon binds."),
+    ] = None,
+    tls_key: Annotated[
+        Path | None,
+        typer.Option("--tls-key", help="TLS private key for wss:// daemon binds."),
+    ] = None,
     state_dir: Annotated[
         Path | None,
         typer.Option(
@@ -107,7 +153,7 @@ def start_cmd(
         typer.Option(
             "--startup-timeout",
             min=0.1,
-            help="Seconds to wait for the daemon socket.",
+            help="Seconds to wait for the daemon gateway endpoint.",
         ),
     ] = 10.0,
     json_output: Annotated[
@@ -124,6 +170,11 @@ def start_cmd(
             GatewayDaemonConfig(
                 cwd=resolved_cwd,
                 scenario=scenario,
+                bind=bind,
+                bind_token_file=bind_token_file,
+                bind_allow_anonymous=bind_allow_anonymous,
+                tls_cert=tls_cert,
+                tls_key=tls_key,
                 state_dir=state_dir,
                 gateway_log=gateway_log,
                 startup_timeout=startup_timeout,
@@ -167,6 +218,43 @@ def restart_cmd(
             help="Default scenario for new gateway sessions.",
         ),
     ] = "chatbot",
+    bind: Annotated[
+        str | None,
+        typer.Option(
+            "--bind",
+            envvar="AGENTM_DAEMON_BIND",
+            help=(
+                "Gateway URL for the daemon worker. Default: per-user unix:// socket. "
+                "Use ws://0.0.0.0:8765 for remote clients."
+            ),
+        ),
+    ] = None,
+    bind_token_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--bind-token-file",
+            envvar="AGENTM_DAEMON_TOKEN_FILE",
+            help=(
+                "Token file for ws/wss daemon auth. Generated with mode 0600 "
+                "when omitted."
+            ),
+        ),
+    ] = None,
+    bind_allow_anonymous: Annotated[
+        bool,
+        typer.Option(
+            "--bind-allow-anonymous",
+            help="Allow unauthenticated ws/wss daemon clients. Not recommended.",
+        ),
+    ] = False,
+    tls_cert: Annotated[
+        Path | None,
+        typer.Option("--tls-cert", help="TLS certificate for wss:// daemon binds."),
+    ] = None,
+    tls_key: Annotated[
+        Path | None,
+        typer.Option("--tls-key", help="TLS private key for wss:// daemon binds."),
+    ] = None,
     state_dir: Annotated[
         Path | None,
         typer.Option(
@@ -195,7 +283,7 @@ def restart_cmd(
         typer.Option(
             "--startup-timeout",
             min=0.1,
-            help="Seconds to wait for the daemon socket.",
+            help="Seconds to wait for the daemon gateway endpoint.",
         ),
     ] = 10.0,
     json_output: Annotated[
@@ -209,6 +297,11 @@ def restart_cmd(
     start_cmd(
         cwd=cwd,
         scenario=scenario,
+        bind=bind,
+        bind_token_file=bind_token_file,
+        bind_allow_anonymous=bind_allow_anonymous,
+        tls_cert=tls_cert,
+        tls_key=tls_key,
         state_dir=state_dir,
         gateway_log=gateway_log,
         no_reload=no_reload,

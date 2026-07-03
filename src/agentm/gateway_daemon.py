@@ -9,8 +9,10 @@ not host AgentSession objects; the supervisor starts the normal
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import signal
+import secrets
 import socket
 import subprocess
 import sys
@@ -19,6 +21,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 class GatewayDaemonError(RuntimeError):
@@ -31,6 +34,11 @@ class GatewayDaemonConfig:
 
     cwd: Path
     scenario: str | None = None
+    bind: str | None = None
+    bind_token_file: Path | None = None
+    bind_allow_anonymous: bool = False
+    tls_cert: Path | None = None
+    tls_key: Path | None = None
     state_dir: Path | None = None
     gateway_log: Path | None = None
     startup_timeout: float = 10.0
@@ -47,6 +55,8 @@ class GatewayDaemonStatus:
     pid_file: Path
     state_dir: Path
     log_path: Path
+    token_file: Path | None
+    auth_required: bool
     pid: int | None
     pid_alive: bool
     socket_ready: bool
@@ -66,6 +76,8 @@ class GatewayDaemonStatus:
             "pid_file": str(self.pid_file),
             "state_dir": str(self.state_dir),
             "log_path": str(self.log_path),
+            "token_file": str(self.token_file) if self.token_file else None,
+            "auth_required": self.auth_required,
         }
 
 
@@ -79,6 +91,10 @@ def default_gateway_log() -> Path:
 
 def default_daemon_state_dir() -> Path:
     return default_agentm_home() / "gateway"
+
+
+def default_daemon_token_file() -> Path:
+    return default_daemon_state_dir() / "token"
 
 
 def default_daemon_runtime_dir(*, create: bool = False) -> Path:
@@ -107,6 +123,10 @@ def default_daemon_pid_file(*, create_runtime_dir: bool = False) -> Path:
     return default_daemon_runtime_dir(create=create_runtime_dir) / "gateway-supervisor.pid"
 
 
+def default_daemon_metadata_file(*, create_runtime_dir: bool = False) -> Path:
+    return default_daemon_runtime_dir(create=create_runtime_dir) / "gateway-daemon.json"
+
+
 def unix_socket_path(connect_url: str) -> Path:
     prefix = "unix://"
     if not connect_url.startswith(prefix):
@@ -120,6 +140,9 @@ def unix_socket_path(connect_url: str) -> Path:
 
 
 def gateway_accepts_connections(connect_url: str) -> bool:
+    parsed = urlparse(connect_url)
+    if parsed.scheme in {"ws", "wss"}:
+        return _websocket_accepts_connections(connect_url)
     try:
         socket_path = unix_socket_path(connect_url)
     except GatewayDaemonError:
@@ -162,15 +185,22 @@ def pid_file_is_live(pid_file: Path) -> bool:
 
 
 def gateway_daemon_status() -> GatewayDaemonStatus:
-    connect_url = default_daemon_connect_url()
+    metadata = _read_daemon_metadata()
+    connect_url = str(metadata.get("connect_url") or default_daemon_connect_url())
     pid_file = default_daemon_pid_file()
     pid = read_pid_file(pid_file)
+    token_file_raw = metadata.get("token_file")
+    token_file = Path(str(token_file_raw)) if token_file_raw else None
+    state_dir_raw = metadata.get("state_dir")
+    log_path_raw = metadata.get("log_path")
     return GatewayDaemonStatus(
         connect_url=connect_url,
         runtime_dir=default_daemon_runtime_dir(),
         pid_file=pid_file,
-        state_dir=default_daemon_state_dir(),
-        log_path=default_gateway_log(),
+        state_dir=Path(str(state_dir_raw)) if state_dir_raw else default_daemon_state_dir(),
+        log_path=Path(str(log_path_raw)) if log_path_raw else default_gateway_log(),
+        token_file=token_file,
+        auth_required=bool(metadata.get("auth_required", False)),
         pid=pid,
         pid_alive=pid is not None and pid_file_is_live(pid_file),
         socket_ready=gateway_accepts_connections(connect_url),
@@ -184,13 +214,19 @@ def ensure_gateway_daemon(config: GatewayDaemonConfig) -> str:
     if not cwd.is_dir():
         raise GatewayDaemonError(f"working directory does not exist: {cwd}")
 
-    connect_url = default_daemon_connect_url(create_runtime_dir=True)
-    if gateway_accepts_connections(connect_url):
-        return connect_url
-
     pid_file = default_daemon_pid_file(create_runtime_dir=True)
-    log_path = config.gateway_log or default_gateway_log()
+    active_metadata = _read_daemon_metadata()
+    active_url = active_metadata.get("connect_url")
     if pid_file_is_live(pid_file):
+        connect_url = str(config.bind or active_url or default_daemon_connect_url())
+        if active_url and str(active_url) != connect_url:
+            raise GatewayDaemonError(
+                f"gateway daemon is already running at {active_url}; "
+                "stop or restart it to change --bind"
+            )
+        log_path = config.gateway_log or default_gateway_log()
+        if gateway_accepts_connections(connect_url):
+            return connect_url
         _wait_for_gateway(
             connect_url,
             timeout_seconds=config.startup_timeout,
@@ -199,9 +235,30 @@ def ensure_gateway_daemon(config: GatewayDaemonConfig) -> str:
         )
         return connect_url
 
+    connect_url = config.bind or default_daemon_connect_url(create_runtime_dir=True)
+    token_file = _resolve_auth_token_file(
+        connect_url,
+        token_file=config.bind_token_file,
+        allow_anonymous=config.bind_allow_anonymous,
+        tls_cert=config.tls_cert,
+        tls_key=config.tls_key,
+    )
+    log_path = config.gateway_log or default_gateway_log()
+    state_dir = config.state_dir or default_daemon_state_dir()
+    metadata = {
+        "connect_url": connect_url,
+        "state_dir": str(state_dir),
+        "log_path": str(log_path),
+        "token_file": str(token_file) if token_file else None,
+        "auth_required": token_file is not None,
+    }
+    if gateway_accepts_connections(connect_url):
+        _write_daemon_metadata(metadata)
+        return connect_url
+
+    _write_daemon_metadata(metadata)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = log_path.open("ab")
-    state_dir = config.state_dir or default_daemon_state_dir()
     args = [
         sys.executable,
         "-m",
@@ -217,6 +274,14 @@ def ensure_gateway_daemon(config: GatewayDaemonConfig) -> str:
         "--poll-interval",
         str(max(config.poll_interval, 0.2)),
     ]
+    if token_file is not None:
+        args.extend(["--bind-token-file", str(token_file)])
+    if config.bind_allow_anonymous:
+        args.append("--bind-allow-anonymous")
+    if config.tls_cert is not None:
+        args.extend(["--tls-cert", str(config.tls_cert)])
+    if config.tls_key is not None:
+        args.extend(["--tls-key", str(config.tls_key)])
     if config.scenario:
         args.extend(["--scenario", config.scenario])
     if not config.reload:
@@ -249,6 +314,135 @@ def ensure_gateway_daemon(config: GatewayDaemonConfig) -> str:
             _terminate_process_group(process.pid, signal.SIGTERM)
         raise
     return connect_url
+
+
+def _resolve_auth_token_file(
+    connect_url: str,
+    *,
+    token_file: Path | None,
+    allow_anonymous: bool,
+    tls_cert: Path | None,
+    tls_key: Path | None,
+) -> Path | None:
+    parsed = urlparse(connect_url)
+    scheme = parsed.scheme
+    if scheme == "unix":
+        if token_file is not None or allow_anonymous or tls_cert is not None or tls_key is not None:
+            raise GatewayDaemonError(
+                "--bind-token-file, --bind-allow-anonymous, --tls-cert, and "
+                "--tls-key are only valid with ws:// or wss:// daemon binds"
+            )
+        return None
+    if scheme not in {"ws", "wss"}:
+        raise GatewayDaemonError(
+            f"daemon --bind scheme {scheme!r} is not supported; use unix://, ws://, or wss://"
+        )
+    if scheme == "wss" and (tls_cert is None or tls_key is None):
+        raise GatewayDaemonError("wss:// daemon bind requires --tls-cert and --tls-key")
+    if scheme == "ws" and (tls_cert is not None or tls_key is not None):
+        raise GatewayDaemonError("ws:// daemon bind cannot use TLS; use wss://")
+    if allow_anonymous:
+        if token_file is not None:
+            raise GatewayDaemonError(
+                "--bind-token-file and --bind-allow-anonymous are mutually exclusive"
+            )
+        return None
+    return _ensure_token_file(token_file or default_daemon_token_file())
+
+
+def _ensure_token_file(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        _read_nonempty_token(path)
+        _chmod_private(path)
+        return path
+    token = "agm_" + secrets.token_urlsafe(32)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except FileExistsError:
+        _read_nonempty_token(path)
+        _chmod_private(path)
+        return path
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(token + "\n")
+    _chmod_private(path)
+    return path
+
+
+def _read_nonempty_token(path: Path) -> str:
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise GatewayDaemonError(f"cannot read daemon token file {path}: {exc}") from exc
+    if not token:
+        raise GatewayDaemonError(f"daemon token file is empty: {path}")
+    return token
+
+
+def _chmod_private(path: Path) -> None:
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _read_daemon_metadata() -> dict[str, Any]:
+    path = default_daemon_metadata_file()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_daemon_metadata(data: dict[str, Any]) -> None:
+    path = default_daemon_metadata_file(create_runtime_dir=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass
+    tmp.replace(path)
+
+
+def _websocket_accepts_connections(connect_url: str) -> bool:
+    try:
+        from websockets.sync.client import connect as ws_connect
+    except Exception:
+        return False
+    probe_url = _websocket_probe_url(connect_url)
+    kwargs: dict[str, Any] = {"open_timeout": 0.2, "close_timeout": 0.2}
+    if probe_url.startswith("wss://"):
+        import ssl
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        kwargs["ssl"] = context
+    try:
+        with ws_connect(probe_url, **kwargs):
+            return True
+    except Exception:
+        return False
+
+
+def _websocket_probe_url(connect_url: str) -> str:
+    parsed = urlparse(connect_url)
+    host = parsed.hostname or "127.0.0.1"
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1" if host == "0.0.0.0" else "::1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return parsed._replace(netloc=netloc, path=parsed.path or "/").geturl()
 
 
 def stop_gateway_daemon(*, timeout_seconds: float = 5.0) -> bool:

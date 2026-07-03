@@ -78,6 +78,13 @@ Process-launch contract:
 | Gateway | `agentm gateway --bind <url>` | Long-lived. Holds all sessions. |
 | Chat client | `agentm-feishu --connect <same-url>` / `agentm-terminal --connect <same-url>` | One per platform. |
 
+`<url>` may be `unix://`, `ws://`, or `wss://`. WebSocket binds are remote
+capable and require token auth by default: direct `agentm gateway --bind ws://…`
+requires `--bind-token-file` unless `--bind-allow-anonymous` is explicitly
+passed; `agentm daemon start --bind ws://…` generates
+`$AGENTM_HOME/gateway/token` with mode `0600` when no token file is supplied and
+reports the token file path in `agentm daemon status`.
+
 Gateway persistent state (`wire-outbox.sqlite`, `wire-inbox.sqlite`,
 `session_map.json`, and `schedules.json`) defaults to `$AGENTM_HOME/gateway`
 for both the direct `agentm gateway` process and the local daemon/supervisor
@@ -543,7 +550,7 @@ Keep / write (target invariants):
 | Current | New |
 |---|---|
 | `agentm-gateway --bind ...` (separate binary) | `agentm gateway --bind ...` (subcommand of `agentm`) |
-| local daemon management | `agentm daemon start/status/stop/restart/socket` |
+| local daemon management | `agentm daemon start/status/stop/restart/socket`, with `start --bind ws://…` for remote clients |
 | `agentm-worker --connect ...` | **deleted** |
 | `agentm-feishu --connect ...` | unchanged; can use `agentm daemon socket` / `AGENTM_SOCKET` |
 | `agentm-terminal --connect ...` | unchanged; defaults to the local daemon socket when `--connect` is omitted |
@@ -551,8 +558,10 @@ Keep / write (target invariants):
 The `agentm` console script gains `gateway` and `daemon` subcommands alongside
 the existing prompt and trace surfaces. `agentm gateway` is the foreground
 server. `agentm daemon` manages the local reloadable supervisor used by
-single-host clients. `agentm terminal` is a convenience wrapper around
-`agentm daemon start` plus `agentm-terminal`.
+single-host clients by default, and can bind `ws://` / `wss://` for remote
+clients with token auth enabled unless `--bind-allow-anonymous` is explicit.
+`agentm terminal` is a convenience wrapper around `agentm daemon start` plus
+`agentm-terminal`.
 
 ### 8.4 CI / config touch points
 
@@ -571,9 +580,9 @@ single-host clients. `agentm terminal` is a convenience wrapper around
 * `src/agentm/extensions/builtin/wire_driver.py` — §4. (`peer_send` removed, not ported — see §4.)
 * `src/agentm/cli/gateway.py` — `agentm gateway` subcommand glue.
 * `src/agentm/gateway_daemon.py` / `src/agentm/cli_daemon.py` — shared local
-  daemon paths, status, start/stop/restart/socket CLI.
+  daemon paths, authenticated ws/unix status, start/stop/restart/socket CLI.
 * `src/agentm/gateway_supervisor.py` — local-development process supervisor
-  used by `agentm daemon`: keeps a stable unix socket, starts the ordinary
+  used by `agentm daemon`: keeps a stable endpoint, starts the ordinary
   `agentm gateway` worker, and restarts that worker when watched source/config
   files change. This is not a distributed worker pool and does not execute
   sessions outside the single gateway process; it exists so code changes apply

@@ -38,6 +38,10 @@ class SupervisorConfig:
     bind: str
     state_dir: Path
     scenario: str | None = None
+    bind_token_file: Path | None = None
+    bind_allow_anonymous: bool = False
+    tls_cert: Path | None = None
+    tls_key: Path | None = None
     reload: bool = True
     poll_interval: float = 1.0
     pid_file: Path | None = None
@@ -102,6 +106,14 @@ class GatewaySupervisor:
             "--state-dir",
             str(self._config.state_dir),
         ]
+        if self._config.bind_token_file is not None:
+            args.extend(["--bind-token-file", str(self._config.bind_token_file)])
+        if self._config.bind_allow_anonymous:
+            args.append("--bind-allow-anonymous")
+        if self._config.tls_cert is not None:
+            args.extend(["--tls-cert", str(self._config.tls_cert)])
+        if self._config.tls_key is not None:
+            args.extend(["--tls-key", str(self._config.tls_key)])
         if self._config.scenario:
             args.extend(["--scenario", self._config.scenario])
         self._log("starting gateway worker: " + " ".join(args))
@@ -223,6 +235,10 @@ def _parse_args(argv: list[str] | None) -> SupervisorConfig:
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--bind", required=True)
     parser.add_argument("--state-dir", required=True)
+    parser.add_argument("--bind-token-file")
+    parser.add_argument("--bind-allow-anonymous", action="store_true")
+    parser.add_argument("--tls-cert")
+    parser.add_argument("--tls-key")
     parser.add_argument("--scenario")
     parser.add_argument("--pid-file")
     parser.add_argument("--no-reload", action="store_true")
@@ -237,6 +253,10 @@ def _parse_args(argv: list[str] | None) -> SupervisorConfig:
         bind=ns.bind,
         state_dir=Path(ns.state_dir),
         scenario=ns.scenario,
+        bind_token_file=Path(ns.bind_token_file) if ns.bind_token_file else None,
+        bind_allow_anonymous=bool(ns.bind_allow_anonymous),
+        tls_cert=Path(ns.tls_cert) if ns.tls_cert else None,
+        tls_key=Path(ns.tls_key) if ns.tls_key else None,
         reload=not ns.no_reload,
         poll_interval=max(float(ns.poll_interval), 0.2),
         pid_file=Path(ns.pid_file) if ns.pid_file else None,

@@ -20,6 +20,7 @@ from agentm.gateway_daemon import (
     default_gateway_log,
     ensure_gateway_daemon,
     gateway_accepts_connections,
+    gateway_daemon_status,
 )
 
 
@@ -72,7 +73,11 @@ def run_terminal(config: TerminalLaunchConfig) -> int:
 
     if config.use_daemon:
         connect_url = _ensure_daemon_gateway(config)
-        return _run_terminal_peer(config, connect_url=connect_url)
+        return _run_terminal_peer(
+            config,
+            connect_url=connect_url,
+            token=_daemon_token_for_connect(connect_url),
+        )
 
     gateway = _start_gateway(config)
     try:
@@ -129,10 +134,17 @@ def _start_gateway(config: TerminalLaunchConfig) -> _GatewayProcess:
     )
 
 
-def _run_terminal_peer(config: TerminalLaunchConfig, *, connect_url: str) -> int:
+def _run_terminal_peer(
+    config: TerminalLaunchConfig,
+    *,
+    connect_url: str,
+    token: str | None = None,
+) -> int:
     executable = _find_executable(config.terminal_bin)
     args = [executable, "--connect", connect_url]
     terminal_args = config.terminal_args
+    if token and not _has_token_arg(terminal_args):
+        args.extend(["--token", token])
     if config.session_id:
         args.extend(["--session-id", config.session_id])
     elif not _has_session_id_arg(terminal_args):
@@ -163,6 +175,23 @@ def _ensure_daemon_gateway(config: TerminalLaunchConfig) -> str:
         )
     except GatewayDaemonError as exc:
         raise TerminalLaunchError(str(exc)) from exc
+
+
+def _daemon_token_for_connect(connect_url: str) -> str | None:
+    status = gateway_daemon_status()
+    if status.connect_url != connect_url or not status.auth_required:
+        return None
+    if status.token_file is None:
+        raise TerminalLaunchError("daemon requires auth but has no token file")
+    try:
+        token = status.token_file.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise TerminalLaunchError(
+            f"cannot read daemon token file {status.token_file}: {exc}"
+        ) from exc
+    if not token:
+        raise TerminalLaunchError(f"daemon token file is empty: {status.token_file}")
+    return token
 
 
 def _validate_local_scenario(scenario: str) -> None:
@@ -270,6 +299,15 @@ def _has_session_id_arg(args: list[str]) -> bool:
         if arg in {"-session-id", "--session-id"}:
             return True
         if arg.startswith("-session-id=") or arg.startswith("--session-id="):
+            return True
+    return False
+
+
+def _has_token_arg(args: list[str]) -> bool:
+    for arg in args:
+        if arg in {"-token", "--token"}:
+            return True
+        if arg.startswith("-token=") or arg.startswith("--token="):
             return True
     return False
 

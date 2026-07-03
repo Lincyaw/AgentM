@@ -213,11 +213,9 @@ class WireServer:
             peer_name = str(body.get("peer_name") or body.get("peer_id") or "")
             peer_id = peer_name
             # "auth" is canonical (what WireClient sends); "token" is a legacy alias.
-            auth_raw = body.get("auth")
-            token_raw = body.get("token") or (
-                auth_raw if isinstance(auth_raw, str) else None
-            )
-            token = str(token_raw) if isinstance(token_raw, str) else None
+            # The Go terminal used to send {"auth": {"token": "..."}}, so accept
+            # that object shape too while keeping the canonical string form.
+            token = _extract_hello_token(body)
             if not peer_name:
                 await _send(
                     writer,
@@ -472,6 +470,20 @@ def _make_env(kind: str, body: dict[str, Any]) -> Envelope:
         ts=time.time(),
         body=body,
     )
+
+
+def _extract_hello_token(body: dict[str, Any]) -> str | None:
+    token_raw = body.get("token")
+    auth_raw = body.get("auth")
+    if isinstance(token_raw, str):
+        return token_raw
+    if isinstance(auth_raw, str):
+        return auth_raw
+    if isinstance(auth_raw, dict):
+        nested = auth_raw.get("token")
+        if isinstance(nested, str):
+            return nested
+    return None
 
 
 def _error_env(code: str, message: str) -> Envelope:

@@ -1476,7 +1476,7 @@ def terminal_cmd(
         typer.Option(
             "--startup-timeout",
             min=0.1,
-            help="Seconds to wait for the local gateway socket.",
+            help="Seconds to wait for the local gateway endpoint.",
         ),
     ] = 10.0,
 ) -> None:

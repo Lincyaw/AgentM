@@ -784,17 +784,20 @@ requirements:
     title: AgentM CLI can launch a gateway-backed terminal in one command
     description: >
       The `agentm terminal` command must start or reuse a local gateway daemon,
-      wait for its unix socket, connect the `agentm-terminal` TUI to it, and
+      wait for its gateway endpoint, connect the `agentm-terminal` TUI to it, and
       write gateway/supervisor logs to a deterministic file. The daemon is a
       lightweight Python supervisor around a gateway worker: it keeps the client
-      socket stable and restarts the worker when watched source/config files
+      endpoint stable and restarts the worker when watched source/config files
       change, so SDK/session code updates apply without manually restarting the
       TUI. Each `agentm terminal` launch must get a fresh terminal session
       by default, so multiple TUI windows attached to the same daemon do not
       share a `terminal:<session-id>` session unless the user explicitly passes a
       session id. `--private-gateway` preserves the old one-terminal-one-gateway
       lifecycle. The Go terminal peer remains a wire-only client; advanced users
-      can still connect it to an external gateway explicitly. Stale
+      can still connect it to an external gateway explicitly. The daemon can also
+      bind ws/wss for remote terminal clients, persists the active connect URL
+      for status/reuse, and enables token-file authentication by default unless
+      anonymous mode is explicit. Stale
       chat-to-session mappings must be discarded automatically when their target
       session file no longer exists, so a terminal can recover by starting a
       fresh session instead of surfacing a raw FileNotFoundError. The standalone
@@ -808,11 +811,13 @@ requirements:
     code:
       - path: contrib/gateway-peers/terminal-go/main.go
       - path: contrib/gateway-peers/terminal-go/internal/adapter/controller.go
+      - path: contrib/gateway-peers/terminal-go/internal/wire/client.go
       - path: contrib/gateway-peers/terminal-go/internal/wire/resolve.go
       - path: src/agentm/cli_daemon.py
       - path: src/agentm/cli.py
       - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway/cli.py
+      - path: src/agentm/gateway/server.py
       - path: src/agentm/gateway/session_manager.py
       - path: src/agentm/gateway_daemon.py
       - path: src/agentm/gateway_supervisor.py
@@ -820,6 +825,7 @@ requirements:
     tests: []
     docs:
       - path: README.md
+      - path: config.toml.example
       - path: .claude/designs/go-terminal-tui.md
       - path: .claude/designs/single-process-gateway.md
       - path: .claude/designs/textual-tui.md

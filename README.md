@@ -195,11 +195,11 @@ Beyond the one-shot prompt, notable subcommands include `agentm terminal`
 OTLP/JSON session log), and `agentm contrib sync` (materialize configurable
 contrib resources under `~/.agentm`). The chat-client peers ship as **separate
 binaries** for vendor-SDK isolation only: `agentm-terminal`, `agentm-feishu`,
-and future peers connect to the same socket (`agentm daemon socket`). Normal
+and future peers connect to the same gateway URL (`agentm daemon socket`). Normal
 terminal use can be either `agentm terminal` for one-command startup or
 `agentm daemon start && agentm-terminal` when you want to manage the server
 separately. In local daemon mode, a lightweight Python supervisor keeps the
-gateway socket stable and restarts the gateway worker when source/config files
+gateway endpoint stable and restarts the gateway worker when source/config files
 change, so SDK/session code updates apply without manually restarting the
 terminal client. Each launch gets a fresh terminal session by default, even
 from the same cwd; pass `--session-id workbench` only when intentionally
@@ -215,6 +215,16 @@ busy), `Shift+Enter`/`Ctrl+j` inserts a newline, `?` opens shortcuts from an
 empty editor, `/` and `@` open inline command/resource completions, `Esc`
 interrupts or double-press clears input, and `Ctrl+c` exits on the second
 press. Run `agentm <sub> --help` or `<binary> --help` for flags.
+
+For remote terminal clients, start the daemon on a WebSocket bind. Authentication
+is enabled by default: if no token file is supplied, the daemon creates
+`$AGENTM_HOME/gateway/token` with mode `0600`.
+
+```bash
+agentm daemon start --bind ws://0.0.0.0:8765
+agentm daemon status
+agentm-terminal --connect ws://<host>:8765 --token "$(cat ~/.agentm/gateway/token)"
+```
 
 ## Five pluggability axes
 
