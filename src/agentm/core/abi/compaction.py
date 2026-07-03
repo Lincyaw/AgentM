@@ -8,6 +8,16 @@ these types are the only stable surface other code should depend on.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
+
+# Canonical prompt-registry keys shared between compaction_prompts and
+# llm_compaction atoms.  Living here avoids the §11-forbidden
+# atom-to-atom import while giving both a single source of truth.
+PROMPT_SUMMARIZATION_SYSTEM: Final = "compaction.summarization_system"
+PROMPT_SUMMARIZATION: Final = "compaction.summarization"
+PROMPT_UPDATE_SUMMARIZATION: Final = "compaction.update_summarization"
+PROMPT_BRANCH_SUMMARY: Final = "compaction.branch_summary"
+PROMPT_BRANCH_SUMMARY_PREAMBLE: Final = "compaction.branch_summary_preamble"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,4 +84,9 @@ __all__ = [
     "CompactionResult",
     "CompactionSettings",
     "ContextUsageSnapshot",
+    "PROMPT_BRANCH_SUMMARY",
+    "PROMPT_BRANCH_SUMMARY_PREAMBLE",
+    "PROMPT_SUMMARIZATION",
+    "PROMPT_SUMMARIZATION_SYSTEM",
+    "PROMPT_UPDATE_SUMMARIZATION",
 ]

@@ -218,6 +218,11 @@ from .compaction import (
     CompactionResult,
     CompactionSettings,
     ContextUsageSnapshot,
+    PROMPT_BRANCH_SUMMARY,
+    PROMPT_BRANCH_SUMMARY_PREAMBLE,
+    PROMPT_SUMMARIZATION,
+    PROMPT_SUMMARIZATION_SYSTEM,
+    PROMPT_UPDATE_SUMMARIZATION,
 )
 
 # -- session -----------------------------------------------------------------
@@ -440,6 +445,11 @@ __all__ = [
     "CompactionResult",
     "CompactionSettings",
     "ContextUsageSnapshot",
+    "PROMPT_BRANCH_SUMMARY",
+    "PROMPT_BRANCH_SUMMARY_PREAMBLE",
+    "PROMPT_SUMMARIZATION",
+    "PROMPT_SUMMARIZATION_SYSTEM",
+    "PROMPT_UPDATE_SUMMARIZATION",
     # session
     "ENTRY_MATERIALIZERS",
     "ENTRY_TYPE_BRANCH_SUMMARY",

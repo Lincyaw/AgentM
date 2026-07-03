@@ -28,7 +28,6 @@ atom and reaches services exclusively via :class:`ExtensionAPI`.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from pydantic import BaseModel
 
@@ -42,24 +41,17 @@ from agentm.core.abi import (
     ENTRY_TYPE_COMPACTION,
     ENTRY_TYPE_MESSAGE,
     ExtensionAPI,
+    PROMPT_BRANCH_SUMMARY,
+    PROMPT_BRANCH_SUMMARY_PREAMBLE,
+    PROMPT_SUMMARIZATION,
+    PROMPT_SUMMARIZATION_SYSTEM,
+    PROMPT_UPDATE_SUMMARIZATION,
     SessionEntry,
     TextContent,
     ToolResultMessage,
     UserMessage,
 )
 from agentm.extensions import ExtensionManifest
-
-# --- Prompt names -----------------------------------------------------------
-#
-# These are the canonical keys the compaction engine and ``llm_compaction``
-# atom look up via ``api.get_service("prompt_templates").get_prompt``.
-# Centralised here so atom-side and engine-side stay in agreement.
-
-PROMPT_SUMMARIZATION_SYSTEM = "compaction.summarization_system"
-PROMPT_SUMMARIZATION = "compaction.summarization"
-PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
-PROMPT_BRANCH_SUMMARY = "compaction.branch_summary"
-PROMPT_BRANCH_SUMMARY_PREAMBLE = "compaction.branch_summary_preamble"
 
 # --- Default prompt bodies --------------------------------------------------
 
@@ -340,10 +332,3 @@ def install(api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
     ENTRY_MATERIALIZERS[ENTRY_TYPE_MESSAGE] = _MessageEntryMaterializer()
     ENTRY_MATERIALIZERS[ENTRY_TYPE_BRANCH_SUMMARY] = _BranchSummaryEntryMaterializer()
     ENTRY_MATERIALIZERS[ENTRY_TYPE_COMPACTION] = _CompactionEntryMaterializer()
-
-
-def _override(config: dict[str, Any], key: str, default: str) -> str:
-    candidate = config.get(key)
-    if isinstance(candidate, str) and candidate:
-        return candidate
-    return default

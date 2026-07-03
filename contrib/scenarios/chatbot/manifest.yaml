@@ -29,17 +29,11 @@ extensions:
   - module: agentm.extensions.builtin.retry_policy
 
   # === tool-result hygiene ==================================================
-  # tool_result_budget is the legacy name for a middle-out token limiter. It is
-  # a fallback if cap cannot spill; cap is mounted after it so its recoverable
-  # spill-path replacement wins when both handlers fire.
-  - module: agentm.extensions.builtin.tool_result_budget
-    config:
-      max_tokens: 50000
-      error_floor_tokens: 256
   - module: agentm.extensions.builtin.tool_result_cap
     config:
       max_tokens: 50000
       preview_tokens: 50000
+      error_floor_tokens: 256
   # Default English text for kernel-emitted ToolErrorEvent.
   - module: agentm.extensions.builtin.tool_error_messages
 
@@ -140,7 +134,6 @@ extensions:
         - file_tools
         - tool_bash
         - tool_bash_guard
-        - tool_result_budget
         - tool_result_cap
         - observability
         - skill_loader
@@ -153,16 +146,12 @@ extensions:
           module: agentm.extensions.builtin.tool_bash
         tool_bash_guard:
           module: agentm.extensions.builtin.tool_bash_guard
-        tool_result_budget:
-          module: agentm.extensions.builtin.tool_result_budget
-          config:
-            max_tokens: 50000
-            error_floor_tokens: 256
         tool_result_cap:
           module: agentm.extensions.builtin.tool_result_cap
           config:
             max_tokens: 50000
             preview_tokens: 50000
+            error_floor_tokens: 256
         observability:
           module: agentm.extensions.builtin.observability
         skill_loader:
@@ -203,11 +192,6 @@ extensions:
   # not a scenario-level atom.
   #   - module: agentm.extensions.builtin.wire_driver
   #
-  # Evolution / self-improvement cluster — tied to eval suites + a
-  # `target_scenario`, with trace-scanning and (guard_watch) AUTO-ROLLBACK
-  # side effects at session_ready. Enable only when testing evolution.
-  #   - module: agentm.extensions.builtin.query_tools
-  #   - module: agentm.extensions.builtin.tool_eval_run
-  #   - module: agentm.extensions.builtin.tool_reflect
-  #   - module: agentm.extensions.builtin.tool_propose_change
-  #   - module: agentm.extensions.builtin.tool_guard_watch
+  # Evolution / self-improvement cluster — removed (was dead code).
+  # Atoms lived in builtin/ but no scenario loaded them.
+  # See git history for the prior implementation.

@@ -38,7 +38,6 @@ import atexit
 import json
 import os
 import threading
-import time
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -94,34 +93,13 @@ from agentm.core.observability.otlp import (  # noqa: E402
 )
 
 
-# Once the single event log is authoritative for conversation state, dropping
-# events on queue overflow would lose data. The stock BatchSpanProcessor /
-# BatchLogRecordProcessor evict from a bounded deque on overflow. These
-# subclasses spin-wait on queue length before delegating, converting drop into
-# bounded backpressure. The queue is sized generously by default so the wait
-# loop is exercised only under genuine producer/consumer mismatch.
-_BACKPRESSURE_POLL_SECONDS = 0.001
-
-
-def _wait_for_queue_space(batch_processor: object) -> None:
-    # ``BatchSpanProcessor`` / ``BatchLogRecordProcessor`` expose an internal
-    # ``_batch_processor`` with ``_queue`` (a ``collections.deque``) and
-    # ``_max_queue_size``. Reach in deliberately — the alternative is a full
-    # reimplementation of batching, which is far larger surface than this
-    # spin-wait.
-    inner = getattr(batch_processor, "_batch_processor", None)
-    if inner is None:
-        return
-    queue = getattr(inner, "_queue", None)
-    max_size = getattr(inner, "_max_queue_size", None)
-    if queue is None or max_size is None:
-        return
-    while len(queue) >= max_size:
-        time.sleep(_BACKPRESSURE_POLL_SECONDS)
-
-
 class _SessionFilterMixin:
-    """Adds session_id_filter and backpressure to batch processors."""
+    """Adds session_id_filter to batch processors.
+
+    The queue is sized generously (default 100k) so overflow-drops are
+    rare. If drops do occur the SDK silently evicts the oldest record —
+    acceptable given the queue headroom.
+    """
 
     _session_id_filter: str | None
 
@@ -136,22 +114,20 @@ class _SessionFilterMixin:
 
 
 class BlockingBatchSpanProcessor(_SessionFilterMixin, BatchSpanProcessor):
-    """Batch span processor with session filtering and backpressure."""
+    """Batch span processor with session filtering."""
 
     def on_end(self, span: ReadableSpan) -> None:  # type: ignore[override]
         if self._should_drop(span.attributes):
             return
-        _wait_for_queue_space(self)
         super().on_end(span)
 
 
 class BlockingBatchLogRecordProcessor(_SessionFilterMixin, BatchLogRecordProcessor):
-    """Batch log processor with session filtering and backpressure."""
+    """Batch log processor with session filtering."""
 
     def on_emit(self, log_record):  # type: ignore[override, no-untyped-def]
         if self._should_drop(getattr(log_record, "log_record", log_record).attributes):
             return
-        _wait_for_queue_space(self)
         super().on_emit(log_record)
 
 

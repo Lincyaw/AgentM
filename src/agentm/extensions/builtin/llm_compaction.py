@@ -16,8 +16,9 @@ Turn numbering is shared with that tool through ``core.lib.enumerate_turns``.
 Per issue #76 the compaction kernel owns no English prompt text; this atom
 resolves the active bodies via ``api.get_service("prompt_templates").get_prompt``
 (populated by the ``compaction_prompts`` atom) and threads them into the
-engine. When the prompts atom is not installed, this atom falls back to
-neutral empty strings and emits a diagnostic so users see the drift.
+engine. Prompt name constants live in ``core.abi.compaction`` so both atoms
+share a single source of truth. When the prompts atom is not installed, this
+atom falls back to neutral empty strings and emits a diagnostic.
 """
 
 from __future__ import annotations
@@ -49,6 +50,9 @@ from agentm.core.abi import (
     FILE_OP_WRITE,
     MessageEnd,
     Model,
+    PROMPT_SUMMARIZATION,
+    PROMPT_SUMMARIZATION_SYSTEM,
+    PROMPT_UPDATE_SUMMARIZATION,
     ProviderConfig,
     ProviderError,
     SessionEntry,
@@ -66,13 +70,6 @@ from agentm.core.lib import (
     truncate_text_tokens,
 )
 from agentm.extensions import ExtensionManifest
-
-# Prompt registry keys. Kept in sync with ``compaction_prompts.py``;
-# forbids atom-to-atom imports so we duplicate the canonical names
-# here instead of importing them.
-_PROMPT_SUMMARIZATION_SYSTEM = "compaction.summarization_system"
-_PROMPT_SUMMARIZATION = "compaction.summarization"
-_PROMPT_UPDATE_SUMMARIZATION = "compaction.update_summarization"
 
 
 class LlmCompactionConfig(BaseModel):
@@ -723,16 +720,16 @@ async def _resolve_prompts(api: ExtensionAPI) -> tuple[CompactionPrompts, str]:
     if registry is None:
         system = summarization = update = None
     else:
-        system = registry.get_prompt(_PROMPT_SUMMARIZATION_SYSTEM)
-        summarization = registry.get_prompt(_PROMPT_SUMMARIZATION)
-        update = registry.get_prompt(_PROMPT_UPDATE_SUMMARIZATION)
+        system = registry.get_prompt(PROMPT_SUMMARIZATION_SYSTEM)
+        summarization = registry.get_prompt(PROMPT_SUMMARIZATION)
+        update = registry.get_prompt(PROMPT_UPDATE_SUMMARIZATION)
 
     missing = [
         name
         for name, body in (
-            (_PROMPT_SUMMARIZATION_SYSTEM, system),
-            (_PROMPT_SUMMARIZATION, summarization),
-            (_PROMPT_UPDATE_SUMMARIZATION, update),
+            (PROMPT_SUMMARIZATION_SYSTEM, system),
+            (PROMPT_SUMMARIZATION, summarization),
+            (PROMPT_UPDATE_SUMMARIZATION, update),
         )
         if not body
     ]
