@@ -931,7 +931,7 @@ class _CreateMonitorParams(BaseModel):
         default=None,
         description="Seconds between condition monitor fires.",
     )
-    recurring: bool | None = Field(
+    recurring: bool = Field(
         default=True,
         description=(
             "For cron monitors, keep firing on every matching cron tick. If "
