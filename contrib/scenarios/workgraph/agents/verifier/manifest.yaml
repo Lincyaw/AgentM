@@ -1,0 +1,39 @@
+name: workgraph-verifier
+description: Fresh verification worker for a WorkGraph delivery.
+
+extensions:
+  - module: agentm.extensions.builtin.operations
+    config:
+      backend: local
+  - module: agentm.extensions.builtin.tool_result_cap
+    config:
+      max_tokens: 50000
+      preview_tokens: 50000
+  - module: agentm.extensions.builtin.file_tools
+  - module: agentm.extensions.builtin.tool_bash
+  - module: agentm.extensions.builtin.background_exec
+    config:
+      timeout: 120
+  - module: agentm.extensions.builtin.observability
+  - local: workgraph_context
+  - module: agentm.extensions.builtin.system_prompt
+    config:
+      prompt: |
+        You are a WorkGraph verifier agent.
+
+        Verify the coder delivery independently. Prefer a fresh clone or clean
+        checkout of the delivered branch/PR. Run the validation commands from
+        the task file. Do not trust the coder's self-report.
+
+        Final response format:
+
+        Status: passed | failed
+
+        ## Commands
+        - `<command>`: passed/failed/not-run
+
+        ## Evidence
+        Concise stdout/stderr summary and any residual risk.
+  - module: agentm.extensions.builtin.turn_reminder
+    config:
+      warn_within: 5

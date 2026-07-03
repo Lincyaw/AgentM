@@ -1199,6 +1199,42 @@ requirements:
     depends_on:
       - REQ-087-builtin-atoms-extension-api
 
+  - id: REQ-196-workgraph-filesystem-orchestration
+    title: WorkGraph filesystem orchestration scenario
+    description: >
+      The contrib workgraph scenario must provide a long-lived main
+      orchestrator agent that talks with the user, maintains a lightweight
+      filesystem task bus under ``.agentm/workgraph/``, and launches
+      short-lived development workflows for individual ready tasks. The task
+      bus must use Markdown task files and simple directories for ready,
+      running, done, failed, conflicts, locks, and results state instead of a
+      rigid database schema. The development workflow must claim dependency-
+      satisfied tasks, honor file/resource locks so parallel work does not
+      trample shared areas, launch coder and verifier child agents with only
+      per-task context, let those workers own git clone/branch/rebase/push/PR
+      operations, and persist each worker's final free-text report as the
+      delivery artifact. Conflicted work must be routed to a conflict queue so
+      the main orchestrator can decide whether to launch a resolver or ask for
+      human intervention.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/scenarios/workgraph/main/manifest.yaml
+      - path: contrib/scenarios/workgraph/agents/coder/manifest.yaml
+      - path: contrib/scenarios/workgraph/agents/coder/workgraph_context.py
+      - path: contrib/scenarios/workgraph/agents/verifier/manifest.yaml
+      - path: contrib/scenarios/workgraph/agents/verifier/workgraph_context.py
+      - path: contrib/scenarios/workgraph/agents/resolver/manifest.yaml
+      - path: contrib/scenarios/workgraph/agents/resolver/workgraph_context.py
+      - path: contrib/scenarios/workgraph/workflow/develop.py
+    tests: []
+    docs:
+      - path: contrib/scenarios/workgraph/README.md
+    depends_on:
+      - REQ-189-workflow-agent-mock
+      - REQ-191-workflow-free-text-agent-output
+
   - id: REQ-192-native-log-defaults
     title: Console entrypoint suppresses noisy native dependency logs by default
     description: >
