@@ -83,7 +83,7 @@ _cached: UserConfig | None = None
 def agentm_home_dir() -> Path:
     """Return the AgentM home directory: ``$AGENTM_HOME`` or ``~/.agentm``."""
     home = os.environ.get("AGENTM_HOME")
-    return Path(home) if home else Path.home() / ".agentm"
+    return Path(home).expanduser() if home else Path.home() / ".agentm"
 
 
 def _config_path() -> Path:

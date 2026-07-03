@@ -852,6 +852,7 @@ requirements:
       - path: src/agentm/gateway/cli.py
       - path: src/agentm/gateway/server.py
       - path: src/agentm/gateway/session_manager.py
+      - path: src/agentm/gateway/workspace.py
       - path: src/agentm/gateway_daemon.py
       - path: src/agentm/gateway_supervisor.py
       - path: src/agentm/terminal_launcher.py

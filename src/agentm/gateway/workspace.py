@@ -9,16 +9,12 @@ channels use the gateway's ``--cwd`` (full backward compat).
 
 from __future__ import annotations
 
-import os
 import tomllib
 from pathlib import Path
 
 from loguru import logger
 
-
-def _agentm_home() -> Path:
-    home = os.environ.get("AGENTM_HOME")
-    return Path(home) if home else Path.home() / ".agentm"
+from agentm.core.lib.user_config import agentm_home_dir
 
 
 class WorkspaceResolver:
@@ -87,7 +83,7 @@ class WorkspaceResolver:
 
 def load_gateway_config(default_cwd: str) -> WorkspaceResolver:
     """Build a :class:`WorkspaceResolver` from ``[gateway]`` in config.toml."""
-    path = _agentm_home() / "config.toml"
+    path = agentm_home_dir() / "config.toml"
     if not path.is_file():
         return WorkspaceResolver(default_cwd)
 

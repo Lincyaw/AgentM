@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agentm.core.lib.user_config import agentm_home_dir
+
 
 _WATCH_SUFFIXES = {".py", ".yaml", ".yml", ".toml", ".json", ".md"}
 _WATCH_NAMES = {".env", "AGENTS.md", "CLAUDE.md"}
@@ -220,8 +222,7 @@ def default_watch_paths(cwd: Path) -> list[Path]:
         [
             cwd / ".env",
             cwd / ".agentm" / "atoms",
-            Path(os.environ.get("AGENTM_HOME", str(Path.home() / ".agentm")))
-            / "config.toml",
+            agentm_home_dir() / "config.toml",
         ]
     )
     return paths

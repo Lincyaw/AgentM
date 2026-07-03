@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from agentm.core.lib.user_config import agentm_home_dir
+
 
 class GatewayDaemonError(RuntimeError):
     """Raised when the local gateway daemon cannot be managed."""
@@ -85,7 +87,7 @@ class GatewayDaemonStatus:
 
 
 def default_agentm_home() -> Path:
-    return Path(os.environ.get("AGENTM_HOME", str(Path.home() / ".agentm")))
+    return agentm_home_dir()
 
 
 def default_gateway_log() -> Path:
