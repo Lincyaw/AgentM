@@ -533,11 +533,16 @@ Keep / write (target invariants):
 | Current | New |
 |---|---|
 | `agentm-gateway --bind ...` (separate binary) | `agentm gateway --bind ...` (subcommand of `agentm`) |
+| local daemon management | `agentm daemon start/status/stop/restart/socket` |
 | `agentm-worker --connect ...` | **deleted** |
-| `agentm-feishu --connect ...` | unchanged |
-| `agentm-terminal --connect ...` | unchanged |
+| `agentm-feishu --connect ...` | unchanged; can use `agentm daemon socket` / `AGENTM_SOCKET` |
+| `agentm-terminal --connect ...` | unchanged; defaults to the local daemon socket when `--connect` is omitted |
 
-The `agentm` console script gains `gateway` as a subcommand alongside the existing `prompt` and `trace`.
+The `agentm` console script gains `gateway` and `daemon` subcommands alongside
+the existing prompt and trace surfaces. `agentm gateway` is the foreground
+server. `agentm daemon` manages the local reloadable supervisor used by
+single-host clients. `agentm terminal` is a convenience wrapper around
+`agentm daemon start` plus `agentm-terminal`.
 
 ### 8.4 CI / config touch points
 
@@ -555,8 +560,10 @@ The `agentm` console script gains `gateway` as a subcommand alongside the existi
 * `src/agentm/gateway/wire/types.py` — typed `InboundBody`, `OutboundBody` dataclasses (from the deleted `bus.py`).
 * `src/agentm/extensions/builtin/wire_driver.py` — §4. (`peer_send` removed, not ported — see §4.)
 * `src/agentm/cli/gateway.py` — `agentm gateway` subcommand glue.
-* `src/agentm/gateway_supervisor.py` — local-development process supervisor used
-  by `agentm terminal`: keeps a stable unix socket, starts the ordinary
+* `src/agentm/gateway_daemon.py` / `src/agentm/cli_daemon.py` — shared local
+  daemon paths, status, start/stop/restart/socket CLI.
+* `src/agentm/gateway_supervisor.py` — local-development process supervisor
+  used by `agentm daemon`: keeps a stable unix socket, starts the ordinary
   `agentm gateway` worker, and restarts that worker when watched source/config
   files change. This is not a distributed worker pool and does not execute
   sessions outside the single gateway process; it exists so code changes apply

@@ -189,26 +189,28 @@ ls contrib/scenarios/           # shipped scenarios: local, sandbox,
 ```
 
 Beyond the one-shot prompt, notable subcommands include `agentm terminal`
-(start or reuse a local gateway daemon and attach the terminal UI in one command),
-`agentm gateway` (single-process gateway holding all chat sessions in memory),
-`agentm trace` (query the OTLP/JSON session log), and `agentm contrib sync`
-(materialize configurable contrib resources under `~/.agentm`). The chat-client
-peers ship as **separate binaries** for vendor-SDK isolation only —
-`agentm-terminal` and `agentm-feishu`; normal terminal use should go through
-`agentm terminal`, while advanced users can still run `agentm gateway` and
-`agentm-terminal --connect ...` separately. In local daemon mode, a lightweight
-Python supervisor keeps the gateway socket stable and restarts the gateway
-worker when source/config files change, so SDK/session code updates apply
-without manually restarting the terminal client. Each launch gets a fresh
-terminal session by default, even from the same cwd; pass a TUI session id
-after `--` only when intentionally reconnecting to a known session, for example
-`agentm terminal -- -session-id workbench`. Use `--private-gateway` for the old
+(open the terminal UI, starting/reusing the local gateway daemon by default),
+`agentm daemon` (start/status/stop/restart/socket for that local daemon),
+`agentm gateway` (foreground single-process gateway), `agentm trace` (query the
+OTLP/JSON session log), and `agentm contrib sync` (materialize configurable
+contrib resources under `~/.agentm`). The chat-client peers ship as **separate
+binaries** for vendor-SDK isolation only: `agentm-terminal`, `agentm-feishu`,
+and future peers connect to the same socket (`agentm daemon socket`). Normal
+terminal use can be either `agentm terminal` for one-command startup or
+`agentm daemon start && agentm-terminal` when you want to manage the server
+separately. In local daemon mode, a lightweight Python supervisor keeps the
+gateway socket stable and restarts the gateway worker when source/config files
+change, so SDK/session code updates apply without manually restarting the
+terminal client. Each launch gets a fresh terminal session by default, even
+from the same cwd; pass `--session-id workbench` only when intentionally
+reconnecting to a known terminal session. Use `--private-gateway` for the old
 one-terminal-one-gateway lifecycle, or `--no-reload` to keep the daemon worker
-fixed. Extra TUI flags can be passed after `--`, for example
-`agentm terminal -- --simple`. Workflow and sub-agent sessions open as
-background task rows so the parent conversation stays focused; `↓` opens the
-task picker, `Enter` views the selected task, `x` stops a selected task, and
-`Ctrl+t` hides/shows the rows. `Enter` sends (or queues while the agent is
+fixed. Common TUI flags are available directly, for example
+`agentm terminal --simple --theme light`; uncommon peer flags can still be
+passed after `--`. Workflow and sub-agent sessions open as background task rows
+so the parent conversation stays focused; `↓` opens the task picker, `Enter`
+views the selected task, `x` stops a selected task, and `Ctrl+t` hides/shows
+the rows. `Enter` sends (or queues while the agent is
 busy), `Shift+Enter`/`Ctrl+j` inserts a newline, `?` opens shortcuts from an
 empty editor, `/` and `@` open inline command/resource completions, `Esc`
 interrupts or double-press clears input, and `Ctrl+c` exits on the second

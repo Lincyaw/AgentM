@@ -290,8 +290,9 @@ class AgentMTui(App[int]):
 async def run_tui(client: TerminalClient, *, sender_id, chat_id, theme="dark") -> int: ...
 ```
 
-Local default stays `unix://` (`DEFAULT_SOCKET_URL` and the gateway bind default are
-unchanged). WS is a first-class explicit-opt-in transport the TUI fully supports.
+Local default stays `unix://`; `DEFAULT_SOCKET_URL`, `agentm daemon socket`, and
+the Go terminal peer default all point at the same per-user local daemon socket.
+WS is a first-class explicit-opt-in transport the TUI fully supports.
 
 ## 8. Related concepts
 

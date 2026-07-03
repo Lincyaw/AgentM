@@ -1,21 +1,33 @@
 package wire
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-// DefaultSocketURL mirrors the Python gateway's default_socket_url():
-// $XDG_RUNTIME_DIR/agentm-gw.sock when set, else /tmp/agentm-gw-<uid>.sock.
+// DefaultSocketURL mirrors the Python gateway daemon default:
+// $AGENTM_RUNTIME_DIR/gateway.sock when set, else
+// $TMPDIR/agentm-<uid>-<AGENTM_HOME hash>/gateway.sock.
 func DefaultSocketURL() string {
-	if runtime := os.Getenv("XDG_RUNTIME_DIR"); runtime != "" {
-		if info, err := os.Stat(runtime); err == nil && info.IsDir() {
-			return "unix://" + filepath.Join(runtime, "agentm-gw.sock")
+	runtime := os.Getenv("AGENTM_RUNTIME_DIR")
+	if runtime == "" {
+		home := os.Getenv("AGENTM_HOME")
+		if home == "" {
+			if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
+				home = filepath.Join(userHome, ".agentm")
+			} else {
+				home = ".agentm"
+			}
 		}
+		sum := sha1.Sum([]byte(home))
+		digest := hex.EncodeToString(sum[:])[:8]
+		runtime = filepath.Join(os.TempDir(), fmt.Sprintf("agentm-%d-%s", os.Getuid(), digest))
 	}
-	return fmt.Sprintf("unix:///tmp/agentm-gw-%d.sock", os.Getuid())
+	return "unix://" + filepath.Join(runtime, "gateway.sock")
 }
 
 // ResolveTransport parses a URL string into a Transport.

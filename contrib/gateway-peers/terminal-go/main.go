@@ -34,9 +34,10 @@ func main() {
 	mockMode := flag.Bool("mock", false, "Run with mock data (no gateway)")
 	simpleMode := flag.Bool("simple", false, "Run a simplified chat layout for narrow terminals")
 	leanMode := flag.Bool("lean", false, "Alias for --simple")
-	flag.Bool("hide-sidebar", true, "Deprecated no-op; the legacy right sidebar is no longer rendered")
 	logFile := flag.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
-	flag.Parse()
+	if err := flag.CommandLine.Parse(stripDeprecatedBoolFlag(os.Args[1:], "hide-sidebar")); err != nil {
+		os.Exit(2)
+	}
 
 	// Default session-id to a per-process value so multiple terminal windows in
 	// the same directory become independent sessions. Pass -session-id
@@ -178,4 +179,24 @@ func defaultSessionID(wd string) string {
 		return base + "-" + hex.EncodeToString(buf)
 	}
 	return fmt.Sprintf("%s-%d-%d", base, os.Getpid(), time.Now().UnixNano())
+}
+
+func stripDeprecatedBoolFlag(args []string, name string) []string {
+	cleaned := make([]string, 0, len(args))
+	short := "-" + name
+	long := "--" + name
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == short || arg == long {
+			if i+1 < len(args) && (args[i+1] == "true" || args[i+1] == "false") {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, short+"=") || strings.HasPrefix(arg, long+"=") {
+			continue
+		}
+		cleaned = append(cleaned, arg)
+	}
+	return cleaned
 }

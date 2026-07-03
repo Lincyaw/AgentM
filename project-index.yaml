@@ -759,14 +759,21 @@ requirements:
     confidence: confirmed
     code:
       - path: contrib/gateway-peers/terminal-go/main.go
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/controller.go
+      - path: contrib/gateway-peers/terminal-go/internal/wire/resolve.go
+      - path: src/agentm/cli_daemon.py
       - path: src/agentm/cli.py
+      - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway/session_manager.py
+      - path: src/agentm/gateway_daemon.py
       - path: src/agentm/gateway_supervisor.py
       - path: src/agentm/terminal_launcher.py
     tests: []
     docs:
       - path: README.md
       - path: .claude/designs/go-terminal-tui.md
+      - path: .claude/designs/single-process-gateway.md
+      - path: .claude/designs/textual-tui.md
     depends_on:
       - REQ-180-terminal-gateway-feedback
 

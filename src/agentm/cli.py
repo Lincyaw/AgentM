@@ -22,6 +22,7 @@ import typer
 from loguru import logger
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY, ProviderRegistry
+from agentm.cli_daemon import app as _daemon_app
 from agentm.cli_trace import app as _trace_app
 from agentm.cli_validate import app as _validate_app
 from agentm.cli_workflow import app as _workflow_app
@@ -860,7 +861,7 @@ def run_cmd(
             help=(
                 "User prompt to send to the agent. Optional when --resume / "
                 "--continue is set and initial messages already exist. For multi-turn / TUI "
-                "use, run the channels gateway + agentm-terminal --format textual."
+                "use, run `agentm terminal`."
             ),
         ),
     ] = "",
@@ -966,7 +967,7 @@ def run_cmd(
     pre_cwd = cwd or os.environ.get("AGENTM_CWD") or os.getcwd()
     autoload_dotenv(Path(pre_cwd))
 
-    # When a subcommand (``trace`` / ``gateway`` / ``list-extensions``) is
+    # When a subcommand (``trace`` / ``daemon`` / ``gateway`` / ``list-extensions``) is
     # being dispatched, this root callback fires first but must defer to the
     # subcommand rather than treat its absent ``--prompt`` as an error. The
     # dotenv load above is intentionally shared with subcommands so trace
@@ -1325,6 +1326,27 @@ def terminal_cmd(
             help="Terminal peer log file. Extra TUI flags may also be passed after --.",
         ),
     ] = None,
+    session_id: Annotated[
+        str | None,
+        typer.Option(
+            "--session-id",
+            help="Reconnect to a known terminal session id. Default: new session per terminal.",
+        ),
+    ] = None,
+    simple: Annotated[
+        bool,
+        typer.Option(
+            "--simple",
+            help="Use the compact terminal layout.",
+        ),
+    ] = False,
+    theme: Annotated[
+        str | None,
+        typer.Option(
+            "--theme",
+            help="Terminal theme: dark or light.",
+        ),
+    ] = None,
     gateway_log: Annotated[
         Path | None,
         typer.Option(
@@ -1364,7 +1386,7 @@ def terminal_cmd(
         ),
     ] = 10.0,
 ) -> None:
-    """Start a gateway-backed terminal in one command."""
+    """Open the terminal UI, starting/reusing the local gateway daemon by default."""
 
     from agentm.terminal_launcher import (
         TerminalLaunchConfig,
@@ -1401,6 +1423,9 @@ def terminal_cmd(
                 state_dir=state_dir,
                 terminal_bin=terminal_bin,
                 terminal_log=terminal_log,
+                session_id=session_id,
+                simple=simple,
+                theme=theme,
                 gateway_log=gateway_log,
                 gateway_command=gateway_command,
                 terminal_args=list(ctx.args),
@@ -1579,6 +1604,7 @@ def onboard_cmd() -> None:
 app.add_typer(_trace_app, name="trace")
 app.add_typer(_workflow_app, name="workflow")
 app.add_typer(_validate_app, name="validate")
+app.add_typer(_daemon_app, name="daemon")
 app.add_typer(_gateway_app, name="gateway")
 app.add_typer(_contrib_app, name="contrib")
 app.add_typer(_lint_app, name="lint")

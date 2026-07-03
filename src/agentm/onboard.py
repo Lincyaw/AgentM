@@ -685,7 +685,8 @@ def run_setup(
     typer.echo(f'  agentm --cwd "{workspace_path}" -p "Say hi"')
     typer.echo(f'  agentm --cwd "{workspace_path}" --scenario minimal -p "Say hi"')
     typer.echo(f'  agentm setup --workspace "{workspace_path}" --check')
-    typer.echo(f'  agentm gateway --cwd "{workspace_path}" --bind unix:///tmp/agentm-gw.sock')
+    typer.echo(f'  agentm terminal --cwd "{workspace_path}"')
+    typer.echo("  agentm daemon status")
     typer.echo("  agentm trace messages --latest")
 
     if test_model:

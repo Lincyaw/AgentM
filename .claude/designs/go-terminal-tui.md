@@ -15,16 +15,18 @@ The TUI is a **dumb adapter** (single-process-gateway.md §5.1) — it sends
 `inbound` envelopes and renders `outbound` ones. No session, scenario, or
 atom knowledge.
 
-The recommended user entrypoint is `agentm terminal`: the Python CLI starts or
-reuses a local gateway daemon, waits for its unix socket, launches
-`agentm-terminal --connect ...`, and leaves the Go binary as a pure wire
-client. A lightweight Python supervisor owns the daemon process and restarts
-the gateway worker when source/config files change, so SDK/session code updates
-apply without manually restarting the terminal. Advanced users can still run
-`agentm gateway` and `agentm-terminal --connect ...` separately.
-Each terminal client launch gets a fresh terminal session id by default; explicit
-`-session-id` is the opt-in mechanism for reconnecting multiple clients to the
-same gateway session.
+The recommended user entrypoints are split by responsibility:
+`agentm daemon start/status/stop/restart/socket` manages the local reloadable
+gateway daemon, `agentm-terminal` is a pure wire client that defaults to the
+daemon socket, and `agentm terminal` is a convenience wrapper that ensures the
+daemon is running before opening the TUI. A lightweight Python supervisor owns
+the daemon process and restarts the gateway worker when source/config files
+change, so SDK/session code updates apply without manually restarting the
+terminal. Advanced users can still run the foreground `agentm gateway` and
+connect peers with `--connect ...` or `AGENTM_SOCKET`.
+Each terminal client launch gets a fresh terminal session id by default;
+explicit `-session-id` is the opt-in mechanism for reconnecting multiple
+clients to the same gateway session.
 
 ## 1. Design principles
 
@@ -696,9 +698,10 @@ The current AgentM terminal implementation follows this direction:
 6. Preserve raw TTY captures for significant UX investigations in
    `.agentm/artifacts/<topic>/` and summarize only the decisions in tracked
    design docs.
-7. Keep process supervision outside the Go peer. `agentm terminal` owns the
+7. Keep process supervision outside the Go peer. `agentm daemon` owns the
    local gateway daemon/supervisor lifecycle; `agentm-terminal` only connects
-   to a gateway URL and renders the wire stream.
+   to a gateway URL and renders the wire stream. `agentm terminal` composes
+   those two for one-command startup.
 8. Remove the legacy right-side session sidebar from the primary AgentM
    terminal layout. Wide screens keep the transcript/composer primary; session
    metadata belongs in status, picker, or detail views rather than a persistent

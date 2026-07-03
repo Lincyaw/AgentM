@@ -17,10 +17,10 @@ chat-client peers):
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from agentm.env import autoload_dotenv
+from agentm.gateway_daemon import default_daemon_connect_url
 
 
 __version__ = "0.2.0"
@@ -29,15 +29,12 @@ __version__ = "0.2.0"
 def default_socket_url() -> str:
     """Conventional ``unix://`` URL shared by gateway and clients.
 
-    Uses ``$XDG_RUNTIME_DIR/agentm-gw.sock`` when set (per-user runtime
-    dir on Linux desktops; cleared on logout), else
-    ``/tmp/agentm-gw-<uid>.sock`` (uid-suffixed to avoid clobber on
-    shared hosts). Peer-cred auth still restricts who can connect.
+    Uses the same per-user, per-``AGENTM_HOME`` runtime path as
+    ``agentm daemon`` so direct gateway and peer invocations agree:
+    ``$AGENTM_RUNTIME_DIR/gateway.sock`` when set, otherwise
+    ``$TMPDIR/agentm-<uid>-<home-hash>/gateway.sock``.
     """
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime and Path(runtime).is_dir():
-        return f"unix://{Path(runtime) / 'agentm-gw.sock'}"
-    return f"unix:///tmp/agentm-gw-{os.geteuid()}.sock"
+    return default_daemon_connect_url(create_runtime_dir=True)
 
 
 DEFAULT_SOCKET_URL = default_socket_url()

@@ -20,7 +20,7 @@ var _ app.Controller = (*Controller)(nil)
 // inbound (§2.4). For the terminal peer these come from CLI flags.
 type Identity struct {
 	Channel    string // "terminal"
-	ChatID     string // -chat-id
+	ChatID     string // -session-id
 	SenderID   string // -sender-id
 	SessionKey string // composed conversation identity (§3.4)
 	Scenario   string // -scenario, sent on the first inbound only
