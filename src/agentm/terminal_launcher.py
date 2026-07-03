@@ -1,0 +1,234 @@
+"""One-command launcher for the gateway-backed terminal peer."""
+
+from __future__ import annotations
+
+import os
+import shlex
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import IO, Any
+
+
+class TerminalLaunchError(RuntimeError):
+    """Raised when the local gateway or terminal peer cannot be launched."""
+
+
+@dataclass(slots=True)
+class TerminalLaunchConfig:
+    """Resolved configuration for ``agentm terminal``."""
+
+    cwd: Path
+    connect: str | None = None
+    scenario: str | None = None
+    state_dir: Path | None = None
+    terminal_bin: str = "agentm-terminal"
+    terminal_log: Path | None = None
+    gateway_log: Path | None = None
+    gateway_command: str = "agentm"
+    terminal_args: list[str] = field(default_factory=list)
+    startup_timeout: float = 10.0
+
+
+@dataclass(slots=True)
+class _GatewayProcess:
+    process: subprocess.Popen[Any]
+    log_file: IO[bytes]
+    temp_dir: tempfile.TemporaryDirectory[str] | None
+    connect_url: str
+    log_path: Path
+
+
+def run_terminal(config: TerminalLaunchConfig) -> int:
+    """Run the terminal peer, starting a private gateway when needed."""
+
+    cwd = config.cwd
+    if not cwd.is_dir():
+        raise TerminalLaunchError(f"working directory does not exist: {cwd}")
+
+    if config.connect:
+        return _run_terminal_peer(config, connect_url=config.connect)
+
+    gateway = _start_gateway(config)
+    try:
+        connect_url = _gateway_connect_url(gateway)
+        _wait_for_gateway(connect_url, gateway, config.startup_timeout)
+        return _run_terminal_peer(config, connect_url=connect_url)
+    finally:
+        _stop_gateway(gateway)
+
+
+def _start_gateway(config: TerminalLaunchConfig) -> _GatewayProcess:
+    temp_dir = tempfile.TemporaryDirectory(prefix="agentm-gw-", dir="/tmp")
+    bind_url = f"unix://{Path(temp_dir.name) / 'gateway.sock'}"
+    log_path = config.gateway_log or _default_gateway_log()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("ab")
+
+    try:
+        command = _split_command(config.gateway_command)
+        executable = _find_executable(command[0])
+        args = [
+            executable,
+            *command[1:],
+            "gateway",
+            "--cwd",
+            str(config.cwd),
+            "--bind",
+            bind_url,
+        ]
+        if config.state_dir is not None:
+            args.extend(["--state-dir", str(config.state_dir)])
+        if config.scenario:
+            args.extend(["--scenario", config.scenario])
+
+        process = subprocess.Popen(
+            args,
+            cwd=str(config.cwd),
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
+        )
+    except Exception:
+        log_file.close()
+        temp_dir.cleanup()
+        raise
+    return _GatewayProcess(
+        process=process,
+        log_file=log_file,
+        temp_dir=temp_dir,
+        connect_url=bind_url,
+        log_path=log_path,
+    )
+
+
+def _run_terminal_peer(config: TerminalLaunchConfig, *, connect_url: str) -> int:
+    executable = _find_executable(config.terminal_bin)
+    args = [executable, "--connect", connect_url]
+    if not _has_sidebar_flag(config.terminal_args):
+        args.append("--hide-sidebar")
+    if config.scenario:
+        args.extend(["--scenario", config.scenario])
+    if config.terminal_log is not None:
+        args.extend(["--log", str(config.terminal_log)])
+    args.extend(config.terminal_args)
+    return subprocess.call(args, cwd=str(config.cwd), env=os.environ.copy())
+
+
+def _wait_for_gateway(
+    connect_url: str,
+    gateway: _GatewayProcess,
+    timeout_seconds: float,
+) -> None:
+    socket_path = _unix_socket_path(connect_url)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        rc = gateway.process.poll()
+        if rc is not None:
+            raise TerminalLaunchError(
+                f"gateway exited before it was ready (exit {rc})."
+                f"{_gateway_log_hint(gateway)}"
+            )
+        if socket_path.exists() and not socket_path.is_dir():
+            return
+        time.sleep(0.1)
+    raise TerminalLaunchError(
+        f"gateway socket was not ready after {timeout_seconds:.1f}s."
+        f"{_gateway_log_hint(gateway)}"
+    )
+
+
+def _stop_gateway(gateway: _GatewayProcess) -> None:
+    try:
+        if gateway.process.poll() is None:
+            _terminate_process_group(gateway.process, signal.SIGTERM)
+            try:
+                gateway.process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                _terminate_process_group(gateway.process, signal.SIGKILL)
+                gateway.process.wait(timeout=5.0)
+    finally:
+        gateway.log_file.close()
+        if gateway.temp_dir is not None:
+            gateway.temp_dir.cleanup()
+
+
+def _terminate_process_group(process: subprocess.Popen[Any], sig: signal.Signals) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, sig)
+            return
+        except ProcessLookupError:
+            return
+    if sig == signal.SIGTERM:
+        process.terminate()
+    else:
+        process.kill()
+
+
+def _gateway_connect_url(gateway: _GatewayProcess) -> str:
+    if not gateway.connect_url:
+        raise TerminalLaunchError("gateway connect URL was not initialized")
+    return gateway.connect_url
+
+
+def _gateway_log_path(gateway: _GatewayProcess) -> Path:
+    return gateway.log_path
+
+
+def _unix_socket_path(connect_url: str) -> Path:
+    prefix = "unix://"
+    if not connect_url.startswith(prefix):
+        raise TerminalLaunchError(
+            f"local terminal launcher only creates unix:// sockets, got {connect_url!r}"
+        )
+    raw_path = connect_url.removeprefix(prefix)
+    if not raw_path:
+        raise TerminalLaunchError("local gateway socket path is empty")
+    return Path(raw_path)
+
+
+def _default_gateway_log() -> Path:
+    home = Path(os.environ.get("AGENTM_HOME", str(Path.home() / ".agentm")))
+    return home / "logs" / "terminal-gateway.log"
+
+
+def _gateway_log_hint(gateway: _GatewayProcess) -> str:
+    path = _gateway_log_path(gateway)
+    try:
+        content = path.read_bytes()
+    except OSError:
+        return f" Log: {path}"
+    if not content:
+        return f" Log: {path}"
+    tail = content[-4000:].decode("utf-8", errors="replace").strip()
+    return f" Log: {path}\n{tail}"
+
+
+def _split_command(value: str) -> list[str]:
+    parts = shlex.split(value)
+    if not parts:
+        raise TerminalLaunchError("gateway command is empty")
+    return parts
+
+
+def _find_executable(value: str) -> str:
+    if os.sep in value or (os.altsep and os.altsep in value):
+        path = Path(value)
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        raise TerminalLaunchError(f"executable not found or not executable: {value}")
+    found = shutil.which(value)
+    if found:
+        return found
+    raise TerminalLaunchError(f"executable not found on PATH: {value}")
+
+
+def _has_sidebar_flag(args: list[str]) -> bool:
+    return "--hide-sidebar" in args

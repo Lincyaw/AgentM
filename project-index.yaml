@@ -736,6 +736,32 @@ requirements:
     depends_on:
       - REQ-096-cli-provider-session-seams
 
+  - id: REQ-198-terminal-one-command-gateway
+    title: AgentM CLI can launch a gateway-backed terminal in one command
+    description: >
+      The `agentm terminal` command must start a private local `agentm gateway`,
+      wait for its unix socket, connect the `agentm-terminal` TUI to it, write
+      gateway logs to a deterministic file, and shut the gateway down when the
+      terminal exits. The Go terminal peer remains a wire-only client; advanced
+      users can still connect it to an external gateway explicitly. Stale
+      chat-to-session mappings must be discarded automatically when their
+      target session file no longer exists, so a terminal can recover by
+      starting a fresh session instead of surfacing a raw FileNotFoundError.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/gateway-peers/terminal-go/main.go
+      - path: src/agentm/cli.py
+      - path: src/agentm/gateway/session_manager.py
+      - path: src/agentm/terminal_launcher.py
+    tests: []
+    docs:
+      - path: README.md
+      - path: .claude/designs/go-terminal-tui.md
+    depends_on:
+      - REQ-180-terminal-gateway-feedback
+
   - id: REQ-189-terminal-wire-only-tool-surface
     title: Terminal peer keeps tool/request surfaces wire-only
     description: >
@@ -819,6 +845,9 @@ requirements:
       cycles agents from an empty editor, Esc interrupts or asks for a second
       press before clearing input, and Ctrl+C uses a second-press exit
       confirmation instead of a focus-stealing modal.
+      The legacy right-side session sidebar is removed from the primary terminal
+      layout, and transient notifications should render as compact Claude-style
+      status hints rather than large bottom-right cards.
     priority: P1
     status: implemented
     confidence: confirmed
@@ -830,6 +859,9 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/messages/messages.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/statusbar/statusbar.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/tabbar/tabbar.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/notification/notification.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/styles/styles.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/styles/theme.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/dispatch.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/messages/tabs.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/messages/toggle.go

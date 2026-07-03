@@ -1275,6 +1275,130 @@ def list_extensions_cmd(
     logger.info("{total} extension(s) shown.", total=total)
 
 
+@app.command(
+    name="terminal",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def terminal_cmd(
+    ctx: typer.Context,
+    connect: Annotated[
+        str | None,
+        typer.Option(
+            "--connect",
+            help=(
+                "Existing gateway URL. Omit this to start a private local "
+                "gateway for the terminal."
+            ),
+        ),
+    ] = None,
+    scenario: Annotated[
+        str | None,
+        typer.Option(
+            "--scenario",
+            help=(
+                "Scenario for the local gateway or the first terminal message. "
+                "Defaults to chatbot in local one-command mode."
+            ),
+        ),
+    ] = None,
+    cwd: CwdOpt = None,
+    state_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--state-dir",
+            envvar="AGENTM_STATE_DIR",
+            help="Persistent gateway state dir. Only used when starting a local gateway.",
+        ),
+    ] = None,
+    terminal_bin: Annotated[
+        str,
+        typer.Option(
+            "--terminal-bin",
+            envvar="AGENTM_TERMINAL_BIN",
+            help="Terminal peer executable.",
+        ),
+    ] = "agentm-terminal",
+    terminal_log: Annotated[
+        Path | None,
+        typer.Option(
+            "--terminal-log",
+            help="Terminal peer log file. Extra TUI flags may also be passed after --.",
+        ),
+    ] = None,
+    gateway_log: Annotated[
+        Path | None,
+        typer.Option(
+            "--gateway-log",
+            envvar="AGENTM_TERMINAL_GATEWAY_LOG",
+            help="Local gateway log file. Default: $AGENTM_HOME/logs/terminal-gateway.log.",
+        ),
+    ] = None,
+    gateway_command: Annotated[
+        str,
+        typer.Option(
+            "--gateway-command",
+            help="Command used to launch the local gateway.",
+            hidden=True,
+        ),
+    ] = "agentm",
+    startup_timeout: Annotated[
+        float,
+        typer.Option(
+            "--startup-timeout",
+            min=0.1,
+            help="Seconds to wait for the local gateway socket.",
+        ),
+    ] = 10.0,
+) -> None:
+    """Start a gateway-backed terminal in one command."""
+
+    from agentm.terminal_launcher import (
+        TerminalLaunchConfig,
+        TerminalLaunchError,
+        run_terminal,
+    )
+
+    resolved_cwd = Path(cwd or os.environ.get("AGENTM_CWD") or os.getcwd())
+    autoload_dotenv(resolved_cwd)
+    resolved_scenario = (
+        scenario if scenario is not None else os.environ.get("AGENTM_SCENARIO")
+    )
+    if not connect and resolved_scenario is None:
+        resolved_scenario = DEFAULT_SCENARIO
+
+    if connect and (
+        state_dir is not None
+        or gateway_log is not None
+        or gateway_command != "agentm"
+    ):
+        raise typer.BadParameter(
+            "--state-dir, --gateway-log, and --gateway-command only apply when "
+            "agentm terminal starts the local gateway"
+        )
+
+    try:
+        rc = run_terminal(
+            TerminalLaunchConfig(
+                cwd=resolved_cwd,
+                connect=connect,
+                scenario=resolved_scenario,
+                state_dir=state_dir,
+                terminal_bin=terminal_bin,
+                terminal_log=terminal_log,
+                gateway_log=gateway_log,
+                gateway_command=gateway_command,
+                terminal_args=list(ctx.args),
+                startup_timeout=startup_timeout,
+            )
+        )
+    except TerminalLaunchError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=7) from exc
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130) from None
+    raise typer.Exit(code=rc)
+
+
 @app.command(name="setup")
 def setup_cmd(
     profile: Annotated[

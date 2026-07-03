@@ -153,9 +153,24 @@ class SessionManager:
                 wire_services[CHILD_SESSION_REGISTRY_SERVICE] = self._child_registry
 
             effective_cwd = cwd or self._cwd
-            sess = await self._factory(
-                effective_cwd, session_key, scenario, prior_session_id, wire_services
-            )
+            try:
+                sess = await self._factory(
+                    effective_cwd, session_key, scenario, prior_session_id, wire_services
+                )
+            except FileNotFoundError as exc:
+                missing_id = str(exc) if str(exc) else None
+                if prior_session_id is None or missing_id != prior_session_id:
+                    raise
+                logger.warning(
+                    "chat_session_map: dropping stale mapping {} -> {}",
+                    session_key,
+                    prior_session_id,
+                )
+                self._chat_map.drop(session_key)
+                prior_session_id = None
+                sess = await self._factory(
+                    effective_cwd, session_key, scenario, None, wire_services
+                )
             new_id = _extract_session_id(sess)
             if new_id and new_id != prior_session_id:
                 self._chat_map.set(session_key, new_id)

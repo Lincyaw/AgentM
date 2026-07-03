@@ -188,20 +188,23 @@ ls contrib/scenarios/           # shipped scenarios: local, sandbox,
                                 # rca, rca_hfsm, terminal_bench
 ```
 
-Beyond the one-shot prompt, notable subcommands include `agentm gateway`
-(single-process gateway holding all chat sessions in memory), `agentm trace`
-(query the OTLP/JSON session log), and `agentm contrib sync` (materialize
-configurable contrib resources under `~/.agentm`). The chat-client peers ship
-as **separate binaries** for vendor-SDK isolation only — `agentm-terminal` and
-`agentm-feishu`. The default terminal UI keeps the legacy right sidebar hidden;
-use `agentm-terminal --simple` for an even smaller chat layout. Workflow and
-sub-agent sessions open as background task rows so the parent conversation stays
-focused; `↓` opens the task picker, `Enter` views the selected task, `x` stops a
-selected task, and `Ctrl+t` hides/shows the rows. `Enter` sends (or queues while
-the agent is busy), `Shift+Enter`/`Ctrl+j` inserts a newline, `?` opens
-shortcuts from an empty editor, `/` and `@` open inline command/resource
-completions, `Esc` interrupts or double-press clears input, and `Ctrl+c` exits
-on the second press. Run `agentm <sub> --help` or `<binary> --help` for flags.
+Beyond the one-shot prompt, notable subcommands include `agentm terminal`
+(start a local gateway and attach the terminal UI in one command),
+`agentm gateway` (single-process gateway holding all chat sessions in memory),
+`agentm trace` (query the OTLP/JSON session log), and `agentm contrib sync`
+(materialize configurable contrib resources under `~/.agentm`). The chat-client
+peers ship as **separate binaries** for vendor-SDK isolation only —
+`agentm-terminal` and `agentm-feishu`; normal terminal use should go through
+`agentm terminal`, while advanced users can still run `agentm gateway` and
+`agentm-terminal --connect ...` separately. Extra TUI flags can be passed after
+`--`, for example `agentm terminal -- --simple`. Workflow and sub-agent
+sessions open as background task rows so the parent conversation stays focused;
+`↓` opens the task picker, `Enter` views the selected task, `x` stops a selected
+task, and `Ctrl+t` hides/shows the rows. `Enter` sends (or queues while the
+agent is busy), `Shift+Enter`/`Ctrl+j` inserts a newline, `?` opens shortcuts
+from an empty editor, `/` and `@` open inline command/resource completions,
+`Esc` interrupts or double-press clears input, and `Ctrl+c` exits on the second
+press. Run `agentm <sub> --help` or `<binary> --help` for flags.
 
 ## Five pluggability axes
 
@@ -258,6 +261,7 @@ Then use AgentM from any repo:
 
 ```bash
 agentm -p "summarize this repository"
+agentm terminal
 agentm --scenario minimal -p "Say hi"
 agentm --cwd /path/to/repo -p "run the relevant checks"
 agentm trace messages --latest

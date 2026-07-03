@@ -5,7 +5,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -15,14 +14,10 @@ import (
 )
 
 const (
-	defaultDuration      = 10 * time.Second
-	notificationPadding  = 2
-	maxNotificationWidth = 80 // Maximum width to prevent covering too much screen
-	closeGlyph           = "✕"
-	closeInset           = 1
-	hoverLabel           = "click to copy"
-	copiedLabel          = "copied!"
-	closeLabel           = "dismiss"
+	defaultDuration      = 4 * time.Second
+	notificationPadding  = 1
+	maxNotificationWidth = 56
+	maxVisibleItems      = 3
 )
 
 var nextID atomic.Uint64
@@ -108,34 +103,40 @@ type notificationItem struct {
 
 // render returns the styled view string for this notification item.
 func (item notificationItem) render(maxWidth int, closeHovered, bodyHovered, copied bool) string {
-	text := item.Text
+	_, _ = closeHovered, bodyHovered
+	text := item.compactText(maxWidth)
+	if copied {
+		text = truncateDisplay(text+" · copied", maxWidth)
+	}
 	style := item.Type.style()
-
-	var rendered string
-	if lipgloss.Width(text) > maxWidth {
-		rendered = style.Width(maxWidth).Render(text)
-	} else {
-		rendered = style.Render(text)
-	}
-
-	rendered = overlayCloseButton(rendered, style, closeHovered)
-
-	if bodyHovered || copied || closeHovered {
-		label := hoverLabel
-		switch {
-		case closeHovered:
-			label = closeLabel
-		case copied:
-			label = copiedLabel
-		}
-		rendered = overlayTopBorderText(rendered, style, label)
-	}
-
-	return rendered
+	return style.Render(text)
 }
 
-// Manager represents a notification manager that displays multiple stacked
-// messages in the bottom right corner of the screen.
+func (item notificationItem) compactText(maxWidth int) string {
+	text := strings.Join(strings.Fields(item.Text), " ")
+	if text == "" {
+		text = "Done"
+	}
+	text = item.Type.prefix() + text
+	return truncateDisplay(text, maxWidth)
+}
+
+func (t Type) prefix() string {
+	switch t {
+	case TypeError:
+		return "Error: "
+	case TypeWarning:
+		return "Warning: "
+	case TypeInfo:
+		return ""
+	default:
+		return ""
+	}
+}
+
+// Manager displays Claude-style compact status notices in the bottom-right
+// corner. Notices are intentionally single-line and short-lived so they do not
+// compete with the main transcript.
 type Manager struct {
 	width, height  int
 	items          []notificationItem
@@ -194,6 +195,9 @@ func (n *Manager) handleShow(msg ShowMsg) (Manager, tea.Cmd) {
 
 	item := notificationItem{ID: id, Text: msg.Text, Type: notifType}
 	n.items = append([]notificationItem{item}, n.items...)
+	if len(n.items) > maxVisibleItems {
+		n.items = n.items[:maxVisibleItems]
+	}
 
 	return *n, makeTimerCmd(id, item.timerGen, notifType.autoHideDuration())
 }
@@ -258,7 +262,8 @@ func (n *Manager) MarkCopied(id uint64) Manager {
 // maxWidth returns the effective maximum width for notification text.
 func (n *Manager) maxWidth() int {
 	if n.width > 0 {
-		return max(1, min(maxNotificationWidth, n.width-notificationPadding*2))
+		screenLimit := max(1, (n.width*2)/5)
+		return max(1, min(maxNotificationWidth, min(screenLimit, n.width-notificationPadding*2)))
 	}
 	return maxNotificationWidth
 }
@@ -319,7 +324,6 @@ type notifBounds struct {
 	width  int
 	height int
 	text   string
-	style  lipgloss.Style
 }
 
 // itemBounds computes screen-space bounds in the same order notifications render.
@@ -346,39 +350,24 @@ func (n *Manager) itemBounds() []notifBounds {
 			width:  w,
 			height: lipgloss.Height(view),
 			text:   item.Text,
-			style:  item.Type.style(),
 		})
 		row += lipgloss.Height(view)
 	}
 	return bounds
 }
 
-func closeButtonPosition(b notifBounds) (x, y int) {
-	return b.col + max(0, b.width-b.style.GetBorderRightSize()-1-closeInset), b.row + b.style.GetBorderTopSize()
-}
-
-// CloseButtonHit checks if the given screen coordinates hit a notification close glyph.
+// CloseButtonHit is kept for callers that still ask the notification layer
+// about dismiss hits. Compact status hints have no inline close control.
 func (n *Manager) CloseButtonHit(x, y int) (uint64, bool) {
-	for _, b := range n.itemBounds() {
-		closeX, closeY := closeButtonPosition(b)
-		if x == closeX && y == closeY {
-			return b.id, true
-		}
-	}
 	return 0, false
 }
 
 // BodyHit checks whether the coordinates hit the body of a notification and
-// returns its ID and text. The close button is excluded so dismiss priority can
-// stay separate from click-to-copy behavior.
+// returns its ID and text.
 func (n *Manager) BodyHit(x, y int) (uint64, string, bool) {
 	for _, b := range n.itemBounds() {
 		if x < b.col || x >= b.col+b.width || y < b.row || y >= b.row+b.height {
 			continue
-		}
-		closeX, closeY := closeButtonPosition(b)
-		if x == closeX && y == closeY {
-			return 0, "", false
 		}
 		return b.id, b.text, true
 	}
@@ -400,11 +389,7 @@ func (n *Manager) CopyHit(x, y int) (uint64, string, bool) {
 // button and returns a dismiss command when they do. Body clicks do not dismiss;
 // callers can use CopyHit for additional behavior such as click-to-copy.
 func (n *Manager) HandleClick(x, y int) tea.Cmd {
-	id, ok := n.CloseButtonHit(x, y)
-	if !ok {
-		return nil
-	}
-	return cmd(DismissMsg{ID: id})
+	return nil
 }
 
 func (n *Manager) hitTestNotification(x, y int) uint64 {
@@ -455,83 +440,23 @@ func (n *Manager) HandleMouseMotion(x, y int) (Manager, tea.Cmd) {
 	return *n, cmd
 }
 
-// overlayCloseButton places a close glyph in the top-right area of a rendered notification.
-func overlayCloseButton(rendered string, style lipgloss.Style, hovered bool) string {
-	lines := strings.Split(rendered, "\n")
-	lineIndex := style.GetBorderTopSize()
-	if lineIndex < 0 || lineIndex >= len(lines) {
-		return rendered
+func truncateDisplay(s string, maxWidth int) string {
+	if maxWidth <= 0 || runewidth.StringWidth(s) <= maxWidth {
+		return s
 	}
-
-	glyph := styles.NoStyle.Foreground(styles.TextSecondary).Render(closeGlyph)
-	if hovered {
-		glyph = styles.NoStyle.Foreground(styles.Error).Bold(true).Render(closeGlyph)
+	if maxWidth <= 1 {
+		return "…"
 	}
-
-	targetCol := lipgloss.Width(lines[lineIndex]) - style.GetBorderRightSize() - 1 - closeInset
-	idx := visibleColumnByteIndex(lines[lineIndex], targetCol)
-	if idx < 0 {
-		return rendered
-	}
-	_, size := utf8.DecodeRuneInString(lines[lineIndex][idx:])
-	lines[lineIndex] = lines[lineIndex][:idx] + glyph + lines[lineIndex][idx+size:]
-	return strings.Join(lines, "\n")
-}
-
-// overlayTopBorderText injects a label into the top border line of a rendered
-// notification.
-func overlayTopBorderText(rendered string, style lipgloss.Style, label string) string {
-	lines := strings.Split(rendered, "\n")
-	if len(lines) == 0 {
-		return rendered
-	}
-
-	paddedLabel := " " + label + " "
-	labelWidth := lipgloss.Width(paddedLabel)
-	totalWidth := lipgloss.Width(lines[0])
-
-	// Need room for: left corner, one dash, label, one dash, right corner.
-	if totalWidth < labelWidth+4 {
-		return rendered
-	}
-
-	bdr := styles.NoStyle.Foreground(style.GetBorderTopForeground())
-	lbl := styles.NoStyle.Foreground(styles.TextMutedGray)
-	lines[0] = bdr.Render("╭─") +
-		lbl.Render(paddedLabel) +
-		bdr.Render(strings.Repeat("─", totalWidth-3-labelWidth)) +
-		bdr.Render("╮")
-
-	return strings.Join(lines, "\n")
-}
-
-func visibleColumnByteIndex(s string, targetCol int) int {
-	if targetCol < 0 {
-		return -1
-	}
-	col := 0
-	for i := 0; i < len(s); {
-		if s[i] == '\x1b' {
-			end := i + 1
-			for end < len(s) && s[end] != 'm' {
-				end++
-			}
-			if end < len(s) {
-				end++
-			}
-			i = end
-			continue
-		}
-		if col == targetCol {
-			return i
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		i += size
+	limit := maxWidth - 1
+	width := 0
+	var b strings.Builder
+	for _, r := range s {
 		w := runewidth.RuneWidth(r)
-		if w <= 0 {
-			w = 1
+		if width+w > limit {
+			break
 		}
-		col += w
+		b.WriteRune(r)
+		width += w
 	}
-	return -1
+	return strings.TrimRight(b.String(), " ") + "…"
 }
