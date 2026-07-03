@@ -944,7 +944,9 @@ requirements:
       running, or waiting for input, and completed workflow rows must disappear
       from the bottom task surface instead of accumulating. Auto-backgrounded
       tool work and monitor/wakeup state must use the same bottom surface as
-      structured activity rows without being promoted into tabs. The composer should
+      structured activity rows without being promoted into tabs, with older
+      activity summarized once the visible row budget is reached so the chat
+      viewport remains primary. The composer should
       follow chat-first terminal semantics:
       Enter sends, Enter queues cooperatively while the active agent is busy,
       Shift+Enter/Ctrl+j inserts a newline, `?` opens shortcuts from an empty

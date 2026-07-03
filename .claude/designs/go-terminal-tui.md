@@ -686,10 +686,13 @@ The current AgentM terminal implementation follows this direction:
    actionable (new, running, or waiting for input). The same bottom surface
    also renders structured background activity from `background_exec` and
    `monitor` (for example auto-backgrounded shell commands, wakeups, and
-   condition/channel monitors) without promoting those units into tabs. `↓`
-   opens the workflow picker when selectable child sessions exist, `Enter`
-   views a selected workflow task, `x` stops it, and `Ctrl+T` hides/shows the
-   bottom rows.
+   condition/channel monitors) without promoting those units into tabs. This
+   surface is bounded: when background activity exceeds the visible row budget,
+   the newest rows stay visible and older rows collapse into a count summary so
+   background work cannot consume the main chat viewport. `↓` opens the
+   workflow picker when selectable child sessions exist, `Enter` views a
+   selected workflow task, `x` stops it, and `Ctrl+T` hides/shows the bottom
+   rows.
 3. Make the composer the control surface:
    `Enter` sends, busy `Enter` queues cooperatively, `Shift+Enter`/`Ctrl+J`
    inserts newline, `?` opens shortcuts, `/` opens commands, `@` opens files,
