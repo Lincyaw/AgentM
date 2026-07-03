@@ -441,6 +441,31 @@ def _find_parent_if(tree: ast.Module, target: ast.AST) -> ast.If | None:
     return None
 
 
+def _is_dict_with_type_object(node: ast.expr) -> bool:
+    """True if *node* is a dict literal containing ``"type": "object"``."""
+    if not isinstance(node, ast.Dict):
+        return False
+    for key, value in zip(node.keys, node.values):
+        if (isinstance(key, ast.Constant) and key.value == "type"
+                and isinstance(value, ast.Constant) and value.value == "object"):
+            return True
+    return False
+
+
+def _collect_dict_schema_names(tree: ast.Module) -> set[str]:
+    """Return names of module-level constants assigned a ``{"type": "object", ...}`` dict."""
+    names: set[str] = set()
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and _is_dict_with_type_object(node.value):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None and _is_dict_with_type_object(node.value):
+                names.add(node.target.id)
+    return names
+
+
 def _check_hand_written_schema(
     tree: ast.Module, path: str, file_path: Path
 ) -> list[Issue]:
@@ -451,6 +476,7 @@ def _check_hand_written_schema(
     if not is_atom:
         return []
 
+    schema_names = _collect_dict_schema_names(tree)
     issues: list[Issue] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -464,12 +490,23 @@ def _check_hand_written_schema(
         if func_name != "FunctionTool":
             continue
         for kw in node.keywords:
-            if kw.arg == "parameters" and isinstance(kw.value, ast.Dict):
+            if kw.arg != "parameters":
+                continue
+            if isinstance(kw.value, ast.Dict):
                 issues.append(Issue(
                     path=path,
                     line=kw.value.lineno,
                     rule="AM011",
                     message="hand-written tool schema — use pydantic_to_tool_schema(Model) instead",
+                    severity="warning",
+                ))
+            elif (isinstance(kw.value, ast.Name)
+                  and kw.value.id in schema_names):
+                issues.append(Issue(
+                    path=path,
+                    line=kw.value.lineno,
+                    rule="AM011",
+                    message=f"hand-written tool schema ({kw.value.id}) — use pydantic_to_tool_schema(Model) instead",
                     severity="warning",
                 ))
     return issues
