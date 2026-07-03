@@ -218,7 +218,8 @@ press. Run `agentm <sub> --help` or `<binary> --help` for flags.
 
 For remote terminal clients, start the daemon on a WebSocket bind. Authentication
 is enabled by default: if no token file is supplied, the daemon creates
-`$AGENTM_HOME/gateway/token` with mode `0600`.
+`$AGENTM_HOME/gateway/token` with mode `0600`. Token files are one token per
+line; blank lines and `#` comments are ignored.
 
 ```bash
 agentm daemon start --bind ws://0.0.0.0:8765

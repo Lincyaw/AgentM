@@ -83,7 +83,10 @@ capable and require token auth by default: direct `agentm gateway --bind ws://â€
 requires `--bind-token-file` unless `--bind-allow-anonymous` is explicitly
 passed; `agentm daemon start --bind ws://â€¦` generates
 `$AGENTM_HOME/gateway/token` with mode `0600` when no token file is supplied and
-reports the token file path in `agentm daemon status`.
+reports the token file path in `agentm daemon status`. Token files are parsed as
+one token per line; blank lines and `#` comments are ignored. Server
+`--bind-token-file` accepts every listed token, while client `--token-file`
+helpers send the first listed token.
 
 Gateway persistent state (`wire-outbox.sqlite`, `wire-inbox.sqlite`,
 `session_map.json`, and `schedules.json`) defaults to `$AGENTM_HOME/gateway`

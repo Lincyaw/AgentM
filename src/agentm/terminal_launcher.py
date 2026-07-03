@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
+from agentm.gateway import load_token_file
 from agentm.gateway_daemon import (
     GatewayDaemonConfig,
     GatewayDaemonError,
@@ -184,14 +185,9 @@ def _daemon_token_for_connect(connect_url: str) -> str | None:
     if status.token_file is None:
         raise TerminalLaunchError("daemon requires auth but has no token file")
     try:
-        token = status.token_file.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        raise TerminalLaunchError(
-            f"cannot read daemon token file {status.token_file}: {exc}"
-        ) from exc
-    if not token:
-        raise TerminalLaunchError(f"daemon token file is empty: {status.token_file}")
-    return token
+        return load_token_file(str(status.token_file))[0]
+    except ValueError as exc:
+        raise TerminalLaunchError(str(exc)) from exc
 
 
 def _validate_local_scenario(scenario: str) -> None:
