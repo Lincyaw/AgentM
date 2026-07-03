@@ -30,7 +30,7 @@ app = typer.Typer(
 
 
 def _resolve_cwd(cwd: str | None) -> Path:
-    return Path(cwd or os.environ.get("AGENTM_CWD") or os.getcwd())
+    return Path(cwd or os.environ.get("AGENTM_CWD") or os.getcwd()).expanduser()
 
 
 def _autoload_daemon_env(cwd: str | None) -> Path:

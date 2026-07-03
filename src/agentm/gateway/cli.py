@@ -440,7 +440,7 @@ def cli(
     # A prior process (e.g. a TUI that crashed) may have left the PTY in
     # raw mode where intr is disabled; without this, Ctrl-C is swallowed.
     _restore_terminal()
-    resolved_cwd = cwd or str(Path.cwd())
+    resolved_cwd = str(Path(cwd or str(Path.cwd())).expanduser())
     autoload_dotenv(Path(resolved_cwd))
     try:
         rc = asyncio.run(

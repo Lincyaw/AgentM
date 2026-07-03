@@ -85,7 +85,9 @@ def run(
             raise typer.BadParameter("--args must be a JSON object")
         workflow_args = parsed
 
-    resolved_cwd = cwd or os.environ.get("AGENTM_CWD") or os.getcwd()
+    resolved_cwd = str(
+        Path(cwd or os.environ.get("AGENTM_CWD") or os.getcwd()).expanduser()
+    )
     script_path = script.resolve()
 
     exit_code = asyncio.run(
