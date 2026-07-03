@@ -4,8 +4,8 @@ Multi-bot support: a single ``agentm-feishu`` process can host N Feishu bots,
 each configured under ``[feishu.bots.<name>]`` in the user's config.toml
 (``$AGENTM_HOME/config.toml`` or ``~/.agentm/config.toml``).
 
-This module reads the TOML file independently — it does NOT import or modify
-``agentm.core.lib.user_config`` (that module is for model profiles).
+This module reads the Feishu tables independently while reusing AgentM's shared
+home-directory resolver so all gateway peers honor ``AGENTM_HOME`` the same way.
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from agentm.core.lib import agentm_home_dir
 from loguru import logger
 
 from .adapter import FeishuConfig
 
 
 def _agentm_home() -> Path:
-    home = os.environ.get("AGENTM_HOME")
-    return Path(home) if home else Path.home() / ".agentm"
+    return agentm_home_dir()
 
 
 def _read_secret(raw: dict[str, Any], bot_name: str) -> str | None:

@@ -1,6 +1,6 @@
 """Persistent state management for weixin accounts, sync buffers, and context tokens.
 
-Storage layout under ``~/.agentm/weixin/``:
+Storage layout under ``$AGENTM_HOME/weixin/``:
   accounts.json           — list of registered account IDs
   accounts/<id>.json      — per-account credentials (token, baseUrl, userId)
   accounts/<id>.sync.json — getUpdates incremental cursor
@@ -10,18 +10,15 @@ Storage layout under ``~/.agentm/weixin/``:
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentm.core.lib import agentm_home_dir
 from loguru import logger
 
 
 def _state_dir() -> Path:
-    home = os.environ.get("AGENTM_HOME", "")
-    if home:
-        return Path(home) / "weixin"
-    return Path.home() / ".agentm" / "weixin"
+    return agentm_home_dir() / "weixin"
 
 
 # -- Account data --------------------------------------------------------

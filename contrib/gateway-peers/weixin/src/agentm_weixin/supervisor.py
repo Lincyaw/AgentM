@@ -24,14 +24,12 @@ import sys
 import textwrap
 from pathlib import Path
 
+from agentm.core.lib import agentm_home_dir
 from loguru import logger
 
 
 def _state_dir() -> Path:
-    home = os.environ.get("AGENTM_HOME", "")
-    if home:
-        return Path(home) / "weixin"
-    return Path.home() / ".agentm" / "weixin"
+    return agentm_home_dir() / "weixin"
 
 
 def _log_dir() -> Path:
