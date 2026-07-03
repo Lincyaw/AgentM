@@ -328,28 +328,27 @@ func (mv *messageModel) render(width int) string {
 			prefix = mv.senderPrefix(msg.Sender)
 		}
 
-		// Always reserve a top row to avoid layout shifts when the copy icon
-		// appears on hover. When not hovered, the row is filled with spaces
-		// (invisible). AssistantMessageStyle has PaddingTop=0, so this extra
-		// row acts as a stable spacer.
 		innerWidth := width - messageStyle.GetHorizontalFrameSize()
-		topRow := strings.Repeat(" ", innerWidth)
+		body := rendered
+		controlRows := 0
 		if mv.hovered || mv.selected {
 			copyIcon := styles.MutedStyle.Render(types.AssistantMessageCopyLabel)
 			iconWidth := ansi.StringWidth(types.AssistantMessageCopyLabel)
 			padding := max(innerWidth-iconWidth, 0)
-			topRow = strings.Repeat(" ", padding) + copyIcon
+			topRow := strings.Repeat(" ", padding) + copyIcon
+			body = topRow + "\n" + rendered
+			controlRows = 1
 		}
 
 		// Translate the markdown-relative line indices into messageModel View()
 		// coordinates. The rendered markdown is preceded by the sender prefix
-		// (when shown) and the always-present topRow line inside the styled
-		// envelope, so the first line of `rendered` lands at this offset.
+		// (when shown) and the optional copy-control row, so the first line of
+		// `rendered` lands at this offset.
 		prefixLines := 0
 		if prefix != "" {
 			prefixLines = strings.Count(prefix, "\n")
 		}
-		lineOffset := prefixLines + 1 // +1 for topRow
+		lineOffset := prefixLines + controlRows
 		if len(codeBlocks) > 0 {
 			mv.codeBlocks = make([]markdown.CodeBlock, len(codeBlocks))
 			for i, cb := range codeBlocks {
@@ -362,7 +361,7 @@ func (mv *messageModel) render(width int) string {
 			mv.codeBlocks = nil
 		}
 
-		return prefix + messageStyle.Width(width).Render(topRow+"\n"+rendered)
+		return prefix + messageStyle.Width(width).Render(body)
 	case types.MessageTypeShellOutput:
 		if rendered, err := markdown.NewRenderer(width).Render(fmt.Sprintf("```console\n%s\n```", msg.Content)); err == nil {
 			return rendered
@@ -444,7 +443,7 @@ func (mv *messageModel) senderPrefix(sender string) string {
 	if sender == "" {
 		return ""
 	}
-	return styles.AgentBadgeStyleFor(sender).MarginLeft(2).Render(sender) + "\n\n"
+	return styles.AgentBadgeStyleFor(sender).MarginLeft(2).Render(sender) + "\n"
 }
 
 // sameAgentAsPrevious returns true if the previous message was from the same agent

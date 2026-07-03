@@ -762,6 +762,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/cagent/session/store.go
       - path: contrib/gateway-peers/terminal-go/internal/cagent/tools/description.go
       - path: contrib/gateway-peers/terminal-go/internal/cagent/tools/tools.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/components/message/message.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/messages/messages.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/sidebar/sidebar.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/statusbar/statusbar.go
@@ -796,6 +797,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/main.go
     tests: []
     docs:
+      - path: README.md
       - path: .claude/designs/go-terminal-tui.md
     depends_on:
       - REQ-180-terminal-gateway-feedback

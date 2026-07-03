@@ -32,6 +32,9 @@ func main() {
 	scenario := flag.String("scenario", "", "Scenario name (first message only)")
 	themeName := flag.String("theme", "dark", "Theme: dark or light")
 	mockMode := flag.Bool("mock", false, "Run with mock data (no gateway)")
+	simpleMode := flag.Bool("simple", false, "Run a simplified chat layout for narrow terminals")
+	leanMode := flag.Bool("lean", false, "Alias for --simple")
+	hideSidebar := flag.Bool("hide-sidebar", false, "Hide the right sidebar in the full layout")
 	logFile := flag.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
 	flag.Parse()
 
@@ -143,7 +146,15 @@ func main() {
 		return msg
 	}
 
-	model := tui.New(ctx, spawner, initialApp, wd, func() {})
+	var tuiOpts []tui.Option
+	if *simpleMode || *leanMode {
+		tuiOpts = append(tuiOpts, tui.WithLeanMode())
+	}
+	if *hideSidebar {
+		tuiOpts = append(tuiOpts, tui.WithHideSidebar())
+	}
+
+	model := tui.New(ctx, spawner, initialApp, wd, func() {}, tuiOpts...)
 
 	p := tea.NewProgram(model, tea.WithContext(ctx), tea.WithFilter(filter))
 	coalescer.SetSender(p.Send)

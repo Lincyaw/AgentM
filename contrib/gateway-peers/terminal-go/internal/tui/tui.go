@@ -60,6 +60,9 @@ const (
 	resizeHandleWidth = 8
 	// appPaddingHorizontal is total horizontal padding from AppStyle (left + right)
 	appPaddingHorizontal = 2 * styles.AppPadding
+	// minEditorLines keeps the default composer compact while preserving a
+	// draggable multiline editor.
+	minEditorLines = 2
 )
 
 // Model is the top-level TUI model that wraps the chat page.
@@ -352,7 +355,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		transcriber:                   transcribe.New(os.Getenv("OPENAI_API_KEY")),
 		workingSpinner:                spinner.New(spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
 		focusedPanel:                  PanelEditor,
-		editorLines:                   3,
+		editorLines:                   minEditorLines,
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
 		appName:                       "AgentM Terminal",
@@ -1686,7 +1689,7 @@ func (m *appModel) resizeAll() tea.Cmd {
 	}
 
 	// Calculate editor height
-	minLines := 4
+	minLines := minEditorLines
 	maxLines := max(minLines, (height-6)/2)
 	m.editorLines = max(minLines, min(m.editorLines, maxLines))
 
@@ -1828,12 +1831,9 @@ func (m *appModel) Bindings() []key.Binding {
 	statusBarKeys := map[string]bool{
 		"ctrl+c":      true, // quit
 		"tab":         true, // switch focus
-		"ctrl+t":      true, // new tab (from tabBar)
-		"ctrl+w":      true, // close tab (from tabBar)
-		"ctrl+p":      true, // prev tab (from tabBar)
-		"ctrl+n":      true, // next tab (from tabBar)
 		"ctrl+k":      true, // commands
 		"ctrl+h":      true, // help
+		"ctrl+o":      true, // toggle tool details
 		"shift+enter": true, // newline
 		"ctrl+j":      true, // newline fallback
 		"ctrl+g":      true, // edit in external editor (editor context)
@@ -1884,6 +1884,10 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	//   - With the exit confirmation already on top: forward the key so it
 	//     can exit the program via its own Yes binding.
 	if msg.String() == "ctrl+c" {
+		if m.leanMode {
+			m.cleanupAll()
+			return m, tea.Quit
+		}
 		if m.dialogMgr.TopIsExitConfirmation() {
 			return m.forwardDialog(msg)
 		}
@@ -2292,7 +2296,7 @@ func (m *appModel) handleEditorResize(y int) tea.Cmd {
 	// Calculate target lines from drag position
 	editorPadding := styles.EditorStyle.GetVerticalFrameSize()
 	targetLines := m.height - y - 1 - editorPadding - m.tabBar.Height()
-	minLines := 4
+	minLines := minEditorLines
 	maxLines := max(minLines, (m.height-6)/2)
 	newLines := max(minLines, min(targetLines, maxLines))
 	if newLines != m.editorLines {

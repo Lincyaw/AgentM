@@ -193,7 +193,9 @@ Beyond the one-shot prompt, notable subcommands include `agentm gateway`
 (query the OTLP/JSON session log), and `agentm contrib sync` (materialize
 configurable contrib resources under `~/.agentm`). The chat-client peers ship
 as **separate binaries** for vendor-SDK isolation only — `agentm-terminal` and
-`agentm-feishu`. Run `agentm <sub> --help` or `<binary> --help` for flags.
+`agentm-feishu`. Use `agentm-terminal --simple` for a minimal chat layout, or
+`agentm-terminal --hide-sidebar` to keep the full chrome without the right
+sidebar. Run `agentm <sub> --help` or `<binary> --help` for flags.
 
 ## Five pluggability axes
 
