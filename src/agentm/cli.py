@@ -1170,7 +1170,8 @@ def list_extensions_cmd(
             help=(
                 "Which discovery source to list: 'builtin' (src/agentm/"
                 "extensions/builtin/), 'contrib' (<repo>/contrib/extensions/),"
-                " 'home' (~/.agentm/contrib/extensions/),"
+                " 'home' ($AGENTM_HOME/contrib/extensions; default "
+                "~/.agentm/contrib/extensions/),"
                 " 'user' (<cwd>/.agentm/atoms/), or 'all'."
             ),
         ),
@@ -1201,8 +1202,9 @@ def list_extensions_cmd(
 
     Builtins ship under ``src/agentm/extensions/builtin/``; contrib atoms
     live at ``<repo>/contrib/extensions/<name>.py``; home atoms are
-    user-installed at ``~/.agentm/contrib/extensions/<name>.py``; user
-    atoms are committed by ``api.install_atom`` to ``<cwd>/.agentm/atoms/``.
+    user-installed at ``$AGENTM_HOME/contrib/extensions/<name>.py`` (default:
+    ``~/.agentm/contrib/extensions/<name>.py``); user atoms are committed by
+    ``api.install_atom`` to ``<cwd>/.agentm/atoms/``.
     Mount any of them via ``agentm -e <module.path>`` (or stack on top of a
     ``--scenario``).
     """

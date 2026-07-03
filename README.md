@@ -132,8 +132,9 @@ agentm -p "list files in src/"
 ```
 
 Pick another by name. Scenario lookup checks `$AGENTM_PROJECT_ROOT`, the
-process cwd, `~/.agentm/contrib/scenarios`, the AgentM checkout, and packaged
-portable scenarios:
+process cwd, `$AGENTM_HOME/contrib/scenarios` (default:
+`~/.agentm/contrib/scenarios`), the AgentM checkout, and packaged portable
+scenarios:
 
 ```bash
 uv run agentm --scenario rca "diagnose this trace"
@@ -181,7 +182,7 @@ agentm --help                   # full flag list (--scenario, --extension,
                                 # --resume, --continue, --tools, ...)
 
 agentm contrib sync             # copy bundled/source contrib resources into
-                                # ~/.agentm/contrib for global customization
+                                # $AGENTM_HOME/contrib for global customization
 
 ls contrib/scenarios/           # shipped scenarios: local, sandbox,
                                 # chatbot, format_fix, mcp_demo,
@@ -193,10 +194,11 @@ Beyond the one-shot prompt, notable subcommands include `agentm terminal`
 `agentm daemon` (start/status/stop/restart/socket for that local daemon),
 `agentm gateway` (foreground single-process gateway), `agentm trace` (query the
 OTLP/JSON session log), and `agentm contrib sync` (materialize configurable
-contrib resources under `~/.agentm`). The chat-client peers ship as **separate
-binaries** for vendor-SDK isolation only: `agentm-terminal`, `agentm-feishu`,
-and future peers connect to the same gateway URL (`agentm daemon socket`). Normal
-terminal use can be either `agentm terminal` for one-command startup or
+contrib resources under `$AGENTM_HOME`). The chat-client peers ship as
+**separate binaries** for vendor-SDK isolation only: `agentm-terminal`,
+`agentm-feishu`, and future peers connect to the same gateway URL
+(`agentm daemon socket`). Normal terminal use can be either `agentm terminal`
+for one-command startup or
 `agentm daemon start && agentm-terminal` when you want to manage the server
 separately. In local daemon mode, a lightweight Python supervisor keeps the
 gateway endpoint stable. By default it keeps the gateway worker fixed so
@@ -267,8 +269,9 @@ uv run agentm -p "list files in src/"
 ```
 
 Installed as a tool, first run the setup command once. It reuses an existing
-`~/.agentm/config.toml` when present; otherwise it infers provider/model from
-env and only asks for missing credentials.
+`$AGENTM_HOME/config.toml` (default `~/.agentm/config.toml`) when present;
+otherwise it infers provider/model from env and only asks for missing
+credentials.
 
 ```bash
 uv tool install agentm
@@ -276,7 +279,7 @@ agentm setup
 ```
 
 `agentm setup` also places editable demo scenarios under
-`~/.agentm/contrib/scenarios/`: `chatbot` (the default full chat stack),
+`$AGENTM_HOME/contrib/scenarios/`: `chatbot` (the default full chat stack),
 and `minimal` (the smallest runnable stack).
 Then use AgentM from any repo:
 

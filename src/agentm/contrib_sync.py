@@ -250,7 +250,7 @@ def sync_cmd(
         bool,
         typer.Option(
             "--overwrite",
-            help="Replace existing ~/.agentm/contrib entries.",
+            help="Replace existing $AGENTM_HOME/contrib entries (default ~/.agentm/contrib).",
         ),
     ] = False,
     kind: Annotated[
@@ -282,7 +282,7 @@ def sync_cmd(
         ),
     ] = "text",
 ) -> None:
-    """Install bundled contrib scenarios/extensions into ``~/.agentm/contrib``."""
+    """Install bundled contrib scenarios/extensions into ``$AGENTM_HOME/contrib``."""
 
     if output_format not in {"text", "json"}:
         raise typer.BadParameter("--format must be 'text' or 'json'")
