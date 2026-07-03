@@ -15,6 +15,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentm.env import resolve_cli_cwd
+
 GATEWAY_UNIT = "agentm-gateway"
 FEISHU_UNIT = "agentm-feishu"
 
@@ -122,10 +124,10 @@ def baked_gateway_argv() -> tuple[list[str], str]:
 
     Strips the systemd flags. ``sys.argv[0]`` is ``"agentm gateway"`` (merged
     by the main CLI dispatcher); the rest are the gateway flags. The workspace
-    is the ``--cwd`` value if present, else the current dir.
+    is the ``--cwd`` value if present, else ``AGENTM_CWD`` / the current dir.
     """
     cleaned: list[str] = []
-    workspace = str(Path.cwd())
+    workspace = str(resolve_cli_cwd())
     argv = sys.argv[1:]
     i = 0
     while i < len(argv):
@@ -135,13 +137,13 @@ def baked_gateway_argv() -> tuple[list[str], str]:
             continue
         if arg == "--cwd":
             if i + 1 < len(argv):
-                workspace = argv[i + 1]
+                workspace = str(resolve_cli_cwd(argv[i + 1]))
                 i += 2
             else:
                 i += 1
             continue
         if arg.startswith("--cwd="):
-            workspace = arg.split("=", 1)[1]
+            workspace = str(resolve_cli_cwd(arg.split("=", 1)[1]))
             i += 1
             continue
         cleaned.append(arg)
