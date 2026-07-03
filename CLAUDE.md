@@ -39,8 +39,12 @@ mechanism; every policy is a replaceable atom. Boundary contract in
   `--reasoning-effort` and env `AGENTM_REASONING_EFFORT` (precedence: flag >
   env > config.toml profile); it maps into `extra_body` per provider, any
   user-set `extra_body` key winning. Run `<cli> --help` for flags.
-- Optional extra: `uv sync --extra agent-env` installs `arl-env` for the
-  `operations_agent_env` atom (ARL-sandboxed Operations).
+- **`uv sync` must include ALL extras** to avoid silently uninstalling
+  workspace members. Always run:
+  `uv sync --extra agent-env --extra llmharness --extra eval --extra all-contrib`
+  Running `uv sync` with only a subset of extras (e.g. `--extra agent-env`
+  alone) will **uninstall** packages from omitted extras — this has caused
+  experiment failures where llmharness was silently removed.
 
 ### WeChat (微信) peer
 

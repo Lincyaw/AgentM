@@ -34,13 +34,6 @@ extensions:
         use generous timeouts, typically 1200 seconds or more, and do not wrap
         validation commands in shorter shell-level timeout limits unless the
         task explicitly requires it.
-        Prefer non-interactive validation commands such as make grade or the
-        task's run-tests.sh. Do not run bare interactive make qemu or
-        make qemu-gdb commands; if qemu is needed for debugging, pipe explicit
-        commands into it and terminate qemu afterwards.
-        For xv6 labs, make grade is the final validation command. Do not run
-        extra manual usertests/qemu loops after make grade or cowtest passes;
-        finish the task instead.
   - module: agentm.extensions.builtin.llm_compaction
     config:
       tool_result_max_tokens: 8000

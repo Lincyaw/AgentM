@@ -39,7 +39,7 @@ dependencies = [
 # ``agent_env`` backend. Install with ``uv sync --extra agent-env``
 # (workspace) or ``pip install agentm[agent-env]``.
 agent-env = [
-    "arl-env>=0.18.5",
+    "arl-env>=0.18.6",
 ]
 eval = [
     "agentm-rescue-window",
