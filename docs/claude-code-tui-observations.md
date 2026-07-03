@@ -4,6 +4,10 @@ Observed on 2026-07-03 through real PTY sessions driven from Codex. The goal of
 this document is to record Claude Code/CCR terminal behavior as a concrete UX
 reference for AgentM terminal-go work.
 
+A later tmux/freeze reverse-engineering pass with per-screen captures and SVG
+screenshots is tracked in `docs/claude-code-tui-reverse-engineering.md` and
+`.agent/tui-dev/claude-code-20260703/`.
+
 Raw TTY captures are intentionally not committed because they contain ANSI
 control sequences and local terminal state. They are stored under the gitignored
 artifact directory:

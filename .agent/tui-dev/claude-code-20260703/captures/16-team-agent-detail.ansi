@@ -1,0 +1,36 @@
+╭─── Claude Code v2.1.199 ─────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                               │ Tips for getting started                                             │
+│                 Welcome back!                 │ Run /init to create a CLAUDE.md file with instructions for Claude    │
+│                                               │ ──────────────────────────────────────────────────────────────────── │
+│                    ▐▛███▜▌                    │ What's new                                                           │
+│                   ▝▜█████▛▘                   │ Stacked slash-skill invocations like `/skill-a /skill-b do XYZ` now… │
+│                     ▘▘ ▝▝                     │ Fixed SSL certificate errors (TLS-inspecting proxies, missing `NODE… │
+│                                               │ Fixed streaming responses being discarded when the API emits a mid-… │
+│   Opus 4.8 (1M context) · API Usage Billing   │ /release-notes for more                                              │
+│      /private/tmp/agentm-tui-team.PkNfjt      │                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  Read 4 files, listed 1 directory (ctrl+o to expand)
+
+⏺ Bash(mkdir -p /private/tmp/agentm-tui-team.PkNfjt/taskflow /private/tmp/agentm-tui-team.PkNfjt/tests)
+  ⎿  Done
+
+✳ Doing… (25s · ↓ 1.2k tokens)
+
+───────────────────────────────────────────────────────────────────────────────────────── Implement task graph helper ──
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Enter to view · x to stop · ctrl+x ctrl+k to stop all agents
+
+  ◯ main
+  ◯ general-purpose  Plan task graph helper                                                                          25s
+❯ ⏺ general-purpose  Implement task graph helper                                                                     25s
+  ◯ general-purpose  QA review task graph                                                                            21s
+
+
+
+
+
+
+

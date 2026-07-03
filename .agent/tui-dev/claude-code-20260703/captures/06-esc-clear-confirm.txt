@@ -1,0 +1,30 @@
+╭─── Claude Code v2.1.199 ─────────────────────────────────────────────────────────────────────────╮
+│                                               │ Tips for getting started                         │
+│                 Welcome back!                 │ Run /init to create a CLAUDE.md file with instr… │
+│                                               │ ──────────────────────────────────────────────── │
+│                    ▐▛███▜▌                    │ What's new                                       │
+│                   ▝▜█████▛▘                   │ Stacked slash-skill invocations like `/skill-a … │
+│                     ▘▘ ▝▝                     │ Fixed SSL certificate errors (TLS-inspecting pr… │
+│                                               │ Fixed streaming responses being discarded when … │
+│   Opus 4.8 (1M context) · API Usage Billing   │ /release-notes for more                          │
+│       /private/tmp/agentm-tui-ui.ybNvf2       │                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+───────────────────────────────────────────────────────────────────────────────────── cc-ui-basic ──
+❯ @
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)                                 Esc again to clear
+
+
+
+
+
+
+
+
+
+
+
+
+

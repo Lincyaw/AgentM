@@ -833,6 +833,9 @@ requirements:
     docs:
       - path: README.md
       - path: docs/claude-code-tui-observations.md
+      - path: docs/claude-code-tui-reverse-engineering.md
+      - path: .agent/tui-dev/claude-code-20260703/captures
+      - path: .agent/tui-dev/claude-code-20260703/screenshots
       - path: .claude/designs/go-terminal-tui.md
       - path: .claude/index.yaml
     depends_on:

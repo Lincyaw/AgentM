@@ -1,0 +1,36 @@
+
+  python3 -m taskflow examples/tasks.json
+
+  Result:
+
+  {
+    "topological_order": ["spec", "api", "ui", "qa"],
+    "parallel_batches": [["spec"], ["api", "ui"], ["qa"]],
+    "owner_grouped_batches": [
+      {"pm": ["spec"]},
+      {"backend": ["api"], "frontend": ["ui"]},
+      {"qa": ["qa"]}
+    ]
+  }
+
+  Working tree now contains the intended changes only:
+
+   M README.md
+  ?? taskflow/
+  ?? tests/
+
+⏺ Ran 3 stop hooks (ctrl+o to expand)
+  ⎿  Stop hook error: Failed with non-blocking status code: Traceback (most recent call last):
+    File
+  "/Users/bytedance/.claude/plugins/cache/autoharness/autoharness/1.7.0/scripts/hooks/run_session_notify.py",
+  line 35, in <module>
+      def _read_ppid(pid: int) -> int | None:
+  TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
+
+✻ Worked for 2m 28s
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────── cc-team-flow ──
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+

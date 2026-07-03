@@ -1,0 +1,30 @@
+
+╭─── Claude Code v2.1.199 ─────────────────────────────────────────────────────────────────────────╮
+│                       │ Tips for getting started                                                 │
+│     Welcome back!     │ Run /init to create a CLAUDE.md file with instructions for Claude        │
+│                       │ ──────────────────────────────────────────────────────────────────────── │
+│        ▐▛███▜▌        │ ──────────────────────────────────────────────────────────────────────── │
+│       ▝▜█████▛▘       │ ────                                                                     │
+│         ▘▘ ▝▝         │ What's new                                                               │
+│ Opus 4.8 (1M context) │ Stacked slash-skill invocations like `/skill-a /skill-b do XYZ` now load │
+│ · API Usage Billing   │ Fixed SSL certificate errors (TLS-inspecting proxies, missing            │
+│ /private/tmp/agentm-t │ Fixed streaming responses being discarded when the API emits a mid-stream│
+│ ui-ui.ybNvf2          │ /release-notes for more after partial output — the partial is now kept wi│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+───────────────────────────────────────────────────────────────────────────────── tmux-bg-manager ──
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

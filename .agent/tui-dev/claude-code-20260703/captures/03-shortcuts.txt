@@ -1,0 +1,30 @@
+(node:27668) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true ca
+n lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+╭─── Claude Code v2.1.199 ─────────────────────────────────────────────────────────────────────────╮
+│                                               │ Tips for getting started                         │
+│                 Welcome back!                 │ Run /init to create a CLAUDE.md file with instr… │
+│                                               │ ──────────────────────────────────────────────── │
+│                    ▐▛███▜▌                    │ What's new                                       │
+│                   ▝▜█████▛▘                   │ Stacked slash-skill invocations like `/skill-a … │
+│                     ▘▘ ▝▝                     │ Fixed SSL certificate errors (TLS-inspecting pr… │
+│                                               │ Fixed streaming responses being discarded when … │
+│   Opus 4.8 (1M context) · API Usage Billing   │ /release-notes for more                          │
+│       /private/tmp/agentm-tui-ui.ybNvf2       │                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+───────────────────────────────────────────────────────────────────────────────────── cc-ui-basic ──
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ! for shell mode        double tap esc to clear input      ctrl + shift + _ to undo
+  / for commands          shift + tab to auto-accept edits   ctrl + z to suspend
+  @ for file paths        ctrl + o for verbose output        ctrl + v to paste images
+  /btw for side question  ctrl + t to toggle tasks           opt + p to switch model
+                          shift + ⏎ for newline              ctrl + s to stash prompt
+                                                             ctrl + g to edit in $EDITOR
+                                                             /keybindings to customize
+
+
+
+

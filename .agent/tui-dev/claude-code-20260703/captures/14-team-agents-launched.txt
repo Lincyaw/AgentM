@@ -1,0 +1,36 @@
+│                    ▐▛███▜▌                    │ What's new                                                           │
+│                   ▝▜█████▛▘                   │ Stacked slash-skill invocations like `/skill-a /skill-b do XYZ` now… │
+│                     ▘▘ ▝▝                     │ Fixed SSL certificate errors (TLS-inspecting proxies, missing `NODE… │
+│                                               │ Fixed streaming responses being discarded when the API emits a mid-… │
+│   Opus 4.8 (1M context) · API Usage Billing   │ /release-notes for more                                              │
+│      /private/tmp/agentm-tui-team.PkNfjt      │                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ Use real Claude Code agents/tasks. Start at least three background agents with distinct roles: planner, implementer,
+  and QA reviewer. Do not simulate the split in one conversation. The main session must orchestrate, wait for them,
+  integrate outputs, run python3 -m unittest discover -s tests and python3 -m taskflow examples/tasks.json, fix
+  failures, and summarize agents used, files changed, and verification. Build the small stdlib-only Python task graph
+  helper described in REQUIREMENTS.md. Keep all edits inside this repo.
+
+⏺ 3 background agents launched (↓ to manage)
+   ├ Plan task graph helper
+   ├ Implement task graph helper
+   └ QA review task graph
+
+· Bloviating… (16s · ↑ 214 tokens)
+  ⎿  ◻ Plan task graph helper implementation
+     ◻ Implement task graph helper
+     ◻ Review and verify task graph helper
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────── cc-team-flow ──
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ctrl+t to hide tasks · ← for agents · ↓ to manage
+                  tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking
+
+  ⏺ main
+  ◯ general-purpose  Plan task graph helper                                                                           0s
+  ◯ general-purpose  Implement task graph helper                                                                      0s
+  ◯ general-purpose  QA review task graph                                                                             0s
+

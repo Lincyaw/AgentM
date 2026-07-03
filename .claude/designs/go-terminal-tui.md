@@ -483,8 +483,11 @@ No CGo. Single static binary.
 This section summarizes direct TTY observations of Claude Code/CCR behavior so
 future terminal UX changes have a concrete reference instead of relying on
 memory. The complete structured observation log lives at
-`docs/claude-code-tui-observations.md`. Raw ANSI captures are stored under the
-gitignored directory `.agentm/artifacts/ccr-tui/`:
+`docs/claude-code-tui-observations.md`. A second tmux/freeze reverse-engineering
+pass with screenshot artifacts lives at
+`docs/claude-code-tui-reverse-engineering.md` and
+`.agent/tui-dev/claude-code-20260703/`. Raw ANSI captures are also stored under
+the gitignored directory `.agentm/artifacts/ccr-tui/`:
 
 - `.agentm/artifacts/ccr-tui/ccr-main-20260703-171453.typescript`
 - `.agentm/artifacts/ccr-tui/real-dev-flow.typescript`
