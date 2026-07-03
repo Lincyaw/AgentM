@@ -567,6 +567,13 @@ func (m *appModel) removeBackgroundActivitiesForSession(sessionID string) {
 	}
 }
 
+func (m *appModel) clearBottomActivitiesForSession(sessionID string) {
+	delete(m.workflowTranscripts, sessionID)
+	delete(m.workflowVisible, sessionID)
+	m.removeBackgroundActivitiesForSession(sessionID)
+	m.statusBar.SetActivity(m.backgroundActivityText())
+}
+
 func (m *appModel) backgroundActivityRows() []backgroundActivity {
 	if len(m.backgroundActivities) == 0 {
 		return nil

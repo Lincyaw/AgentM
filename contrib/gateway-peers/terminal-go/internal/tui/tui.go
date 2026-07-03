@@ -1437,6 +1437,7 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 	m.supervisor.SetRunnerTitle(activeID, "")
 	m.sessionState.SetSessionTitle("")
 	m.sessionState.SetPreviousMessage(nil)
+	m.clearBottomActivitiesForSession(activeID)
 
 	// Update persisted tab to point to the new session.
 	if m.tuiStore != nil {
@@ -1791,9 +1792,7 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	delete(m.pendingRestores, sessionID)
 	delete(m.pendingSidebarCollapsed, sessionID)
 	delete(m.stashedDialogs, sessionID)
-	delete(m.workflowTranscripts, sessionID)
-	delete(m.workflowVisible, sessionID)
-	m.removeBackgroundActivitiesForSession(sessionID)
+	m.clearBottomActivitiesForSession(sessionID)
 	bottomSurfaceHeightChanged := prevBottomSurfaceHeight != m.bottomSurfaceHeight(m.width)
 
 	var cmds []tea.Cmd
