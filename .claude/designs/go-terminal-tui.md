@@ -683,9 +683,13 @@ The current AgentM terminal implementation follows this direction:
    background activity and do not steal focus.
 2. Collapse background-only child sessions out of tab chrome and render them as
    inline task rows below the composer/status surface only while they are
-   actionable (new, running, or waiting for input). `↓` opens an inline picker,
-   `Enter` views a selected task, `x` stops it, and `Ctrl+T` hides/shows the
-   task rows.
+   actionable (new, running, or waiting for input). The same bottom surface
+   also renders structured background activity from `background_exec` and
+   `monitor` (for example auto-backgrounded shell commands, wakeups, and
+   condition/channel monitors) without promoting those units into tabs. `↓`
+   opens the workflow picker when selectable child sessions exist, `Enter`
+   views a selected workflow task, `x` stops it, and `Ctrl+T` hides/shows the
+   bottom rows.
 3. Make the composer the control surface:
    `Enter` sends, busy `Enter` queues cooperatively, `Shift+Enter`/`Ctrl+J`
    inserts newline, `?` opens shortcuts, `/` opens commands, `@` opens files,
@@ -716,7 +720,8 @@ The current AgentM terminal implementation follows this direction:
     session keys must differ unless the user explicitly passes `-session-id`.
 
 The implementation still reuses tab/supervisor plumbing internally; the user
-surface is main chat plus workflow rows/picker/detail. The 2026-07-03
+surface is main chat plus workflow rows/picker/detail plus background
+shell/monitor activity rows. The 2026-07-03
 terminal-go verification captures under `.agent/tui-dev/captures/` exercised a
 real gateway workflow with two parallel child agents. The parent remained on
 the main transcript, and the two selected task details rendered `ALPHA` and

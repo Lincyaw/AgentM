@@ -282,6 +282,9 @@ func (t *Translator) handleOutbound(body map[string]any) {
 	case "cost_budget_exceeded":
 		t.emit(t.costBudgetEvent(meta))
 
+	case "background_activity":
+		t.emit(t.backgroundActivityEvent(meta))
+
 	case "command_dispatched":
 		t.emit(t.commandDispatchedEvent(meta))
 
@@ -757,6 +760,37 @@ func (t *Translator) costBudgetEvent(meta map[string]any) runtime.Event {
 	return runtime.Warning(
 		"cost budget exceeded: "+formatMoney(used, currency)+" / "+formatMoney(limit, currency),
 		t.agentName,
+	)
+}
+
+func (t *Translator) backgroundActivityEvent(meta map[string]any) runtime.Event {
+	source, _ := meta["source"].(string)
+	activityID, _ := meta["activity_id"].(string)
+	label, _ := meta["label"].(string)
+	status, _ := meta["status"].(string)
+	note, _ := meta["note"].(string)
+	terminal, _ := meta["terminal"].(bool)
+	if source == "" {
+		source = "background"
+	}
+	if activityID == "" {
+		activityID = source + ":" + label
+	}
+	if label == "" {
+		label = source
+	}
+	if status == "" {
+		status = "running"
+	}
+	return runtime.BackgroundActivity(
+		t.sessionID(),
+		source,
+		activityID,
+		label,
+		status,
+		note,
+		t.agentName,
+		terminal,
 	)
 }
 

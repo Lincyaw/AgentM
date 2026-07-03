@@ -321,6 +321,35 @@ func RequestStatus(requestID, action, status string) Event {
 	}
 }
 
+type BackgroundActivityEvent struct {
+	AgentContext
+
+	Type       string `json:"type"`
+	SessionID  string `json:"session_id,omitempty"`
+	Source     string `json:"source"`
+	ActivityID string `json:"activity_id"`
+	Label      string `json:"label"`
+	Status     string `json:"status"`
+	Note       string `json:"note,omitempty"`
+	Terminal   bool   `json:"terminal"`
+}
+
+func BackgroundActivity(sessionID, source, activityID, label, status, note, agentName string, terminal bool) Event {
+	return &BackgroundActivityEvent{
+		Type:         "background_activity",
+		SessionID:    sessionID,
+		Source:       source,
+		ActivityID:   activityID,
+		Label:        label,
+		Status:       status,
+		Note:         note,
+		Terminal:     terminal,
+		AgentContext: newAgentContext(agentName),
+	}
+}
+
+func (e *BackgroundActivityEvent) GetSessionID() string { return e.SessionID }
+
 type WarningEvent struct {
 	AgentContext
 

@@ -129,15 +129,16 @@ type appModel struct {
 	// Claude Code-style workflow surface state. Background sessions remain
 	// routed by supervisor, but the visible model is main + task rows/picker
 	// instead of one visible tab per worker.
-	mainSessionID       string
-	workflowRowsHidden  bool
-	workflowPickerOpen  bool
-	workflowPickerIndex int
-	workflowTranscripts map[string]string
-	workflowVisible     map[string]bool
-	shortcutSheetOpen   bool
-	transcriptDetailed  bool
-	transcriptVerbose   bool
+	mainSessionID        string
+	workflowRowsHidden   bool
+	workflowPickerOpen   bool
+	workflowPickerIndex  int
+	workflowTranscripts  map[string]string
+	workflowVisible      map[string]bool
+	backgroundActivities map[string]backgroundActivity
+	shortcutSheetOpen    bool
+	transcriptDetailed   bool
+	transcriptVerbose    bool
 
 	// keyboardEnhancements stores the last keyboard enhancements message
 	keyboardEnhancements *tea.KeyboardEnhancementsMsg
@@ -360,6 +361,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		mainSessionID:                 sessID,
 		workflowTranscripts:           map[string]string{},
 		workflowVisible:               map[string]bool{},
+		backgroundActivities:          map[string]backgroundActivity{},
 		history:                       historyStore,
 		pendingRestores:               make(map[string]string),
 		pendingSidebarCollapsed:       make(map[string]bool),
@@ -559,8 +561,19 @@ func (m *appModel) syncTabChrome(tabs []messages.TabInfo, activeIdx int) bool {
 }
 
 func (m *appModel) backgroundActivityText() string {
-	if !m.tabBar.HasOnlyInactiveBackgroundTabs() {
+	if m.tabBar.HasBackgroundTasks(m.mainSessionID) {
 		return ""
+	}
+	if !m.tabBar.HasOnlyInactiveBackgroundTabs() {
+		total := len(m.backgroundActivities)
+		if total == 0 {
+			return ""
+		}
+		noun := "activity"
+		if total != 1 {
+			noun = "activities"
+		}
+		return fmt.Sprintf("%d background %s", total, noun)
 	}
 
 	total, running, needsAttention := m.tabBar.BackgroundStats()
@@ -947,6 +960,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionState.SetSessionTitle(msg.Title)
 		return m.forwardChat(msg)
 
+	case *runtime.BackgroundActivityEvent:
+		return m.handleBackgroundActivity(msg)
+
 	// --- New session (slash command /new) ---
 
 	case messages.NewSessionMsg:
@@ -1178,6 +1194,12 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) {
 	activeID := m.supervisor.ActiveID()
 	m.recordWorkflowTranscript(msg.SessionID, msg.Inner)
+	if ev, ok := msg.Inner.(*runtime.BackgroundActivityEvent); ok {
+		if ev.SessionID == "" {
+			ev.SessionID = msg.SessionID
+		}
+		return m.handleBackgroundActivity(ev)
+	}
 
 	if msg.SessionID == activeID {
 		// Active session: forward through Update for full processing (spinners, cmds, etc.)
@@ -1770,6 +1792,7 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	delete(m.stashedDialogs, sessionID)
 	delete(m.workflowTranscripts, sessionID)
 	delete(m.workflowVisible, sessionID)
+	m.removeBackgroundActivitiesForSession(sessionID)
 
 	var cmds []tea.Cmd
 	// Remove from persistent store using the persisted session-store ID.

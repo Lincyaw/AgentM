@@ -54,6 +54,7 @@ from agentm.core.abi import (
     AgentEndEvent,
     ApiRegisterEvent,
     ApiSendUserMessageEvent,
+    BackgroundActivityEvent,
     AssistantMessage,
     ChildSessionEndEvent,
     ChildSessionStartEvent,
@@ -128,6 +129,7 @@ MANIFEST = ExtensionManifest(
         "event:resource_write",
         "event:plan_submitted",
         "event:after_compact",
+        "event:background_activity",
         "event:cost_budget_exceeded",
         "event:session_ready",
         "event:command_dispatched",
@@ -319,6 +321,17 @@ def _p_cost_budget(ev: CostBudgetExceededEvent) -> ProjectorResult:
         "currency": ev.currency,
     }
 
+def _p_background_activity(ev: BackgroundActivityEvent) -> ProjectorResult:
+    return {
+        "kind": "background_activity",
+        "source": ev.source,
+        "activity_id": ev.activity_id,
+        "label": ev.label,
+        "status": ev.status,
+        "note": ev.note,
+        "terminal": ev.terminal,
+    }
+
 def _make_session_ready_projector(model_names: list[str]) -> Projector:
     """Build the session_ready projector bound to the available model-profile
     names the gateway seeds via the ``model_names`` service.
@@ -385,6 +398,7 @@ _SYNC_PROJECTORS: tuple[tuple[str, Projector], ...] = (
     (ResourceWriteEvent.CHANNEL, _p_resource_write),
     (PlanSubmittedEvent.CHANNEL, _p_plan_submitted),
     (AfterCompactEvent.CHANNEL, _p_after_compact),
+    (BackgroundActivityEvent.CHANNEL, _p_background_activity),
     (CostBudgetExceededEvent.CHANNEL, _p_cost_budget),
     (CommandDispatchedEvent.CHANNEL, _p_command_dispatched),
     # SessionReadyEvent is subscribed in install() instead — its projector is
@@ -460,8 +474,9 @@ def attach_child_wire_forwarder(
     the parent bus, so without this they reach no peer (only the
     ``child_start`` / ``child_end`` markers emitted on the parent bus do).
     This subscribes the child bus to the SAME async wire projectors the parent
-    uses (``_ASYNC_PROJECTORS``) and ships each body over ``wire_outbound``
-    stamped with ``metadata.child_id``.
+    uses (``_ASYNC_PROJECTORS``), plus presenter-facing background activity
+    updates, and ships each body over ``wire_outbound`` stamped with
+    ``metadata.child_id``.
 
     Invoked at child-spawn sites (``sub_agent`` / ``workflow``) with the
     parent's wire services pulled from ``api.get_service``. The child-lifecycle
@@ -475,6 +490,7 @@ def attach_child_wire_forwarder(
         turn_context=turn_context,
         child_id=child_id,
     )
+    bg_tasks: set[asyncio.Task[Any]] = set()
 
     def _make_async(projector: Projector) -> Callable[[Any], Any]:
         async def handler(ev: Any) -> None:
@@ -483,11 +499,25 @@ def attach_child_wire_forwarder(
 
         return handler
 
+    def _make_sync(projector: Projector) -> Callable[[Any], Any]:
+        def handler(ev: Any) -> None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            for body in _bodies(projector(ev)):
+                task = loop.create_task(ship(body))
+                bg_tasks.add(task)
+                task.add_done_callback(bg_tasks.discard)
+
+        return handler
+
     for channel, projector in _ASYNC_PROJECTORS:
         # child_session_* markers belong to the parent bus; don't echo them.
         if channel in _CHILD_MARKER_CHANNELS:
             continue
         child_bus.on(channel, _make_async(projector))
+    child_bus.on(BackgroundActivityEvent.CHANNEL, _make_sync(_p_background_activity))
 
 
 def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG001

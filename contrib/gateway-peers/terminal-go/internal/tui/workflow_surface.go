@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,8 +27,27 @@ type workflowRow struct {
 	createdAt      time.Time
 }
 
+type backgroundActivity struct {
+	sessionID string
+	source    string
+	id        string
+	label     string
+	status    string
+	note      string
+	updatedAt time.Time
+	terminal  bool
+}
+
 func (m *appModel) hasWorkflowTasks() bool {
 	return len(m.workflowTaskTabs()) > 0
+}
+
+func (m *appModel) hasBackgroundActivities() bool {
+	return len(m.backgroundActivities) > 0
+}
+
+func (m *appModel) hasBottomActivities() bool {
+	return m.hasWorkflowTasks() || m.hasBackgroundActivities()
 }
 
 func (m *appModel) activeIsWorkflowTask() bool {
@@ -247,7 +267,7 @@ func isWorkflowCompletionNote(content string) bool {
 }
 
 func (m *appModel) toggleWorkflowRows() tea.Cmd {
-	if !m.hasWorkflowTasks() {
+	if !m.hasBottomActivities() {
 		return nil
 	}
 	m.workflowRowsHidden = !m.workflowRowsHidden
@@ -313,12 +333,15 @@ func (m *appModel) footerText() string {
 		return "↑/↓ to select · Enter to view"
 	case m.activeIsWorkflowTask():
 		return "Enter to view · x to stop · ctrl+x ctrl+k to stop all agents"
-	case m.hasWorkflowTasks():
+	case m.hasBottomActivities():
 		verb := "hide"
 		if m.workflowRowsHidden {
 			verb = "show"
 		}
-		return "ctrl+t to " + verb + " tasks · ← for agents · ↓ to manage"
+		if m.hasWorkflowTasks() {
+			return "ctrl+t to " + verb + " tasks · ← for agents · ↓ to manage"
+		}
+		return "ctrl+t to " + verb + " background activity · ← for agents"
 	case m.sessionState != nil && m.sessionState.YoloMode():
 		return "bypass permissions on (shift+tab to cycle) · ← for agents"
 	default:
@@ -400,21 +423,25 @@ func (m *appModel) renderWorkflowDetail(width, height int) string {
 }
 
 func (m *appModel) renderWorkflowRows(width int) string {
-	if !m.hasWorkflowTasks() || (m.workflowRowsHidden && !m.workflowPickerOpen) {
+	if !m.hasBottomActivities() || (m.workflowRowsHidden && !m.workflowPickerOpen) {
 		return ""
 	}
-	rows := m.workflowRows()
-	if len(rows) == 0 {
+	workflowRows := m.workflowRows()
+	activityRows := m.backgroundActivityRows()
+	if len(workflowRows) == 0 && len(activityRows) == 0 {
 		return ""
 	}
 	selected := m.workflowPickerIndex
-	if selected < 0 || selected >= len(rows) {
+	if selected < 0 || selected >= len(workflowRows) {
 		selected = 0
 	}
 	innerWidth := max(20, width-appPaddingHorizontal)
-	lines := make([]string, 0, len(rows))
-	for i, row := range rows {
+	lines := make([]string, 0, len(workflowRows)+len(activityRows))
+	for i, row := range workflowRows {
 		lines = append(lines, m.renderWorkflowRow(row, i == selected && m.workflowPickerOpen, innerWidth))
+	}
+	for _, row := range activityRows {
+		lines = append(lines, m.renderBackgroundActivityRow(row, innerWidth))
 	}
 	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Render(strings.Join(lines, "\n"))
 }
@@ -479,4 +506,106 @@ func cmpNonEmpty(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func (m *appModel) handleBackgroundActivity(ev *runtime.BackgroundActivityEvent) (tea.Model, tea.Cmd) {
+	if ev == nil {
+		return m, nil
+	}
+	changed := m.updateBackgroundActivity(ev)
+	m.statusBar.SetActivity(m.backgroundActivityText())
+	if !changed {
+		return m, nil
+	}
+	return m, m.resizeAll()
+}
+
+func (m *appModel) updateBackgroundActivity(ev *runtime.BackgroundActivityEvent) bool {
+	if m.backgroundActivities == nil {
+		m.backgroundActivities = map[string]backgroundActivity{}
+	}
+	id := strings.TrimSpace(ev.ActivityID)
+	if id == "" {
+		id = strings.TrimSpace(ev.Source) + ":" + strings.TrimSpace(ev.Label)
+	}
+	if id == ":" {
+		return false
+	}
+	status := strings.TrimSpace(ev.Status)
+	if status == "" {
+		status = "running"
+	}
+	if ev.Terminal && status != "error" && status != "failed" {
+		_, existed := m.backgroundActivities[id]
+		delete(m.backgroundActivities, id)
+		return existed
+	}
+	next := backgroundActivity{
+		sessionID: strings.TrimSpace(ev.SessionID),
+		source:    cmpNonEmpty(ev.Source, "background"),
+		id:        id,
+		label:     cmpNonEmpty(ev.Label, "background"),
+		status:    status,
+		note:      strings.TrimSpace(ev.Note),
+		updatedAt: time.Now(),
+		terminal:  ev.Terminal,
+	}
+	prev, existed := m.backgroundActivities[id]
+	if existed && prev == next {
+		return false
+	}
+	m.backgroundActivities[id] = next
+	return true
+}
+
+func (m *appModel) removeBackgroundActivitiesForSession(sessionID string) {
+	if sessionID == "" || len(m.backgroundActivities) == 0 {
+		return
+	}
+	for id, activity := range m.backgroundActivities {
+		if activity.sessionID == sessionID {
+			delete(m.backgroundActivities, id)
+		}
+	}
+}
+
+func (m *appModel) backgroundActivityRows() []backgroundActivity {
+	if len(m.backgroundActivities) == 0 {
+		return nil
+	}
+	rows := make([]backgroundActivity, 0, len(m.backgroundActivities))
+	for _, activity := range m.backgroundActivities {
+		rows = append(rows, activity)
+	}
+	slices.SortFunc(rows, func(a, b backgroundActivity) int {
+		return a.updatedAt.Compare(b.updatedAt)
+	})
+	return rows
+}
+
+func (m *appModel) renderBackgroundActivityRow(row backgroundActivity, width int) string {
+	prefix := "  "
+	icon := "◯"
+	if row.terminal {
+		icon = "✻"
+	}
+	left := fmt.Sprintf("%s%s %-16s %s", prefix, icon, cmpNonEmpty(row.source, "background"), cmpNonEmpty(row.label, "task"))
+	status := cmpNonEmpty(row.status, "running")
+	right := status
+	if row.note != "" {
+		right = status + " · " + row.note
+	}
+	age := formatWorkflowAge(row.updatedAt)
+	if age != "" {
+		right += " · " + age
+	}
+	gap := max(1, width-lipgloss.Width(left)-lipgloss.Width(right))
+	line := left + strings.Repeat(" ", gap) + styles.MutedStyle.Render(right)
+	if lipgloss.Width(line) > width {
+		line = ansi.Truncate(line, width, "…")
+	}
+	if row.terminal {
+		return styles.SecondaryStyle.Render(line)
+	}
+	return styles.MutedStyle.Render(line)
 }

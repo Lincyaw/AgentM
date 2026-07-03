@@ -47,6 +47,7 @@ from loguru import logger
 
 from agentm.core.abi import (
     AgentStartEvent,
+    BackgroundActivityEvent,
     ExtensionAPI,
     ExtensionStaleError,
     FunctionTool,
@@ -201,6 +202,9 @@ def _task_payload(state: _BgTask) -> dict[str, Any]:
     if state.status == _COMPLETED and state.outcome is not None:
         payload["result"] = _result_text(_outcome_result(state.outcome))
     return payload
+
+def _activity_id(task_id: str) -> str:
+    return f"background:{task_id}"
 
 async def _forward_abort(source: asyncio.Event, target: asyncio.Event) -> None:
     """Set ``target`` once ``source`` fires (one-directional bridge).
@@ -359,6 +363,31 @@ class _BgManager:
         # bus has been cleared: once set, background() refuses to register.
         self._shutting_down = False
 
+    def _emit_activity(
+        self,
+        state: _BgTask,
+        *,
+        note: str | None = None,
+        terminal: bool = False,
+    ) -> None:
+        events = getattr(self._api, "events", None)
+        if events is None:
+            return
+        try:
+            events.emit_sync(
+                BackgroundActivityEvent.CHANNEL,
+                BackgroundActivityEvent(
+                    source="background",
+                    activity_id=_activity_id(state.task_id),
+                    label=state.tool_name,
+                    status=state.status,
+                    note=note,
+                    terminal=terminal,
+                ),
+            )
+        except ExtensionStaleError:
+            return
+
     # --- install-time tool wrapping ---------------------------------------
 
     def wrap_tools(self) -> None:
@@ -444,11 +473,13 @@ class _BgManager:
         # reservation counter so this no-reservation register stays at zero
         # rather than going negative.
         await self._registry.register(state)
+        ticket_note = note or f"moved to background after {self.timeout:g}s"
+        self._emit_activity(state, note=ticket_note)
         return _tool_result(
             {
                 "task_id": task_id,
                 "status": _RUNNING,
-                "note": note or f"moved to background after {self.timeout:g}s",
+                "note": ticket_note,
             }
         )
 
@@ -563,6 +594,11 @@ class _BgManager:
         terminal = state.status == _COMPLETED and isinstance(
             state.outcome, ToolTerminate
         )
+        self._emit_activity(
+            state,
+            note=_completion_note(state),
+            terminal=state.status in (_COMPLETED, _ERROR, _CANCELLED),
+        )
         try:
             self._api.post_inbox(
                 source="background",
@@ -608,6 +644,7 @@ class _BgManager:
                         f"Background task {state.task_id} ({state.tool_name}) "
                         f"still running ({time.monotonic() - state.started_at:.0f}s)."
                     )
+                self._emit_activity(state, note=note)
                 self._api.post_inbox(
                     source="background",
                     payload=note,
@@ -703,6 +740,10 @@ class _BgManager:
                 },
                 is_error=True,
             )
+        async with self._registry.lock:
+            state = self._registry.get(task_id)
+            if state is not None:
+                self._emit_activity(state, note="cancellation requested")
         return _tool_result({"task_id": task_id, "status": "cancelling"})
 
     # --- session shutdown --------------------------------------------------

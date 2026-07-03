@@ -54,6 +54,7 @@ from typing import Any, Literal
 from loguru import logger
 
 from agentm.core.abi import (
+    BackgroundActivityEvent,
     ExtensionAPI,
     ExtensionStaleError,
     FunctionTool,
@@ -235,6 +236,29 @@ def _monitor_view(state: _Monitor) -> dict[str, Any]:
         view["note"] = state.note
     return view
 
+def _activity_id(monitor_id: str) -> str:
+    return f"monitor:{monitor_id}"
+
+def _monitor_label(state: _Monitor) -> str:
+    if state.kind == _KIND_WAKEUP:
+        return "wakeup"
+    if state.kind == _KIND_CONDITION:
+        return "monitor condition"
+    if state.watch:
+        return f"monitor {state.watch}"
+    return "monitor"
+
+def _monitor_note(state: _Monitor) -> str | None:
+    if state.note:
+        return state.note
+    if state.condition:
+        return state.condition
+    if state.watch:
+        return state.watch
+    if state.delay is not None:
+        return f"{state.delay:g}s"
+    return None
+
 class _MonitorManager:
     """Per-session registry + asyncio/bus handles for live monitors.
 
@@ -260,6 +284,31 @@ class _MonitorManager:
         # Set in on_session_shutdown so any in-flight wakeup that wakes mid-
         # shutdown sees it and exits without trying to register / push.
         self._shutting_down = False
+
+    def _emit_activity(
+        self,
+        state: _Monitor,
+        *,
+        note: str | None = None,
+        terminal: bool = False,
+    ) -> None:
+        events = getattr(self._api, "events", None)
+        if events is None:
+            return
+        try:
+            events.emit_sync(
+                BackgroundActivityEvent.CHANNEL,
+                BackgroundActivityEvent(
+                    source="monitor",
+                    activity_id=_activity_id(state.monitor_id),
+                    label=_monitor_label(state),
+                    status=state.status,
+                    note=note if note is not None else _monitor_note(state),
+                    terminal=terminal,
+                ),
+            )
+        except ExtensionStaleError:
+            return
 
     # --- producers ---------------------------------------------------------
 
@@ -295,6 +344,7 @@ class _MonitorManager:
         )
         state.task = asyncio.create_task(self._wakeup_runner(state))
         self._monitors[monitor_id] = state
+        self._emit_activity(state)
         return _tool_result(
             {
                 "monitor_id": monitor_id,
@@ -330,6 +380,7 @@ class _MonitorManager:
             "note": state.note,
             "delay": delay,
         }
+        self._emit_activity(state, terminal=True)
         try:
             self._api.post_inbox(
                 source="monitor",
@@ -391,6 +442,7 @@ class _MonitorManager:
         )
         state.task = asyncio.create_task(self._condition_runner(state))
         self._monitors[monitor_id] = state
+        self._emit_activity(state)
         return _tool_result(
             {
                 "monitor_id": monitor_id,
@@ -425,6 +477,7 @@ class _MonitorManager:
                     "note": state.note,
                     "poll_interval": interval,
                 }
+                self._emit_activity(state)
                 self._api.post_inbox(
                     source="monitor",
                     payload=payload,
@@ -546,6 +599,7 @@ class _MonitorManager:
 
         state.unsubscribe = self._api.on(watch, _handler)
         self._monitors[monitor_id] = state
+        self._emit_activity(state)
         return _tool_result(
             {
                 "monitor_id": monitor_id,
@@ -584,6 +638,7 @@ class _MonitorManager:
                 {"monitor_id": monitor_id, "status": state.status}
             )
         state.status = _CANCELLED
+        self._emit_activity(state, terminal=True)
         # Wakeup + condition monitors own an asyncio.Task; channels own an
         # unsubscribe callable. Either way we stop ONLY this monitor's handle —
         # never a shared session/kernel signal (step-3 Major 2).
@@ -659,6 +714,17 @@ class _CreateMonitorParams(BaseModel):
             "(e.g. 'tool_call', 'agent_end')."
         ),
     )
+    condition: str | None = Field(
+        default=None,
+        description=(
+            "Free-text predicate to re-surface every poll_interval seconds "
+            "until the agent decides it is satisfied and cancels the monitor."
+        ),
+    )
+    poll_interval: float | None = Field(
+        default=None,
+        description="Seconds between condition monitor fires.",
+    )
     note: str | None = Field(
         default=None,
         description="Free-form note delivered with each fire.",
@@ -696,7 +762,8 @@ def install(api: ExtensionAPI, config: MonitorConfig) -> None:
                 "Subscribe to a bus channel; each fire posts a "
                 "source='monitor' item to the session inbox under a stable "
                 "dedup_key (latest fire replaces the prior undrained one). "
-                "Condition-polling is not yet supported."
+                "Alternatively pass condition + optional poll_interval for a "
+                "recurring condition-poll monitor."
             ),
             parameters=pydantic_to_tool_schema(_CreateMonitorParams),
             fn=manager.create_monitor,

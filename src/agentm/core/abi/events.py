@@ -583,6 +583,28 @@ class DiagnosticEvent(Event):
     message: str
 
 
+@dataclass(slots=True)
+class BackgroundActivityEvent(Event):
+    """Structured status for detached background work and monitor signals.
+
+    Producers still use ``SessionInbox`` for model-visible completions and
+    monitor fires. This event is the sibling presenter signal that lets a wire
+    client render the same unit in its chrome while it is live.
+    """
+
+    CHANNEL: ClassVar[Literal["background_activity"]] = "background_activity"
+    HOOK: ClassVar[HookContract] = HookContract(
+        visibility="advanced",
+        effects=("observe",),
+    )
+    source: str
+    activity_id: str
+    label: str
+    status: str
+    note: str | None = None
+    terminal: bool = False
+
+
 # --- Runtime-level event payloads ------------------------------------------
 #
 # The events below are emitted by runtime-level subsystems (compaction,
@@ -1207,6 +1229,7 @@ __all__ = [
     "AgentStartEvent",
     "ApiRegisterEvent",
     "ApiSendUserMessageEvent",
+    "BackgroundActivityEvent",
     "BeforeAgentStartEvent",
     "BeforeCompactEvent",
     "BeforeInstallAtomEvent",
