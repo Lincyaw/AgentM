@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     ExtensionAPI,
@@ -37,8 +37,10 @@ from agentm.extensions import ExtensionManifest
 # MANIFEST
 # ---------------------------------------------------------------------------
 
+
 class QueryToolsConfig(BaseModel):
     default_scenario: str = ""
+
 
 MANIFEST = ExtensionManifest(
     name="query_tools",
@@ -58,57 +60,49 @@ MANIFEST = ExtensionManifest(
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
 
+
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+
 
 # ---------------------------------------------------------------------------
 # query_traces helpers
 # ---------------------------------------------------------------------------
 
-_TRACES_PARAMETERS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "task_class": {
-            "type": "string",
-            "description": "Required task_class to filter by.",
-        },
-        "fingerprint": {
-            "type": "object",
-            "description": (
-                "Optional exact-match filter against session.fingerprint "
-                "atoms map. Each key is an atom name; value must equal the "
-                "trace's fingerprint atom hash."
-            ),
-            "additionalProperties": {"type": "string"},
-        },
-        "n": {
-            "type": "integer",
-            "default": 50,
-            "description": "Max number of most-recent traces to return.",
-        },
-        "include_eval_runs": {
-            "type": "boolean",
-            "default": True,
-            "description": (
-                "If False, exclude traces produced by tool_eval_run "
-                "(those carry a non-null eval_run_id)."
-            ),
-        },
-        "only_eval_runs": {
-            "type": "boolean",
-            "default": False,
-            "description": (
-                "If True, return ONLY eval-run traces. Mutually exclusive "
-                "with include_eval_runs=False (only_eval_runs wins)."
-            ),
-        },
-    },
-    "required": ["task_class"],
-    "additionalProperties": False,
-}
+
+class _TracesArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    task_class: str = Field(description="Required task_class to filter by.")
+    fingerprint: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Optional exact-match filter against session.fingerprint "
+            "atoms map. Each key is an atom name; value must equal the "
+            "trace's fingerprint atom hash."
+        ),
+    )
+    n: int = Field(
+        default=50, description="Max number of most-recent traces to return."
+    )
+    include_eval_runs: bool = Field(
+        default=True,
+        description=(
+            "If False, exclude traces produced by tool_eval_run "
+            "(those carry a non-null eval_run_id)."
+        ),
+    )
+    only_eval_runs: bool = Field(
+        default=False,
+        description=(
+            "If True, return ONLY eval-run traces. Mutually exclusive "
+            "with include_eval_runs=False (only_eval_runs wins)."
+        ),
+    )
+
 
 def _summarize_trace(path: Path) -> dict[str, Any] | None:
     """Walk an OTLP/JSON trace once and extract load-bearing identity fields."""
@@ -137,9 +131,7 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
                     task_id = task_meta.get("task_id") or task_id
                 atoms = body.get("atoms") or {}
                 if isinstance(atoms, dict):
-                    fingerprint_atoms = {
-                        str(k): str(v) for k, v in atoms.items()
-                    }
+                    fingerprint_atoms = {str(k): str(v) for k, v in atoms.items()}
             if timestamp_ns is None:
                 timestamp_ns = record.time_unix_nano
         elif event_name == "agentm.session.ready":
@@ -180,6 +172,7 @@ def _summarize_trace(path: Path) -> dict[str, Any] | None:
         "fingerprint_atoms": fingerprint_atoms,
     }
 
+
 def _ns_to_iso(value: Any) -> str | None:
     if not isinstance(value, (int, float)):
         return None
@@ -187,23 +180,22 @@ def _ns_to_iso(value: Any) -> str | None:
 
     return dt.datetime.fromtimestamp(value / 1e9, tz=dt.timezone.utc).isoformat()
 
+
 # ---------------------------------------------------------------------------
 # query_candidates helpers
 # ---------------------------------------------------------------------------
 
-_CANDIDATES_PARAMETERS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "target_scenario": {
-            "type": "string",
-            "description": (
-                "Scenario key under .agentm/decisions/. If omitted, the "
-                "atom's install-time default_scenario is used."
-            ),
-        },
-    },
-    "additionalProperties": False,
-}
+
+class _CandidatesArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_scenario: str | None = Field(
+        default=None,
+        description=(
+            "Scenario key under .agentm/decisions/. If omitted, the "
+            "atom's install-time default_scenario is used."
+        ),
+    )
+
 
 def _load_candidates(candidates_dir: Path) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
@@ -221,6 +213,7 @@ def _load_candidates(candidates_dir: Path) -> dict[str, dict[str, Any]]:
             continue
         out[cid] = rec
     return out
+
 
 def _compute_win_tasks(
     records: dict[str, dict[str, Any]],
@@ -248,6 +241,7 @@ def _compute_win_tasks(
             wins[best_holders[0]].append(tid)
     return wins
 
+
 def _coerce_parent_ids(rec: dict[str, Any]) -> list[str]:
     """B-4 schema migration: accept both ``parent_ids`` and ``parent_id``."""
     raw = rec.get("parent_ids")
@@ -258,6 +252,7 @@ def _coerce_parent_ids(rec: dict[str, Any]) -> list[str]:
         return [legacy]
     return []
 
+
 def _score_summary(rec: dict[str, Any]) -> dict[str, float]:
     scores = rec.get("per_task_scores") or {}
     if not isinstance(scores, dict) or not scores:
@@ -266,31 +261,26 @@ def _score_summary(rec: dict[str, Any]) -> dict[str, float]:
     aggregate = sum(values) / len(values) if values else 0.0
     return {"aggregate": aggregate, "task_count": float(len(values))}
 
+
 # ---------------------------------------------------------------------------
 # query_module_feedback helpers
 # ---------------------------------------------------------------------------
 
-_FEEDBACK_PARAMETERS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "target_scenario": {
-            "type": "string",
-            "description": (
-                "Scenario task_class to filter by. If omitted, the atom's "
-                "install-time default_scenario is used."
-            ),
-        },
-        "n": {
-            "type": "integer",
-            "default": 20,
-            "description": (
-                "Max number of most-recent matching eval-run summaries to "
-                "scan."
-            ),
-        },
-    },
-    "additionalProperties": False,
-}
+
+class _FeedbackArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_scenario: str | None = Field(
+        default=None,
+        description=(
+            "Scenario task_class to filter by. If omitted, the atom's "
+            "install-time default_scenario is used."
+        ),
+    )
+    n: int = Field(
+        default=20,
+        description=("Max number of most-recent matching eval-run summaries to scan."),
+    )
+
 
 def _load_run(
     path: Path,
@@ -320,9 +310,11 @@ def _load_run(
         return None, []
     return summary, tasks
 
+
 # ---------------------------------------------------------------------------
 # install()
 # ---------------------------------------------------------------------------
+
 
 def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
     default_scenario = config.default_scenario
@@ -337,12 +329,8 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
     async def _traces_execute(args: dict[str, Any]) -> ToolResult:
         task_class = str(args["task_class"])
         fingerprint_filter = args.get("fingerprint") or None
-        if fingerprint_filter is not None and not isinstance(
-            fingerprint_filter, dict
-        ):
-            return _error(
-                "fingerprint must be a mapping of atom_name -> hash"
-            )
+        if fingerprint_filter is not None and not isinstance(fingerprint_filter, dict):
+            return _error("fingerprint must be a mapping of atom_name -> hash")
         n = int(args.get("n", 50))
         include_eval_runs = bool(args.get("include_eval_runs", True))
         only_eval_runs = bool(args.get("only_eval_runs", False))
@@ -370,9 +358,7 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
                 continue
             if fingerprint_filter is not None:
                 atoms = summary.get("fingerprint_atoms") or {}
-                if not all(
-                    atoms.get(k) == v for k, v in fingerprint_filter.items()
-                ):
+                if not all(atoms.get(k) == v for k, v in fingerprint_filter.items()):
                     continue
             surfaced = {k: v for k, v in summary.items() if k != "fingerprint_atoms"}
             out.append(surfaced)
@@ -389,7 +375,7 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
                 "and optional fingerprint. Returns summaries only — fetch "
                 "full bodies via the `read` tool."
             ),
-            parameters=_TRACES_PARAMETERS,
+            parameters=_TracesArgs,
             fn=_traces_execute,
         )
     )
@@ -400,8 +386,7 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
         scenario = str(args.get("target_scenario") or default_scenario or "")
         if not scenario:
             return _error(
-                "target_scenario is required (or set default_scenario at "
-                "install time)"
+                "target_scenario is required (or set default_scenario at install time)"
             )
         decisions_dir = cwd / ".agentm" / "decisions" / scenario
         candidates_dir = decisions_dir / "candidates"
@@ -460,7 +445,7 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
                 "scenario. Each frontier entry lists the tasks the "
                 "candidate uniquely wins on plus a score summary."
             ),
-            parameters=_CANDIDATES_PARAMETERS,
+            parameters=_CandidatesArgs,
             fn=_candidates_execute,
         )
     )
@@ -509,13 +494,9 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
                         continue
                     if not isinstance(fb_text, str) or not fb_text:
                         continue
-                    module_distribution.setdefault(module_name, []).append(
-                        fb_text
-                    )
+                    module_distribution.setdefault(module_name, []).append(fb_text)
 
-        ordered = {
-            k: module_distribution[k] for k in sorted(module_distribution)
-        }
+        ordered = {k: module_distribution[k] for k in sorted(module_distribution)}
         return _ok(
             json.dumps(
                 {
@@ -535,7 +516,7 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
                 "eval-run summaries. Surfaces grader fingering so the tuner "
                 "can round-robin its mutation target."
             ),
-            parameters=_FEEDBACK_PARAMETERS,
+            parameters=_FeedbackArgs,
             fn=_feedback_execute,
         )
     )

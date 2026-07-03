@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Final
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     ExtensionAPI,
@@ -51,34 +51,26 @@ _DEFAULT_DUMP_PATH: Final[str] = "/tmp/agentm-tui-dump.txt"
 _CSI_RE: Final = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _OSC_RE: Final = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
-_PARAMETERS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "path": {
-            "type": "string",
-            "description": (
-                "Dump file to read. Defaults to $AGENTM_TUI_DUMP or "
-                f"{_DEFAULT_DUMP_PATH}."
-            ),
-        },
-        "raw": {
-            "type": "boolean",
-            "default": False,
-            "description": (
-                "Keep ANSI escape codes (colours/layout). Default strips "
-                "them for clean plain text."
-            ),
-        },
-        "tail": {
-            "type": "integer",
-            "description": (
-                "Return only the last N lines. Omit for the whole frame."
-            ),
-        },
-    },
-    "required": [],
-    "additionalProperties": False,
-}
+class _TuiSnapshotArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str | None = Field(
+        default=None,
+        description=(
+            "Dump file to read. Defaults to $AGENTM_TUI_DUMP or "
+            f"{_DEFAULT_DUMP_PATH}."
+        ),
+    )
+    raw: bool = Field(
+        default=False,
+        description=(
+            "Keep ANSI escape codes (colours/layout). Default strips "
+            "them for clean plain text."
+        ),
+    )
+    tail: int | None = Field(
+        default=None,
+        description="Return only the last N lines. Omit for the whole frame.",
+    )
 
 def _strip_ansi(text: str) -> str:
     return _CSI_RE.sub("", _OSC_RE.sub("", text))
@@ -130,7 +122,7 @@ def install(api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
                 "layout, or interaction bugs you cannot infer from the "
                 "conversation alone."
             ),
-            parameters=_PARAMETERS,
+            parameters=_TuiSnapshotArgs,
             fn=_execute,
             metadata={"file_op": "read"},
         )

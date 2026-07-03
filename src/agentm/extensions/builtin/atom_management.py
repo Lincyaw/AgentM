@@ -20,10 +20,10 @@ loaded atom with name, tier, and source path.
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Any
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     ExtensionAPI,
@@ -70,68 +70,52 @@ def _error(text: str) -> ToolResult:
 # Tool parameter schemas
 # ---------------------------------------------------------------------------
 
-_INSTALL_PARAMETERS: Final = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string",
-            "description": (
-                "Atom name; must match the source's MANIFEST.name. "
-                "Becomes the file stem at <cwd>/.agentm/atoms/<name>.py."
-            ),
-        },
-        "source": {
-            "type": "string",
-            "description": (
-                "Full Python module text. Must contain a top-level "
-                "``MANIFEST = ExtensionManifest(...)`` and an "
-                "``install(api, config)`` function. single-file "
-                "contract applies — no imports of other atom modules, "
-                "no agentm.core._internal, no agentm.core.runtime.session."
-            ),
-        },
-        "rationale": {
-            "type": "string",
-            "description": (
-                "Why this atom is being installed. Surfaces in "
-                "observability so future operators can audit "
-                "agent-initiated installs."
-            ),
-        },
-        "config": {
-            "type": "object",
-            "description": (
-                "Optional config dict passed to the atom's install() "
-                "call. Defaults to {} when omitted."
-            ),
-            "additionalProperties": True,
-        },
-    },
-    "required": ["name", "source", "rationale"],
-    "additionalProperties": False,
-}
 
-_UNLOAD_PARAMETERS: Final = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string",
-            "description": "Atom name as registered (matches MANIFEST.name).",
-        },
-        "rationale": {
-            "type": "string",
-            "description": "Why this atom is being removed.",
-        },
-    },
-    "required": ["name", "rationale"],
-    "additionalProperties": False,
-}
+class _InstallArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(
+        description=(
+            "Atom name; must match the source's MANIFEST.name. "
+            "Becomes the file stem at <cwd>/.agentm/atoms/<name>.py."
+        ),
+    )
+    source: str = Field(
+        description=(
+            "Full Python module text. Must contain a top-level "
+            "``MANIFEST = ExtensionManifest(...)`` and an "
+            "``install(api, config)`` function. single-file "
+            "contract applies — no imports of other atom modules, "
+            "no agentm.core._internal, no agentm.core.runtime.session."
+        ),
+    )
+    rationale: str = Field(
+        description=(
+            "Why this atom is being installed. Surfaces in "
+            "observability so future operators can audit "
+            "agent-initiated installs."
+        ),
+    )
+    config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Optional config dict passed to the atom's install() "
+            "call. Defaults to {} when omitted."
+        ),
+    )
 
-_LIST_PARAMETERS: Final = {
-    "type": "object",
-    "properties": {},
-    "additionalProperties": False,
-}
+
+class _UnloadArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(
+        description="Atom name as registered (matches MANIFEST.name).",
+    )
+    rationale: str = Field(
+        description="Why this atom is being removed.",
+    )
+
+
+class _ListArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 # ---------------------------------------------------------------------------
 # install()
@@ -183,7 +167,7 @@ def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
                 "MANIFEST and install() function. The atom is registered "
                 "in the live session and on disk so it survives restarts."
             ),
-            parameters=_INSTALL_PARAMETERS,
+            parameters=_InstallArgs,
             fn=_install_execute,
             metadata={"meta_op": "install_atom"},
         )
@@ -221,7 +205,7 @@ def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
                 "Reverses install_atom's live registration but does not "
                 "delete the source file."
             ),
-            parameters=_UNLOAD_PARAMETERS,
+            parameters=_UnloadArgs,
             fn=_unload_execute,
             metadata={"meta_op": "unload_atom"},
         )
@@ -252,7 +236,7 @@ def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
                 "with name, tier, and source path. Useful before install "
                 "or unload to avoid collisions and confirm state."
             ),
-            parameters=_LIST_PARAMETERS,
+            parameters=_ListArgs,
             fn=_list_execute,
             metadata={"meta_op": "list_atoms"},
         )

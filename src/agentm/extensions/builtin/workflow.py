@@ -77,7 +77,7 @@ from typing import (
     overload,
 )
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentm.core.abi import (
     AgentMessage,
@@ -1632,65 +1632,59 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
             sys.modules.pop(module_name, None)
 
 
-_WORKFLOW_TOOL_PARAMS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "script": {
-            "type": "string",
-            "description": (
-                "Async Python orchestration script. Available names: "
-                "agent(prompt, *, schema=, scenario=, model=, isolation=, "
-                "tool_allowlist=, extra_extensions=, atom_config=, retry=0) "
-                "(awaitable -> str | dict when schema set; retry=N retries on failure), "
-                "parallel(list_of_awaitables) -> list, "
-                "pipeline(items, *stages) -> list, budget (.total / .spent() / "
-                ".remaining()), args (dict), json (module), log(msg), "
-                "phase(name). Use await for agent / parallel / pipeline. "
-                "`return <value>` becomes the tool result. Only "
-                "data-manipulation builtins are available — "
-                "no import / open / time / random. "
-                "Mutually exclusive with script_path."
-            ),
-        },
-        "script_path": {
-            "type": "string",
-            "description": (
-                "Path to a pre-written async Python workflow script file. "
-                "Mutually exclusive with script. The file is read and executed "
-                "in the same curated namespace as an inline script."
-            ),
-        },
-        "args": {
-            "type": "object",
-            "description": "Arbitrary JSON payload exposed to the script as args.",
-            "additionalProperties": True,
-        },
-        "cwd": {
-            "type": "string",
-            "description": (
-                "Working directory for child agent sessions spawned by "
-                "the workflow. Defaults to the caller's cwd."
-            ),
-        },
-        "model": {
-            "type": "string",
-            "description": (
-                "Model name or config.toml profile for child agent "
-                "sessions. Defaults to the caller's model."
-            ),
-        },
-        "agent_mock": {
-            "type": "string",
-            "enum": ["off", "mock"],
-            "description": (
-                "Set to 'mock' to dry-run agent() calls. The workflow still "
-                "executes, but ctx.agent/agent returns synthetic results and "
-                "logs call parameters via workflow_phase events."
-            ),
-        },
-    },
-    "additionalProperties": False,
-}
+class _WorkflowArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    script: str | None = Field(
+        default=None,
+        description=(
+            "Async Python orchestration script. Available names: "
+            "agent(prompt, *, schema=, scenario=, model=, isolation=, "
+            "tool_allowlist=, extra_extensions=, atom_config=, retry=0) "
+            "(awaitable -> str | dict when schema set; retry=N retries on failure), "
+            "parallel(list_of_awaitables) -> list, "
+            "pipeline(items, *stages) -> list, budget (.total / .spent() / "
+            ".remaining()), args (dict), json (module), log(msg), "
+            "phase(name). Use await for agent / parallel / pipeline. "
+            "`return <value>` becomes the tool result. Only "
+            "data-manipulation builtins are available — "
+            "no import / open / time / random. "
+            "Mutually exclusive with script_path."
+        ),
+    )
+    script_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to a pre-written async Python workflow script file. "
+            "Mutually exclusive with script. The file is read and executed "
+            "in the same curated namespace as an inline script."
+        ),
+    )
+    args: dict[str, Any] | None = Field(
+        default=None,
+        description="Arbitrary JSON payload exposed to the script as args.",
+    )
+    cwd: str | None = Field(
+        default=None,
+        description=(
+            "Working directory for child agent sessions spawned by "
+            "the workflow. Defaults to the caller's cwd."
+        ),
+    )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Model name or config.toml profile for child agent "
+            "sessions. Defaults to the caller's model."
+        ),
+    )
+    agent_mock: Literal["off", "mock"] | None = Field(
+        default=None,
+        description=(
+            "Set to 'mock' to dry-run agent() calls. The workflow still "
+            "executes, but ctx.agent/agent returns synthetic results and "
+            "logs call parameters via workflow_phase events."
+        ),
+    )
 
 _WORKFLOW_RUNNER_SERVICE: Final[str] = "workflow_runner"
 
@@ -2075,7 +2069,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
                 "resumes from cache. agent(prompt, schema={...}) returns a "
                 "parsed dict conforming to the JSON Schema."
             ),
-            parameters=_WORKFLOW_TOOL_PARAMS,
+            parameters=_WorkflowArgs,
             fn=_run_workflow,
             metadata={"workflow": True},
         )

@@ -42,9 +42,9 @@ from loguru import logger
 import re
 import time
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
     BeforeAgentStartEvent,
@@ -84,82 +84,52 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-_SAVE_PARAMS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "type": {
-            "type": "string",
-            "enum": list(_VALID_TYPES),
-            "description": "Memory category.",
-        },
-        "name": {
-            "type": "string",
-            "description": (
-                "Short identifier; letters/digits/underscore/hyphen only. "
-                "File is stored as <type>_<name>.md."
-            ),
-        },
-        "description": {
-            "type": "string",
-            "description": (
-                "One-line relevance hint shown in MEMORY.md index. Used for "
-                "future memory_search ranking."
-            ),
-        },
-        "content": {
-            "type": "string",
-            "description": "Memory body. Markdown is fine.",
-        },
-    },
-    "required": ["type", "name", "description", "content"],
-    "additionalProperties": False,
-}
+class _SaveArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["feedback", "project", "user", "reference"] = Field(
+        description="Memory category.",
+    )
+    name: str = Field(
+        description=(
+            "Short identifier; letters/digits/underscore/hyphen only. "
+            "File is stored as <type>_<name>.md."
+        ),
+    )
+    description: str = Field(
+        description=(
+            "One-line relevance hint shown in MEMORY.md index. Used for "
+            "future memory_search ranking."
+        ),
+    )
+    content: str = Field(description="Memory body. Markdown is fine.")
 
-_READ_PARAMS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string",
-            "description": (
-                "Memory name (without the type_ prefix or .md extension). "
-                "Increments the access counter on success."
-            ),
-        }
-    },
-    "required": ["name"],
-    "additionalProperties": False,
-}
 
-_SEARCH_PARAMS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "query": {
-            "type": "string",
-            "description": (
-                "Substring matched case-insensitively against each memory's "
-                "name + description. Returns up to ``limit`` results."
-            ),
-        },
-        "limit": {
-            "type": "integer",
-            "description": "Max results to return (default 10).",
-        },
-    },
-    "required": ["query"],
-    "additionalProperties": False,
-}
+class _ReadArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(
+        description=(
+            "Memory name (without the type_ prefix or .md extension). "
+            "Increments the access counter on success."
+        ),
+    )
 
-_DELETE_PARAMS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string",
-            "description": "Memory name to delete; also removes its MEMORY.md entry.",
-        }
-    },
-    "required": ["name"],
-    "additionalProperties": False,
-}
+
+class _SearchArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(
+        description=(
+            "Substring matched case-insensitively against each memory's "
+            "name + description. Returns up to ``limit`` results."
+        ),
+    )
+    limit: int = Field(default=10, description="Max results to return (default 10).")
+
+
+class _DeleteArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(
+        description="Memory name to delete; also removes its MEMORY.md entry.",
+    )
 
 def install(api: ExtensionAPI, config: MemoryConfig) -> None:
     base_path = _resolve_base(api.cwd, config.path)
@@ -296,7 +266,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
                 "Persist a typed memory (feedback/project/user/reference) "
                 "into .agentm/memory/. Updates MEMORY.md index."
             ),
-            parameters=_SAVE_PARAMS,
+            parameters=_SaveArgs,
             fn=_save,
             metadata={"memory_op": "save"},
         )
@@ -308,7 +278,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
                 "Read a memory's body by name. Increments access counter so "
                 "evolution can later identify hot/cold memories."
             ),
-            parameters=_READ_PARAMS,
+            parameters=_ReadArgs,
             fn=_read,
             metadata={"memory_op": "read"},
         )
@@ -320,7 +290,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
                 "Substring search across memory name+description; returns "
                 "up to limit candidates with their type and one-line hint."
             ),
-            parameters=_SEARCH_PARAMS,
+            parameters=_SearchArgs,
             fn=_search,
             metadata={"memory_op": "search"},
         )
@@ -329,7 +299,7 @@ def install(api: ExtensionAPI, config: MemoryConfig) -> None:
         FunctionTool(
             name="memory_delete",
             description="Delete a memory file and remove its MEMORY.md entry.",
-            parameters=_DELETE_PARAMS,
+            parameters=_DeleteArgs,
             fn=_delete,
             metadata={"memory_op": "delete"},
         )

@@ -24,7 +24,7 @@ from pathlib import Path, PurePath
 from typing import Any, Final
 
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agentm.core.abi import (
     ExtensionAPI,
@@ -220,62 +220,46 @@ def _check_path_allowed(
         )
     return None
 
-_READ_PARAMETERS: Final = {
-    "type": "object",
-    "properties": {
-        "path": {
-            "type": "string",
-            "description": "Absolute path to the file to read.",
-        },
-        "offset": {
-            "type": "integer",
-            "description": (
-                "1-based line number to start reading from. "
-                "Only provide if the file is too large to read at once."
-            ),
-        },
-        "limit": {
-            "type": "integer",
-            "description": (
-                "Number of lines to read. "
-                "Only provide if the file is too large to read at once."
-            ),
-        },
-    },
-    "required": ["path"],
-    "additionalProperties": False,
-}
+class _ReadArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(description="Absolute path to the file to read.")
+    offset: int | None = Field(
+        default=None,
+        description=(
+            "1-based line number to start reading from. "
+            "Only provide if the file is too large to read at once."
+        ),
+    )
+    limit: int | None = Field(
+        default=None,
+        description=(
+            "Number of lines to read. "
+            "Only provide if the file is too large to read at once."
+        ),
+    )
 
 # ---------------------------------------------------------------------------
 # Edit helpers
 # ---------------------------------------------------------------------------
 
-_EDIT_PARAMETERS: Final = {
-    "type": "object",
-    "properties": {
-        "path": {"type": "string", "description": "File path to edit."},
-        "old_string": {
-            "type": "string",
-            "description": "Exact text to find and replace. Mutually exclusive with start_line/end_line.",
-        },
-        "new_string": {
-            "type": "string",
-            "description": "Replacement text.",
-        },
-        "start_line": {
-            "type": "integer",
-            "description": "1-based start line for line-range replacement (inclusive).",
-        },
-        "end_line": {
-            "type": "integer",
-            "description": "1-based end line for line-range replacement (inclusive).",
-        },
-        "replace_all": {"type": "boolean", "default": False},
-        "rationale": {"type": "string", "default": "agent edit via file_tools"},
-    },
-    "required": ["path", "new_string"],
-    "additionalProperties": False,
-}
+class _EditArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(description="File path to edit.")
+    old_string: str | None = Field(
+        default=None,
+        description="Exact text to find and replace. Mutually exclusive with start_line/end_line.",
+    )
+    new_string: str = Field(description="Replacement text.")
+    start_line: int | None = Field(
+        default=None,
+        description="1-based start line for line-range replacement (inclusive).",
+    )
+    end_line: int | None = Field(
+        default=None,
+        description="1-based end line for line-range replacement (inclusive).",
+    )
+    replace_all: bool = Field(default=False)
+    rationale: str = Field(default="agent edit via file_tools")
 
 _CONTEXT_LINES = 4
 _MAX_UNINTENDED_SHRINK_LINES = 5
@@ -385,22 +369,11 @@ def _find_actual_string(file_content: str, search: str) -> str | None:
 # Write helpers
 # ---------------------------------------------------------------------------
 
-_WRITE_PARAMETERS: Final = {
-    "type": "object",
-    "properties": {
-        "path": {"type": "string", "description": "File path to write."},
-        "content": {
-            "type": "string",
-            "description": "The full content to write.",
-        },
-        "rationale": {
-            "type": "string",
-            "default": "agent write via file_tools",
-        },
-    },
-    "required": ["path", "content"],
-    "additionalProperties": False,
-}
+class _WriteArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(description="File path to write.")
+    content: str = Field(description="The full content to write.")
+    rationale: str = Field(default="agent write via file_tools")
 
 # ---------------------------------------------------------------------------
 # install()
@@ -522,7 +495,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
                     f"Files larger than {max_size_bytes} bytes require "
                     "offset and limit parameters."
                 ),
-                parameters=_READ_PARAMETERS,
+                parameters=_ReadArgs,
                 fn=_read_execute,
                 metadata={"file_op": "read"},
             )
@@ -631,7 +604,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
                     "existing files — use write only for new files or complete "
                     "rewrites."
                 ),
-                parameters=_WRITE_PARAMETERS,
+                parameters=_WriteArgs,
                 fn=_write_execute,
                 metadata={"file_op": "write"},
             )
@@ -792,7 +765,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
                     "2. Line-range replacement: provide start_line + end_line + new_string "
                     "(1-based, inclusive). You MUST read the file first to see line numbers."
                 ),
-                parameters=_EDIT_PARAMETERS,
+                parameters=_EditArgs,
                 fn=_edit_execute,
                 metadata={"file_op": "edit", TOOL_RESULT_FORMAT_METADATA_KEY: "diff"},
             )

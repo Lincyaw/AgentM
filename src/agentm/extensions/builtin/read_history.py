@@ -16,7 +16,7 @@ the observability atom. For cross-session trace mining use ``query_traces`` /
 from __future__ import annotations
 
 import json
-from typing import Any, Final
+from typing import Any
 
 from agentm.core.abi import (
     AgentMessage,
@@ -56,25 +56,16 @@ MANIFEST = ExtensionManifest(
     config_schema=ReadHistoryConfig,
 )
 
-_PARAMETERS: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "start": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "First turn index (1-based) to fetch.",
-        },
-        "end": {
-            "type": "integer",
-            "minimum": 1,
-            "description": (
-                "Last turn index to fetch (inclusive). Omit to fetch only `start`."
-            ),
-        },
-    },
-    "required": ["start"],
-    "additionalProperties": False,
-}
+class _ReadHistoryArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start: int = Field(ge=1, description="First turn index (1-based) to fetch.")
+    end: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Last turn index to fetch (inclusive). Omit to fetch only `start`."
+        ),
+    )
 
 def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
     tool_result_max_tokens = config.tool_result_max_tokens
@@ -123,7 +114,7 @@ def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
                 "reference in a compaction summary. Args: start (required), "
                 "end (optional, inclusive)."
             ),
-            parameters=_PARAMETERS,
+            parameters=_ReadHistoryArgs,
             fn=_execute,
         )
     )
