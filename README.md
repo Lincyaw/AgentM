@@ -199,9 +199,12 @@ peers ship as **separate binaries** for vendor-SDK isolation only —
 `agentm-terminal --connect ...` separately. In local daemon mode, a lightweight
 Python supervisor keeps the gateway socket stable and restarts the gateway
 worker when source/config files change, so SDK/session code updates apply
-without manually restarting the terminal client. Use `--private-gateway` for
-the old one-terminal-one-gateway lifecycle, or `--no-reload` to keep the daemon
-worker fixed. Extra TUI flags can be passed after `--`, for example
+without manually restarting the terminal client. Each launch gets a fresh
+terminal session by default, even from the same cwd; pass a TUI session id
+after `--` only when intentionally reconnecting to a known session, for example
+`agentm terminal -- -session-id workbench`. Use `--private-gateway` for the old
+one-terminal-one-gateway lifecycle, or `--no-reload` to keep the daemon worker
+fixed. Extra TUI flags can be passed after `--`, for example
 `agentm terminal -- --simple`. Workflow and sub-agent sessions open as
 background task rows so the parent conversation stays focused; `↓` opens the
 task picker, `Enter` views the selected task, `x` stops a selected task, and

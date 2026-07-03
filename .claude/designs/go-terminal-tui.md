@@ -22,6 +22,9 @@ client. A lightweight Python supervisor owns the daemon process and restarts
 the gateway worker when source/config files change, so SDK/session code updates
 apply without manually restarting the terminal. Advanced users can still run
 `agentm gateway` and `agentm-terminal --connect ...` separately.
+Each terminal client launch gets a fresh terminal session id by default; explicit
+`-session-id` is the opt-in mechanism for reconnecting multiple clients to the
+same gateway session.
 
 ## 1. Design principles
 
@@ -703,6 +706,9 @@ The current AgentM terminal implementation follows this direction:
 9. Render transient notices as compact one-line status hints near the bottom
    edge. They should auto-dismiss quickly, truncate long logs/errors, and never
    occupy a large bordered bottom-right card.
+10. Treat each terminal window as an independent session by default. Multiple TUI
+    windows may share the same daemon socket, but their `terminal:<session-id>`
+    session keys must differ unless the user explicitly passes `-session-id`.
 
 The implementation still reuses tab/supervisor plumbing internally; the user
 surface is main chat plus workflow rows/picker/detail. The 2026-07-03

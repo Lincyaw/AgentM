@@ -5,7 +5,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha1"
+	cryptorand "crypto/rand"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -27,7 +27,7 @@ import (
 func main() {
 	connectURL := flag.String("connect", "", "Gateway URL (unix:///path or ws://host:port)")
 	token := flag.String("token", "", "Bearer token for ws/wss")
-	chatID := flag.String("chat-id", "", "Chat/session ID (default: working directory basename)")
+	sessionID := flag.String("session-id", "", "Session ID (default: new session per terminal)")
 	senderID := flag.String("sender-id", "local", "Sender ID")
 	scenario := flag.String("scenario", "", "Scenario name (first message only)")
 	themeName := flag.String("theme", "dark", "Theme: dark or light")
@@ -38,20 +38,12 @@ func main() {
 	logFile := flag.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
 	flag.Parse()
 
-	// Default chat-id to "<basename>-<sha1(abspath)[:12]>" so different directories
-	// produce different session keys even when they share the same basename,
-	// while the same directory always gets the same key (conversation continuity).
-	if *chatID == "" {
+	// Default session-id to a per-process value so multiple terminal windows in
+	// the same directory become independent sessions. Pass -session-id
+	// explicitly to reconnect to a known session key.
+	if *sessionID == "" {
 		wd, _ := os.Getwd()
-		if wd != "" {
-			parts := strings.Split(strings.TrimRight(wd, "/"), "/")
-			base := parts[len(parts)-1]
-			h := sha1.Sum([]byte(wd))
-			suffix := hex.EncodeToString(h[:])[:12]
-			*chatID = base + "-" + suffix
-		} else {
-			*chatID = "terminal"
-		}
+		*sessionID = defaultSessionID(wd)
 	}
 
 	// File logging: bubbletea owns stdout and stderr is unreliable in alt-screen.
@@ -116,9 +108,9 @@ func main() {
 		// Compose the session_key per the §3.4 default rule (<channel>:<chat_id>).
 		id := adapter.Identity{
 			Channel:    "terminal",
-			ChatID:     *chatID,
+			ChatID:     *sessionID,
 			SenderID:   *senderID,
-			SessionKey: "terminal:" + *chatID,
+			SessionKey: "terminal:" + *sessionID,
 			Scenario:   *scenario,
 		}
 
@@ -171,4 +163,19 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func defaultSessionID(wd string) string {
+	base := "terminal"
+	if wd != "" {
+		parts := strings.Split(strings.TrimRight(wd, "/"), "/")
+		if parts[len(parts)-1] != "" {
+			base = parts[len(parts)-1]
+		}
+	}
+	buf := make([]byte, 6)
+	if _, err := cryptorand.Read(buf); err == nil {
+		return base + "-" + hex.EncodeToString(buf)
+	}
+	return fmt.Sprintf("%s-%d-%d", base, os.Getpid(), time.Now().UnixNano())
 }

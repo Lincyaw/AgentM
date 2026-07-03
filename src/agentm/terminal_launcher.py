@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
@@ -120,11 +121,14 @@ def _start_gateway(config: TerminalLaunchConfig) -> _GatewayProcess:
 def _run_terminal_peer(config: TerminalLaunchConfig, *, connect_url: str) -> int:
     executable = _find_executable(config.terminal_bin)
     args = [executable, "--connect", connect_url]
+    terminal_args = config.terminal_args
+    if not _has_session_id_arg(terminal_args):
+        args.extend(["--session-id", _default_terminal_session_id(config.cwd)])
     if config.scenario:
         args.extend(["--scenario", config.scenario])
     if config.terminal_log is not None:
         args.extend(["--log", str(config.terminal_log)])
-    args.extend(config.terminal_args)
+    args.extend(terminal_args)
     return subprocess.call(args, cwd=str(config.cwd), env=os.environ.copy())
 
 
@@ -366,3 +370,17 @@ def _find_executable(value: str) -> str:
     if found:
         return found
     raise TerminalLaunchError(f"executable not found on PATH: {value}")
+
+
+def _has_session_id_arg(args: list[str]) -> bool:
+    for arg in args:
+        if arg in {"-session-id", "--session-id"}:
+            return True
+        if arg.startswith("-session-id=") or arg.startswith("--session-id="):
+            return True
+    return False
+
+
+def _default_terminal_session_id(cwd: Path) -> str:
+    base = cwd.name or "terminal"
+    return f"{base}-{uuid.uuid4().hex[:12]}"

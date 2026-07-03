@@ -745,7 +745,10 @@ requirements:
       lightweight Python supervisor around a gateway worker: it keeps the client
       socket stable and restarts the worker when watched source/config files
       change, so SDK/session code updates apply without manually restarting the
-      TUI. `--private-gateway` preserves the old one-terminal-one-gateway
+      TUI. Each `agentm terminal` launch must get a fresh terminal session
+      by default, so multiple TUI windows attached to the same daemon do not
+      share a `terminal:<session-id>` session unless the user explicitly passes a
+      session id. `--private-gateway` preserves the old one-terminal-one-gateway
       lifecycle. The Go terminal peer remains a wire-only client; advanced users
       can still connect it to an external gateway explicitly. Stale
       chat-to-session mappings must be discarded automatically when their target
