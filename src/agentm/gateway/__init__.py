@@ -40,6 +40,25 @@ def default_socket_url() -> str:
 DEFAULT_SOCKET_URL = default_socket_url()
 
 
+def load_token_file(token_file: str, *, option_name: str = "--token-file") -> tuple[str, ...]:
+    """Load non-empty, non-comment bearer tokens from a token file."""
+
+    try:
+        content = Path(token_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(
+            f"{option_name} {token_file!r}: cannot read: {exc.strerror or exc}"
+        ) from exc
+    tokens = tuple(
+        line
+        for raw in content.splitlines()
+        if (line := raw.strip()) and not line.startswith("#")
+    )
+    if not tokens:
+        raise ValueError(f"{option_name} {token_file!r}: file is empty")
+    return tokens
+
+
 def resolve_token(token: str | None, token_file: str | None) -> str | None:
     """Resolve the bearer token shared by every client CLI.
 
@@ -47,6 +66,9 @@ def resolve_token(token: str | None, token_file: str | None) -> str | None:
     fallback is wired by typer via ``envvar=`` on the ``--token`` flag).
     The two CLI flags are mutually exclusive — secrets should flow through
     a file (no /proc / shell-history leak).
+    Token files use the same line format as gateway ``--bind-token-file``:
+    blank lines and ``#`` comments are ignored, and clients send the first
+    remaining token.
 
     Returns ``None`` when neither source is set. Raises ``ValueError`` on
     mutual-exclusion violation; CLI layers translate that into typer's
@@ -58,14 +80,7 @@ def resolve_token(token: str | None, token_file: str | None) -> str | None:
             "--token-file is preferred (CLI args leak into /proc and shell history)"
         )
     if token_file:
-        try:
-            content = Path(token_file).read_text(encoding="utf-8")
-        except OSError as exc:
-            raise ValueError(f"--token-file {token_file!r}: {exc}") from exc
-        stripped = content.strip()
-        if not stripped:
-            raise ValueError(f"--token-file {token_file!r}: file is empty")
-        return stripped
+        return load_token_file(token_file)[0]
     return token
 
 
@@ -73,5 +88,6 @@ __all__ = [
     "DEFAULT_SOCKET_URL",
     "autoload_dotenv",
     "default_socket_url",
+    "load_token_file",
     "resolve_token",
 ]

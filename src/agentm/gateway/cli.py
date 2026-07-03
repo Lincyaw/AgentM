@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 import typer
 from loguru import logger
 
-from agentm.gateway import DEFAULT_SOCKET_URL, autoload_dotenv
+from agentm.gateway import DEFAULT_SOCKET_URL, autoload_dotenv, load_token_file
 from agentm.gateway.auth import (
     Authenticator,
     TokenAuthenticator,
@@ -107,18 +107,9 @@ class BindSpec:
 
 def _load_tokens_file(path: str) -> set[str]:
     try:
-        text = Path(path).read_text(encoding="utf-8")
-    except OSError as exc:
-        raise SystemExit(
-            f"--bind-token-file {path!r}: cannot read: {exc.strerror or exc}"
-        ) from exc
-    tokens: set[str] = set()
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        tokens.add(line)
-    return tokens
+        return set(load_token_file(path, option_name="--bind-token-file"))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _resolve_bind(
