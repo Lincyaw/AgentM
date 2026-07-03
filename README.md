@@ -247,7 +247,7 @@ flows through the **same** `EventBus`. The `observability` builtin is a pure
 subscriber writing OTel-flavored JSONL to
 `$AGENTM_HOME/observability/<session_id>.jsonl` (default:
 `~/.agentm/observability/<session_id>.jsonl`; override with
-`AGENTM_OBSERVABILITY_DIR`).
+`AGENTM_OBSERVABILITY_DIR`, which also supports `~`).
 
 ## Showcase
 

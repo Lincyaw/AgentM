@@ -1027,6 +1027,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/core/lib/user_config.py
+      - path: src/agentm/core/lib/observability_dir.py
       - path: src/agentm/env.py
       - path: src/agentm/cli.py
       - path: src/agentm/contrib_sync.py
@@ -1062,6 +1063,7 @@ requirements:
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/command-routing.md
       - path: .claude/designs/skills.md
+      - path: .claude/designs/observability.md
       - path: .claude/designs/prompt-templates.md
       - path: .claude/designs/pluggable-architecture.md
       - path: .claude/designs/single-event-log.md

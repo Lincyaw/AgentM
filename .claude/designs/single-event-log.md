@@ -59,7 +59,7 @@ separation. It carried four costs:
 Single per-session event log, OTLP/JSON ndjson on disk.
 
 - **One file per session**, at `$AGENTM_HOME/observability/<session_id>.jsonl`
-  by default (override with `AGENTM_OBSERVABILITY_DIR`).
+  by default (override with `AGENTM_OBSERVABILITY_DIR`; `~` is expanded).
 - **`SessionManager._append_record` no longer writes its own file.** Instead
   it dispatches a `MessageAppendedEvent` through the EventBus; the
   observability atom subscribes and writes an `agentm.message.appended` log
