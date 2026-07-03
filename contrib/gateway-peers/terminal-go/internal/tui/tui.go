@@ -1770,7 +1770,7 @@ func (m *appModel) handleReorderTab(msg messages.ReorderTabMsg) (tea.Model, tea.
 // handleCloseTab closes a session tab.
 func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	wasActive := sessionID == m.supervisor.ActiveID()
-	prevBottomSurfaceHeight := m.bottomSurfaceHeight(m.width)
+	prevBottomSurfaceHeight := m.bottomSurfaceLayoutHeight
 
 	// Capture the working dir before closing so we can reuse it if this is the last tab.
 	var closedWorkingDir string

@@ -512,9 +512,9 @@ func (m *appModel) handleBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 	if ev == nil {
 		return m, nil
 	}
-	layoutChanged := m.updateBackgroundActivity(ev)
+	activityChanged := m.updateBackgroundActivity(ev)
 	m.statusBar.SetActivity(m.backgroundActivityText())
-	if !layoutChanged {
+	if !activityChanged || m.bottomSurfaceHeight(m.width) == m.bottomSurfaceLayoutHeight {
 		return m, nil
 	}
 	return m, m.resizeAll()
