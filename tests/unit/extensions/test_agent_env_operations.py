@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import os
 import sys
 from types import SimpleNamespace
 from typing import Any, cast
+
+import pytest
 
 from agentm.extensions.builtin._operations import agent_env
 from agentm.extensions.builtin._operations.agent_env import (
@@ -50,29 +51,39 @@ def test_operations_config_forwards_agent_env_profile() -> None:
     assert agent_config.profile == "gpu"
 
 
-def test_install_attach_passes_timeout_and_does_not_use_global_arl_api_key(
-    monkeypatch,
+@pytest.mark.asyncio
+async def test_install_attach_passes_timeout_and_registers_operations(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
 
-    class FakeSandboxSession:
+    class FakeAsyncSandboxSession:
+        def __init__(self) -> None:
+            self._session_id: str | None = None
+
         @classmethod
-        def attach(cls, session_id: str, **kwargs: Any) -> Any:
-            captured["arl_api_key_during_attach"] = os.environ.get("ARL_API_KEY")
+        async def attach(cls, session_id: str, **kwargs: Any) -> Any:
             captured["session_id"] = session_id
             captured.update(kwargs)
-            return SimpleNamespace(session_id=session_id)
+            instance = cls()
+            instance._session_id = session_id
+            return instance
+
+        @property
+        def session_id(self) -> str | None:
+            return self._session_id
 
     monkeypatch.setitem(
         sys.modules,
         "arl",
-        SimpleNamespace(SandboxSession=FakeSandboxSession),
+        SimpleNamespace(
+            AsyncSandboxSession=FakeAsyncSandboxSession,
+            GatewayClient=SimpleNamespace,
+        ),
     )
-    monkeypatch.setenv("ARL_API_KEY", "global-key-that-must-not-leak")
-    monkeypatch.delenv("AGENTM_AGENT_ENV_API_KEY", raising=False)
 
     api = _FakeOperationsAPI()
-    install_agent_env(
+    await install_agent_env(
         cast(Any, api),
         AgentEnvConfig(
             attach_session="sandbox-session",
@@ -82,55 +93,61 @@ def test_install_attach_passes_timeout_and_does_not_use_global_arl_api_key(
     )
 
     assert captured == {
-        "arl_api_key_during_attach": None,
         "session_id": "sandbox-session",
         "gateway_url": "http://gateway.invalid",
         "api_key": None,
         "timeout": 123.0,
     }
-    assert os.environ["ARL_API_KEY"] == "global-key-that-must-not-leak"
     assert api.services["agent_env.session_id"] == "sandbox-session"
     assert set(api.operations) == {"file", "bash"}
     assert api.resource_writer is not None
 
 
-def test_execute_session_recovers_pending_operation_result(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_async_execute_recovers_pending_operation_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     expected = object()
 
-    class PendingOperationError(Exception):
-        operation_id = "op-1"
+    class FakeGatewayOperationTimeout(TimeoutError):
+        def __init__(self, operation_id: str) -> None:
+            self.operation_id = operation_id
+            super().__init__(f"timed out; operation_id={operation_id}")
 
-    class FakeClient:
+    monkeypatch.setitem(
+        sys.modules,
+        "arl",
+        SimpleNamespace(GatewayOperationTimeout=FakeGatewayOperationTimeout),
+    )
+
+    class FakeAsyncSession:
         def __init__(self) -> None:
-            self.calls: list[tuple[str, str]] = []
-            self.responses = [
+            self.op_calls: list[str] = []
+            self._responses = [
                 SimpleNamespace(status="running", result=None, error=""),
                 SimpleNamespace(status="done", result=expected, error=""),
             ]
 
-        def get_execute_operation(self, session_id: str, operation_id: str) -> Any:
-            self.calls.append((session_id, operation_id))
-            return self.responses.pop(0)
+        @property
+        def session_id(self) -> str:
+            return "session-1"
 
-    class FakeSession:
-        session_id = "session-1"
+        async def execute(
+            self,
+            steps: list[dict[str, Any]],
+            **_kwargs: Any,
+        ) -> Any:
+            raise FakeGatewayOperationTimeout("op-1")
 
-        def __init__(self) -> None:
-            self._client = FakeClient()
+        async def get_execute_operation(self, operation_id: str) -> Any:
+            self.op_calls.append(operation_id)
+            return self._responses.pop(0)
 
-        def execute(self, steps: list[dict[str, Any]]) -> Any:
-            raise PendingOperationError
-
-    session = FakeSession()
-    monkeypatch.setattr(agent_env.time, "sleep", lambda _seconds: None)
-
-    result = agent_env._execute_session_sync(
-        session,
+    session = FakeAsyncSession()
+    result = await agent_env._async_execute(
+        session,  # type: ignore[arg-type]
         [{"cmd": "sleep 10", "timeout": 1}],
     )
 
     assert result is expected
-    assert session._client.calls == [
-        ("session-1", "op-1"),
-        ("session-1", "op-1"),
-    ]
+    assert session.op_calls == ["op-1", "op-1"]

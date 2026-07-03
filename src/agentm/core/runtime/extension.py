@@ -51,7 +51,6 @@ from agentm.core.abi.extension import (
 )
 from agentm.core.abi.operations import (
     BashOperations,
-    FileOperations,
     Operations,
 )
 from agentm.core.abi.project_layout import ProjectLayout
@@ -441,7 +440,7 @@ class _ExtensionAPIImpl:
         return name in self._providers
 
     def register_operations(
-        self, *, file: FileOperations, bash: BashOperations
+        self, *, bash: BashOperations
     ) -> None:
         self._assert_active()
         if self._operations_holder.bundle is not None:
@@ -450,7 +449,7 @@ class _ExtensionAPIImpl:
                 "an earlier atom called api.register_operations(...). "
                 "Only one Operations atom per scenario."
             )
-        self._operations_holder.bundle = Operations(file=file, bash=bash)
+        self._operations_holder.bundle = Operations(bash=bash)
 
     def register_message_renderer(
         self, custom_type: str, renderer: Renderer

@@ -197,8 +197,6 @@ from .extension import (
 from .operations import (
     BashOperations,
     ExecResult,
-    FileOperations,
-    FileStat,
 )
 
 # -- resource ----------------------------------------------------------------
@@ -427,8 +425,6 @@ __all__ = [
     # operations
     "BashOperations",
     "ExecResult",
-    "FileOperations",
-    "FileStat",
     # resource
     "BatchHandle",
     "PathClass",

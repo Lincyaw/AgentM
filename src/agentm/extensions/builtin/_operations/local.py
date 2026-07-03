@@ -1,83 +1,18 @@
-"""Local-stdlib implementations of ``FileOperations`` and ``BashOperations``.
+"""Local-stdlib implementation of ``BashOperations``.
 
-Moved from the former ``operations_local`` builtin atom. Provides
-:func:`install_local` for use by the unified ``operations`` atom entry point.
+Provides :func:`install_local` for use by the unified ``operations`` atom.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import stat as stat_module
 from collections.abc import Callable
-from pathlib import Path
 from signal import SIGKILL
 from typing import Any
 
-from agentm.core.abi import ExecResult, ExtensionAPI, FileStat
+from agentm.core.abi import ExecResult, ExtensionAPI
 
-class LocalFileOperations:
-    """Default filesystem implementation backed by local stdlib I/O.
-
-    ``cwd`` anchors relative paths to the session's working directory.
-    Without it, ``read("foo.py")`` resolves against the process cwd —
-    typically wherever the operator launched ``agentm`` from — which
-    diverges from the bash op's cwd handling and breaks any agent
-    reasoning about its own workspace. ``cwd=None`` keeps the legacy
-    "process cwd" behavior for tests and embedded uses that do not
-    supply one.
-    """
-
-    def __init__(self, cwd: str | None = None) -> None:
-        self._cwd = cwd
-
-    def _resolve(self, path: str) -> Path:
-        candidate = Path(path)
-        if candidate.is_absolute() or self._cwd is None:
-            return candidate
-        return Path(self._cwd) / candidate
-
-    async def read_file(self, path: str) -> bytes:
-        return await asyncio.to_thread(self._resolve(path).read_bytes)
-
-    async def access(self, path: str) -> bool:
-        def _access() -> bool:
-            target = self._resolve(path)
-            return target.exists() and os.access(target, os.R_OK)
-
-        return await asyncio.to_thread(_access)
-
-    async def is_dir(self, path: str) -> bool:
-        return await asyncio.to_thread(self._resolve(path).is_dir)
-
-    async def is_file(self, path: str) -> bool:
-        return await asyncio.to_thread(self._resolve(path).is_file)
-
-    async def list_dir(self, path: str) -> list[str]:
-        def _list_dir() -> list[str]:
-            return sorted(entry.name for entry in self._resolve(path).iterdir())
-
-        return await asyncio.to_thread(_list_dir)
-
-    async def stat(self, path: str) -> FileStat:
-        def _stat() -> FileStat:
-            s = self._resolve(path).stat()
-            return FileStat(
-                size=s.st_size,
-                mtime_ns=s.st_mtime_ns,
-                is_file=stat_module.S_ISREG(s.st_mode),
-                is_dir=stat_module.S_ISDIR(s.st_mode),
-            )
-
-        return await asyncio.to_thread(_stat)
-
-    async def write_file(self, path: str, data: bytes) -> None:
-        resolved = self._resolve(path)
-        await asyncio.to_thread(resolved.write_bytes, data)
-
-    async def makedirs(self, path: str, exist_ok: bool = True) -> None:
-        resolved = self._resolve(path)
-        await asyncio.to_thread(resolved.mkdir, parents=True, exist_ok=exist_ok)
 
 class LocalBashOperations:
     """Default shell implementation backed by ``asyncio`` subprocesses."""
@@ -177,9 +112,7 @@ class LocalBashOperations:
         except ProcessLookupError:
             return
 
+
 def install_local(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config
-    api.register_operations(
-        file=LocalFileOperations(cwd=api.cwd),
-        bash=LocalBashOperations(),
-    )
+    api.register_operations(bash=LocalBashOperations())

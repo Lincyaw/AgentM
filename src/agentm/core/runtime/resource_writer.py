@@ -217,6 +217,15 @@ class GitBackedResourceWriter:
     async def read(self, path: str) -> bytes:
         return await asyncio.to_thread(self._resolve_path(path).read_bytes)
 
+    async def exists(self, path: str) -> bool:
+        resolved = self._resolve_path(path)
+        return await asyncio.to_thread(lambda: resolved.exists() and os.access(resolved, os.R_OK))
+
+    async def list_dir(self, path: str) -> list[str]:
+        def _list() -> list[str]:
+            return sorted(e.name for e in self._resolve_path(path).iterdir())
+        return await asyncio.to_thread(_list)
+
     async def write(
         self,
         path: str,
@@ -264,7 +273,9 @@ class GitBackedResourceWriter:
             try:
                 await asyncio.to_thread(self._write_bytes, resolved, new)
             except Exception as exc:  # noqa: BLE001
-                logger.debug("resource_writer: write_bytes failed for {}: {}", path, exc)
+                logger.debug(
+                    "resource_writer: write_bytes failed for {}: {}", path, exc
+                )
                 return WriteResult._error(path, path_class, str(exc))
             return WriteResult._uncommitted(path, path_class)
 
@@ -343,7 +354,14 @@ class GitBackedResourceWriter:
         try:
             self._ensure_git_ready()
             result = self._run_git_sync(
-                ("log", "-n", "1", "--format=%H", "--", PurePosixPath(relative).as_posix())
+                (
+                    "log",
+                    "-n",
+                    "1",
+                    "--format=%H",
+                    "--",
+                    PurePosixPath(relative).as_posix(),
+                )
             )
         except GitOperationError:
             return None
@@ -354,7 +372,9 @@ class GitBackedResourceWriter:
     def restore(self, path: Path, version: str) -> None:
         self._lazy_setup()
         if self._advisory_mode or self.classify(str(path)) != "managed":
-            raise NotImplementedError("git rollback requires a versioned ResourceWriter")
+            raise NotImplementedError(
+                "git rollback requires a versioned ResourceWriter"
+            )
 
         resolved = self._resolve_path(str(path))
         relative = resolved.relative_to(self._cwd)
@@ -400,7 +420,9 @@ class GitBackedResourceWriter:
         unmanaged_restore: list[_RestoreState] = []
         try:
             for op, resolved in unmanaged_ops:
-                unmanaged_restore.append(await asyncio.to_thread(self._capture_restore_state, resolved))
+                unmanaged_restore.append(
+                    await asyncio.to_thread(self._capture_restore_state, resolved)
+                )
                 await asyncio.to_thread(self._apply_pending_op, op, resolved)
         except Exception:  # noqa: BLE001
             await asyncio.to_thread(self._restore_paths, unmanaged_restore)
@@ -510,22 +532,29 @@ class GitBackedResourceWriter:
         await asyncio.to_thread(self._ensure_git_ready)
         pre_sha = await asyncio.to_thread(self._head_sha)
         restore_exists = resolved.exists()
-        restore_bytes = await asyncio.to_thread(resolved.read_bytes) if restore_exists else None
+        restore_bytes = (
+            await asyncio.to_thread(resolved.read_bytes) if restore_exists else None
+        )
         try:
             await asyncio.to_thread(self._snapshot_human_if_dirty, relative_posix)
             await asyncio.to_thread(write_op, resolved)
             await asyncio.to_thread(self._stage_paths, [relative_posix])
-            if await asyncio.to_thread(self._is_index_clean_for_paths, [relative_posix]):
+            if await asyncio.to_thread(
+                self._is_index_clean_for_paths, [relative_posix]
+            ):
                 current_sha = await asyncio.to_thread(self._head_sha)
                 return WriteResult._uncommitted(
-                    path, "managed",
+                    path,
+                    "managed",
                     commit_sha_before=pre_sha,
                     commit_sha_after=current_sha,
                 )
             await asyncio.to_thread(self._commit, rationale, author)
             post_sha = await asyncio.to_thread(self._head_sha)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("resource_writer: commit failed for {}, restoring: {}", path, exc)
+            logger.warning(
+                "resource_writer: commit failed for {}, restoring: {}", path, exc
+            )
             await asyncio.to_thread(
                 self._restore_after_failure,
                 resolved,
@@ -714,7 +743,9 @@ class GitBackedResourceWriter:
             else:
                 resolved.unlink(missing_ok=True)
             if pre_sha is not None:
-                self._run_git_sync(("restore", "--source", pre_sha, "--", relative_path))
+                self._run_git_sync(
+                    ("restore", "--source", pre_sha, "--", relative_path)
+                )
                 if self._head_sha() != pre_sha:
                     self._run_git_sync(("reset", "--hard", pre_sha))
         except Exception:  # noqa: BLE001
@@ -729,7 +760,9 @@ class GitBackedResourceWriter:
         try:
             self._restore_paths(restore_states)
             if pre_sha is not None:
-                self._run_git_sync(("restore", "--source", pre_sha, "--", *relative_paths))
+                self._run_git_sync(
+                    ("restore", "--source", pre_sha, "--", *relative_paths)
+                )
                 if self._head_sha() != pre_sha:
                     self._run_git_sync(("reset", "--hard", pre_sha))
         except Exception:  # noqa: BLE001
@@ -740,7 +773,9 @@ class GitBackedResourceWriter:
         content = resolved.read_bytes() if existed else None
         return _RestoreState(resolved=resolved, existed=existed, content=content)
 
-    def _capture_restore_states(self, resolved_paths: list[Path]) -> list[_RestoreState]:
+    def _capture_restore_states(
+        self, resolved_paths: list[Path]
+    ) -> list[_RestoreState]:
         return [self._capture_restore_state(path) for path in resolved_paths]
 
     def _restore_paths(self, restore_states: list[_RestoreState]) -> None:

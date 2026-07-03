@@ -39,7 +39,6 @@ from agentm.core.abi import (
 from agentm.core.abi.catalog import CatalogService
 from agentm.core.abi.operations import (
     BashOperations,
-    FileOperations,
     Operations,
 )
 from agentm.core.abi.project_layout import ProjectLayout
@@ -330,7 +329,7 @@ class ExtensionAPI(Protocol):
         ...
 
     def register_operations(
-        self, *, file: FileOperations, bash: BashOperations
+        self, *, bash: BashOperations
     ) -> None:
         """Register the session's ``Operations`` bundle.
 

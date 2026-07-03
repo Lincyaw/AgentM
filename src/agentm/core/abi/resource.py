@@ -72,7 +72,18 @@ class BatchHandle(Protocol):
 
 @runtime_checkable
 class ResourceWriter(Protocol):
-    async def read(self, path: str) -> bytes: ...
+    async def read(self, path: str) -> bytes:
+        """Read file content. Not restricted by path classification — any
+        readable path is allowed (reads are safe; only writes are gated)."""
+        ...
+
+    async def exists(self, path: str) -> bool:
+        """Return True if *path* exists and is readable."""
+        ...
+
+    async def list_dir(self, path: str) -> list[str]:
+        """List entries in *path*. Raises ``FileNotFoundError`` if absent."""
+        ...
 
     async def write(
         self,

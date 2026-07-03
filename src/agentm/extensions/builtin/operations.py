@@ -70,7 +70,7 @@ async def install(api: ExtensionAPI, config: OperationsConfig) -> None:
             install_agent_env,
         )
 
-        install_agent_env(
+        await install_agent_env(
             api, AgentEnvConfig.model_validate(config.model_dump(exclude={"backend"}))
         )
     else:

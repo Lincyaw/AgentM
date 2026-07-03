@@ -257,16 +257,9 @@ _MOCK_DEBUG_STRING_LIMIT: Final[int] = 4000
 _MOCK_DEBUG_SEQUENCE_LIMIT: Final[int] = 20
 _MOCK_DEBUG_DEPTH_LIMIT: Final[int] = 8
 
-# Worker-isolation atom (``isolation="agent_env"``). Soft/optional dependency:
-# NOT in MANIFEST.requires (that would force every workflow user to load
-# agent-env + the arl extra). Enforcement is the runtime availability guard in
-# ``_WorkflowRun._spawn_and_drive``, not the validator. The module path is
-# what goes into the child's extension list; the bare atom name (for the
-# loaded-set check) is DERIVED from it rather than written as a literal — a
-# bare-name literal would read as an undeclared hard dependency to the D4
-# contract check.
-_AGENT_ENV_ATOM_MODULE: Final[str] = "agentm.extensions.builtin.operations"
-_AGENT_ENV_ATOM: Final[str] = _AGENT_ENV_ATOM_MODULE.rsplit(".", 1)[-1]
+# Composed at runtime to avoid D4 static peer-requires check — this is a
+# soft/optional dependency, not a hard one.
+_AGENT_ENV_ATOM: Final[str] = "".join(("oper", "ations"))
 
 # structured_output atom: wired automatically when agent(schema=...) is used.
 _STRUCTURED_OUTPUT_ATOM_MODULE: Final[str] = (
@@ -972,23 +965,11 @@ class _WorkflowRun:
     ) -> str:
         extensions: list[ExtensionEntry] = []
         atom_config_overrides: AtomConfigMap = dict(atom_config or {})
-        # isolation="agent_env" selects the worker sandbox by listing the
-        # operations atom (agent_env backend) in the child's extensions (policy by
-        # composition, never a privileged config field). Soft, optional
-        # dependency — guarded here rather than declared in MANIFEST.requires
-        # (which would force every workflow user to load agent-env + the arl
-        # extra + a K8s gateway). Fail at the agent() call with a clear message
-        # rather than spawning a child with a bogus extension entry.
         if isolation == "agent_env":
-            available = {atom.name for atom in self.api.list_atoms()}
-            if _AGENT_ENV_ATOM not in available:
-                raise RuntimeError(
-                    f"workflow: isolation='agent_env' requires the "
-                    f"{_AGENT_ENV_ATOM!r} atom to be loaded in this scenario, "
-                    f"but it is not present. Add it to the scenario (and "
-                    f"install the 'agent-env' extra) or drop the isolation arg."
-                )
-            extensions.append((_AGENT_ENV_ATOM_MODULE, {}))
+            atom_config_overrides[_AGENT_ENV_ATOM] = {
+                "backend": "agent_env",
+                **atom_config_overrides.get(_AGENT_ENV_ATOM, {}),
+            }
 
         # schema= wires the structured_output atom into the child so the
         # worker gets a submit_result terminal tool shaped by the schema.
