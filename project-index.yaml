@@ -449,6 +449,10 @@ requirements:
       duplicated presenter wiring, dotenv loading is centralized, local JSONL
       fallback lives under AGENTM_HOME, and Textual must clone AgentSessionConfig
       through a public with_bus helper instead of reflecting on __dict__.
+      Scenario discovery is exposed through the CLI/gateway, explicit scenario
+      selection fails fast, and gateway `/model` / `/scenario` switches are
+      scoped to the current chat/session key rather than mutating global
+      gateway state.
     priority: P1
     status: implemented
     confidence: confirmed
@@ -468,6 +472,10 @@ requirements:
       - path: src/agentm/cli_workflow.py
       - path: src/agentm/gateway/cli.py
       - path: src/agentm/gateway/__init__.py
+      - path: src/agentm/gateway/runtime.py
+      - path: src/agentm/gateway/commands/protocol.py
+      - path: src/agentm/gateway/commands/builtins/model.py
+      - path: src/agentm/gateway/commands/builtins/scenario.py
       - path: src/agentm/ai/types.py
       - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/core/abi/session_store.py
@@ -755,9 +763,9 @@ requirements:
       session file no longer exists, so a terminal can recover by starting a
       fresh session instead of surfacing a raw FileNotFoundError. The standalone
       `ag` terminal binary exposes a compact long-option CLI, including
-      `--scenario <name>` for scenario selection, and intentionally stays an
-      interactive TUI surface rather than adding structured output modes that
-      belong to the Python CLI/SDK.
+      `--scenario <name>` for validated scenario selection, and intentionally
+      stays an interactive TUI surface rather than adding structured output
+      modes that belong to the Python CLI/SDK.
     priority: P1
     status: implemented
     confidence: confirmed

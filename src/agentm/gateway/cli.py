@@ -322,6 +322,15 @@ def _build_session_factory(
     return factory
 
 
+def _validate_scenario(scenario: str) -> None:
+    from agentm.extensions.loader import ScenarioLoadError, validate_scenario
+
+    try:
+        validate_scenario(scenario)
+    except ScenarioLoadError as exc:
+        raise SystemExit(f"--scenario {scenario!r}: {exc}") from exc
+
+
 # -------- typer app ----------------------------------------------------
 
 
@@ -510,6 +519,7 @@ async def _arun(
     raw_model = model_flag
 
     resolved_state_dir = state_dir or (Path(cwd) / ".agentm" / "gateway")
+    _validate_scenario(scenario)
 
     if check:
         payload = {

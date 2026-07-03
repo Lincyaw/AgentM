@@ -715,7 +715,7 @@ async def _resolve_extensions(
         try:
             to_load, _scenario_meta = load_scenario(config.scenario)
             config.scenario_dir = _scenario_meta.get("scenario_dir")
-        except (ScenarioLoadError, Exception) as exc:  # noqa: BLE001
+        except ScenarioLoadError as exc:
             await bus.emit(
                 DiagnosticEvent.CHANNEL,
                 DiagnosticEvent(
@@ -724,7 +724,17 @@ async def _resolve_extensions(
                     message=str(exc),
                 ),
             )
-            to_load = []
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await bus.emit(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="error",
+                    source="scenario_loader",
+                    message=str(exc),
+                ),
+            )
+            raise
         ensure_floor_atom(to_load, prompt_registry_module)
         ensure_floor_atom(to_load, compaction_prompts_module)
         ensure_floor_atom(to_load, command_parser_module)

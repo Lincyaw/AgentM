@@ -79,7 +79,8 @@ ScenarioOpt = Annotated[
             "$AGENTM_PROJECT_ROOT, the process cwd, ~/.agentm/contrib, "
             "the AgentM checkout, or packaged portable scenarios. An "
             "absolute path is also accepted. When unset, falls back to "
-            "the ``chatbot`` scenario."
+            "the ``chatbot`` scenario. Use `agentm list-scenarios` to "
+            "browse available scenarios."
         ),
     ),
 ]
@@ -691,6 +692,8 @@ def _build_session_config(
         scenario = stored.get("scenario")
     if scenario is None and not config.no_extensions:
         scenario = DEFAULT_SCENARIO
+    if scenario is not None and not config.no_extensions:
+        _validate_scenario_arg(scenario)
     stored_provider = stored.get("provider") if stored else None
     provider_spec: Any
     if (
@@ -762,6 +765,15 @@ def _build_session_config(
         ),
         session_state,
     )
+
+
+def _validate_scenario_arg(scenario: str) -> None:
+    from agentm.extensions.loader import ScenarioLoadError, validate_scenario
+
+    try:
+        validate_scenario(scenario)
+    except ScenarioLoadError as exc:
+        raise typer.BadParameter(f"--scenario {scenario!r}: {exc}") from exc
 
 
 async def run(
@@ -967,7 +979,8 @@ def run_cmd(
     pre_cwd = cwd or os.environ.get("AGENTM_CWD") or os.getcwd()
     autoload_dotenv(Path(pre_cwd))
 
-    # When a subcommand (``trace`` / ``daemon`` / ``gateway`` / ``list-extensions``) is
+    # When a subcommand (``trace`` / ``daemon`` / ``gateway`` /
+    # ``list-extensions`` / ``list-scenarios``) is
     # being dispatched, this root callback fires first but must defer to the
     # subcommand rather than treat its absent ``--prompt`` as an error. The
     # dotenv load above is intentionally shared with subcommands so trace
@@ -1274,6 +1287,82 @@ def list_extensions_cmd(
                 f"    -e {entry.module_path}"
             )
     logger.info("{total} extension(s) shown.", total=total)
+
+
+@app.command(name="list-scenarios")
+def list_scenarios_cmd(
+    output_format: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output format: 'text' for humans, 'json' for scripts.",
+        ),
+    ] = "text",
+    filter_substr: Annotated[
+        str | None,
+        typer.Option(
+            "--filter",
+            help="Substring filter applied to scenario name, source, path, or description.",
+        ),
+    ] = None,
+) -> None:
+    """List discoverable scenarios usable with ``--scenario``."""
+
+    from agentm.extensions.loader import list_scenarios
+
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter(
+            f"--format {output_format!r}: must be 'text' or 'json'"
+        )
+
+    entries = list_scenarios()
+    needle = filter_substr.lower() if filter_substr else None
+
+    def matches(entry: Any) -> bool:
+        if needle is None:
+            return True
+        return (
+            needle in entry.name.lower()
+            or needle in entry.source.lower()
+            or needle in entry.manifest_path.lower()
+            or needle in entry.description.lower()
+        )
+
+    filtered = [entry for entry in entries if matches(entry)]
+    if output_format == "json":
+        print(
+            json.dumps(
+                [
+                    {
+                        "name": entry.name,
+                        "source": entry.source,
+                        "manifest_path": entry.manifest_path,
+                        "description": entry.description,
+                    }
+                    for entry in filtered
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    print(f"# scenarios ({len(filtered)})")
+    if not filtered:
+        print("  (none)")
+        return
+    name_width = min(max(32, max(len(entry.name) for entry in filtered)), 48)
+    for entry in filtered:
+        summary = _compact_text(entry.description, 96)
+        suffix = f"  {summary}" if summary else ""
+        print(f"  {entry.name:{name_width}s} {entry.source:12s}{suffix}")
+    print("\nUse with `--scenario <name>` or `/scenario <name>` in terminal.")
+
+
+def _compact_text(value: str, limit: int) -> str:
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 @app.command(

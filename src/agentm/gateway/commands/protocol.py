@@ -50,6 +50,11 @@ async def _default_switch_model(_name: str) -> tuple[bool, str]:
     return (False, "model switching is not supported in this context")
 
 
+async def _default_switch_scenario(_name: str) -> tuple[bool, str]:
+    """Default ``switch_scenario`` capability for contexts without a gateway."""
+    return (False, "scenario switching is not supported in this context")
+
+
 async def _default_resume(_sid: str) -> None:
     raise NotImplementedError("resume_session not wired")
 
@@ -158,12 +163,25 @@ class CommandContext:
 
     list_models: Callable[[], tuple[str, list[str]]] = lambda: ("", [])
     """Returns ``(active_model_name, available_profile_names)`` for ``/model``.
-    Names are the ``[models.<name>]`` keys from ``config.toml``."""
+    Names are the ``[models.<name>]`` keys from ``config.toml``. The active
+    value is scoped to this command context's chat/session key."""
 
     switch_model: Callable[[str], Awaitable[tuple[bool, str]]] = lambda _name: (
         _default_switch_model(_name)
     )
-    """Switch the active model profile and start a fresh session.
+    """Switch this chat's active model profile and start a fresh session.
+    Returns ``(ok, message)``."""
+
+    list_scenarios: Callable[[], tuple[str, list[dict[str, str]]]] = lambda: ("", [])
+    """Returns ``(active_scenario, scenarios)`` for ``/scenario``. The active
+    value is scoped to this command context's chat/session key. Scenario dicts
+    carry at least ``name``, ``source``, ``manifest_path`` and ``description``
+    keys."""
+
+    switch_scenario: Callable[[str], Awaitable[tuple[bool, str]]] = lambda _name: (
+        _default_switch_scenario(_name)
+    )
+    """Switch this chat's active scenario and start a fresh session.
     Returns ``(ok, message)``."""
 
     cwd: str = "."

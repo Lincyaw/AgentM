@@ -145,7 +145,7 @@ Seven kinds. Half of v1's set.
 
 | kind | body shape | purpose |
 |---|---|---|
-| `welcome` | `{server_version, wire_version, peer_id, session_resume[], capabilities?}` | Reply to `hello`. `capabilities` (optional) carries the gateway's static, session-independent view — `{models[], model, scenario, commands:[{name,kind,summary}], skills:[{name,summary}]}` — so a chat client can populate its model picker, command palette, and skill list *before* its first message creates a session. Session-specific capabilities (the scenario's tools, in-session commands) still arrive later on the `session_ready` outbound. Sourced from `GatewayRuntime.describe_capabilities` via the `WireServer(capabilities_provider=…)` hook. |
+| `welcome` | `{server_version, wire_version, peer_id, session_resume[], capabilities?}` | Reply to `hello`. `capabilities` (optional) carries the gateway's static, session-independent view — `{models[], model, scenario, scenarios:[{name,source,manifest_path,description}], commands:[{name,kind,summary}], skills:[{name,summary}]}` — so a chat client can populate its model picker, scenario picker, command palette, and skill list *before* its first message creates a session. `model` and `scenario` here are gateway defaults; `/model` and `/scenario` maintain per-`session_key` overrides. Session-specific capabilities (the scenario's tools, in-session commands) still arrive later on the `session_ready` outbound. Sourced from `GatewayRuntime.describe_capabilities` via the `WireServer(capabilities_provider=…)` hook. |
 | `outbound` | §2.5 | Render-and-send-this in the chat platform. |
 | `error` | `{code, message, fatal}` | Protocol-level error. |
 | `ping` | `{}` | Liveness probe. |
@@ -320,6 +320,8 @@ Single concern: intercept `inbound` whose `body.content` starts with `/`.
 | `/help`, `/status` | Compose an outbound locally; never reach a session. |
 | `/new` | `SessionManager.shutdown_session(session_key)`; leave ChatSessionMap intact; reply confirmation. Next message re-resumes from transcript. |
 | `/end` | `SessionManager.shutdown_session(session_key)`; **also** clear `ChatSessionMap[session_key]`; reply confirmation. Next message starts a fresh session. |
+| `/model [name]` | With no args, list configured model profiles and mark the current `session_key`'s active profile. With a name, validate the profile, store a per-`session_key` factory override, shut down the current session, clear the chat mapping, and let the next user message create a fresh session under the selected model. |
+| `/scenario [name]` | With no args, list discoverable scenarios and mark the current `session_key`'s active scenario. With a name, validate via `validate_scenario(name)`, store a per-`session_key` scenario override, shut down the current session, clear the chat mapping, and let the next user message create a fresh session under the selected scenario. |
 | `/skill:X`, `/<markdown_cmd>` | Look up handler, expand body, replace `env.body.content` with expanded text, mark `metadata.expanded_from = "/skill:X"`, fall through to `PROMPT_SESSION` as a normal inbound. |
 | `/atom:install X`, `/atom:uninstall X` | `sess.install_atom(X)` / `sess.uninstall_atom(X)` directly. Reply confirmation. |
 | Unknown `/foo` | Reply `diagnostic_error{"Unknown command: /foo"}`. Never propagate to LLM. |

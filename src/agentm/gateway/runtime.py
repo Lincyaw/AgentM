@@ -79,6 +79,15 @@ class _SessionSnapshot:
         }
 
 
+def _scenario_payload(info: Any) -> dict[str, str]:
+    return {
+        "name": str(getattr(info, "name", "")),
+        "source": str(getattr(info, "source", "")),
+        "manifest_path": str(getattr(info, "manifest_path", "")),
+        "description": str(getattr(info, "description", "")),
+    }
+
+
 def route_targets(
     peers: list[PeerSession],
     peer_channels: dict[str, str],
@@ -131,9 +140,19 @@ class GatewayRuntime:
         self._cwd = cwd
         self._scenario = scenario
         self._outbox = outbox
+        self._chat_map = chat_map
         self._command_router = command_router
         self._model_name = model_name
+        self._default_session_factory = session_factory
         self._make_factory = make_factory
+        self._session_model_names: dict[str, str] = {}
+        self._session_model_factories: dict[
+            str,
+            Callable[
+                [str, str, str | None, str | None, dict[str, Any]], Awaitable[Any]
+            ],
+        ] = {}
+        self._session_scenarios: dict[str, str] = {}
         require, block, timeout = approval_policy
         self._approval = ApprovalManager(
             self._emit_outbound,
@@ -149,7 +168,7 @@ class GatewayRuntime:
         self._sessions = SessionManager(
             cwd=cwd,
             chat_map=chat_map,
-            session_factory=session_factory,
+            session_factory=self._session_factory_for_key,
             outbound_sink=self._emit_outbound,
             approval_manager=self._approval,
             child_registry=self._child_registry,
@@ -171,6 +190,53 @@ class GatewayRuntime:
 
     def attach_server(self, server: WireServer) -> None:
         self._server = server
+
+    async def _session_factory_for_key(
+        self,
+        cwd: str,
+        session_key: str,
+        scenario: str | None,
+        resume: str | None,
+        wire_services: dict[str, Any],
+    ) -> Any:
+        factory = self._session_model_factories.get(session_key)
+        if factory is None:
+            model_name = self._session_model_names.get(
+                session_key
+            ) or self._chat_map.metadata(session_key).get("model")
+            if (
+                model_name
+                and model_name != self._model_name
+                and self._make_factory is not None
+            ):
+                try:
+                    factory = self._make_factory(model_name)
+                    self._session_model_factories[session_key] = factory
+                    self._session_model_names[session_key] = model_name
+                except Exception:
+                    logger.exception(
+                        "failed to restore model override {} for {}",
+                        model_name,
+                        session_key,
+                    )
+        if factory is None:
+            factory = self._default_session_factory
+        return await factory(cwd, session_key, scenario, resume, wire_services)
+
+    def _active_model_name(self, session_key: str) -> str:
+        return (
+            self._session_model_names.get(session_key)
+            or self._chat_map.metadata(session_key).get("model")
+            or self._model_name
+        )
+
+    def _active_scenario_name(self, session_key: str) -> str:
+        return (
+            self._session_scenarios.get(session_key)
+            or self._chat_map.metadata(session_key).get("scenario")
+            or self._scenario
+            or ""
+        )
 
     def describe_capabilities(self) -> dict[str, Any]:
         """Static, session-independent capabilities for the welcome handshake.
@@ -205,10 +271,18 @@ class GatewayRuntime:
             for h in all_handlers
             if h.namespace == "skill"
         ]
+        try:
+            from agentm.extensions.loader import list_scenarios
+
+            scenarios = [_scenario_payload(info) for info in list_scenarios()]
+        except Exception:
+            logger.exception("describe_capabilities: failed to list scenarios")
+            scenarios = []
         return {
             "models": models,
             "model": self._model_name,
             "scenario": self._scenario or "",
+            "scenarios": scenarios,
             "commands": commands,
             "skills": skills,
         }
@@ -317,9 +391,13 @@ class GatewayRuntime:
         child_registry = getattr(self, "_child_registry", None)
         child_ids = child_registry.ids() if child_registry is not None else []
         approval = getattr(self, "_approval", None)
+        chat_routes = self._chat_map.snapshot()
+        chat_metadata = self._chat_map.snapshot_metadata()
 
         sessions_state: dict[str, Any] = {}
-        for key in sorted(set(session_routes.keys()) | set(snapshots.keys())):
+        for key in sorted(
+            set(session_routes.keys()) | set(snapshots.keys()) | set(chat_routes)
+        ):
             route = session_routes.get(key)
             sessions_state[key] = {
                 "session_id": self._sessions.session_id(key),
@@ -333,6 +411,10 @@ class GatewayRuntime:
                     else None
                 ),
                 "snapshot": self._snapshot_for(key).as_dict(),
+                "model": self._active_model_name(key),
+                "scenario": self._active_scenario_name(key),
+                "chat_session_map": chat_routes.get(key),
+                "metadata": chat_metadata.get(key, {}),
             }
 
         return {
@@ -349,6 +431,8 @@ class GatewayRuntime:
                     else None
                 ),
                 "snapshot": self._snapshot_for(session_key).as_dict(),
+                "model": self._active_model_name(session_key),
+                "scenario": self._active_scenario_name(session_key),
                 "command_names": sorted(self._session_commands.get(session_key, set())),
                 "turn_count": self._turn_counts.get(session_key, 0),
                 "pending_approvals": (
@@ -774,8 +858,14 @@ class GatewayRuntime:
         if body.policy is not None and body.policy.lower() == "interrupt_first":
             self._interrupt_session(session_key)
         peer_cwd = self._resolve_peer_cwd(session_key)
+        if scenario:
+            from agentm.extensions.loader import validate_scenario
+
+            validate_scenario(scenario)
+            self._session_scenarios[session_key] = scenario
+            self._chat_map.set_metadata(session_key, scenario=scenario)
         sess = await self._sessions.get_or_create(
-            session_key, scenario or self._scenario, body, cwd=peer_cwd
+            session_key, self._active_scenario_name(session_key), body, cwd=peer_cwd
         )
         self._sessions.set_turn_context(session_key, body)
         self._turn_counts[session_key] = self._turn_counts.get(session_key, 0) + 1
@@ -837,10 +927,24 @@ class GatewayRuntime:
         def list_models() -> tuple[str, list[str]]:
             from agentm.core.lib.user_config import load_user_config
 
-            return (self._model_name, list(load_user_config().models.keys()))
+            return (
+                self._active_model_name(session_key),
+                list(load_user_config().models.keys()),
+            )
 
         async def switch_model(name: str) -> tuple[bool, str]:
             return await self._switch_model(session_key, name)
+
+        def list_scenarios() -> tuple[str, list[dict[str, str]]]:
+            from agentm.extensions.loader import list_scenarios as _list_scenarios
+
+            return (
+                self._active_scenario_name(session_key),
+                [_scenario_payload(info) for info in _list_scenarios()],
+            )
+
+        async def switch_scenario(name: str) -> tuple[bool, str]:
+            return await self._switch_scenario(session_key, name)
 
         async def resume_session(target_sid: str) -> None:
             await self._sessions.shutdown_session(session_key)
@@ -872,6 +976,8 @@ class GatewayRuntime:
             get_extension_api=get_extension_api,
             list_models=list_models,
             switch_model=switch_model,
+            list_scenarios=list_scenarios,
+            switch_scenario=switch_scenario,
             cwd=self._cwd,
             resume_session=resume_session,
             load_session_history=load_session_history,
@@ -913,10 +1019,36 @@ class GatewayRuntime:
         key = name.lower()
         if key not in load_user_config().models:
             return (False, f"unknown model '{name}'")
-        self._sessions.set_factory(self._make_factory(key))
-        self._model_name = key
+        self._session_model_factories[session_key] = self._make_factory(key)
+        self._session_model_names[session_key] = key
+        self._chat_map.set_metadata(session_key, model=key)
         await self._sessions.shutdown_session(session_key)
         self._sessions.forget(session_key)
+        self._session_commands.pop(session_key, None)
+        self._turn_counts.pop(session_key, None)
+        self._snapshots.pop(session_key, None)
+        self._session_routes.pop(session_key, None)
+        return (True, key)
+
+    async def _switch_scenario(self, session_key: str, name: str) -> tuple[bool, str]:
+        """Switch the active scenario and start a fresh session for this chat."""
+        from agentm.extensions.loader import ScenarioLoadError, validate_scenario
+
+        key = name.strip()
+        if not key:
+            return (False, "scenario name is required")
+        try:
+            validate_scenario(key)
+        except ScenarioLoadError as exc:
+            return (False, str(exc))
+        self._session_scenarios[session_key] = key
+        self._chat_map.set_metadata(session_key, scenario=key)
+        await self._sessions.shutdown_session(session_key)
+        self._sessions.forget(session_key)
+        self._session_commands.pop(session_key, None)
+        self._turn_counts.pop(session_key, None)
+        self._snapshots.pop(session_key, None)
+        self._session_routes.pop(session_key, None)
         return (True, key)
 
     async def _emit_unknown_command(

@@ -67,6 +67,9 @@ def run_terminal(config: TerminalLaunchConfig) -> int:
     if config.connect:
         return _run_terminal_peer(config, connect_url=config.connect)
 
+    if config.scenario:
+        _validate_local_scenario(config.scenario)
+
     if config.use_daemon:
         connect_url = _ensure_daemon_gateway(config)
         return _run_terminal_peer(config, connect_url=connect_url)
@@ -160,6 +163,15 @@ def _ensure_daemon_gateway(config: TerminalLaunchConfig) -> str:
         )
     except GatewayDaemonError as exc:
         raise TerminalLaunchError(str(exc)) from exc
+
+
+def _validate_local_scenario(scenario: str) -> None:
+    from agentm.extensions.loader import ScenarioLoadError, validate_scenario
+
+    try:
+        validate_scenario(scenario)
+    except ScenarioLoadError as exc:
+        raise TerminalLaunchError(f"--scenario {scenario!r}: {exc}") from exc
 
 
 def _wait_for_gateway(

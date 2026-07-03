@@ -1,8 +1,8 @@
 """``/model`` — show or switch the active model.
 
 ``/model`` lists the named profiles from ``config.toml`` and marks the active
-one. ``/model <name>`` switches to that profile and starts a fresh session on
-the new model (history cleared, same as ``/new``).
+one for this chat. ``/model <name>`` switches this chat to that profile and
+starts a fresh session on the new model.
 
 A ``control`` command: the typed text never reaches the LLM.
 """

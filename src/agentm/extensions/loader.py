@@ -38,6 +38,7 @@ import importlib
 import importlib.util
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,18 @@ from agentm.core.abi import ExtensionLoadError
 class ScenarioLoadError(ExtensionLoadError):
     """Raised when a scenario YAML cannot be resolved or validated."""
 
-def _candidate_roots() -> list[Path]:
+
+@dataclass(frozen=True, slots=True)
+class ScenarioInfo:
+    """Discoverable scenario summary for CLI/gateway presentation."""
+
+    name: str
+    manifest_path: str
+    source: str
+    description: str = ""
+
+
+def _candidate_root_entries() -> list[tuple[str, Path]]:
     """Return search roots for ``contrib/scenarios/...`` resolution.
 
     Order matters: the first root that contains the requested manifest
@@ -64,11 +76,20 @@ def _candidate_roots() -> list[Path]:
     console-script entry point.
     """
 
-    roots: list[Path] = []
+    roots: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+
+    def add(source: str, root: Path) -> None:
+        text = str(root)
+        if text in seen:
+            return
+        roots.append((source, root))
+        seen.add(text)
+
     project_root_env = os.environ.get("AGENTM_PROJECT_ROOT")
     if project_root_env:
-        roots.append(Path(project_root_env))
-    roots.append(Path(os.getcwd()))
+        add("project", Path(project_root_env))
+    add("cwd", Path(os.getcwd()))
     # Home contrib directory: ~/.agentm/ (or $AGENTM_HOME/).
     # Scenarios installed here are resolved as
     # <home>/contrib/scenarios/<name>/manifest.yaml.
@@ -77,7 +98,7 @@ def _candidate_roots() -> list[Path]:
 
         home = agentm_home_dir()
         if (home / "contrib").is_dir():
-            roots.append(home)
+            add("home", home)
     except Exception as exc:  # noqa: BLE001
         # Home-contrib discovery is a best-effort scenario root; skip it.
         logger.debug("scenario loader: home contrib root discovery failed: {}", exc)
@@ -96,13 +117,17 @@ def _candidate_roots() -> list[Path]:
         walker = package_dir
         for _ in range(_PACKAGE_WALK_DEPTH):
             if (walker / "contrib").is_dir():
-                roots.append(walker)
+                add("checkout", walker)
                 break
             walker = walker.parent
     except Exception as exc:  # noqa: BLE001 — best-effort fallback
         # Package-relative contrib walk is a dev-time fallback; skip on failure.
         logger.debug("scenario loader: package-relative root walk failed: {}", exc)
     return roots
+
+
+def _candidate_roots() -> list[Path]:
+    return [root for _source, root in _candidate_root_entries()]
 
 # Conservative cap: src/agentm → src → worktree-root covers the editable
 # install case in two steps; doubled to absorb wheel layouts that nest
@@ -218,6 +243,121 @@ def _resolve_packaged_scenario(name: str) -> Path | None:
         logger.debug("packaged scenario {!r}: not filesystem-backed: {}", name, exc)
         return None
     return concrete if concrete.is_file() else None
+
+
+def validate_scenario(name_or_path: str) -> None:
+    """Fail fast if ``name_or_path`` cannot be resolved and loaded."""
+
+    load_scenario(name_or_path)
+
+
+def list_scenarios() -> list[ScenarioInfo]:
+    """List scenario manifests discoverable from the current process.
+
+    Listing intentionally performs only cheap manifest summary reads. Full
+    dependency/import validation remains the job of :func:`load_scenario` when a
+    scenario is actually selected.
+    """
+
+    discovered: list[ScenarioInfo] = []
+    seen: set[str] = set()
+
+    def add(path: Path | None, *, source: str, name_hint: str) -> None:
+        if path is None or not path.is_file():
+            return
+        name, description = _scenario_manifest_summary(path, name_hint)
+        if name in seen:
+            return
+        discovered.append(
+            ScenarioInfo(
+                name=name,
+                manifest_path=str(path),
+                source=source,
+                description=description,
+            )
+        )
+        seen.add(name)
+
+    for ep_name in sorted(_scenario_entrypoint_names()):
+        add(
+            _resolve_scenario_entrypoint(ep_name),
+            source="entry_point",
+            name_hint=ep_name,
+        )
+
+    for source, root in _candidate_root_entries():
+        for manifest_path, name_hint in _iter_contrib_scenario_manifests(root):
+            add(manifest_path, source=source, name_hint=name_hint)
+
+    packaged_root = _packaged_scenario_root()
+    if packaged_root is not None:
+        for manifest_path, name_hint in _iter_packaged_scenario_manifests(packaged_root):
+            add(manifest_path, source="packaged", name_hint=name_hint)
+
+    return sorted(discovered, key=lambda item: item.name)
+
+
+def _scenario_entrypoint_names() -> list[str]:
+    try:
+        from importlib.metadata import entry_points
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("scenario list: importlib.metadata unavailable: {}", exc)
+        return []
+    try:
+        return [ep.name for ep in entry_points(group="agentm.scenarios")]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("scenario list: entry point discovery failed: {}", exc)
+        return []
+
+
+def _iter_contrib_scenario_manifests(root: Path) -> list[tuple[Path, str]]:
+    scenarios_root = root / "contrib" / "scenarios"
+    if not scenarios_root.is_dir():
+        return []
+    manifests: list[tuple[Path, str]] = []
+    for scenario_dir in sorted(scenarios_root.iterdir(), key=lambda item: item.name):
+        if not scenario_dir.is_dir():
+            continue
+        manifests.append((scenario_dir / "manifest.yaml", scenario_dir.name))
+        for variant_path in sorted(scenario_dir.glob("manifest.*.yaml")):
+            variant = variant_path.name.removeprefix("manifest.").removesuffix(".yaml")
+            if variant:
+                manifests.append((variant_path, f"{scenario_dir.name}:{variant}"))
+    return manifests
+
+
+def _packaged_scenario_root() -> Path | None:
+    try:
+        import agentm
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("scenario list: package import failed: {}", exc)
+        return None
+    root = Path(agentm.__file__).parent / "scenarios"
+    return root if root.is_dir() else None
+
+
+def _iter_packaged_scenario_manifests(root: Path) -> list[tuple[Path, str]]:
+    manifests: list[tuple[Path, str]] = []
+    for scenario_dir in sorted(root.iterdir(), key=lambda item: item.name):
+        if scenario_dir.is_dir():
+            manifests.append((scenario_dir / "manifest.yaml", scenario_dir.name))
+    return manifests
+
+
+def _scenario_manifest_summary(path: Path, name_hint: str) -> tuple[str, str]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("scenario list: failed to read {}: {}", path, exc)
+        return name_hint, ""
+    if not isinstance(payload, dict):
+        return name_hint, ""
+    raw_name = payload.get("name")
+    name = raw_name if isinstance(raw_name, str) and raw_name else name_hint
+    raw_description = payload.get("description")
+    description = raw_description.strip() if isinstance(raw_description, str) else ""
+    return name, description
+
 
 def load_scenario(
     name_or_path: str,
@@ -745,4 +885,11 @@ def _register_local(
 def _entry_error(index: int, detail: str) -> str:
     return f"extensions[{index}] {detail}"
 
-__all__ = ["ScenarioLoadError", "load_scenario", "sort_extensions_by_requires"]
+__all__ = [
+    "ScenarioInfo",
+    "ScenarioLoadError",
+    "list_scenarios",
+    "load_scenario",
+    "sort_extensions_by_requires",
+    "validate_scenario",
+]
