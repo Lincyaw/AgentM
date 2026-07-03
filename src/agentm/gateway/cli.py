@@ -40,6 +40,7 @@ from agentm.gateway.commands import (
 )
 from agentm.gateway.outbox import SqliteInbox, SqliteOutbox
 from agentm.gateway.runtime import GatewayRuntime
+from agentm.gateway.scheduler import GatewayScheduleStore
 from agentm.gateway.server import WireServer
 from agentm.gateway.systemd import systemd_action
 from agentm.gateway.transport import (
@@ -531,6 +532,7 @@ async def _arun(
             "scenario": scenario,
             "state_dir": str(resolved_state_dir),
             "bind": {"scheme": bind_spec.scheme, "url": bind_spec.url or f"unix://{bind_spec.socket_path}"},
+            "schedule_store": str(resolved_state_dir / "schedules.json"),
         }
         sys.stdout.write(json.dumps(payload) + "\n")
         sys.stdout.flush()
@@ -540,6 +542,7 @@ async def _arun(
     outbox = SqliteOutbox(str(resolved_state_dir / "wire-outbox.sqlite"))
     inbox = SqliteInbox(str(resolved_state_dir / "wire-inbox.sqlite"))
     chat_map = ChatSessionMap(resolved_state_dir / "session_map.json")
+    schedule_store = GatewayScheduleStore(resolved_state_dir / "schedules.json")
     command_registry = discover_commands(
         cwd,
         atom_commands_enabled=bool(atoms_allow),
@@ -585,6 +588,7 @@ async def _arun(
         approval_policy=approval_policy,
         model_name=str(initial_model_label or ""),
         make_factory=make_factory,
+        schedule_store=schedule_store,
     )
     server = WireServer(
         transport=_build_server_transport(bind_spec),
@@ -635,6 +639,7 @@ async def _arun(
             logger.debug("gateway: could not install handler for {}: {}", sig, exc)
 
     await server.start()
+    runtime.start_scheduler()
     if bind_spec.scheme == "unix":
         logger.info(f"gateway bound at unix://{bind_spec.socket_path}")
     else:

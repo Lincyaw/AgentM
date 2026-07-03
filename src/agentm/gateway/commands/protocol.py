@@ -67,6 +67,20 @@ async def _default_fork(_up_to: int | None) -> str | None:
     raise NotImplementedError("fork_session not wired")
 
 
+def _default_create_schedule(
+    _cron: str,
+    _prompt: str,
+    *,
+    recurring: bool = True,
+) -> dict[str, Any]:
+    del recurring
+    return {"error": "gateway scheduler is not configured"}
+
+
+async def _default_run_schedule(_job_id: str) -> tuple[bool, str]:
+    return (False, "gateway scheduler is not configured")
+
+
 @dataclass(frozen=True, slots=True)
 class CommandInbound:
     """The slash-command-relevant slice of an inbound envelope.
@@ -183,6 +197,20 @@ class CommandContext:
     )
     """Switch this chat's active scenario and start a fresh session.
     Returns ``(ok, message)``."""
+
+    create_schedule: Callable[..., dict[str, Any]] = _default_create_schedule
+    """Create a durable gateway scheduled prompt for this chat/session."""
+
+    list_schedules: Callable[[], list[dict[str, Any]]] = lambda: []
+    """List durable gateway scheduled prompts targeting this chat/session."""
+
+    delete_schedule: Callable[[str], bool] = lambda _job_id: False
+    """Delete a durable gateway scheduled prompt by id."""
+
+    run_schedule: Callable[[str], Awaitable[tuple[bool, str]]] = (
+        _default_run_schedule
+    )
+    """Fire a durable gateway scheduled prompt immediately by id."""
 
     cwd: str = "."
     """Working directory for the gateway process."""

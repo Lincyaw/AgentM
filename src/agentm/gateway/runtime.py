@@ -17,8 +17,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -35,6 +34,11 @@ from agentm.gateway.commands import (
 from agentm.gateway.outbox import SqliteOutbox
 from agentm.gateway.peer import PeerSession
 from agentm.gateway.router import RouterAction, dispatch
+from agentm.gateway.scheduler import (
+    GatewayScheduler,
+    GatewayScheduleStore,
+    ScheduledJob,
+)
 from agentm.gateway.server import WireServer
 from agentm.gateway.session_manager import SessionManager
 from agentm.gateway.wire import (
@@ -136,6 +140,7 @@ class GatewayRuntime:
         approval_policy: tuple[frozenset[str], frozenset[str], float],
         model_name: str = "",
         make_factory: Callable[[str], Any] | None = None,
+        schedule_store: GatewayScheduleStore | None = None,
     ) -> None:
         self._cwd = cwd
         self._scenario = scenario
@@ -186,10 +191,20 @@ class GatewayRuntime:
         # Per-chat prompt count, surfaced by /status. Incremented on each
         # conversational turn (a prompt, not a control command).
         self._turn_counts: dict[str, int] = {}
+        self._scheduler: GatewayScheduler | None = None
+        if schedule_store is not None:
+            self._scheduler = GatewayScheduler(
+                store=schedule_store,
+                fire=self._fire_scheduled_job,
+            )
 
 
     def attach_server(self, server: WireServer) -> None:
         self._server = server
+
+    def start_scheduler(self) -> None:
+        if self._scheduler is not None:
+            self._scheduler.start()
 
     async def _session_factory_for_key(
         self,
@@ -889,6 +904,23 @@ class GatewayRuntime:
     ) -> None:
         await self._submit_session_input(session_key, scenario, body)
 
+    async def _fire_scheduled_job(self, job: ScheduledJob) -> None:
+        request_id = f"gateway-schedule:{job.id}:{uuid.uuid4().hex[:12]}"
+        content = (
+            f"<system-reminder source=\"gateway_schedule\" job_id=\"{job.id}\">\n"
+            f"{job.prompt}\n"
+            "</system-reminder>"
+        )
+        body = InboundBody(
+            channel=job.channel,
+            chat_id=job.chat_id,
+            content=content,
+            thread_id=job.thread_id,
+            sender_id=job.sender_id,
+            request_id=request_id,
+        )
+        await self._submit_session_input(job.session_key, job.scenario, body)
+
     # -- command-context plumbing -------------------------------------
 
     def _command_context(
@@ -946,6 +978,49 @@ class GatewayRuntime:
         async def switch_scenario(name: str) -> tuple[bool, str]:
             return await self._switch_scenario(session_key, name)
 
+        def create_schedule(
+            cron: str,
+            prompt: str,
+            *,
+            recurring: bool = True,
+        ) -> dict[str, Any]:
+            if self._scheduler is None:
+                return {"error": "gateway scheduler is not configured"}
+            active_scenario = self._active_scenario_name(session_key) or None
+            try:
+                job = self._scheduler.create(
+                    session_key=session_key,
+                    channel=body.channel,
+                    chat_id=body.chat_id,
+                    thread_id=body.thread_id,
+                    sender_id=body.sender_id,
+                    scenario=active_scenario,
+                    cron=cron,
+                    prompt=prompt,
+                    recurring=recurring,
+                )
+            except ValueError as exc:
+                return {"error": str(exc)}
+            return job.to_dict()
+
+        def list_schedules() -> list[dict[str, Any]]:
+            if self._scheduler is None:
+                return []
+            return [
+                job.to_dict()
+                for job in self._scheduler.list(session_key=session_key)
+            ]
+
+        def delete_schedule(job_id: str) -> bool:
+            if self._scheduler is None:
+                return False
+            return self._scheduler.delete(job_id, session_key=session_key)
+
+        async def run_schedule(job_id: str) -> tuple[bool, str]:
+            if self._scheduler is None:
+                return (False, "gateway scheduler is not configured")
+            return await self._scheduler.fire_now(job_id, session_key=session_key)
+
         async def resume_session(target_sid: str) -> None:
             await self._sessions.shutdown_session(session_key)
             self._sessions.set_chat_mapping(session_key, target_sid)
@@ -978,6 +1053,10 @@ class GatewayRuntime:
             switch_model=switch_model,
             list_scenarios=list_scenarios,
             switch_scenario=switch_scenario,
+            create_schedule=create_schedule,
+            list_schedules=list_schedules,
+            delete_schedule=delete_schedule,
+            run_schedule=run_schedule,
             cwd=self._cwd,
             resume_session=resume_session,
             load_session_history=load_session_history,
@@ -1081,6 +1160,8 @@ class GatewayRuntime:
         )
 
     async def shutdown(self) -> None:
+        if self._scheduler is not None:
+            await self._scheduler.stop()
         inflight = list(self._inflight)
         for task in inflight:
             task.cancel()

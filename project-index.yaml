@@ -727,6 +727,34 @@ requirements:
     depends_on:
       - REQ-096-cli-provider-session-seams
 
+  - id: REQ-199-gateway-durable-schedule
+    title: Gateway durable scheduled prompts
+    description: >
+      The gateway owns durable, host-level scheduled prompts for chat sessions:
+      jobs are persisted under the gateway state directory, target a
+      ``session_key`` plus routing metadata, accept standard 5-field cron
+      expressions, and fire by enqueueing a synthetic prompt into the target
+      session's inbox through the same path as external inbound messages.
+      If the target session is not live, the gateway resumes it via
+      ``ChatSessionMap``; if the session is already running, the prompt waits
+      for the normal inbox turn boundary. Session-local ``monitor`` timers stay
+      in-memory and do not manage host crontab state.
+    priority: P1
+    status: implemented
+    confidence: inferred
+    code:
+      - path: src/agentm/gateway/scheduler.py
+      - path: src/agentm/gateway/runtime.py
+      - path: src/agentm/gateway/cli.py
+      - path: src/agentm/gateway/commands/protocol.py
+      - path: src/agentm/gateway/commands/builtins/schedule.py
+    tests: []
+    docs:
+      - path: .claude/designs/single-process-gateway.md
+    depends_on:
+      - REQ-176-session-inbox
+      - REQ-183-gateway-concurrent-terminal-peers
+
   - id: REQ-180-terminal-gateway-feedback
     title: Terminal gateway peer surfaces request and connection progress
     description: >
