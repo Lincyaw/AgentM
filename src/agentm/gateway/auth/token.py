@@ -1,9 +1,9 @@
 """Bearer-token :class:`Authenticator`.
 
-Reads ``hello.body.token`` (passed into ``authenticate`` by the server
-— see ``server._handle_connection``) and matches it against a static
-allow-list. An empty allow-list rejects every connection, mirroring
-the ``UnixPeerCredAuthenticator(set())`` "circuit breaker" shape.
+Matches the bearer token extracted from ``hello.body.auth`` (canonical) or the
+legacy ``hello.body.token`` alias against a static allow-list. An empty
+allow-list rejects every connection, mirroring the
+``UnixPeerCredAuthenticator(set())`` "circuit breaker" shape.
 
 Tokens are matched verbatim; rotation/expiry is out of scope.
 """
@@ -36,8 +36,7 @@ def _constant_time_membership(token: str, allowed: tuple[str, ...]) -> bool:
 
 
 class TokenAuthenticator:
-    """Accept connections whose ``hello.body.token`` is in
-    ``allowed_tokens``.
+    """Accept connections whose extracted hello token is in ``allowed_tokens``.
 
     Args:
         allowed_tokens: A set of acceptable bearer tokens. An empty
@@ -48,7 +47,9 @@ class TokenAuthenticator:
         # Freeze as a tuple so the comparison loop walks a deterministic
         # sequence — the constant-time guarantee assumes a fixed order
         # of probes per call.
-        self._allowed_tokens: tuple[str, ...] = tuple(str(t) for t in allowed_tokens)
+        self._allowed_tokens: tuple[str, ...] = tuple(
+            sorted(str(t) for t in allowed_tokens)
+        )
 
     async def authenticate(
         self,

@@ -473,16 +473,16 @@ def _make_env(kind: str, body: dict[str, Any]) -> Envelope:
 
 
 def _extract_hello_token(body: dict[str, Any]) -> str | None:
-    token_raw = body.get("token")
     auth_raw = body.get("auth")
-    if isinstance(token_raw, str):
-        return token_raw
     if isinstance(auth_raw, str):
         return auth_raw
     if isinstance(auth_raw, dict):
         nested = auth_raw.get("token")
         if isinstance(nested, str):
             return nested
+    token_raw = body.get("token")
+    if isinstance(token_raw, str):
+        return token_raw
     return None
 
 
