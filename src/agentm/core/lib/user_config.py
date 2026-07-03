@@ -1,4 +1,4 @@
-"""Global user configuration from ``~/.agentm/config.toml``.
+"""Global user configuration from ``$AGENTM_HOME/config.toml``.
 
 Reads once per process and caches. Missing file or parse errors fall back
 to empty defaults — the config file is always optional.
@@ -129,7 +129,7 @@ def _parse_profile(key: str, raw: dict[str, Any]) -> ModelProfile | None:
 
 
 def load_user_config() -> UserConfig:
-    """Load and cache ``~/.agentm/config.toml`` (or ``$AGENTM_HOME/config.toml``).
+    """Load and cache ``$AGENTM_HOME/config.toml``.
 
     Returns :data:`_EMPTY` when the file does not exist or cannot be parsed.
     """

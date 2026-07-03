@@ -8,13 +8,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 
+from agentm.core.lib.user_config import agentm_home_dir
+
 _PACKAGE_WALK_DEPTH = 8
-
-
-def _agentm_home_env() -> Path:
-    raw_home = os.environ.get("AGENTM_HOME")
-    home = Path(raw_home).expanduser() if raw_home else Path.home() / ".agentm"
-    return home / ".env"
 
 
 def autoload_dotenv(cwd: Path | None = None) -> None:
@@ -51,7 +47,7 @@ def autoload_dotenv(cwd: Path | None = None) -> None:
             break
         walker = walker.parent
 
-    home_env = _agentm_home_env()
+    home_env = agentm_home_dir() / ".env"
     if home_env not in candidates:
         candidates.append(home_env)
 

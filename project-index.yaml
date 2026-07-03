@@ -1016,6 +1016,8 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/core/lib/user_config.py
+      - path: src/agentm/env.py
+      - path: src/agentm/cli.py
       - path: src/agentm/core/runtime/resource_loader.py
       - path: src/agentm/extensions/builtin/skill_loader.py
       - path: src/agentm/extensions/builtin/prompt_templates.py
@@ -1027,6 +1029,7 @@ requirements:
     tests: []
     docs:
       - path: AGENTS.md
+      - path: src/agentm/skills/deployment-awareness/SKILL.md
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/command-routing.md
       - path: .claude/designs/skills.md

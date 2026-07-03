@@ -133,7 +133,7 @@ ProviderOpt = Annotated[
         "--provider",
         help=(
             "LLM provider to register. Defaults via AGENTM_PROVIDER, "
-            "~/.agentm/config.toml profiles, or the provider registry. "
+            "$AGENTM_HOME/config.toml profiles, or the provider registry. "
             "Built-ins include 'anthropic' and 'openai'."
         ),
     ),
@@ -143,7 +143,7 @@ ModelOpt = Annotated[
     typer.Option(
         "--model",
         help=(
-            "Model id or ~/.agentm/config.toml profile name. Defaults "
+            "Model id or $AGENTM_HOME/config.toml profile name. Defaults "
             "via AGENTM_MODEL, config.toml default_model, or the "
             "registry default_model for the resolved provider."
         ),

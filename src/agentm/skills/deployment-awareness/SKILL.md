@@ -30,10 +30,10 @@ systemctl --user status agentm-feishu 2>/dev/null || pgrep -af agentm-feishu
 agentm-feishu --check-config 2>&1    # lists resolved bots
 
 # Is workspace routing active?
-grep 'workspace_root' ~/.agentm/config.toml 2>/dev/null
+grep 'workspace_root' "${AGENTM_HOME:-$HOME/.agentm}/config.toml" 2>/dev/null
 
 # What workspaces exist?
-ls ~/.agentm/workspaces/ 2>/dev/null
+ls "${AGENTM_HOME:-$HOME/.agentm}/workspaces/" 2>/dev/null
 ```
 
 ## Architecture
@@ -73,8 +73,8 @@ gateway restarts.
 
 ## Configuration
 
-All long-lived config lives in `~/.agentm/config.toml`
-(`$AGENTM_HOME/config.toml`). See `config.toml.example` at repo root for
+All long-lived config lives in `$AGENTM_HOME/config.toml`
+(default `~/.agentm/config.toml`). See `config.toml.example` at repo root for
 the full annotated reference.
 
 | Section | What it controls | Read by |
@@ -91,8 +91,8 @@ process (`systemctl --user restart agentm-feishu` / `agentm-gateway`).
 
 | Thing | Path |
 |-------|------|
-| Central config | `~/.agentm/config.toml` |
-| Per-bot workspaces | `~/.agentm/workspaces/{channel_name}/` |
+| Central config | `$AGENTM_HOME/config.toml` |
+| Per-bot workspaces | `$AGENTM_HOME/workspaces/{channel_name}/` |
 | Persona / character files | `<workspace>/persona.md` |
 | Observability trace | `$AGENTM_HOME/observability/<session_id>.jsonl` |
 | Example config | `config.toml.example` at repo root |
@@ -163,8 +163,8 @@ the bot who it should be, the bot writes `persona.md` in its workspace.
 ### Listing bots and workspaces
 
 ```bash
-grep -A3 '\[feishu\.bots\.' ~/.agentm/config.toml
-ls ~/.agentm/workspaces/
+grep -A3 '\[feishu\.bots\.' "${AGENTM_HOME:-$HOME/.agentm}/config.toml"
+ls "${AGENTM_HOME:-$HOME/.agentm}/workspaces/"
 ```
 
 ## Observability
@@ -231,8 +231,9 @@ it mid-task.
 
 ```bash
 # 1. Copy example and fill in credentials
-cp config.toml.example ~/.agentm/config.toml
-vim ~/.agentm/config.toml
+mkdir -p "${AGENTM_HOME:-$HOME/.agentm}"
+cp config.toml.example "${AGENTM_HOME:-$HOME/.agentm}/config.toml"
+vim "${AGENTM_HOME:-$HOME/.agentm}/config.toml"
 
 # 2. Install managed user services
 uv sync --all-packages
