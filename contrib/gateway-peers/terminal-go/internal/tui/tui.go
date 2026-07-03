@@ -2553,7 +2553,7 @@ func (m *appModel) editorTop() int {
 func (m *appModel) handleEditorResize(y int) tea.Cmd {
 	// Calculate target lines from drag position
 	editorPadding := styles.EditorStyle.GetVerticalFrameSize()
-	targetLines := m.height - y - 1 - editorPadding - m.tabBarHeight() - m.bottomSurfaceHeight(m.width)
+	targetLines := m.height - y - 1 - editorPadding - m.tabBarHeight() - m.bottomSurfaceLayoutHeight
 	minLines := minEditorLines
 	maxLines := max(minLines, (m.height-6)/2)
 	newLines := max(minLines, min(targetLines, maxLines))
