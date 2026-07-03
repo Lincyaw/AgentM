@@ -750,6 +750,7 @@ requirements:
     confidence: confirmed
     code:
       - path: contrib/gateway-peers/terminal-go/internal/adapter/controller.go
+      - path: contrib/gateway-peers/terminal-go/internal/adapter/children.go
       - path: contrib/gateway-peers/terminal-go/internal/cagent/agent/agent.go
       - path: contrib/gateway-peers/terminal-go/internal/cagent/agent/opts.go
       - path: contrib/gateway-peers/terminal-go/internal/cagent/app/app.go
@@ -785,6 +786,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/tui/dialog/tools.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/handlers.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/messages/messages.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/messages/tabs.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/messages/toggle.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/runtime_events.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/service/supervisor/supervisor.go

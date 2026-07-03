@@ -39,10 +39,11 @@ type childSession struct {
 //  3. sends a SpawnSessionMsg to the tea.Program.
 //
 // The TUI then calls supervisor.SpawnSession -> our Spawner, which pops the
-// parked child app. The supervisor registers it as a tab (routing key ==
-// child session ID == child_id) and switches to it. Every subsequent body for
-// that child_id is fed into the child's Translator, whose EmitEvent fans out as
-// RoutedMsg{SessionID: child_id} that the supervisor paints onto that tab.
+// parked child app. The supervisor registers it as a background tab (routing
+// key == child session ID == child_id) while keeping the parent conversation
+// active. Every subsequent body for that child_id is fed into the child's
+// Translator, whose EmitEvent fans out as RoutedMsg{SessionID: child_id} that
+// the supervisor paints onto that tab.
 //
 // All public methods are concurrency-safe: Route/markStart/markEnd run on the
 // wire-pump goroutine while Spawn runs on the bubbletea goroutine.
@@ -173,8 +174,9 @@ func (m *ChildManager) Start(childID, purpose string) {
 		return
 	}
 	// Drive the TUI's normal new-tab path, which pulls our queued child app via
-	// Spawner and switches to the freshly opened tab.
-	p.Send(messages.SpawnSessionMsg{WorkingDir: m.workingDir})
+	// Spawner. Child workflow tabs open in the background so the user does not
+	// lose the parent conversation that initiated the workflow.
+	p.Send(messages.SpawnSessionMsg{WorkingDir: m.workingDir, Background: true})
 }
 
 // Route feeds one child-stamped body into the child's translator so it paints

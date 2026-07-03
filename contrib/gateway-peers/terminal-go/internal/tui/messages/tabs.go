@@ -13,6 +13,7 @@ type RoutedMsg struct {
 // SpawnSessionMsg is sent when a new session should be created.
 type SpawnSessionMsg struct {
 	WorkingDir string // The working directory for the new session
+	Background bool   // If true, create the tab without switching to it
 }
 
 // SwitchTabMsg requests switching to a different session tab.

@@ -515,6 +515,15 @@ func (m *appModel) editorOpts() []editor.Option {
 // the given app and stores them in the per-session maps under tabID. The active
 // convenience pointers (m.chatPage, m.sessionState, m.editor) are also updated.
 func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session.Session) {
+	cp, ss, ed := m.createSessionComponents(tabID, a, sess)
+
+	m.application = a
+	m.sessionState = ss
+	m.chatPage = cp
+	m.editor = ed
+}
+
+func (m *appModel) createSessionComponents(tabID string, a *app.App, sess *session.Session) (chat.Page, *service.SessionState, editor.Editor) {
 	ss := service.NewSessionState(sess)
 	cp := chat.New(a, ss, m.chatPageOpts()...)
 	ed := editor.New(m.history, m.editorOpts()...)
@@ -523,10 +532,7 @@ func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session
 	m.sessionStates[tabID] = ss
 	m.editors[tabID] = ed
 
-	m.application = a
-	m.sessionState = ss
-	m.chatPage = cp
-	m.editor = ed
+	return cp, ss, ed
 }
 
 // initAndFocusComponents returns a batch of commands that initializes and focuses
@@ -640,7 +646,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case messages.SpawnSessionMsg:
-		return m.handleSpawnSession(msg.WorkingDir)
+		return m.handleSpawnSession(msg.WorkingDir, msg.Background)
 
 	case messages.SwitchTabMsg:
 		return m.handleSwitchTab(msg.SessionID)
@@ -855,7 +861,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.NewSessionMsg:
 		// /new spawns a new tab when a session spawner is configured.
-		return m.handleSpawnSession("")
+		return m.handleSpawnSession("", false)
 
 	case messages.ClearSessionMsg:
 		// /clear resets the current tab with a fresh session in the same working dir.
@@ -1332,7 +1338,7 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 }
 
 // handleSpawnSession spawns a new session.
-func (m *appModel) handleSpawnSession(workingDir string) (tea.Model, tea.Cmd) {
+func (m *appModel) handleSpawnSession(workingDir string, background bool) (tea.Model, tea.Cmd) {
 	// If no working dir specified, open the picker
 	if workingDir == "" {
 		return m.openWorkingDirPicker()
@@ -1350,6 +1356,30 @@ func (m *appModel) handleSpawnSession(workingDir string) (tea.Model, tea.Cmd) {
 		if err := m.tuiStore.AddTab(ctx, sessionID, workingDir); err != nil {
 			slog.WarnContext(ctx, "Failed to persist new tab", "error", err)
 		}
+	}
+
+	if background {
+		var cmds []tea.Cmd
+		if _, exists := m.chatPages[sessionID]; !exists {
+			if runner := m.supervisor.GetRunner(sessionID); runner != nil {
+				cp, _, ed := m.createSessionComponents(sessionID, runner.App, runner.App.Session())
+				if cmd := cp.Init(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				if cmd := ed.Init(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+		}
+
+		prevHeight := m.tabBar.Height()
+		tabs, activeIdx := m.supervisor.GetTabs()
+		m.tabBar.SetTabs(tabs, activeIdx)
+		m.statusBar.SetShowNewTab(m.tabBar.Height() == 0)
+		if m.tabBar.Height() != prevHeight {
+			cmds = append(cmds, m.resizeAll())
+		}
+		return m, tea.Batch(cmds...)
 	}
 
 	// Switch to the new session
@@ -1643,7 +1673,7 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 		if workingDir == "" {
 			workingDir = "/"
 		}
-		return m.handleSpawnSession(workingDir)
+		return m.handleSpawnSession(workingDir, false)
 	}
 
 	// If the closed tab was active, switch to the next one
@@ -2113,7 +2143,7 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 
 	case regionStatusBar:
 		if msg.Button == tea.MouseLeft && m.statusBar.ClickedNewTab(msg.X) {
-			return m.handleSpawnSession("")
+			return m.handleSpawnSession("", false)
 		}
 	}
 
