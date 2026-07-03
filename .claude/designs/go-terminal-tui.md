@@ -499,19 +499,21 @@ memory. The complete structured observation log lives at
 `docs/claude-code-tui-observations.md`. A second tmux/freeze reverse-engineering
 pass with screenshot artifacts lives at
 `docs/claude-code-tui-reverse-engineering.md` and
-`.agent/tui-dev/claude-code-20260703/`. Raw ANSI captures are also stored under
-the gitignored directory `.agentm/artifacts/ccr-tui/`:
+`.agent/tui-dev/claude-code-20260703/`. Keep future TUI investigation artifacts
+under `.agent/tui-dev/<topic>/`, not project `.agentm/`, because `.agentm/` is
+reserved for AgentM runtime state:
 
-- `.agentm/artifacts/ccr-tui/ccr-main-20260703-171453.typescript`
-- `.agentm/artifacts/ccr-tui/real-dev-flow.typescript`
-- `.agentm/artifacts/ccr-tui/agent-team-flow-command.typescript`
+- `.agent/tui-dev/claude-code-20260703/captures/02-main-idle.txt`
+- `.agent/tui-dev/claude-code-20260703/captures/14-team-agents-launched.txt`
+- `.agent/tui-dev/claude-code-20260703/captures/23-team-final-idle.txt`
 
 Reproduction commands used:
 
 ```bash
 mkdir -p /tmp/agentm-ccr-ui
 git init /tmp/agentm-ccr-ui
-script -q .agentm/artifacts/ccr-tui/ccr-main-$(date +%Y%m%d-%H%M%S).typescript \
+mkdir -p .agent/tui-dev/captures
+script -q .agent/tui-dev/captures/ccr-main-$(date +%Y%m%d-%H%M%S).typescript \
   ccr code --dangerously-skip-permissions --name agentm-ccr-logged
 ```
 
@@ -705,8 +707,9 @@ The current AgentM terminal implementation follows this direction:
    `Ctrl+O` toggles detailed transcript blocks, while `Ctrl+E` toggles fully
    verbose output within detailed mode.
 6. Preserve raw TTY captures for significant UX investigations in
-   `.agentm/artifacts/<topic>/` and summarize only the decisions in tracked
-   design docs.
+   `.agent/tui-dev/<topic>/` and summarize only the decisions in tracked
+   design docs. Do not use project `.agentm/` for these captures; that
+   directory is runtime state and follows the AgentM home/workspace policy.
 7. Keep process supervision outside the Go peer. `agentm daemon` owns the
    local gateway daemon/supervisor lifecycle; `agentm-terminal` only connects
    to a gateway URL and renders the wire stream. `agentm terminal` composes

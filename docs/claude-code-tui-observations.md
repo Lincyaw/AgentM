@@ -8,17 +8,17 @@ A later tmux/freeze reverse-engineering pass with per-screen captures and SVG
 screenshots is tracked in `docs/claude-code-tui-reverse-engineering.md` and
 `.agent/tui-dev/claude-code-20260703/`.
 
-Raw TTY captures are intentionally not committed because they contain ANSI
-control sequences and local terminal state. They are stored under the gitignored
-artifact directory:
+Curated captures and screenshots are tracked under
+`.agent/tui-dev/claude-code-20260703/`. Keep future TUI investigation artifacts
+under `.agent/tui-dev/<topic>/`; do not use project `.agentm/` for development
+captures, because `.agentm/` is AgentM runtime state.
 
-- `.agentm/artifacts/ccr-tui/trust-gate.typescript`
-- `.agentm/artifacts/ccr-tui/composer-menus.typescript`
-- `.agentm/artifacts/ccr-tui/ccr-main-20260703-171453.typescript`
-- `.agentm/artifacts/ccr-tui/background-receipt.txt`
-- `.agentm/artifacts/ccr-tui/real-dev-flow.typescript`
-- `.agentm/artifacts/ccr-tui/agent-team-flow.typescript`
-- `.agentm/artifacts/ccr-tui/agent-team-flow-command.typescript`
+- `.agent/tui-dev/claude-code-20260703/captures/01-trust-gate.txt`
+- `.agent/tui-dev/claude-code-20260703/captures/02-main-idle.txt`
+- `.agent/tui-dev/claude-code-20260703/captures/08-background-receipt.txt`
+- `.agent/tui-dev/claude-code-20260703/captures/14-team-agents-launched.txt`
+- `.agent/tui-dev/claude-code-20260703/captures/15-team-agent-picker.txt`
+- `.agent/tui-dev/claude-code-20260703/captures/23-team-final-idle.txt`
 
 ## Capture Setup
 
@@ -29,20 +29,22 @@ mkdir -p /tmp/agentm-ccr-ui
 git init /tmp/agentm-ccr-ui
 printf 'hello\n' > /tmp/agentm-ccr-ui/sample.txt
 
-script -q .agentm/artifacts/ccr-tui/composer-menus.typescript \
+mkdir -p .agent/tui-dev/captures
+
+script -q .agent/tui-dev/captures/composer-menus.typescript \
   ccr code --dangerously-skip-permissions --name composer-menus
 
-script -q .agentm/artifacts/ccr-tui/ccr-main-20260703-171453.typescript \
+script -q .agent/tui-dev/captures/ccr-main-20260703-171453.typescript \
   ccr code --dangerously-skip-permissions --name agentm-ccr-logged
 
 ccr code --dangerously-skip-permissions --bg --name bg-receipt-sample \
   'Stay idle; this is only to record the background-agent receipt UI.' \
-  | tee .agentm/artifacts/ccr-tui/background-receipt.txt
+  | tee .agent/tui-dev/captures/background-receipt.txt
 
-script -q .agentm/artifacts/ccr-tui/real-dev-flow.typescript \
+script -q .agent/tui-dev/captures/real-dev-flow.typescript \
   ccr code --dangerously-skip-permissions --name real-dev-flow
 
-script -q .agentm/artifacts/ccr-tui/agent-team-flow-command.typescript \
+script -q .agent/tui-dev/captures/agent-team-flow-command.typescript \
   ccr code --dangerously-skip-permissions --name agent-team-flow-command
 ```
 
