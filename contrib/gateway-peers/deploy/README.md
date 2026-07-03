@@ -117,14 +117,14 @@ That's why:
 - You only restart feishu (`--with-feishu`) when the **feishu client's own
   code** changed and the new code must actually load.
 
-## Why the socket path is pinned (not the XDG default)
+## Why the socket path is pinned
 
-`default_socket_url()` returns `$XDG_RUNTIME_DIR/agentm-gw.sock` when that env
-var is set, else `/tmp/agentm-gw-<uid>.sock`. Under systemd there is no login
-session, so `XDG_RUNTIME_DIR` is typically unset and the path silently falls
-back to the uid-suffixed `/tmp` form — ambiguous, and easy for the two units to
-disagree on. So `--install-systemd` **pins** the socket and writes the same
-value into both units (gateway `--bind` == feishu `--connect`):
+The local default socket is scoped by `$AGENTM_RUNTIME_DIR` when set, otherwise
+by a per-user temp directory whose name includes a hash of `$AGENTM_HOME`.
+That is the right default for ad hoc local CLIs, but managed user units should
+not depend on whichever environment systemd happened to provide. So
+`--install-systemd` **pins** the socket and writes the same value into both
+units (gateway `--bind` == feishu `--connect`):
 `unix://%t/agentm/gw.sock`, where `%t` expands to the per-user runtime dir
 (`$XDG_RUNTIME_DIR`, i.e. `/run/user/<uid>`).
 

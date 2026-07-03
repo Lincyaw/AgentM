@@ -1037,6 +1037,7 @@ requirements:
       - path: AGENTS.md
       - path: config.toml.example
       - path: .claude/skills/deployment-awareness/SKILL.md
+      - path: contrib/gateway-peers/deploy/README.md
       - path: contrib/gateway-peers/feishu/README.md
       - path: src/agentm/skills/deployment-awareness/SKILL.md
       - path: .claude/designs/extension-as-scenario.md

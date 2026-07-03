@@ -441,6 +441,7 @@ def cli(
     # raw mode where intr is disabled; without this, Ctrl-C is swallowed.
     _restore_terminal()
     resolved_cwd = cwd or str(Path.cwd())
+    autoload_dotenv(Path(resolved_cwd))
     try:
         rc = asyncio.run(
             _arun(
