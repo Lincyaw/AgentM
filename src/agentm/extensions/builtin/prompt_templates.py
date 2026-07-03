@@ -13,6 +13,7 @@ import os
 import re
 from pathlib import Path
 
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -103,7 +104,8 @@ def _fallback_description(body: str) -> str:
 def _load_template_file(file_path: str, source: str) -> PromptTemplateRecord | None:
     try:
         raw = Path(file_path).read_text(encoding="utf-8")
-    except OSError:
+    except OSError as exc:
+        logger.debug("prompt_templates: failed to read {}: {}", file_path, exc)
         return None
 
     metadata, body = parse_frontmatter(raw)
@@ -138,7 +140,8 @@ def _load_templates_from_dir(
     templates: list[PromptTemplateRecord] = []
     try:
         entries = sorted(os.listdir(directory))
-    except OSError:
+    except OSError as exc:
+        logger.debug("prompt_templates: failed to list {}: {}", directory, exc)
         return templates
     for entry in entries:
         if not entry.endswith(".md"):

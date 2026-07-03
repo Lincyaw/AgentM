@@ -130,7 +130,8 @@ def apply_child_session_contributions(
         # may return list, tuple, or generator.
         try:
             iterator = list(ret)
-        except TypeError:
+        except TypeError as exc:
+            logger.debug("session_factory: before_agent_start handler returned non-iterable: {}", exc)
             continue
         for entry in iterator:
             if not (isinstance(entry, tuple) and len(entry) == 2):

@@ -294,8 +294,8 @@ def _install_helper_macros(conn: duckdb.DuckDBPyConnection) -> None:
     for stmt in _HELPER_MACROS:
         try:
             conn.execute(stmt)
-        except duckdb.Error:  # pragma: no cover - macro already present / engine drift
-            pass
+        except duckdb.Error as exc:  # pragma: no cover - macro already present / engine drift
+            logger.debug("duckdb_sql: macro install failed: {}", exc)
 
 def _cap_duckdb_threads(conn: duckdb.DuckDBPyConnection) -> None:
     """Bound this connection's DuckDB worker pool.
@@ -316,8 +316,8 @@ def _cap_duckdb_threads(conn: duckdb.DuckDBPyConnection) -> None:
         return
     try:
         conn.execute(f"SET threads={n}")
-    except duckdb.Error:  # pragma: no cover - engine drift
-        pass
+    except duckdb.Error as exc:  # pragma: no cover - engine drift
+        logger.debug("duckdb_sql: SET threads={} failed: {}", n, exc)
 
 class _DuckDBState:
     def __init__(

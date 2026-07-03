@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, cast
 
+from loguru import logger
+
 if TYPE_CHECKING:
     from agentm.core.abi.project_layout import ProjectLayout
 
@@ -49,7 +51,8 @@ def scan_artifact_metadata(artifacts_dir: Path) -> list[ArtifactMetadata]:
     for meta_path in sorted(artifacts_dir.glob("*.meta.json")):
         try:
             raw = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("artifact_files: skipping corrupt metadata {}: {}", meta_path, exc)
             continue
         if isinstance(raw, dict):
             metas.append(cast(ArtifactMetadata, raw))

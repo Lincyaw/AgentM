@@ -95,8 +95,8 @@ def save_account(account_id: str, data: AccountData) -> None:
     path.write_text(json.dumps(d, indent=2), "utf-8")
     try:
         path.chmod(0o600)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.warning("state: failed to chmod 0600 on {}: {}", path, exc)
 
 
 # -- Sync buffer ----------------------------------------------------------

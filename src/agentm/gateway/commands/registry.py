@@ -184,6 +184,7 @@ def _load_entry_points(registry: CommandRegistry) -> None:
     try:
         eps = entry_points(group="agentm.gateway.commands")
     except TypeError:
+        logger.debug("registry: entry_points() does not support group= (old stdlib)")
         return
     for ep in eps:
         try:

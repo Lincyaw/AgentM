@@ -69,11 +69,13 @@ def _packaged_scenarios_root() -> Path | None:
         return None
     try:
         root = files("agentm.scenarios")
-    except (ModuleNotFoundError, TypeError):
+    except (ModuleNotFoundError, TypeError) as exc:
+        logger.debug("contrib_sync: agentm.scenarios not found: {}", exc)
         return None
     try:
         concrete = Path(os.fspath(root))  # type: ignore[call-overload]
-    except TypeError:
+    except TypeError as exc:
+        logger.debug("contrib_sync: cannot resolve path for agentm.scenarios: {}", exc)
         return None
     return concrete if concrete.is_dir() else None
 

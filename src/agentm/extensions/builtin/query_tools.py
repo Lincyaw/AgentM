@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from typing import Any, Final
 
+from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import (
@@ -210,7 +211,8 @@ def _load_candidates(candidates_dir: Path) -> dict[str, dict[str, Any]]:
         try:
             with p.open("r", encoding="utf-8") as fh:
                 rec = json.load(fh)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("query_tools: skipping corrupt candidate {}: {}", p, exc)
             continue
         cid = rec.get("candidate_id")
         if not isinstance(cid, str):
@@ -313,7 +315,8 @@ def _load_run(
                     summary = rec
                 elif kind == "eval_run.task":
                     tasks.append(rec)
-    except OSError:
+    except OSError as exc:
+        logger.warning("query_tools: failed to read eval results {}: {}", path, exc)
         return None, []
     return summary, tasks
 

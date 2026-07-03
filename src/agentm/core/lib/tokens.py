@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import tiktoken
+from loguru import logger
 
 _FALLBACK_ENCODING = "cl100k_base"
 
@@ -20,7 +21,7 @@ def _encoding(model: str | None, fallback_encoding: str) -> tiktoken.Encoding:
         try:
             return tiktoken.encoding_for_model(model)
         except KeyError:
-            pass
+            logger.debug("tiktoken: no encoding for model {!r}, using fallback", model)
     return tiktoken.get_encoding(fallback_encoding)
 
 

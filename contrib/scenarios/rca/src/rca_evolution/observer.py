@@ -95,8 +95,8 @@ def _build_trajectory_snapshot(trajectory_path: str) -> list[dict[str, Any]]:
                     turns.append(rec)
             except json.JSONDecodeError:
                 continue
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.debug("observer: failed to read trajectory {}: {}", path, exc)
     return turns
 
 def _build_trajectory_summary(snapshot: list[dict[str, Any]]) -> str:

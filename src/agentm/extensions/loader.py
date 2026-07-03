@@ -65,7 +65,6 @@ def _candidate_roots() -> list[Path]:
     """
 
     roots: list[Path] = []
-    # TODO(doc): add AGENTM_PROJECT_ROOT to the CLAUDE.md env-var table.
     project_root_env = os.environ.get("AGENTM_PROJECT_ROOT")
     if project_root_env:
         roots.append(Path(project_root_env))
@@ -168,7 +167,8 @@ def _resolve_scenario_entrypoint(name: str) -> Path | None:
             continue
         try:
             manifest = files(ep.value) / "manifest.yaml"
-        except (ModuleNotFoundError, TypeError):
+        except (ModuleNotFoundError, TypeError) as exc:
+            logger.debug("scenario loader: entry-point {!r} not resolvable: {}", ep.name, exc)
             continue
         # Scenarios require a real on-disk directory (sibling ``local:`` atoms,
         # import roots), so demand a filesystem-backed resource: os.fspath()
@@ -184,7 +184,8 @@ def _resolve_scenario_entrypoint(name: str) -> Path | None:
             # TypeError`` above is the explicit fallback for the zipped
             # case where ``os.fspath`` legitimately refuses.
             concrete = Path(os.fspath(manifest))  # type: ignore[call-overload]
-        except TypeError:
+        except TypeError as exc:
+            logger.debug("scenario loader: {!r} manifest not filesystem-backed: {}", ep.name, exc)
             continue
         if concrete.is_file():
             return concrete
@@ -208,11 +209,13 @@ def _resolve_packaged_scenario(name: str) -> Path | None:
         return None
     try:
         manifest = files(f"agentm.scenarios.{name}") / "manifest.yaml"
-    except (ModuleNotFoundError, TypeError):
+    except (ModuleNotFoundError, TypeError) as exc:
+        logger.debug("packaged scenario {!r}: module not found: {}", name, exc)
         return None
     try:
         concrete = Path(os.fspath(manifest))  # type: ignore[call-overload]
-    except TypeError:
+    except TypeError as exc:
+        logger.debug("packaged scenario {!r}: not filesystem-backed: {}", name, exc)
         return None
     return concrete if concrete.is_file() else None
 

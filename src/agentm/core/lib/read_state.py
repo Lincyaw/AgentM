@@ -22,6 +22,8 @@ from __future__ import annotations
 import hashlib
 import os
 from contextvars import ContextVar
+
+from loguru import logger
 from dataclasses import dataclass
 
 
@@ -94,7 +96,8 @@ def file_modified_since_read(path: str) -> bool:
         return False
     try:
         current_mtime_ns = os.stat(normalized).st_mtime_ns
-    except OSError:
+    except OSError as exc:
+        logger.debug("read_state: stat({}) failed, reporting not-changed: {}", normalized, exc)
         return False
     return current_mtime_ns > state.mtime_ns
 

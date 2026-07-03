@@ -249,7 +249,8 @@ class ArtifactStore:
             body_path = Path(str(meta["path"]))
             try:
                 lines = (await asyncio.to_thread(body_path.read_text, encoding="utf-8")).splitlines()
-            except OSError:
+            except OSError as exc:
+                logger.debug("artifact_store: search skipping unreadable {}: {}", body_path, exc)
                 continue
             for index, line in enumerate(lines, start=1):
                 if compiled.search(line) is None:
@@ -319,7 +320,8 @@ class ArtifactStore:
             return None
         try:
             return json.loads(matches[0].read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("artifact_store: corrupt metadata {}: {}", matches[0], exc)
             return None
 
     def _scan_metadata(self) -> list[ArtifactMetadata]:
@@ -436,7 +438,8 @@ def _allocate_id_sync(artifacts_dir: Path) -> str:
         if next_id_path.exists():
             try:
                 next_value = int(next_id_path.read_text(encoding="utf-8").strip())
-            except ValueError:
+            except ValueError as exc:
+                logger.warning("artifact_store: corrupt .next_id file, resetting to 1: {}", exc)
                 next_value = 1
         artifact_id = f"art_{next_value:0{_NEXT_ID_WIDTH}d}"
         _atomic_write_text(next_id_path, str(next_value + 1))
@@ -545,7 +548,8 @@ def _maybe_str(value: Any) -> str | None:
 def _file_size(meta: ArtifactMetadata) -> int:
     try:
         return Path(str(meta["path"])).stat().st_size
-    except OSError:
+    except OSError as exc:
+        logger.debug("artifact_store: stat failed for {}: {}", meta.get("path"), exc)
         return 0
 
 def _ok(payload: dict[str, Any]) -> ToolResult:

@@ -13,6 +13,19 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from loguru import logger
+
+try:
+    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.lib import resolve_model_profile
+    from agentm.env import autoload_dotenv
+    _HAS_AGENTM = True
+except ImportError:
+    DEFAULT_PROVIDER_REGISTRY = None  # type: ignore[assignment]
+    resolve_model_profile = None  # type: ignore[assignment]
+    autoload_dotenv = None  # type: ignore[assignment]
+    _HAS_AGENTM = False
+    logger.debug("telbench.evolve: agentm SDK not available; model profile resolution disabled")
 
 _PROMPTS_DIR = Path(__file__).parents[2] / "agents" / "tel" / "prompts"
 
@@ -122,12 +135,8 @@ def evolve(
     """Read reflection reports and evolve prompt files in-place."""
     import os
 
-    try:
-        from agentm.env import autoload_dotenv
-
+    if _HAS_AGENTM:
         autoload_dotenv()
-    except ImportError:
-        pass
 
     if not reflections.is_dir():
         typer.echo(f"Error: {reflections} is not a directory", err=True)
@@ -141,36 +150,24 @@ def evolve(
     typer.echo(f"Loaded {len(reflection_data)} reflections")
 
     resolved_provider: tuple[str, dict[str, Any]] | None = None
-    if model:
-        try:
-            from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-            from agentm.core.lib import resolve_model_profile
-
-            profile = resolve_model_profile(model)
-            if profile is not None:
-                resolved_provider = DEFAULT_PROVIDER_REGISTRY.build(
-                    profile.provider, profile.to_build_config(), env=os.environ
-                )
-        except ImportError:
-            pass
+    if model and _HAS_AGENTM:
+        profile = resolve_model_profile(model)
+        if profile is not None:
+            resolved_provider = DEFAULT_PROVIDER_REGISTRY.build(
+                profile.provider, profile.to_build_config(), env=os.environ
+            )
     if resolved_provider is None and provider:
         if ":" in provider:
             mod, payload = provider.split(":", 1)
             resolved_provider = mod.strip(), json.loads(payload)
         else:
             resolved_provider = provider, {}
-    if resolved_provider is None:
-        try:
-            from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-            from agentm.core.lib import resolve_model_profile
-
-            profile = resolve_model_profile(None)
-            if profile is not None:
-                resolved_provider = DEFAULT_PROVIDER_REGISTRY.build(
-                    profile.provider, profile.to_build_config(), env=os.environ
-                )
-        except ImportError:
-            pass
+    if resolved_provider is None and _HAS_AGENTM:
+        profile = resolve_model_profile(None)
+        if profile is not None:
+            resolved_provider = DEFAULT_PROVIDER_REGISTRY.build(
+                profile.provider, profile.to_build_config(), env=os.environ
+            )
 
     typer.echo("Running evolve agent…")
     summary = asyncio.run(

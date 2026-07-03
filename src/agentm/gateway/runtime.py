@@ -230,7 +230,8 @@ class GatewayRuntime:
         """
         if self._server is None:
             return
-        session_key = str(body.pop("_session_key", "") or "") or None
+        raw_key = body.pop("_session_key", None)
+        session_key = str(raw_key) if raw_key else None
         target_channel = str(body.get("channel") or "")
         meta = body.get("metadata")
         kind = str((meta or {}).get("kind") or "assistant_text")

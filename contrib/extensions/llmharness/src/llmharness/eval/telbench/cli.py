@@ -7,7 +7,6 @@ Usage::
 """
 
 from __future__ import annotations
-from loguru import logger
 
 import asyncio
 import json
@@ -16,10 +15,23 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from loguru import logger
 
 from .adapter import TelBenchInstance, load_telbench
 from .runner import EvalResult, evaluate_instance, evaluate_instance_tel, reflect_on_result
 from .scoring import AggregateScores, SpanScores, aggregate_scores
+
+try:
+    from agentm.ai import DEFAULT_PROVIDER_REGISTRY
+    from agentm.core.lib import resolve_model_profile
+    from agentm.env import autoload_dotenv
+    _HAS_AGENTM = True
+except ImportError:
+    DEFAULT_PROVIDER_REGISTRY = None  # type: ignore[assignment]
+    resolve_model_profile = None  # type: ignore[assignment]
+    autoload_dotenv = None  # type: ignore[assignment]
+    _HAS_AGENTM = False
+    logger.debug("telbench.cli: agentm SDK not available; model profile resolution disabled")
 
 app = typer.Typer(help="TELBench span-level error localization evaluation.")
 
@@ -29,29 +41,20 @@ def _resolve_provider(
     model_name: str | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Resolve a provider from a ``--model`` profile name, explicit spec, or env."""
-    if model_name:
-        try:
-            from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-            from agentm.core.lib import resolve_model_profile
-
-            profile = resolve_model_profile(model_name)
-            if profile is not None:
-                registry = DEFAULT_PROVIDER_REGISTRY
-                return registry.build(profile.provider, profile.to_build_config(), env=os.environ)
-        except ImportError:
-            pass
+    if model_name and _HAS_AGENTM:
+        profile = resolve_model_profile(model_name)
+        if profile is not None:
+            return DEFAULT_PROVIDER_REGISTRY.build(  # noqa: F823 — guarded by _HAS_AGENTM
+                profile.provider, profile.to_build_config(), env=os.environ
+            )
 
     if not provider_spec:
-        try:
-            from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-            from agentm.core.lib import resolve_model_profile
-
+        if _HAS_AGENTM:
             profile = resolve_model_profile(None)
             if profile is not None:
-                registry = DEFAULT_PROVIDER_REGISTRY
-                return registry.build(profile.provider, profile.to_build_config(), env=os.environ)
-        except ImportError:
-            pass
+                return DEFAULT_PROVIDER_REGISTRY.build(
+                    profile.provider, profile.to_build_config(), env=os.environ
+                )
         return None
 
     if ":" in provider_spec:
@@ -132,12 +135,8 @@ def telbench(
     # Load .env the same way the ``agentm`` CLI does, so child sessions inherit
     # OTEL_EXPORTER_OTLP_ENDPOINT (trajectories ship to ClickHouse) and the
     # model/provider profile without the caller having to ``source .env`` first.
-    try:
-        from agentm.env import autoload_dotenv
-
+    if _HAS_AGENTM:
         autoload_dotenv()
-    except ImportError:
-        pass
 
     if mode not in ("posthoc", "online", "tel"):
         typer.echo(

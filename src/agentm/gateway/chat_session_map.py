@@ -15,6 +15,8 @@ import tempfile
 import threading
 from pathlib import Path
 
+from loguru import logger
+
 
 class ChatSessionMap:
     def __init__(self, path: Path) -> None:
@@ -28,7 +30,8 @@ class ChatSessionMap:
             return
         try:
             data = json.loads(self._path.read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            logger.warning("chat_session_map: failed to load {}: {}", self._path, exc)
             return
         if isinstance(data, dict):
             self._routes = {

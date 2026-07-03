@@ -154,13 +154,13 @@ def _validate_sqls(data_dir: Path, verdict: SeedVerdict) -> list[dict[str, str]]
     if cap:
         try:
             conn.execute(f"SET threads={max(1, int(cap))}")
-        except (ValueError, duckdb.Error):
-            pass
+        except (ValueError, duckdb.Error) as exc:
+            logger.warning("seed_finalize: SET threads failed: {}", exc)
     for pct in (("p50", "0.5"), ("p90", "0.9"), ("p95", "0.95"), ("p99", "0.99")):
         try:
             conn.execute(f"CREATE OR REPLACE MACRO {pct[0]}(x) AS quantile_cont(x, {pct[1]})")
-        except duckdb.Error:
-            pass
+        except duckdb.Error as exc:
+            logger.warning("seed_finalize: macro {} creation failed: {}", pct[0], exc)
     view_names: set[str] = set()
     for f in sorted(data_dir.iterdir()):
         if f.is_file() and f.suffix == ".parquet" and f.name != "conclusion.parquet":

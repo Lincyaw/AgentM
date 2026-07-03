@@ -528,7 +528,7 @@ def install(api: ExtensionAPI, config: LiveInspectorConfig) -> None:
             try:
                 port = int(env_port)
             except ValueError:
-                pass
+                logger.debug("live_inspector: invalid AGENTM_LIVE_INSPECT_PORT={!r}, using default", env_port)
         if env_url_file:
             url_file = env_url_file
     else:

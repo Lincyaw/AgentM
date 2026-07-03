@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any, Final
 
+from loguru import logger
+
 from agentm.core.abi import (
     ExtensionAPI,
     FunctionTool,
@@ -176,7 +178,8 @@ def install(api: ExtensionAPI, _config: dict[str, Any]) -> None:
                 continue
             try:
                 payload = json.loads(Path(path).read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("hypothesis_tools: failed to load artifact {}: {}", path, exc)
                 continue
             if not isinstance(payload, dict):
                 continue

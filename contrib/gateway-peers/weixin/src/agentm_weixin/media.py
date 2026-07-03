@@ -168,7 +168,8 @@ async def download_media(
     if not key_hex and cdn_media.aes_key:
         try:
             key_hex = base64.b64decode(cdn_media.aes_key).hex()
-        except Exception:
+        except Exception as exc:
+            logger.warning("download_media: base64 decode of AES key failed: {}", exc)
             key_hex = cdn_media.aes_key
     if not key_hex:
         logger.warning("download_media: no AES key available")

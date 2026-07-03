@@ -187,8 +187,8 @@ def extract_json(text: str) -> dict[str, JsonValue] | None:
         obj = json.loads(text)
         if isinstance(obj, dict):
             return obj
-    except json.JSONDecodeError:
-        pass
+    except json.JSONDecodeError as exc:
+        logger.debug("extract_json: full-text parse failed: {}", exc)
 
     m = _JSON_BLOCK_RE.search(text)
     if m:
@@ -196,8 +196,8 @@ def extract_json(text: str) -> dict[str, JsonValue] | None:
             obj = json.loads(m.group(1))
             if isinstance(obj, dict):
                 return obj
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as exc:
+            logger.debug("extract_json: code-block parse failed: {}", exc)
 
     start = text.find("{")
     if start >= 0:
@@ -212,8 +212,8 @@ def extract_json(text: str) -> dict[str, JsonValue] | None:
                         obj = json.loads(text[start : i + 1])
                         if isinstance(obj, dict):
                             return obj
-                    except json.JSONDecodeError:
-                        pass
+                    except json.JSONDecodeError as exc:
+                        logger.debug("extract_json: brace-scan parse failed: {}", exc)
                     break
     return None
 

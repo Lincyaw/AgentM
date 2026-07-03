@@ -25,6 +25,15 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from loguru import logger
+
+try:
+    from agentm.env import autoload_dotenv
+    _HAS_AGENTM = True
+except ImportError:
+    autoload_dotenv = None  # type: ignore[assignment]
+    _HAS_AGENTM = False
+    logger.debug("telbench.iterate: agentm SDK not available; dotenv autoload disabled")
 
 from .scoring import AggregateScores
 
@@ -153,12 +162,8 @@ def iterate(
     import os
     import subprocess
 
-    try:
-        from agentm.env import autoload_dotenv
-
+    if _HAS_AGENTM:
         autoload_dotenv()
-    except ImportError:
-        pass
 
     runs_dir = runs_dir.resolve()
     runs_dir.mkdir(parents=True, exist_ok=True)
