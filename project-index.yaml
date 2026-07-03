@@ -1018,6 +1018,7 @@ requirements:
       - path: src/agentm/core/lib/user_config.py
       - path: src/agentm/env.py
       - path: src/agentm/cli.py
+      - path: src/agentm/cli_trace.py
       - path: src/agentm/cli_daemon.py
       - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway/cli.py

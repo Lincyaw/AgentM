@@ -31,7 +31,7 @@ import typer
 from loguru import logger
 
 from agentm.core.abi import LogRecord, Span, TraceReader
-from agentm.env import autoload_dotenv
+from agentm.env import autoload_dotenv, resolve_cli_cwd
 
 # ClickHouse backend — lazy import to avoid urllib cost on the prompt path.
 _ch_mod: Any = None
@@ -46,6 +46,10 @@ def _ch() -> Any:
     return _ch_mod
 
 
+def _trace_cwd(cwd: Path | None = None) -> Path:
+    return resolve_cli_cwd(cwd)
+
+
 def _trace_clickhouse_url(cwd: Path | None = None) -> str | None:
     """Return a ClickHouse URL only when remote trace storage is configured.
 
@@ -54,7 +58,7 @@ def _trace_clickhouse_url(cwd: Path | None = None) -> str | None:
     endpoint should not shadow a freshly written JSONL fallback session unless
     the environment says this run is exporting remote traces.
     """
-    autoload_dotenv(cwd)
+    autoload_dotenv(_trace_cwd(cwd))
     if not (
         os.environ.get("AGENTM_CLICKHOUSE_URL")
         or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -69,7 +73,7 @@ def _local_session_file(session: str | None, cwd: Path | None) -> Path | None:
         return None
     from agentm.core.observability.otel_export import resolve_observability_dir
 
-    base = cwd if cwd is not None else Path.cwd()
+    base = _trace_cwd(cwd)
     path = resolve_observability_dir(base) / f"{session}.jsonl"
     return path if path.is_file() else None
 
@@ -108,9 +112,9 @@ def _ch_session(
                 exc,
             )
             return None
-    resolved_cwd = cwd.expanduser().resolve() if cwd is not None else None
+    resolved_cwd = _trace_cwd(cwd).resolve()
     sid = _ch().resolve_session(
-        url, session, latest, str(resolved_cwd) if resolved_cwd is not None else None
+        url, session, latest, str(resolved_cwd)
     )
     if sid is None:
         return None
@@ -150,13 +154,14 @@ def _resolve_source(
     file: Path | None,
     session: str | None,
     latest: bool,
-    cwd: Path,
+    cwd: Path | None,
 ) -> Path:
     """Pick exactly one of ``--file`` / ``--session`` / ``--latest``.
 
     Mutual exclusion is validated explicitly (cli-design §2). Missing
     file → exit 3; unreadable → exit 4.
     """
+    resolved_cwd = _trace_cwd(cwd)
 
     chosen = sum([file is not None, session is not None, latest])
     if chosen == 0:
@@ -178,11 +183,11 @@ def _resolve_source(
     elif session is not None:
         from agentm.core.observability.otel_export import resolve_observability_dir
 
-        path = resolve_observability_dir(cwd) / f"{session}.jsonl"
+        path = resolve_observability_dir(resolved_cwd) / f"{session}.jsonl"
     else:
         from agentm.core.observability.otel_export import resolve_observability_dir
 
-        obs_dir = resolve_observability_dir(cwd)
+        obs_dir = resolve_observability_dir(resolved_cwd)
         if not obs_dir.is_dir():
             _fail(
                 3,
@@ -568,10 +573,13 @@ LatestOpt = Annotated[
     ),
 ]
 CwdOpt = Annotated[
-    Path,
+    Path | None,
     typer.Option(
         "--cwd",
-        help="Working directory for .env loading and ClickHouse --latest filtering.",
+        help=(
+            "Working directory for .env loading and ClickHouse --latest "
+            "filtering. Defaults to AGENTM_CWD, then the process cwd."
+        ),
     ),
 ]
 FormatOpt = Annotated[
@@ -743,7 +751,7 @@ def messages_cmd(
     file: FileOpt = None,
     session: SessionOpt = None,
     latest: LatestOpt = False,
-    cwd: CwdOpt = Path("."),
+    cwd: CwdOpt = None,
     role: Annotated[
         list[str] | None,
         typer.Option("--role", help="Filter by payload.role (repeatable)."),
@@ -900,7 +908,7 @@ def turns_cmd(
     file: FileOpt = None,
     session: SessionOpt = None,
     latest: LatestOpt = False,
-    cwd: CwdOpt = Path("."),
+    cwd: CwdOpt = None,
     limit: LimitOpt = None,
     fmt: FormatOpt = None,
     out: OutputOpt = None,
@@ -951,7 +959,7 @@ def usage_cmd(
     file: FileOpt = None,
     session: SessionOpt = None,
     latest: LatestOpt = False,
-    cwd: CwdOpt = Path("."),
+    cwd: CwdOpt = None,
     fmt: FormatOpt = None,
     out: OutputOpt = None,
 ) -> None:
@@ -1023,7 +1031,7 @@ def chats_cmd(
     file: FileOpt = None,
     session: SessionOpt = None,
     latest: LatestOpt = False,
-    cwd: CwdOpt = Path("."),
+    cwd: CwdOpt = None,
     model: Annotated[
         list[str] | None,
         typer.Option("--model", help="Filter by gen_ai.request.model (repeatable)."),
@@ -1140,7 +1148,7 @@ def tools_cmd(
     file: FileOpt = None,
     session: SessionOpt = None,
     latest: LatestOpt = False,
-    cwd: CwdOpt = Path("."),
+    cwd: CwdOpt = None,
     tool: Annotated[
         list[str] | None,
         typer.Option("--tool", help="Filter by tool name (repeatable)."),
@@ -1215,7 +1223,7 @@ def info_cmd(
     file: FileOpt = None,
     session: SessionOpt = None,
     latest: LatestOpt = False,
-    cwd: CwdOpt = Path("."),
+    cwd: CwdOpt = None,
     what: Annotated[
         str,
         typer.Option(
@@ -1298,7 +1306,7 @@ def spans_cmd(
     file: FileOpt = None,
     session: SessionOpt = None,
     latest: LatestOpt = False,
-    cwd: CwdOpt = Path("."),
+    cwd: CwdOpt = None,
     name: Annotated[
         str | None,
         typer.Option("--name", help="Exact span name match."),
@@ -1372,7 +1380,7 @@ def logs_cmd(
     file: FileOpt = None,
     session: SessionOpt = None,
     latest: LatestOpt = False,
-    cwd: CwdOpt = Path("."),
+    cwd: CwdOpt = None,
     name: Annotated[
         str | None,
         typer.Option("--name", help="Exact eventName match."),
@@ -1451,7 +1459,7 @@ def stats_cmd(
     file: FileOpt = None,
     session: SessionOpt = None,
     latest: LatestOpt = False,
-    cwd: CwdOpt = Path("."),
+    cwd: CwdOpt = None,
     fmt: FormatOpt = None,
     out: OutputOpt = None,
 ) -> None:
@@ -1591,7 +1599,7 @@ def _index_filter(
 
 @app.command("index")
 def index_cmd(
-    cwd: CwdOpt = Path("."),
+    cwd: CwdOpt = None,
     directory: Annotated[
         Path | None,
         typer.Option(
@@ -1693,7 +1701,8 @@ def index_cmd(
     sink, close = _open_output(out)
     try:
         chosen_fmt = _resolve_format(fmt, sink)
-        autoload_dotenv(cwd)
+        resolved_cwd = _trace_cwd(cwd)
+        autoload_dotenv(resolved_cwd)
 
         def _render(d: dict[str, Any]) -> str:
             return (
@@ -1736,7 +1745,7 @@ def index_cmd(
         else:
             from agentm.core.observability.otel_export import resolve_observability_dir
 
-            obs_dir = resolve_observability_dir(cwd)
+            obs_dir = resolve_observability_dir(resolved_cwd)
         if not obs_dir.is_dir():
             _fail(
                 3,
