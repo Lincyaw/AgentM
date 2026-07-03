@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -32,6 +35,8 @@ class TerminalLaunchConfig:
     gateway_command: str = "agentm"
     terminal_args: list[str] = field(default_factory=list)
     startup_timeout: float = 10.0
+    use_daemon: bool = True
+    reload: bool = True
 
 
 @dataclass(slots=True)
@@ -44,7 +49,7 @@ class _GatewayProcess:
 
 
 def run_terminal(config: TerminalLaunchConfig) -> int:
-    """Run the terminal peer, starting a private gateway when needed."""
+    """Run the terminal peer, ensuring a gateway is available when needed."""
 
     cwd = config.cwd
     if not cwd.is_dir():
@@ -52,6 +57,10 @@ def run_terminal(config: TerminalLaunchConfig) -> int:
 
     if config.connect:
         return _run_terminal_peer(config, connect_url=config.connect)
+
+    if config.use_daemon:
+        connect_url = _ensure_daemon_gateway(config)
+        return _run_terminal_peer(config, connect_url=connect_url)
 
     gateway = _start_gateway(config)
     try:
@@ -119,12 +128,74 @@ def _run_terminal_peer(config: TerminalLaunchConfig, *, connect_url: str) -> int
     return subprocess.call(args, cwd=str(config.cwd), env=os.environ.copy())
 
 
+def _ensure_daemon_gateway(config: TerminalLaunchConfig) -> str:
+    connect_url = _default_daemon_connect_url()
+    if _gateway_accepts_connections(connect_url):
+        return connect_url
+
+    runtime_dir = _daemon_runtime_dir()
+    pid_file = runtime_dir / "gateway-supervisor.pid"
+    if _pid_file_is_live(pid_file):
+        _wait_for_gateway(connect_url, _pid_only_gateway(pid_file), config.startup_timeout)
+        return connect_url
+
+    log_path = config.gateway_log or _default_gateway_log()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("ab")
+    args = [
+        sys.executable,
+        "-m",
+        "agentm.gateway_supervisor",
+        "--cwd",
+        str(config.cwd),
+        "--bind",
+        connect_url,
+        "--state-dir",
+        str(config.state_dir or _default_daemon_state_dir()),
+        "--pid-file",
+        str(pid_file),
+    ]
+    if config.scenario:
+        args.extend(["--scenario", config.scenario])
+    if not config.reload:
+        args.append("--no-reload")
+    try:
+        process = subprocess.Popen(
+            args,
+            cwd=str(config.cwd),
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
+        )
+    except Exception:
+        log_file.close()
+        raise
+    log_file.close()
+    gateway = _GatewayProcess(
+        process=process,
+        log_file=open(os.devnull, "ab"),
+        temp_dir=None,
+        connect_url=connect_url,
+        log_path=log_path,
+    )
+    try:
+        _wait_for_gateway(connect_url, gateway, config.startup_timeout)
+    except Exception:
+        if process.poll() is None:
+            _terminate_process_group(process, signal.SIGTERM)
+        raise
+    finally:
+        gateway.log_file.close()
+    return connect_url
+
+
 def _wait_for_gateway(
     connect_url: str,
     gateway: _GatewayProcess,
     timeout_seconds: float,
 ) -> None:
-    socket_path = _unix_socket_path(connect_url)
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         rc = gateway.process.poll()
@@ -133,7 +204,7 @@ def _wait_for_gateway(
                 f"gateway exited before it was ready (exit {rc})."
                 f"{_gateway_log_hint(gateway)}"
             )
-        if socket_path.exists() and not socket_path.is_dir():
+        if _gateway_accepts_connections(connect_url):
             return
         time.sleep(0.1)
     raise TerminalLaunchError(
@@ -195,6 +266,75 @@ def _unix_socket_path(connect_url: str) -> Path:
 def _default_gateway_log() -> Path:
     home = Path(os.environ.get("AGENTM_HOME", str(Path.home() / ".agentm")))
     return home / "logs" / "terminal-gateway.log"
+
+
+def _default_daemon_state_dir() -> Path:
+    home = Path(os.environ.get("AGENTM_HOME", str(Path.home() / ".agentm")))
+    return home / "gateway"
+
+
+def _daemon_runtime_dir() -> Path:
+    root = os.environ.get("AGENTM_RUNTIME_DIR")
+    if root:
+        path = Path(root)
+    else:
+        uid = os.getuid() if hasattr(os, "getuid") else os.getpid()
+        home = os.environ.get("AGENTM_HOME", str(Path.home() / ".agentm"))
+        digest = hashlib.sha1(home.encode("utf-8")).hexdigest()[:8]
+        path = Path(tempfile.gettempdir()) / f"agentm-{uid}-{digest}"
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
+
+
+def _default_daemon_connect_url() -> str:
+    return f"unix://{_daemon_runtime_dir() / 'gateway.sock'}"
+
+
+def _gateway_accepts_connections(connect_url: str) -> bool:
+    try:
+        socket_path = _unix_socket_path(connect_url)
+    except TerminalLaunchError:
+        return False
+    if not socket_path.exists() or socket_path.is_dir():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.2)
+            probe.connect(str(socket_path))
+            return True
+    except OSError:
+        return False
+
+
+def _pid_file_is_live(pid_file: Path) -> bool:
+    try:
+        raw = pid_file.read_text(encoding="utf-8").strip()
+        pid = int(raw)
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _pid_only_gateway(pid_file: Path) -> _GatewayProcess:
+    class _PidProcess:
+        def poll(self) -> int | None:
+            return None if _pid_file_is_live(pid_file) else 1
+
+    return _GatewayProcess(
+        process=_PidProcess(),  # type: ignore[arg-type]
+        log_file=open(os.devnull, "ab"),
+        temp_dir=None,
+        connect_url=_default_daemon_connect_url(),
+        log_path=_default_gateway_log(),
+    )
 
 
 def _gateway_log_hint(gateway: _GatewayProcess) -> str:

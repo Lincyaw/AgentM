@@ -555,7 +555,12 @@ The `agentm` console script gains `gateway` as a subcommand alongside the existi
 * `src/agentm/gateway/wire/types.py` — typed `InboundBody`, `OutboundBody` dataclasses (from the deleted `bus.py`).
 * `src/agentm/extensions/builtin/wire_driver.py` — §4. (`peer_send` removed, not ported — see §4.)
 * `src/agentm/cli/gateway.py` — `agentm gateway` subcommand glue.
-* `scripts/agentm-all-in-one` (optional) — convenience shell wrapper that `popen`s gateway + chosen chat client in one command, for single-user installs. Not a daemon mode — just a process supervisor.
+* `src/agentm/gateway_supervisor.py` — local-development process supervisor used
+  by `agentm terminal`: keeps a stable unix socket, starts the ordinary
+  `agentm gateway` worker, and restarts that worker when watched source/config
+  files change. This is not a distributed worker pool and does not execute
+  sessions outside the single gateway process; it exists so code changes apply
+  without manually restarting the TUI client.
 
 No new third-party deps.
 

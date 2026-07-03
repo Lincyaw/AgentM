@@ -1286,8 +1286,8 @@ def terminal_cmd(
         typer.Option(
             "--connect",
             help=(
-                "Existing gateway URL. Omit this to start a private local "
-                "gateway for the terminal."
+                "Existing gateway URL. Omit this to start or reuse the local "
+                "gateway daemon."
             ),
         ),
     ] = None,
@@ -1296,8 +1296,8 @@ def terminal_cmd(
         typer.Option(
             "--scenario",
             help=(
-                "Scenario for the local gateway or the first terminal message. "
-                "Defaults to chatbot in local one-command mode."
+                "Scenario for the local gateway daemon or the first terminal "
+                "message. Defaults to chatbot in one-command mode."
             ),
         ),
     ] = None,
@@ -1330,14 +1330,28 @@ def terminal_cmd(
         typer.Option(
             "--gateway-log",
             envvar="AGENTM_TERMINAL_GATEWAY_LOG",
-            help="Local gateway log file. Default: $AGENTM_HOME/logs/terminal-gateway.log.",
+            help="Gateway daemon/supervisor log file. Default: $AGENTM_HOME/logs/terminal-gateway.log.",
         ),
     ] = None,
+    private_gateway: Annotated[
+        bool,
+        typer.Option(
+            "--private-gateway",
+            help="Start a gateway only for this terminal and stop it when the TUI exits.",
+        ),
+    ] = False,
+    no_reload: Annotated[
+        bool,
+        typer.Option(
+            "--no-reload",
+            help="Disable daemon supervisor source watching and worker restarts.",
+        ),
+    ] = False,
     gateway_command: Annotated[
         str,
         typer.Option(
             "--gateway-command",
-            help="Command used to launch the local gateway.",
+            help="Command used to launch a --private-gateway worker.",
             hidden=True,
         ),
     ] = "agentm",
@@ -1369,11 +1383,13 @@ def terminal_cmd(
     if connect and (
         state_dir is not None
         or gateway_log is not None
+        or private_gateway
+        or no_reload
         or gateway_command != "agentm"
     ):
         raise typer.BadParameter(
-            "--state-dir, --gateway-log, and --gateway-command only apply when "
-            "agentm terminal starts the local gateway"
+            "--state-dir, --gateway-log, --private-gateway, --no-reload, and "
+            "--gateway-command only apply when agentm terminal starts the local gateway"
         )
 
     try:
@@ -1389,6 +1405,8 @@ def terminal_cmd(
                 gateway_command=gateway_command,
                 terminal_args=list(ctx.args),
                 startup_timeout=startup_timeout,
+                use_daemon=not private_gateway,
+                reload=not no_reload,
             )
         )
     except TerminalLaunchError as exc:

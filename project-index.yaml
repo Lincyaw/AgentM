@@ -739,14 +739,18 @@ requirements:
   - id: REQ-198-terminal-one-command-gateway
     title: AgentM CLI can launch a gateway-backed terminal in one command
     description: >
-      The `agentm terminal` command must start a private local `agentm gateway`,
-      wait for its unix socket, connect the `agentm-terminal` TUI to it, write
-      gateway logs to a deterministic file, and shut the gateway down when the
-      terminal exits. The Go terminal peer remains a wire-only client; advanced
-      users can still connect it to an external gateway explicitly. Stale
-      chat-to-session mappings must be discarded automatically when their
-      target session file no longer exists, so a terminal can recover by
-      starting a fresh session instead of surfacing a raw FileNotFoundError.
+      The `agentm terminal` command must start or reuse a local gateway daemon,
+      wait for its unix socket, connect the `agentm-terminal` TUI to it, and
+      write gateway/supervisor logs to a deterministic file. The daemon is a
+      lightweight Python supervisor around a gateway worker: it keeps the client
+      socket stable and restarts the worker when watched source/config files
+      change, so SDK/session code updates apply without manually restarting the
+      TUI. `--private-gateway` preserves the old one-terminal-one-gateway
+      lifecycle. The Go terminal peer remains a wire-only client; advanced users
+      can still connect it to an external gateway explicitly. Stale
+      chat-to-session mappings must be discarded automatically when their target
+      session file no longer exists, so a terminal can recover by starting a
+      fresh session instead of surfacing a raw FileNotFoundError.
     priority: P1
     status: implemented
     confidence: confirmed
@@ -754,6 +758,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/main.go
       - path: src/agentm/cli.py
       - path: src/agentm/gateway/session_manager.py
+      - path: src/agentm/gateway_supervisor.py
       - path: src/agentm/terminal_launcher.py
     tests: []
     docs:

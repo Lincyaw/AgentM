@@ -15,11 +15,13 @@ The TUI is a **dumb adapter** (single-process-gateway.md §5.1) — it sends
 `inbound` envelopes and renders `outbound` ones. No session, scenario, or
 atom knowledge.
 
-The recommended user entrypoint is `agentm terminal`: the Python CLI starts a
-private local `agentm gateway`, waits for its unix socket, launches
-`agentm-terminal --connect ...`, and tears the gateway down when the terminal
-exits. The Go binary intentionally stays a pure wire client; advanced users can
-still run `agentm gateway` and `agentm-terminal --connect ...` separately.
+The recommended user entrypoint is `agentm terminal`: the Python CLI starts or
+reuses a local gateway daemon, waits for its unix socket, launches
+`agentm-terminal --connect ...`, and leaves the Go binary as a pure wire
+client. A lightweight Python supervisor owns the daemon process and restarts
+the gateway worker when source/config files change, so SDK/session code updates
+apply without manually restarting the terminal. Advanced users can still run
+`agentm gateway` and `agentm-terminal --connect ...` separately.
 
 ## 1. Design principles
 
@@ -692,8 +694,8 @@ The current AgentM terminal implementation follows this direction:
    `.agentm/artifacts/<topic>/` and summarize only the decisions in tracked
    design docs.
 7. Keep process supervision outside the Go peer. `agentm terminal` owns the
-   local gateway lifecycle; `agentm-terminal` only connects to a gateway URL
-   and renders the wire stream.
+   local gateway daemon/supervisor lifecycle; `agentm-terminal` only connects
+   to a gateway URL and renders the wire stream.
 8. Remove the legacy right-side session sidebar from the primary AgentM
    terminal layout. Wide screens keep the transcript/composer primary; session
    metadata belongs in status, picker, or detail views rather than a persistent
