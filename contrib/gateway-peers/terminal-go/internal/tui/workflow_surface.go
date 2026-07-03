@@ -16,7 +16,10 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/styles"
 )
 
-const maxVisibleBackgroundActivities = 4
+const (
+	maxVisibleBackgroundActivities = 4
+	backgroundActivityKeySeparator = "\x00"
+)
 
 type workflowRow struct {
 	sessionID      string
@@ -38,6 +41,13 @@ type backgroundActivity struct {
 	note      string
 	updatedAt time.Time
 	terminal  bool
+}
+
+func backgroundActivityKey(sessionID, activityID string) string {
+	if sessionID == "" {
+		return activityID
+	}
+	return sessionID + backgroundActivityKeySeparator + activityID
 }
 
 func (m *appModel) hasWorkflowTasks() bool {
@@ -545,34 +555,36 @@ func (m *appModel) updateBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 	if m.backgroundActivities == nil {
 		m.backgroundActivities = map[string]backgroundActivity{}
 	}
-	id := strings.TrimSpace(ev.ActivityID)
-	if id == "" {
-		id = strings.TrimSpace(ev.Source) + ":" + strings.TrimSpace(ev.Label)
+	activityID := strings.TrimSpace(ev.ActivityID)
+	if activityID == "" {
+		activityID = strings.TrimSpace(ev.Source) + ":" + strings.TrimSpace(ev.Label)
 	}
-	if id == ":" {
+	if activityID == ":" {
 		return false
 	}
+	sessionID := strings.TrimSpace(ev.SessionID)
+	key := backgroundActivityKey(sessionID, activityID)
 	status := strings.TrimSpace(ev.Status)
 	if status == "" {
 		status = "running"
 	}
 	if ev.Terminal && status != "error" && status != "failed" {
-		_, existed := m.backgroundActivities[id]
-		delete(m.backgroundActivities, id)
+		_, existed := m.backgroundActivities[key]
+		delete(m.backgroundActivities, key)
 		return existed
 	}
 	next := backgroundActivity{
-		sessionID: strings.TrimSpace(ev.SessionID),
+		sessionID: sessionID,
 		source:    cmpNonEmpty(ev.Source, "background"),
-		id:        id,
+		id:        activityID,
 		label:     cmpNonEmpty(ev.Label, "background"),
 		status:    status,
 		note:      strings.TrimSpace(ev.Note),
 		updatedAt: time.Now(),
 		terminal:  ev.Terminal,
 	}
-	_, existed := m.backgroundActivities[id]
-	m.backgroundActivities[id] = next
+	_, existed := m.backgroundActivities[key]
+	m.backgroundActivities[key] = next
 	// Existing activity rows keep the same bottom-surface height; repaint is enough.
 	return !existed
 }
