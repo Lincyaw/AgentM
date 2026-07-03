@@ -34,7 +34,7 @@ func main() {
 	mockMode := flag.Bool("mock", false, "Run with mock data (no gateway)")
 	simpleMode := flag.Bool("simple", false, "Run a simplified chat layout for narrow terminals")
 	leanMode := flag.Bool("lean", false, "Alias for --simple")
-	hideSidebar := flag.Bool("hide-sidebar", false, "Keep the Claude-style full layout without the legacy right sidebar")
+	flag.Bool("hide-sidebar", true, "Deprecated no-op; the legacy right sidebar is no longer rendered")
 	logFile := flag.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
 	flag.Parse()
 
@@ -150,9 +150,7 @@ func main() {
 	if *simpleMode || *leanMode {
 		tuiOpts = append(tuiOpts, tui.WithLeanMode())
 	}
-	if *hideSidebar {
-		tuiOpts = append(tuiOpts, tui.WithHideSidebar())
-	}
+	tuiOpts = append(tuiOpts, tui.WithHideSidebar())
 
 	model := tui.New(ctx, spawner, initialApp, wd, func() {}, tuiOpts...)
 
