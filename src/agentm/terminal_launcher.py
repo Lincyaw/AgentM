@@ -29,6 +29,10 @@ class TerminalLaunchError(RuntimeError):
     """Raised when the local gateway or terminal peer cannot be launched."""
 
 
+def _expand_path(path: Path | str) -> Path:
+    return Path(os.path.expandvars(str(path))).expanduser()
+
+
 @dataclass(slots=True)
 class TerminalLaunchConfig:
     """Resolved configuration for ``agentm terminal``."""
@@ -48,6 +52,13 @@ class TerminalLaunchConfig:
     startup_timeout: float = 10.0
     use_daemon: bool = True
     reload: bool = False
+
+    def __post_init__(self) -> None:
+        self.cwd = _expand_path(self.cwd)
+        for field_name in ("state_dir", "terminal_log", "gateway_log"):
+            path = getattr(self, field_name)
+            if path is not None:
+                setattr(self, field_name, _expand_path(path))
 
 
 @dataclass(slots=True)
@@ -281,10 +292,12 @@ def _split_command(value: str) -> list[str]:
 
 def _find_executable(value: str) -> str:
     if os.sep in value or (os.altsep and os.altsep in value):
-        path = Path(value)
+        path = _expand_path(value)
         if path.is_file() and os.access(path, os.X_OK):
             return str(path)
-        raise TerminalLaunchError(f"executable not found or not executable: {value}")
+        raise TerminalLaunchError(
+            f"executable not found or not executable: {value} ({path})"
+        )
     found = shutil.which(value)
     if found:
         return found
