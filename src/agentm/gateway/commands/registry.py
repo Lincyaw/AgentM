@@ -17,6 +17,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from agentm.core.lib import expand_path
+
 from .atom_command import build_atom_commands
 from .markdown_command import MarkdownPromptCommand
 from .protocol import CommandHandler
@@ -86,11 +88,12 @@ def discover_commands(
        layer enforces deployment opt-in.
     """
     registry = CommandRegistry()
+    resolved_cwd = expand_path(cwd).resolve()
     _load_builtins(registry)
-    _load_markdown(registry, Path(cwd))
+    _load_markdown(registry, resolved_cwd)
     _load_skills(
         registry,
-        Path(cwd),
+        resolved_cwd,
         extra=tuple(skill_paths) + tuple(_configured_skill_paths()),
         include_defaults=include_default_skill_paths,
     )
