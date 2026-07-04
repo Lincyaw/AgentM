@@ -1625,7 +1625,9 @@ requirements:
       type tools cannot express. Rule targeting must use precise path
       classification so checks such as atom raw-I/O detection only apply to
       actual builtin atom files, and Python-version compatibility aliases do
-      not drift away from the project's Python 3.12+ baseline.
+      not drift away from the project's Python 3.12+ baseline. The documented
+      ``python -m agentm.code_health`` entrypoint must execute the same Typer
+      app as ``agentm lint``.
     priority: P2
     status: implemented
     confidence: confirmed

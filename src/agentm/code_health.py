@@ -46,6 +46,10 @@ Rules:
   ``asyncio.TimeoutError`` instead of builtin ``TimeoutError``. On Python
   3.12 this is an alias; using the builtin keeps timeout handling uniform
   with modern stdlib guidance and ruff's Python-3.12 pyupgrade rules.
+- **AM014** ``resolved-parent-chain``: ``path.resolve().parent`` or
+  ``path.resolve().parents[...]``. Resolve-before-parent hides intent and
+  silently follows symlinks; split into ``real = path.resolve(); real.parent``
+  only when symlink resolution is intentional.
 
 Invocation::
 
@@ -582,13 +586,54 @@ def _check_legacy_asyncio_timeout_error(tree: ast.Module, path: str) -> list[Iss
     return issues
 
 
+def _is_resolve_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "resolve"
+    )
+
+
+def _check_resolved_parent_chain(tree: ast.Module, path: str) -> list[Issue]:
+    """AM014: ``path.resolve().parent`` / ``path.resolve().parents[...]``."""
+    issues: list[Issue] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "parent":
+            if _is_resolve_call(node.value):
+                issues.append(Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM014",
+                    message=(
+                        "avoid path.resolve().parent — split resolve() from "
+                        "parent access when symlink resolution is intentional"
+                    ),
+                ))
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "parents"
+            and _is_resolve_call(node.value.value)
+        ):
+            issues.append(Issue(
+                path=path,
+                line=node.lineno,
+                rule="AM014",
+                message=(
+                    "avoid path.resolve().parents[...] — split resolve() from "
+                    "parent access when symlink resolution is intentional"
+                ),
+            ))
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
 ALL_RULES: Final[tuple[str, ...]] = (
     "AM001", "AM002", "AM003", "AM004", "AM005", "AM006", "AM007",
-    "AM008", "AM009", "AM010", "AM011", "AM012", "AM013",
+    "AM008", "AM009", "AM010", "AM011", "AM012", "AM013", "AM014",
 )
 
 
@@ -621,6 +666,7 @@ def check_file(file_path: Path) -> list[Issue]:
     issues.extend(_check_hand_written_schema(tree, rel, file_path))
     issues.extend(_check_config_dict_splat(tree, rel))
     issues.extend(_check_legacy_asyncio_timeout_error(tree, rel))
+    issues.extend(_check_resolved_parent_chain(tree, rel))
     return issues
 
 
@@ -731,3 +777,7 @@ def lint_cmd(
     logger.info("Code health: {}", ", ".join(summary_parts))
 
     raise typer.Exit(1 if errors else 0)
+
+
+if __name__ == "__main__":
+    app()
