@@ -210,13 +210,16 @@ terminal session. Use `--private-gateway` for the old
 one-terminal-one-gateway lifecycle. Common TUI flags are available directly, for example
 `agentm terminal --simple --theme light`; uncommon peer flags can still be
 passed after `--`. Workflow and sub-agent sessions open as background task rows
-so the parent conversation stays focused; `↓` opens the task picker, `Enter`
-views the selected task, `x` stops a selected task, and `Ctrl+t` hides/shows
-the rows. `Enter` sends (or queues while the agent is
-busy), `Shift+Enter`/`Ctrl+j` inserts a newline, `?` opens shortcuts from an
-empty editor, `/` and `@` open inline command/resource completions, `Esc`
-interrupts or double-press clears input, and `Ctrl+c` exits on the second
-press. Run `agentm <sub> --help` or `<binary> --help` for flags.
+so the parent conversation stays focused; auto-backgrounded shell/tool work and
+monitor wakeups use the same bottom activity surface without becoming tabs.
+When workflow tasks exist, `↓` opens the task picker, `Enter` views the
+selected task, `x` stops a selected task, and `Ctrl+t` hides/shows the rows.
+With only shell/monitor activity, `Ctrl+t` hides/shows activity rows; with no
+background activity, `Ctrl+t` creates a new tab. `Enter` sends (or queues while
+the agent is busy), `Shift+Enter`/`Ctrl+j` inserts a newline, `?` opens
+shortcuts from an empty editor, `/` and `@` open inline command/resource
+completions, `Esc` interrupts or double-press clears input, and `Ctrl+c` exits
+on the second press. Run `agentm <sub> --help` or `<binary> --help` for flags.
 
 For remote terminal clients, start the daemon on a WebSocket bind. Authentication
 is enabled by default: if no token file is supplied, the daemon creates
