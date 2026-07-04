@@ -1666,28 +1666,30 @@ def setup_cmd(
     ] = False,
 ) -> None:
     """Set up AgentM for first use with the fewest required choices."""
-    from agentm.onboard import run_setup
+    from agentm.onboard import SetupConfig, run_setup
 
     raise typer.Exit(
         code=run_setup(
-            profile=profile,
-            provider=provider,
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            context_window=context_window,
-            reasoning_effort=reasoning_effort,
-            workspace=workspace,
-            bot_name=bot_name,
-            voice=voice,
-            quick=quick,
-            check=check,
-            test_model=test_model,
-            test_prompt=test_prompt,
-            install_demo_scenarios=not no_contrib,
-            install_skills=not no_skills,
-            seed_persona_files=not no_persona,
-            force_model=force_model,
+            SetupConfig(
+                profile=profile,
+                provider=provider,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                context_window=context_window,
+                reasoning_effort=reasoning_effort,
+                workspace=workspace,
+                bot_name=bot_name,
+                voice=voice,
+                quick=quick,
+                check=check,
+                test_model=test_model,
+                test_prompt=test_prompt,
+                install_demo_scenarios=not no_contrib,
+                install_skills=not no_skills,
+                seed_persona_files=not no_persona,
+                force_model=force_model,
+            )
         )
     )
 

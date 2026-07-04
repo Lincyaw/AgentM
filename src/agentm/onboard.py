@@ -191,6 +191,28 @@ class ModelSetup:
     base_url: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class SetupConfig:
+    profile: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    context_window: int | None = None
+    reasoning_effort: str | None = None
+    workspace: Path | None = None
+    bot_name: str = "Assistant"
+    voice: str = ""
+    quick: bool = False
+    check: bool = False
+    test_model: bool = False
+    test_prompt: str = "Reply with exactly: agentm-ok"
+    install_demo_scenarios: bool = True
+    install_skills: bool = True
+    seed_persona_files: bool = True
+    force_model: bool = False
+
+
 def _infer_model_setup(
     *,
     profile: str | None,
@@ -551,27 +573,7 @@ async def _test_model_request(
     return 0
 
 
-def run_setup(
-    *,
-    profile: str | None = None,
-    provider: str | None = None,
-    model: str | None = None,
-    api_key: str | None = None,
-    base_url: str | None = None,
-    context_window: int | None = None,
-    reasoning_effort: str | None = None,
-    workspace: Path | None = None,
-    bot_name: str = "Assistant",
-    voice: str = "",
-    quick: bool = False,
-    check: bool = False,
-    test_model: bool = False,
-    test_prompt: str = "Reply with exactly: agentm-ok",
-    install_demo_scenarios: bool = True,
-    install_skills: bool = True,
-    seed_persona_files: bool = True,
-    force_model: bool = False,
-) -> int:
+def run_setup(config: SetupConfig) -> int:
     """Fast setup path for tool-installed AgentM.
 
     The default is intentionally low-friction: reuse an existing
@@ -580,15 +582,17 @@ def run_setup(
     non-interactive for scripts.
     """
 
-    workspace_path = expand_path(workspace) if workspace is not None else Path.cwd()
-    if check:
+    workspace_path = (
+        expand_path(config.workspace) if config.workspace is not None else Path.cwd()
+    )
+    if config.check:
         _print_status(workspace_path)
-        if test_model:
+        if config.test_model:
             return asyncio.run(
                 _test_model_request(
                     workspace=workspace_path,
-                    model_name=model,
-                    prompt=test_prompt,
+                    model_name=config.model,
+                    prompt=config.test_prompt,
                 )
             )
         return 0
@@ -598,21 +602,30 @@ def run_setup(
     has_existing_model = _has_existing_default_model()
     explicit_model_input = any(
         value is not None
-        for value in (profile, provider, api_key, base_url, context_window, reasoning_effort)
-    ) or (model is not None and (force_model or not has_existing_model))
+        for value in (
+            config.profile,
+            config.provider,
+            config.api_key,
+            config.base_url,
+            config.context_window,
+            config.reasoning_effort,
+        )
+    ) or (
+        config.model is not None and (config.force_model or not has_existing_model)
+    )
     config_path: Path | None = None
-    if has_existing_model and not force_model and not explicit_model_input:
+    if has_existing_model and not config.force_model and not explicit_model_input:
         typer.echo(f"  model:     kept existing {_config_path()}")
     else:
         inferred = _infer_model_setup(
-            profile=profile,
-            provider=provider,
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
+            profile=config.profile,
+            provider=config.provider,
+            model=config.model,
+            api_key=config.api_key,
+            base_url=config.base_url,
         )
         key = inferred.api_key
-        if not key and not quick:
+        if not key and not config.quick:
             key = typer.prompt(
                 f"API key for {inferred.provider}",
                 hide_input=True,
@@ -630,8 +643,8 @@ def run_setup(
             model=inferred.model,
             api_key=key,
             base_url=inferred.base_url,
-            context_window=context_window,
-            reasoning_effort=reasoning_effort,
+            context_window=config.context_window,
+            reasoning_effort=config.reasoning_effort,
         )
         typer.echo(
             f"  model:     wrote {config_path} "
@@ -641,8 +654,12 @@ def run_setup(
     workspace_path = ensure_workspace(workspace_path)
 
     persona_paths: list[Path] = []
-    if seed_persona_files:
-        persona_paths = seed_persona(workspace_path, name=bot_name, voice=voice)
+    if config.seed_persona_files:
+        persona_paths = seed_persona(
+            workspace_path,
+            name=config.bot_name,
+            voice=config.voice,
+        )
         if persona_paths:
             typer.echo(
                 "  persona:   wrote "
@@ -652,7 +669,7 @@ def run_setup(
             typer.echo("  persona:   already present")
 
     skills_written: list[Path] = []
-    if install_skills:
+    if config.install_skills:
         skills_written = install_bundled_skills(overwrite=False)
         if skills_written:
             typer.echo(
@@ -662,7 +679,7 @@ def run_setup(
         else:
             typer.echo("  skills:    already present or unavailable")
 
-    if install_demo_scenarios:
+    if config.install_demo_scenarios:
         from agentm.contrib_sync import sync_demo_scenarios
 
         records = sync_demo_scenarios(overwrite=False)
@@ -689,12 +706,12 @@ def run_setup(
     typer.echo("  agentm daemon status")
     typer.echo("  agentm trace messages --latest")
 
-    if test_model:
+    if config.test_model:
         return asyncio.run(
             _test_model_request(
                 workspace=workspace_path,
-                model_name=model,
-                prompt=test_prompt,
+                model_name=config.model,
+                prompt=config.test_prompt,
             )
         )
     _ = config_path
