@@ -990,6 +990,7 @@ requirements:
     status: implemented
     confidence: confirmed
     code:
+      - path: .gitignore
       - path: src/agentm/core/abi/events.py
       - path: src/agentm/core/abi/__init__.py
       - path: src/agentm/extensions/builtin/background_exec.py

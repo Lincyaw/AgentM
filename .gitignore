@@ -48,6 +48,10 @@ datasets/
 .claude/tasks/
 .claude/plans/
 
+# Transient TUI verification captures. Curated captures live under
+# .agent/tui-dev/<topic>/ and stay explicitly tracked when useful.
+.agent/tui-dev/captures/
+
 # llmharness local experiment outputs (audit dumps, eval DBs, per-iter runs)
 contrib/extensions/llmharness/runs/
 runs/
