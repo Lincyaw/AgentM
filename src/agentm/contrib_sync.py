@@ -13,7 +13,7 @@ from typing import Annotated
 import typer
 from loguru import logger
 
-from agentm.core.lib.user_config import agentm_home_dir
+from agentm.core.lib import agentm_home_dir, expand_path
 
 
 class SyncMode(str, Enum):
@@ -124,9 +124,9 @@ def sync_contrib(
     if invalid:
         raise ValueError(f"unknown contrib kind(s): {', '.join(invalid)}")
 
-    home_root = (home or agentm_home_dir()).expanduser()
+    home_root = expand_path(home) if home is not None else agentm_home_dir()
     contrib_root = home_root / "contrib"
-    explicit_root = source.expanduser().resolve() if source is not None else None
+    explicit_root = expand_path(source).resolve() if source is not None else None
     records: list[SyncRecord] = []
 
     for kind in selected:
@@ -190,7 +190,7 @@ def sync_demo_scenarios(
     """
 
     selected = names or list(DEMO_SCENARIOS)
-    home_root = (home or agentm_home_dir()).expanduser()
+    home_root = expand_path(home) if home is not None else agentm_home_dir()
     scenarios_root = home_root / "contrib" / "scenarios"
     records: list[SyncRecord] = []
 
