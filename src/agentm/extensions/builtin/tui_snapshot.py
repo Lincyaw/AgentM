@@ -10,6 +10,8 @@ ANSI escape stripping (the model gets clean layout text) and a staleness
 header (the model knows how old the frame is, since the dump is
 user-triggered). The dump path is ``$AGENTM_TUI_DUMP`` or, failing that,
 ``/tmp/agentm-tui-dump.txt`` — the same default ``terminal-go`` writes to.
+User paths such as ``~/agentm-tui-dump.txt`` are expanded consistently for
+the config value, environment override, and per-call path argument.
 """
 
 from __future__ import annotations
@@ -75,18 +77,21 @@ class _TuiSnapshotArgs(BaseModel):
 def _strip_ansi(text: str) -> str:
     return _CSI_RE.sub("", _OSC_RE.sub("", text))
 
-def _resolve_path(configured: str | None, arg: Any) -> str:
+def _resolve_path(configured: str | None, arg: Any) -> Path:
     if isinstance(arg, str) and arg:
-        return arg
+        return Path(arg).expanduser()
     if configured:
-        return configured
-    return os.environ.get("AGENTM_TUI_DUMP") or _DEFAULT_DUMP_PATH
+        return Path(configured).expanduser()
+    env_path = os.environ.get("AGENTM_TUI_DUMP")
+    if env_path:
+        return Path(env_path).expanduser()
+    return Path(_DEFAULT_DUMP_PATH)
 
 def install(api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
     configured_path = config.dump_path
 
     async def _execute(args: dict[str, Any]) -> ToolResult:
-        path = Path(_resolve_path(configured_path, args.get("path")))
+        path = _resolve_path(configured_path, args.get("path"))
         if not path.is_file():
             return _error(
                 f"No TUI dump at {path}. Ask the user to press /dump (or run "

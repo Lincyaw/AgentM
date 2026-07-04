@@ -48,6 +48,19 @@ class GatewayDaemonConfig:
     reload: bool = False
     poll_interval: float = 1.0
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "cwd", self.cwd.expanduser())
+        for field_name in (
+            "bind_token_file",
+            "tls_cert",
+            "tls_key",
+            "state_dir",
+            "gateway_log",
+        ):
+            path = getattr(self, field_name)
+            if path is not None:
+                object.__setattr__(self, field_name, path.expanduser())
+
 
 @dataclass(frozen=True, slots=True)
 class GatewayDaemonStatus:

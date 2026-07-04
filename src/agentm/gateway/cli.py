@@ -60,6 +60,10 @@ EXIT_CONFIG_ERROR = 2
 EXIT_SIGINT = 130
 
 
+def _expand_user_path_text(path: str | None) -> str | None:
+    return str(Path(path).expanduser()) if path else None
+
+
 def _restore_terminal() -> None:
     """Best-effort ``stty sane`` so Ctrl-C works even if a prior program
     (e.g. a crashed TUI) left the PTY in raw mode."""
@@ -108,7 +112,11 @@ class BindSpec:
 
 def _load_tokens_file(path: str) -> set[str]:
     try:
-        return set(load_token_file(path, option_name="--bind-token-file"))
+        return set(
+            load_token_file(
+                str(Path(path).expanduser()), option_name="--bind-token-file"
+            )
+        )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -124,6 +132,9 @@ def _resolve_bind(
     tls_key: str | None,
 ) -> BindSpec:
     """Merge CLI flags > shared default into a :class:`BindSpec`."""
+    bind_token_file = _expand_user_path_text(bind_token_file)
+    tls_cert = _expand_user_path_text(tls_cert)
+    tls_key = _expand_user_path_text(tls_key)
     url = bind or default_socket_url(create_runtime_dir=True)
     parsed = urlparse(str(url))
     scheme = parsed.scheme
@@ -516,7 +527,10 @@ async def _arun(
     )
     raw_model = model_flag
 
-    resolved_state_dir = state_dir or (agentm_home_dir() / "gateway")
+    if state_dir is not None:
+        resolved_state_dir = state_dir.expanduser()
+    else:
+        resolved_state_dir = agentm_home_dir() / "gateway"
     _validate_scenario(scenario)
 
     if check:

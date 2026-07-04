@@ -1020,6 +1020,9 @@ requirements:
       match core AgentM semantics, including ``~`` expansion inside
       ``AGENTM_HOME``, so AgentM does not write user-scoped state under the
       source checkout or treat a tilde override as a literal relative path.
+      Path-like user overrides for terminal diagnostics and gateway process
+      state must also expand ``~`` before opening files or creating
+      directories.
       Gateway daemon socket paths must also honor ``AGENTM_RUNTIME_DIR`` with
       the same ``~`` expansion in Python and terminal-go clients.
     priority: P1
@@ -1043,6 +1046,7 @@ requirements:
       - path: src/agentm/extensions/loader.py
       - path: src/agentm/extensions/builtin/skill_loader.py
       - path: src/agentm/extensions/builtin/prompt_templates.py
+      - path: src/agentm/extensions/builtin/tui_snapshot.py
       - path: src/agentm/gateway/commands/skill_command.py
       - path: src/agentm/onboard.py
       - path: contrib/gateway-peers/terminal-go/internal/wire/resolve.go
