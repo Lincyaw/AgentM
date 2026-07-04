@@ -658,7 +658,5 @@ __all__ = [
     "Unsubscribe",
     "UnknownCommandError",
     "UnloadAtomResult",
-    "_INSTALLING_EXTENSION",
-    "_SessionGateway",
     "current_installing_extension",
 ]
