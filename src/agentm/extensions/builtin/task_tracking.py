@@ -43,8 +43,15 @@ _Status = Literal["pending", "in_progress", "completed"]
 
 class _Task:
     __slots__ = (
-        "id", "subject", "description", "active_form",
-        "status", "parent_id", "blocks", "blocked_by", "metadata",
+        "id",
+        "subject",
+        "description",
+        "active_form",
+        "status",
+        "parent_id",
+        "blocks",
+        "blocked_by",
+        "metadata",
     )
 
     def __init__(
@@ -94,6 +101,7 @@ class _Task:
 # ---------------------------------------------------------------------------
 # Manager
 # ---------------------------------------------------------------------------
+
 
 class _TaskManager:
     def __init__(self) -> None:
@@ -160,13 +168,13 @@ class _TaskManager:
 
     def add_blocks(self, task_id: str, target_ids: list[str]) -> str | None:
         for tid in target_ids:
-            if (err := self._link_dependency(task_id, tid)):
+            if err := self._link_dependency(task_id, tid):
                 return err
         return None
 
     def add_blocked_by(self, task_id: str, blocker_ids: list[str]) -> str | None:
         for bid in blocker_ids:
-            if (err := self._link_dependency(bid, task_id)):
+            if err := self._link_dependency(bid, task_id):
                 return err
         return None
 
@@ -195,23 +203,50 @@ MANIFEST = ExtensionManifest(
 # Tool schemas (Pydantic → JSON Schema via pydantic_to_tool_schema)
 # ---------------------------------------------------------------------------
 
+
 class _CreateParams(BaseModel):
-    subject: str = Field(description="Brief, actionable title in imperative form (e.g. 'Fix authentication bug in login flow').")
+    subject: str = Field(
+        description=(
+            "Brief, actionable title in imperative form "
+            "(e.g. 'Fix authentication bug in login flow')."
+        )
+    )
     description: str = Field(description="What needs to be done.")
-    active_form: str | None = Field(default=None, description="Present-continuous form shown while in_progress (e.g. 'Fixing authentication bug').")
-    parent_id: str | None = Field(default=None, description="ID of a parent task to nest under.")
-    metadata: dict[str, Any] | None = Field(default=None, description="Arbitrary metadata to attach.")
+    active_form: str | None = Field(
+        default=None,
+        description=(
+            "Present-continuous form shown while in_progress "
+            "(e.g. 'Fixing authentication bug')."
+        ),
+    )
+    parent_id: str | None = Field(
+        default=None, description="ID of a parent task to nest under."
+    )
+    metadata: dict[str, Any] | None = Field(
+        default=None, description="Arbitrary metadata to attach."
+    )
 
 
 class _UpdateParams(BaseModel):
     task_id: str = Field(description="The ID of the task to update.")
-    status: Literal["pending", "in_progress", "completed", "deleted"] | None = Field(default=None, description="New status. 'deleted' permanently removes the task.")
+    status: Literal["pending", "in_progress", "completed", "deleted"] | None = Field(
+        default=None, description="New status. 'deleted' permanently removes the task."
+    )
     subject: str | None = Field(default=None, description="New subject.")
     description: str | None = Field(default=None, description="New description.")
     active_form: str | None = Field(default=None, description="New active-form text.")
-    metadata: dict[str, Any] | None = Field(default=None, description="Metadata keys to merge. Set a key to null to delete it.")
-    add_blocks: list[str] | None = Field(default=None, description="Task IDs that cannot start until this one completes.")
-    add_blocked_by: list[str] | None = Field(default=None, description="Task IDs that must complete before this one can start.")
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Metadata keys to merge. Set a key to null to delete it.",
+    )
+    add_blocks: list[str] | None = Field(
+        default=None,
+        description="Task IDs that cannot start until this one completes.",
+    )
+    add_blocked_by: list[str] | None = Field(
+        default=None,
+        description="Task IDs that must complete before this one can start.",
+    )
 
 
 class _GetParams(BaseModel):
@@ -226,8 +261,13 @@ class _ListParams(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _ok(payload: Any) -> ToolResult:
-    text = json.dumps(payload, ensure_ascii=False) if not isinstance(payload, str) else payload
+    text = (
+        json.dumps(payload, ensure_ascii=False)
+        if not isinstance(payload, str)
+        else payload
+    )
     return ToolResult(content=[TextContent(type="text", text=text)])
 
 
@@ -245,18 +285,68 @@ def _optional_id_list(args: dict[str, Any], key: str) -> list[str] | ToolResult 
 
 
 # ---------------------------------------------------------------------------
-# install
+# Runtime
 # ---------------------------------------------------------------------------
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    mgr = _TaskManager()
 
-    async def _create(args: dict[str, Any]) -> ToolResult:
+class _TaskTrackingRuntime:
+    def __init__(self) -> None:
+        self._mgr = _TaskManager()
+
+    def install(self, api: ExtensionAPI) -> None:
+        api.register_tool(
+            FunctionTool(
+                name="task_create",
+                description=(
+                    "Create a structured task to track progress on a multi-step "
+                    "piece of work. Use for complex work that benefits from "
+                    "decomposition and progress tracking."
+                ),
+                parameters=pydantic_to_tool_schema(_CreateParams),
+                fn=self.create,
+            )
+        )
+        api.register_tool(
+            FunctionTool(
+                name="task_update",
+                description=(
+                    "Update a task's status, subject, description, or "
+                    "dependencies. Set status to 'in_progress' when starting "
+                    "work, 'completed' when done, 'deleted' to remove."
+                ),
+                parameters=pydantic_to_tool_schema(_UpdateParams),
+                fn=self.update,
+            )
+        )
+        api.register_tool(
+            FunctionTool(
+                name="task_list",
+                description=(
+                    "List all tasks with their status and blockers. Use to "
+                    "check overall progress or find available work."
+                ),
+                parameters=pydantic_to_tool_schema(_ListParams),
+                fn=self.list_tasks,
+            )
+        )
+        api.register_tool(
+            FunctionTool(
+                name="task_get",
+                description=(
+                    "Get full details of a task including description, "
+                    "dependencies, and metadata."
+                ),
+                parameters=pydantic_to_tool_schema(_GetParams),
+                fn=self.get,
+            )
+        )
+
+    async def create(self, args: dict[str, Any]) -> ToolResult:
         parent_id = args.get("parent_id")
-        if parent_id is not None and mgr.get(str(parent_id)) is None:
+        if parent_id is not None and self._mgr.get(str(parent_id)) is None:
             return _error(f"parent task {parent_id!r} not found")
 
-        task = mgr.create(
+        task = self._mgr.create(
             subject=str(args["subject"]),
             description=str(args["description"]),
             active_form=args.get("active_form"),
@@ -265,20 +355,44 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         )
         return _ok(task.to_detail())
 
-    async def _update(args: dict[str, Any]) -> ToolResult:
+    async def update(self, args: dict[str, Any]) -> ToolResult:
         task_id = str(args["task_id"])
 
         status = args.get("status")
         if status == "deleted":
-            removed = mgr.delete(task_id)
+            removed = self._mgr.delete(task_id)
             if removed is None:
                 return _error(f"task {task_id!r} not found")
             return _ok({"deleted": task_id})
 
-        task = mgr.get(task_id)
+        task = self._mgr.get(task_id)
         if task is None:
             return _error(f"task {task_id!r} not found")
 
+        self._update_fields(task, args)
+        if error := self._update_metadata(task, args):
+            return error
+        if error := self._update_dependencies(task_id, args):
+            return error
+        if error := self._update_status(task, status):
+            return error
+
+        return _ok(task.to_detail())
+
+    async def list_tasks(self, args: dict[str, Any]) -> ToolResult:  # noqa: ARG002
+        tasks = self._mgr.list_all()
+        if not tasks:
+            return _ok({"tasks": [], "summary": "No tasks."})
+        return _ok({"tasks": [t.to_summary() for t in tasks]})
+
+    async def get(self, args: dict[str, Any]) -> ToolResult:
+        task = self._mgr.get(str(args["task_id"]))
+        if task is None:
+            return _error(f"task {args['task_id']!r} not found")
+        return _ok(task.to_detail())
+
+    @staticmethod
+    def _update_fields(task: _Task, args: dict[str, Any]) -> None:
         subject = args.get("subject")
         if subject is not None:
             task.subject = str(subject)
@@ -289,6 +403,8 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
             active_form = args.get("active_form")
             task.active_form = str(active_form) if active_form is not None else None
 
+    @staticmethod
+    def _update_metadata(task: _Task, args: dict[str, Any]) -> ToolResult | None:
         metadata = args.get("metadata")
         if isinstance(metadata, dict):
             for k, v in metadata.items():
@@ -298,12 +414,16 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
                     task.metadata[k] = v
         elif metadata is not None:
             return _error("metadata must be an object")
+        return None
 
+    def _update_dependencies(
+        self, task_id: str, args: dict[str, Any]
+    ) -> ToolResult | None:
         add_blocks = _optional_id_list(args, "add_blocks")
         if isinstance(add_blocks, ToolResult):
             return add_blocks
         if add_blocks:
-            err = mgr.add_blocks(task_id, add_blocks)
+            err = self._mgr.add_blocks(task_id, add_blocks)
             if err:
                 return _error(err)
 
@@ -311,75 +431,24 @@ def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
         if isinstance(add_blocked_by, ToolResult):
             return add_blocked_by
         if add_blocked_by:
-            err = mgr.add_blocked_by(task_id, add_blocked_by)
+            err = self._mgr.add_blocked_by(task_id, add_blocked_by)
             if err:
                 return _error(err)
+        return None
 
+    def _update_status(self, task: _Task, status: Any) -> ToolResult | None:
         if status is not None:
-            if status not in ("pending", "in_progress", "completed"):
-                return _error(f"invalid status {status!r}")
             if status == "completed":
-                mgr.complete(task)
+                self._mgr.complete(task)
+            elif status == "pending":
+                task.status = "pending"
+            elif status == "in_progress":
+                task.status = "in_progress"
             else:
-                task.status = status  # type: ignore[assignment]
+                return _error(f"invalid status {status!r}")
+        return None
 
-        return _ok(task.to_detail())
 
-    async def _list(args: dict[str, Any]) -> ToolResult:  # noqa: ARG001
-        tasks = mgr.list_all()
-        if not tasks:
-            return _ok({"tasks": [], "summary": "No tasks."})
-        return _ok({"tasks": [t.to_summary() for t in tasks]})
-
-    async def _get(args: dict[str, Any]) -> ToolResult:
-        task = mgr.get(str(args["task_id"]))
-        if task is None:
-            return _error(f"task {args['task_id']!r} not found")
-        return _ok(task.to_detail())
-
-    api.register_tool(
-        FunctionTool(
-            name="task_create",
-            description=(
-                "Create a structured task to track progress on a multi-step "
-                "piece of work. Use for complex work that benefits from "
-                "decomposition and progress tracking."
-            ),
-            parameters=pydantic_to_tool_schema(_CreateParams),
-            fn=_create,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="task_update",
-            description=(
-                "Update a task's status, subject, description, or "
-                "dependencies. Set status to 'in_progress' when starting "
-                "work, 'completed' when done, 'deleted' to remove."
-            ),
-            parameters=pydantic_to_tool_schema(_UpdateParams),
-            fn=_update,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="task_list",
-            description=(
-                "List all tasks with their status and blockers. Use to "
-                "check overall progress or find available work."
-            ),
-            parameters=pydantic_to_tool_schema(_ListParams),
-            fn=_list,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="task_get",
-            description=(
-                "Get full details of a task including description, "
-                "dependencies, and metadata."
-            ),
-            parameters=pydantic_to_tool_schema(_GetParams),
-            fn=_get,
-        )
-    )
+def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    del config
+    _TaskTrackingRuntime().install(api)
