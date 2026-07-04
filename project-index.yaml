@@ -584,6 +584,7 @@ requirements:
       - path: contrib/extensions/llmharness/src/llmharness/eval/telbench/iterate.py
       - path: contrib/scenarios/rca/src/rca_evolution/cli.py
       - path: contrib/scenarios/rca/src/rca_evolution/loop.py
+      - path: contrib/scenarios/rca/pyproject.toml
       - path: contrib/scenarios/rca/src/rca_eval/agent.py
       - path: contrib/scenarios/rca/src/rca_eval/seed_dataset.py
       - path: contrib/scenarios/verifier/cli.py
