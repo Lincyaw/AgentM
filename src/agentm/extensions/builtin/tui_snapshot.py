@@ -34,10 +34,12 @@ from agentm.core.abi import (
 from agentm.core.lib import expand_path
 from agentm.extensions import ExtensionManifest
 
+
 class TuiSnapshotConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     dump_path: str | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="tui_snapshot",
@@ -55,13 +57,13 @@ _DEFAULT_DUMP_PATH: Final[str] = "/tmp/agentm-tui-dump.txt"
 _CSI_RE: Final = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _OSC_RE: Final = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
+
 class _TuiSnapshotArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: str | None = Field(
         default=None,
         description=(
-            "Dump file to read. Defaults to $AGENTM_TUI_DUMP or "
-            f"{_DEFAULT_DUMP_PATH}."
+            f"Dump file to read. Defaults to $AGENTM_TUI_DUMP or {_DEFAULT_DUMP_PATH}."
         ),
     )
     raw: bool = Field(
@@ -76,8 +78,10 @@ class _TuiSnapshotArgs(BaseModel):
         description="Return only the last N lines. Omit for the whole frame.",
     )
 
+
 def _strip_ansi(text: str) -> str:
     return _CSI_RE.sub("", _OSC_RE.sub("", text))
+
 
 def _resolve_path(configured: str | None, arg: Any) -> Path:
     if isinstance(arg, str) and arg:
@@ -89,11 +93,31 @@ def _resolve_path(configured: str | None, arg: Any) -> Path:
         return expand_path(env_path)
     return Path(_DEFAULT_DUMP_PATH)
 
-def install(api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
-    configured_path = config.dump_path
 
-    async def _execute(args: dict[str, Any]) -> ToolResult:
-        path = _resolve_path(configured_path, args.get("path"))
+class _TuiSnapshotRuntime:
+    def __init__(self, api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
+        self._api = api
+        self._configured_path = config.dump_path
+
+    def install(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="tui_snapshot",
+                description=(
+                    "Read the latest terminal-client screen dump so you can see "
+                    "the TUI the user sees. The dump is written when the user "
+                    "runs /dump in the client. Use this to diagnose rendering, "
+                    "layout, or interaction bugs you cannot infer from the "
+                    "conversation alone."
+                ),
+                parameters=_TuiSnapshotArgs,
+                fn=self.execute,
+                metadata={"file_op": "read"},
+            )
+        )
+
+    async def execute(self, args: dict[str, Any]) -> ToolResult:
+        path = _resolve_path(self._configured_path, args.get("path"))
         if not path.is_file():
             return _error(
                 f"No TUI dump at {path}. Ask the user to press /dump (or run "
@@ -119,24 +143,14 @@ def install(api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
             )
         return _ok(header + text)
 
-    api.register_tool(
-        FunctionTool(
-            name="tui_snapshot",
-            description=(
-                "Read the latest terminal-client screen dump so you can see "
-                "the TUI the user sees. The dump is written when the user "
-                "runs /dump in the client. Use this to diagnose rendering, "
-                "layout, or interaction bugs you cannot infer from the "
-                "conversation alone."
-            ),
-            parameters=_TuiSnapshotArgs,
-            fn=_execute,
-            metadata={"file_op": "read"},
-        )
-    )
+
+def install(api: ExtensionAPI, config: TuiSnapshotConfig) -> None:
+    _TuiSnapshotRuntime(api, config).install()
+
 
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
+
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
