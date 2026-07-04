@@ -40,10 +40,10 @@ def autoload_dotenv(cwd: Path | None = None) -> None:
 
     base = cwd if cwd is not None else Path.cwd()
     try:
-        base = base.expanduser().resolve()
+        base = expand_path(base).resolve()
     except OSError as exc:
         logger.debug("env: could not resolve dotenv base {}: {}", base, exc)
-        base = base.expanduser()
+        base = expand_path(base)
 
     local_candidates: list[Path] = [base / ".env"]
     walker = base
