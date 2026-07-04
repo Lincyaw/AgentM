@@ -55,6 +55,7 @@ from agentm.core.abi.operations import (
 )
 from agentm.core.abi.project_layout import ProjectLayout
 from agentm.core.abi.resource import ResourceWriter
+from agentm.core.lib.paths import expand_path
 from agentm.core.runtime.session_inbox import InboxItem, SessionInbox
 from agentm.core.observability.otel_export import (
     SessionTelemetry,
@@ -207,12 +208,18 @@ def _default_session_telemetry_factory(
     def _build() -> SessionTelemetry:
         return setup_session_telemetry(
             session_id=session_id,
-            cwd=Path(cwd) if cwd else Path.cwd(),
+            cwd=_scope_cwd_path(cwd),
             scenario_name=scenario,
             file_path=file_path,
         )
 
     return _build
+
+
+def _scope_cwd_path(cwd: str) -> Path:
+    if not cwd:
+        return Path.cwd().resolve()
+    return expand_path(cwd).resolve()
 
 
 # --- Concrete impl ----------------------------------------------------------
@@ -280,10 +287,11 @@ def build_extension_api_scope(
     telemetry_factory: SessionTelemetryFactory | None = None,
     service_registry: dict[str, Any] | None = None,
 ) -> ExtensionAPIScope:
-    resolved_layout = project_layout or default_project_layout(cwd)
+    resolved_cwd = str(_scope_cwd_path(cwd))
+    resolved_layout = project_layout or default_project_layout(resolved_cwd)
     return ExtensionAPIScope(
         bus=bus,
-        cwd=cwd,
+        cwd=resolved_cwd,
         scenario_dir=scenario_dir,
         session_id=session_id,
         # If no trace_id is supplied, the session is its own trace —
@@ -311,12 +319,12 @@ def build_extension_api_scope(
         child_session_factory=child_session_factory or _NoopChildSessionFactory(),
         resource_writer=_ResourceWriterHolder(
             resource_writer
-            or GitBackedResourceWriter(cwd=cwd, session_id=session_id, bus=bus)
+            or GitBackedResourceWriter(cwd=resolved_cwd, session_id=session_id, bus=bus)
         ),
         telemetry=_SessionTelemetryHolder(
             telemetry_factory
             or _default_session_telemetry_factory(
-                cwd=cwd,
+                cwd=resolved_cwd,
                 session_id=session_id,
                 scenario=scenario,
                 file_path=session_file,
