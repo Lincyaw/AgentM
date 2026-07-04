@@ -29,6 +29,11 @@ from typing import Any
 from loguru import logger
 
 from agentm.core.abi.session_store import SessionState, SessionStore
+from agentm.core.lib.paths import expand_path
+
+
+def _session_cwd_path(cwd: str | Path) -> Path:
+    return expand_path(cwd).resolve()
 
 
 class ClickHouseSessionStore:
@@ -160,7 +165,7 @@ def make_default_session_store(cwd: str) -> SessionStore:
         # JSONL store. Log so an operator who expected CH knows why it fell back.
         logger.debug("session store: ClickHouse unavailable, using JSONL store: {}", exc)
     from agentm.core.runtime.session_manager import JsonlSessionStore
-    return JsonlSessionStore(cwd=Path(cwd))
+    return JsonlSessionStore(cwd=_session_cwd_path(cwd))
 
 
 def resolve_session_state(
@@ -199,11 +204,12 @@ def resolve_session_state(
         )
     if resume:
         return session_store.open(resume)
+    cwd_path = _session_cwd_path(cwd)
     if continue_recent:
-        state = session_store.most_recent(Path(cwd))
+        state = session_store.most_recent(cwd_path)
         if state is not None:
             return state
-    return session_store.create(Path(cwd))
+    return session_store.create(cwd_path)
 
 
 __all__ = ["make_default_session_store", "resolve_session_state"]
