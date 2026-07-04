@@ -260,7 +260,6 @@ def install(api: ExtensionAPI, config: ToolCatalogMutateConfig) -> None:
     async def _unload_atom_tool(args: dict[str, Any]) -> ToolResult:
         result = api.unload_atom(
             str(args["name"]),
-            rationale=(str(args["rationale"]) if "rationale" in args else None),
             agent_initiated=True,
         )
         payload = _serialize_result(result)

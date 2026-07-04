@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 
 from agentm.core.abi import AtomInfo, ExtensionAPI
+from agentm.core.lib import expand_path, expand_path_from_cwd
 
 class ResolvedCatalogPath:
     def __init__(
@@ -22,12 +23,8 @@ class ResolvedCatalogPath:
 
 def catalog_root(api: ExtensionAPI, raw_root: str | None = None) -> Path:
     if raw_root is None:
-        root = Path(api.cwd)
-    else:
-        root = Path(raw_root)
-        if not root.is_absolute():
-            root = Path(api.cwd) / root
-    return root.resolve()
+        return expand_path(api.cwd).resolve()
+    return expand_path_from_cwd(raw_root, api.cwd).resolve()
 
 def resolve_catalog_path(
     api: ExtensionAPI,
@@ -37,7 +34,7 @@ def resolve_catalog_path(
     atoms = api.list_atoms()
     atom = _atom_by_name(atoms, raw_path)
     if atom is not None and atom.source_path is not None:
-        source_path = Path(atom.source_path).resolve()
+        source_path = expand_path(atom.source_path).resolve()
         git_path = PurePosixPath(source_path.relative_to(root)).as_posix()
         return ResolvedCatalogPath(
             atom_name=atom.name,
@@ -46,7 +43,7 @@ def resolve_catalog_path(
             writer_path=str(source_path),
         )
 
-    candidate = Path(raw_path)
+    candidate = expand_path(raw_path)
     if candidate.is_absolute():
         resolved = candidate.resolve()
         try:
@@ -58,7 +55,7 @@ def resolve_catalog_path(
     else:
         resolved = (root / candidate).resolve()
         git_path = PurePosixPath(candidate).as_posix()
-        writer_path = raw_path
+        writer_path = str(resolved)
 
     matched = _atom_by_source_path(atoms, resolved)
     if matched is not None:
@@ -66,9 +63,11 @@ def resolve_catalog_path(
             atom_name=matched.name,
             display_path=raw_path,
             git_path=git_path,
-            writer_path=str(Path(matched.source_path).resolve())
-            if matched.source_path is not None
-            else writer_path,
+            writer_path=(
+                str(expand_path(matched.source_path).resolve())
+                if matched.source_path is not None
+                else writer_path
+            ),
         )
 
     return ResolvedCatalogPath(
@@ -89,7 +88,7 @@ def _atom_by_source_path(atoms: list[AtomInfo], resolved: Path) -> AtomInfo | No
         if atom.source_path is None:
             continue
         try:
-            if Path(atom.source_path).resolve() == resolved:
+            if expand_path(atom.source_path).resolve() == resolved:
                 return atom
         except OSError:
             continue

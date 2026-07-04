@@ -244,10 +244,6 @@ class AtomUninstallCommand(_AtomVerbBase):
             result = api.unload_atom(
                 name=atom_name,
                 agent_initiated=False,
-                rationale=(
-                    f"User {ctx.sender_id} invoked /atom:uninstall "
-                    f"{atom_name} from {ctx.channel}:{ctx.chat_id}."
-                ),
             )
         except Exception as exc:
             logger.exception("unload_atom raised")

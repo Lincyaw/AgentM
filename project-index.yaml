@@ -500,6 +500,7 @@ requirements:
       - path: src/agentm/gateway/commands/registry.py
       - path: src/agentm/gateway/commands/router.py
       - path: src/agentm/gateway/commands/skill_command.py
+      - path: src/agentm/gateway/commands/atom_command.py
       - path: src/agentm/gateway/commands/builtins/model.py
       - path: src/agentm/gateway/commands/builtins/scenario.py
       - path: src/agentm/ai/types.py
@@ -1089,6 +1090,7 @@ requirements:
       - path: contrib/extensions/cc/agents.py
       - path: contrib/extensions/cc/commands.py
       - path: contrib/extensions/cc/plugins.py
+      - path: contrib/extensions/tool_catalog/_paths.py
       - path: src/agentm/gateway/commands/skill_command.py
       - path: src/agentm/onboard.py
       - path: contrib/gateway-peers/terminal-go/main.go
