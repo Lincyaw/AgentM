@@ -24,6 +24,7 @@ from agentm.core.lib.paths import (
     expand_optional_path_text,
     expand_path,
     expand_path_text,
+    parsed_unix_socket_path,
 )
 from agentm.core.lib.read_state import (
     FileReadState,
@@ -82,6 +83,7 @@ __all__ = [
     "get_read_state",
     "list_artifacts_for_task",
     "parse_frontmatter",
+    "parsed_unix_socket_path",
     "pydantic_to_openai_tool_schema",
     "pydantic_to_tool_schema",
     "record_read",

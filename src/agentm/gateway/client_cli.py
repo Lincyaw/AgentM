@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import ssl
 from dataclasses import dataclass
-from urllib.parse import ParseResult
 from urllib.parse import urlparse
 
-from agentm.core.lib.paths import expand_path_text as _expand_path_text
+from agentm.core.lib.paths import (
+    expand_path_text as _expand_path_text,
+    parsed_unix_socket_path,
+)
 
 from .transport import ClientTransport, UnixClientTransport, WebSocketClientTransport
 
@@ -43,12 +45,6 @@ class ConnectOptions:
     tls_ca: str | None = None
 
 
-def _unix_socket_path_text(parsed: ParseResult) -> str:
-    if parsed.netloc:
-        return f"{parsed.netloc}{parsed.path}"
-    return parsed.path
-
-
 def resolve_connect(
     url: str,
     *,
@@ -65,7 +61,7 @@ def resolve_connect(
             raise ConnectError(
                 "--tls-ca is only meaningful with wss:// (got unix://)."
             )
-        socket_path = _expand_path_text(_unix_socket_path_text(parsed))
+        socket_path = _expand_path_text(parsed_unix_socket_path(parsed))
         if not socket_path or not socket_path.startswith("/"):
             raise ConnectError(
                 f"--connect URL {url!r} has no absolute socket path"

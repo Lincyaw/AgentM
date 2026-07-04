@@ -24,7 +24,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from agentm.core.lib.paths import expand_path as _expand_path
+from agentm.core.lib.paths import (
+    expand_path as _expand_path,
+    parsed_unix_socket_path,
+)
 from agentm.core.lib.user_config import agentm_home_dir
 
 
@@ -38,9 +41,7 @@ def _unix_socket_path_text(connect_url: str) -> str:
         raise GatewayDaemonError(
             f"local gateway daemon only supports unix:// sockets, got {connect_url!r}"
         )
-    if parsed.netloc:
-        return f"{parsed.netloc}{parsed.path}"
-    return parsed.path
+    return parsed_unix_socket_path(parsed)
 
 
 def _expand_connect_url(connect_url: str) -> str:

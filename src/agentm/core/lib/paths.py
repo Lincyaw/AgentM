@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import ParseResult
 
 
 def expand_path(path: Path | str) -> Path:
@@ -27,3 +28,16 @@ def expand_optional_path_text(path: Path | str | None) -> str | None:
     if not raw_path:
         return None
     return expand_path_text(raw_path)
+
+
+def parsed_unix_socket_path(parsed: ParseResult) -> str:
+    """Return the socket path encoded in a parsed ``unix://`` URL.
+
+    ``urllib.parse.urlparse("unix://~/gw.sock")`` treats ``~`` as ``netloc``
+    and ``/gw.sock`` as ``path``. For AgentM's unix-socket URLs, both pieces
+    are path text and must be rejoined before normal path expansion.
+    """
+
+    if parsed.netloc:
+        return f"{parsed.netloc}{parsed.path}"
+    return parsed.path

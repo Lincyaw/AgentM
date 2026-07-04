@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import ParseResult, urlparse
+from urllib.parse import urlparse
 
 import typer
 from loguru import logger
@@ -30,6 +30,7 @@ from loguru import logger
 from agentm.core.lib.paths import (
     expand_optional_path_text as _expand_path_text,
     expand_path as _expand_path,
+    parsed_unix_socket_path,
 )
 from agentm.env import resolve_cli_cwd
 from agentm.gateway import autoload_dotenv, default_socket_url, load_token_file
@@ -121,12 +122,6 @@ def _load_tokens_file(path: str) -> set[str]:
         raise SystemExit(str(exc)) from exc
 
 
-def _unix_socket_path_text(parsed: ParseResult) -> str:
-    if parsed.netloc:
-        return f"{parsed.netloc}{parsed.path}"
-    return parsed.path
-
-
 def _resolve_bind(
     *,
     bind: str | None,
@@ -151,7 +146,7 @@ def _resolve_bind(
                 "--tls-cert/--tls-key are only valid with ws://wss:// binds, "
                 f"not {url!r}."
             )
-        socket_path = _expand_path_text(_unix_socket_path_text(parsed))
+        socket_path = _expand_path_text(parsed_unix_socket_path(parsed))
         if not socket_path:
             raise SystemExit(
                 f"--bind {url!r} has no socket path; use unix:///abs/path/to/sock"
