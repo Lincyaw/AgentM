@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from loguru import logger
 from pydantic import BaseModel
 
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI, SYSTEM_PROMPT_PROVIDER
+from agentm.core.lib import expand_path, expand_path_from_cwd
 from agentm.extensions import ExtensionManifest
 
 class SystemPromptConfig(BaseModel):
@@ -35,7 +34,7 @@ _CONTEXT_FILENAMES = ("AGENTS.md", "CLAUDE.md")
 def _discover_context_files(cwd: str) -> str:
     """Walk from filesystem root down to *cwd*, collecting AGENTS.md / CLAUDE.md."""
     parts: list[str] = []
-    resolved = Path(cwd).resolve()
+    resolved = expand_path(cwd).resolve()
     chain = [resolved, *resolved.parents]
     chain.reverse()
     for directory in chain:
@@ -59,9 +58,10 @@ def _resolve_prompt(
     config: SystemPromptConfig, *, cwd: str, scenario_dir: str | None
 ) -> str:
     if config.prompt_file:
-        p = Path(config.prompt_file)
-        if not p.is_absolute() and scenario_dir:
-            p = Path(scenario_dir) / p
+        if scenario_dir:
+            p = expand_path_from_cwd(config.prompt_file, scenario_dir)
+        else:
+            p = expand_path(config.prompt_file)
         return p.read_text(encoding="utf-8")
     if config.prompt is not None:
         return config.prompt
