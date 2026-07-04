@@ -16,8 +16,10 @@ from pydantic import BaseModel
 from agentm.core.abi import ExtensionAPI, ToolCallEvent
 from agentm.extensions import ExtensionManifest
 
+
 class ToolBashGuardConfig(BaseModel):
     model_config = {"extra": "allow"}
+
 
 MANIFEST = ExtensionManifest(
     name="tool_bash_guard",
@@ -44,10 +46,15 @@ _BLOCKED: Final[list[tuple[re.Pattern[str], str]]] = [
     ),
 ]
 
-def install(api: ExtensionAPI, config: ToolBashGuardConfig) -> None:
-    del config
 
-    def _on_tool_call(event: ToolCallEvent) -> dict[str, Any] | None:
+class _ToolBashGuardRuntime:
+    def __init__(self, api: ExtensionAPI) -> None:
+        self._api = api
+
+    def install(self) -> None:
+        self._api.on(ToolCallEvent.CHANNEL, self.on_tool_call)
+
+    def on_tool_call(self, event: ToolCallEvent) -> dict[str, Any] | None:
         if event.tool_name != "bash":
             return None
         cmd = event.args.get("command", "")
@@ -58,4 +65,7 @@ def install(api: ExtensionAPI, config: ToolBashGuardConfig) -> None:
                 return {"block": True, "reason": reason}
         return None
 
-    api.on(ToolCallEvent.CHANNEL, _on_tool_call)
+
+def install(api: ExtensionAPI, config: ToolBashGuardConfig) -> None:
+    del config
+    _ToolBashGuardRuntime(api).install()
