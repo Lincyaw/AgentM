@@ -13,6 +13,15 @@ def expand_path(path: Path | str) -> Path:
     return Path(os.path.expandvars(str(path))).expanduser()
 
 
+def expand_path_from_cwd(path: Path | str, cwd: Path | str) -> Path:
+    """Expand ``path`` and interpret relative results under ``cwd``."""
+
+    expanded = expand_path(str(path).strip())
+    if expanded.is_absolute():
+        return expanded
+    return (Path(cwd) / expanded).absolute()
+
+
 def expand_path_text(path: Path | str) -> str:
     """Text form of :func:`expand_path` for APIs that accept plain strings."""
 

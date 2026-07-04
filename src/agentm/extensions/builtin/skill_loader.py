@@ -33,7 +33,7 @@ from agentm.core.abi import (
 )
 from pydantic import BaseModel, Field
 
-from agentm.core.lib import agentm_home_dir, parse_frontmatter
+from agentm.core.lib import agentm_home_dir, expand_path_from_cwd, parse_frontmatter
 from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
@@ -60,18 +60,6 @@ MANIFEST = ExtensionManifest(
 DEFAULT_MAX_NAME_LENGTH = 64
 DEFAULT_MAX_DESCRIPTION_LENGTH = 1024
 _NAME_PATTERN = r"^[a-z0-9-]+$"
-
-def _normalize_path(raw_path: str, cwd: str) -> str:
-    expanded = raw_path.strip()
-    if expanded == "~":
-        return str(Path.home())
-    if expanded.startswith("~/"):
-        return str(Path.home() / expanded[2:])
-    if expanded.startswith("~"):
-        return str(Path.home() / expanded[1:])
-    if os.path.isabs(expanded):
-        return expanded
-    return os.path.abspath(os.path.join(cwd, expanded))
 
 def _validate_name(
     name: str, parent_dir_name: str, *, max_name_length: int
@@ -305,7 +293,7 @@ def load_skills(
             )
 
     for raw_path in skill_paths:
-        resolved_path = _normalize_path(raw_path, cwd)
+        resolved_path = str(expand_path_from_cwd(raw_path, cwd))
         if os.path.isdir(resolved_path):
             add_batch(
                 *_load_skills_from_dir(

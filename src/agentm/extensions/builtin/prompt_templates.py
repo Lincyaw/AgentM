@@ -25,7 +25,7 @@ from agentm.core.abi import (
     ResourcesDiscoverEvent,
     SessionReadyEvent,
 )
-from agentm.core.lib import agentm_home_dir, parse_frontmatter
+from agentm.core.lib import agentm_home_dir, expand_path_from_cwd, parse_frontmatter
 from agentm.extensions import ExtensionManifest
 
 # --- Module-level helpers (private) ----------------------------------------
@@ -80,18 +80,6 @@ def _substitute_args(body: str, args: list[str]) -> str:
     result = result.replace("$ARGUMENTS", all_args)
     result = result.replace("$@", all_args)
     return result
-
-def _normalize_path(raw_path: str, cwd: str) -> str:
-    expanded = raw_path.strip()
-    if expanded == "~":
-        return str(Path.home())
-    if expanded.startswith("~/"):
-        return str(Path.home() / expanded[2:])
-    if expanded.startswith("~"):
-        return str(Path.home() / expanded[1:])
-    if os.path.isabs(expanded):
-        return expanded
-    return os.path.abspath(os.path.join(cwd, expanded))
 
 def _fallback_description(body: str) -> str:
     for line in body.split("\n"):
@@ -189,7 +177,7 @@ class _PromptRegistry:
                 )
 
         for raw_path in prompt_paths:
-            resolved_path = _normalize_path(raw_path, cwd)
+            resolved_path = str(expand_path_from_cwd(raw_path, cwd))
             if os.path.isdir(resolved_path):
                 templates.extend(_load_templates_from_dir(resolved_path, "path"))
                 continue

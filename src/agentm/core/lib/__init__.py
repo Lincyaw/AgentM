@@ -23,6 +23,7 @@ from agentm.core.lib.observability_dir import file_export_requested, resolve_obs
 from agentm.core.lib.paths import (
     expand_optional_path_text,
     expand_path,
+    expand_path_from_cwd,
     expand_path_text,
     parsed_unix_socket_path,
 )
@@ -75,6 +76,7 @@ __all__ = [
     "enumerate_turns",
     "expand_optional_path_text",
     "expand_path",
+    "expand_path_from_cwd",
     "expand_path_text",
     "file_export_requested",
     "file_modified_since_read",
