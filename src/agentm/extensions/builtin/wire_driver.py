@@ -521,36 +521,58 @@ def attach_child_wire_forwarder(
     child_bus.on(BackgroundActivityEvent.CHANNEL, _make_sync(_p_background_activity))
 
 
-def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG001
-    outbound_sink = api.get_service(WIRE_OUTBOUND_SERVICE)
-    session_key = api.get_service("session_key")
-    if outbound_sink is None or session_key is None:
-        # Mounting wire_driver outside the gateway has no effect; fail at
-        # install so the misconfiguration surfaces immediately rather than
-        # silently swallowing every session event.
-        raise RuntimeError(
-            "wire_driver requires 'wire_outbound' and 'session_key' services; "
-            "this atom only works inside the agentm gateway process."
+class _WireDriverRuntime:
+    """Per-session bus-to-wire runtime for the gateway-mounted wire driver."""
+
+    def __init__(
+        self,
+        *,
+        api: ExtensionAPI,
+        outbound_sink: Callable[[dict[str, Any]], Any],
+        session_key: str,
+        turn_context: dict[str, Any] | None,
+        approval_mgr: Any | None,
+    ) -> None:
+        self._api = api
+        self._outbound_sink = outbound_sink
+        self._session_key = session_key
+        self._turn_context = turn_context
+        self._approval_mgr = approval_mgr
+        # Holds scheduled control-frame tasks so the loop does not GC them mid-flight.
+        self._bg_tasks: set[asyncio.Task[Any]] = set()
+        self._ship = _make_ship(
+            outbound_sink=outbound_sink,
+            session_key=session_key,
+            turn_context=turn_context,
         )
-    turn_context: dict[str, Any] | None = api.get_service("turn_context")
-    approval_mgr = api.get_service(APPROVAL_MANAGER_SERVICE)
-    # Holds scheduled control-frame tasks so the loop does not GC them mid-flight.
-    bg_tasks: set[asyncio.Task[Any]] = set()
 
-    _ship = _make_ship(
-        outbound_sink=outbound_sink,
-        session_key=session_key,
-        turn_context=turn_context,
-    )
+    def install(self) -> None:
+        for channel, projector in _ASYNC_PROJECTORS:
+            self._api.on(channel, self._make_async(projector))
+        for channel, projector in _SYNC_PROJECTORS:
+            self._api.on(channel, self._make_sync(projector))
+        # session_ready advertises the available model-profile names so a chat
+        # client can populate a model switcher. The gateway seeds them via the
+        # optional ``model_names`` service (absent -> empty list); the atom must not
+        # read user config itself (§11.4.6).
+        model_names = self._api.get_service("model_names") or []
+        self._api.on(
+            SessionReadyEvent.CHANNEL,
+            self._make_sync(_make_session_ready_projector(list(model_names))),
+        )
+        # Approval gate runs alongside the tool_call projector; it returns a block
+        # decision the loop acts on, independent of the outbound forwarding.
+        self._api.on(ToolCallEvent.CHANNEL, self._approval_gate)
+        self._api.set_service(WIRE_CHILD_FORWARDER_SERVICE, self._forward_child)
 
-    def _make_async(projector: Projector) -> Callable[[Any], Any]:
+    def _make_async(self, projector: Projector) -> Callable[[Any], Any]:
         async def handler(ev: Any) -> None:
             for body in _bodies(projector(ev)):
-                await _ship(body)
+                await self._ship(body)
 
         return handler
 
-    def _make_sync(projector: Projector) -> Callable[[Any], Any]:
+    def _make_sync(self, projector: Projector) -> Callable[[Any], Any]:
         def handler(ev: Any) -> None:
             bodies = _bodies(projector(ev))
             if not bodies:
@@ -560,18 +582,18 @@ def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG00
             except RuntimeError:
                 return  # no loop — emitted outside the gateway; nothing to do
             for body in bodies:
-                task = loop.create_task(_ship(body))
-                bg_tasks.add(task)
-                task.add_done_callback(bg_tasks.discard)
+                task = loop.create_task(self._ship(body))
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
 
         return handler
 
-    async def _approval_gate(ev: ToolCallEvent) -> dict[str, Any] | None:
-        if approval_mgr is None or not approval_mgr.requires(ev.tool_name):
+    async def _approval_gate(self, ev: ToolCallEvent) -> dict[str, Any] | None:
+        if self._approval_mgr is None or not self._approval_mgr.requires(ev.tool_name):
             return None
-        ctx = turn_context or {}
-        ok = await approval_mgr.request(
-            session_key=session_key,
+        ctx = self._turn_context or {}
+        ok = await self._approval_mgr.request(
+            session_key=self._session_key,
             sender_id=str(ctx.get("sender_id") or ""),
             channel=str(ctx.get("channel") or ""),
             chat_id=str(ctx.get("chat_id") or ""),
@@ -589,24 +611,7 @@ def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG00
             }
         return None
 
-    for channel, projector in _ASYNC_PROJECTORS:
-        api.on(channel, _make_async(projector))
-    for channel, projector in _SYNC_PROJECTORS:
-        api.on(channel, _make_sync(projector))
-    # session_ready advertises the available model-profile names so a chat
-    # client can populate a model switcher. The gateway seeds them via the
-    # optional ``model_names`` service (absent -> empty list); the atom must not
-    # read user config itself (§11.4.6).
-    model_names = api.get_service("model_names") or []
-    api.on(
-        SessionReadyEvent.CHANNEL,
-        _make_sync(_make_session_ready_projector(list(model_names))),
-    )
-    # Approval gate runs alongside the tool_call projector; it returns a block
-    # decision the loop acts on, independent of the outbound forwarding.
-    api.on(ToolCallEvent.CHANNEL, _approval_gate)
-
-    def _forward_child(child: Any) -> None:
+    def _forward_child(self, child: Any) -> None:
         """Subscribe a freshly spawned child session to this session's wire.
 
         Registered as the ``child_wire_forwarder`` service so child-spawning
@@ -622,10 +627,29 @@ def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG00
             return
         attach_child_wire_forwarder(
             child_bus,
-            wire_outbound=outbound_sink,
-            session_key=session_key,
+            wire_outbound=self._outbound_sink,
+            session_key=self._session_key,
             child_id=str(child_id),
-            turn_context=turn_context,
+            turn_context=self._turn_context,
         )
 
-    api.set_service(WIRE_CHILD_FORWARDER_SERVICE, _forward_child)
+
+def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG001
+    outbound_sink = api.get_service(WIRE_OUTBOUND_SERVICE)
+    session_key = api.get_service("session_key")
+    if outbound_sink is None or session_key is None:
+        # Mounting wire_driver outside the gateway has no effect; fail at
+        # install so the misconfiguration surfaces immediately rather than
+        # silently swallowing every session event.
+        raise RuntimeError(
+            "wire_driver requires 'wire_outbound' and 'session_key' services; "
+            "this atom only works inside the agentm gateway process."
+        )
+    runtime = _WireDriverRuntime(
+        api=api,
+        outbound_sink=outbound_sink,
+        session_key=session_key,
+        turn_context=api.get_service("turn_context"),
+        approval_mgr=api.get_service(APPROVAL_MANAGER_SERVICE),
+    )
+    runtime.install()
