@@ -133,8 +133,8 @@ type appModel struct {
 	// rows instead of being promoted into tabs.
 	mainSessionID            string
 	bottomActivityRowsHidden bool
-	workflowPickerOpen       bool
-	workflowPickerIndex      int
+	workflowTaskPickerOpen   bool
+	workflowTaskPickerIndex  int
 	workflowTranscripts      map[string]string
 	workflowVisible          map[string]bool
 	backgroundActivities     map[string]backgroundActivity
@@ -733,7 +733,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.TabsUpdatedMsg:
 		tabChromeChanged := m.syncTabChrome(msg.Tabs, msg.ActiveIdx)
-		m.syncWorkflowPickerState()
+		m.syncWorkflowTaskPickerState()
 		bottomSurfaceHeightChanged := m.bottomSurfaceHeight(m.width) != m.bottomSurfaceLayoutHeight
 		if tabChromeChanged || bottomSurfaceHeightChanged {
 			cmd := m.resizeAll()
@@ -2127,21 +2127,21 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.forwardDialog(msg)
 	}
 
-	if m.workflowPickerOpen {
+	if m.workflowTaskPickerOpen {
 		switch msg.String() {
 		case "up":
-			m.moveWorkflowSelection(-1)
+			m.moveWorkflowTaskSelection(-1)
 			return m, nil
 		case "down":
-			m.moveWorkflowSelection(1)
+			m.moveWorkflowTaskSelection(1)
 			return m, nil
 		case "enter":
-			return m.activateWorkflowSelection()
+			return m.activateWorkflowTaskSelection()
 		case "esc":
-			m.closeWorkflowPicker()
+			m.closeWorkflowTaskPicker()
 			return m, m.resizeAll()
 		case "x":
-			return m.stopWorkflowSelection()
+			return m.stopWorkflowTaskSelection()
 		}
 	}
 
@@ -2186,7 +2186,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.toggleShortcutSheet()
 
 	case msg.String() == "down" && m.focusedPanel == PanelEditor && m.editor.Value() == "" && m.hasWorkflowTasks():
-		m.openWorkflowPicker()
+		m.openWorkflowTaskPicker()
 		return m, m.resizeAll()
 
 	case msg.String() == "left" && m.focusedPanel == PanelEditor && m.editor.Value() == "":

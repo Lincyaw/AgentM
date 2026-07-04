@@ -167,28 +167,28 @@ func (m *appModel) workflowRole(sessionID string) string {
 	return "general-purpose"
 }
 
-func (m *appModel) openWorkflowPicker() {
+func (m *appModel) openWorkflowTaskPicker() {
 	if !m.hasWorkflowTasks() {
 		return
 	}
-	m.workflowPickerOpen = true
+	m.workflowTaskPickerOpen = true
 	m.shortcutSheetOpen = false
-	m.syncWorkflowPickerIndex()
+	m.syncWorkflowTaskPickerIndex()
 	m.statusBar.InvalidateCache()
 }
 
-func (m *appModel) closeWorkflowPicker() {
-	if !m.workflowPickerOpen {
+func (m *appModel) closeWorkflowTaskPicker() {
+	if !m.workflowTaskPickerOpen {
 		return
 	}
-	m.workflowPickerOpen = false
+	m.workflowTaskPickerOpen = false
 	m.statusBar.InvalidateCache()
 }
 
-func (m *appModel) syncWorkflowPickerIndex() {
+func (m *appModel) syncWorkflowTaskPickerIndex() {
 	rows := m.workflowRows()
 	if len(rows) == 0 {
-		m.workflowPickerIndex = 0
+		m.workflowTaskPickerIndex = 0
 		return
 	}
 	activeID := ""
@@ -197,59 +197,59 @@ func (m *appModel) syncWorkflowPickerIndex() {
 	}
 	for i, row := range rows {
 		if row.sessionID == activeID {
-			m.workflowPickerIndex = i
+			m.workflowTaskPickerIndex = i
 			return
 		}
 	}
-	m.workflowPickerIndex = min(max(m.workflowPickerIndex, 0), len(rows)-1)
+	m.workflowTaskPickerIndex = min(max(m.workflowTaskPickerIndex, 0), len(rows)-1)
 }
 
-func (m *appModel) syncWorkflowPickerState() {
-	if !m.workflowPickerOpen {
+func (m *appModel) syncWorkflowTaskPickerState() {
+	if !m.workflowTaskPickerOpen {
 		return
 	}
 	if !m.hasWorkflowTasks() {
-		m.closeWorkflowPicker()
+		m.closeWorkflowTaskPicker()
 		return
 	}
-	m.syncWorkflowPickerIndex()
+	m.syncWorkflowTaskPickerIndex()
 }
 
-func (m *appModel) moveWorkflowSelection(delta int) {
+func (m *appModel) moveWorkflowTaskSelection(delta int) {
 	rows := m.workflowRows()
 	if len(rows) == 0 {
 		return
 	}
-	m.workflowPickerIndex = (m.workflowPickerIndex + delta + len(rows)) % len(rows)
+	m.workflowTaskPickerIndex = (m.workflowTaskPickerIndex + delta + len(rows)) % len(rows)
 }
 
-func (m *appModel) activateWorkflowSelection() (tea.Model, tea.Cmd) {
+func (m *appModel) activateWorkflowTaskSelection() (tea.Model, tea.Cmd) {
 	rows := m.workflowRows()
 	if len(rows) == 0 {
-		m.closeWorkflowPicker()
+		m.closeWorkflowTaskPicker()
 		return m, nil
 	}
-	idx := min(max(m.workflowPickerIndex, 0), len(rows)-1)
+	idx := min(max(m.workflowTaskPickerIndex, 0), len(rows)-1)
 	target := rows[idx].sessionID
-	m.closeWorkflowPicker()
+	m.closeWorkflowTaskPicker()
 	if target == "" {
 		return m, nil
 	}
 	return m.handleSwitchTab(target)
 }
 
-func (m *appModel) stopWorkflowSelection() (tea.Model, tea.Cmd) {
+func (m *appModel) stopWorkflowTaskSelection() (tea.Model, tea.Cmd) {
 	rows := m.workflowRows()
 	if len(rows) == 0 {
 		return m, nil
 	}
-	idx := min(max(m.workflowPickerIndex, 0), len(rows)-1)
+	idx := min(max(m.workflowTaskPickerIndex, 0), len(rows)-1)
 	row := rows[idx]
 	if row.isMain || row.sessionID == "" {
 		return m, nil
 	}
 	model, cmd := m.handleCloseTab(row.sessionID)
-	m.syncWorkflowPickerState()
+	m.syncWorkflowTaskPickerState()
 	return model, cmd
 }
 
@@ -299,7 +299,7 @@ func (m *appModel) toggleBottomActivityRows() tea.Cmd {
 		return nil
 	}
 	m.bottomActivityRowsHidden = !m.bottomActivityRowsHidden
-	m.workflowPickerOpen = false
+	m.workflowTaskPickerOpen = false
 	m.statusBar.InvalidateCache()
 	return m.resizeAll()
 }
@@ -307,16 +307,16 @@ func (m *appModel) toggleBottomActivityRows() tea.Cmd {
 func (m *appModel) toggleShortcutSheet() tea.Cmd {
 	m.shortcutSheetOpen = !m.shortcutSheetOpen
 	if m.shortcutSheetOpen {
-		m.workflowPickerOpen = false
+		m.workflowTaskPickerOpen = false
 	}
 	m.statusBar.InvalidateCache()
 	return m.resizeAll()
 }
 
 func (m *appModel) closeInlineSurfaces() tea.Cmd {
-	changed := m.shortcutSheetOpen || m.workflowPickerOpen
+	changed := m.shortcutSheetOpen || m.workflowTaskPickerOpen
 	m.shortcutSheetOpen = false
-	m.workflowPickerOpen = false
+	m.workflowTaskPickerOpen = false
 	if !changed {
 		return nil
 	}
@@ -357,8 +357,8 @@ func (m *appModel) footerText() string {
 		return "Showing verbose transcript · ctrl+o to toggle · ctrl+e to collapse verbose"
 	case m.transcriptDetailed:
 		return "Showing detailed transcript · ctrl+o to toggle · ctrl+e to show all verbose"
-	case m.workflowPickerOpen:
-		return "↑/↓ to select · Enter to view"
+	case m.workflowTaskPickerOpen:
+		return "↑/↓ to select · Enter to view · x to stop task"
 	case m.activeIsWorkflowTask():
 		return "ctrl+n/p to switch tabs · ↓ to manage tasks"
 	case m.hasBottomActivityRows():
@@ -462,7 +462,7 @@ func (m *appModel) renderWorkflowDetail(width, height int) string {
 }
 
 func (m *appModel) renderBottomActivityRows(width int) string {
-	if !m.hasBottomActivityRows() || (m.bottomActivityRowsHidden && !m.workflowPickerOpen) {
+	if !m.hasBottomActivityRows() || (m.bottomActivityRowsHidden && !m.workflowTaskPickerOpen) {
 		return ""
 	}
 	var workflowRows []workflowRow
@@ -473,14 +473,14 @@ func (m *appModel) renderBottomActivityRows(width int) string {
 	if len(workflowRows) == 0 && len(activityRows) == 0 {
 		return ""
 	}
-	selected := m.workflowPickerIndex
+	selected := m.workflowTaskPickerIndex
 	if selected < 0 || selected >= len(workflowRows) {
 		selected = 0
 	}
 	innerWidth := max(20, width-appPaddingHorizontal)
 	lines := make([]string, 0, len(workflowRows)+len(activityRows)+1)
 	for i, row := range workflowRows {
-		lines = append(lines, m.renderWorkflowRow(row, i == selected && m.workflowPickerOpen, innerWidth))
+		lines = append(lines, m.renderWorkflowRow(row, i == selected && m.workflowTaskPickerOpen, innerWidth))
 	}
 	if hiddenActivityCount > 0 {
 		lines = append(lines, renderHiddenBackgroundActivitiesRow(hiddenActivityCount, innerWidth))
