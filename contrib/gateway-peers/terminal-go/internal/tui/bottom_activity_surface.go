@@ -322,6 +322,7 @@ func (m *appModel) toggleBottomActivityRows() tea.Cmd {
 	}
 	m.bottomActivityRowsHidden = !m.bottomActivityRowsHidden
 	m.workflowTaskPickerOpen = false
+	m.statusBar.SetActivity(m.backgroundActivityText())
 	m.statusBar.InvalidateCache()
 	return m.resizeAll()
 }

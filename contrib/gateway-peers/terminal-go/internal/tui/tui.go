@@ -566,6 +566,9 @@ func (m *appModel) backgroundActivityText() string {
 		return ""
 	}
 	if !m.tabBar.HasOnlyInactiveBackgroundTabs() {
+		if !m.bottomActivityRowsHidden {
+			return ""
+		}
 		total := len(m.backgroundActivities)
 		if total == 0 {
 			return ""
