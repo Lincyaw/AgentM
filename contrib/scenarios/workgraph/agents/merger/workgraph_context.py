@@ -1,4 +1,5 @@
 """Context injection for WorkGraph merge workers."""
+
 from __future__ import annotations
 
 import json
@@ -40,8 +41,7 @@ def install(api: ExtensionAPI, config: WorkGraphContextConfig) -> None:
         return
 
     parts = [
-        f"## {key}\n\n{_format_value(value)}"
-        for key, value in context_values.items()
+        f"## {key}\n\n{_format_value(value)}" for key, value in context_values.items()
     ]
     context = "\n\n".join(parts)
 
