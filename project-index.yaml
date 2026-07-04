@@ -208,6 +208,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin
+      - path: src/agentm/extensions/builtin/atom_management.py
       - path: src/agentm/extensions/builtin/task_tracking.py
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/loader.py

@@ -117,17 +117,38 @@ class _UnloadArgs(BaseModel):
 class _ListArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+
 # ---------------------------------------------------------------------------
 # install()
 # ---------------------------------------------------------------------------
 
 
-def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
-    del config
+class _AtomManagementRuntime:
+    def __init__(self, api: ExtensionAPI) -> None:
+        self._api = api
 
-    # --- install_atom tool ------------------------------------------------
+    def install(self) -> None:
+        self._register_install_atom()
+        self._register_unload_atom()
+        self._register_list_atoms()
 
-    async def _install_execute(args: dict[str, Any]) -> ToolResult:
+    def _register_install_atom(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="install_atom",
+                description=(
+                    "Install a new agent-authored atom. Source must be a "
+                    "single §11-compliant Python module with a top-level "
+                    "MANIFEST and install() function. The atom is registered "
+                    "in the live session and on disk so it survives restarts."
+                ),
+                parameters=_InstallArgs,
+                fn=self.install_atom,
+                metadata={"meta_op": "install_atom"},
+            )
+        )
+
+    async def install_atom(self, args: dict[str, Any]) -> ToolResult:
         name = str(args["name"])
         source = str(args["source"])
         rationale = str(args["rationale"])
@@ -135,7 +156,7 @@ def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
         if atom_config is not None and not isinstance(atom_config, dict):
             return _error("`config` must be an object/mapping when provided.")
         try:
-            result = api.install_atom(
+            result = self._api.install_atom(
                 name=name,
                 source=source,
                 target_path=None,  # default: <cwd>/.agentm/atoms/<name>.py
@@ -158,31 +179,29 @@ def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
             "for future sessions via <cwd>/.agentm/atoms/."
         )
 
-    api.register_tool(
-        FunctionTool(
-            name="install_atom",
-            description=(
-                "Install a new agent-authored atom. Source must be a "
-                "single §11-compliant Python module with a top-level "
-                "MANIFEST and install() function. The atom is registered "
-                "in the live session and on disk so it survives restarts."
-            ),
-            parameters=_InstallArgs,
-            fn=_install_execute,
-            metadata={"meta_op": "install_atom"},
+    def _register_unload_atom(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="unload_atom",
+                description=(
+                    "Remove a loaded atom from the running session. "
+                    "Reverses install_atom's live registration but does not "
+                    "delete the source file."
+                ),
+                parameters=_UnloadArgs,
+                fn=self.unload_atom,
+                metadata={"meta_op": "unload_atom"},
+            )
         )
-    )
 
-    # --- unload_atom tool -------------------------------------------------
-
-    async def _unload_execute(args: dict[str, Any]) -> ToolResult:
+    async def unload_atom(self, args: dict[str, Any]) -> ToolResult:
         name = str(args["name"])
         # ``rationale`` is required by the tool schema for human/audit clarity
         # but the kernel does not currently consume it; the trajectory captures
         # the args verbatim.
         _ = str(args["rationale"])
         try:
-            result = api.unload_atom(name, agent_initiated=True)
+            result = self._api.unload_atom(name, agent_initiated=True)
         except Exception as exc:  # noqa: BLE001
             logger.debug("atom_management: unload_atom raised: {}", exc)
             return _error(f"unload_atom raised: {exc}")
@@ -197,26 +216,25 @@ def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
             "you want it removed permanently."
         )
 
-    api.register_tool(
-        FunctionTool(
-            name="unload_atom",
-            description=(
-                "Remove a loaded atom from the running session. "
-                "Reverses install_atom's live registration but does not "
-                "delete the source file."
-            ),
-            parameters=_UnloadArgs,
-            fn=_unload_execute,
-            metadata={"meta_op": "unload_atom"},
+    def _register_list_atoms(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="list_atoms",
+                description=(
+                    "List every atom currently registered in this session, "
+                    "with name, tier, and source path. Useful before install "
+                    "or unload to avoid collisions and confirm state."
+                ),
+                parameters=_ListArgs,
+                fn=self.list_atoms,
+                metadata={"meta_op": "list_atoms"},
+            )
         )
-    )
 
-    # --- list_atoms tool --------------------------------------------------
-
-    async def _list_execute(args: dict[str, Any]) -> ToolResult:
+    async def list_atoms(self, args: dict[str, Any]) -> ToolResult:
         del args
         try:
-            atoms = api.list_atoms()
+            atoms = self._api.list_atoms()
         except Exception as exc:  # noqa: BLE001
             logger.debug("atom_management: list_atoms raised: {}", exc)
             return _error(f"list_atoms raised: {exc}")
@@ -228,16 +246,7 @@ def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
             lines.append(f"  {entry.name}  tier={entry.tier}  src={source}")
         return _ok("\n".join(lines))
 
-    api.register_tool(
-        FunctionTool(
-            name="list_atoms",
-            description=(
-                "List every atom currently registered in this session, "
-                "with name, tier, and source path. Useful before install "
-                "or unload to avoid collisions and confirm state."
-            ),
-            parameters=_ListArgs,
-            fn=_list_execute,
-            metadata={"meta_op": "list_atoms"},
-        )
-    )
+
+def install(api: ExtensionAPI, config: AtomManagementConfig) -> None:
+    del config
+    _AtomManagementRuntime(api).install()
