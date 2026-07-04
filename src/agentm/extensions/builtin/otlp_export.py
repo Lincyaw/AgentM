@@ -35,15 +35,21 @@ from __future__ import annotations
 import atexit
 import os
 import threading
+from dataclasses import dataclass
 from typing import Any, Final
 
 from loguru import logger
-from pydantic import BaseModel
-
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi import ExtensionAPI, ExtensionLoadError
+from agentm.extensions import ExtensionManifest
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from pydantic import BaseModel
+
+
+_DEFAULT_PROTOCOL = "grpc"
+_DEFAULT_GRPC_INSECURE = True
+_DEFAULT_TIMEOUT_SECONDS = 10
+_SUPPORTED_PROTOCOLS: Final = frozenset({"grpc", "http/protobuf"})
 
 
 class OtlpExportConfig(BaseModel):
@@ -68,13 +74,6 @@ MANIFEST = ExtensionManifest(
     tier=1,
 )
 
-# Process-level guard. ``install`` may run once per session in one Python
-# process; the global TracerProvider only wants the OTLP processor attached
-# once or every export would be duplicated.
-_lock = threading.Lock()
-_attached = False
-
-
 def _parse_headers(raw: str | None) -> dict[str, str] | None:
     if not raw:
         return None
@@ -91,28 +90,60 @@ def _parse_headers(raw: str | None) -> dict[str, str] | None:
     return out or None
 
 
-def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
-    # Reach the process-level SDK TracerProvider + LoggerProvider through
-    # the per-session telemetry handle. The substrate does not register
-    # these as OTel globals (so ``opentelemetry.trace.get_tracer_provider``
-    # returns ``ProxyTracerProvider``); the handle holds direct references
-    # we can attach our network processors to.
-    #
-    # Since core.observability.otel_export.setup_process_telemetry() now
-    # attaches OTLP exporters early when OTEL_EXPORTER_OTLP_ENDPOINT is
-    # set, this extension is only needed when the env var was NOT set at
-    # provider-construction time but the user explicitly mounts the
-    # extension with a config override.
-    telemetry = api.get_session_telemetry()
-    global _attached
-    with _lock:
-        if _attached:
-            return
+@dataclass(frozen=True, slots=True)
+class _ResolvedOtlpConfig:
+    endpoint: str
+    protocol: str
+    headers: dict[str, str] | None
+    insecure: bool
+    timeout: int
 
-        endpoint = (
-            config.endpoint
-            or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        )
+
+class _ProcessOtlpExportState:
+    """Process-level idempotence guard for OTLP processor attachment."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._attached = False
+
+    def attach_once(self, runtime: "_OtlpExportRuntime") -> None:
+        with self._lock:
+            if self._attached:
+                return
+            runtime.attach()
+            self._attached = True
+
+
+class _OtlpExportRuntime:
+    """Resolve config and attach OTLP exporters to the process telemetry handle."""
+
+    def __init__(self, api: ExtensionAPI, config: OtlpExportConfig) -> None:
+        self._api = api
+        self._config = config
+
+    def attach(self) -> None:
+        # Reach the process-level SDK TracerProvider + LoggerProvider through
+        # the per-session telemetry handle. The substrate does not register
+        # these as OTel globals (so ``opentelemetry.trace.get_tracer_provider``
+        # returns ``ProxyTracerProvider``); the handle holds direct references
+        # we can attach our network processors to.
+        #
+        # Since core.observability.otel_export.setup_process_telemetry() now
+        # attaches OTLP exporters early when OTEL_EXPORTER_OTLP_ENDPOINT is
+        # set, this extension is only needed when the env var was NOT set at
+        # provider-construction time but the user explicitly mounts the
+        # extension with a config override.
+        telemetry = self._api.get_session_telemetry()
+        resolved = self._resolve_config()
+        span_exporter, log_exporter = self._build_exporters(resolved)
+        span_processor = BatchSpanProcessor(span_exporter)
+        log_processor = BatchLogRecordProcessor(log_exporter)
+        telemetry.tracer_provider.add_span_processor(span_processor)
+        telemetry.logger_provider.add_log_record_processor(log_processor)
+        self._register_shutdown(span_processor, log_processor)
+
+    def _resolve_config(self) -> _ResolvedOtlpConfig:
+        endpoint = self._config.endpoint or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
         if not endpoint:
             raise ExtensionLoadError(
                 __name__,
@@ -125,9 +156,11 @@ def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
                 ),
             )
         protocol = (
-            config.protocol or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL") or "grpc"
+            self._config.protocol
+            or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
+            or _DEFAULT_PROTOCOL
         )
-        if protocol not in ("grpc", "http/protobuf"):
+        if protocol not in _SUPPORTED_PROTOCOLS:
             raise ExtensionLoadError(
                 __name__,
                 ValueError(
@@ -135,64 +168,79 @@ def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
                     "expected 'grpc' or 'http/protobuf'"
                 ),
             )
-        headers = _parse_headers(
-            config.headers or os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
+        return _ResolvedOtlpConfig(
+            endpoint=endpoint,
+            protocol=protocol,
+            headers=_parse_headers(
+                self._config.headers or os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
+            ),
+            insecure=self._resolve_insecure(),
+            timeout=self._resolve_timeout(),
         )
-        insecure_raw = config.insecure
-        if insecure_raw is None:
-            env_insecure = os.environ.get("OTEL_EXPORTER_OTLP_INSECURE")
-            insecure = env_insecure is None or env_insecure.lower() == "true"
-        else:
-            insecure = bool(insecure_raw)
-        timeout_raw: float | str = (
-            config.timeout or os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT") or 10
-        )
-        timeout = int(float(timeout_raw))
 
-        if protocol == "grpc":
-            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                OTLPSpanExporter as GrpcSpanExporter,
-            )
+    def _resolve_insecure(self) -> bool:
+        if self._config.insecure is not None:
+            return bool(self._config.insecure)
+        env_insecure = os.environ.get("OTEL_EXPORTER_OTLP_INSECURE")
+        if env_insecure is None:
+            return _DEFAULT_GRPC_INSECURE
+        return env_insecure.lower() == "true"
+
+    def _resolve_timeout(self) -> int:
+        timeout_raw: float | str = (
+            self._config.timeout
+            if self._config.timeout is not None
+            else os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT") or _DEFAULT_TIMEOUT_SECONDS
+        )
+        return int(float(timeout_raw))
+
+    def _build_exporters(self, config: _ResolvedOtlpConfig) -> tuple[Any, Any]:
+        if config.protocol == "grpc":
             from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
                 OTLPLogExporter as GrpcLogExporter,
             )
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter as GrpcSpanExporter,
+            )
 
             span_exporter: Any = GrpcSpanExporter(
-                endpoint=endpoint,
-                insecure=insecure,
-                headers=headers,
-                timeout=timeout,
+                endpoint=config.endpoint,
+                insecure=config.insecure,
+                headers=config.headers,
+                timeout=config.timeout,
             )
             log_exporter: Any = GrpcLogExporter(
-                endpoint=endpoint,
-                insecure=insecure,
-                headers=headers,
-                timeout=timeout,
+                endpoint=config.endpoint,
+                insecure=config.insecure,
+                headers=config.headers,
+                timeout=config.timeout,
             )
-        else:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-                OTLPSpanExporter as HttpSpanExporter,
-            )
-            from opentelemetry.exporter.otlp.proto.http._log_exporter import (
-                OTLPLogExporter as HttpLogExporter,
-            )
+            return span_exporter, log_exporter
 
-            span_exporter = HttpSpanExporter(
-                endpoint=endpoint,
-                headers=headers,
-                timeout=timeout,
-            )
-            log_exporter = HttpLogExporter(
-                endpoint=endpoint,
-                headers=headers,
-                timeout=timeout,
-            )
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import (
+            OTLPLogExporter as HttpLogExporter,
+        )
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter as HttpSpanExporter,
+        )
 
-        span_processor = BatchSpanProcessor(span_exporter)
-        log_processor = BatchLogRecordProcessor(log_exporter)
-        telemetry.tracer_provider.add_span_processor(span_processor)
-        telemetry.logger_provider.add_log_record_processor(log_processor)
+        span_exporter = HttpSpanExporter(
+            endpoint=config.endpoint,
+            headers=config.headers,
+            timeout=config.timeout,
+        )
+        log_exporter = HttpLogExporter(
+            endpoint=config.endpoint,
+            headers=config.headers,
+            timeout=config.timeout,
+        )
+        return span_exporter, log_exporter
 
+    def _register_shutdown(
+        self,
+        span_processor: BatchSpanProcessor,
+        log_processor: BatchLogRecordProcessor,
+    ) -> None:
         def _shutdown() -> None:
             try:
                 span_processor.shutdown()
@@ -204,7 +252,13 @@ def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
                 logger.debug("otlp_export: log processor shutdown failed: {}", exc)
 
         atexit.register(_shutdown)
-        _attached = True
+
+
+_PROCESS_STATE = _ProcessOtlpExportState()
+
+
+def install(api: ExtensionAPI, config: OtlpExportConfig) -> None:
+    _PROCESS_STATE.attach_once(_OtlpExportRuntime(api, config))
 
 
 __all__: Final = ["MANIFEST", "install"]

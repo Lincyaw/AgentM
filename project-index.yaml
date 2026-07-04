@@ -216,6 +216,7 @@ requirements:
       - path: src/agentm/extensions/builtin/tool_bash.py
       - path: src/agentm/extensions/builtin/tool_bash_guard.py
       - path: src/agentm/extensions/builtin/tool_error_messages.py
+      - path: src/agentm/extensions/builtin/otlp_export.py
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/loader.py
       - path: src/agentm/core/runtime/session_factory.py
