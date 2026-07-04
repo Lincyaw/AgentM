@@ -53,13 +53,20 @@ def _resolve_provider(model_profile: str) -> tuple[str, dict[str, Any]]:
 
 def _eval_observability_dir(env: dict[str, str]) -> Path:
     """Resolve the observability directory used by the eval subprocess."""
-    from agentm.core.lib import expand_path, resolve_observability_dir
+    from agentm.core.lib import expand_path
 
     if obs_dir := env.get("AGENTM_OBSERVABILITY_DIR"):
         return expand_path(obs_dir)
     if agentm_home := env.get("AGENTM_HOME"):
         return expand_path(agentm_home) / "observability"
-    return resolve_observability_dir(Path.cwd())
+    if home := env.get("HOME"):
+        return Path(home).expanduser() / ".agentm" / "observability"
+    return Path.home() / ".agentm" / "observability"
+
+
+def _effective_env(env_override: dict[str, str] | None = None) -> dict[str, str]:
+    """Return the environment passed to eval subprocesses."""
+    return {**os.environ, **(env_override or {})}
 
 
 def _run_eval(
@@ -77,7 +84,7 @@ def _run_eval(
 
     Renders ``${VAR}`` placeholders in the config via ``envsubst`` first.
     """
-    env = {**os.environ, **(env_override or {})}
+    env = _effective_env(env_override)
 
     rendered = subprocess.run(
         ["envsubst"], input=Path(config_path).read_text(),
@@ -144,7 +151,7 @@ def _write_eval_config(
     env_vars: dict[str, str],
 ) -> str:
     """Render an eval config YAML with envsubst and return the temp path."""
-    env = {**os.environ, **env_vars}
+    env = _effective_env(env_vars)
     result = subprocess.run(
         ["envsubst"],
         input=Path(template_path).read_text(),
@@ -200,7 +207,7 @@ async def run_evolution_loop(
     if provider_cfg.get("base_url"):
         eval_env["OPENAI_BASE_URL"] = provider_cfg["base_url"]
     eval_env.update(env_vars or {})
-    eval_obs_dir = _eval_observability_dir(eval_env)
+    eval_obs_dir = _eval_observability_dir(_effective_env(eval_env))
 
     result = EvolutionResult()
 
