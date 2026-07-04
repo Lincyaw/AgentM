@@ -1069,6 +1069,7 @@ requirements:
       - path: src/agentm/core/runtime/resource_loader.py
       - path: src/agentm/extensions/discover.py
       - path: src/agentm/extensions/loader.py
+      - path: src/agentm/extensions/builtin/runtime_context.py
       - path: src/agentm/extensions/builtin/skill_loader.py
       - path: src/agentm/extensions/builtin/prompt_templates.py
       - path: src/agentm/extensions/builtin/tui_snapshot.py

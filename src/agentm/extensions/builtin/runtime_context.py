@@ -12,14 +12,17 @@ ground-truth cwd / platform without scenario-specific code.
 from __future__ import annotations
 
 import platform
-from pathlib import Path
+
 from pydantic import BaseModel
 
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.core.lib import expand_path
+from agentm.extensions import ExtensionManifest
+
 
 class RuntimeContextConfig(BaseModel):
     pass
+
 
 MANIFEST = ExtensionManifest(
     name="runtime_context",
@@ -29,8 +32,9 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Leaf atom: reads only api.cwd + stdlib platform.
 )
 
+
 def _build_block(cwd: str) -> str:
-    workspace = str(Path(cwd).expanduser().resolve())
+    workspace = str(expand_path(cwd).resolve())
     sysname = platform.system()
     runtime = (
         f"{'macOS' if sysname == 'Darwin' else sysname} "
@@ -48,6 +52,7 @@ def _build_block(cwd: str) -> str:
         "home directory. All file paths you reference and shell commands "
         "you run use this workspace as the working directory."
     )
+
 
 def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:
     block = _build_block(api.cwd)

@@ -49,7 +49,9 @@ author wrote — when both are listed, whichever runs first sits closest to the
 top.
 
 **Inputs**:
-- `api.cwd` — already exposed on `ExtensionAPI` (used by `skill_loader.py`).
+- `api.cwd` — already exposed on `ExtensionAPI` (used by `skill_loader.py`);
+  rendered through shared path expansion so `$VAR` and `~` forms show the
+  same workspace AgentM will use elsewhere.
 - `platform.system()`, `platform.machine()`, `platform.python_version()` — stdlib.
 
 **Output (injected, prepend)**:
@@ -90,9 +92,10 @@ MANIFEST = ExtensionManifest(
 ### 2.2 §11 compliance
 
 - One file under `src/agentm/extensions/builtin/`.
-- Allowed imports only: stdlib (`platform`, `pathlib`), `agentm.extensions`
+- Allowed imports only: stdlib (`platform`), `agentm.extensions`
   (`ExtensionManifest`), `agentm.core.abi.events` (`BeforeAgentStartEvent`),
-  `agentm.core.abi.extension` (`ExtensionAPI`).
+  `agentm.core.abi.extension` (`ExtensionAPI`), and the shared
+  `agentm.core.lib` path helper.
 - No atom-to-atom imports, no `harness.session`, no `core._internal`.
 - Config schema declared.
 
