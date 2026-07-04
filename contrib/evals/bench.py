@@ -20,6 +20,7 @@ import signal
 import subprocess
 import tempfile
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Callable, cast
@@ -242,6 +243,32 @@ _active_eval_sessions: set[Any] = set()
 _active_eval_lock = __import__("threading").Lock()
 
 
+@dataclass(frozen=True, slots=True)
+class _RunEvalConfig:
+    adapter: Any
+    model: str
+    gateway: str
+    registry: str
+    prefix: str
+    tag: str
+    eval_timeout: int
+    agent_timeout: int
+    agent_env_create_timeout: int
+    api_key: str
+    scenario: str
+    run_id: str
+    private_eval: bool
+    private_eval_container: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RunEvalJob:
+    task: TaskSpec
+    out: Path
+    attempt_slot: int
+    experiment_attempt_idx: int | None
+
+
 def _terminate_process_group(
     proc: subprocess.Popen,  # type: ignore[type-arg]
     *,
@@ -276,35 +303,26 @@ def _terminate_process_group(
 
 
 def _run_and_eval_one(
-    task: TaskSpec, *,
-    adapter: Any,
-    source: str,
-    model: str, gateway: str,
-    registry: str, prefix: str, tag: str,
-    out: Path, eval_timeout: int, agent_timeout: int = 0,
-    agent_env_create_timeout: int = 1200,
-    api_key: str = "",
-    scenario: str = DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
-    run_id: str = "",
-    attempt_idx: int | None = None,
-    private_eval: bool = False,
-    private_eval_container: str = "eval",
+    job: _RunEvalJob,
+    config: _RunEvalConfig,
 ) -> dict[str, Any]:
     """Run agent + evaluate one task. Returns result dict."""
     import arl
 
+    task = job.task
+    adapter = config.adapter
     name = task.name
-    log = out / f"{name}.log"
-    score_file = out / f"{name}.score.json"
+    log = job.out / f"{name}.log"
+    score_file = job.out / f"{name}.score.json"
     agent_exp_id, eval_exp_id = _experiment_ids(
-        prefix,
-        model,
-        run_id,
+        config.prefix,
+        config.model,
+        config.run_id,
         name,
-        attempt_idx,
+        job.experiment_attempt_idx,
     )
 
-    image = adapter.get_image(task, registry, prefix, tag)
+    image = adapter.get_image(task, config.registry, config.prefix, config.tag)
     profile = os.environ.get("AGENTM_AGENT_ENV_PROFILE")
 
     # --- Agent phase ---
@@ -323,12 +341,18 @@ def _run_and_eval_one(
         if not prompt:
             return {"task": name, "status": "no_instruction"}
 
-        idle_timeout = max(3600, agent_timeout * 2 if agent_timeout > 0 else 0)
-        max_lifetime = max(7200, agent_timeout * 3 if agent_timeout > 0 else 0)
+        idle_timeout = max(
+            3600,
+            config.agent_timeout * 2 if config.agent_timeout > 0 else 0,
+        )
+        max_lifetime = max(
+            7200,
+            config.agent_timeout * 3 if config.agent_timeout > 0 else 0,
+        )
         env = {
             **os.environ,
             "AGENTM_AGENT_ENV_IMAGE": image,
-            "AGENTM_AGENT_ENV_GATEWAY_URL": gateway,
+            "AGENTM_AGENT_ENV_GATEWAY_URL": config.gateway,
             "AGENTM_AGENT_ENV_EXPERIMENT_ID": agent_exp_id,
             "AGENTM_AGENT_ENV_CPU_REQUEST": "1",
             "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
@@ -344,19 +368,19 @@ def _run_and_eval_one(
             ),
             "AGENTM_AGENT_ENV_CREATE_TIMEOUT": os.environ.get(
                 "AGENTM_AGENT_ENV_CREATE_TIMEOUT",
-                str(agent_env_create_timeout),
+                str(config.agent_env_create_timeout),
             ),
             "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN": os.environ.get(
                 "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN",
                 "false",
             ),
             **({"AGENTM_AGENT_ENV_PROFILE": profile} if profile else {}),
-            **({"AGENTM_AGENT_ENV_API_KEY": api_key} if api_key else {}),
+            **({"AGENTM_AGENT_ENV_API_KEY": config.api_key} if config.api_key else {}),
         }
         cmd = [
             "uv", "run", "agentm",
-            "--scenario", scenario,
-            "--model", model,
+            "--scenario", config.scenario,
+            "--model", config.model,
             "-p", prompt,
         ]
         with open(log, "w") as f:
@@ -371,10 +395,17 @@ def _run_and_eval_one(
                 _active_procs.add(proc)
             try:
                 try:
-                    proc.wait(timeout=agent_timeout if agent_timeout > 0 else None)
+                    proc.wait(
+                        timeout=config.agent_timeout
+                        if config.agent_timeout > 0
+                        else None
+                    )
                 except subprocess.TimeoutExpired:
                     agent_timed_out = True
-                    f.write(f"\n[bench] agent timeout after {agent_timeout}s; terminating\n")
+                    f.write(
+                        "\n[bench] agent timeout after "
+                        f"{config.agent_timeout}s; terminating\n"
+                    )
                     f.flush()
                     _terminate_process_group(proc, log_file=f)
             finally:
@@ -393,9 +424,9 @@ def _run_and_eval_one(
     tools_count = tools_m.group(1).decode() if tools_m else "?"
 
     # --- Eval phase ---
-    wanted_eval_mode = _eval_mode(private_eval)
+    wanted_eval_mode = _eval_mode(config.private_eval)
     evaluate_private = getattr(adapter, "evaluate_private_container", None)
-    if private_eval and not callable(evaluate_private):
+    if config.private_eval and not callable(evaluate_private):
         return {
             "task": name,
             "status": "eval_failed",
@@ -409,29 +440,29 @@ def _run_and_eval_one(
             return {"task": name, "status": "done", "tools": tools_count, **cached_scores}
 
     from arl.session import ResourceRequirements  # type: ignore[import-not-found]
-    eval_idle_timeout = max(3600, eval_timeout * 2)
-    eval_max_lifetime = max(7200, eval_timeout * 3)
+    eval_idle_timeout = max(3600, config.eval_timeout * 2)
+    eval_max_lifetime = max(7200, config.eval_timeout * 3)
     private_containers: list[dict[str, Any]] | None = None
-    if private_eval:
+    if config.private_eval:
         private_containers = [
             _private_eval_container(
                 adapter,
                 task,
-                registry,
-                prefix,
-                tag,
-                container=private_eval_container,
+                config.registry,
+                config.prefix,
+                config.tag,
+                container=config.private_eval_container,
             ),
         ]
 
     session_kwargs = {
         "image": image,
         "experiment_id": eval_exp_id,
-        "gateway_url": gateway,
+        "gateway_url": config.gateway,
         "workspace_dir": "/app",
-        "api_key": api_key or None,
+        "api_key": config.api_key or None,
         "profile": profile or "default",
-        "timeout": max(600.0, eval_timeout * 2.0),
+        "timeout": max(600.0, config.eval_timeout * 2.0),
         "idle_timeout_seconds": eval_idle_timeout,
         "max_lifetime_seconds": eval_max_lifetime,
         "resources": ResourceRequirements(
@@ -442,7 +473,7 @@ def _run_and_eval_one(
     if private_containers is not None:
         session_kwargs["private_containers"] = private_containers
     supported_session_kwargs = _filter_supported_kwargs(arl.ManagedSession, session_kwargs)
-    if private_eval and "private_containers" not in supported_session_kwargs:
+    if config.private_eval and "private_containers" not in supported_session_kwargs:
         return {
             "task": name,
             "status": "eval_create_failed",
@@ -455,7 +486,10 @@ def _run_and_eval_one(
     try:
         session.create_sandbox()
     except Exception as e:
-        client = arl.GatewayClient(base_url=gateway, api_key=api_key or None)
+        client = arl.GatewayClient(
+            base_url=config.gateway,
+            api_key=config.api_key or None,
+        )
         try:
             for exp_id in (eval_exp_id, agent_exp_id):
                 try:
@@ -472,22 +506,25 @@ def _run_and_eval_one(
     eval_error: Exception | None = None
     try:
         replay_trajectory(session, session_id)
-        if private_eval:
+        if config.private_eval:
             scores = cast(Callable[..., dict], evaluate_private)(
                 session,
                 task,
-                container=private_eval_container,
-                timeout=eval_timeout,
+                container=config.private_eval_container,
+                timeout=config.eval_timeout,
             )
         else:
-            scores = adapter.evaluate(session, task, timeout=eval_timeout)
+            scores = adapter.evaluate(session, task, timeout=config.eval_timeout)
     except Exception as e:
         eval_error = e
         typer.echo(f"  [WARN] eval {name}: {e}", err=True)
     finally:
         with _active_eval_lock:
             _active_eval_sessions.discard(session)
-        client = arl.GatewayClient(base_url=gateway, api_key=api_key or None)
+        client = arl.GatewayClient(
+            base_url=config.gateway,
+            api_key=config.api_key or None,
+        )
         try:
             client.delete_experiment(eval_exp_id)
         except Exception as e:  # noqa: BLE001
@@ -975,7 +1012,7 @@ def batch(
 
     # Build flat job list: task-first so same-image jobs run together (warm pool)
     all_attempt_results: list[dict[str, dict]] = [{} for _ in range(attempts)]
-    jobs: list[tuple[int, TaskSpec]] = []
+    jobs: list[_RunEvalJob] = []
     for attempt_idx in range(attempts):
         out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
         out.mkdir(parents=True, exist_ok=True)
@@ -997,7 +1034,14 @@ def batch(
                     **scores,
                 }
                 continue
-            jobs.append((attempt_idx, t))
+            jobs.append(
+                _RunEvalJob(
+                    task=t,
+                    out=out,
+                    attempt_slot=attempt_idx,
+                    experiment_attempt_idx=attempt_idx if attempts > 1 else None,
+                )
+            )
 
     total_jobs = len(jobs)
     typer.echo(
@@ -1010,33 +1054,38 @@ def batch(
     typer.echo(f"Results: {base_out}")
     typer.echo("")
 
+    run_config = _RunEvalConfig(
+        adapter=adapter,
+        model=model,
+        gateway=gateway,
+        registry=registry,
+        prefix=prefix,
+        tag=tag,
+        eval_timeout=eval_timeout,
+        agent_timeout=agent_timeout,
+        agent_env_create_timeout=agent_env_create_timeout,
+        api_key=api_key,
+        scenario=scenario,
+        run_id=resolved_run_id,
+        private_eval=private_eval,
+        private_eval_container=private_eval_container,
+    )
+
     # Collect results per attempt
     completed = 0
 
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            pending: dict[Future[dict[str, Any]], tuple[int, str]] = {}
-            for attempt_idx, t in jobs:
+            pending: dict[Future[dict[str, Any]], _RunEvalJob] = {}
+            for job in jobs:
                 if interrupted:
                     break
-                out = base_out / f"attempt_{attempt_idx}" if attempts > 1 else base_out
-                f = pool.submit(
-                    _run_and_eval_one, t,
-                    adapter=adapter, source=resolved_source,
-                    model=model, gateway=gateway,
-                    registry=registry, prefix=prefix, tag=tag,
-                    out=out, eval_timeout=eval_timeout, agent_timeout=agent_timeout,
-                    agent_env_create_timeout=agent_env_create_timeout,
-                    api_key=api_key,
-                    scenario=scenario,
-                    run_id=resolved_run_id,
-                    attempt_idx=attempt_idx if attempts > 1 else None,
-                    private_eval=private_eval,
-                    private_eval_container=private_eval_container,
-                )
-                pending[f] = (attempt_idx, t.name)
+                f = pool.submit(_run_and_eval_one, job, run_config)
+                pending[f] = job
             for future in as_completed(pending):
-                attempt_idx, name = pending[future]
+                job = pending[future]
+                attempt_idx = job.attempt_slot
+                name = job.task.name
                 completed += 1
                 attempt_label = f"[a{attempt_idx}] " if attempts > 1 else ""
                 try:
