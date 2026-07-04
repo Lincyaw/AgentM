@@ -37,10 +37,12 @@ from agentm.core.lib import agentm_home_dir, expand_path_from_cwd, parse_frontma
 from agentm.core.lib import pydantic_to_tool_schema
 from agentm.extensions import ExtensionManifest
 
+
 class SkillLoaderConfig(BaseModel):
     skill_paths: list[str] = []
     include_defaults: bool = True
     inherit_claude: bool | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="skill_loader",
@@ -60,6 +62,7 @@ MANIFEST = ExtensionManifest(
 DEFAULT_MAX_NAME_LENGTH = 64
 DEFAULT_MAX_DESCRIPTION_LENGTH = 1024
 _NAME_PATTERN = r"^[a-z0-9-]+$"
+
 
 def _validate_name(
     name: str, parent_dir_name: str, *, max_name_length: int
@@ -81,6 +84,7 @@ def _validate_name(
         issues.append("name must not contain consecutive hyphens")
     return issues
 
+
 def _validate_description(
     description: str | None, *, max_description_length: int
 ) -> list[str]:
@@ -93,6 +97,7 @@ def _validate_description(
             f"({len(description)})"
         )
     return issues
+
 
 def _parse_skill_file(
     file_path: str,
@@ -124,9 +129,7 @@ def _parse_skill_file(
 
     raw_name = metadata.get("name")
     name = raw_name if isinstance(raw_name, str) and raw_name else parent_dir_name
-    for issue in _validate_name(
-        name, parent_dir_name, max_name_length=max_name_length
-    ):
+    for issue in _validate_name(name, parent_dir_name, max_name_length=max_name_length):
         diagnostics.append(
             SkillDiagnostic(level="warning", message=issue, path=file_path)
         )
@@ -156,6 +159,7 @@ def _parse_skill_file(
         ),
         diagnostics,
     )
+
 
 def _load_skills_from_dir(
     directory: str,
@@ -200,9 +204,8 @@ def _load_skills_from_dir(
             dirnames[:] = []
             continue
 
-        if (
-            not include_root_files
-            or os.path.abspath(dirpath) != os.path.abspath(directory)
+        if not include_root_files or os.path.abspath(dirpath) != os.path.abspath(
+            directory
         ):
             continue
 
@@ -223,6 +226,7 @@ def _load_skills_from_dir(
             diagnostics.extend(skill_diags)
 
     return skills, diagnostics
+
 
 def load_skills(
     *,
@@ -316,6 +320,7 @@ def load_skills(
 
     return discovered, diagnostics
 
+
 def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
     visible_skills = [skill for skill in skills if not skill.disable_model_invocation]
     if not visible_skills:
@@ -350,176 +355,115 @@ def format_skills_for_prompt(skills: list[SkillRecord]) -> str:
     lines.append("</available_skills>")
     return "\n".join(lines)
 
+
 # Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
 # ---------------------------------------------------------------------------
+
 
 class _LoadSkillParams(BaseModel):
     name: str = Field(description="Skill name from <available_skills>.")
 
+
 # === Atom install ==========================================================
 
-async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
-    include_defaults = config.include_defaults
-    # ``inherit_claude`` defaults to ``include_defaults`` — when callers turn
-    # off the standard agentm defaults (e.g. test isolation) they should not
-    # silently pick up the real user's ``~/.claude/skills`` either.
-    inherit_claude = config.inherit_claude if config.inherit_claude is not None else include_defaults
-    configured_skill_paths = list(config.skill_paths)
-    cached_prompt_block = ""
-    skills_by_name: dict[str, SkillRecord] = {}
+_RESOURCE_RESPONSE_KEYS = frozenset({"skill_paths", "extra_skills"})
 
-    async def _populate(_: SessionReadyEvent) -> None:
-        nonlocal cached_prompt_block
-        discovered_paths = list(configured_skill_paths)
-        if inherit_claude:
-            # Auto-pick up Claude Code skill directories so users can reuse
-            # the same `.claude/skills/<name>/SKILL.md` layout. Non-existent
-            # paths are silently ignored by ``load_skills``.
-            discovered_paths.append(str(Path.home() / ".claude" / "skills"))
-            discovered_paths.append(
-                str(expand_path_from_cwd(".claude/skills", api.cwd))
-            )
-            # Also walk Claude Code's installed-plugin skills:
-            # ``~/.claude/plugins/cache/<source>/<plugin>/<version>/skills/``.
-            # Plugins are how the bulk of Claude Code's library ships
-            # (autoharness, workbuddy, codex, …) — ignoring them would
-            # leave agentm with only the user's personal ``~/.claude/skills``.
-            plugin_cache = Path.home() / ".claude" / "plugins" / "cache"
-            if plugin_cache.is_dir():
-                for source_dir in plugin_cache.iterdir():
-                    if not source_dir.is_dir():
-                        continue
-                    for plugin_dir in source_dir.iterdir():
-                        if not plugin_dir.is_dir():
-                            continue
-                        for version_dir in plugin_dir.iterdir():
-                            if not version_dir.is_dir():
-                                continue
-                            skills_dir = version_dir / "skills"
-                            if skills_dir.is_dir():
-                                discovered_paths.append(str(skills_dir))
-        response_owners: dict[int, str] = {}
 
-        class _ResourceResponseObserver:
-            def on_emit_start(self, channel: str, event: Any) -> None:
-                del channel, event
+class _ResourceResponseObserver:
+    def __init__(self) -> None:
+        self.response_owners: dict[int, str] = {}
 
-            def on_handler_done(
-                self,
-                channel: str,
-                handler: Any,
-                event: Any,
-                value: Any,
-                err: BaseException | None,
-                duration_ns: int,
-                owner: str | None = None,
-            ) -> None:
-                del handler, event, err, duration_ns
-                if channel == ResourcesDiscoverEvent.CHANNEL and isinstance(value, dict):
-                    response_owners[id(value)] = owner or "<unknown>"
+    def on_emit_start(self, channel: str, event: Any) -> None:
+        del channel, event
 
-            def on_emit_end(
-                self, channel: str, event: Any, results: list[Any]
-            ) -> None:
-                del channel, event, results
+    def on_handler_done(
+        self,
+        channel: str,
+        handler: Any,
+        event: Any,
+        value: Any,
+        err: BaseException | None,
+        duration_ns: int,
+        owner: str | None = None,
+    ) -> None:
+        del handler, event, err, duration_ns
+        if channel == ResourcesDiscoverEvent.CHANNEL and isinstance(value, dict):
+            self.response_owners[id(value)] = owner or "<unknown>"
 
-        unsubscribe = api.add_observer(_ResourceResponseObserver())
-        try:
-            responses = await api.events.emit(
-                ResourcesDiscoverEvent.CHANNEL,
-                ResourcesDiscoverEvent(cwd=api.cwd, reason="startup"),
-            )
-        finally:
-            unsubscribe()
-        contributed_skills: list[SkillRecord] = []
-        allowed_response_keys = {"skill_paths", "extra_skills"}
-        for response in responses:
-            if not isinstance(response, dict):
-                continue
-            origin = response_owners.get(id(response), "<unknown>")
-            for key in sorted(set(response) - allowed_response_keys):
-                await api.events.emit(
-                    DiagnosticEvent.CHANNEL,
-                    DiagnosticEvent(
-                        level="warning",
-                        source="skill_loader",
-                        message=(
-                            f"ignored unknown ResourcesDiscoverEvent response key {key!r} "
-                            f"from {origin}"
-                        ),
-                    ),
-                )
-            extra_paths = response.get("skill_paths")
-            if isinstance(extra_paths, list):
-                discovered_paths.extend(str(path) for path in extra_paths)
-            extra_skills = response.get("extra_skills")
-            if isinstance(extra_skills, list):
-                for entry in extra_skills:
-                    if isinstance(entry, SkillRecord):
-                        contributed_skills.append(entry)
+    def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
+        del channel, event, results
 
-        # Resolve project-scope skill dirs from the harness-supplied layout
-        # (previously the SkillsService injected this; now the atom does it
-        # directly).
-        layout = api.get_project_layout()
-        project_dirs = tuple(str(p) for p in layout.skills_dirs())
 
-        skills, _diagnostics = load_skills(
-            cwd=api.cwd,
-            agent_dir=str(agentm_home_dir()),
-            skill_paths=tuple(discovered_paths),
-            include_defaults=include_defaults,
-            project_skill_dirs=project_dirs,
+class _SkillLoaderRuntime:
+    def __init__(self, api: ExtensionAPI, config: SkillLoaderConfig) -> None:
+        self._api = api
+        self._include_defaults = config.include_defaults
+        # ``inherit_claude`` defaults to ``include_defaults`` — when callers turn
+        # off the standard agentm defaults (e.g. test isolation) they should not
+        # silently pick up the real user's ``~/.claude/skills`` either.
+        self._inherit_claude = (
+            config.inherit_claude
+            if config.inherit_claude is not None
+            else self._include_defaults
         )
-        # Append peer-contributed records last so they don't shadow disk-based
-        # skills with the same name.
-        seen_names = {skill.name for skill in skills}
-        for record in contributed_skills:
-            if record.name in seen_names:
-                continue
-            seen_names.add(record.name)
-            skills.append(record)
-        cached_prompt_block = format_skills_for_prompt(skills)
-        skills_by_name.clear()
-        for skill in skills:
-            skills_by_name[skill.name] = skill
+        self._configured_skill_paths = list(config.skill_paths)
+        self._cached_prompt_block = ""
+        self._skills_by_name: dict[str, SkillRecord] = {}
 
-    def _inject(event: BeforeAgentStartEvent) -> dict[str, str] | None:
-        if not cached_prompt_block:
+    def install(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="load_skill",
+                description=(
+                    "Load the full content of a skill by name. "
+                    "Use this to read detailed instructions from <available_skills>."
+                ),
+                parameters=pydantic_to_tool_schema(_LoadSkillParams),
+                fn=self.load_skill,
+            )
+        )
+        self._api.on(SessionReadyEvent.CHANNEL, self.populate)
+        self._api.on(BeforeAgentStartEvent.CHANNEL, self.inject)
+
+    async def populate(self, _: SessionReadyEvent) -> None:
+        discovered_paths = self._discovery_paths()
+        responses, response_owners = await self._discover_peer_resources()
+        contributed_skills = await self._merge_resource_responses(
+            responses,
+            response_owners=response_owners,
+            discovered_paths=discovered_paths,
+        )
+        skills = self._load_disk_skills(discovered_paths)
+        self._append_contributed_skills(skills, contributed_skills)
+        self._cached_prompt_block = format_skills_for_prompt(skills)
+        self._skills_by_name = {skill.name: skill for skill in skills}
+
+    def inject(self, event: BeforeAgentStartEvent) -> dict[str, str] | None:
+        if not self._cached_prompt_block:
             return None
-        updated = f"{event.system or ''}{cached_prompt_block}"
+        updated = f"{event.system or ''}{self._cached_prompt_block}"
         event.system = updated
         return {"system": updated}
 
-    def _resolve_sibling(name: str) -> Path | None:
-        """Check if *name* is a sibling file of any registered skill."""
-        filename = name if name.endswith(".md") else f"{name}.md"
-        for record in skills_by_name.values():
-            candidate = Path(record.base_dir) / filename
-            if candidate.is_file():
-                return candidate
-        return None
-
-    async def _load_skill(args: dict[str, Any]) -> Any:
+    async def load_skill(self, args: dict[str, Any]) -> Any:
         name = str(args.get("name", "")).strip()
         if not name:
             return ToolResult(
                 content=[TextContent(type="text", text="error: name is required")],
                 is_error=True,
             )
-        record = skills_by_name.get(name)
-        target: Path | None
-        if record is not None:
-            target = Path(record.file_path)
-        else:
-            target = _resolve_sibling(name)
+        target = self._skill_target(name)
         if target is None:
-            available = ", ".join(sorted(skills_by_name)) or "(none)"
+            available = ", ".join(sorted(self._skills_by_name)) or "(none)"
             return ToolResult(
-                content=[TextContent(
-                    type="text",
-                    text=f"error: skill {name!r} not found. Available: {available}",
-                )],
+                content=[
+                    TextContent(
+                        type="text",
+                        text=(
+                            f"error: skill {name!r} not found. Available: {available}"
+                        ),
+                    )
+                ],
                 is_error=True,
             )
         try:
@@ -531,17 +475,138 @@ async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
             )
         return ToolResult(content=[TextContent(type="text", text=content)])
 
-    api.register_tool(
-        FunctionTool(
-            name="load_skill",
-            description=(
-                "Load the full content of a skill by name. "
-                "Use this to read detailed instructions from <available_skills>."
-            ),
-            parameters=pydantic_to_tool_schema(_LoadSkillParams),
-            fn=_load_skill,
+    def _discovery_paths(self) -> list[str]:
+        discovered_paths = list(self._configured_skill_paths)
+        if not self._inherit_claude:
+            return discovered_paths
+        # Auto-pick up Claude Code skill directories so users can reuse the
+        # same `.claude/skills/<name>/SKILL.md` layout. Non-existent paths are
+        # silently ignored by ``load_skills``.
+        discovered_paths.append(str(Path.home() / ".claude" / "skills"))
+        discovered_paths.append(
+            str(expand_path_from_cwd(".claude/skills", self._api.cwd))
         )
-    )
+        discovered_paths.extend(self._claude_plugin_skill_dirs())
+        return discovered_paths
 
-    api.on(SessionReadyEvent.CHANNEL, _populate)
-    api.on(BeforeAgentStartEvent.CHANNEL, _inject)
+    def _claude_plugin_skill_dirs(self) -> list[str]:
+        # Also walk Claude Code's installed-plugin skills:
+        # ``~/.claude/plugins/cache/<source>/<plugin>/<version>/skills/``.
+        # Plugins are how the bulk of Claude Code's library ships
+        # (autoharness, workbuddy, codex, ...); ignoring them would leave
+        # agentm with only the user's personal ``~/.claude/skills``.
+        plugin_cache = Path.home() / ".claude" / "plugins" / "cache"
+        if not plugin_cache.is_dir():
+            return []
+        paths: list[str] = []
+        for source_dir in plugin_cache.iterdir():
+            if not source_dir.is_dir():
+                continue
+            for plugin_dir in source_dir.iterdir():
+                if not plugin_dir.is_dir():
+                    continue
+                for version_dir in plugin_dir.iterdir():
+                    if not version_dir.is_dir():
+                        continue
+                    skills_dir = version_dir / "skills"
+                    if skills_dir.is_dir():
+                        paths.append(str(skills_dir))
+        return paths
+
+    async def _discover_peer_resources(self) -> tuple[list[Any], dict[int, str]]:
+        observer = _ResourceResponseObserver()
+        unsubscribe = self._api.add_observer(observer)
+        try:
+            responses = await self._api.events.emit(
+                ResourcesDiscoverEvent.CHANNEL,
+                ResourcesDiscoverEvent(cwd=self._api.cwd, reason="startup"),
+            )
+        finally:
+            unsubscribe()
+        return responses, observer.response_owners
+
+    async def _merge_resource_responses(
+        self,
+        responses: list[Any],
+        *,
+        response_owners: dict[int, str],
+        discovered_paths: list[str],
+    ) -> list[SkillRecord]:
+        contributed_skills: list[SkillRecord] = []
+        for response in responses:
+            if not isinstance(response, dict):
+                continue
+            origin = response_owners.get(id(response), "<unknown>")
+            await self._warn_unknown_resource_keys(response, origin)
+            extra_paths = response.get("skill_paths")
+            if isinstance(extra_paths, list):
+                discovered_paths.extend(str(path) for path in extra_paths)
+            extra_skills = response.get("extra_skills")
+            if isinstance(extra_skills, list):
+                contributed_skills.extend(
+                    entry for entry in extra_skills if isinstance(entry, SkillRecord)
+                )
+        return contributed_skills
+
+    async def _warn_unknown_resource_keys(
+        self, response: dict[Any, Any], origin: str
+    ) -> None:
+        for key in sorted(set(response) - _RESOURCE_RESPONSE_KEYS):
+            await self._api.events.emit(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="warning",
+                    source="skill_loader",
+                    message=(
+                        f"ignored unknown ResourcesDiscoverEvent response key "
+                        f"{key!r} from {origin}"
+                    ),
+                ),
+            )
+
+    def _load_disk_skills(self, discovered_paths: list[str]) -> list[SkillRecord]:
+        # Resolve project-scope skill dirs from the harness-supplied layout
+        # (previously the SkillsService injected this; now the atom does it
+        # directly).
+        layout = self._api.get_project_layout()
+        project_dirs = tuple(str(p) for p in layout.skills_dirs())
+        skills, _diagnostics = load_skills(
+            cwd=self._api.cwd,
+            agent_dir=str(agentm_home_dir()),
+            skill_paths=tuple(discovered_paths),
+            include_defaults=self._include_defaults,
+            project_skill_dirs=project_dirs,
+        )
+        return skills
+
+    @staticmethod
+    def _append_contributed_skills(
+        skills: list[SkillRecord], contributed_skills: list[SkillRecord]
+    ) -> None:
+        # Append peer-contributed records last so they don't shadow disk-based
+        # skills with the same name.
+        seen_names = {skill.name for skill in skills}
+        for record in contributed_skills:
+            if record.name in seen_names:
+                continue
+            seen_names.add(record.name)
+            skills.append(record)
+
+    def _skill_target(self, name: str) -> Path | None:
+        record = self._skills_by_name.get(name)
+        if record is not None:
+            return Path(record.file_path)
+        return self._resolve_sibling(name)
+
+    def _resolve_sibling(self, name: str) -> Path | None:
+        """Check if *name* is a sibling file of any registered skill."""
+        filename = name if name.endswith(".md") else f"{name}.md"
+        for record in self._skills_by_name.values():
+            candidate = Path(record.base_dir) / filename
+            if candidate.is_file():
+                return candidate
+        return None
+
+
+async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
+    _SkillLoaderRuntime(api, config).install()
