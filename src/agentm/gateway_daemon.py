@@ -35,6 +35,24 @@ class GatewayDaemonError(RuntimeError):
     """Raised when the local gateway daemon cannot be managed."""
 
 
+def _unix_socket_path_text(connect_url: str) -> str:
+    parsed = urlparse(connect_url)
+    if parsed.scheme != "unix":
+        raise GatewayDaemonError(
+            f"local gateway daemon only supports unix:// sockets, got {connect_url!r}"
+        )
+    if parsed.netloc:
+        return f"{parsed.netloc}{parsed.path}"
+    return parsed.path
+
+
+def _expand_connect_url(connect_url: str) -> str:
+    parsed = urlparse(connect_url)
+    if parsed.scheme != "unix":
+        return connect_url
+    return f"unix://{unix_socket_path(connect_url)}"
+
+
 @dataclass(frozen=True, slots=True)
 class GatewayDaemonConfig:
     """Configuration for starting or reusing the local gateway daemon."""
@@ -54,6 +72,8 @@ class GatewayDaemonConfig:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cwd", _expand_path(self.cwd))
+        if self.bind is not None:
+            object.__setattr__(self, "bind", _expand_connect_url(self.bind))
         for field_name in (
             "bind_token_file",
             "tls_cert",
@@ -150,15 +170,10 @@ def default_daemon_metadata_file(*, create_runtime_dir: bool = False) -> Path:
 
 
 def unix_socket_path(connect_url: str) -> Path:
-    prefix = "unix://"
-    if not connect_url.startswith(prefix):
-        raise GatewayDaemonError(
-            f"local gateway daemon only supports unix:// sockets, got {connect_url!r}"
-        )
-    raw_path = connect_url.removeprefix(prefix)
+    raw_path = _unix_socket_path_text(connect_url)
     if not raw_path:
         raise GatewayDaemonError("local gateway socket path is empty")
-    return Path(raw_path)
+    return _expand_path(raw_path)
 
 
 def gateway_accepts_connections(connect_url: str) -> bool:
@@ -208,7 +223,9 @@ def pid_file_is_live(pid_file: Path) -> bool:
 
 def gateway_daemon_status() -> GatewayDaemonStatus:
     metadata = _read_daemon_metadata()
-    connect_url = str(metadata.get("connect_url") or default_daemon_connect_url())
+    connect_url = _expand_connect_url(
+        str(metadata.get("connect_url") or default_daemon_connect_url())
+    )
     pid_file = default_daemon_pid_file()
     pid = read_pid_file(pid_file)
     token_file_raw = metadata.get("token_file")
