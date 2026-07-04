@@ -61,7 +61,7 @@ func (m *appModel) hasBackgroundActivities() bool {
 	return len(m.backgroundActivities) > 0
 }
 
-func (m *appModel) hasBottomActivities() bool {
+func (m *appModel) hasBottomActivityRows() bool {
 	return m.hasWorkflowTasks() || m.hasBackgroundActivities()
 }
 
@@ -294,11 +294,11 @@ func isWorkflowCompletionNote(content string) bool {
 	return strings.HasPrefix(content, "✓ ") || strings.HasPrefix(content, "sub-agent ")
 }
 
-func (m *appModel) toggleWorkflowRows() tea.Cmd {
-	if !m.hasBottomActivities() {
+func (m *appModel) toggleBottomActivityRows() tea.Cmd {
+	if !m.hasBottomActivityRows() {
 		return nil
 	}
-	m.workflowRowsHidden = !m.workflowRowsHidden
+	m.bottomActivityRowsHidden = !m.bottomActivityRowsHidden
 	m.workflowPickerOpen = false
 	m.statusBar.InvalidateCache()
 	return m.resizeAll()
@@ -361,9 +361,9 @@ func (m *appModel) footerText() string {
 		return "↑/↓ to select · Enter to view"
 	case m.activeIsWorkflowTask():
 		return "ctrl+n/p to switch tabs · ↓ to manage tasks"
-	case m.hasBottomActivities():
+	case m.hasBottomActivityRows():
 		verb := "hide"
-		if m.workflowRowsHidden {
+		if m.bottomActivityRowsHidden {
 			verb = "show"
 		}
 		if m.hasWorkflowTasks() {
@@ -411,7 +411,7 @@ func (m *appModel) renderBottomSurface(width int) string {
 	if m.shortcutSheetOpen {
 		parts = append(parts, m.renderShortcutSheet(width))
 	}
-	if rows := m.renderWorkflowRows(width); rows != "" {
+	if rows := m.renderBottomActivityRows(width); rows != "" {
 		parts = append(parts, rows)
 	}
 	return strings.Join(parts, "\n")
@@ -461,8 +461,8 @@ func (m *appModel) renderWorkflowDetail(width, height int) string {
 		Render(styles.BaseStyle.Render(strings.Join(lines, "\n")))
 }
 
-func (m *appModel) renderWorkflowRows(width int) string {
-	if !m.hasBottomActivities() || (m.workflowRowsHidden && !m.workflowPickerOpen) {
+func (m *appModel) renderBottomActivityRows(width int) string {
+	if !m.hasBottomActivityRows() || (m.bottomActivityRowsHidden && !m.workflowPickerOpen) {
 		return ""
 	}
 	var workflowRows []workflowRow

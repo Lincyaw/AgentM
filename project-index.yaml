@@ -1017,7 +1017,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/tui/service/tuistate/store.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/tabs.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/tui.go
-      - path: contrib/gateway-peers/terminal-go/internal/tui/workflow_surface.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/bottom_activity_surface.go
       - path: contrib/gateway-peers/terminal-go/main.go
     tests: []
     docs:

@@ -128,19 +128,19 @@ type appModel struct {
 	lastExitRequest     time.Time
 	lastEscClearRequest time.Time
 
-	// Claude Code-style workflow surface state. Background sessions remain
-	// routed by supervisor, but the visible model is main + task rows/picker
-	// instead of one visible tab per worker.
-	mainSessionID        string
-	workflowRowsHidden   bool
-	workflowPickerOpen   bool
-	workflowPickerIndex  int
-	workflowTranscripts  map[string]string
-	workflowVisible      map[string]bool
-	backgroundActivities map[string]backgroundActivity
-	shortcutSheetOpen    bool
-	transcriptDetailed   bool
-	transcriptVerbose    bool
+	// Claude Code-style bottom activity surface. Background workflow sessions
+	// stay routed by supervisor, while shell/tool and monitor activity stays as
+	// rows instead of being promoted into tabs.
+	mainSessionID            string
+	bottomActivityRowsHidden bool
+	workflowPickerOpen       bool
+	workflowPickerIndex      int
+	workflowTranscripts      map[string]string
+	workflowVisible          map[string]bool
+	backgroundActivities     map[string]backgroundActivity
+	shortcutSheetOpen        bool
+	transcriptDetailed       bool
+	transcriptVerbose        bool
 
 	// keyboardEnhancements stores the last keyboard enhancements message
 	keyboardEnhancements *tea.KeyboardEnhancementsMsg
@@ -2145,8 +2145,8 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if msg.String() == "ctrl+t" && m.hasBottomActivities() {
-		return m, m.toggleWorkflowRows()
+	if msg.String() == "ctrl+t" && m.hasBottomActivityRows() {
+		return m, m.toggleBottomActivityRows()
 	}
 
 	if m.shortcutSheetOpen {
