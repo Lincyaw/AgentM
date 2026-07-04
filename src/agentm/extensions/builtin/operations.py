@@ -53,25 +53,51 @@ MANIFEST = ExtensionManifest(
     registers=(),
     config_schema=OperationsConfig,
     requires=(),
+    api_version=1,
+    tier=1,
 )
 
 
-async def install(api: ExtensionAPI, config: OperationsConfig) -> None:
-    # Sub-installers expect a plain dict; forward the full model dump.
-    config_dict = config.model_dump()
-    backend = config.backend
-    if backend == "local":
+class _OperationsRuntime:
+    """Install-time backend dispatcher for the unified operations atom."""
+
+    def __init__(self, api: ExtensionAPI, config: OperationsConfig) -> None:
+        self._api = api
+        self._config = config
+
+    async def install(self) -> None:
+        if self._config.backend == "local":
+            self._install_local()
+            return
+        if self._config.backend == "agent_env":
+            await self._install_agent_env()
+            return
+        raise ValueError(f"Unknown operations backend: {self._config.backend!r}")
+
+    def _install_local(self) -> None:
+        # Sub-installers expect a plain dict; forward the full model dump.
         from agentm.extensions.builtin._operations.local import install_local
 
-        install_local(api, config_dict)
-    elif backend == "agent_env":
+        install_local(self._api, self._config.model_dump())
+
+    async def _install_agent_env(self) -> None:
         from agentm.extensions.builtin._operations.agent_env import (
             AgentEnvConfig,
             install_agent_env,
         )
 
         await install_agent_env(
-            api, AgentEnvConfig.model_validate(config.model_dump(exclude={"backend"}))
+            self._api,
+            AgentEnvConfig.model_validate(self._config.model_dump(exclude={"backend"})),
         )
-    else:
-        raise ValueError(f"Unknown operations backend: {backend!r}")
+
+
+async def install(api: ExtensionAPI, config: OperationsConfig) -> None:
+    await _OperationsRuntime(api, config).install()
+
+
+__all__ = (
+    "MANIFEST",
+    "OperationsConfig",
+    "install",
+)
