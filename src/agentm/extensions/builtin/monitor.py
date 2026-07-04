@@ -155,12 +155,14 @@ _KERNEL_CONTROL_CHANNELS: frozenset[str] = frozenset(
     }
 )
 
+
 class MonitorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
     event_summary_max_tokens: int = Field(gt=0)
     condition_poll_min_seconds: float = _DEFAULT_CONDITION_POLL_MIN
+
 
 MANIFEST = ExtensionManifest(
     name="monitor",
@@ -180,6 +182,7 @@ MANIFEST = ExtensionManifest(
     config_schema=MonitorConfig,
     requires=(),
 )
+
 
 @dataclass(slots=True, kw_only=True)
 class _Monitor:
@@ -203,12 +206,14 @@ class _Monitor:
     task: asyncio.Task[Any] | None = None  # wakeup sleep / condition poll task
     unsubscribe: Unsubscribe | None = None  # channel's bus unsubscribe
 
+
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(to_jsonable(payload)))],
         is_error=is_error,
         extras=payload,
     )
+
 
 def _event_summary(
     event: Any,
@@ -230,6 +235,7 @@ def _event_summary(
         return text
     return truncated.text + "..."
 
+
 def _monitor_view(state: _Monitor) -> dict[str, Any]:
     view: dict[str, Any] = {
         "monitor_id": state.monitor_id,
@@ -248,14 +254,17 @@ def _monitor_view(state: _Monitor) -> dict[str, Any]:
         view["note"] = state.note
     return view
 
+
 def _schedule_monitor_id(job_id: Any) -> str:
     return f"{_GATEWAY_SCHEDULE_PREFIX}{job_id}"
+
 
 def _schedule_job_id(monitor_id: str) -> str | None:
     if not monitor_id.startswith(_GATEWAY_SCHEDULE_PREFIX):
         return None
     job_id = monitor_id.removeprefix(_GATEWAY_SCHEDULE_PREFIX)
     return job_id or None
+
 
 def _schedule_view(job: dict[str, Any]) -> dict[str, Any]:
     job_id = str(job.get("id") or "")
@@ -283,8 +292,10 @@ def _schedule_view(job: dict[str, Any]) -> dict[str, Any]:
         view["last_error"] = str(job["last_error"])
     return view
 
+
 def _activity_id(monitor_id: str) -> str:
     return f"monitor:{monitor_id}"
+
 
 def _monitor_label(state: _Monitor) -> str:
     if state.kind == _KIND_WAKEUP:
@@ -297,6 +308,7 @@ def _monitor_label(state: _Monitor) -> str:
         return f"monitor {state.watch}"
     return "monitor"
 
+
 def _monitor_note(state: _Monitor) -> str | None:
     if state.note:
         return state.note
@@ -307,6 +319,7 @@ def _monitor_note(state: _Monitor) -> str | None:
     if state.delay is not None:
         return f"{state.delay:g}s"
     return None
+
 
 class _MonitorManager:
     """Per-session registry + asyncio/bus handles for live monitors.
@@ -397,8 +410,7 @@ class _MonitorManager:
             return _tool_result(
                 {
                     "error": (
-                        "persistent cron monitors require the gateway scheduler "
-                        "service"
+                        "persistent cron monitors require the gateway scheduler service"
                     )
                 },
                 is_error=True,
@@ -467,8 +479,7 @@ class _MonitorManager:
             return _tool_result(
                 {
                     "error": (
-                        "persistent cron monitors require the gateway scheduler "
-                        "service"
+                        "persistent cron monitors require the gateway scheduler service"
                     )
                 },
                 is_error=True,
@@ -513,9 +524,7 @@ class _MonitorManager:
                 {"error": "delay must be a number (seconds)"}, is_error=True
             )
         if delay < 0:
-            return _tool_result(
-                {"error": "delay must be non-negative"}, is_error=True
-            )
+            return _tool_result({"error": "delay must be non-negative"}, is_error=True)
         if self._shutting_down:
             return _tool_result(
                 {"error": "session is shutting down; wakeup refused"},
@@ -809,9 +818,7 @@ class _MonitorManager:
     async def list_monitors(self, _args: dict[str, Any]) -> ToolResult:
         monitors = [_monitor_view(state) for state in self._monitors.values()]
         monitors.extend(await self._list_gateway_monitors())
-        return _tool_result(
-            {"monitors": monitors}
-        )
+        return _tool_result({"monitors": monitors})
 
     async def cancel_monitor(self, args: dict[str, Any]) -> ToolResult:
         """Cancel one monitor — and ONLY that monitor.
@@ -837,9 +844,7 @@ class _MonitorManager:
             # after a successful fire must NOT overwrite ``_FIRED`` (the
             # bookkeeping would then lie to the agent). Return the actual
             # current status — idempotent in both directions.
-            return _tool_result(
-                {"monitor_id": monitor_id, "status": state.status}
-            )
+            return _tool_result({"monitor_id": monitor_id, "status": state.status})
         state.status = _CANCELLED
         self._emit_activity(state, terminal=True)
         # Wakeup + condition monitors own an asyncio.Task; channels own an
@@ -854,7 +859,9 @@ class _MonitorManager:
             except Exception as exc:  # noqa: BLE001
                 # An unsubscribe failure must not crash the tool — the monitor
                 # is now marked cancelled and its handler is the no-op branch.
-                logger.debug("monitor: unsubscribe failed cancelling {}: {}", monitor_id, exc)
+                logger.debug(
+                    "monitor: unsubscribe failed cancelling {}: {}", monitor_id, exc
+                )
         return _tool_result({"monitor_id": monitor_id, "status": _CANCELLED})
 
     # --- lifecycle ---------------------------------------------------------
@@ -879,10 +886,7 @@ class _MonitorManager:
             state.status = _CANCELLED
             # Wakeup AND condition monitors own an asyncio.Task; cancel both so
             # no detached poll survives the session. Channels own an unsubscribe.
-            if (
-                state.kind in (_KIND_WAKEUP, _KIND_CONDITION)
-                and state.task is not None
-            ):
+            if state.kind in (_KIND_WAKEUP, _KIND_CONDITION) and state.task is not None:
                 if not state.task.done():
                     state.task.cancel()
                     wakeup_tasks.append(state.task)
@@ -899,8 +903,10 @@ class _MonitorManager:
         # (no "Task exception was never retrieved" past shutdown).
         await asyncio.gather(*wakeup_tasks, return_exceptions=True)
 
+
 # Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
 # ---------------------------------------------------------------------------
+
 
 class _ScheduleWakeupParams(BaseModel):
     delay: float = Field(ge=0, description="Seconds to wait before firing.")
@@ -909,12 +915,12 @@ class _ScheduleWakeupParams(BaseModel):
         description="Free-form note delivered with the wake.",
     )
 
+
 class _CreateMonitorParams(BaseModel):
     watch: str | None = Field(
         default=None,
         description=(
-            "Bus channel name to subscribe to "
-            "(e.g. 'tool_call', 'agent_end')."
+            "Bus channel name to subscribe to (e.g. 'tool_call', 'agent_end')."
         ),
     )
     condition: str | None = Field(
@@ -946,68 +952,81 @@ class _CreateMonitorParams(BaseModel):
     note: str | None = Field(
         default=None,
         description=(
-            "Free-form note delivered with each fire. Required for cron "
-            "monitors."
+            "Free-form note delivered with each fire. Required for cron monitors."
         ),
     )
+
 
 class _ListMonitorsParams(BaseModel):
     pass
 
+
 class _CancelMonitorParams(BaseModel):
     monitor_id: str
 
+
+class _MonitorRuntime:
+    def __init__(self, api: ExtensionAPI, config: MonitorConfig) -> None:
+        self._api = api
+        self._manager = _MonitorManager(
+            api=api,
+            shutdown_grace_seconds=config.shutdown_grace_seconds,
+            event_summary_max_tokens=config.event_summary_max_tokens,
+            condition_poll_min_seconds=config.condition_poll_min_seconds,
+        )
+
+    def install(self) -> None:
+        self._api.on(SessionShutdownEvent.CHANNEL, self._manager.on_session_shutdown)
+        self._register_tools()
+
+    def _register_tools(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="schedule_wakeup",
+                description=(
+                    "Schedule a one-shot wakeup that posts to the session inbox "
+                    "after `delay` seconds. Returns a monitor_id."
+                ),
+                parameters=pydantic_to_tool_schema(_ScheduleWakeupParams),
+                fn=self._manager.schedule_wakeup,
+            )
+        )
+        self._api.register_tool(
+            FunctionTool(
+                name="create_monitor",
+                description=(
+                    "Subscribe to a bus channel; each fire posts a "
+                    "source='monitor' item to the session inbox under a stable "
+                    "dedup_key (latest fire replaces the prior undrained one). "
+                    "Alternatively pass condition + optional poll_interval for a "
+                    "recurring condition-poll monitor, or cron + note for a "
+                    "persistent gateway-backed monitor."
+                ),
+                parameters=pydantic_to_tool_schema(_CreateMonitorParams),
+                fn=self._manager.create_monitor,
+            )
+        )
+        self._api.register_tool(
+            FunctionTool(
+                name="list_monitors",
+                description="List every live monitor (id, kind, watch, status).",
+                parameters=pydantic_to_tool_schema(_ListMonitorsParams),
+                fn=self._manager.list_monitors,
+            )
+        )
+        self._api.register_tool(
+            FunctionTool(
+                name="cancel_monitor",
+                description=(
+                    "Cancel one monitor by id. Cancels the wakeup task or "
+                    "unsubscribes the channel handler — never touches any shared "
+                    "session signal. Idempotent."
+                ),
+                parameters=pydantic_to_tool_schema(_CancelMonitorParams),
+                fn=self._manager.cancel_monitor,
+            )
+        )
+
+
 def install(api: ExtensionAPI, config: MonitorConfig) -> None:
-    manager = _MonitorManager(
-        api=api,
-        shutdown_grace_seconds=config.shutdown_grace_seconds,
-        event_summary_max_tokens=config.event_summary_max_tokens,
-        condition_poll_min_seconds=config.condition_poll_min_seconds,
-    )
-    api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
-    api.register_tool(
-        FunctionTool(
-            name="schedule_wakeup",
-            description=(
-                "Schedule a one-shot wakeup that posts to the session inbox "
-                "after `delay` seconds. Returns a monitor_id."
-            ),
-            parameters=pydantic_to_tool_schema(_ScheduleWakeupParams),
-            fn=manager.schedule_wakeup,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="create_monitor",
-            description=(
-                "Subscribe to a bus channel; each fire posts a "
-                "source='monitor' item to the session inbox under a stable "
-                "dedup_key (latest fire replaces the prior undrained one). "
-                "Alternatively pass condition + optional poll_interval for a "
-                "recurring condition-poll monitor, or cron + note for a "
-                "persistent gateway-backed monitor."
-            ),
-            parameters=pydantic_to_tool_schema(_CreateMonitorParams),
-            fn=manager.create_monitor,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="list_monitors",
-            description="List every live monitor (id, kind, watch, status).",
-            parameters=pydantic_to_tool_schema(_ListMonitorsParams),
-            fn=manager.list_monitors,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="cancel_monitor",
-            description=(
-                "Cancel one monitor by id. Cancels the wakeup task or "
-                "unsubscribes the channel handler — never touches any shared "
-                "session signal. Idempotent."
-            ),
-            parameters=pydantic_to_tool_schema(_CancelMonitorParams),
-            fn=manager.cancel_monitor,
-        )
-    )
+    _MonitorRuntime(api, config).install()
