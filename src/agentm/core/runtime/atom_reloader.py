@@ -30,6 +30,7 @@ from agentm.core.abi.events import (
     ExtensionReloadEvent,
     ExtensionUnloadEvent,
 )
+from agentm.core.lib import expand_path, expand_path_from_cwd
 from agentm.core.runtime.extension import (
     AtomInfo,
     CommandSpec,
@@ -114,7 +115,7 @@ class AtomReloader:
         apis: dict[str, _ExtensionAPIImpl],
         on_provider_changed: Callable[[], None],
     ) -> None:
-        self._cwd = cwd
+        self._cwd = str(expand_path(cwd).resolve())
         self._resource_writer = resource_writer
         self._bus = bus
         self._tools = tools
@@ -1093,10 +1094,7 @@ class AtomReloader:
     def _resolve_install_target(self, name: str, target_path: str | None) -> Path:
         if target_path is None:
             return (Path(self._cwd) / ".agentm" / "atoms" / f"{name}.py").resolve()
-        candidate = Path(target_path)
-        if not candidate.is_absolute():
-            candidate = Path(self._cwd) / candidate
-        return candidate.resolve()
+        return expand_path_from_cwd(target_path, self._cwd).resolve()
 
     def _validate_install_source(
         self, name: str, module_path: str, new_source: str
