@@ -29,6 +29,7 @@ from agentm.core._internal.catalog.manifest import (
     matches_manifest_glob,
 )
 from agentm.core.abi.events import ResourceWriteEvent
+from agentm.core.lib.paths import expand_path
 
 
 # Author / committer identity overrides leak from the user's shell into git
@@ -140,7 +141,7 @@ class GitBackedResourceWriter:
         # creation is deferred to `_lazy_setup()`, which fires on the first
         # mutating operation (write/replace/delete/batch/restore). Scenarios
         # that only read or classify pay zero filesystem cost.
-        self._cwd = Path(cwd).resolve()
+        self._cwd = expand_path(cwd).resolve()
         self._session_id = session_id
         self._bus = bus
         self._auto_commit = auto_commit

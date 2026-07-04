@@ -1067,6 +1067,7 @@ requirements:
       - path: src/agentm/gateway/workspace.py
       - path: src/agentm/core/runtime/session_factory.py
       - path: src/agentm/core/runtime/session_bootstrap.py
+      - path: src/agentm/core/runtime/resource_writer.py
       - path: src/agentm/core/runtime/catalog/__init__.py
       - path: src/agentm/core/runtime/catalog/indexer.py
       - path: src/agentm/core/runtime/resource_loader.py
