@@ -50,6 +50,18 @@ def _resolve_provider(model_profile: str) -> tuple[str, dict[str, Any]]:
         )
     return DEFAULT_PROVIDER_REGISTRY.build(profile.provider, profile.to_build_config())
 
+
+def _eval_observability_dir(env: dict[str, str]) -> Path:
+    """Resolve the observability directory used by the eval subprocess."""
+    from agentm.core.lib import expand_path, resolve_observability_dir
+
+    if obs_dir := env.get("AGENTM_OBSERVABILITY_DIR"):
+        return expand_path(obs_dir)
+    if agentm_home := env.get("AGENTM_HOME"):
+        return expand_path(agentm_home) / "observability"
+    return resolve_observability_dir(Path.cwd())
+
+
 def _run_eval(
     *,
     config_path: str,
@@ -188,6 +200,7 @@ async def run_evolution_loop(
     if provider_cfg.get("base_url"):
         eval_env["OPENAI_BASE_URL"] = provider_cfg["base_url"]
     eval_env.update(env_vars or {})
+    eval_obs_dir = _eval_observability_dir(eval_env)
 
     result = EvolutionResult()
 
@@ -240,10 +253,11 @@ async def run_evolution_loop(
             case_dir = os.path.join(data_root, source)
             meta = json.loads(row.get("meta") or "{}")
             session_log_id = meta.get("session_log_id", "")
-            traj_path = os.path.join(
-                os.getcwd(), ".agentm", "observability",
-                f"{session_log_id}.jsonl",
-            ) if session_log_id else ""
+            traj_path = (
+                str(eval_obs_dir / f"{session_log_id}.jsonl")
+                if session_log_id
+                else ""
+            )
 
             report = await observe_case(
                 case_id=source,

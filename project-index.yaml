@@ -596,6 +596,7 @@ requirements:
       - path: .claude/skills/agentm-sdk/references/provider-and-cli.md
       - path: contrib/evals/rescue_window/README.md
       - path: contrib/scenarios/mcp_demo/README.md
+      - path: contrib/scenarios/rca/README.md
       - path: .claude/designs/pluggable-architecture.md
     depends_on:
       - REQ-094-ai-provider-descriptor-registry

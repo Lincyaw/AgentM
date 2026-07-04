@@ -148,8 +148,8 @@ is untouched.
 
 As of the 2026-05-12 unification, AgentM's identity model maps 1:1 onto
 the OTel data model so any OTel-compatible store (Jaeger, Grafana
-Tempo, OTLP collectors) can ingest `.agentm/observability/*.jsonl`
-without translation:
+Tempo, OTLP collectors) can ingest `$AGENTM_HOME/observability/*.jsonl`
+(or `AGENTM_OBSERVABILITY_DIR/*.jsonl`) without translation:
 
 | AgentM field              | OTel field        | Shape       | Notes                                                                                                                                              |
 |---------------------------|-------------------|-------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -170,7 +170,8 @@ trace_id=$(sqlite3 eval.db \
    and exp_id like 'agentm-rca-opslite-fixed-50-%' \
    order by created_at desc limit 1")
 
-grep -l "\"trace_id\": \"$trace_id\"" .agentm/observability/*.jsonl
+obs_dir="${AGENTM_OBSERVABILITY_DIR:-${AGENTM_HOME:-$HOME/.agentm}/observability}"
+grep -l "\"trace_id\": \"$trace_id\"" "$obs_dir"/*.jsonl
 ```
 
 A helper that materialises the mapping for an entire eval run lives at
