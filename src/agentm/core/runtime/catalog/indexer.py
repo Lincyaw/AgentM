@@ -17,6 +17,7 @@ from typing import Annotated, Any
 
 import typer
 
+from agentm.core.lib.paths import expand_path
 from agentm.core.runtime.catalog import _layout
 from agentm.core.lib.trace_reader import TraceReader
 
@@ -224,7 +225,7 @@ def index_trace(trace_path: Path, *, root: Path | None = None) -> IndexerResult:
     if root is None:
         cwd_root = trace_path.parent.parent.parent
     else:
-        cwd_root = Path(root).expanduser().resolve()
+        cwd_root = expand_path(root).resolve()
     _layout.catalog_root(root=cwd_root).mkdir(parents=True, exist_ok=True)
     result = IndexerResult()
     trace_id = trace_path.stem
@@ -368,7 +369,7 @@ def rebuild(
     ] = None,
 ) -> None:
     """Re-derive catalog metrics from raw observability traces."""
-    resolved_root = root.expanduser().resolve()
+    resolved_root = expand_path(root).resolve()
     if observability is None:
         # Resolve through the default project layout so the on-disk policy
         # lives in one place. Constructed lazily — no filesystem touch at
@@ -376,7 +377,7 @@ def rebuild(
         from agentm.core.runtime.catalog import DefaultProjectLayout
 
         observability = DefaultProjectLayout(cwd=resolved_root).observability_root()
-    resolved_obs = observability.resolve()
+    resolved_obs = expand_path(observability).resolve()
     n_traces, n_atoms, n_warnings, failures = rebuild_catalog(
         root=resolved_root, observability=resolved_obs
     )

@@ -1065,6 +1065,7 @@ requirements:
       - path: src/agentm/gateway/systemd.py
       - path: src/agentm/gateway/workspace.py
       - path: src/agentm/core/runtime/session_factory.py
+      - path: src/agentm/core/runtime/catalog/indexer.py
       - path: src/agentm/core/runtime/resource_loader.py
       - path: src/agentm/extensions/discover.py
       - path: src/agentm/extensions/loader.py
