@@ -1088,6 +1088,7 @@ requirements:
       - path: src/agentm/extensions/builtin/query_tools.py
       - path: src/agentm/extensions/builtin/tool_result_cap.py
       - path: src/agentm/extensions/builtin/tui_snapshot.py
+      - path: src/agentm/extensions/builtin/workflow.py
       - path: contrib/extensions/cc/__init__.py
       - path: contrib/extensions/cc/agents.py
       - path: contrib/extensions/cc/commands.py

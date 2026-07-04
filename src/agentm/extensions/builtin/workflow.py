@@ -95,6 +95,7 @@ from agentm.core.abi import (
     TurnEndEvent,
 )
 from agentm.core.abi import ARTIFACT_STORE_SERVICE
+from agentm.core.lib import expand_path_from_cwd
 from agentm.core.lib import forward_child_to_wire as _forward_child_to_wire
 from agentm.extensions import ExtensionManifest
 
@@ -1824,7 +1825,7 @@ class WorkflowRunner:
         """Run a pre-written workflow script file."""
         sp = Path(path)
         if not sp.is_absolute():
-            sp = Path(self._api.cwd) / sp
+            sp = expand_path_from_cwd(sp, self._api.cwd)
         sp = sp.resolve()
         if not sp.is_file():
             raise FileNotFoundError(f"workflow script not found: {sp}")
