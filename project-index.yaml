@@ -1730,8 +1730,10 @@ requirements:
     description: >
       The contrib workgraph scenario must provide a long-lived main
       orchestrator agent that talks with the user, maintains a lightweight
-      filesystem task bus under ``.agentm/workgraph/``, and launches
-      short-lived ARL-backed development workflows for individual ready tasks.
+      filesystem task bus under ``$AGENTM_HOME/workgraph/`` by default, and
+      launches short-lived ARL-backed development workflows for individual
+      ready tasks. An explicit ``state_dir`` may select a project-local bus for
+      controlled runs.
       The main orchestrator must have skill discovery, prompt templates,
       history compaction, explicit history recall, and terminal TUI snapshot
       support so it can operate as a durable chat-facing controller rather than

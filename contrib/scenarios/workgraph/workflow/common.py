@@ -9,10 +9,9 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from agentm.core.lib import expand_path_from_cwd
+from agentm.core.lib import agentm_home_dir, expand_path_from_cwd
 from agentm.extensions.builtin.workflow import WorkflowContext
 
-DEFAULT_STATE_DIR = ".agentm/workgraph"
 TASK_HEADER_FIELDS = {"depends", "locks", "repo", "base"}
 CONFIG_FILENAMES = ("config.toml", "workgraph.toml")
 
@@ -53,7 +52,9 @@ def _workflow_cwd(ctx: WorkflowContext) -> str:
 
 
 def _state_root(ctx: WorkflowContext) -> Path:
-    raw = _as_str(ctx.args.get("state_dir"), DEFAULT_STATE_DIR)
+    raw = _as_str(ctx.args.get("state_dir"))
+    if not raw.strip():
+        return agentm_home_dir() / "workgraph"
     return expand_path_from_cwd(raw, _workflow_cwd(ctx))
 
 

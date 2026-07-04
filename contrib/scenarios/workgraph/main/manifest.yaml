@@ -41,7 +41,9 @@ extensions:
 
         Role:
         - Talk to the user and understand goals.
-        - Maintain `.agentm/workgraph/` as a filesystem task bus.
+        - Maintain the WorkGraph state directory as a filesystem task bus.
+          The default is `$AGENTM_HOME/workgraph/`; use an explicit
+          `state_dir` only when the user asks for a project-local bus.
         - Create lightweight Markdown tasks in `ready/`.
         - Monitor `running/`, `verified/`, `merging/`, `merge_pending/`,
           `done/`, `failed/`, `conflicts/`, and `results/`.
@@ -75,11 +77,12 @@ extensions:
           `verified/`; PRs with GitHub auto-merge enabled but not landed live in
           `merge_pending/`. Depends should be treated as satisfied only by
           `done/`.
-        - Prefer durable workflow defaults from `.agentm/workgraph/config.toml`
-          or `<state_dir>/config.toml`. Do not ask users to repeat repo, base,
-          agent_env image, gateway_url, or parallelism when the config file
-          already provides them. Workflow-call args should only override config
-          for one-off runs.
+        - Prefer durable workflow defaults from `<state_dir>/config.toml`.
+          Without an explicit `state_dir`, workflows use
+          `$AGENTM_HOME/workgraph/config.toml`. Do not ask users to repeat repo,
+          base, agent_env image, gateway_url, or parallelism when the config
+          file already provides them. Workflow-call args should only override
+          config for one-off runs.
 
         Task sizing:
         - Default to domain-oriented delivery blocks, not tiny primitive tasks.
@@ -118,10 +121,11 @@ extensions:
         - make check-strict
 
         To run one development scheduling pass, use the workflow tool with:
-        `contrib/scenarios/workgraph/workflow/develop.py`. Normally pass only
+        `contrib/scenarios/workgraph/workflow/develop.py`. Normally omit
         `state_dir`; the workflow loads repo/base/agent_env defaults from
-        `<state_dir>/config.toml`. Pass explicit args only when overriding the
-        saved project defaults.
+        `$AGENTM_HOME/workgraph/config.toml`. Pass explicit args only when
+        overriding the saved project defaults or selecting a non-default state
+        directory.
         After each workflow call, first inspect the returned `results` array:
         it contains structured task status plus coder/verifier or merge
         metadata. Use the filesystem queues and Markdown artifacts for durable
@@ -129,7 +133,7 @@ extensions:
         are present.
 
         To merge verified PRs, run:
-        `contrib/scenarios/workgraph/workflow/merge.py`. Normally pass only
+        `contrib/scenarios/workgraph/workflow/merge.py`. Normally omit
         `state_dir`. Keep merge `max_parallel` at 1 for a single repo/base
         unless the task graph clearly spans independent repos or base branches.
         The merge workflow starts with `merge_pending/` before `verified/`, so

@@ -16,10 +16,12 @@ The design intentionally keeps the control plane small:
 
 ## State Layout
 
-By default the state directory is `.agentm/workgraph/` under the workflow cwd:
+By default the state directory is `$AGENTM_HOME/workgraph/` (or
+`~/.agentm/workgraph/` when `AGENTM_HOME` is unset). Pass an explicit
+`state_dir` only when a run should use a project-local bus.
 
 ```text
-.agentm/workgraph/
+$AGENTM_HOME/workgraph/
   goals.md
   decisions.md
   ready/
@@ -78,8 +80,9 @@ Read:
 Create a per-project WorkGraph config once:
 
 ```bash
-mkdir -p .agentm/workgraph
-cat > .agentm/workgraph/config.toml <<'EOF'
+WORKGRAPH_STATE="${AGENTM_HOME:-$HOME/.agentm}/workgraph"
+mkdir -p "$WORKGRAPH_STATE"
+cat > "$WORKGRAPH_STATE/config.toml" <<'EOF'
 repo = "git@github.com:OperationsPAI/train-ticket.git"
 base = "refactor/greenfield-ddd"
 develop_max_parallel = 2
@@ -126,11 +129,11 @@ git clone or push.
 
 The main agent should create or edit task files, monitor state directories, and
 invoke the develop and merge workflows when work is ready. With
-`.agentm/workgraph/config.toml` in place, the user-facing instruction can be as
-small as:
+`$AGENTM_HOME/workgraph/config.toml` in place, the user-facing instruction can
+be as small as:
 
 ```text
-Use .agentm/workgraph. Create domain-sized tasks for this request, then run
+Use the default WorkGraph state. Create domain-sized tasks for this request, then run
 develop and merge until the queue is stable.
 ```
 
@@ -145,8 +148,7 @@ Run one scheduling pass manually with the saved config:
 
 ```bash
 agentm workflow run contrib/scenarios/workgraph/workflow/develop.py \
-  --cwd /path/to/control-repo \
-  --args '{"state_dir": ".agentm/workgraph"}'
+  --cwd /path/to/control-repo
 ```
 
 Explicit workflow args override the config for one-off runs:
@@ -155,7 +157,6 @@ Explicit workflow args override the config for one-off runs:
 agentm workflow run contrib/scenarios/workgraph/workflow/develop.py \
   --cwd /path/to/control-repo \
   --args '{
-    "state_dir": ".agentm/workgraph",
     "repo": "git@github.com:OperationsPAI/train-ticket.git",
     "base": "refactor/greenfield-ddd",
     "max_parallel": 1,
@@ -173,7 +174,8 @@ agentm workflow run contrib/scenarios/workgraph/workflow/develop.py \
 `agent_env` is required for development workers. The worker manifests install
 the `operations` atom with `backend: agent_env`, and the workflow fails before
 claiming tasks unless an image is provided by workflow args,
-`<state_dir>/config.toml`, or `AGENTM_AGENT_ENV_IMAGE`.
+`$AGENTM_HOME/workgraph/config.toml`, an explicit `<state_dir>/config.toml`, or
+`AGENTM_AGENT_ENV_IMAGE`.
 For automatic task claiming, pass an image so each claimed task gets its own
 sandbox. Do not pass a shared `attach_session` to the develop workflow; the
 only supported attach path is the workflow's own per-task session reuse.
@@ -232,8 +234,7 @@ Run one merge scheduling pass manually with the saved config:
 
 ```bash
 agentm workflow run contrib/scenarios/workgraph/workflow/merge.py \
-  --cwd /path/to/control-repo \
-  --args '{"state_dir": ".agentm/workgraph"}'
+  --cwd /path/to/control-repo
 ```
 
 Explicit workflow args override the config for one-off runs:
@@ -242,7 +243,6 @@ Explicit workflow args override the config for one-off runs:
 agentm workflow run contrib/scenarios/workgraph/workflow/merge.py \
   --cwd /path/to/control-repo \
   --args '{
-    "state_dir": ".agentm/workgraph",
     "repo": "git@github.com:OperationsPAI/train-ticket.git",
     "base": "refactor/greenfield-ddd",
     "max_parallel": 1,
