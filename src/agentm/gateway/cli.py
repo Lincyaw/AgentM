@@ -111,6 +111,28 @@ class BindSpec:
     tls_key: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _GatewayRunConfig:
+    """Internal runtime config assembled from the Typer option schema."""
+
+    cwd: str
+    scenario: str
+    state_dir: Path | None
+    provider_flag: str | None
+    model_flag: str | None
+    reasoning_effort: str | None
+    bind: str | None
+    bind_token_file: str | None
+    bind_allow_anonymous: bool
+    tls_cert: str | None
+    tls_key: str | None
+    bind_allow_uid: list[int] | None
+    bind_allow_any_uid: bool
+    require_approval: list[str] | None
+    atoms_allow: list[str] | None
+    check: bool
+
+
 def _load_tokens_file(path: str) -> set[str]:
     try:
         return set(
@@ -458,22 +480,24 @@ def cli(
     try:
         rc = asyncio.run(
             _arun(
-                cwd=resolved_cwd,
-                scenario=scenario,
-                state_dir=state_dir,
-                provider_flag=provider,
-                model_flag=model,
-                reasoning_effort=reasoning_effort,
-                bind=bind,
-                bind_token_file=str(bind_token_file) if bind_token_file else None,
-                bind_allow_anonymous=bind_allow_anonymous,
-                tls_cert=str(tls_cert) if tls_cert else None,
-                tls_key=str(tls_key) if tls_key else None,
-                bind_allow_uid=bind_allow_uid,
-                bind_allow_any_uid=bind_allow_any_uid,
-                require_approval=require_approval,
-                atoms_allow=atoms_allow,
-                check=check,
+                _GatewayRunConfig(
+                    cwd=resolved_cwd,
+                    scenario=scenario,
+                    state_dir=state_dir,
+                    provider_flag=provider,
+                    model_flag=model,
+                    reasoning_effort=reasoning_effort,
+                    bind=bind,
+                    bind_token_file=str(bind_token_file) if bind_token_file else None,
+                    bind_allow_anonymous=bind_allow_anonymous,
+                    tls_cert=str(tls_cert) if tls_cert else None,
+                    tls_key=str(tls_key) if tls_key else None,
+                    bind_allow_uid=bind_allow_uid,
+                    bind_allow_any_uid=bind_allow_any_uid,
+                    require_approval=require_approval,
+                    atoms_allow=atoms_allow,
+                    check=check,
+                )
             )
         )
     except KeyboardInterrupt:
@@ -487,25 +511,7 @@ def cli(
     raise typer.Exit(code=rc)
 
 
-async def _arun(
-    *,
-    cwd: str,
-    scenario: str,
-    state_dir: Path | None,
-    provider_flag: str | None,
-    model_flag: str | None,
-    reasoning_effort: str | None,
-    bind: str | None,
-    bind_token_file: str | None,
-    bind_allow_anonymous: bool,
-    tls_cert: str | None,
-    tls_key: str | None,
-    bind_allow_uid: list[int] | None,
-    bind_allow_any_uid: bool,
-    require_approval: list[str] | None,
-    atoms_allow: list[str] | None,
-    check: bool,
-) -> int:
+async def _arun(config: _GatewayRunConfig) -> int:
     from agentm.core.lib.user_config import (
         agentm_home_dir,
         resolve_model_profile,
@@ -513,31 +519,31 @@ async def _arun(
     )
 
     bind_spec = _resolve_bind(
-        bind=bind,
-        bind_allow_uid=bind_allow_uid,
-        bind_allow_any_uid=bind_allow_any_uid,
-        bind_token_file=bind_token_file,
-        bind_allow_anonymous=bind_allow_anonymous,
-        tls_cert=tls_cert,
-        tls_key=tls_key,
+        bind=config.bind,
+        bind_allow_uid=config.bind_allow_uid,
+        bind_allow_any_uid=config.bind_allow_any_uid,
+        bind_token_file=config.bind_token_file,
+        bind_allow_anonymous=config.bind_allow_anonymous,
+        tls_cert=config.tls_cert,
+        tls_key=config.tls_key,
     )
 
     resolved_provider, resolved_model, profile = resolve_provider_model(
-        provider_flag=provider_flag,
-        model_flag=model_flag,
+        provider_flag=config.provider_flag,
+        model_flag=config.model_flag,
     )
-    raw_model = model_flag
+    raw_model = config.model_flag
 
-    if state_dir is not None:
-        resolved_state_dir = _expand_path(state_dir)
+    if config.state_dir is not None:
+        resolved_state_dir = _expand_path(config.state_dir)
     else:
         resolved_state_dir = agentm_home_dir() / "gateway"
-    _validate_scenario(scenario)
+    _validate_scenario(config.scenario)
 
-    if check:
+    if config.check:
         payload = {
             "kind": "check",
-            "scenario": scenario,
+            "scenario": config.scenario,
             "state_dir": str(resolved_state_dir),
             "bind": {"scheme": bind_spec.scheme, "url": bind_spec.url or f"unix://{bind_spec.socket_path}"},
             "schedule_store": str(resolved_state_dir / "schedules.json"),
@@ -552,26 +558,26 @@ async def _arun(
     chat_map = ChatSessionMap(resolved_state_dir / "session_map.json")
     schedule_store = GatewayScheduleStore(resolved_state_dir / "schedules.json")
     command_registry = discover_commands(
-        cwd,
-        atom_commands_enabled=bool(atoms_allow),
-        atom_allow=atoms_allow or [],
+        config.cwd,
+        atom_commands_enabled=bool(config.atoms_allow),
+        atom_allow=config.atoms_allow or [],
     )
     approval_policy: tuple[frozenset[str], frozenset[str], float] = (
-        frozenset(require_approval or ()),
+        frozenset(config.require_approval or ()),
         frozenset(),
         300.0,
     )
-    workspace = load_gateway_config(cwd)
+    workspace = load_gateway_config(config.cwd)
 
     def make_factory(model_name: str) -> Any:
         prof = resolve_model_profile(model_name)
         if prof is None:  # pragma: no cover — caller validates
             raise ValueError(f"no model profile {model_name!r}")
         return _build_session_factory(
-            provider=provider_flag or prof.provider,
+            provider=config.provider_flag or prof.provider,
             model=prof.model,
             profile=prof,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=config.reasoning_effort,
             workspace=workspace,
         )
 
@@ -581,15 +587,15 @@ async def _arun(
         raw_model or load_user_config().default_model or resolved_model
     )
     runtime = GatewayRuntime(
-        cwd=cwd,
-        scenario=scenario,
+        cwd=config.cwd,
+        scenario=config.scenario,
         outbox=outbox,
         chat_map=chat_map,
         session_factory=_build_session_factory(
             provider=resolved_provider,
             model=resolved_model,
             profile=profile,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=config.reasoning_effort,
             workspace=workspace,
         ),
         command_router=CommandRouter(registry=command_registry),
