@@ -234,6 +234,8 @@ class AgentMAgent(BaseInstalledAgent):
         agentm_home = agent_dir / "agentm-home"
         env["AGENTM_HOME"] = str(agentm_home)
         scenario_dir = getattr(self, "_active_scenario_dir", _SCENARIO_DIR)
+        scenario_dir_q = shlex.quote(str(scenario_dir))
+        trace_path_q = shlex.quote(str(agent_dir / "agentm-trace.jsonl"))
 
         await self.exec_as_agent(
             environment,
@@ -251,9 +253,9 @@ class AgentMAgent(BaseInstalledAgent):
                     'export PATH="$HOME/.local/bin:$PATH"; '
                     f"agentm -p {escaped}"
                     f" {model_args}"
-                    f" --scenario {scenario_dir}"
+                    f" --scenario {scenario_dir_q}"
                     f"{extra}"
-                    f" 2>&1 | tee {agent_dir / 'agentm-trace.jsonl'}"
+                    f" 2>&1 | tee {trace_path_q}"
                     "; exit 0"
                 ),
                 env=env,
