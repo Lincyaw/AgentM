@@ -487,6 +487,29 @@ requirements:
       - REQ-086-atom-rework-infra
       - REQ-093-llm-provider-stream-common
 
+  - id: REQ-203-thinking-only-retry
+    title: Thinking-only model turns retry before clean termination
+    description: >
+      The chatbot and local scenarios must include a thinking_retry atom that
+      observes ``decide_turn_action`` and converts a voluntary
+      ``Stop(ModelEndTurn)`` into ``Step()`` only when the assistant message
+      contains ThinkingBlock content with no text or tool calls. The atom must
+      keep a per-session consecutive retry counter so thinking-only leaks from
+      provider reasoning do not silently end useful sessions and also cannot
+      loop forever.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/thinking_retry.py
+      - path: src/agentm/scenarios/chatbot/manifest.yaml
+      - path: src/agentm/scenarios/local/manifest.yaml
+    tests: []
+    docs:
+      - path: .claude/designs/agent-loop.md
+    depends_on:
+      - REQ-092-retry-transport-policy
+
   - id: REQ-096-cli-provider-session-seams
     title: CLI presenter consumes provider registry and session-store ports
     description: >

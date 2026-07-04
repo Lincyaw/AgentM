@@ -34,6 +34,7 @@ from agentm.extensions import ExtensionManifest
 class ThinkingRetryConfig(BaseModel):
     max_retries: int = 3
 
+
 MANIFEST = ExtensionManifest(
     name="thinking_retry",
     description=(
@@ -47,6 +48,7 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
+
 def _is_thinking_only(content: list[Any]) -> bool:
     has_thinking = False
     for block in content:
@@ -58,32 +60,46 @@ def _is_thinking_only(content: list[Any]) -> bool:
             return False
     return has_thinking
 
-def install(api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
-    max_retries: int = config.max_retries
-    consecutive_count = 0
 
-    def on_decide(event: DecideTurnActionEvent) -> Step | None:
-        nonlocal consecutive_count
+class _ThinkingRetryRuntime:
+    def __init__(self, api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
+        self._api = api
+        self._max_retries = config.max_retries
+        self._consecutive_count = 0
 
+    def install(self) -> None:
+        self._api.on(DecideTurnActionEvent.CHANNEL, self.on_decide)
+
+    def on_decide(self, event: DecideTurnActionEvent) -> Step | None:
         obs = event.observation
         default = obs.default_action
 
         if not (isinstance(default, Stop) and isinstance(default.cause, ModelEndTurn)):
-            consecutive_count = 0
+            self._reset()
             return None
 
         msg = obs.assistant_message
         if msg is None or not _is_thinking_only(msg.content):
-            consecutive_count = 0
+            self._reset()
             return None
 
-        consecutive_count += 1
-        if consecutive_count > max_retries:
-            logger.warning(f"thinking_retry: exhausted {max_retries} retries; stopping")
-            consecutive_count = 0
+        self._consecutive_count += 1
+        if self._consecutive_count > self._max_retries:
+            logger.warning(
+                f"thinking_retry: exhausted {self._max_retries} retries; stopping"
+            )
+            self._reset()
             return None
 
-        logger.info(f"thinking_retry: thinking-only response ({consecutive_count}/{max_retries}); stepping")
+        logger.info(
+            "thinking_retry: thinking-only response "
+            f"({self._consecutive_count}/{self._max_retries}); stepping"
+        )
         return Step()
 
-    api.on(DecideTurnActionEvent.CHANNEL, on_decide)
+    def _reset(self) -> None:
+        self._consecutive_count = 0
+
+
+def install(api: ExtensionAPI, config: ThinkingRetryConfig) -> None:
+    _ThinkingRetryRuntime(api, config).install()
