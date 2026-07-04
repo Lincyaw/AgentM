@@ -1088,6 +1088,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/tui/service/supervisor/supervisor.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/service/tuistate/store.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/lifecycle.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/mouse.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/tabs.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/tui.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/view.go
