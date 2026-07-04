@@ -5,8 +5,10 @@ Architecture:
 - :class:`_ChildTaskManager` owns the long-lived state (worker registry,
   registry lock, reserved-slot counter, parent session id, shutdown grace
   logic). Pulling this out of the closure-heavy ``install`` body keeps
-  ``install`` itself a thin "wire-up the manager" entry point per
-  the extension-as-scenario §4 dispatcher rule.
+  child lifecycle separate from install-time wiring.
+- :class:`_SubAgentRuntime` owns install-time validation, manager construction,
+  event subscription, and tool registration so ``install`` stays a thin
+  dispatcher entry point.
 """
 
 from __future__ import annotations
@@ -95,6 +97,8 @@ MANIFEST = ExtensionManifest(
     ),
     config_schema=SubAgentConfig,
     requires=("system_prompt",),
+    api_version=1,
+    tier=1,
     provides_role=(SUB_AGENT_RUNTIME,),
 )
 
@@ -1135,96 +1139,132 @@ def _format_config_validation_error(
     return f"config for {schema_cls.__name__} is invalid: {exc}"
 
 
-async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
-    inherit_extensions = list(config.inherit_extensions)
-    available_inherited = dict(config.available_inherited_extensions)
-    _validate_available_inherited_configs(available_inherited)
-    missing = [name for name in inherit_extensions if name not in available_inherited]
-    if missing:
-        raise ExtensionLoadError(
-            __name__,
-            ValueError(
-                "sub_agent.inherit_extensions references "
-                f"{missing!r} but available_inherited_extensions does not "
-                "supply them; parent must populate the resolution map for "
-                "every inherited name."
-            ),
-        )
+class _SubAgentRuntime:
+    """Install-time wiring for the sub-agent atom."""
 
-    builtins = discover_builtin()
-    system_prompt = builtins.get("system_prompt")
-    if system_prompt is None:
-        raise ExtensionLoadError(
-            __name__,
-            ValueError("sub_agent requires the builtin system_prompt atom"),
-        )
+    def __init__(self, api: ExtensionAPI, config: SubAgentConfig) -> None:
+        self._api = api
+        self._config = config
 
-    manager = _ChildTaskManager(
-        api=api,
-        inherit_extensions=inherit_extensions,
-        available_inherited=available_inherited,
-        max_workers=config.max_workers,
-        system_prompt_module=system_prompt.module_path,
+    async def install(self) -> None:
+        inherit_extensions = list(self._config.inherit_extensions)
+        available_inherited = dict(self._config.available_inherited_extensions)
+        self._validate_inheritance_config(inherit_extensions, available_inherited)
+        manager = _ChildTaskManager(
+            api=self._api,
+            inherit_extensions=inherit_extensions,
+            available_inherited=available_inherited,
+            max_workers=self._config.max_workers,
+            system_prompt_module=self._system_prompt_module(),
+            child_registry=self._child_registry(),
+            shutdown_grace_seconds=self._config.shutdown_grace_seconds,
+        )
+        self._register_events(manager)
+        self._register_tools(manager)
+
+    def _validate_inheritance_config(
+        self,
+        inherit_extensions: list[str],
+        available_inherited: dict[str, Any],
+    ) -> None:
+        _validate_available_inherited_configs(available_inherited)
+        missing = [
+            name for name in inherit_extensions if name not in available_inherited
+        ]
+        if missing:
+            raise ExtensionLoadError(
+                __name__,
+                ValueError(
+                    "sub_agent.inherit_extensions references "
+                    f"{missing!r} but available_inherited_extensions does not "
+                    "supply them; parent must populate the resolution map for "
+                    "every inherited name."
+                ),
+            )
+
+    def _system_prompt_module(self) -> str:
+        builtins = discover_builtin()
+        system_prompt = builtins.get("system_prompt")
+        if system_prompt is None:
+            raise ExtensionLoadError(
+                __name__,
+                ValueError("sub_agent requires the builtin system_prompt atom"),
+            )
+        return system_prompt.module_path
+
+    def _child_registry(self) -> Any | None:
         # Present only inside the interactive gateway: makes spawned children
         # human-addressable and keeps them alive after their task. ``getattr``
         # guards minimal stub APIs that omit the service registry.
-        child_registry=getattr(api, "get_service", lambda _n: None)(
+        return getattr(self._api, "get_service", lambda _name: None)(
             _CHILD_SESSION_REGISTRY_SERVICE
-        ),
-        shutdown_grace_seconds=config.shutdown_grace_seconds,
-    )
+        )
 
-    api.on(SessionReadyEvent.CHANNEL, manager.on_session_ready)
-    api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
-    api.on(DecideTurnActionEvent.CHANNEL, manager.decide_turn_action)
-    # B3 boundary-review fix: encapsulate the counter reset behind the bus
-    # so any tool invocation drives it (not just sub_agent's own tools).
-    # ToolCallEvent fires per tool call BEFORE execute, sync handler is
-    # sufficient (single int assignment).
-    api.on(ToolCallEvent.CHANNEL, manager._on_tool_call_reset_counter)
-    api.register_tool(
-        FunctionTool(
-            name="dispatch_agent",
-            description=(
-                "Spawn a child AgentSession and return its task id immediately. "
-                "Pass ``subagent_type`` to launch a named persona (resolved by "
-                "peer extensions via the ``resolve_subagent`` event); the "
-                "persona's system prompt and tool allowlist are applied to the "
-                "child."
-            ),
-            parameters=pydantic_to_tool_schema(_DispatchAgentParams),
-            fn=manager.dispatch,
+    def _register_events(self, manager: _ChildTaskManager) -> None:
+        self._api.on(SessionReadyEvent.CHANNEL, manager.on_session_ready)
+        self._api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
+        self._api.on(DecideTurnActionEvent.CHANNEL, manager.decide_turn_action)
+        # B3 boundary-review fix: encapsulate the counter reset behind the bus
+        # so any tool invocation drives it (not just sub_agent's own tools).
+        # ToolCallEvent fires per tool call BEFORE execute, sync handler is
+        # sufficient (single int assignment).
+        self._api.on(ToolCallEvent.CHANNEL, manager._on_tool_call_reset_counter)
+
+    def _register_tools(self, manager: _ChildTaskManager) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="dispatch_agent",
+                description=(
+                    "Spawn a child AgentSession and return its task id immediately. "
+                    "Pass ``subagent_type`` to launch a named persona (resolved by "
+                    "peer extensions via the ``resolve_subagent`` event); the "
+                    "persona's system prompt and tool allowlist are applied to the "
+                    "child."
+                ),
+                parameters=pydantic_to_tool_schema(_DispatchAgentParams),
+                fn=manager.dispatch,
+            )
         )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="check_tasks",
-            description="List active and completed child tasks.",
-            parameters=pydantic_to_tool_schema(_CheckTasksParams),
-            fn=manager.check_tasks,
+        self._api.register_tool(
+            FunctionTool(
+                name="check_tasks",
+                description="List active and completed child tasks.",
+                parameters=pydantic_to_tool_schema(_CheckTasksParams),
+                fn=manager.check_tasks,
+            )
         )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="wait_subagent",
-            description="Wait for one child task to reach a terminal state.",
-            parameters=pydantic_to_tool_schema(_WaitSubagentParams),
-            fn=manager.wait_subagent,
+        self._api.register_tool(
+            FunctionTool(
+                name="wait_subagent",
+                description="Wait for one child task to reach a terminal state.",
+                parameters=pydantic_to_tool_schema(_WaitSubagentParams),
+                fn=manager.wait_subagent,
+            )
         )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="inject_instruction",
-            description="Queue an instruction for the child's next prompt turn.",
-            parameters=pydantic_to_tool_schema(_InjectInstructionParams),
-            fn=manager.inject_instruction,
+        self._api.register_tool(
+            FunctionTool(
+                name="inject_instruction",
+                description="Queue an instruction for the child's next prompt turn.",
+                parameters=pydantic_to_tool_schema(_InjectInstructionParams),
+                fn=manager.inject_instruction,
+            )
         )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="abort_task",
-            description="Abort a running child session.",
-            parameters=pydantic_to_tool_schema(_AbortTaskParams),
-            fn=manager.abort,
+        self._api.register_tool(
+            FunctionTool(
+                name="abort_task",
+                description="Abort a running child session.",
+                parameters=pydantic_to_tool_schema(_AbortTaskParams),
+                fn=manager.abort,
+            )
         )
-    )
+
+
+async def install(api: ExtensionAPI, config: SubAgentConfig) -> None:
+    await _SubAgentRuntime(api, config).install()
+
+
+__all__ = (
+    "MANIFEST",
+    "SubAgentConfig",
+    "install",
+)
