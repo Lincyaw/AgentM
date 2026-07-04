@@ -11,7 +11,7 @@
 
 ## 1. Overview
 
-`agentm-terminal` is the interactive terminal frontend. After the channels-v2
+`ag` is the interactive terminal frontend. After the channels-v2
 rewrite it is a **wire client** of the single-process gateway, not an in-process
 presenter: the `AgentSession` lives inside the `agentm gateway` daemon; the TUI
 is a separate process that connects over the wire (`unix://` locally, `ws://` /
@@ -329,7 +329,7 @@ WS is a first-class explicit-opt-in transport the TUI fully supports.
 | T6 | Extension injects a user message | synthetic UserTurn marked `system → you` |
 | T7 | Peer disconnects mid-turn, reconnects | ephemeral deltas dropped; durable `assistant_text` delivered on reconnect |
 | T8 | `/tools` after startup | InfoModal lists registered tools (from `api_register` / `session_ready`) |
-| T9 | Piped: `printf '/help\n' \| agentm-terminal` | `json` frames on stdout unchanged (non-TTY) |
+| T9 | Piped: `printf '/help\n' \| ag` | `json` frames on stdout unchanged (non-TTY) |
 | T10 | Connect over `ws://` with token | identical behavior to `unix://` |
 
 ## 11. Open questions

@@ -20,7 +20,7 @@ import (
 // ErrNoQueuedChild is returned by the child manager's spawner when the TUI asks
 // to spawn a session but no sub-agent child app is queued — i.e. a genuine
 // user-driven "new tab", which a single-conversation wire peer does not support.
-var ErrNoQueuedChild = errors.New("agentm-terminal: no sub-agent session to open; multi-session spawning is not supported over the wire")
+var ErrNoQueuedChild = errors.New("ag: no sub-agent session to open; multi-session spawning is not supported over the wire")
 
 // tabSession holds the per-tab state for an independently-spawned gateway
 // session (user-driven new tab via Ctrl+T / "+"). Each tab talks to a
@@ -195,7 +195,7 @@ func (ad *Adapter) Start(ctx context.Context) {
 func ErrorSpawner() tui.SessionSpawner {
 	return func(ctx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
 		_, _ = ctx, workingDir
-		return nil, nil, nil, errors.New("agentm-terminal: multi-session spawning is not supported without a gateway connection")
+		return nil, nil, nil, errors.New("ag: multi-session spawning is not supported without a gateway connection")
 	}
 }
 

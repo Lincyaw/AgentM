@@ -72,7 +72,7 @@ def register_terminal_command(
                 envvar="AGENTM_TERMINAL_BIN",
                 help="Terminal peer executable.",
             ),
-        ] = "agentm-terminal",
+        ] = "ag",
         terminal_log: Annotated[
             Path | None,
             typer.Option(

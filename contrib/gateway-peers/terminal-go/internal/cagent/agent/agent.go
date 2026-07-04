@@ -1,7 +1,7 @@
 // Package agent is a tiny data-type shim of cagent's pkg/agent.
 //
 // The full cagent Agent carries model/provider/cache/harness machinery driven
-// by the local runtime loop. In the agentm-terminal peer that runtime is
+// by the local runtime loop. In the ag peer that runtime is
 // replaced by the gateway wire protocol, so the only consumers of this package
 // are the vendored session/chat data-types. They reference the descriptive
 // surface of an agent (Name, Model, Provider, Thinking, Description) plus a

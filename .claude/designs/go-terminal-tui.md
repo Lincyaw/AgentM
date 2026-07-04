@@ -17,7 +17,7 @@ atom knowledge.
 
 The recommended user entrypoints are split by responsibility:
 `agentm daemon start/status/stop/restart/socket` manages the local gateway
-daemon, `agentm-terminal` is a pure wire client that defaults to the daemon
+daemon, `ag` is a pure wire client that defaults to the daemon
 socket, and `agentm terminal` is a convenience wrapper that ensures the daemon
 is running before opening the TUI. A lightweight Python supervisor owns the
 daemon process and keeps the gateway worker fixed by default; pass `--reload`
@@ -720,7 +720,7 @@ The current AgentM terminal implementation follows this direction:
    design docs. Do not use project `.agentm/` for these captures; that
    directory is runtime state and follows the AgentM home/workspace policy.
 8. Keep process supervision outside the Go peer. `agentm daemon` owns the
-   local gateway daemon/supervisor lifecycle; `agentm-terminal` only connects
+   local gateway daemon/supervisor lifecycle; `ag` only connects
    to a gateway URL and renders the wire stream. `agentm terminal` composes
    those two for one-command startup.
 9. Remove the legacy right-side session sidebar from the primary AgentM

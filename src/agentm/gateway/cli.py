@@ -7,7 +7,7 @@ systemd integration lives in :mod:`gateway.systemd`.
 Run as a long-lived daemon and connect chat clients separately::
 
     agentm gateway --bind unix:///tmp/gw.sock
-    agentm-terminal --connect unix:///tmp/gw.sock
+    ag --connect unix:///tmp/gw.sock
 """
 
 from __future__ import annotations

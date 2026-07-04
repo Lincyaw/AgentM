@@ -110,7 +110,7 @@ agentm gateway \
   --cwd /path/to/control-repo \
   --bind unix:///tmp/agentm-workgraph.sock
 
-agentm-terminal \
+ag \
   --connect unix:///tmp/agentm-workgraph.sock \
   --chat-id workgraph
 ```

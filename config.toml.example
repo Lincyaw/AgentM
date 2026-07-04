@@ -83,7 +83,7 @@ scenario = "rca"
 # The reloadable daemon can also expose ws for remote terminal clients. It
 # generates $AGENTM_HOME/gateway/token automatically when omitted:
 #   agentm daemon start --bind ws://0.0.0.0:8765
-#   agentm-terminal --connect ws://<host>:8765 --token "$(cat "${AGENTM_HOME:-$HOME/.agentm}/gateway/token")"
+#   ag --connect ws://<host>:8765 --token "$(cat "${AGENTM_HOME:-$HOME/.agentm}/gateway/token")"
 #
 # Result:
 #   @assistant in Feishu  -->  session in $AGENTM_HOME/workspaces/assistant/

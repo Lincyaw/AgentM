@@ -906,7 +906,7 @@ requirements:
     title: AgentM CLI can launch a gateway-backed terminal in one command
     description: >
       The `agentm terminal` command must start or reuse a local gateway daemon,
-      wait for its gateway endpoint, connect the `agentm-terminal` TUI to it, and
+      wait for its gateway endpoint, connect the `ag` TUI to it, and
       write gateway/supervisor logs to a deterministic file. The daemon is a
       lightweight Python supervisor around a gateway worker: it keeps the client
       endpoint stable and keeps the worker fixed by default so in-memory

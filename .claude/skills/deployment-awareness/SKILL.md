@@ -16,7 +16,7 @@ AgentM supports three deployment modes. Each is a superset of the previous:
 | Mode | Processes | When to use |
 |------|-----------|-------------|
 | **Standalone** | `agentm -p "..."` or `agentm` (TUI) | local dev, one-shot prompts, terminal chat |
-| **Gateway + client** | `agentm gateway` + `agentm-feishu` (or `agentm-terminal`) | single bot served over Feishu/Lark |
+| **Gateway + client** | `agentm gateway` + `agentm-feishu` (or `ag`) | single bot served over Feishu/Lark |
 | **Multi-bot** | `agentm gateway` + `agentm-feishu` (N bots from config.toml) | multiple agents in one group chat |
 
 ### Detecting the current mode

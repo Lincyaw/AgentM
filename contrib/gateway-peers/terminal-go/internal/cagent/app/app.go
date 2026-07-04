@@ -1,7 +1,7 @@
 // Package app defines the controller seam the TUI drives.
 //
 // In cagent this package wires a runtime.Runtime, a session.Session and a
-// title generator into the App the TUI talks to. In the agentm-terminal peer
+// title generator into the App the TUI talks to. In the ag peer
 // the runtime is the gateway wire protocol; the real implementation of these
 // methods is supplied later by internal/adapter. This file exists so the
 // cagent-derived TUI compiles against a stable App surface: the exported
@@ -36,7 +36,7 @@ import (
 
 // Controller is the behavioural seam between the vendored cagent App surface
 // (which the TUI drives, see pkg/tui) and the live backend. In cagent the
-// backend is a local runtime.Runtime; in the agentm-terminal peer it is the
+// backend is a local runtime.Runtime; in the ag peer it is the
 // gateway wire protocol, implemented by internal/adapter.
 //
 // Only the methods that actually need to reach the backend are listed here;

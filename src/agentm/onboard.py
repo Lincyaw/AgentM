@@ -520,7 +520,7 @@ def _print_status(workspace: Path) -> None:
         + (f" ({', '.join(scenarios)})" if scenarios else "")
         + f"; extensions={'yes' if extensions_dir.exists() else 'no'}"
     )
-    bins = ["agentm", "agentm-terminal", "agentm-feishu", "agentm-weixin"]
+    bins = ["agentm", "ag", "agentm-feishu", "agentm-weixin"]
     found = [name for name in bins if shutil.which(name)]
     typer.echo(f"  binaries:  {', '.join(found) if found else 'agentm only / PATH not set'}")
 

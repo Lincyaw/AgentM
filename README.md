@@ -195,11 +195,11 @@ Beyond the one-shot prompt, notable subcommands include `agentm terminal`
 `agentm gateway` (foreground single-process gateway), `agentm trace` (query the
 OTLP/JSON session log), and `agentm contrib sync` (materialize configurable
 contrib resources under `$AGENTM_HOME`). The chat-client peers ship as
-**separate binaries** for vendor-SDK isolation only: `agentm-terminal`,
+**separate binaries** for vendor-SDK isolation only: `ag`,
 `agentm-feishu`, and future peers connect to the same gateway URL
 (`agentm daemon socket`). Normal terminal use can be either `agentm terminal`
 for one-command startup or
-`agentm daemon start && agentm-terminal` when you want to manage the server
+`agentm daemon start && ag` when you want to manage the server
 separately. In local daemon mode, a lightweight Python supervisor keeps the
 gateway endpoint stable. By default it keeps the gateway worker fixed so
 in-memory sessions survive source edits; pass `--reload` when you want the
@@ -232,7 +232,7 @@ line; blank lines and `#` comments are ignored.
 ```bash
 agentm daemon start --bind ws://0.0.0.0:8765
 agentm daemon status
-agentm-terminal --connect ws://<host>:8765 --token-file ~/.agentm/gateway/token
+ag --connect ws://<host>:8765 --token-file ~/.agentm/gateway/token
 ```
 
 ## Five pluggability axes

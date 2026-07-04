@@ -1,4 +1,4 @@
-// Command agentm-terminal is the AgentM gateway's terminal chat-client peer.
+// Command ag is the AgentM gateway's terminal chat-client peer.
 // It renders a cagent-derived TUI adapted to the AgentM gateway wire protocol
 // (internal/wire) via internal/adapter, instead of a local agent runtime.
 package main
@@ -83,12 +83,12 @@ func main() {
 	// File logging: bubbletea owns stdout and stderr is unreliable in alt-screen.
 	logPath := *logFile
 	if logPath == "" {
-		logPath = filepath.Join(paths.GetDataDir(), "logs", "agentm-terminal.log")
+		logPath = filepath.Join(paths.GetDataDir(), "logs", "ag.log")
 	} else {
 		logPath = expandCLIPath(logPath)
 	}
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err == nil {
-		if f, err := tea.LogToFile(logPath, "agentm-terminal"); err == nil {
+		if f, err := tea.LogToFile(logPath, "ag"); err == nil {
 			defer f.Close()
 		}
 	}
@@ -235,7 +235,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  --token-file <path>   Read bearer token from file")
 	fmt.Fprintln(out, "  --sender-id <id>      Sender id for gateway routing (default: local)")
 	fmt.Fprintln(out, "  --theme <dark|light>  Terminal theme (default: dark)")
-	fmt.Fprintln(out, "  --log <path>          Log file path (default: $AGENTM_HOME/terminal-go/data/logs/agentm-terminal.log)")
+	fmt.Fprintln(out, "  --log <path>          Log file path (default: $AGENTM_HOME/terminal-go/data/logs/ag.log)")
 	fmt.Fprintln(out, "  --mock                Run the TUI without a gateway, for layout inspection")
 	fmt.Fprintln(out, "  --version             Print version and exit")
 	fmt.Fprintln(out, "  --help                Show this help")

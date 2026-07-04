@@ -64,7 +64,7 @@ What is deleted, with prejudice:
                 │     chat_client peers (one process per platform)
                 │
    ┌────────────┴──────┐  ┌─────────────────┐  ┌──────────────────┐
-   │  agentm-feishu    │  │ agentm-terminal │  │  (future Slack)  │
+   │  agentm-feishu    │  │       ag        │  │  (future Slack)  │
    │   lark_oapi       │  │  textual / rich │  │                  │
    └───────────────────┘  └─────────────────┘  └──────────────────┘
 ```
@@ -76,7 +76,7 @@ Process-launch contract:
 | Process | Binary | Purpose |
 |---|---|---|
 | Gateway | `agentm gateway --bind <url>` | Long-lived. Holds all sessions. |
-| Chat client | `agentm-feishu --connect <same-url>` / `agentm-terminal --connect <same-url>` | One per platform. |
+| Chat client | `agentm-feishu --connect <same-url>` / `ag --connect <same-url>` | One per platform. |
 
 `<url>` may be `unix://`, `ws://`, or `wss://`. WebSocket binds are remote
 capable and require token auth by default: direct `agentm gateway --bind ws://…`
@@ -438,7 +438,7 @@ That's it. Translation glue, fully expressible inside the §11 atom contract. No
 
 ## 5. Chat client peers
 
-Packages: `agentm-feishu`, `agentm-terminal` (and any future platform) at `contrib/gateway-peers/<name>/`. Same shape as today; updated for v2 envelope.
+Packages: `agentm-feishu`, `ag` (and any future platform) at `contrib/gateway-peers/<name>/`. Same shape as today; updated for v2 envelope.
 
 ### 5.1 Components per chat client
 
@@ -556,7 +556,7 @@ Keep / write (target invariants):
 | local daemon management | `agentm daemon start/status/stop/restart/socket`, with `start --bind ws://…` for remote clients |
 | `agentm-worker --connect ...` | **deleted** |
 | `agentm-feishu --connect ...` | unchanged; can use `agentm daemon socket` / `AGENTM_SOCKET` |
-| `agentm-terminal --connect ...` | unchanged; defaults to the local daemon socket when `--connect` is omitted |
+| `ag --connect ...` | unchanged; defaults to the local daemon socket when `--connect` is omitted |
 
 The `agentm` console script gains `gateway` and `daemon` subcommands alongside
 the existing prompt and trace surfaces. `agentm gateway` is the foreground
@@ -564,7 +564,7 @@ server. `agentm daemon` manages the local supervisor used by single-host
 clients by default, and can bind `ws://` / `wss://` for remote
 clients with token auth enabled unless `--bind-allow-anonymous` is explicit.
 `agentm terminal` is a convenience wrapper around `agentm daemon start` plus
-`agentm-terminal`.
+`ag`.
 
 ### 8.4 CI / config touch points
 

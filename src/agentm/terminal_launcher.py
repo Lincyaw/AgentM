@@ -38,7 +38,7 @@ class TerminalLaunchConfig:
     connect: str | None = None
     scenario: str | None = None
     state_dir: Path | None = None
-    terminal_bin: str = "agentm-terminal"
+    terminal_bin: str = "ag"
     terminal_log: Path | None = None
     session_id: str | None = None
     simple: bool = False
