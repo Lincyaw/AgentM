@@ -52,6 +52,7 @@ MANIFEST = ExtensionManifest(
 # Frontmatter parsing helpers
 # ---------------------------------------------------------------------------
 
+
 def _parse_tools(raw: Any) -> list[str] | None:
     if isinstance(raw, list):
         tools = [str(item).strip() for item in raw if str(item).strip()]
@@ -92,6 +93,7 @@ def _parse_input_schema(raw: Any) -> dict[str, list[str]] | None:
 # ---------------------------------------------------------------------------
 # Agent discovery
 # ---------------------------------------------------------------------------
+
 
 def _version_sort_key(path: Path) -> tuple[int, ...]:
     """Parse ``path.name`` as a dotted version for numeric comparison.
@@ -176,6 +178,7 @@ def _load_agents(dirs: list[Path]) -> dict[str, dict[str, Any]]:
 # available_agents XML block (inlined per §11)
 # ---------------------------------------------------------------------------
 
+
 def _field(persona: Any, key: str, default: Any = "") -> Any:
     if isinstance(persona, Mapping):
         return persona.get(key, default)
@@ -221,32 +224,41 @@ def _available_agents_block(agents: dict[str, dict[str, Any]]) -> str:
 # Atom install
 # ---------------------------------------------------------------------------
 
-async def install(api: ExtensionAPI, config: ClaudeAgentsConfig) -> None:
-    inherit_claude = config.inherit_claude
-    extra_paths = [
-        expand_path_from_cwd(p, api.cwd) / "agents"
-        for p in config.extra_paths
-        if p.strip()
-    ]
-    agents: dict[str, dict[str, Any]] = {}
-    cached_block = ""
 
-    async def _load(_event: SessionReadyEvent) -> None:
-        nonlocal agents, cached_block
-        dirs = _discover_dirs(api.cwd, inherit_claude)
-        dirs.extend(extra_paths)
-        agents = _load_agents(dirs)
-        cached_block = _available_agents_block(agents)
+class _ClaudeAgentsRuntime:
+    def __init__(self, api: ExtensionAPI, config: ClaudeAgentsConfig) -> None:
+        self._api = api
+        self._inherit_claude = config.inherit_claude
+        self._extra_paths = [
+            expand_path_from_cwd(path, api.cwd) / "agents"
+            for path in config.extra_paths
+            if path.strip()
+        ]
+        self._agents: dict[str, dict[str, Any]] = {}
+        self._cached_block = ""
 
-    def _inject(event: BeforeAgentStartEvent) -> dict[str, str] | None:
-        if not cached_block:
+    def install(self) -> None:
+        self._api.on(SessionReadyEvent.CHANNEL, self.load)
+        self._api.on(BeforeAgentStartEvent.CHANNEL, self.inject)
+        self._api.on(ResolveSubagentEvent.CHANNEL, self.resolve)
+
+    async def load(self, _event: SessionReadyEvent) -> None:
+        dirs = _discover_dirs(self._api.cwd, self._inherit_claude)
+        dirs.extend(self._extra_paths)
+        self._agents = _load_agents(dirs)
+        self._cached_block = _available_agents_block(self._agents)
+
+    def inject(self, event: BeforeAgentStartEvent) -> dict[str, str] | None:
+        if not self._cached_block:
             return None
         existing = event.system or ""
-        merged = f"{existing}\n\n{cached_block}" if existing else cached_block
+        merged = (
+            f"{existing}\n\n{self._cached_block}" if existing else self._cached_block
+        )
         event.system = merged
         return {"system": merged}
 
-    def _resolve(payload: Any) -> dict[str, Any] | None:
+    def resolve(self, payload: Any) -> dict[str, Any] | None:
         if isinstance(payload, ResolveSubagentEvent):
             name = payload.name
         elif isinstance(payload, dict):
@@ -256,7 +268,7 @@ async def install(api: ExtensionAPI, config: ClaudeAgentsConfig) -> None:
             name = raw_name
         else:
             return None
-        persona = agents.get(name.strip())
+        persona = self._agents.get(name.strip())
         if persona is None:
             return None
         return {
@@ -267,6 +279,6 @@ async def install(api: ExtensionAPI, config: ClaudeAgentsConfig) -> None:
             "artifact_kinds": persona["artifact_kinds"],
         }
 
-    api.on(SessionReadyEvent.CHANNEL, _load)
-    api.on(BeforeAgentStartEvent.CHANNEL, _inject)
-    api.on(ResolveSubagentEvent.CHANNEL, _resolve)
+
+async def install(api: ExtensionAPI, config: ClaudeAgentsConfig) -> None:
+    _ClaudeAgentsRuntime(api, config).install()
