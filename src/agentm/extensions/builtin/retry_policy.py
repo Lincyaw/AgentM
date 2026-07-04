@@ -25,6 +25,7 @@ from agentm.extensions import ExtensionManifest
 
 T = TypeVar("T")
 
+
 class RetryPolicyConfig(PydanticBaseModel):
     max_retries: int = 7
     base_delay: float = 5.0
@@ -32,6 +33,7 @@ class RetryPolicyConfig(PydanticBaseModel):
     jitter: float = 0.0
     retry_streaming: bool = False
     wrap_providers: bool = False
+
 
 MANIFEST = ExtensionManifest(
     name="retry_policy",
@@ -44,6 +46,7 @@ MANIFEST = ExtensionManifest(
     requires=(),
     tier=1,
 )
+
 
 @dataclass(slots=True)
 class ExponentialBackoffRetry:
@@ -67,10 +70,13 @@ class ExponentialBackoffRetry:
                 if not is_retryable(exc) or attempt >= self.max_retries:
                     raise
                 attempt += 1
-                sleep_for = delay + (random.uniform(0.0, self.jitter) if self.jitter else 0.0)
+                sleep_for = delay + (
+                    random.uniform(0.0, self.jitter) if self.jitter else 0.0
+                )
                 if sleep_for > 0:
                     await asyncio.sleep(sleep_for)
                 delay *= self.factor
+
 
 @dataclass(slots=True)
 class _RetryingStreamFn:
@@ -142,9 +148,11 @@ class _RetryingStreamFn:
             yielded = True
             yield event
 
+
 def _is_generic_retryable(exc: BaseException) -> bool:
     status_code = getattr(exc, "status_code", None)
     return status_code == 429
+
 
 def _wrap_provider(
     provider: ProviderConfig,
@@ -163,57 +171,83 @@ def _wrap_provider(
         ),
     )
 
-def install(api: ExtensionAPI, config: RetryPolicyConfig) -> None:
-    policy = ExponentialBackoffRetry(
-        max_retries=max(0, config.max_retries),
-        base_delay=max(0.0, config.base_delay),
-        factor=max(1.0, config.factor),
-        jitter=max(0.0, config.jitter),
-    )
-    api.set_service(RETRY_POLICY_SERVICE, policy)
 
-    retry_streaming = config.retry_streaming
-    wrap_providers = config.wrap_providers
-    if not wrap_providers:
-        return
+class _RetryPolicyRuntime:
+    def __init__(self, api: ExtensionAPI, config: RetryPolicyConfig) -> None:
+        self._api = api
+        self._policy = ExponentialBackoffRetry(
+            max_retries=max(0, config.max_retries),
+            base_delay=max(0.0, config.base_delay),
+            factor=max(1.0, config.factor),
+            jitter=max(0.0, config.jitter),
+        )
+        self._retry_streaming = config.retry_streaming
+        self._wrap_providers = config.wrap_providers
+        self._wrapped: set[str] = set()
 
-    wrapped: set[str] = set()
+    def install(self) -> None:
+        self._api.set_service(RETRY_POLICY_SERVICE, self._policy)
+        if not self._wrap_providers:
+            return
+        self._wrap_current_provider()
+        self._api.on(ApiRegisterEvent.CHANNEL, self.on_api_register)
 
-    def _on_register(event: ApiRegisterEvent) -> None:
-        if event.kind != "provider" or event.name in wrapped:
+    def on_api_register(self, event: ApiRegisterEvent) -> None:
+        if event.kind != "provider":
             return
         provider = event.payload
         if not isinstance(provider, ProviderConfig):
             return
+        self._wrap_provider_by_name(
+            event.name,
+            provider,
+            emit_diagnostic=True,
+        )
+
+    def _wrap_current_provider(self) -> None:
+        current = self._api.provider
+        if current is None:
+            return
+        self._wrap_provider_by_name(
+            current.name,
+            current,
+            emit_diagnostic=False,
+        )
+
+    def _wrap_provider_by_name(
+        self,
+        name: str,
+        provider: ProviderConfig,
+        *,
+        emit_diagnostic: bool,
+    ) -> None:
+        if name in self._wrapped:
+            return
         wrapped_provider = _wrap_provider(
             provider,
-            policy=policy,
-            retry_streaming=retry_streaming,
+            policy=self._policy,
+            retry_streaming=self._retry_streaming,
         )
         if wrapped_provider is provider:
             return
-        wrapped.add(event.name)
-        api.register_provider(event.name, wrapped_provider)
-        api.events.emit_sync(
+        self._wrapped.add(name)
+        self._api.register_provider(name, wrapped_provider)
+        if emit_diagnostic:
+            self._emit_wrapped_diagnostic(name)
+
+    def _emit_wrapped_diagnostic(self, name: str) -> None:
+        self._api.events.emit_sync(
             DiagnosticEvent.CHANNEL,
             DiagnosticEvent(
                 level="info",
                 source="retry_policy",
-                message=f"wrapped provider {event.name!r} with retry policy",
+                message=f"wrapped provider {name!r} with retry policy",
             ),
         )
 
-    current = api.provider
-    if current is not None:
-        wrapped_provider = _wrap_provider(
-            current,
-            policy=policy,
-            retry_streaming=retry_streaming,
-        )
-        if wrapped_provider is not current:
-            wrapped.add(current.name)
-            api.register_provider(current.name, wrapped_provider)
 
-    api.on(ApiRegisterEvent.CHANNEL, _on_register)
+def install(api: ExtensionAPI, config: RetryPolicyConfig) -> None:
+    _RetryPolicyRuntime(api, config).install()
+
 
 __all__: Final = ["ExponentialBackoffRetry", "MANIFEST", "install"]
