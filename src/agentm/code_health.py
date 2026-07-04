@@ -26,9 +26,10 @@ Rules:
   for potential split candidates.
 - **AM008** ``redundant-local-import``: A function-body import that
   duplicates a module-level import. Inconsistent style with no benefit.
-- **AM009** ``god-class``: Classes with >25 concrete methods. Type-only
-  ``@overload`` signatures are ignored. Swiss-army-knife signal — consider
-  splitting into composable facades.
+- **AM009** ``god-class``: Concrete classes with >25 concrete methods.
+  Protocols, type-only ``@overload`` signatures, and ``@property`` accessors
+  are ignored. Swiss-army-knife signal — consider splitting into composable
+  facades.
 - **AM010** ``cross-layer-import``: Imports that violate the layer
   hierarchy (e.g. gateway → extensions/builtin, extensions → gateway,
   abi → runtime). Extends §11 to cover the full dependency graph.
@@ -431,16 +432,34 @@ def _has_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> b
     return False
 
 
+def _base_name(expr: ast.expr) -> str | None:
+    match expr:
+        case ast.Name(id=name):
+            return name
+        case ast.Attribute(attr=name):
+            return name
+        case ast.Subscript(value=value):
+            return _base_name(value)
+    return None
+
+
+def _is_protocol_class(node: ast.ClassDef) -> bool:
+    return any(_base_name(base) == "Protocol" for base in node.bases)
+
+
 def _check_god_class(tree: ast.Module, path: str) -> list[Issue]:
-    """AM009: Classes with >25 concrete methods."""
+    """AM009: Concrete classes with >25 concrete methods."""
     issues: list[Issue] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
+            continue
+        if _is_protocol_class(node):
             continue
         method_count = sum(
             1 for child in node.body
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
             and not _has_decorator(child, "overload")
+            and not _has_decorator(child, "property")
         )
         if method_count > 25:
             issues.append(Issue(
