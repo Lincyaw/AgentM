@@ -41,17 +41,27 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(api: ExtensionAPI, config: LoopBudgetConfig) -> None:
-    max_turns = _positive_int_or_none_from_model(config.max_turns, "max_turns")
-    max_tool_calls = _positive_int_or_none_from_model(
-        config.max_tool_calls, "max_tool_calls"
-    )
-    api.set_service(
-        LOOP_BUDGET_SERVICE,
-        LoopConfig(max_turns=max_turns, max_tool_calls=max_tool_calls),
-    )
+class _LoopBudgetRuntime:
+    def __init__(self, api: ExtensionAPI, config: LoopBudgetConfig) -> None:
+        self._api = api
+        self._loop_config = LoopConfig(
+            max_turns=_positive_int_or_none_from_model(config.max_turns, "max_turns"),
+            max_tool_calls=_positive_int_or_none_from_model(
+                config.max_tool_calls, "max_tool_calls"
+            ),
+        )
 
-    async def _loop_command(_args: str, cmd_api: ExtensionAPI) -> None:
+    def install(self) -> None:
+        self._api.set_service(LOOP_BUDGET_SERVICE, self._loop_config)
+        self._api.register_command(
+            "loop",
+            CommandSpec(
+                description="Show this session's agent-loop turn/tool budget.",
+                handler=self.loop_command,
+            ),
+        )
+
+    async def loop_command(self, _args: str, cmd_api: ExtensionAPI) -> None:
         cfg = cmd_api.session.get_loop_config()
         cmd_api.send_user_message(
             "Loop budget: "
@@ -60,13 +70,9 @@ def install(api: ExtensionAPI, config: LoopBudgetConfig) -> None:
             f"max_tool_calls_per_turn={_render_limit(cfg.max_tool_calls_per_turn)}."
         )
 
-    api.register_command(
-        "loop",
-        CommandSpec(
-            description="Show this session's agent-loop turn/tool budget.",
-            handler=_loop_command,
-        ),
-    )
+
+def install(api: ExtensionAPI, config: LoopBudgetConfig) -> None:
+    _LoopBudgetRuntime(api, config).install()
 
 
 def _render_limit(value: int | None) -> str:
