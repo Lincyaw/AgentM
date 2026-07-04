@@ -84,7 +84,9 @@ _ACTIVITY_TERMINAL_STATUSES: frozenset[_Status] = frozenset(
 
 # The companion tools never auto-background themselves — they are pure registry
 # pokes that return promptly, and backgrounding a poll would be nonsensical.
-_COMPANION_TOOLS = frozenset({"check_background", "wait_background", "cancel_background"})
+_COMPANION_TOOLS = frozenset(
+    {"check_background", "wait_background", "cancel_background"}
+)
 
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_HEARTBEAT = 120.0
@@ -92,12 +94,14 @@ _DEFAULT_SILENCE_WARNING = 300.0
 _MAX_WAIT_BACKGROUND_SECONDS = 30.0
 _MAX_ACTIVITY_LABEL_CHARS = 96
 
+
 class BackgroundExecConfig(BaseModel):
     timeout: float = _DEFAULT_TIMEOUT
     heartbeat_interval: float = _DEFAULT_HEARTBEAT
     silence_warning: float = _DEFAULT_SILENCE_WARNING
     denylist: list[str] = []
     shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS
+
 
 MANIFEST = ExtensionManifest(
     name="background_exec",
@@ -115,6 +119,7 @@ MANIFEST = ExtensionManifest(
     config_schema=BackgroundExecConfig,
     requires=(),  # Defers wrapping to agent_start so tool atoms may load in any order.
 )
+
 
 @dataclass(slots=True, kw_only=True)
 class _BgTask(BackgroundTask):
@@ -144,12 +149,14 @@ class _BgTask(BackgroundTask):
     # tracking was skipped (atom reloaded mid-dispatch).
     work_bracket: AbstractContextManager[None] | None = None
 
+
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(to_jsonable(payload)))],
         is_error=is_error,
         extras=payload,
     )
+
 
 def _outcome_result(outcome: ToolResult | ToolOutcome) -> ToolResult:
     """Extract the :class:`ToolResult` from any tool return shape.
@@ -166,21 +173,21 @@ def _outcome_result(outcome: ToolResult | ToolOutcome) -> ToolResult:
         return outcome.result
     raise TypeError(f"unexpected tool outcome: {type(outcome).__name__}")
 
+
 def _result_text(result: ToolResult) -> str:
-    chunks = [
-        block.text
-        for block in result.content
-        if isinstance(block, TextContent)
-    ]
+    chunks = [block.text for block in result.content if isinstance(block, TextContent)]
     return "\n".join(chunks).strip()
+
 
 def _single_line(value: str) -> str:
     return " ".join(value.split())
+
 
 def _truncate_label(value: str) -> str:
     if len(value) <= _MAX_ACTIVITY_LABEL_CHARS:
         return value
     return value[: _MAX_ACTIVITY_LABEL_CHARS - 3].rstrip() + "..."
+
 
 def _activity_label(tool_name: str, args: dict[str, Any]) -> str:
     """Presenter-facing label for a detached tool task.
@@ -200,26 +207,21 @@ def _activity_label(tool_name: str, args: dict[str, Any]) -> str:
                 return _truncate_label(f"{tool_name}: {command}")
     return tool_name
 
+
 def _completion_note(state: _BgTask) -> str:
     """Human-readable completion / error note for the background inbox item."""
 
     if state.status == _COMPLETED:
         result = _outcome_result(state.outcome) if state.outcome is not None else None
         body = _result_text(result) if result is not None else ""
-        head = (
-            f"Background task {state.task_id} ({state.label}) finished."
-        )
+        head = f"Background task {state.task_id} ({state.label}) finished."
         return f"{head}\n\nResult:\n{body}" if body else head
     if state.status == _ERROR:
-        return (
-            f"Background task {state.task_id} ({state.label}) failed: "
-            f"{state.error}"
-        )
+        return f"Background task {state.task_id} ({state.label}) failed: {state.error}"
     if state.status == _CANCELLED:
-        return (
-            f"Background task {state.task_id} ({state.label}) was cancelled."
-        )
+        return f"Background task {state.task_id} ({state.label}) was cancelled."
     return f"Background task {state.task_id} ({state.label}): {state.status}."
+
 
 def _task_payload(state: _BgTask) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -235,8 +237,10 @@ def _task_payload(state: _BgTask) -> dict[str, Any]:
         payload["result"] = _result_text(_outcome_result(state.outcome))
     return payload
 
+
 def _activity_id(task_id: str) -> str:
     return f"background:{task_id}"
+
 
 async def _forward_abort(source: asyncio.Event, target: asyncio.Event) -> None:
     """Set ``target`` once ``source`` fires (one-directional bridge).
@@ -250,6 +254,7 @@ async def _forward_abort(source: asyncio.Event, target: asyncio.Event) -> None:
 
     await source.wait()
     target.set()
+
 
 class _BgTool:
     """Transparent auto-bg shim wrapping one registered tool.
@@ -363,6 +368,7 @@ class _BgTool:
         finally:
             timeout_task.cancel()
             inbox_task.cancel()
+
 
 class _BgManager:
     """Per-session registry + ticker/completion machinery for backgrounded
@@ -548,7 +554,9 @@ class _BgManager:
                 self._finalize(state)
                 return
             except Exception as exc:  # noqa: BLE001
-                logger.warning("background_exec: tool {} raised: {}", state.tool_name, exc)
+                logger.warning(
+                    "background_exec: tool {} raised: {}", state.tool_name, exc
+                )
                 state.status = _ERROR
                 state.error = str(exc) or exc.__class__.__name__
                 self._finalize(state)
@@ -742,7 +750,9 @@ class _BgManager:
                 )
             task = state.task if state.status == _RUNNING else None
         if task is not None:
-            await asyncio.wait({task}, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait(
+                {task}, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED
+            )
         async with self._registry.lock:
             state = self._registry.get(task_id)
             assert state is not None
@@ -771,11 +781,7 @@ class _BgManager:
         cancelled = await self._registry.cancel(task_id)
         if not cancelled:
             return _tool_result(
-                {
-                    "error": (
-                        f"cannot cancel {task_id}: unknown or already terminal"
-                    )
-                },
+                {"error": (f"cannot cancel {task_id}: unknown or already terminal")},
                 is_error=True,
             )
         async with self._registry.lock:
@@ -825,11 +831,14 @@ class _BgManager:
         for state in states:
             self._exit_work_tracking(state)
 
+
 # Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
 # ---------------------------------------------------------------------------
 
+
 class _CheckBackgroundParams(BaseModel):
     pass
+
 
 class _WaitBackgroundParams(BaseModel):
     task_id: str
@@ -841,50 +850,62 @@ class _WaitBackgroundParams(BaseModel):
         ),
     )
 
+
 class _CancelBackgroundParams(BaseModel):
     task_id: str
 
+
+class _BackgroundExecRuntime:
+    def __init__(self, api: ExtensionAPI, config: BackgroundExecConfig) -> None:
+        self._api = api
+        self._manager = _BgManager(
+            api=api,
+            timeout=config.timeout,
+            heartbeat_interval=config.heartbeat_interval,
+            silence_warning=config.silence_warning,
+            denylist=set(config.denylist),
+            shutdown_grace_seconds=config.shutdown_grace_seconds,
+        )
+
+    def install(self) -> None:
+        self._api.on(AgentStartEvent.CHANNEL, self.on_agent_start)
+        self._api.on(SessionShutdownEvent.CHANNEL, self._manager.on_session_shutdown)
+        self._register_tools()
+
+    def on_agent_start(self, _: AgentStartEvent) -> None:
+        self._manager.wrap_tools()
+
+    def _register_tools(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="check_background",
+                description=(
+                    "List background tasks (state + elapsed) without waiting."
+                ),
+                parameters=pydantic_to_tool_schema(_CheckBackgroundParams),
+                fn=self._manager.check_background,
+            )
+        )
+        self._api.register_tool(
+            FunctionTool(
+                name="wait_background",
+                description=(
+                    "Wait briefly for one background task to reach a terminal state; "
+                    "returns the current running status if timeout_s elapses."
+                ),
+                parameters=pydantic_to_tool_schema(_WaitBackgroundParams),
+                fn=self._manager.wait_background,
+            )
+        )
+        self._api.register_tool(
+            FunctionTool(
+                name="cancel_background",
+                description="Request cancellation of a running background task.",
+                parameters=pydantic_to_tool_schema(_CancelBackgroundParams),
+                fn=self._manager.cancel_background,
+            )
+        )
+
+
 def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
-    manager = _BgManager(
-        api=api,
-        timeout=config.timeout,
-        heartbeat_interval=config.heartbeat_interval,
-        silence_warning=config.silence_warning,
-        denylist=set(config.denylist),
-        shutdown_grace_seconds=config.shutdown_grace_seconds,
-    )
-
-    def on_agent_start(_: AgentStartEvent) -> None:
-        manager.wrap_tools()
-
-    api.on(AgentStartEvent.CHANNEL, on_agent_start)
-    api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
-    api.register_tool(
-        FunctionTool(
-            name="check_background",
-            description=(
-                "List background tasks (state + elapsed) without waiting."
-            ),
-            parameters=pydantic_to_tool_schema(_CheckBackgroundParams),
-            fn=manager.check_background,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="wait_background",
-            description=(
-                "Wait briefly for one background task to reach a terminal state; "
-                "returns the current running status if timeout_s elapses."
-            ),
-            parameters=pydantic_to_tool_schema(_WaitBackgroundParams),
-            fn=manager.wait_background,
-        )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="cancel_background",
-            description="Request cancellation of a running background task.",
-            parameters=pydantic_to_tool_schema(_CancelBackgroundParams),
-            fn=manager.cancel_background,
-        )
-    )
+    _BackgroundExecRuntime(api, config).install()
