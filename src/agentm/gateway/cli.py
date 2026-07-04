@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 import typer
 from loguru import logger
@@ -60,8 +60,17 @@ EXIT_CONFIG_ERROR = 2
 EXIT_SIGINT = 130
 
 
-def _expand_user_path_text(path: str | None) -> str | None:
-    return str(Path(path).expanduser()) if path else None
+def _expand_path(path: Path | str) -> Path:
+    return Path(os.path.expandvars(str(path))).expanduser()
+
+
+def _expand_path_text(path: Path | str | None) -> str | None:
+    if path is None:
+        return None
+    raw_path = str(path)
+    if not raw_path:
+        return None
+    return str(_expand_path(raw_path))
 
 
 def _restore_terminal() -> None:
@@ -114,11 +123,17 @@ def _load_tokens_file(path: str) -> set[str]:
     try:
         return set(
             load_token_file(
-                str(Path(path).expanduser()), option_name="--bind-token-file"
+                str(_expand_path(path)), option_name="--bind-token-file"
             )
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def _unix_socket_path_text(parsed: ParseResult) -> str:
+    if parsed.netloc:
+        return f"{parsed.netloc}{parsed.path}"
+    return parsed.path
 
 
 def _resolve_bind(
@@ -132,9 +147,9 @@ def _resolve_bind(
     tls_key: str | None,
 ) -> BindSpec:
     """Merge CLI flags > shared default into a :class:`BindSpec`."""
-    bind_token_file = _expand_user_path_text(bind_token_file)
-    tls_cert = _expand_user_path_text(tls_cert)
-    tls_key = _expand_user_path_text(tls_key)
+    bind_token_file = _expand_path_text(bind_token_file)
+    tls_cert = _expand_path_text(tls_cert)
+    tls_key = _expand_path_text(tls_key)
     url = bind or default_socket_url(create_runtime_dir=True)
     parsed = urlparse(str(url))
     scheme = parsed.scheme
@@ -145,7 +160,7 @@ def _resolve_bind(
                 "--tls-cert/--tls-key are only valid with ws://wss:// binds, "
                 f"not {url!r}."
             )
-        socket_path = parsed.path or parsed.netloc
+        socket_path = _expand_path_text(_unix_socket_path_text(parsed))
         if not socket_path:
             raise SystemExit(
                 f"--bind {url!r} has no socket path; use unix:///abs/path/to/sock"
@@ -528,7 +543,7 @@ async def _arun(
     raw_model = model_flag
 
     if state_dir is not None:
-        resolved_state_dir = state_dir.expanduser()
+        resolved_state_dir = _expand_path(state_dir)
     else:
         resolved_state_dir = agentm_home_dir() / "gateway"
     _validate_scenario(scenario)
