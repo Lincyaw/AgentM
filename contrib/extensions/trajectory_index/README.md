@@ -77,12 +77,19 @@ Validated at three levels:
 ### Step 1: Prepare trace sources
 
 Traces can come from:
-- **Local JSONL files**: `.agentm/observability/*.jsonl` under any case directory
+- **Local JSONL files**: direct files or an observability directory such as
+  `$AGENTM_HOME/observability` (default `~/.agentm/observability`) or
+  `AGENTM_OBSERVABILITY_DIR`; legacy case directories with nested
+  `.agentm/observability/*.jsonl` are still accepted
 - **ClickHouse session IDs**: `--session <id>` (repeatable)
 
 ```bash
-# Find available trace files
-find datasets/ -name '*.jsonl' -path '*observability*' | head
+# Find local trace files in AgentM's default observability directory
+find "${AGENTM_OBSERVABILITY_DIR:-${AGENTM_HOME:-$HOME/.agentm}/observability}" \
+  -name '*.jsonl' | head
+
+# Legacy per-case exports still work
+find datasets/ -path '*/.agentm/observability/*.jsonl' | head
 
 # Or use ClickHouse session IDs
 agentm trace index | head

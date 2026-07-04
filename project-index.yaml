@@ -1206,6 +1206,25 @@ requirements:
     depends_on:
       - REQ-096-cli-provider-session-seams
 
+  - id: REQ-204-trajectory-index-trace-discovery
+    title: Trajectory index accepts AgentM home trace directories
+    description: >
+      The trajectory_index SFT collection CLI must accept direct AgentM trace
+      JSONL files, observability directories such as
+      ``$AGENTM_HOME/observability`` or ``AGENTM_OBSERVABILITY_DIR``, and
+      legacy case roots containing nested ``.agentm/observability/*.jsonl``,
+      without treating cwd-local ``.agentm`` as the only local trace layout.
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/extensions/trajectory_index/src/trajectory_index/data.py
+    tests: []
+    docs:
+      - path: contrib/extensions/trajectory_index/README.md
+    depends_on:
+      - REQ-200-agentm-home-resolution
+
   - id: REQ-119-core-kernel-residuals
     title: Core kernel removes hard-coded layout literals and dead Tool surface
     description: >

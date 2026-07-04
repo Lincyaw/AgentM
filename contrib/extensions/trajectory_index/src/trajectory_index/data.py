@@ -726,15 +726,30 @@ app = typer.Typer(pretty_exceptions_enable=False)
 def _find_trace_files(paths: list[Path]) -> list[Path]:
     """Resolve paths to individual .jsonl trace files.
 
-    Accepts files directly, or directories (searches for
-    ``.agentm/observability/*.jsonl`` recursively).
+    Accepts direct files, observability directories such as
+    ``$AGENTM_HOME/observability``, and legacy case directories containing
+    nested ``.agentm/observability/*.jsonl`` traces.
     """
     files: list[Path] = []
+    seen: set[Path] = set()
+
+    def add_trace_file(path: Path) -> None:
+        if path.suffix != ".jsonl":
+            return
+        key = path.absolute()
+        if key in seen:
+            return
+        seen.add(key)
+        files.append(path)
+
     for p in paths:
-        if p.is_file() and p.suffix == ".jsonl":
-            files.append(p)
+        if p.is_file():
+            add_trace_file(p)
         elif p.is_dir():
-            files.extend(sorted(p.rglob(".agentm/observability/*.jsonl")))
+            for trace_file in sorted(p.glob("*.jsonl")):
+                add_trace_file(trace_file)
+            for trace_file in sorted(p.rglob(".agentm/observability/*.jsonl")):
+                add_trace_file(trace_file)
     return files
 
 
