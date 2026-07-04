@@ -1070,6 +1070,8 @@ requirements:
       - path: src/agentm/core/runtime/resource_writer.py
       - path: src/agentm/core/runtime/extension.py
       - path: src/agentm/core/runtime/catalog/__init__.py
+      - path: src/agentm/core/runtime/catalog/freeze.py
+      - path: src/agentm/core/runtime/catalog/migrate.py
       - path: src/agentm/core/runtime/catalog/indexer.py
       - path: src/agentm/core/runtime/resource_loader.py
       - path: src/agentm/extensions/discover.py

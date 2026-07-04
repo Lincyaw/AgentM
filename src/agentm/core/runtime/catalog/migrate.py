@@ -6,14 +6,15 @@ from loguru import logger
 import shutil
 from pathlib import Path
 
+from agentm.core.lib.paths import expand_path
 from agentm.core.runtime.catalog import _layout
 
 _MIGRATION_MARKER = ".migration-v2"
 _LEGACY_FILES = {"source.py", "manifest.yaml"}
 
 
-def migrate_catalog_v2(*, root: Path | None = None) -> bool:
-    cwd_root = (root or Path.cwd()).resolve()
+def migrate_catalog_v2(*, root: str | Path | None = None) -> bool:
+    cwd_root = expand_path(root).resolve() if root is not None else Path.cwd().resolve()
     catalog_root = _layout.catalog_root(root=cwd_root)
     marker = catalog_root / _MIGRATION_MARKER
     if marker.exists():

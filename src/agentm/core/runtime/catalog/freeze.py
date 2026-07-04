@@ -11,6 +11,7 @@ from agentm.core._internal.catalog.hashing import compute_atom_hash
 from agentm.core.abi import EventBus
 from agentm.core.abi.manifest import ExtensionManifest
 from agentm.core.abi.resource import ResourceWriter, WriteResult
+from agentm.core.lib.paths import expand_path
 from agentm.core.runtime.catalog import _layout
 
 _INDEXER_SESSION_ID = "catalog-freeze"
@@ -21,7 +22,7 @@ def freeze_current(
     source: str,
     manifest: ExtensionManifest,
     *,
-    root: Path | None = None,
+    root: str | Path | None = None,
     writer: ResourceWriter | None = None,
 ) -> str:
     if manifest.name != name:
@@ -29,7 +30,7 @@ def freeze_current(
             f"manifest.name {manifest.name!r} does not match atom name {name!r}"
         )
 
-    cwd_root = (root or Path.cwd()).resolve()
+    cwd_root = expand_path(root).resolve() if root is not None else Path.cwd().resolve()
     atom_path = _resolve_atom_source_path(name, root=cwd_root)
     relative_path = atom_path.relative_to(cwd_root)
 
