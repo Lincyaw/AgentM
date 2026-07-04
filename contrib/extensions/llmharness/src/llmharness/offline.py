@@ -381,8 +381,6 @@ async def offline_audit(
     """Audit a recorded trajectory and return surfaced reminder candidates."""
 
     del kwargs
-    from loguru import logger
-
     from llmharness.agents.auditor.context import load_auditor_prompt
 
     typed_messages: list[AgentMessage] = list(messages)
