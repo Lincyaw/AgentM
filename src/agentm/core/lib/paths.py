@@ -14,12 +14,12 @@ def expand_path(path: Path | str) -> Path:
 
 
 def expand_path_from_cwd(path: Path | str, cwd: Path | str) -> Path:
-    """Expand ``path`` and interpret relative results under ``cwd``."""
+    """Expand ``path`` and interpret relative results under expanded ``cwd``."""
 
     expanded = expand_path(str(path).strip())
     if expanded.is_absolute():
         return expanded
-    return (Path(cwd) / expanded).absolute()
+    return (expand_path(cwd) / expanded).absolute()
 
 
 def expand_path_text(path: Path | str) -> str:
