@@ -3,10 +3,10 @@
 This is the substrate shared by every atom that runs work in a detached
 ``asyncio.Task`` while the agent keeps taking turns. It was extracted out of
 ``extensions/builtin/sub_agent.py`` (the original prototype, where the unit is
-a child :class:`AgentSession`) so a future ``background_exec`` atom — whose
-unit is a single tool coroutine — can sit on the same machinery without either
-atom importing the other (forbids atom→atom imports; ``core.lib`` is the
-non-atom seam they share).
+a child :class:`AgentSession`) so ``background_exec`` — whose unit is a single
+tool coroutine — can sit on the same machinery without either atom importing
+the other (forbids atom→atom imports; ``core.lib`` is the non-atom seam they
+share).
 
 Generalization boundary: this module owns only what is generic to *any*
 asyncio background unit — the task handle, a free-text status string, an abort

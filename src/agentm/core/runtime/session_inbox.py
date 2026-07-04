@@ -1,22 +1,20 @@
 """SessionInbox — the single entry point for messages reaching the loop.
 
-Design: ``.claude/designs/session-inbox.md``. This is step 1 (the spine):
-every message that enters the agent loop — user input today, background
-completions / ticker / monitor fires / subagent findings in later steps —
-arrives through :meth:`SessionInbox.push`. A turn-boundary handler drains the
-inbox and renders each item into an :class:`AgentMessage` according to its
-``source``.
+Design: ``.claude/designs/session-inbox.md``. Every message that enters the
+agent loop through the runtime entry point — user input, background tool
+completion/status, monitor fires, and subagent findings — arrives through
+:meth:`SessionInbox.push`. A turn-boundary handler drains the inbox and renders
+each item into an :class:`AgentMessage` according to its ``source``.
 
 The inbox lives in ``core.runtime`` (substrate), not in an atom: it is
 mechanism, not policy, so the single-file-extension contract does not
-apply. Producers (atoms in later steps) push items; the runtime-owned
-handlers registered by the session drain them.
+apply. Producers push items; the runtime-owned handlers registered by the
+session drain them.
 
 ``push`` is a plain synchronous list append (task/thread-safe enough for the
 single-threaded asyncio model AgentM runs under). ``wait_nonempty`` is backed
-by an :class:`asyncio.Event` so a future persistent driver (step 5) can block
-while idle without burning CPU or LLM calls; it is implemented now but unused
-by step 1, whose only driver is ``prompt``/``tick``'s run-to-idle.
+by an :class:`asyncio.Event` so the persistent driver can block while idle
+without burning CPU or LLM calls.
 """
 
 from __future__ import annotations
@@ -35,9 +33,9 @@ from agentm.core.abi import (
 # ``InboxSource`` is a mechanism-level routing tag, not a subjective
 # classification — it decides *how* an item lands (UserMessage vs synthetic
 # tool_result vs system-reminder note), which is objective plumbing. It is an
-# open string set: step 1 only renders ``"user"``; later steps add
-# ``"background"`` / ``"ticker"`` / ``"monitor"`` / ``"subagent"`` without
-# touching this type.
+# open string set: current renderers cover ``"user"``, ``"background"``,
+# ``"monitor"``, and ``"subagent"`` without constraining future producers to a
+# closed enum.
 InboxSource = str
 
 
@@ -70,7 +68,7 @@ class SessionInbox:
     """FIFO queue of out-of-band items, drained at each turn boundary.
 
     Producer side: :meth:`push` (synchronous append, optional dedup).
-    Driver side: :meth:`wait_nonempty` (block while idle — step-5 driver).
+    Driver side: :meth:`wait_nonempty` (block while idle).
     Loop side: :meth:`drain` (take everything at a turn boundary) and
     :meth:`is_empty` (non-blocking emptiness check for the keep-alive floor).
     """
@@ -215,17 +213,17 @@ class SessionInbox:
 def render_item(item: InboxItem) -> AgentMessage:
     """Render an :class:`InboxItem` into an :class:`AgentMessage`.
 
-    Handles ``source="user"`` → :class:`UserMessage` (step 1),
+    Handles ``source="user"`` → :class:`UserMessage`,
     ``source="background"`` → a
     ``<system-reminder source="background">``-wrapped :class:`UserMessage`
-    (step 3: auto-backgrounding completion / ticker status),
-    ``source="monitor"`` → ``<system-reminder source="monitor">`` (step 4:
-    agent-defined wakeups + channel subscriptions), and
-    ``source="subagent"`` → ``<system-reminder source="subagent">`` (step 5:
-    child-task findings posted by ``sub_agent._finalize_state``). All four
-    land as new ``user`` messages so the prefix stays stable and the
-    KV/prefix cache survives (no synthetic ``tool_result``, which would need
-    a live ``tool_call_id`` the inbox does not carry at drain time).
+    for auto-backgrounding completion/status,
+    ``source="monitor"`` → ``<system-reminder source="monitor">`` for
+    agent-defined wakeups + channel subscriptions, and
+    ``source="subagent"`` → ``<system-reminder source="subagent">`` for
+    child-task findings posted by ``sub_agent._finalize_state``. All four land
+    as new ``user`` messages so the prefix stays stable and the KV/prefix cache
+    survives (no synthetic ``tool_result``, which would need a live
+    ``tool_call_id`` the inbox does not carry at drain time).
 
     The ``source="..."`` attribute on the wrapper tag exists so the agent
     can distinguish producer classes textually — first surfaced as an E2E

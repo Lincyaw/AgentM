@@ -4,13 +4,14 @@ Status: **accepted (2026-05-28); steps 1-5 implemented — SessionInbox spine, s
 Owner: kernel + orchestration
 
 Reaches into: `core/abi/loop.py` (the `decide_turn_action`/`Inject` drain seam),
-`core/runtime/session.py` (`prompt`/`tick`, `_drain_pending_user_messages`),
-`core/runtime/extension.py` (`send_user_message`), `extensions/builtin/sub_agent.py`
-(the existing background prototype), plus two new atoms (`background_exec`, `monitor`).
+`core/runtime/session.py` (`prompt`/`tick`, persistent driver),
+`core/runtime/session_inbox.py`, `core/runtime/extension.py` (`send_user_message`,
+`post_inbox`), and the producer atoms `extensions/builtin/sub_agent.py`,
+`extensions/builtin/background_exec.py`, `extensions/builtin/monitor.py`.
 
 Related: [agent-loop](agent-loop.md) (the per-turn decision protocol this rides on),
-[sub-agent-lifecycle](sub-agent-lifecycle.md) (the working prototype of the background
-pattern), [nested-session-task](nested-session-task.md), [pluggable-architecture](pluggable-architecture.md)
+[sub-agent-lifecycle](sub-agent-lifecycle.md) (child-session completion delivery),
+[nested-session-task](nested-session-task.md), [pluggable-architecture](pluggable-architecture.md)
 §3 (the loop is kernel ABI), [extension-as-scenario](extension-as-scenario.md) §11
 (atoms are single files).
 
@@ -59,9 +60,9 @@ producers on top of it.
   (`extensions/builtin/sub_agent.py`): `dispatch` spawns an `asyncio.create_task` and
   returns an immediate `{task_id, status:running}` ticket; `inject_instruction` pushes
   a message into a running child; `abort` sets a signal; and child completion posts a
-  `source="subagent"` inbox item. This is the prototype we generalize.
-- There is **no timer/ticker anywhere in `core`**; `asyncio.create_task` appears only
-  in `sub_agent`.
+  `source="subagent"` inbox item. It is one producer on the shared inbox path.
+- Timer/ticker work stays outside `core`: `background_exec` and `monitor` own their
+  own asyncio tasks and post status/completion through the inbox.
 
 ---
 
@@ -124,7 +125,7 @@ ergonomics (`messages = await session.prompt(...)` still works). A one-shot CLI 
 host may use `prompt` *or* `inbox.push` + bus subscription — same mechanism, two
 usages, not two APIs.
 
-`source` is a **mechanism-level routing enum** — `user | background | ticker |
+`source` is a **mechanism-level routing enum** — `user | background |
 monitor | subagent | ...` — deciding how the item lands (a `UserMessage`, a synthetic
 `tool_result`, or a `<system-reminder>`-wrapped note). It is objective plumbing, not a
 subjective classification, so it does not violate the "no preset enums for subjective
@@ -240,10 +241,10 @@ long-turn agent never finds a pile of stale status lines.
   foreground terminate, never a silent drop.
 - **Completion + idle boundary.** Completion and ticker items
   `post_inbox(source="background")`; while the agent is actively taking turns the
-  step-1 `context` drain injects them. **Idle auto-wakeup is step 5** (the persistent
-  driver) — in step 3 the agent stays informed by being active or by calling
-  `wait_background`. `cancel_background` is the first caller of
-  `BackgroundTaskRegistry.cancel`.
+  runtime `context` drain injects them. When the session is parked, the persistent
+  driver wakes on inbox non-empty and runs the next turn. The agent can also inspect
+  or control backgrounded work directly with `check_background`, `wait_background`,
+  and `cancel_background`.
 - **render_item** handles all four sources: `"user"` (plain `UserMessage`),
   `"background"` / `"monitor"` / `"subagent"` (`<system-reminder source="...">`-wrapped
   `UserMessage`). Any other source raises `NotImplementedError`.
@@ -297,8 +298,8 @@ loading the same atoms, so `background_exec` + `monitor` apply recursively.
 3. **One entry + one driver; `prompt` is sugar.** No dual API, no separate `Park`;
    the runtime inbox floor is "inbox non-empty ⇒ keep running".
 4. **FIFO, no priority.** Drain takes all and injects them as one batch ordered by
-   arrival ("earlier-happened, earlier-said"); user vs ticker priority adds nothing
-   when the agent sees the whole batch in one turn. No config knob.
+   arrival ("earlier-happened, earlier-said"); user vs background/monitor priority
+   adds nothing when the agent sees the whole batch in one turn. No config knob.
 5. **Undrained-window persistence: MVP none.** Inbox items are mostly transient signals
    (ticker/monitor) that should regenerate after a restart; the user-input window
    before drain is tiny. Items enter the session log only once drained and landed as

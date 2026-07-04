@@ -384,7 +384,7 @@ class ExtensionAPI(Protocol):
         """Push an item onto the session inbox — the generic producer entry.
 
         ``source`` is the mechanism-level routing tag (``"user"`` /
-        ``"background"`` / ``"ticker"`` / ``"monitor"`` / ``"subagent"``) that
+        ``"background"`` / ``"monitor"`` / ``"subagent"``) that
         decides how the item is rendered at the next turn boundary (see
         ``SessionInbox.render_item``). ``payload`` is rendered per ``source``.
         A producer that supersedes its own prior, not-yet-drained item passes a
@@ -399,10 +399,10 @@ class ExtensionAPI(Protocol):
         keeping the agent alive on the non-empty inbox. The message still lands
         in the conversation first.
 
-        :meth:`send_user_message` is the ``source="user"`` sugar over this; new
-        producers (``background_exec``, ``monitor``, the future ``sub_agent``
-        rewrite) post through ``post_inbox`` directly. See
-        ``.claude/designs/session-inbox.md`` (step-3 design decisions).
+        :meth:`send_user_message` is the ``source="user"`` sugar over this;
+        producer atoms (``background_exec``, ``monitor``, ``sub_agent``) post
+        through ``post_inbox`` directly. See
+        ``.claude/designs/session-inbox.md``.
         """
         ...
 
