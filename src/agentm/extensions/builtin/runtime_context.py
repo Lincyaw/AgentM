@@ -54,13 +54,21 @@ def _build_block(cwd: str) -> str:
     )
 
 
-def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:
-    block = _build_block(api.cwd)
+class _RuntimeContextRuntime:
+    def __init__(self, api: ExtensionAPI) -> None:
+        self._api = api
+        self._block = _build_block(api.cwd)
 
-    def before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str]:
+    def install(self) -> None:
+        self._api.on(BeforeAgentStartEvent.CHANNEL, self.before_agent_start)
+
+    def before_agent_start(self, event: BeforeAgentStartEvent) -> dict[str, str]:
         current = str(event.system or "")
-        updated = f"{block}\n\n{current}" if current else block
+        updated = f"{self._block}\n\n{current}" if current else self._block
         event.system = updated
         return {"system": updated}
 
-    api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)
+
+def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:
+    del config
+    _RuntimeContextRuntime(api).install()
