@@ -16,7 +16,13 @@ from loguru import logger
 from pydantic import BaseModel, Field
 from typing import Any
 
-from agentm.core.abi import ExtensionAPI, FunctionTool, TextContent, ToolResult
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    MODEL_RESOLVER_SERVICE,
+    TextContent,
+    ToolResult,
+)
 from agentm.extensions import ExtensionManifest
 from agentm.extensions.builtin._workflow.runner import (
     WorkflowRunner,
@@ -41,6 +47,7 @@ from agentm.extensions.builtin._workflow.sdk import (
     _coerce_agent_mock,
     _default_concurrency,
 )
+
 
 class WorkflowConfig(BaseModel):
     max_concurrency: int | None = None
@@ -80,84 +87,115 @@ MANIFEST = ExtensionManifest(
 
 # Name of the service that backs the workflow-local resume journal.
 
-def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
-    if api.purpose == _WORKER_PURPOSE:
-        return
 
-    concurrency = (
-        config.max_concurrency
-        if config.max_concurrency is not None and config.max_concurrency > 0
-        else _default_concurrency()
-    )
-    max_agents = (
-        config.max_agents
-        if config.max_agents is not None and config.max_agents > 0
-        else _AGENT_COUNT_BACKSTOP
-    )
-    wall_clock_timeout: float | None = (
-        config.wall_clock_timeout_s
-        if config.wall_clock_timeout_s is not None and config.wall_clock_timeout_s > 0
-        else None
-    )
-    default_scenario = config.default_scenario
-    budget_tokens = config.budget_tokens
-    default_agent_timeout: float | None = (
-        config.default_agent_timeout_s
-        if config.default_agent_timeout_s is not None
-        and config.default_agent_timeout_s > 0
-        else None
-    )
-    agent_mock = config.agent_mock
+class _WorkflowRuntime:
+    def __init__(self, api: ExtensionAPI, config: WorkflowConfig) -> None:
+        self._api = api
+        self._wall_clock_timeout = self._positive_float_or_none(
+            config.wall_clock_timeout_s
+        )
+        self._agent_mock = config.agent_mock
+        self._model_resolver = api.get_service(MODEL_RESOLVER_SERVICE)
+        self._runner = WorkflowRunner(
+            api,
+            concurrency=self._positive_int_or_default(
+                config.max_concurrency,
+                _default_concurrency(),
+            ),
+            max_agents=self._positive_int_or_default(
+                config.max_agents,
+                _AGENT_COUNT_BACKSTOP,
+            ),
+            wall_clock_timeout=self._wall_clock_timeout,
+            default_scenario=config.default_scenario,
+            budget_tokens=config.budget_tokens,
+            default_agent_timeout=self._positive_float_or_none(
+                config.default_agent_timeout_s
+            ),
+            agent_mock=self._agent_mock,
+            model_resolver=self._model_resolver,
+        )
 
-    from agentm.core.abi import MODEL_RESOLVER_SERVICE
+    def install(self) -> None:
+        self._api.set_service(_WORKFLOW_RUNNER_SERVICE, self._runner)
+        self._api.register_tool(
+            FunctionTool(
+                name="workflow",
+                description=(
+                    "Run an async Python orchestration script (inline or from a "
+                    "file via script_path) that fans out deterministic child agent "
+                    "sessions. Use for parallel verify / judge / sweep harnesses "
+                    "where you author the control flow as code rather than "
+                    "turn-by-turn. Names: agent, parallel, pipeline, budget, args, "
+                    "json, log, phase. The script runs in a curated "
+                    "namespace (data builtins only; no import / open / time / "
+                    "random). agent() results are "
+                    "journaled by hash(prompt, args) so re-running a workflow "
+                    "resumes from cache. agent(prompt, schema={...}) returns a "
+                    "parsed dict conforming to the JSON Schema."
+                ),
+                parameters=_WorkflowArgs,
+                fn=self.run_workflow,
+                metadata={"workflow": True},
+            )
+        )
 
-    model_resolver = api.get_service(MODEL_RESOLVER_SERVICE)
+    @staticmethod
+    def _positive_int_or_default(value: int | None, default: int) -> int:
+        if value is not None and value > 0:
+            return value
+        return default
 
-    runner = WorkflowRunner(
-        api,
-        concurrency=concurrency,
-        max_agents=max_agents,
-        wall_clock_timeout=wall_clock_timeout,
-        default_scenario=default_scenario,
-        budget_tokens=budget_tokens,
-        default_agent_timeout=default_agent_timeout,
-        agent_mock=agent_mock,
-        model_resolver=model_resolver,
-    )
-    api.set_service(_WORKFLOW_RUNNER_SERVICE, runner)
+    @staticmethod
+    def _positive_float_or_none(value: float | None) -> float | None:
+        if value is not None and value > 0:
+            return value
+        return None
 
-    async def _run_workflow(args: dict[str, Any]) -> ToolResult:
+    @staticmethod
+    def _cwd_arg(args: dict[str, Any]) -> str | None:
+        cwd_arg = args.get("cwd")
+        if isinstance(cwd_arg, str) and cwd_arg.strip():
+            return str(cwd_arg)
+        return None
+
+    def _provider_arg(
+        self, model_arg: Any
+    ) -> tuple[tuple[str, dict[str, Any]] | None, ToolResult | None]:
+        if not isinstance(model_arg, str) or not model_arg.strip():
+            return None, None
+        if self._model_resolver is None:
+            return None, _error(
+                "workflow: model= requires the model_resolver service, "
+                "but it is not available in this session"
+            )
+        provider = self._model_resolver(model_arg.strip())
+        if provider is None:
+            return None, _error(f"workflow: unknown model profile '{model_arg}'")
+        return provider, None
+
+    async def run_workflow(self, args: dict[str, Any]) -> ToolResult:
         script = args.get("script")
         script_path_raw = args.get("script_path")
 
         if script_path_raw and script:
             return _error("workflow: 'script' and 'script_path' are mutually exclusive")
 
-        cwd_arg = args.get("cwd")
-        cwd: str | None = (
-            str(cwd_arg) if isinstance(cwd_arg, str) and cwd_arg.strip() else None
-        )
-
-        model_arg = args.get("model")
-        provider: tuple[str, dict[str, Any]] | None = None
-        if isinstance(model_arg, str) and model_arg.strip():
-            if model_resolver is None:
-                return _error(
-                    "workflow: model= requires the model_resolver service, "
-                    "but it is not available in this session"
-                )
-            provider = model_resolver(model_arg.strip())
-            if provider is None:
-                return _error(f"workflow: unknown model profile '{model_arg}'")
+        cwd = self._cwd_arg(args)
+        provider, error = self._provider_arg(args.get("model"))
+        if error is not None:
+            return error
 
         try:
-            agent_mock_arg = _coerce_agent_mock(args.get("agent_mock"), agent_mock)
+            agent_mock_arg = _coerce_agent_mock(
+                args.get("agent_mock"), self._agent_mock
+            )
         except ValueError as exc:
             return _error(str(exc))
 
         try:
             if isinstance(script_path_raw, str) and script_path_raw.strip():
-                result = await runner.run_file(
+                result = await self._runner.run_file(
                     script_path_raw,
                     args.get("args"),
                     cwd=cwd,
@@ -165,7 +203,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
                     agent_mock=agent_mock_arg,
                 )
             elif isinstance(script, str) and script.strip():
-                result = await runner.run_script(
+                result = await self._runner.run_script(
                     script,
                     args.get("args"),
                     cwd=cwd,
@@ -180,7 +218,8 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
             return _error(f"workflow: {exc}")
         except TimeoutError:
             return _error(
-                f"workflow: script exceeded wall-clock budget ({wall_clock_timeout}s)"
+                "workflow: script exceeded wall-clock budget "
+                f"({self._wall_clock_timeout}s)"
             )
         except Exception as exc:
             logger.warning("workflow script error: {}: {}", type(exc).__name__, exc)
@@ -194,32 +233,17 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
                 )
             ],
             extras={
-                "progress": runner.last_progress,
-                "summary": runner.last_run_summary,
+                "progress": self._runner.last_progress,
+                "summary": self._runner.last_run_summary,
             },
         )
 
-    api.register_tool(
-        FunctionTool(
-            name="workflow",
-            description=(
-                "Run an async Python orchestration script (inline or from a "
-                "file via script_path) that fans out deterministic child agent "
-                "sessions. Use for parallel verify / judge / sweep harnesses "
-                "where you author the control flow as code rather than "
-                "turn-by-turn. Names: agent, parallel, pipeline, budget, args, "
-                "json, log, phase. The script runs in a curated "
-                "namespace (data builtins only; no import / open / time / "
-                "random). agent() results are "
-                "journaled by hash(prompt, args) so re-running a workflow "
-                "resumes from cache. agent(prompt, schema={...}) returns a "
-                "parsed dict conforming to the JSON Schema."
-            ),
-            parameters=_WorkflowArgs,
-            fn=_run_workflow,
-            metadata={"workflow": True},
-        )
-    )
+
+def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
+    if api.purpose == _WORKER_PURPOSE:
+        return
+    _WorkflowRuntime(api, config).install()
+
 
 __all__ = (
     "AgentResult",
