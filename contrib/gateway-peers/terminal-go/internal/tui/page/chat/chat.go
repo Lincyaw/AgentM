@@ -241,8 +241,9 @@ type KeyMap struct {
 }
 
 // defaultKeyMap returns the default key bindings.
-// ctrl+t is reserved for "new tab" in the tab bar,
-// so ToggleSplitDiff is disabled (available via /split-diff command instead).
+// ctrl+t is reserved by the top-level TUI for task rows when background
+// activity exists, and for new tabs otherwise. ToggleSplitDiff is available via
+// /split-diff instead.
 func defaultKeyMap() KeyMap {
 	splitDiff := key.NewBinding(
 		key.WithKeys("ctrl+t"),

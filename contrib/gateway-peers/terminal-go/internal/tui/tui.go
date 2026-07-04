@@ -1944,11 +1944,16 @@ func (m *appModel) AllBindings() []key.Binding {
 	}
 	bindings = append(bindings, m.tabBar.Bindings()...)
 
+	ctrlTHelp := "new tab"
+	if m.hasBottomActivities() {
+		ctrlTHelp = "toggle tasks"
+	}
+
 	// Additional global shortcuts
 	bindings = append(bindings,
 		key.NewBinding(
 			key.WithKeys("ctrl+t"),
-			key.WithHelp("Ctrl+t", "toggle tasks"),
+			key.WithHelp("Ctrl+t", ctrlTHelp),
 		),
 		key.NewBinding(
 			key.WithKeys("ctrl+k"),
@@ -2146,7 +2151,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if msg.String() == "ctrl+t" {
+	if msg.String() == "ctrl+t" && m.hasBottomActivities() {
 		return m, m.toggleWorkflowRows()
 	}
 
