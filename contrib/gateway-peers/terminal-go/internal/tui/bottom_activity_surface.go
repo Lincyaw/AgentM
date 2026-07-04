@@ -47,6 +47,15 @@ type backgroundActivity struct {
 	finished  bool
 }
 
+type normalizedBackgroundActivity struct {
+	sessionID  string
+	activityID string
+	source     string
+	label      string
+	status     string
+	note       string
+}
+
 type bottomActivityKind int
 
 const (
@@ -639,6 +648,26 @@ func retainFinishedBackgroundActivity(status string) bool {
 	}
 }
 
+func normalizeBackgroundActivity(ev *runtime.BackgroundActivityEvent) (normalizedBackgroundActivity, bool) {
+	source := strings.TrimSpace(ev.Source)
+	label := strings.TrimSpace(ev.Label)
+	activityID := strings.TrimSpace(ev.ActivityID)
+	if activityID == "" {
+		activityID = source + ":" + label
+	}
+	if activityID == ":" {
+		return normalizedBackgroundActivity{}, false
+	}
+	return normalizedBackgroundActivity{
+		sessionID:  strings.TrimSpace(ev.SessionID),
+		activityID: activityID,
+		source:     cmpNonEmpty(source, "background"),
+		label:      cmpNonEmpty(label, "background"),
+		status:     normalizeBackgroundActivityStatus(ev.Status),
+		note:       strings.TrimSpace(ev.Note),
+	}, true
+}
+
 func (m *appModel) handleBackgroundActivity(ev *runtime.BackgroundActivityEvent) (tea.Model, tea.Cmd) {
 	if ev == nil {
 		return m, nil
@@ -655,28 +684,23 @@ func (m *appModel) updateBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 	if m.backgroundActivities == nil {
 		m.backgroundActivities = map[string]backgroundActivity{}
 	}
-	activityID := strings.TrimSpace(ev.ActivityID)
-	if activityID == "" {
-		activityID = strings.TrimSpace(ev.Source) + ":" + strings.TrimSpace(ev.Label)
-	}
-	if activityID == ":" {
+	activity, ok := normalizeBackgroundActivity(ev)
+	if !ok {
 		return false
 	}
-	sessionID := strings.TrimSpace(ev.SessionID)
-	key := backgroundActivityKey(sessionID, activityID)
-	status := normalizeBackgroundActivityStatus(ev.Status)
-	if ev.Terminal && !retainFinishedBackgroundActivity(status) {
+	key := backgroundActivityKey(activity.sessionID, activity.activityID)
+	if ev.Terminal && !retainFinishedBackgroundActivity(activity.status) {
 		_, existed := m.backgroundActivities[key]
 		delete(m.backgroundActivities, key)
 		return existed
 	}
 	next := backgroundActivity{
-		sessionID: sessionID,
-		source:    cmpNonEmpty(ev.Source, "background"),
-		id:        activityID,
-		label:     cmpNonEmpty(ev.Label, "background"),
-		status:    status,
-		note:      strings.TrimSpace(ev.Note),
+		sessionID: activity.sessionID,
+		source:    activity.source,
+		id:        activity.activityID,
+		label:     activity.label,
+		status:    activity.status,
+		note:      activity.note,
 		updatedAt: time.Now(),
 		finished:  ev.Terminal,
 	}
