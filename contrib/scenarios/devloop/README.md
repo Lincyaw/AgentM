@@ -77,6 +77,6 @@ works for your stack.
 
 - **Add agent types**: new directory under `agents/` with a `manifest.yaml`
 - **Add skills**: new directory under `skills/` with a `SKILL.md`
-- **Change prompts**: edit `workflow/prompts.py`
-- **Change pipeline**: edit `workflow/devloop_workflow.py`
-- **Change output schemas**: edit `workflow/types.py`
+- **Change prompts**: edit `agentm_devloop/workflow/prompts.py`
+- **Change pipeline**: edit `agentm_devloop/workflow/devloop_workflow.py`
+- **Change output schemas**: edit `agentm_devloop/workflow/types.py`
