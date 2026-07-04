@@ -31,6 +31,7 @@ from agentm.core.abi import (
     ToolResult,
     TraceReader,
 )
+from agentm.core.lib import expand_path
 from agentm.extensions import ExtensionManifest
 
 # ---------------------------------------------------------------------------
@@ -318,7 +319,7 @@ def _load_run(
 
 def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
     default_scenario = config.default_scenario
-    cwd = Path(api.cwd)
+    cwd = expand_path(api.cwd).resolve()
 
     from agentm.core.lib import resolve_observability_dir
 
