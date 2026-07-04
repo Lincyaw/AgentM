@@ -22,6 +22,34 @@ const reconnectMaxDelay = 30 * time.Second
 
 const defaultPeerVersion = "0.1.0"
 
+func nextReconnectDelay(delay time.Duration) time.Duration {
+	next := delay * 2
+	if next > reconnectMaxDelay {
+		return reconnectMaxDelay
+	}
+	return next
+}
+
+func waitReconnectDelay(delay time.Duration, stop <-chan struct{}) bool {
+	timer := time.NewTimer(delay)
+	defer func() {
+		if timer.Stop() {
+			return
+		}
+		select {
+		case <-timer.C:
+		default:
+		}
+	}()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-stop:
+		return false
+	}
+}
+
 // WireClient manages a connection to the AgentM gateway.
 type WireClient struct {
 	transport Transport
@@ -228,9 +256,7 @@ func (c *WireClient) reconnect() bool {
 		log.Printf("[wire] reconnecting in %v ...", delay)
 
 		// Wait for the backoff delay, but abort if Close() is called.
-		select {
-		case <-time.After(delay):
-		case <-c.stopReconnect:
+		if !waitReconnectDelay(delay, c.stopReconnect) {
 			log.Printf("[wire] reconnect aborted by Close during backoff")
 			return false
 		}
@@ -241,10 +267,7 @@ func (c *WireClient) reconnect() bool {
 		cancel()
 		if err != nil {
 			log.Printf("[wire] reconnect attempt failed: %v", err)
-			delay *= 2
-			if delay > reconnectMaxDelay {
-				delay = reconnectMaxDelay
-			}
+			delay = nextReconnectDelay(delay)
 			continue
 		}
 
@@ -252,10 +275,7 @@ func (c *WireClient) reconnect() bool {
 		if err := WriteFrame(conn, c.helloEnvelope()); err != nil {
 			log.Printf("[wire] reconnect hello failed: %v", err)
 			conn.Close()
-			delay *= 2
-			if delay > reconnectMaxDelay {
-				delay = reconnectMaxDelay
-			}
+			delay = nextReconnectDelay(delay)
 			continue
 		}
 
@@ -264,10 +284,7 @@ func (c *WireClient) reconnect() bool {
 		if err != nil {
 			log.Printf("[wire] reconnect welcome read failed: %v", err)
 			conn.Close()
-			delay *= 2
-			if delay > reconnectMaxDelay {
-				delay = reconnectMaxDelay
-			}
+			delay = nextReconnectDelay(delay)
 			continue
 		}
 
@@ -287,10 +304,7 @@ func (c *WireClient) reconnect() bool {
 		if resp.Kind != KindWelcome {
 			log.Printf("[wire] reconnect unexpected response kind: %s", resp.Kind)
 			conn.Close()
-			delay *= 2
-			if delay > reconnectMaxDelay {
-				delay = reconnectMaxDelay
-			}
+			delay = nextReconnectDelay(delay)
 			continue
 		}
 
