@@ -243,20 +243,28 @@ func (s *Supervisor) activeIndexLocked() int {
 }
 
 // SwitchTo switches to a different session.
-func (s *Supervisor) SwitchTo(sessionID string) *SessionRunner {
+//
+// Background workflow tabs are promoted to regular tabs in the same state
+// transition. User-opened workflow tabs should then use normal tab chrome
+// instead of disappearing back into the task surface.
+func (s *Supervisor) SwitchTo(sessionID string) (*SessionRunner, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	runner, ok := s.runners[sessionID]
 	if !ok {
-		return nil
+		return nil, false
 	}
 
+	wasBackground := runner.Background
+	if runner.Background {
+		runner.Background = false
+	}
 	s.activeID = sessionID
 	runner.NeedsAttn = false // Clear attention flag when switching to this tab
 	s.notifyTabsUpdated()
 
-	return runner
+	return runner, wasBackground
 }
 
 // SetBackground marks whether a runner should be treated as background

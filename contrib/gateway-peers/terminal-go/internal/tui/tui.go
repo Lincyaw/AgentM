@@ -1570,11 +1570,13 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 		outgoingTabID = m.supervisor.ActiveID()
 	}
 
-	runner := m.supervisor.SwitchTo(sessionID)
+	runner, wasBackground := m.supervisor.SwitchTo(sessionID)
 	if runner == nil {
 		return m, notification.ErrorCmd("Session not found")
 	}
-	if !runner.Background {
+	if wasBackground {
+		m.setWorkflowVisible(sessionID, false)
+	} else {
 		m.mainSessionID = sessionID
 	}
 
