@@ -29,9 +29,15 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(api: ExtensionAPI, _config: ToolIndexConfig) -> None:
-    def _inject(event: BeforeAgentStartEvent) -> dict[str, str] | None:
-        tools = api.tools
+class _ToolIndexRuntime:
+    def __init__(self, api: ExtensionAPI) -> None:
+        self._api = api
+
+    def install(self) -> None:
+        self._api.on(BeforeAgentStartEvent.CHANNEL, self.inject)
+
+    def inject(self, event: BeforeAgentStartEvent) -> dict[str, str] | None:
+        tools = self._api.tools
         if not tools:
             return None
         lines = [
@@ -57,4 +63,6 @@ def install(api: ExtensionAPI, _config: ToolIndexConfig) -> None:
         event.system = updated
         return {"system": updated}
 
-    api.on(BeforeAgentStartEvent.CHANNEL, _inject)
+
+def install(api: ExtensionAPI, _config: ToolIndexConfig) -> None:
+    _ToolIndexRuntime(api).install()
