@@ -18,8 +18,10 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 
+
 class FileMutationQueueConfig(BaseModel):
     tools: list[str] = ["edit", "write"]
+
 
 MANIFEST = ExtensionManifest(
     name="file_mutation_queue",
@@ -30,6 +32,7 @@ MANIFEST = ExtensionManifest(
 )
 
 _PATH_KEYS = ("path", "file_path", "filepath", "target")
+
 
 class _QueuedTool:
     def __init__(self, wrapped: Tool, locks: dict[str, asyncio.Lock]) -> None:
@@ -49,6 +52,7 @@ class _QueuedTool:
         async with lock:
             return await self._wrapped.execute(args, signal=signal)
 
+
 def _normalize_path(args: dict[str, Any]) -> str:
     raw = None
     for key in _PATH_KEYS:
@@ -60,14 +64,22 @@ def _normalize_path(args: dict[str, Any]) -> str:
         return "<missing-path>"
     return os.path.abspath(raw)
 
-def install(api: ExtensionAPI, config: FileMutationQueueConfig) -> None:
-    target_names = tuple(config.tools)
-    locks: dict[str, asyncio.Lock] = {}
-    wrapped_names: set[str] = set()
 
-    def on_agent_start(_: AgentStartEvent) -> ExtensionLoadError | None:
-        tools_by_name = {tool.name: (index, tool) for index, tool in enumerate(api.tools)}
-        missing = [name for name in target_names if name not in tools_by_name]
+class _FileMutationQueueRuntime:
+    def __init__(self, api: ExtensionAPI, config: FileMutationQueueConfig) -> None:
+        self._api = api
+        self._target_names = tuple(config.tools)
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._wrapped_names: set[str] = set()
+
+    def install(self) -> None:
+        self._api.on(AgentStartEvent.CHANNEL, self.on_agent_start)
+
+    def on_agent_start(self, _: AgentStartEvent) -> ExtensionLoadError | None:
+        tools_by_name = {
+            tool.name: (index, tool) for index, tool in enumerate(self._api.tools)
+        }
+        missing = [name for name in self._target_names if name not in tools_by_name]
         if missing:
             return ExtensionLoadError(
                 __name__,
@@ -76,12 +88,17 @@ def install(api: ExtensionAPI, config: FileMutationQueueConfig) -> None:
                     + ", ".join(sorted(missing))
                 ),
             )
-        for name in target_names:
-            if name in wrapped_names:
+        for name in self._target_names:
+            if name in self._wrapped_names:
                 continue
             index, tool = tools_by_name[name]
-            api.tools[index] = _QueuedTool(tool, locks)
-            wrapped_names.add(name)
+            if isinstance(tool, _QueuedTool):
+                self._wrapped_names.add(name)
+                continue
+            self._api.tools[index] = _QueuedTool(tool, self._locks)
+            self._wrapped_names.add(name)
         return None
 
-    api.on(AgentStartEvent.CHANNEL, on_agent_start)
+
+def install(api: ExtensionAPI, config: FileMutationQueueConfig) -> None:
+    _FileMutationQueueRuntime(api, config).install()
