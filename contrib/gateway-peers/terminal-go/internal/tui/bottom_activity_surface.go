@@ -47,6 +47,45 @@ type backgroundActivity struct {
 	finished  bool
 }
 
+type bottomActivityKind int
+
+const (
+	bottomActivityNone bottomActivityKind = iota
+	bottomActivityWorkflowOnly
+	bottomActivityBackgroundOnly
+	bottomActivityMixed
+)
+
+func (k bottomActivityKind) hasRows() bool {
+	return k != bottomActivityNone
+}
+
+func (k bottomActivityKind) hasWorkflowTasks() bool {
+	return k == bottomActivityWorkflowOnly || k == bottomActivityMixed
+}
+
+func (k bottomActivityKind) toggleTarget() string {
+	switch k {
+	case bottomActivityWorkflowOnly:
+		return "tasks"
+	case bottomActivityBackgroundOnly, bottomActivityMixed:
+		return "activity rows"
+	default:
+		return ""
+	}
+}
+
+func (k bottomActivityKind) ctrlTActionLabel() string {
+	switch k {
+	case bottomActivityWorkflowOnly:
+		return "toggle tasks"
+	case bottomActivityBackgroundOnly, bottomActivityMixed:
+		return "toggle activity"
+	default:
+		return "new tab"
+	}
+}
+
 func backgroundActivityKey(sessionID, activityID string) string {
 	if sessionID == "" {
 		return activityID
@@ -54,16 +93,27 @@ func backgroundActivityKey(sessionID, activityID string) string {
 	return sessionID + backgroundActivityKeySeparator + activityID
 }
 
-func (m *appModel) hasWorkflowTasks() bool {
-	return len(m.workflowTaskTabs()) > 0
+func (m *appModel) bottomActivityKind() bottomActivityKind {
+	hasWorkflow := len(m.workflowTaskTabs()) > 0
+	hasBackground := len(m.backgroundActivities) > 0
+	switch {
+	case hasWorkflow && hasBackground:
+		return bottomActivityMixed
+	case hasWorkflow:
+		return bottomActivityWorkflowOnly
+	case hasBackground:
+		return bottomActivityBackgroundOnly
+	default:
+		return bottomActivityNone
+	}
 }
 
-func (m *appModel) hasBackgroundActivities() bool {
-	return len(m.backgroundActivities) > 0
+func (m *appModel) hasWorkflowTasks() bool {
+	return m.bottomActivityKind().hasWorkflowTasks()
 }
 
 func (m *appModel) hasBottomActivityRows() bool {
-	return m.hasWorkflowTasks() || m.hasBackgroundActivities()
+	return m.bottomActivityKind().hasRows()
 }
 
 func (m *appModel) activeIsWorkflowTask() bool {
@@ -372,6 +422,7 @@ func (m *appModel) toggleTranscriptVerbose() tea.Cmd {
 }
 
 func (m *appModel) footerText() string {
+	activityKind := m.bottomActivityKind()
 	if time.Since(m.lastExitRequest) <= 2*time.Second {
 		return "Press Ctrl-C again to exit"
 	}
@@ -384,15 +435,16 @@ func (m *appModel) footerText() string {
 		return m.workflowTaskPickerFooterText()
 	case m.activeIsWorkflowTask():
 		return "ctrl+n/p to switch tabs · ↓ to manage tasks"
-	case m.hasBottomActivityRows():
+	case activityKind.hasRows():
 		verb := "hide"
 		if m.bottomActivityRowsHidden {
 			verb = "show"
 		}
-		if m.hasWorkflowTasks() {
-			return "ctrl+t to " + verb + " " + m.bottomActivityToggleTarget() + " · ← for agents · ↓ to manage"
+		target := activityKind.toggleTarget()
+		if activityKind.hasWorkflowTasks() {
+			return "ctrl+t to " + verb + " " + target + " · ← for agents · ↓ to manage"
 		}
-		return "ctrl+t to " + verb + " " + m.bottomActivityToggleTarget() + " · ← for agents"
+		return "ctrl+t to " + verb + " " + target + " · ← for agents"
 	case m.sessionState != nil && m.sessionState.YoloMode():
 		return "bypass permissions on (shift+tab to cycle) · ← for agents"
 	default:
@@ -401,24 +453,7 @@ func (m *appModel) footerText() string {
 }
 
 func (m *appModel) ctrlTActionLabel() string {
-	switch {
-	case m.hasWorkflowTasks() && !m.hasBackgroundActivities():
-		return "toggle tasks"
-	case m.hasBottomActivityRows():
-		return "toggle activity"
-	default:
-		return "new tab"
-	}
-}
-
-func (m *appModel) bottomActivityToggleTarget() string {
-	if m.hasWorkflowTasks() && !m.hasBackgroundActivities() {
-		return "tasks"
-	}
-	if m.hasWorkflowTasks() {
-		return "activity rows"
-	}
-	return "activity rows"
+	return m.bottomActivityKind().ctrlTActionLabel()
 }
 
 func (m *appModel) footerRightText() string {
@@ -495,11 +530,12 @@ func (m *appModel) renderWorkflowDetail(width, height int) string {
 }
 
 func (m *appModel) renderBottomActivityRows(width int) string {
-	if !m.hasBottomActivityRows() || (m.bottomActivityRowsHidden && !m.workflowTaskPickerOpen) {
+	activityKind := m.bottomActivityKind()
+	if !activityKind.hasRows() || (m.bottomActivityRowsHidden && !m.workflowTaskPickerOpen) {
 		return ""
 	}
 	var workflowRows []workflowRow
-	if m.hasWorkflowTasks() {
+	if activityKind.hasWorkflowTasks() {
 		workflowRows = m.workflowRows()
 	}
 	activityRows, hiddenActivityCount := m.backgroundActivityRows()
