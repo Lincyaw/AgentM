@@ -126,8 +126,8 @@ host may use `prompt` *or* `inbox.push` + bus subscription — same mechanism, t
 usages, not two APIs.
 
 `source` is a **mechanism-level routing enum** — `user | background |
-monitor | subagent | ...` — deciding how the item lands (a `UserMessage`, a synthetic
-`tool_result`, or a `<system-reminder>`-wrapped note). It is objective plumbing, not a
+monitor | subagent | ...` — deciding how the item lands (a plain
+`UserMessage` or a `<system-reminder>`-wrapped note). It is objective plumbing, not a
 subjective classification, so it does not violate the "no preset enums for subjective
 fields" rule.
 
@@ -212,10 +212,10 @@ minutes of no activity) bounds the worst case. Every ticker item carries a `dedu
 `push` **replaces** the same-key undrained item rather than stacking, so a stuck-in-a-
 long-turn agent never finds a pile of stale status lines.
 
-**Step-3 design decisions (2026-05-28).**
+**Producer wiring decisions (2026-05-28).**
 - **ABI `ExtensionAPI.post_inbox(*, source, payload, dedup_key=None)`** is the generic
   producer entry. `send_user_message` becomes `post_inbox(source="user", …)`;
-  background_exec / monitor / the step-5 sub_agent rewrite all post through it.
+  background_exec / monitor / sub_agent all post through it.
   `ExtensionAPI.wait_inbox_nonempty()` exposes a non-draining wakeup so
   background_exec can soft-preempt on pending user input without stealing the
   runtime-owned drain role.
@@ -283,9 +283,9 @@ loading the same atoms, so `background_exec` + `monitor` apply recursively.
   the current turn (existing `signal` path, `core/abi/loop.py:440,667`), keep the
   conversation context, push the new input as a `source="user"` inbox item, and let
   the driver re-run. The inbox and `signal` cooperate: `signal` preempts the in-flight
-  turn; the inbox carries the new input into the next run. (Caveat to handle in step 5:
-  a turn aborted mid-flight may have already appended a partial assistant message — the
-  host must leave the session in a clean, resumable state.)
+  turn; the inbox carries the new input into the next run. If a turn aborts
+  mid-flight after partial assistant output, the host must still leave the session
+  in a clean, resumable state.
 
 ---
 

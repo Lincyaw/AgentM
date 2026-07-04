@@ -1,8 +1,7 @@
 """Builtin ``background_exec`` atom: auto-backgrounding + ticker.
 
 Design: ``.claude/designs/session-inbox.md`` (the ``background_exec`` section
-and the "Step-3 design decisions (2026-05-28)" block) — step 3 of the
-Session Inbox work.
+and producer wiring decisions).
 
 What it does (opt-in; a scenario lists it):
 
