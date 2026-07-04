@@ -180,6 +180,8 @@ requirements:
       - path: src/agentm/extensions/builtin/observability.py
       - path: src/agentm/extensions/builtin/sub_agent.py
       - path: src/agentm/extensions/builtin/workflow.py
+      - path: src/agentm/extensions/builtin/_workflow/sdk.py
+      - path: src/agentm/extensions/builtin/_workflow/runner.py
       - path: src/agentm/extensions/builtin/artifact_store.py
       - path: src/agentm/extensions/builtin/llm_compaction.py
       - path: contrib/scenarios/rca/src/rca/default/hypothesis_tools.py
@@ -1100,6 +1102,8 @@ requirements:
       - path: src/agentm/extensions/builtin/tool_result_cap.py
       - path: src/agentm/extensions/builtin/tui_snapshot.py
       - path: src/agentm/extensions/builtin/workflow.py
+      - path: src/agentm/extensions/builtin/_workflow/sdk.py
+      - path: src/agentm/extensions/builtin/_workflow/runner.py
       - path: contrib/extensions/cc/__init__.py
       - path: contrib/extensions/cc/agents.py
       - path: contrib/extensions/cc/commands.py
@@ -1500,6 +1504,8 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin/workflow.py
+      - path: src/agentm/extensions/builtin/_workflow/sdk.py
+      - path: src/agentm/extensions/builtin/_workflow/runner.py
       - path: src/agentm/cli_workflow.py
     tests: []
     docs:
@@ -1545,6 +1551,8 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin/workflow.py
+      - path: src/agentm/extensions/builtin/_workflow/sdk.py
+      - path: src/agentm/extensions/builtin/_workflow/runner.py
     tests: []
     docs:
       - path: .claude/designs/dynamic-workflow.md
