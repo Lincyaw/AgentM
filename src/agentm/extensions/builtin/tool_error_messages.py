@@ -49,33 +49,45 @@ def _extract_exception_summary(reason: str) -> str:
     return last_line if last_line else stripped
 
 
-def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
-    def _on_tool_error(event: ToolErrorEvent) -> None:
+class _ToolErrorMessagesRuntime:
+    def __init__(self, api: ExtensionAPI) -> None:
+        self._api = api
+
+    def install(self) -> None:
+        self._api.on(ToolErrorEvent.CHANNEL, self.on_tool_error)
+
+    def on_tool_error(self, event: ToolErrorEvent) -> None:
         if event.result.content:
             return
+        event.result.content.append(
+            TextContent(type="text", text=self._message_for(event))
+        )
+
+    def _message_for(self, event: ToolErrorEvent) -> str:
         if event.kind == "execution_failed":
             summary = _extract_exception_summary(event.reason)
-            text = (
+            return (
                 f"Tool '{event.tool_name}' raised an error: {summary}\n"
                 f"Adjust your arguments or try a different approach."
             )
-        elif event.kind == "unknown_tool":
-            text = (
+        if event.kind == "unknown_tool":
+            return (
                 f"No tool named '{event.tool_name}' is registered. "
                 f"Check the tool name and try again."
             )
-        elif event.kind == "user_rejected":
-            text = (
+        if event.kind == "user_rejected":
+            return (
                 f"Tool '{event.tool_name}' was denied by the user. "
                 f"Try a different approach instead of retrying the same call."
             )
-        elif event.kind == "blocked":
-            text = (
+        if event.kind == "blocked":
+            return (
                 f"Tool '{event.tool_name}' was blocked: {event.reason}\n"
                 f"This call is not allowed under the current policy."
             )
-        else:  # pragma: no cover
-            text = f"tool_error: {event.kind} ({event.tool_name})"
-        event.result.content.append(TextContent(type="text", text=text))
+        return f"tool_error: {event.kind} ({event.tool_name})"  # pragma: no cover
 
-    api.on(ToolErrorEvent.CHANNEL, _on_tool_error)
+
+def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
+    del config
+    _ToolErrorMessagesRuntime(api).install()

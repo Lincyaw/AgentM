@@ -213,6 +213,7 @@ requirements:
       - path: src/agentm/extensions/builtin
       - path: src/agentm/extensions/builtin/atom_management.py
       - path: src/agentm/extensions/builtin/task_tracking.py
+      - path: src/agentm/extensions/builtin/tool_error_messages.py
       - path: src/agentm/extensions/validate.py
       - path: src/agentm/extensions/loader.py
       - path: src/agentm/core/runtime/session_factory.py
