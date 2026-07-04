@@ -1525,6 +1525,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/extensions/builtin/workflow.py
+      - path: src/agentm/extensions/builtin/structured_output.py
       - path: src/agentm/extensions/builtin/_workflow/sdk.py
       - path: src/agentm/extensions/builtin/_workflow/runner.py
       - path: src/agentm/cli_workflow.py

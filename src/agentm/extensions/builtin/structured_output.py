@@ -20,14 +20,20 @@ import json
 from loguru import logger
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from agentm.core.abi import FunctionTool, TextContent, ToolResult, ToolTerminate
+from agentm.core.abi import (
+    ExtensionAPI,
+    FunctionTool,
+    TextContent,
+    ToolResult,
+    ToolTerminate,
+)
 from agentm.extensions import ExtensionManifest
 
 
 class StructuredOutputConfig(BaseModel):
-    result_schema: dict[str, Any] = {}
+    result_schema: dict[str, Any] = Field(default_factory=dict)
 
     def __init__(self, **data: Any) -> None:
         # Accept "schema" from external callers (manifest config dicts use
@@ -49,78 +55,94 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(api: Any, config: StructuredOutputConfig) -> None:
-    schema: dict[str, Any] = config.result_schema
+class _SchemaValidator:
+    def __init__(self) -> None:
+        self._validate_fn: Any = None
+        self._validation_error_cls: Any = None
+        self._load()
 
-    # Soft-dep: validate against the schema if jsonschema is available.
-    _validate_fn: Any = None
-    try:
-        from jsonschema import validate as _jschema_validate, ValidationError  # type: ignore[import-untyped]
+    def _load(self) -> None:
+        # Soft-dep: validate against the schema if jsonschema is available.
+        try:
+            from jsonschema import validate as _jschema_validate, ValidationError  # type: ignore[import-untyped]
+        except ImportError:
+            logger.debug(
+                "jsonschema not installed; submit_result will skip validation "
+                "(LLM schema enforcement at the provider level is the primary gate)"
+            )
+            return
 
-        _validate_fn = _jschema_validate
-        _validation_error_cls = ValidationError
-    except ImportError:
-        logger.debug(
-            "jsonschema not installed; submit_result will skip validation "
-            "(LLM schema enforcement at the provider level is the primary gate)"
+        self._validate_fn = _jschema_validate
+        self._validation_error_cls = ValidationError
+
+    def validate_error(self, result: Any, schema: dict[str, Any]) -> str | None:
+        if self._validate_fn is None or self._validation_error_cls is None:
+            return None
+        try:
+            self._validate_fn(result, schema)
+        except self._validation_error_cls as exc:
+            return str(exc.message)
+        return None
+
+
+class _StructuredOutputRuntime:
+    def __init__(self, api: ExtensionAPI, schema: dict[str, Any]) -> None:
+        self._api = api
+        self._schema = schema
+        self._validator = _SchemaValidator()
+
+    def install(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="submit_result",
+                description=(
+                    "Submit your structured result and end this session. "
+                    "The result must conform to the schema provided in the "
+                    "tool parameters."
+                ),
+                parameters=self._tool_params(),
+                fn=self.submit_result,
+            )
         )
-        _validation_error_cls = None
 
-    tool_params: dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "result": schema,
-        },
-        "required": ["result"],
-    }
+    def _tool_params(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "result": self._schema,
+            },
+            "required": ["result"],
+        }
 
-    async def _submit_result(args: dict[str, Any]) -> ToolTerminate:
+    async def submit_result(self, args: dict[str, Any]) -> ToolTerminate:
         result = args.get("result")
+        validation_error = self._validator.validate_error(result, self._schema)
+        if validation_error is not None:
+            return _terminate_result(
+                {
+                    "error": "schema_validation_failed",
+                    "detail": validation_error,
+                },
+                is_error=True,
+            )
 
-        if _validate_fn is not None and _validation_error_cls is not None:
-            try:
-                _validate_fn(result, schema)
-            except _validation_error_cls as exc:
-                return ToolTerminate(
-                    result=ToolResult(
-                        content=[
-                            TextContent(
-                                type="text",
-                                text=json.dumps(
-                                    {
-                                        "error": "schema_validation_failed",
-                                        "detail": str(exc.message),
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                            )
-                        ],
-                        is_error=True,
-                    ),
-                    reason="workflow:structured_output",
+        return _terminate_result(result)
+
+
+def _terminate_result(payload: Any, *, is_error: bool = False) -> ToolTerminate:
+    return ToolTerminate(
+        result=ToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=json.dumps(payload, ensure_ascii=False),
                 )
-
-        return ToolTerminate(
-            result=ToolResult(
-                content=[
-                    TextContent(
-                        type="text",
-                        text=json.dumps(result, ensure_ascii=False),
-                    )
-                ],
-            ),
-            reason="workflow:structured_output",
-        )
-
-    api.register_tool(
-        FunctionTool(
-            name="submit_result",
-            description=(
-                "Submit your structured result and end this session. "
-                "The result must conform to the schema provided in the "
-                "tool parameters."
-            ),
-            parameters=tool_params,
-            fn=_submit_result,
-        )
+            ],
+            is_error=is_error,
+        ),
+        reason="workflow:structured_output",
     )
+
+
+def install(api: ExtensionAPI, config: StructuredOutputConfig) -> None:
+    _StructuredOutputRuntime(api, config.result_schema).install()
