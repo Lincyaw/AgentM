@@ -219,7 +219,10 @@ background activity, `Ctrl+t` creates a new tab. `Enter` sends (or queues while
 the agent is busy), `Shift+Enter`/`Ctrl+j` inserts a newline, `?` opens
 shortcuts from an empty editor, `/` and `@` open inline command/resource
 completions, `Esc` interrupts or double-press clears input, and `Ctrl+c` exits
-on the second press. Run `agentm <sub> --help` or `<binary> --help` for flags.
+on the second press. Terminal-local history, user themes, and peer logs live
+under `$AGENTM_HOME/terminal-go/` (default `~/.agentm/terminal-go/`), not the
+checkout/cwd `.agentm` tree. Run `agentm <sub> --help` or `<binary> --help` for
+flags.
 
 For remote terminal clients, start the daemon on a WebSocket bind. Authentication
 is enabled by default: if no token file is supplied, the daemon creates

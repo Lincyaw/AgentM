@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 
 	"github.com/AoyangSpace/agentm-terminal/internal/adapter"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
+	pathx "github.com/AoyangSpace/agentm-terminal/internal/cagent/path"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/paths"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/version"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui"
@@ -39,7 +42,7 @@ func main() {
 	scenario := flags.String("scenario", "", "Scenario name (first message only)")
 	themeName := flags.String("theme", "dark", "Theme: dark or light")
 	mockMode := flags.Bool("mock", false, "Run with mock data (no gateway)")
-	logFile := flags.String("log", "", "Log file path (default: /tmp/agentm-terminal.log)")
+	logFile := flags.String("log", "", "Log file path")
 	showVersion := flags.Bool("version", false, "Print version and exit")
 	rawArgs := os.Args[1:]
 	if wantsHelp(rawArgs) {
@@ -80,10 +83,14 @@ func main() {
 	// File logging: bubbletea owns stdout and stderr is unreliable in alt-screen.
 	logPath := *logFile
 	if logPath == "" {
-		logPath = "/tmp/agentm-terminal.log"
+		logPath = filepath.Join(paths.GetDataDir(), "logs", "agentm-terminal.log")
+	} else {
+		logPath = expandLogPath(logPath)
 	}
-	if f, err := tea.LogToFile(logPath, "agentm-terminal"); err == nil {
-		defer f.Close()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err == nil {
+		if f, err := tea.LogToFile(logPath, "agentm-terminal"); err == nil {
+			defer f.Close()
+		}
 	}
 
 	// Apply the requested theme before constructing the model.
@@ -211,6 +218,14 @@ func defaultSessionID(wd string) string {
 	return fmt.Sprintf("%s-%d-%d", base, os.Getpid(), time.Now().UnixNano())
 }
 
+func expandLogPath(path string) string {
+	expanded, err := pathx.ExpandHomeDir(path)
+	if err != nil {
+		return path
+	}
+	return expanded
+}
+
 func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "Usage: ag [--scenario <name>] [options]")
 	fmt.Fprintln(out)
@@ -224,7 +239,7 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, "  --token-file <path>   Read bearer token from file")
 	fmt.Fprintln(out, "  --sender-id <id>      Sender id for gateway routing (default: local)")
 	fmt.Fprintln(out, "  --theme <dark|light>  Terminal theme (default: dark)")
-	fmt.Fprintln(out, "  --log <path>          Log file path (default: /tmp/agentm-terminal.log)")
+	fmt.Fprintln(out, "  --log <path>          Log file path (default: $AGENTM_HOME/terminal-go/data/logs/agentm-terminal.log)")
 	fmt.Fprintln(out, "  --mock                Run the TUI without a gateway, for layout inspection")
 	fmt.Fprintln(out, "  --version             Print version and exit")
 	fmt.Fprintln(out, "  --help                Show this help")

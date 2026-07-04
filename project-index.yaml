@@ -1071,6 +1071,11 @@ requirements:
       - path: src/agentm/extensions/builtin/tui_snapshot.py
       - path: src/agentm/gateway/commands/skill_command.py
       - path: src/agentm/onboard.py
+      - path: contrib/gateway-peers/terminal-go/main.go
+      - path: contrib/gateway-peers/terminal-go/internal/cagent/paths/paths.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/tui.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/styles/theme.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/styles/theme_watcher.go
       - path: contrib/gateway-peers/terminal-go/internal/wire/resolve.go
       - path: contrib/gateway-peers/feishu/src/agentm_feishu/cli.py
       - path: contrib/gateway-peers/feishu/src/agentm_feishu/bot_config.py
@@ -1083,6 +1088,7 @@ requirements:
       - path: README.md
       - path: AGENTS.md
       - path: config.toml.example
+      - path: .claude/designs/go-terminal-tui.md
       - path: .claude/skills/deployment-awareness/SKILL.md
       - path: contrib/gateway-peers/deploy/README.md
       - path: contrib/gateway-peers/feishu/README.md

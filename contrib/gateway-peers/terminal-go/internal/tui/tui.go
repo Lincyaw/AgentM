@@ -20,6 +20,7 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/app"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/audio/transcribe"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/history"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/paths"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/runtime"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/session"
 	"github.com/AoyangSpace/agentm-terminal/internal/cagent/userconfig"
@@ -334,7 +335,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	}
 
 	// Initialize shared command history
-	historyStore, err := history.New("")
+	historyStore, err := history.NewAtDir(paths.GetDataDir())
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to initialize command history", "error", err)
 		startupWarnings = append(startupWarnings, "Command history unavailable.")

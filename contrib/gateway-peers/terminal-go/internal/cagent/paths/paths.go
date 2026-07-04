@@ -1,10 +1,15 @@
 package paths
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
+
+	pathx "github.com/AoyangSpace/agentm-terminal/internal/cagent/path"
 )
+
+const terminalStateDir = "terminal-go"
 
 // overridable holds an optional directory override backed by an atomic pointer.
 // A nil pointer (the zero value) means "use the default".
@@ -68,19 +73,11 @@ func SetRoot(root string) {
 //
 // If an override has been set via [SetCacheDir] it is returned instead.
 //
-// On Linux this follows XDG: $XDG_CACHE_HOME/cagent (default ~/.cache/cagent).
-// On macOS this uses ~/Library/Caches/cagent.
-// On Windows this uses %LocalAppData%/cagent.
-//
-// If the cache directory cannot be determined, it falls back to a directory
-// under the system temporary directory.
+// By default this is $AGENTM_HOME/terminal-go/cache, with $AGENTM_HOME
+// defaulting to ~/.agentm.
 func GetCacheDir() string {
 	return cacheDirOverride.get(func() string {
-		cacheDir, err := os.UserCacheDir()
-		if err != nil {
-			return filepath.Clean(filepath.Join(os.TempDir(), ".cagent-cache"))
-		}
-		return filepath.Clean(filepath.Join(cacheDir, "cagent"))
+		return filepath.Join(defaultAgentMHome(), terminalStateDir, "cache")
 	})
 }
 
@@ -88,32 +85,23 @@ func GetCacheDir() string {
 //
 // If an override has been set via [SetConfigDir] it is returned instead.
 //
-// If the home directory cannot be determined, it falls back to a directory
-// under the system temporary directory. This is a best-effort fallback and
-// not intended to be a security boundary.
+// By default this is $AGENTM_HOME/terminal-go/config, with $AGENTM_HOME
+// defaulting to ~/.agentm.
 func GetConfigDir() string {
 	return configDirOverride.get(func() string {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return filepath.Clean(filepath.Join(os.TempDir(), ".cagent-config"))
-		}
-		return filepath.Clean(filepath.Join(homeDir, ".config", "cagent"))
+		return filepath.Join(defaultAgentMHome(), terminalStateDir, "config")
 	})
 }
 
-// GetDataDir returns the user's data directory for AgentM Terminal (caches, content, logs).
+// GetDataDir returns the user's data directory for AgentM Terminal.
 //
 // If an override has been set via [SetDataDir] it is returned instead.
 //
-// If the home directory cannot be determined, it falls back to a directory
-// under the system temporary directory.
+// By default this is $AGENTM_HOME/terminal-go/data, with $AGENTM_HOME
+// defaulting to ~/.agentm.
 func GetDataDir() string {
 	return dataDirOverride.get(func() string {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return filepath.Clean(filepath.Join(os.TempDir(), ".cagent"))
-		}
-		return filepath.Clean(filepath.Join(homeDir, ".cagent"))
+		return filepath.Join(defaultAgentMHome(), terminalStateDir, "data")
 	})
 }
 
@@ -126,4 +114,19 @@ func GetHomeDir() string {
 		return ""
 	}
 	return filepath.Clean(homeDir)
+}
+
+func defaultAgentMHome() string {
+	home := os.Getenv("AGENTM_HOME")
+	if home == "" {
+		if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
+			return filepath.Clean(filepath.Join(userHome, ".agentm"))
+		}
+		return filepath.Clean(filepath.Join(os.TempDir(), fmt.Sprintf("agentm-home-%d", os.Getuid())))
+	}
+	expanded, err := pathx.ExpandHomeDir(home)
+	if err != nil {
+		return filepath.Clean(home)
+	}
+	return filepath.Clean(expanded)
 }

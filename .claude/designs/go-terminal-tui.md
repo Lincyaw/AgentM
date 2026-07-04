@@ -706,15 +706,19 @@ The current AgentM terminal implementation follows this direction:
 5. Keep transcript detail controls:
    `Ctrl+O` toggles detailed transcript blocks, while `Ctrl+E` toggles fully
    verbose output within detailed mode.
-6. Preserve raw TTY captures for significant UX investigations in
+6. Keep terminal-go local state under `$AGENTM_HOME/terminal-go/` (default
+   `~/.agentm/terminal-go/`). Command history, user themes, and peer logs are
+   user-scoped runtime state; the Go peer must not write them under the
+   checkout/cwd `.agentm` tree.
+7. Preserve raw TTY captures for significant UX investigations in
    `.agent/tui-dev/<topic>/` and summarize only the decisions in tracked
    design docs. Do not use project `.agentm/` for these captures; that
    directory is runtime state and follows the AgentM home/workspace policy.
-7. Keep process supervision outside the Go peer. `agentm daemon` owns the
+8. Keep process supervision outside the Go peer. `agentm daemon` owns the
    local gateway daemon/supervisor lifecycle; `agentm-terminal` only connects
    to a gateway URL and renders the wire stream. `agentm terminal` composes
    those two for one-command startup.
-8. Remove the legacy right-side session sidebar from the primary AgentM
+9. Remove the legacy right-side session sidebar from the primary AgentM
    terminal layout. Wide screens keep the transcript/composer primary; session
    metadata belongs in status, picker, or detail views rather than a persistent
    side panel.
