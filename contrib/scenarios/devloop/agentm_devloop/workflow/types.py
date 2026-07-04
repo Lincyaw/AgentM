@@ -3,6 +3,7 @@
 Each model serves as both the runtime type AND the JSON Schema source
 (via ``pydantic_to_tool_schema``). No hand-written schemas.
 """
+
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -12,6 +13,7 @@ _STRICT = ConfigDict(extra="forbid")
 
 # ── Workflow Args ─────────────────────────────────────────────
 
+
 class DevloopArgs(BaseModel):
     model_config = ConfigDict(extra="allow")
     requirement: str = Field(description="Natural-language feature requirement.")
@@ -19,10 +21,13 @@ class DevloopArgs(BaseModel):
     test_framework: str = Field(default="pytest", description="Test framework.")
     max_rounds: int = Field(default=3, description="Max develop+test iterations.")
     skip_review: bool = Field(default=False, description="Skip final code review.")
-    agent_timeout_seconds: float = Field(default=900.0, description="Per-agent wall-clock timeout.")
+    agent_timeout_seconds: float = Field(
+        default=900.0, description="Per-agent wall-clock timeout."
+    )
 
 
 # ── Spec ───────────────────────────────────────────────────────
+
 
 class InterfaceSpec(BaseModel):
     model_config = _STRICT
@@ -35,25 +40,38 @@ class AcceptanceCriterion(BaseModel):
     model_config = _STRICT
     id: str = Field(description="e.g. AC-1")
     description: str = Field(description="What to verify.")
-    test_method: str = Field(default="", description="How to verify (test name or command).")
+    test_method: str = Field(
+        default="", description="How to verify (test name or command)."
+    )
 
 
 class FileStructure(BaseModel):
     model_config = _STRICT
-    source_files: list[str] = Field(default_factory=list, description="Paths for implementation files.")
-    test_files: list[str] = Field(default_factory=list, description="Paths for test files.")
+    source_files: list[str] = Field(
+        default_factory=list, description="Paths for implementation files."
+    )
+    test_files: list[str] = Field(
+        default_factory=list, description="Paths for test files."
+    )
 
 
 class ImplementationSpec(BaseModel):
     model_config = _STRICT
     title: str = Field(description="Short feature title.")
     description: str = Field(default="", description="What the feature does.")
-    interfaces: list[InterfaceSpec] = Field(description="Function/class/method signatures.")
-    acceptance_criteria: list[AcceptanceCriterion] = Field(description="Testable acceptance criteria.")
-    file_structure: FileStructure = Field(default_factory=FileStructure, description="Where source and test files go.")
+    interfaces: list[InterfaceSpec] = Field(
+        description="Function/class/method signatures."
+    )
+    acceptance_criteria: list[AcceptanceCriterion] = Field(
+        description="Testable acceptance criteria."
+    )
+    file_structure: FileStructure = Field(
+        default_factory=FileStructure, description="Where source and test files go."
+    )
 
 
 # ── Design Review ──────────────────────────────────────────────
+
 
 class ReviewIssue(BaseModel):
     model_config = _STRICT
@@ -70,10 +88,13 @@ class DesignReview(BaseModel):
     model_config = _STRICT
     approved: bool = Field(description="Whether the spec passes review.")
     feedback: str = Field(default="", description="Overall feedback.")
-    issues: list[ReviewIssue] = Field(default_factory=list, description="Per-AC issues found.")
+    issues: list[ReviewIssue] = Field(
+        default_factory=list, description="Per-AC issues found."
+    )
 
 
 # ── Test ───────────────────────────────────────────────────────
+
 
 class TestFailure(BaseModel):
     model_config = _STRICT
@@ -93,11 +114,14 @@ class TestResult(BaseModel):
     total: int = Field(description="Total test count.")
     passed: int = Field(description="Passed count.")
     failed: int = Field(description="Failed count.")
-    failures: list[TestFailure] = Field(default_factory=list, description="Details of each failure.")
+    failures: list[TestFailure] = Field(
+        default_factory=list, description="Details of each failure."
+    )
     stdout: str = Field(default="", description="Raw pytest output.")
 
 
 # ── Code Review ────────────────────────────────────────────────
+
 
 class ACVerdict(BaseModel):
     model_config = _STRICT
@@ -115,5 +139,9 @@ class Finding(BaseModel):
 class CodeReview(BaseModel):
     model_config = _STRICT
     approved: bool = Field(description="Whether the implementation passes review.")
-    verdicts: list[ACVerdict] = Field(default_factory=list, description="Per-AC verdicts.")
-    findings: list[Finding] = Field(default_factory=list, description="Code quality findings.")
+    verdicts: list[ACVerdict] = Field(
+        default_factory=list, description="Per-AC verdicts."
+    )
+    findings: list[Finding] = Field(
+        default_factory=list, description="Code quality findings."
+    )

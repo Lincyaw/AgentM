@@ -3,6 +3,7 @@
 Pure orchestration: requirement → spec → design review → test writing →
 development → test verification (with retry) → code review.
 """
+
 from __future__ import annotations
 
 import json
@@ -31,6 +32,7 @@ from .types import (
     TestResult,
 )
 
+
 def _find_project_root() -> Path:
     d = Path(__file__).parent
     while d != d.parent:
@@ -52,41 +54,60 @@ CODING_TOOLS = ["read", "write", "edit", "bash"]
 TEST_RUN_TOOLS = ["bash", "submit_result"]
 REVIEW_TOOLS = ["read", "bash", "submit_result"]
 STRUCTURED_BUDGET = [
-    ("agentm.extensions.builtin.loop_budget", {
-        "max_turns": 8,
-        "max_tool_calls": 12,
-    }),
+    (
+        "agentm.extensions.builtin.loop_budget",
+        {
+            "max_turns": 8,
+            "max_tool_calls": 12,
+        },
+    ),
 ]
 TEST_WRITING_BUDGET = [
-    ("agentm.extensions.builtin.loop_budget", {
-        "max_turns": 45,
-        "max_tool_calls": 90,
-    }),
+    (
+        "agentm.extensions.builtin.loop_budget",
+        {
+            "max_turns": 45,
+            "max_tool_calls": 90,
+        },
+    ),
 ]
 DEVELOP_BUDGET = [
-    ("agentm.extensions.builtin.loop_budget", {
-        "max_turns": 80,
-        "max_tool_calls": 160,
-    }),
+    (
+        "agentm.extensions.builtin.loop_budget",
+        {
+            "max_turns": 80,
+            "max_tool_calls": 160,
+        },
+    ),
 ]
 TEST_RUN_BUDGET = [
-    ("agentm.extensions.builtin.loop_budget", {
-        "max_turns": 12,
-        "max_tool_calls": 24,
-    }),
+    (
+        "agentm.extensions.builtin.loop_budget",
+        {
+            "max_turns": 12,
+            "max_tool_calls": 24,
+        },
+    ),
 ]
 REVIEW_BUDGET = [
-    ("agentm.extensions.builtin.loop_budget", {
-        "max_turns": 30,
-        "max_tool_calls": 80,
-    }),
+    (
+        "agentm.extensions.builtin.loop_budget",
+        {
+            "max_turns": 30,
+            "max_tool_calls": 80,
+        },
+    ),
 ]
 SUPERVISE_BUDGET = [
-    ("agentm.extensions.builtin.loop_budget", {
-        "max_turns": 30,
-        "max_tool_calls": 60,
-    }),
+    (
+        "agentm.extensions.builtin.loop_budget",
+        {
+            "max_turns": 30,
+            "max_tool_calls": 60,
+        },
+    ),
 ]
+
 
 def _snapshot_test_files(test_files: list[str]) -> dict[str, bytes | None]:
     snapshot: dict[str, bytes | None] = {}
@@ -125,7 +146,8 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         scenario=CODER,
         tool_allowlist=STRUCTURED_ONLY_TOOLS,
         extra_extensions=STRUCTURED_BUDGET,
-        retry=3, timeout=args.agent_timeout_seconds,
+        retry=3,
+        timeout=args.agent_timeout_seconds,
     )
     ctx.log(f"Spec: {spec.title} — {len(spec.acceptance_criteria)} ACs")
 
@@ -141,7 +163,8 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         scenario=CODER,
         tool_allowlist=STRUCTURED_ONLY_TOOLS,
         extra_extensions=STRUCTURED_BUDGET,
-        retry=3, timeout=args.agent_timeout_seconds,
+        retry=3,
+        timeout=args.agent_timeout_seconds,
     )
 
     if not review.approved:
@@ -152,7 +175,8 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             scenario=CODER,
             tool_allowlist=STRUCTURED_ONLY_TOOLS,
             extra_extensions=STRUCTURED_BUDGET,
-            retry=3, timeout=args.agent_timeout_seconds,
+            retry=3,
+            timeout=args.agent_timeout_seconds,
         )
         ctx.log(f"Revised: {spec.title} — {len(spec.acceptance_criteria)} ACs")
 
@@ -169,11 +193,15 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         scenario=CODER,
         tool_allowlist=[*CODING_TOOLS, "submit_result"],
         extra_extensions=TEST_WRITING_BUDGET,
-        atom_config={**_SKILL_CONFIG, "devloop_context": {
-            "task": test_writing_task(args.test_framework, spec_json),
-            "spec": spec_json,
-        }},
-        retry=3, timeout=args.agent_timeout_seconds,
+        atom_config={
+            **_SKILL_CONFIG,
+            "devloop_context": {
+                "task": test_writing_task(args.test_framework, spec_json),
+                "spec": spec_json,
+            },
+        },
+        retry=3,
+        timeout=args.agent_timeout_seconds,
     )
     test_files = test_info.test_files
     ctx.log(f"Wrote {len(test_files)} test file(s): {', '.join(test_files)}")
@@ -198,8 +226,10 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         }
         if test_result.failures:
             dev_context["task"] = dev_fix_task(
-                round_n, args.max_rounds,
-                test_result.passed, test_result.total,
+                round_n,
+                args.max_rounds,
+                test_result.passed,
+                test_result.total,
                 test_result.failures,
             )
 
@@ -218,7 +248,9 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             ctx.log(f"Restored modified test files: {', '.join(mutated[:5])}")
             test_result = TestResult(
                 all_passed=False,
-                total=len(mutated), passed=0, failed=len(mutated),
+                total=len(mutated),
+                passed=0,
+                failed=len(mutated),
                 failures=[
                     TestFailure(
                         test_name=f"test-file-mutation:{p}",
@@ -238,10 +270,14 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             scenario=CODER,
             tool_allowlist=TEST_RUN_TOOLS,
             extra_extensions=TEST_RUN_BUDGET,
-            atom_config={**_SKILL_CONFIG, "devloop_context": {
-                "task": test_run_task(args.test_framework, test_files),
-            }},
-            retry=3, timeout=args.agent_timeout_seconds,
+            atom_config={
+                **_SKILL_CONFIG,
+                "devloop_context": {
+                    "task": test_run_task(args.test_framework, test_files),
+                },
+            },
+            retry=3,
+            timeout=args.agent_timeout_seconds,
         )
 
         if test_result.all_passed:
@@ -267,11 +303,15 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
             scenario=CODER,
             tool_allowlist=REVIEW_TOOLS,
             extra_extensions=REVIEW_BUDGET,
-            atom_config={**_SKILL_CONFIG, "devloop_context": {
-                "task": CODE_REVIEW_TASK,
-                "spec": spec_json,
-            }},
-            retry=3, timeout=args.agent_timeout_seconds,
+            atom_config={
+                **_SKILL_CONFIG,
+                "devloop_context": {
+                    "task": CODE_REVIEW_TASK,
+                    "spec": spec_json,
+                },
+            },
+            retry=3,
+            timeout=args.agent_timeout_seconds,
         )
 
         if code_review.approved:
@@ -286,9 +326,8 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         "test_result": test_result.model_dump(),
         "code_review": code_review.model_dump() if code_review else None,
         "rounds": round_n,
-        "success": test_result.all_passed and (
-            args.skip_review or code_review is None or code_review.approved
-        ),
+        "success": test_result.all_passed
+        and (args.skip_review or code_review is None or code_review.approved),
     }
 
     # ── Stage 7: Supervisor Reflection ────────────────────────

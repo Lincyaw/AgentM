@@ -5,6 +5,7 @@ the system prompt. The workflow orchestrator passes task-specific data
 (spec, test feedback, file lists) via atom_config; this atom formats
 it so the agent starts with full context.
 """
+
 from __future__ import annotations
 
 import json
@@ -30,6 +31,7 @@ MANIFEST = ExtensionManifest(
     config_schema=DevloopContextConfig,
 )
 
+
 def _format_value(value: ContextValue) -> str:
     if isinstance(value, str):
         return value
@@ -37,14 +39,14 @@ def _format_value(value: ContextValue) -> str:
         return "\n".join(f"- {v}" for v in value)
     return f"```json\n{json.dumps(value, indent=2, ensure_ascii=False)}\n```"
 
+
 def install(api: ExtensionAPI, config: DevloopContextConfig) -> None:
     context_values = dict(config.model_extra or {})
     if not context_values:
         return
 
     parts = [
-        f"## {key}\n\n{_format_value(value)}"
-        for key, value in context_values.items()
+        f"## {key}\n\n{_format_value(value)}" for key, value in context_values.items()
     ]
     context = "\n\n".join(parts)
 
@@ -55,5 +57,6 @@ def install(api: ExtensionAPI, config: DevloopContextConfig) -> None:
         return {"system": updated}
 
     api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)
+
 
 __all__ = ["MANIFEST", "install"]

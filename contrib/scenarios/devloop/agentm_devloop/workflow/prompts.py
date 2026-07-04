@@ -3,6 +3,7 @@
 Each function takes structured data and returns a prompt string.
 The workflow script calls these instead of building prompts inline.
 """
+
 from __future__ import annotations
 
 import json
@@ -48,7 +49,9 @@ def revise_spec_prompt(
     issues: list[ReviewIssue],
 ) -> str:
     issues_text = json.dumps(
-        [i.model_dump() for i in issues], indent=2, ensure_ascii=False,
+        [i.model_dump() for i in issues],
+        indent=2,
+        ensure_ascii=False,
     )
     return (
         f"Revise the spec based on reviewer feedback.\n\n"
@@ -91,10 +94,7 @@ def dev_fix_task(
     total: int,
     failures: list[TestFailure],
 ) -> str:
-    failure_summary = "\n".join(
-        f"- {f.test_name}: {f.error_message}"
-        for f in failures
-    )
+    failure_summary = "\n".join(f"- {f.test_name}: {f.error_message}" for f in failures)
     if any(f.test_name.startswith("code-review:") for f in failures):
         return (
             f"Fix the code review findings (round {round_n}/{max_rounds}).\n\n"
