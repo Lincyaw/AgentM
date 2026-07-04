@@ -138,3 +138,8 @@ extensions:
         unless the task graph clearly spans independent repos or base branches.
         The merge workflow starts with `merge_pending/` before `verified/`, so
         pending auto-merge PRs are checked before new PRs target the same base.
+        The merger must fetch the latest remote base, rebase the delivery
+        branch onto `origin/<base>`, push that rebased delivery branch
+        immediately with `--force-with-lease`, merge with GitHub rebase
+        semantics, and fetch `origin/<base>` again before reporting a merged
+        commit.

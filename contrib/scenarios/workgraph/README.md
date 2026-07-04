@@ -265,11 +265,15 @@ parallel when `max_parallel` allows it.
 
 The merge agent runs in ARL `agent_env` and owns all `git` and `gh` operations:
 identify the delivery branch, create a PR when the coder only pushed a remote
-branch, inspect the PR, fetch the latest base, rebase the delivery branch, push
-the rebased branch with `--force-with-lease`, run validation, and merge through
-GitHub with `gh pr merge --rebase --delete-branch`. If branch protection
-requires waiting, it may enable auto-merge with
-`gh pr merge --auto --rebase --delete-branch` and report `Status: auto_merge`;
-the workflow then parks the task in `merge_pending/` for a later pass. A
-successful merge moves the task to `done/`; non-mechanical conflicts move to
-`conflicts/`; validation or tooling failures move to `failed/`.
+branch, inspect the PR, fetch the latest remote base, rebase the delivery
+branch onto `origin/<base>`, immediately push the rebased branch with
+`--force-with-lease`, verify that the remote delivery branch now points at the
+rebased commit, run validation, and merge through GitHub with
+`gh pr merge --rebase --delete-branch`. After a successful merge it immediately
+fetches `origin/<base>` again and reports `MergedCommit` as the remote base HEAD
+that contains the delivery. If branch protection requires waiting, it may enable
+auto-merge with `gh pr merge --auto --rebase --delete-branch` and report
+`Status: auto_merge`; the workflow then parks the task in `merge_pending/` for a
+later pass. A successful merge moves the task to `done/`; non-mechanical
+conflicts move to `conflicts/`; validation or tooling failures move to
+`failed/`.

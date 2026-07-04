@@ -1769,8 +1769,10 @@ requirements:
       workflow must serialize merges by repo/base, delegate rebase and GitHub
       merge operations to a merge agent, accept a verified remote branch even
       when no PR exists yet, create the PR before merging when needed, move
-      merged tasks to done, park GitHub auto-merge tasks in merge_pending, and
-      route non-mechanical merge conflicts to conflicts. Conflicted work must be
+      merged tasks to done after the merge agent has fetched and reported the
+      remote base HEAD containing the delivery, park GitHub auto-merge tasks in
+      merge_pending, and route non-mechanical merge conflicts to conflicts.
+      Conflicted work must be
       routed to a conflict queue so
       the main orchestrator can decide whether to launch a resolver or ask for
       human intervention.

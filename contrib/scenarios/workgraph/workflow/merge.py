@@ -81,7 +81,10 @@ class MergeReport(BaseModel):
     )
     pr: str = Field(default="", description="Pull request URL or number.")
     branch: str = Field(default="", description="Delivery branch merged or pending.")
-    merged_commit: str = Field(default="", description="Merged commit sha, or none.")
+    merged_commit: str = Field(
+        default="",
+        description="Commit sha visible on the remote base branch after merge, or none.",
+    )
     report: str = Field(
         description="Human-readable markdown report with commands, blockers, and evidence."
     )
@@ -314,12 +317,16 @@ def _context_for_task(
             "repository as the worktree. Perform GitHub and git operations for "
             "exactly one verified delivery branch or PR. If no PR exists yet, "
             "create it from the delivery branch before merge operations. "
-            "Rebase onto the latest base, push only the worker delivery branch "
-            "with --force-with-lease after a successful rebase, run validation, "
-            "and merge through gh. If source_queue is merge_pending, first "
-            "check whether the PR is already merged; if it is still waiting on "
-            "checks or branch protection, report Status: auto_merge again. "
-            "Never print credentials."
+            "Fetch the latest remote base, rebase the delivery branch onto "
+            "origin/<base>, immediately push only the worker delivery branch "
+            "with --force-with-lease after a successful rebase, verify the "
+            "remote delivery branch was updated, run validation, and merge "
+            "through gh with rebase semantics. After a successful merge, fetch "
+            "origin/<base> immediately and report MergedCommit as the remote "
+            "base HEAD that contains the delivery. If source_queue is "
+            "merge_pending, first check whether the PR is already merged; if "
+            "it is still waiting on checks or branch protection, report "
+            "Status: auto_merge again. Never print credentials."
         ),
     }
     if extra:

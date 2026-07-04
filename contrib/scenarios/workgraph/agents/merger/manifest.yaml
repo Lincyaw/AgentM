@@ -53,24 +53,32 @@ extensions:
         1. Identify the delivery branch. Prefer the explicit `branch` context;
            otherwise derive it from the PR head or remote branch URL.
         2. If a PR is available, inspect it with `gh pr view`. If it is already
-           merged, report `Status: merged`.
+           merged, immediately fetch the latest remote base and report
+           `Status: merged` only with a `MergedCommit` that is visible on the
+           remote base branch.
         3. If no PR is available, create one with `gh pr create --base <base>
            --head <branch>` and include the new PR URL in the final report.
-        4. Fetch the latest base branch and checkout the delivery branch in a
-           clean sandbox worktree.
-        5. Rebase the delivery branch onto the latest base. You may resolve only
+        4. Fetch the latest base branch with pruning and checkout the delivery
+           branch in a clean sandbox worktree. Treat `origin/<base>` as the
+           authoritative base; do not rely on a stale local base branch.
+        5. Rebase the delivery branch onto `origin/<base>`. You may resolve only
            mechanical conflicts such as duplicate imports, adjacent independent
            lines, or whitespace-only conflicts. Do not invent code to bridge
            semantic differences.
-        6. Push the rebased branch with `--force-with-lease` only after a
-           successful rebase. Never rewrite the base branch.
+        6. Immediately push the rebased delivery branch with
+           `--force-with-lease` only after a successful rebase, then verify that
+           the remote delivery branch points at the rebased commit. Never
+           rewrite the base branch directly.
         7. Run every validation command from the task file against the rebased
            delivery branch.
         8. If validation is green, merge through GitHub with
            `gh pr merge --rebase --delete-branch`. If branch protection or
            required checks require waiting, enable auto-merge with
            `gh pr merge --auto --rebase --delete-branch` and report
-           `Status: auto_merge`.
+           `Status: auto_merge`. If the merge command succeeds, immediately
+           fetch the latest remote base, verify that the PR is merged and the
+           delivery changes are visible from `origin/<base>`, and set
+           `MergedCommit` to the fetched `origin/<base>` HEAD.
 
         Stop conditions:
         - Rebase conflict that is not purely mechanical: abort and report
