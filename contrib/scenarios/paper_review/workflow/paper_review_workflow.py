@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agentm.core.lib import expand_path_from_cwd
 from agentm.extensions.builtin.workflow import WorkflowContext
 
 from .types import PaperReviewArgs
@@ -63,10 +64,7 @@ class RoleArtifact:
 
 
 def _resolve_input_path(raw: str, cwd: str) -> Path:
-    candidate = Path(raw).expanduser()
-    if not candidate.is_absolute():
-        candidate = Path(cwd) / candidate
-    return candidate.resolve(strict=False)
+    return expand_path_from_cwd(raw, cwd).resolve(strict=False)
 
 
 def _workflow_cwd(ctx: WorkflowContext) -> str:
@@ -94,10 +92,7 @@ def _resolve_output_path(output_path: str | None, cwd: str, input_path: Path) ->
     if output_path is None or not output_path.strip():
         base = input_path if input_path.is_dir() else input_path.parent
         return base / "paper-review-report.md"
-    out = Path(output_path).expanduser()
-    if not out.is_absolute():
-        out = Path(cwd) / out
-    return out
+    return expand_path_from_cwd(output_path, cwd)
 
 
 def _resolve_artifact_dir(output_path: Path) -> Path:
