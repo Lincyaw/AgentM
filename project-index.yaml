@@ -220,6 +220,26 @@ requirements:
     depends_on:
       - REQ-086-atom-rework-infra
 
+  - id: REQ-187-goal-atom-continuation
+    title: Goal atom drives condition-checked session continuation
+    description: >
+      The builtin goal atom must expose a /goal command, optionally derive an
+      initial compound completion condition before the first LLM request, and
+      evaluate non-final model/tool turn stops with an independent checker
+      child session that can inspect the parent trajectory through trace_query.
+      Hard-stop causes must remain final, and goal runtime state must stay
+      session-local rather than module-global.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/goal.py
+    tests: []
+    docs: []
+    depends_on:
+      - REQ-086-atom-rework-infra
+      - REQ-096-cli-provider-session-seams
+
   - id: REQ-100-cc-extension-package
     title: Claude Code compatibility atoms share a package boundary
     description: >

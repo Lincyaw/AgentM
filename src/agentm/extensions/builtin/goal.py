@@ -54,9 +54,16 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 
-_CLEAR_ALIASES: Final[frozenset[str]] = frozenset({
-    "clear", "stop", "off", "reset", "none", "cancel",
-})
+_CLEAR_ALIASES: Final[frozenset[str]] = frozenset(
+    {
+        "clear",
+        "stop",
+        "off",
+        "reset",
+        "none",
+        "cancel",
+    }
+)
 
 _CHECKER_PROMPT_TEMPLATE: Final[str] = (
     "You are an independent goal-completion checker. Your job is to verify "
@@ -113,7 +120,8 @@ _AUTO_INIT_PROMPT: Final[str] = (
 )
 
 _TRACE_QUERY_EXT: Final[tuple[str, dict[str, Any]]] = (
-    "agentm.extensions.builtin.trace_query", {},
+    "agentm.extensions.builtin.trace_query",
+    {},
 )
 
 
@@ -126,10 +134,14 @@ class _CheckerVerdictArgs(BaseModel):
 async def _checker_submit_verdict(args: dict[str, Any]) -> ToolTerminate:
     parsed = _CheckerVerdictArgs.model_validate(args)
     return ToolTerminate(
-        result=ToolResult(content=[TextContent(
-            type="text",
-            text=parsed.model_dump_json(),
-        )]),
+        result=ToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=parsed.model_dump_json(),
+                )
+            ]
+        ),
         reason="goal_checker:verdict_submitted",
     )
 
@@ -144,10 +156,15 @@ _CHECKER_VERDICT_TOOL: Final = FunctionTool(
     fn=_checker_submit_verdict,
 )
 
+
 class _ConditionSchema(BaseModel):
     goal: str = Field(description="The final acceptance criterion.")
-    invariants: list[str] = Field(description="Correctness constraints the implementation must satisfy. Focus on tricky edge cases: init paths, concurrency, API surface, build system.")
-    checklist: list[str] = Field(description="Yes/no verification questions the reviewer should check against the code.")
+    invariants: list[str] = Field(
+        description="Correctness constraints the implementation must satisfy. Focus on tricky edge cases: init paths, concurrency, API surface, build system."
+    )
+    checklist: list[str] = Field(
+        description="Yes/no verification questions the reviewer should check against the code."
+    )
 
 
 _STRUCTURED_OUTPUT_EXT: Final[tuple[str, dict[str, Any]]] = (
@@ -206,6 +223,7 @@ MANIFEST = ExtensionManifest(
 # Child-session helpers
 # ---------------------------------------------------------------------------
 
+
 async def _prompt_child_session_messages(
     api: ExtensionAPI,
     scenario: str,
@@ -260,6 +278,7 @@ def _agent_env_attach_overrides(api: ExtensionAPI) -> dict[str, dict[str, Any]]:
 # Checker evaluation (child agent with trace_query tools)
 # ---------------------------------------------------------------------------
 
+
 async def _evaluate_checker(
     api: ExtensionAPI,
     scenario: str,
@@ -272,7 +291,11 @@ async def _evaluate_checker(
     else:
         prompt = _CHECKER_PROMPT_TEMPLATE.format(condition=condition)
     messages = await _prompt_child_session_messages(
-        api, scenario, max_turns, prompt, "goal_checker",
+        api,
+        scenario,
+        max_turns,
+        prompt,
+        "goal_checker",
         extra_extensions=[_TRACE_QUERY_EXT],
         extra_tools=[_CHECKER_VERDICT_TOOL],
     )
@@ -284,6 +307,7 @@ async def _evaluate_checker(
 # ---------------------------------------------------------------------------
 # Verdict parsing — structured tool call
 # ---------------------------------------------------------------------------
+
 
 def _parse_verdict_from_tool_call(
     messages: list[AgentMessage],
@@ -326,8 +350,7 @@ def _parse_structured_condition(
                 parts = [f"## Goal\n{payload.goal}"]
                 if payload.invariants:
                     inv_lines = "\n".join(
-                        f"{i + 1}. {v}"
-                        for i, v in enumerate(payload.invariants)
+                        f"{i + 1}. {v}" for i, v in enumerate(payload.invariants)
                     )
                     parts.append(f"## Invariants\n{inv_lines}")
                 if payload.checklist:
@@ -364,156 +387,175 @@ def _collect_user_text(messages: list[AgentMessage]) -> str:
 # install
 # ---------------------------------------------------------------------------
 
-def install(api: ExtensionAPI, config: GoalConfig) -> None:
-    checker_scenario = config.checker_scenario
-    checker_max_turns = config.checker_max_turns
-    checker_prompt_override = config.checker_prompt
-    state: _GoalState | None = None
 
-    if config.condition:
-        state = _GoalState(condition=config.condition)
-        logger.info("goal: static condition — {}", config.condition)
+class _GoalRuntime:
+    def __init__(self, api: ExtensionAPI, config: GoalConfig) -> None:
+        self._api = api
+        self._checker_scenario = config.checker_scenario
+        self._checker_max_turns = config.checker_max_turns
+        self._checker_prompt_override = config.checker_prompt
+        self._auto_init_enabled = config.auto_init
+        self._auto_init_scenario = config.auto_init_scenario or api.scenario
+        self._auto_init_max_turns = config.auto_init_max_turns
+        self._auto_init_retries = max(config.auto_init_retries, 0)
+        self._auto_init_started = False
+        self._state: _GoalState | None = None
 
-    # -- slash command: /goal -----------------------------------------------
+        if config.condition:
+            self._state = _GoalState(condition=config.condition)
+            logger.info("goal: static condition — {}", config.condition)
 
-    async def _goal_command(args: str, cmd_api: ExtensionAPI) -> None:
-        nonlocal state
+    def install(self) -> None:
+        self._register_goal_command()
+        self._register_auto_init()
+        self._api.on(DecideTurnActionEvent.CHANNEL, self._on_decide)
+
+    def _register_goal_command(self) -> None:
+        self._api.register_command(
+            "goal",
+            CommandSpec(
+                description=(
+                    "Set a completion condition that keeps the session running "
+                    "until met."
+                ),
+                handler=self._goal_command,
+            ),
+        )
+
+    async def _goal_command(self, args: str, cmd_api: ExtensionAPI) -> None:
         stripped = args.strip()
 
         if not stripped:
-            if state is None:
-                cmd_api.send_user_message("No active goal.")
-                return
-            elapsed = time.monotonic() - state.started_at
-            if state.achieved:
-                cmd_api.send_user_message(
-                    f"Goal achieved in {state.turns_evaluated} turn(s) "
-                    f"({elapsed:.0f}s): {state.condition}"
-                )
-            else:
-                msg = (
-                    f"Active goal ({state.turns_evaluated} turn(s), "
-                    f"{elapsed:.0f}s): {state.condition}"
-                )
-                if state.last_reason:
-                    msg += f"\nLast evaluation: {state.last_reason}"
-                msg += f"\nChecker: scenario={checker_scenario}"
-                cmd_api.send_user_message(msg)
+            cmd_api.send_user_message(self._goal_status_message())
             return
 
         if stripped.lower() in _CLEAR_ALIASES:
-            if state is not None and not state.achieved:
-                state = None
+            if self._state is not None and not self._state.achieved:
+                self._state = None
                 cmd_api.send_user_message("Goal cleared.")
             else:
                 cmd_api.send_user_message("No active goal to clear.")
             return
 
-        state = _GoalState(condition=stripped)
+        self._state = _GoalState(condition=stripped)
         cmd_api.send_user_message(
-            f"Goal set (checker scenario={checker_scenario}): {stripped}"
+            f"Goal set (checker scenario={self._checker_scenario}): {stripped}"
         )
 
-    api.register_command(
-        "goal",
-        CommandSpec(
-            description="Set a completion condition that keeps the session running until met.",
-            handler=_goal_command,
-        ),
-    )
+    def _goal_status_message(self) -> str:
+        state = self._state
+        if state is None:
+            return "No active goal."
 
-    # -- auto-init: derive goal before the first LLM request ----------------
+        elapsed = time.monotonic() - state.started_at
+        if state.achieved:
+            return (
+                f"Goal achieved in {state.turns_evaluated} turn(s) "
+                f"({elapsed:.0f}s): {state.condition}"
+            )
 
-    _auto_init_started = False
-    if config.auto_init:
-        init_scenario = config.auto_init_scenario or api.scenario
-        init_max_turns = config.auto_init_max_turns
-        init_retries = max(config.auto_init_retries, 0)
-        if init_scenario is None:
-            logger.warning("goal: auto_init requires a scenario but none is set — skipping")
+        msg = (
+            f"Active goal ({state.turns_evaluated} turn(s), "
+            f"{elapsed:.0f}s): {state.condition}"
+        )
+        if state.last_reason:
+            msg += f"\nLast evaluation: {state.last_reason}"
+        return msg + f"\nChecker: scenario={self._checker_scenario}"
 
-        if init_scenario is not None and api.parent_session_id is None:
+    def _register_auto_init(self) -> None:
+        if not self._auto_init_enabled:
+            return
+        if self._auto_init_scenario is None:
+            logger.warning(
+                "goal: auto_init requires a scenario but none is set — skipping"
+            )
+            return
+        if self._api.parent_session_id is not None:
+            return
+        self._api.on(BeforeSendToLlmEvent.CHANNEL, self._on_before_send)
 
-            async def _derive_goal(system: str, user_text: str) -> None:
-                nonlocal state
-                base_prompt = _AUTO_INIT_PROMPT.format(
-                    system=system,
-                    user_text=user_text,
+    async def _on_before_send(self, event: BeforeSendToLlmEvent) -> None:
+        if self._state is not None:
+            return
+        if self._auto_init_started:
+            return
+        user_text = _collect_user_text(event.messages)
+        if not user_text:
+            logger.warning(
+                "goal: auto_init skipped; no user message available "
+                "before first LLM request"
+            )
+            self._auto_init_started = True
+            return
+
+        self._auto_init_started = True
+        await self._derive_goal(event.system or "", user_text)
+
+    async def _derive_goal(self, system: str, user_text: str) -> None:
+        if self._auto_init_scenario is None:
+            return
+
+        base_prompt = _AUTO_INIT_PROMPT.format(
+            system=system,
+            user_text=user_text,
+        )
+        prompt = base_prompt
+        last_error: Exception | None = None
+        for attempt in range(self._auto_init_retries + 1):
+            messages = await _prompt_child_session_messages(
+                self._api,
+                self._auto_init_scenario,
+                self._auto_init_max_turns,
+                prompt,
+                "goal_derivation",
+                extra_extensions=[_STRUCTURED_OUTPUT_EXT],
+                atom_config_overrides=_agent_env_attach_overrides(self._api),
+            )
+            if messages is None:
+                last_error = RuntimeError("goal derivation child produced no response")
+            else:
+                try:
+                    condition = _parse_structured_condition(messages)
+                except (TypeError, ValueError, ValidationError) as exc:
+                    last_error = exc
+                else:
+                    if self._state is not None:
+                        return
+                    self._state = _GoalState(condition=condition)
+                    logger.info(
+                        "goal: auto-initialized after {} attempt(s) — {}",
+                        attempt + 1,
+                        condition,
+                    )
+                    return
+
+            if attempt < self._auto_init_retries:
+                assert last_error is not None
+                logger.warning(
+                    "goal: auto_init structured output invalid "
+                    "(attempt {}, retrying {} left): {}",
+                    attempt + 1,
+                    self._auto_init_retries - attempt,
+                    last_error,
                 )
-                prompt = base_prompt
-                last_error: Exception | None = None
-                for attempt in range(init_retries + 1):
-                    messages = await _prompt_child_session_messages(
-                        api, init_scenario, init_max_turns, prompt,
-                        "goal_derivation",
-                        extra_extensions=[_STRUCTURED_OUTPUT_EXT],
-                        atom_config_overrides=_agent_env_attach_overrides(api),
-                    )
-                    if messages is None:
-                        last_error = RuntimeError(
-                            "goal derivation child produced no response"
-                        )
-                    else:
-                        try:
-                            condition = _parse_structured_condition(messages)
-                        except (TypeError, ValueError, ValidationError) as exc:
-                            last_error = exc
-                        else:
-                            if state is not None:
-                                return
-                            state = _GoalState(condition=condition)
-                            logger.info(
-                                "goal: auto-initialized after {} attempt(s) — {}",
-                                attempt + 1, condition,
-                            )
-                            return
+                prompt = _structured_retry_prompt(
+                    base_prompt,
+                    last_error,
+                    attempt + 1,
+                )
+                continue
 
-                    if attempt < init_retries:
-                        assert last_error is not None
-                        logger.warning(
-                            "goal: auto_init structured output invalid "
-                            "(attempt {}, retrying {} left): {}",
-                            attempt + 1, init_retries - attempt, last_error,
-                        )
-                        prompt = _structured_retry_prompt(
-                            base_prompt,
-                            last_error,
-                            attempt + 1,
-                        )
-                        continue
+            if last_error is not None:
+                logger.warning(
+                    "goal: auto_init failed after {} attempt(s); "
+                    "leaving goal unset: {}",
+                    attempt + 1,
+                    last_error,
+                )
+            return
 
-                    if last_error is not None:
-                        logger.warning(
-                            "goal: auto_init failed after {} attempt(s); "
-                            "leaving goal unset: {}",
-                            attempt + 1, last_error,
-                    )
-                    return
-
-            async def _on_before_send(event: BeforeSendToLlmEvent) -> None:
-                nonlocal _auto_init_started
-                if state is not None:
-                    return
-                if _auto_init_started:
-                    return
-                user_text = _collect_user_text(event.messages)
-                if not user_text:
-                    logger.warning(
-                        "goal: auto_init skipped; no user message available "
-                        "before first LLM request"
-                    )
-                    _auto_init_started = True
-                    return
-
-                _auto_init_started = True
-                await _derive_goal(event.system or "", user_text)
-
-            api.on(BeforeSendToLlmEvent.CHANNEL, _on_before_send)
-
-    # -- decide_turn_action: evaluate after each turn -----------------------
-
-    async def _on_decide(event: DecideTurnActionEvent) -> Any:
-        nonlocal state
+    async def _on_decide(self, event: DecideTurnActionEvent) -> Any:
+        state = self._state
         if state is None or state.achieved:
             return None
 
@@ -527,8 +569,11 @@ def install(api: ExtensionAPI, config: GoalConfig) -> None:
             return None
 
         is_met, reason = await _evaluate_checker(
-            api, checker_scenario, checker_max_turns, state.condition,
-            checker_prompt_override,
+            self._api,
+            self._checker_scenario,
+            self._checker_max_turns,
+            state.condition,
+            self._checker_prompt_override,
         )
         state.turns_evaluated += 1
         state.last_reason = reason
@@ -539,11 +584,15 @@ def install(api: ExtensionAPI, config: GoalConfig) -> None:
             return None
 
         logger.info("goal: not met — {}", reason)
-        return Inject(messages=[
-            text_message(
-                f"[Goal not met] {reason}\n\n"
-                f"Continue working toward: {state.condition}"
-            ),
-        ])
+        return Inject(
+            messages=[
+                text_message(
+                    f"[Goal not met] {reason}\n\n"
+                    f"Continue working toward: {state.condition}"
+                ),
+            ]
+        )
 
-    api.on(DecideTurnActionEvent.CHANNEL, _on_decide)
+
+def install(api: ExtensionAPI, config: GoalConfig) -> None:
+    _GoalRuntime(api, config).install()
