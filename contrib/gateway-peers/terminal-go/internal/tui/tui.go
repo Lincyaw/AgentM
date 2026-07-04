@@ -1050,9 +1050,6 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.ToggleSplitDiffMsg:
 		return m.handleToggleSplitDiff()
 
-	case messages.ClearQueueMsg:
-		return m.forwardChat(msg)
-
 	case messages.CompactSessionMsg:
 		return m.handleCompactSession(msg.AdditionalPrompt)
 
@@ -1982,10 +1979,6 @@ func (m *appModel) AllBindings() []key.Binding {
 			key.WithHelp("Ctrl+m", "model picker"),
 		),
 		key.NewBinding(
-			key.WithKeys("ctrl+x"),
-			key.WithHelp("Ctrl+x", "clear queue"),
-		),
-		key.NewBinding(
 			key.WithKeys("ctrl+z"),
 			key.WithHelp("Ctrl+z", "suspend"),
 		),
@@ -2219,9 +2212,6 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+m"))):
 		return m.handleOpenModelPicker()
-
-	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+x"))):
-		return m, core.CmdHandler(messages.ClearQueueMsg{})
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+h", "f1", "ctrl+?"))):
 		return m, m.toggleShortcutSheet()
@@ -2593,18 +2583,9 @@ func (m *appModel) renderResizeHandle(width int) string {
 	case m.chatPage.IsWorking():
 		// Truncate right side and append spinner (handle stays centered)
 		workingText := "Working…"
-		if queueLen := m.chatPage.QueueLength(); queueLen > 0 {
-			workingText = fmt.Sprintf("Working… (%d queued)", queueLen)
-		}
 		suffix := " " + m.workingSpinner.View() + " " + styles.SpinnerDotsHighlightStyle.Render(workingText)
 		cancelKeyPart := styles.HighlightWhiteStyle.Render("Esc")
 		suffix += " (" + cancelKeyPart + " to interrupt)"
-		suffixWidth := lipgloss.Width(suffix)
-		result = lipgloss.NewStyle().MaxWidth(innerWidth-suffixWidth).Render(fullLine) + suffix
-
-	case m.chatPage.QueueLength() > 0:
-		queueText := fmt.Sprintf("%d queued", m.chatPage.QueueLength())
-		suffix := " " + styles.WarningStyle.Render(queueText) + " "
 		suffixWidth := lipgloss.Width(suffix)
 		result = lipgloss.NewStyle().MaxWidth(innerWidth-suffixWidth).Render(fullLine) + suffix
 

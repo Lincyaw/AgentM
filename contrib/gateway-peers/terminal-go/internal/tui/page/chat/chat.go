@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -102,8 +101,6 @@ type Page interface {
 	IsWorking() bool
 	// IsInlineEditing returns true if a past user message is being edited inline
 	IsInlineEditing() bool
-	// QueueLength returns the number of queued messages
-	QueueLength() int
 	// SetCommandParser replaces the slash-command parser for the chat page.
 	SetCommandParser(*commands.Parser)
 	// FocusMessages gives focus to the messages panel for keyboard scrolling
@@ -117,15 +114,6 @@ type Page interface {
 	// SetSidebarSettings applies sidebar display settings
 	SetSidebarSettings(settings SidebarSettings)
 }
-
-// queuedMessage represents a message waiting to be sent to the agent
-type queuedMessage struct {
-	content     string
-	attachments []msgtypes.Attachment
-}
-
-// maxQueuedMessages is the maximum number of messages that can be queued
-const maxQueuedMessages = 5
 
 // chatPage implements Page
 type chatPage struct {
@@ -149,9 +137,6 @@ type chatPage struct {
 	// Track whether we've received content from an assistant response
 	// Used by --exit-after-response to ensure we don't exit before receiving content
 	hasReceivedAssistantContent bool
-
-	// Message queue for enqueuing messages while agent is working
-	messageQueue []queuedMessage
 
 	// Editing state for branching sessions
 	editing          bool
@@ -359,11 +344,6 @@ func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, p.messages.ScrollToBottom())
 
-		// Process next queued message after cancel (queue is preserved)
-		if queueCmd := p.processNextQueuedMessage(); queueCmd != nil {
-			cmds = append(cmds, queueCmd)
-		}
-
 		return p, tea.Batch(cmds...)
 
 	case msgtypes.EditUserMessageMsg:
@@ -392,9 +372,6 @@ func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		})
 		p.messages = model.(messages.Model)
 		return p, cmd
-
-	case msgtypes.ClearQueueMsg:
-		return p.handleClearQueue()
 
 	case msgtypes.ThemeChangedMsg:
 		// Theme changed - forward to all child components to invalidate caches
@@ -433,8 +410,7 @@ func (p *chatPage) setWorking(working bool) tea.Cmd {
 
 	if working != wasWorking {
 		return core.CmdHandler(msgtypes.WorkingStateChangedMsg{
-			Working:     working,
-			QueueLength: len(p.messageQueue),
+			Working: working,
 		})
 	}
 
@@ -722,9 +698,6 @@ func (p *chatPage) handleInlineEditCommitted(msg messages.InlineEditCommittedMsg
 		cancelCmd = p.cancelStream(false)
 	}
 
-	p.messageQueue = nil
-	p.syncQueueToSidebar()
-
 	parentID := ""
 	if sess := p.app.Session(); sess != nil {
 		parentID = sess.ID
@@ -805,60 +778,6 @@ func (p *chatPage) extractAttachmentsFromSession(position int) []msgtypes.Attach
 	}
 
 	return attachments
-}
-
-// processNextQueuedMessage pops the next message from the queue and processes it.
-// Returns nil if the queue is empty.
-func (p *chatPage) processNextQueuedMessage() tea.Cmd {
-	if len(p.messageQueue) == 0 {
-		return nil
-	}
-
-	// Pop the first message from the queue
-	queued := p.messageQueue[0]
-	p.messageQueue[0] = queuedMessage{} // zero out to allow GC
-	p.messageQueue = p.messageQueue[1:]
-	p.syncQueueToSidebar()
-
-	msg := msgtypes.SendMsg{
-		Content:     queued.content,
-		Attachments: queued.attachments,
-	}
-
-	return p.processMessage(msg)
-}
-
-// handleClearQueue clears all queued messages and shows a notification.
-func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {
-	count := len(p.messageQueue)
-	if count == 0 {
-		return p, notification.InfoCmd("No messages queued")
-	}
-
-	p.messageQueue = nil
-	p.syncQueueToSidebar()
-
-	var msg string
-	if count == 1 {
-		msg = "Cleared 1 queued message"
-	} else {
-		msg = fmt.Sprintf("Cleared %d queued messages", count)
-	}
-	return p, notification.SuccessCmd(msg)
-}
-
-// syncQueueToSidebar updates the sidebar with truncated previews of queued messages.
-func (p *chatPage) syncQueueToSidebar() {
-	previews := make([]string, len(p.messageQueue))
-	for i, qm := range p.messageQueue {
-		// Take first line and limit length for preview
-		content := strings.TrimSpace(qm.content)
-		if idx := strings.IndexAny(content, "\n\r"); idx != -1 {
-			content = content[:idx]
-		}
-		previews[i] = content
-	}
-	p.sidebar.SetQueuedMessages(previews...)
 }
 
 // processMessage processes a message with the runtime
@@ -1023,11 +942,6 @@ func (p *chatPage) IsWorking() bool {
 // IsInlineEditing returns true if a past user message is being edited inline.
 func (p *chatPage) IsInlineEditing() bool {
 	return p.messages.IsInlineEditing()
-}
-
-// QueueLength returns the number of queued messages
-func (p *chatPage) QueueLength() int {
-	return len(p.messageQueue)
 }
 
 // FocusMessages gives focus to the messages panel

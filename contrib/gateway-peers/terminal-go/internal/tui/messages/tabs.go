@@ -52,8 +52,7 @@ type TabsUpdatedMsg struct {
 // WorkingStateChangedMsg is emitted by the content view when working state changes.
 // tui.Model uses this to update the editor's working indicator and resize handle spinner.
 type WorkingStateChangedMsg struct {
-	Working     bool
-	QueueLength int
+	Working bool
 }
 
 // BellMsg is sent when the terminal bell should be rung to notify the user.

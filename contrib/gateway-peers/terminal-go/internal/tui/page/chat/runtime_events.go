@@ -158,7 +158,6 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 			return true, tea.Batch(
 				p.setWorking(false),
 				p.setPendingResponse(false),
-				p.processNextQueuedMessage(),
 				notification.SuccessCmd("Session compacted successfully."),
 				p.messages.ScrollToBottom(),
 			)
@@ -322,7 +321,6 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	p.streamCancelled = false
 	spinnerCmd := p.setWorking(false)
 	p.setPendingResponse(false)
-	queueCmd := p.processNextQueuedMessage()
 
 	var exitCmd tea.Cmd
 	if p.app.ShouldExitAfterFirstResponse() && p.hasReceivedAssistantContent {
@@ -332,7 +330,7 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		})
 	}
 
-	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, queueCmd, exitCmd)
+	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, exitCmd)
 }
 
 // handlePartialToolCall processes partial tool call events by rendering each

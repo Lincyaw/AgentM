@@ -93,9 +93,6 @@ type (
 	// StreamCancelledMsg notifies components that the stream has been cancelled.
 	StreamCancelledMsg struct{ ShowMessage bool }
 
-	// ClearQueueMsg clears all queued messages.
-	ClearQueueMsg struct{}
-
 	// ToggleSplitDiffMsg toggles split diff view mode.
 	ToggleSplitDiffMsg struct{}
 
