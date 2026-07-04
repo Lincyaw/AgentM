@@ -1081,6 +1081,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/tui/dialog/working_dir_picker.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/styles/styles.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/styles/theme.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/background_activity.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/dispatch.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/messages/tabs.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/messages/toggle.go
