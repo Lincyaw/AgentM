@@ -1063,6 +1063,7 @@ requirements:
       - path: src/agentm/cli_daemon.py
       - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway_daemon.py
+      - path: src/agentm/gateway_supervisor.py
       - path: src/agentm/gateway/cli.py
       - path: src/agentm/gateway/systemd.py
       - path: src/agentm/gateway/workspace.py

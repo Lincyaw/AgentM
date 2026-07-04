@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentm.core.lib.user_config import agentm_home_dir
+from agentm.core.lib import agentm_home_dir, expand_path
 
 
 _WATCH_SUFFIXES = {".py", ".yaml", ".yml", ".toml", ".json", ".md"}
@@ -232,6 +232,10 @@ def _is_watch_file(path: Path) -> bool:
     return path.name in _WATCH_NAMES or path.suffix in _WATCH_SUFFIXES
 
 
+def _optional_path(value: str | None) -> Path | None:
+    return expand_path(value) if value else None
+
+
 def _parse_args(argv: list[str] | None) -> SupervisorConfig:
     parser = argparse.ArgumentParser(prog="python -m agentm.gateway_supervisor")
     parser.add_argument("--cwd", required=True)
@@ -259,21 +263,21 @@ def _parse_args(argv: list[str] | None) -> SupervisorConfig:
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--watch", action="append", default=[])
     ns = parser.parse_args(argv)
-    cwd = Path(ns.cwd)
+    cwd = expand_path(ns.cwd)
     watch_paths = default_watch_paths(cwd)
-    watch_paths.extend(Path(p) for p in ns.watch)
+    watch_paths.extend(expand_path(p) for p in ns.watch)
     return SupervisorConfig(
         cwd=cwd,
         bind=ns.bind,
-        state_dir=Path(ns.state_dir),
+        state_dir=expand_path(ns.state_dir),
         scenario=ns.scenario,
-        bind_token_file=Path(ns.bind_token_file) if ns.bind_token_file else None,
+        bind_token_file=_optional_path(ns.bind_token_file),
         bind_allow_anonymous=bool(ns.bind_allow_anonymous),
-        tls_cert=Path(ns.tls_cert) if ns.tls_cert else None,
-        tls_key=Path(ns.tls_key) if ns.tls_key else None,
+        tls_cert=_optional_path(ns.tls_cert),
+        tls_key=_optional_path(ns.tls_key),
         reload=bool(ns.reload),
         poll_interval=max(float(ns.poll_interval), 0.2),
-        pid_file=Path(ns.pid_file) if ns.pid_file else None,
+        pid_file=_optional_path(ns.pid_file),
         watch_paths=watch_paths,
     )
 
