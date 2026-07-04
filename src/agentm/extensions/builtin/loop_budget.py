@@ -38,6 +38,8 @@ MANIFEST = ExtensionManifest(
     registers=("command:loop",),
     config_schema=LoopBudgetConfig,
     requires=(),
+    api_version=1,
+    tier=1,
 )
 
 
@@ -95,3 +97,10 @@ def _positive_int_or_none_from_model(value: int | None, key: str) -> int | None:
             f"loop_budget: '{key}' must be a positive integer or null; got {value!r}"
         )
     return value
+
+
+__all__ = (
+    "LoopBudgetConfig",
+    "MANIFEST",
+    "install",
+)

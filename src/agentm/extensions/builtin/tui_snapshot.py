@@ -49,6 +49,9 @@ MANIFEST = ExtensionManifest(
     ),
     registers=("tool:tui_snapshot",),
     config_schema=TuiSnapshotConfig,
+    requires=(),
+    api_version=1,
+    tier=1,
 )
 
 _DEFAULT_DUMP_PATH: Final[str] = "/tmp/agentm-tui-dump.txt"
@@ -154,3 +157,10 @@ def _ok(text: str) -> ToolResult:
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+
+
+__all__ = (
+    "MANIFEST",
+    "TuiSnapshotConfig",
+    "install",
+)

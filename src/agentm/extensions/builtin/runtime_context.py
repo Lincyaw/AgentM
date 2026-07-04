@@ -30,6 +30,8 @@ MANIFEST = ExtensionManifest(
     registers=("event:before_agent_start",),
     config_schema=RuntimeContextConfig,
     requires=(),  # Leaf atom: reads only api.cwd + stdlib platform.
+    api_version=1,
+    tier=1,
 )
 
 
@@ -72,3 +74,10 @@ class _RuntimeContextRuntime:
 def install(api: ExtensionAPI, config: RuntimeContextConfig) -> None:
     del config
     _RuntimeContextRuntime(api).install()
+
+
+__all__ = (
+    "MANIFEST",
+    "RuntimeContextConfig",
+    "install",
+)
