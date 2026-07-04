@@ -28,7 +28,7 @@ from typing import Any, Final
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.core.lib import truncate_text_tokens
+from agentm.core.lib import expand_path_from_cwd, truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 
@@ -56,8 +56,7 @@ MANIFEST = ExtensionManifest(
 )
 
 def _resolve_dir(cwd: str, raw: str) -> Path:
-    path = Path(raw).expanduser()
-    return path if path.is_absolute() else (Path(cwd) / path).resolve()
+    return expand_path_from_cwd(raw, cwd).resolve()
 
 def _heading(filename: str) -> str:
     """`SOUL.md` -> `## Soul`; keeps the label human and source-traceable."""
