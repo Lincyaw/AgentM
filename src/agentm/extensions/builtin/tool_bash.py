@@ -19,11 +19,13 @@ from agentm.extensions import ExtensionManifest
 
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 120.0
 
+
 class ToolBashConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     bash_ops: Any = None
     default_timeout: float = _DEFAULT_TIMEOUT_SECONDS
+
 
 MANIFEST = ExtensionManifest(
     name="tool_bash",
@@ -32,6 +34,7 @@ MANIFEST = ExtensionManifest(
     config_schema=ToolBashConfig,
     requires=(),  # Leaf tool atom: consumes Operations via ExtensionAPI.
 )
+
 
 _PARAMETERS: Final[dict[str, Any]] = {
     "type": "object",
@@ -43,26 +46,35 @@ _PARAMETERS: Final[dict[str, Any]] = {
     "additionalProperties": False,
 }
 
-def install(api: ExtensionAPI, config: ToolBashConfig) -> None:
-    bash_ops = _coerce_bash_ops(api, config.bash_ops)
-    default_timeout = float(config.default_timeout)
 
-    parameters = {
-        **_PARAMETERS,
-        "properties": {
-            **_PARAMETERS["properties"],
-            "timeout": {"type": "number", "default": default_timeout},
-        },
-    }
+class _ToolBashRuntime:
+    def __init__(self, api: ExtensionAPI, config: ToolBashConfig) -> None:
+        self._api = api
+        self._bash_ops = _coerce_bash_ops(api, config.bash_ops)
+        self._default_timeout = float(config.default_timeout)
 
-    api.register_tool(
-        _BashTool(
-            api=api,
-            bash_ops=bash_ops,
-            default_timeout=default_timeout,
-            parameters=parameters,
+    def install(self) -> None:
+        self._api.register_tool(
+            _BashTool(
+                api=self._api,
+                bash_ops=self._bash_ops,
+                default_timeout=self._default_timeout,
+                parameters=self._parameters(),
+            )
         )
-    )
+
+    def _parameters(self) -> dict[str, Any]:
+        return {
+            **_PARAMETERS,
+            "properties": {
+                **_PARAMETERS["properties"],
+                "timeout": {"type": "number", "default": self._default_timeout},
+            },
+        }
+
+
+def install(api: ExtensionAPI, config: ToolBashConfig) -> None:
+    _ToolBashRuntime(api, config).install()
 
 
 class _BashTool:
@@ -127,8 +139,10 @@ class _BashTool:
             is_error=is_error,
         )
 
+
 def _coerce_bash_ops(api: ExtensionAPI, candidate: Any) -> BashOperations:
     return candidate if candidate is not None else api.get_operations().bash
+
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
