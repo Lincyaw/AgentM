@@ -1,10 +1,8 @@
 ---
 name: tui-dev
-description: >
-  Develop, test, and validate Terminal User Interface applications using tmux as your "headless browser" for terminals. Use when asked to run a TUI application, capture its output, verify its behavior, or debug rendering issues. This skill provides a structured workflow for TUI development, including session management, interaction patterns, state capture, and regression detection.
+description: Develop, test, and validate Terminal User Interface applications using tmux as your "headless browser" for terminals.
 ---
 
-Develop, test, and validate Terminal User Interface applications using tmux as your "headless browser" for terminals.
 
 ## Philosophy
 
