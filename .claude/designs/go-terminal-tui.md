@@ -692,9 +692,9 @@ The current AgentM terminal implementation follows this direction:
    surface is bounded: when background activity exceeds the visible row budget,
    the newest rows stay visible and older rows collapse into a count summary so
    background work cannot consume the main chat viewport. `↓` opens the
-   workflow picker when selectable child sessions exist, `Enter` views a
+   workflow task picker when selectable child sessions exist, `Enter` views a
    selected workflow task, `x` stops it, and `Ctrl+T` hides/shows the bottom
-   rows.
+   activity rows.
 3. Make the composer the control surface:
    `Enter` sends, busy `Enter` queues cooperatively, `Shift+Enter`/`Ctrl+J`
    inserts newline, `?` opens shortcuts, `/` opens commands, `@` opens files,
@@ -726,8 +726,8 @@ The current AgentM terminal implementation follows this direction:
     session keys must differ unless the user explicitly passes `-session-id`.
 
 The implementation still reuses tab/supervisor plumbing internally; the user
-surface is main chat plus workflow rows/picker/detail plus background
-shell/monitor activity rows. The 2026-07-03
+surface is main chat plus bottom activity rows, workflow task picker/detail, and
+background shell/monitor activity rows. The 2026-07-03
 terminal-go verification captures under `.agent/tui-dev/captures/` exercised a
 real gateway workflow with two parallel child agents. The parent remained on
 the main transcript, and the two selected task details rendered `ALPHA` and

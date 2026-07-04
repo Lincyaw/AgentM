@@ -75,8 +75,8 @@ func (s *StatusBar) SetActivity(activity string) {
 }
 
 // SetModeLine overrides the left help area with a context-specific status
-// phrase. This supports Claude Code-style mode footers such as workflow picker
-// controls and transcript detail state.
+// phrase. This supports Claude Code-style mode footers such as workflow task
+// picker controls and transcript detail state.
 func (s *StatusBar) SetModeLine(modeLine string) {
 	if s.modeLine != modeLine {
 		s.modeLine = modeLine
