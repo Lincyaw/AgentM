@@ -390,9 +390,9 @@ func (m *appModel) footerText() string {
 			verb = "show"
 		}
 		if m.hasWorkflowTasks() {
-			return "ctrl+t to " + verb + " tasks · ← for agents · ↓ to manage"
+			return "ctrl+t to " + verb + " " + m.bottomActivityToggleTarget() + " · ← for agents · ↓ to manage"
 		}
-		return "ctrl+t to " + verb + " background activity · ← for agents"
+		return "ctrl+t to " + verb + " " + m.bottomActivityToggleTarget() + " · ← for agents"
 	case m.sessionState != nil && m.sessionState.YoloMode():
 		return "bypass permissions on (shift+tab to cycle) · ← for agents"
 	default:
@@ -402,13 +402,23 @@ func (m *appModel) footerText() string {
 
 func (m *appModel) ctrlTActionLabel() string {
 	switch {
-	case m.hasWorkflowTasks():
+	case m.hasWorkflowTasks() && !m.hasBackgroundActivities():
 		return "toggle tasks"
-	case m.hasBackgroundActivities():
+	case m.hasBottomActivityRows():
 		return "toggle activity"
 	default:
 		return "new tab"
 	}
+}
+
+func (m *appModel) bottomActivityToggleTarget() string {
+	if m.hasWorkflowTasks() && !m.hasBackgroundActivities() {
+		return "tasks"
+	}
+	if m.hasWorkflowTasks() {
+		return "activity rows"
+	}
+	return "background activity"
 }
 
 func (m *appModel) footerRightText() string {
