@@ -219,20 +219,6 @@ func (t *TabBar) HasOnlyMainAndBackgroundTabs(mainSessionID string) bool {
 	return true
 }
 
-// HasBackgroundTasks reports whether any workflow/background task sessions are
-// currently tracked.
-func (t *TabBar) HasBackgroundTasks(mainSessionID string) bool {
-	for _, tab := range t.tabs {
-		if tab.SessionID == mainSessionID {
-			continue
-		}
-		if tab.Background {
-			return true
-		}
-	}
-	return false
-}
-
 // BackgroundStats returns inactive background workflow counts.
 func (t *TabBar) BackgroundStats() (total, running, needsAttention int) {
 	for _, tab := range t.tabs {

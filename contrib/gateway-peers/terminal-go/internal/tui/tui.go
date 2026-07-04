@@ -554,33 +554,21 @@ func (m *appModel) syncTabChrome(tabs []messages.TabInfo, activeIdx int) bool {
 	prevHeight := m.tabBarHeight()
 	m.tabBar.SetTabs(tabs, activeIdx)
 	nextHeight := m.tabBarHeight()
-	if m.tabBar.HasBackgroundTasks(m.mainSessionID) {
-		m.statusBar.SetActivity("")
-	} else {
-		m.statusBar.SetActivity(m.backgroundActivityText())
-	}
+	m.statusBar.SetActivity(m.backgroundActivityText())
 	return nextHeight != prevHeight
 }
 
 func (m *appModel) backgroundActivityText() string {
-	if m.tabBar.HasBackgroundTasks(m.mainSessionID) {
+	if m.tabBar.HasOnlyInactiveBackgroundTabs() {
+		return m.workflowBackgroundText()
+	}
+	if !m.bottomActivityRowsHidden {
 		return ""
 	}
-	if !m.tabBar.HasOnlyInactiveBackgroundTabs() {
-		if !m.bottomActivityRowsHidden {
-			return ""
-		}
-		total := len(m.backgroundActivities)
-		if total == 0 {
-			return ""
-		}
-		noun := "activity"
-		if total != 1 {
-			noun = "activities"
-		}
-		return fmt.Sprintf("%d background %s", total, noun)
-	}
+	return m.backgroundActivityCountText()
+}
 
+func (m *appModel) workflowBackgroundText() string {
 	total, running, needsAttention := m.tabBar.BackgroundStats()
 	if total == 0 {
 		return ""
@@ -608,6 +596,18 @@ func (m *appModel) backgroundActivityText() string {
 		}
 		return fmt.Sprintf("%d %s done (Ctrl+n)", total, noun)
 	}
+}
+
+func (m *appModel) backgroundActivityCountText() string {
+	total := len(m.backgroundActivities)
+	if total == 0 {
+		return ""
+	}
+	noun := "activity"
+	if total != 1 {
+		noun = "activities"
+	}
+	return fmt.Sprintf("%d background %s", total, noun)
 }
 
 // initSessionComponents creates a new chat page, session state, and editor for
