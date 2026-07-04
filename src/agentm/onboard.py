@@ -37,7 +37,7 @@ import tomli_w
 import typer
 
 from agentm.ai import DEFAULT_PROVIDER_REGISTRY
-from agentm.core.lib.user_config import agentm_home_dir
+from agentm.core.lib import agentm_home_dir, expand_path
 
 # --- persona skeletons: mirror the ``defaults`` block in
 # contrib/scenarios/chatbot/manifest.yaml so an onboard-seeded workspace and a
@@ -234,7 +234,7 @@ def _redact_secret(value: str | None) -> str:
 
 def ensure_workspace(workspace: Path) -> Path:
     """Create *workspace* and its ``.agentm/`` subdir if missing."""
-    workspace = workspace.expanduser().resolve()
+    workspace = expand_path(workspace).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / ".agentm").mkdir(parents=True, exist_ok=True)
     return workspace
@@ -580,7 +580,7 @@ def run_setup(
     non-interactive for scripts.
     """
 
-    workspace_path = (workspace or Path.cwd()).expanduser()
+    workspace_path = expand_path(workspace) if workspace is not None else Path.cwd()
     if check:
         _print_status(workspace_path)
         if test_model:

@@ -15,11 +15,12 @@ The yaml lists extensions in declaration order; each entry is one of:
 Path resolution:
 
 - An absolute path argument loads that file directly (or its
-  ``manifest.yaml`` if a directory). Path-like arguments may use ``~``.
+  ``manifest.yaml`` if a directory). Path-like arguments may use ``~`` and
+  environment variables.
 - A bare name is searched in this order:
     1. ``$AGENTM_PROJECT_ROOT/contrib/scenarios/<name>/manifest.yaml``
-       when the env var is set (with ``~`` expanded; gives long-running
-       daemons a stable anchor independent of process cwd).
+       when the env var is set (with shell-like path expansion; gives
+       long-running daemons a stable anchor independent of process cwd).
     2. ``<cwd>/contrib/scenarios/<name>/manifest.yaml`` — the original
        behavior; works when ``agentm`` is invoked from a project root.
     3. ``$AGENTM_HOME/contrib/scenarios/<name>/manifest.yaml`` (default
@@ -47,8 +48,9 @@ from typing import Any
 import yaml
 from loguru import logger
 
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi import ExtensionLoadError
+from agentm.core.lib import expand_path
+from agentm.extensions import ExtensionManifest
 
 class ScenarioLoadError(ExtensionLoadError):
     """Raised when a scenario YAML cannot be resolved or validated."""
@@ -72,18 +74,18 @@ def _candidate_root_entries() -> list[tuple[str, Path]]:
     Feishu gateway) anchor scenario lookup independent of process cwd;
     cwd is preserved as the canonical default so existing
     ``agentm --scenario X`` invocations from a project root keep
-    working unchanged. ``AGENTM_PROJECT_ROOT`` accepts the same ``~`` shorthand
-    users expect from shell paths. The agentm-package-relative root rescues
-    editable installs whose worktree contains a sibling ``contrib/``
-    that the user didn't ``cd`` into — common when invoking via a
-    console-script entry point.
+    working unchanged. ``AGENTM_PROJECT_ROOT`` accepts the same shell-like path
+    expansion users expect from other AgentM path knobs. The
+    agentm-package-relative root rescues editable installs whose worktree
+    contains a sibling ``contrib/`` that the user didn't ``cd`` into — common
+    when invoking via a console-script entry point.
     """
 
     roots: list[tuple[str, Path]] = []
     seen: set[str] = set()
 
     def add(source: str, root: Path) -> None:
-        root = root.expanduser()
+        root = expand_path(root)
         text = str(root)
         if text in seen:
             return
@@ -374,7 +376,7 @@ def load_scenario(
     ``promotion``, etc.
     """
 
-    candidate = Path(name_or_path).expanduser()
+    candidate = expand_path(name_or_path)
     if candidate.is_absolute():
         manifest_path = (
             candidate / "manifest.yaml" if candidate.is_dir() else candidate
