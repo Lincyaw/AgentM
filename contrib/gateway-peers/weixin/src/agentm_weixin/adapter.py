@@ -23,6 +23,7 @@ from typing import Any
 import aiohttp
 from loguru import logger
 
+from agentm.core.lib import agentm_home_dir
 from agentm.gateway.client import WireClient
 from agentm.gateway.wire import KIND_INBOUND, WIRE_VERSION, Envelope
 
@@ -51,8 +52,8 @@ BACKOFF_DELAY = 30.0
 RETRY_DELAY = 2.0
 TYPING_KEEPALIVE = 5.0
 
-# Workspace subdirectory for inbound media files the agent can access.
-MEDIA_INBOX_DIR = ".agentm/weixin/media/inbox"
+# AgentM-home subdirectory for inbound media files the agent can access.
+MEDIA_INBOX_DIR = Path("weixin") / "media" / "inbox"
 
 # Regex to detect MEDIA: directives in outbound text.
 # Must be on its own line: ``MEDIA:/abs/path/to/file.png``
@@ -242,8 +243,8 @@ class WeixinAdapter:
     # -- inbound (WeChat -> gateway) ----------------------------------
 
     def _media_inbox(self) -> Path:
-        """Return the workspace-relative media inbox directory, creating it."""
-        d = Path(MEDIA_INBOX_DIR)
+        """Return the AgentM-home media inbox directory, creating it."""
+        d = agentm_home_dir() / MEDIA_INBOX_DIR
         d.mkdir(parents=True, exist_ok=True)
         return d
 
