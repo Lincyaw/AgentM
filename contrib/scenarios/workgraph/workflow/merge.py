@@ -26,7 +26,7 @@ TASK_HEADER_FIELDS = {"depends", "locks", "repo", "base"}
 CONFIG_FILENAMES = ("config.toml", "workgraph.toml")
 
 
-@dataclass
+@dataclass(slots=True)
 class TaskFile:
     task_id: str
     path: Path
@@ -38,7 +38,7 @@ class TaskFile:
     validation: list[str]
 
 
-@dataclass
+@dataclass(slots=True)
 class ClaimedMergeTask:
     task: TaskFile
     merging_path: Path
