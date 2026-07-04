@@ -119,7 +119,7 @@ Drives off `core-manifest.yaml` (already the constitution registry) plus a manag
 |---|---|---|
 | `constitution` | `is_constitution_path(path)` returns True | `src/agentm/core/abi/...`, `core-manifest.yaml`, `.agentm/catalog/**` |
 | `managed` | inside repo working tree AND not constitution AND matches `MANAGED_GLOBS` | `src/agentm/extensions/builtin/*.py`, `scenarios/**`, `skills/**`, `prompts/**`, `.claude/**`, `*.md` at repo root |
-| `unmanaged` | inside repo but neither managed nor constitution | runtime artifacts: `.agentm/observability/**`, `.agentm/replay_cache/**`, build outputs; or paths outside the working tree |
+| `unmanaged` | inside repo but neither managed nor constitution | runtime artifacts: `.agentm/replay_cache/**`, build outputs; or paths outside the working tree such as `$AGENTM_HOME/observability/**` |
 
 `MANAGED_GLOBS` is a new section in `core-manifest.yaml`:
 
@@ -134,7 +134,7 @@ managed:
     - "*.md"      # top-level docs
 ```
 
-Outside-the-repo paths are always `unmanaged` (writer cannot version them; agent gets a result with `committed: false`, no error). Writes to `.agentm/observability/**` are `unmanaged` because they are derived data, not source.
+Outside-the-repo paths are always `unmanaged` (writer cannot version them; agent gets a result with `committed: false`, no error). Writes to `$AGENTM_HOME/observability/**` or legacy `.agentm/observability/**` are `unmanaged` because they are derived data, not source.
 
 ### 3.3 Wiring: tool_edit / tool_write / reload_atom
 

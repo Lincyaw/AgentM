@@ -196,7 +196,7 @@ Lives at `agentm/core/_internal/catalog/indexer.py` (constitution layer). Trigge
 ### 5.1 Pipeline
 
 ```
-for each new trace_id in .agentm/observability/:
+for each new trace_id in $AGENTM_HOME/observability/:
   1. parse session.start header → fingerprint, task_meta
   2. parse all events → derive metrics:
        - tool_call success/failure counts per tool

@@ -217,7 +217,7 @@ Phase 2's refactor is correct iff:
 2. **Phase 1's 50 fail-stop tests still pass** when scenario mounts stub-mode judges scripted to mirror Phase 1's structural decisions. This proves behavior preservation under the refactor.
 3. **Gate function signatures unchanged.** External callers (evidence tools, FSM policy, finalize) see the same `gate.apply(update) -> UpdateResult` API. The refactor is internal.
 4. **Each judge has both stub and llm modes; both modes covered by tests.** Stub tests are unit-style; llm tests are contract-style (mocked provider returns scripted tool_use payloads; judge atom passes them through to `Verdict`).
-5. **Eval run on 10 cases against `contrib/scenarios/rca/eval/tasks/`** completes without infrastructure errors, produces per-case trajectory under `.agentm/observability/`, and yields a results report. Pass-rate is not a strict acceptance — the question is whether the refactor *behaves reasonably* on real cases, not whether it matches a target score on the first run.
+5. **Eval run on 10 cases against `contrib/scenarios/rca/eval/tasks/`** completes without infrastructure errors, produces per-case trajectory under `$AGENTM_HOME/observability/` (or `AGENTM_OBSERVABILITY_DIR`), and yields a results report. Pass-rate is not a strict acceptance — the question is whether the refactor *behaves reasonably* on real cases, not whether it matches a target score on the first run.
 
 The pass-rate question is intentionally not in the acceptance gate. Phase 2's purpose is removing hardcode and enabling LLM-driven judgment; whether that yields better answers is a downstream measurement (Phase 3+ would tune prompts and possibly the judge set based on what the 10-case run reveals).
 

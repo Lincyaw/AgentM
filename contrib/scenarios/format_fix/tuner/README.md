@@ -174,7 +174,8 @@ sed -i 's/format_fix/<your_scenario>/g' tuner/manifest.yaml
 
 # 8. Smoke test the production scenario first
 agentm --scenario <your_scenario> --cwd /tmp/sandbox "<sample input>"
-# → check .agentm/observability/*.jsonl shows task_class=<your_scenario>
+# → check "${AGENTM_OBSERVABILITY_DIR:-${AGENTM_HOME:-$HOME/.agentm}/observability}"/*.jsonl
+#   shows task_class=<your_scenario>
 
 # 9. Run one tuning iteration
 agentm --scenario <your_scenario>/tuner --cwd /tmp/sandbox \
