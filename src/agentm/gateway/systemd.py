@@ -15,6 +15,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentm.core.lib import expand_path
 from agentm.env import resolve_cli_cwd
 
 GATEWAY_UNIT = "agentm-gateway"
@@ -169,7 +170,7 @@ def build_systemd_plan() -> SystemdPlan:
     run_as = None
 
     cleaned, workspace = baked_gateway_argv()
-    workspace_path = Path(workspace).expanduser().resolve()
+    workspace_path = expand_path(workspace).resolve()
     env_file = workspace_path / ".env"
 
     flags: list[str] = []
