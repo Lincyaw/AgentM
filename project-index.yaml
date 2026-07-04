@@ -212,6 +212,8 @@ requirements:
     code:
       - path: src/agentm/extensions/builtin
       - path: src/agentm/extensions/builtin/atom_management.py
+      - path: src/agentm/extensions/builtin/background_exec.py
+      - path: src/agentm/extensions/builtin/monitor.py
       - path: src/agentm/extensions/builtin/task_tracking.py
       - path: src/agentm/extensions/builtin/tool_bash.py
       - path: src/agentm/extensions/builtin/tool_bash_guard.py

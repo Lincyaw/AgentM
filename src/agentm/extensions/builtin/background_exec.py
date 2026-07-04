@@ -114,10 +114,13 @@ MANIFEST = ExtensionManifest(
         "tool:wait_background",
         "tool:cancel_background",
         "event:agent_start",
+        "event:background_activity",
         "event:session_shutdown",
     ),
     config_schema=BackgroundExecConfig,
     requires=(),  # Defers wrapping to agent_start so tool atoms may load in any order.
+    api_version=1,
+    tier=1,
 )
 
 
@@ -909,3 +912,10 @@ class _BackgroundExecRuntime:
 
 def install(api: ExtensionAPI, config: BackgroundExecConfig) -> None:
     _BackgroundExecRuntime(api, config).install()
+
+
+__all__ = (
+    "BackgroundExecConfig",
+    "MANIFEST",
+    "install",
+)

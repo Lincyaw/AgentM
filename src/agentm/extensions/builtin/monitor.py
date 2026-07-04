@@ -177,10 +177,13 @@ MANIFEST = ExtensionManifest(
         "tool:create_monitor",
         "tool:list_monitors",
         "tool:cancel_monitor",
+        "event:background_activity",
         "event:session_shutdown",
     ),
     config_schema=MonitorConfig,
     requires=(),
+    api_version=1,
+    tier=1,
 )
 
 
@@ -1030,3 +1033,10 @@ class _MonitorRuntime:
 
 def install(api: ExtensionAPI, config: MonitorConfig) -> None:
     _MonitorRuntime(api, config).install()
+
+
+__all__ = (
+    "MANIFEST",
+    "MonitorConfig",
+    "install",
+)
