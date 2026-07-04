@@ -23,6 +23,7 @@ import pytest
 from agentm.core.abi import EventBus
 from agentm.core.abi.events import SessionShutdownEvent
 from agentm.core.runtime.extension import (
+    ExtensionAPIScopeConfig,
     _ExtensionAPIImpl,
     build_extension_api_scope,
 )
@@ -33,6 +34,7 @@ from contrib.extensions.mcp_bridge.client import (
     MCPSessionManager,
     set_test_session_factory,
 )
+from contrib.extensions.mcp_bridge.manifest import MCPBridgeConfig
 
 
 # ---- Stub MCP server ------------------------------------------------------
@@ -118,17 +120,19 @@ class _SessionView:
 
 def _make_api(tmp_path: Path, tools: list[Any]) -> _ExtensionAPIImpl:
     scope = build_extension_api_scope(
-        bus=EventBus(),
-        cwd=str(tmp_path),
-        session_id="session",
-        session=_SessionView(),
-        tools=tools,
-        commands={},
-        providers={},
-        renderers={},
-        inbox=SessionInbox(),
-        model_getter=lambda: None,
-        provider_getter=lambda: None,
+        ExtensionAPIScopeConfig(
+            bus=EventBus(),
+            cwd=str(tmp_path),
+            session_id="session",
+            session=_SessionView(),
+            tools=tools,
+            commands={},
+            providers={},
+            renderers={},
+            inbox=SessionInbox(),
+            model_getter=lambda: None,
+            provider_getter=lambda: None,
+        )
     )
     return _ExtensionAPIImpl(scope)
 
@@ -165,15 +169,15 @@ async def test_install_snapshot_and_call_roundtrip(tmp_path: Path) -> None:
     tools_catalog: list[Any] = []
     api = _make_api(tmp_path, tools_catalog)
 
-    config = {
-        "servers": [
+    config = MCPBridgeConfig(
+        servers=[
             {
                 "name": "fs",
                 "transport": "stdio",
                 "command": ["unused", "--because-of-factory"],
             }
         ],
-    }
+    )
 
     set_test_session_factory(_factory)
     await install(api, config)
@@ -231,17 +235,17 @@ async def test_test_factory_survives_malformed_spec(tmp_path: Path) -> None:
     set_test_session_factory(_factory)
     api = _make_api(tmp_path, [])
 
-    # Malformed: ``transport`` missing → parse_server_spec raises.
-    bad_config = {"servers": [{"name": "fs"}]}
+    # Malformed for parse_server_spec: stdio requires a command.
+    bad_config = MCPBridgeConfig(servers=[{"name": "fs", "transport": "stdio"}])
     with pytest.raises(Exception):
         await install(api, bad_config)
 
     # Factory must still be available for the next attempt.
-    good_config = {
-        "servers": [
+    good_config = MCPBridgeConfig(
+        servers=[
             {"name": "fs", "transport": "stdio", "command": ["unused"]}
         ],
-    }
+    )
     await install(api, good_config)
     # If the factory had been drained, ``connect_all`` would have tried
     # to spawn a real subprocess for ``unused`` and failed; reaching here

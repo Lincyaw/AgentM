@@ -524,7 +524,9 @@ requirements:
       - path: contrib/scenarios/rca/src/rca_eval/seed_dataset.py
       - path: contrib/scenarios/verifier/cli.py
       - path: contrib/gateway-peers/terminal-go/internal/adapter/translator.go
-    tests: []
+      - path: contrib/scenarios/mcp_demo/smoke.py
+    tests:
+      - path: contrib/extensions/mcp_bridge/tests/test_e2e.py
     docs:
       - path: README.md
       - path: .claude/skills/agentm-sdk/references/provider-and-cli.md

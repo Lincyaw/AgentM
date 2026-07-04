@@ -30,6 +30,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from agentm.core.abi import EventBus, Tool  # noqa: E402
 from agentm.core.runtime.extension import (  # noqa: E402
+    ExtensionAPIScopeConfig,
     _ExtensionAPIImpl,
     build_extension_api_scope,
 )
@@ -69,17 +70,19 @@ class _SessionView:
 async def main() -> int:
     tools: list[Tool] = []
     scope = build_extension_api_scope(
-        bus=EventBus(),
-        cwd="/tmp",
-        session_id="mcp-smoke",
-        session=_SessionView(),
-        tools=tools,
-        commands={},
-        providers={},
-        renderers={},
-        inbox=SessionInbox(),
-        model_getter=lambda: None,
-        provider_getter=lambda: None,
+        ExtensionAPIScopeConfig(
+            bus=EventBus(),
+            cwd="/tmp",
+            session_id="mcp-smoke",
+            session=_SessionView(),
+            tools=tools,
+            commands={},
+            providers={},
+            renderers={},
+            inbox=SessionInbox(),
+            model_getter=lambda: None,
+            provider_getter=lambda: None,
+        )
     )
     api = _ExtensionAPIImpl(scope)
 

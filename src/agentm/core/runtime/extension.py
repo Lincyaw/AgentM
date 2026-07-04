@@ -257,81 +257,97 @@ class ExtensionAPIScope:
     service_registry: dict[str, Any]
 
 
-def build_extension_api_scope(
-    *,
-    bus: EventBus,
-    cwd: str,
-    scenario_dir: str | None = None,
-    session_id: str,
-    root_session_id: str | None = None,
-    parent_session_id: str | None = None,
-    purpose: str = "root",
-    scenario: str | None = None,
-    lineage: dict[str, Any] | None = None,
-    experiment: dict[str, Any] | None = None,
-    session: ReadonlySession,
-    tools: list[Tool],
-    commands: dict[str, CommandSpec],
-    providers: dict[str, ProviderConfig],
-    renderers: dict[str, Renderer],
-    inbox: SessionInbox,
-    model_getter: Any,
-    provider_getter: Any,
-    gateway: _SessionGateway | None = None,
-    operations: _OperationsHolder | None = None,
-    project_layout: ProjectLayout | None = None,
-    catalog: CatalogService | None = None,
-    child_session_factory: ChildSessionFactory | None = None,
-    resource_writer: ResourceWriter | None = None,
-    session_file: Path | None = None,
-    telemetry_factory: SessionTelemetryFactory | None = None,
-    service_registry: dict[str, Any] | None = None,
-) -> ExtensionAPIScope:
-    resolved_cwd = str(_scope_cwd_path(cwd))
-    resolved_layout = project_layout or default_project_layout(resolved_cwd)
+@dataclass(frozen=True, slots=True)
+class ExtensionAPIScopeConfig:
+    """Inputs used to build an :class:`ExtensionAPIScope`.
+
+    Keep this separate from ``ExtensionAPIScope`` because callers provide raw
+    optional dependencies here; the builder resolves defaults and holder objects.
+    """
+
+    bus: EventBus
+    cwd: str
+    session_id: str
+    session: ReadonlySession
+    tools: list[Tool]
+    commands: dict[str, CommandSpec]
+    providers: dict[str, ProviderConfig]
+    renderers: dict[str, Renderer]
+    inbox: SessionInbox
+    model_getter: Any
+    provider_getter: Any
+    scenario_dir: str | None = None
+    root_session_id: str | None = None
+    parent_session_id: str | None = None
+    purpose: str = "root"
+    scenario: str | None = None
+    lineage: dict[str, Any] | None = None
+    experiment: dict[str, Any] | None = None
+    gateway: _SessionGateway | None = None
+    operations: _OperationsHolder | None = None
+    project_layout: ProjectLayout | None = None
+    catalog: CatalogService | None = None
+    child_session_factory: ChildSessionFactory | None = None
+    resource_writer: ResourceWriter | None = None
+    session_file: Path | None = None
+    telemetry_factory: SessionTelemetryFactory | None = None
+    service_registry: dict[str, Any] | None = None
+
+
+def build_extension_api_scope(config: ExtensionAPIScopeConfig) -> ExtensionAPIScope:
+    resolved_cwd = str(_scope_cwd_path(config.cwd))
+    resolved_layout = config.project_layout or default_project_layout(resolved_cwd)
     return ExtensionAPIScope(
-        bus=bus,
+        bus=config.bus,
         cwd=resolved_cwd,
-        scenario_dir=scenario_dir,
-        session_id=session_id,
+        scenario_dir=config.scenario_dir,
+        session_id=config.session_id,
         # If no trace_id is supplied, the session is its own trace —
         # collapse to session_id. Callers that want strict OTel shape
         # (32-hex trace_id vs 16-hex span_id) should supply both
         # ``session_id`` and ``root_session_id`` on the config.
-        root_session_id=root_session_id or session_id,
-        parent_session_id=parent_session_id,
-        purpose=purpose,
-        scenario=scenario,
-        lineage=lineage,
-        experiment=experiment,
-        session=session,
-        tools=tools,
-        commands=commands,
-        providers=providers,
-        renderers=renderers,
-        inbox=inbox,
-        model_getter=model_getter,
-        provider_getter=provider_getter,
-        gateway=gateway or _NoopSessionGateway(),
-        operations=operations if operations is not None else _OperationsHolder(),
+        root_session_id=config.root_session_id or config.session_id,
+        parent_session_id=config.parent_session_id,
+        purpose=config.purpose,
+        scenario=config.scenario,
+        lineage=config.lineage,
+        experiment=config.experiment,
+        session=config.session,
+        tools=config.tools,
+        commands=config.commands,
+        providers=config.providers,
+        renderers=config.renderers,
+        inbox=config.inbox,
+        model_getter=config.model_getter,
+        provider_getter=config.provider_getter,
+        gateway=config.gateway or _NoopSessionGateway(),
+        operations=(
+            config.operations if config.operations is not None else _OperationsHolder()
+        ),
         project_layout=resolved_layout,
-        catalog=catalog or default_catalog_service(),
-        child_session_factory=child_session_factory or _NoopChildSessionFactory(),
+        catalog=config.catalog or default_catalog_service(),
+        child_session_factory=config.child_session_factory or _NoopChildSessionFactory(),
         resource_writer=_ResourceWriterHolder(
-            resource_writer
-            or GitBackedResourceWriter(cwd=resolved_cwd, session_id=session_id, bus=bus)
+            config.resource_writer
+            or GitBackedResourceWriter(
+                cwd=resolved_cwd,
+                session_id=config.session_id,
+                bus=config.bus,
+            )
         ),
         telemetry=_SessionTelemetryHolder(
-            telemetry_factory
+            config.telemetry_factory
             or _default_session_telemetry_factory(
                 cwd=resolved_cwd,
-                session_id=session_id,
-                scenario=scenario,
-                file_path=session_file,
+                session_id=config.session_id,
+                scenario=config.scenario,
+                file_path=config.session_file,
             ),
-            bus=bus,
+            bus=config.bus,
         ),
-        service_registry=service_registry if service_registry is not None else {},
+        service_registry=(
+            config.service_registry if config.service_registry is not None else {}
+        ),
     )
 
 
@@ -851,6 +867,7 @@ __all__ = [
     "CommandSpec",
     "ExtensionAPI",
     "ExtensionAPIScope",
+    "ExtensionAPIScopeConfig",
     "ExtensionFactory",
     "ExtensionLoadError",
     "ExtensionStaleError",

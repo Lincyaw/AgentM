@@ -38,6 +38,7 @@ from agentm.core.abi.events import (
 )
 from agentm.core.runtime.extension import (
     CommandSpec,
+    ExtensionAPIScopeConfig,
     ExtensionLoadError,
     ProviderConfig,
     ReadonlySession,
@@ -408,29 +409,31 @@ async def create_agent_session(
     )
 
     scope = build_extension_api_scope(
-        bus=bus,
-        cwd=config.cwd,
-        scenario_dir=config.scenario_dir,
-        session_id=session_id,
-        root_session_id=root_session_id,
-        parent_session_id=config.parent_session_id,
-        purpose=config.purpose,
-        scenario=config.scenario,
-        lineage=config.lineage,
-        experiment=config.experiment,
-        session=session_view,
-        tools=tools,
-        commands=commands,
-        providers=providers,
-        renderers=renderers,
-        inbox=inbox,
-        model_getter=_model_getter,
-        provider_getter=_provider_getter,
-        gateway=reloader,
-        child_session_factory=child_session_fn,
-        resource_writer=resource_writer,
-        session_file=session_manager.session_file,
-        service_registry=services,
+        ExtensionAPIScopeConfig(
+            bus=bus,
+            cwd=config.cwd,
+            scenario_dir=config.scenario_dir,
+            session_id=session_id,
+            root_session_id=root_session_id,
+            parent_session_id=config.parent_session_id,
+            purpose=config.purpose,
+            scenario=config.scenario,
+            lineage=config.lineage,
+            experiment=config.experiment,
+            session=session_view,
+            tools=tools,
+            commands=commands,
+            providers=providers,
+            renderers=renderers,
+            inbox=inbox,
+            model_getter=_model_getter,
+            provider_getter=_provider_getter,
+            gateway=reloader,
+            child_session_factory=child_session_fn,
+            resource_writer=resource_writer,
+            session_file=session_manager.session_file,
+            service_registry=services,
+        )
     )
 
     api_factory = partial(_make_api, scope=scope, reloader=reloader, apis=apis)
