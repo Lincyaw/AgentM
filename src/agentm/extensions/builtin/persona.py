@@ -34,6 +34,7 @@ from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 
 _DEFAULT_FILES: Final = ("SOUL.md", "IDENTITY.md", "USER.md")
 
+
 class PersonaConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -41,6 +42,7 @@ class PersonaConfig(BaseModel):
     files: list[str] | None = None
     max_tokens: int = Field(gt=0)
     defaults: dict[str, str] | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="persona",
@@ -55,13 +57,16 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
+
 def _resolve_dir(cwd: str, raw: str) -> Path:
     return expand_path_from_cwd(raw, cwd).resolve()
+
 
 def _heading(filename: str) -> str:
     """`SOUL.md` -> `## Soul`; keeps the label human and source-traceable."""
     stem = Path(filename).stem.replace("_", " ").replace("-", " ").strip()
     return f"## {stem.title()}" if stem else f"## {filename}"
+
 
 async def _read_file(
     writer: Any,
@@ -84,9 +89,9 @@ async def _read_file(
     if not truncated.was_truncated:
         return text
     return (
-        truncated.text
-        + f"\n... ({truncated.truncated_tokens} more tokens truncated)"
+        truncated.text + f"\n... ({truncated.truncated_tokens} more tokens truncated)"
     )
+
 
 async def _build_block(
     writer: Any,
@@ -111,11 +116,13 @@ async def _build_block(
         + "\n\n".join(sections)
     )
 
+
 def _cwd_relative(path: Path, cwd: str) -> str:
     try:
         return str(path.resolve().relative_to(expand_path(cwd).resolve()))
     except ValueError:
         return str(path)
+
 
 async def _seed_defaults(
     writer: Any,
@@ -143,21 +150,43 @@ async def _seed_defaults(
             logger.warning("persona: failed to seed identity file {}: {}", path, exc)
             continue
 
-def install(api: ExtensionAPI, config: PersonaConfig) -> None:
-    base = _resolve_dir(api.cwd, config.dir or ".")
-    files = tuple(config.files) if config.files is not None else _DEFAULT_FILES
-    max_tokens = config.max_tokens
-    defaults = dict(config.defaults) if config.defaults is not None else {}
-    writer = api.get_resource_writer()
-    seeded = {"done": False}
 
-    async def _before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str] | None:
-        if defaults and not seeded["done"]:
-            seeded["done"] = True
-            await _seed_defaults(writer, base, api.cwd, files, defaults)
+class _PersonaRuntime:
+    def __init__(self, api: ExtensionAPI, config: PersonaConfig) -> None:
+        self._api = api
+        self._base = _resolve_dir(api.cwd, config.dir or ".")
+        self._files = (
+            tuple(config.files) if config.files is not None else _DEFAULT_FILES
+        )
+        self._max_tokens = config.max_tokens
+        self._defaults = dict(config.defaults) if config.defaults is not None else {}
+        self._writer = api.get_resource_writer()
+        self._seeded = False
 
-        model_name = api.model.id if api.model is not None else None
-        block = await _build_block(writer, base, files, max_tokens, model_name)
+    def install(self) -> None:
+        self._api.on(BeforeAgentStartEvent.CHANNEL, self.before_agent_start)
+
+    async def before_agent_start(
+        self, event: BeforeAgentStartEvent
+    ) -> dict[str, str] | None:
+        if self._defaults and not self._seeded:
+            self._seeded = True
+            await _seed_defaults(
+                self._writer,
+                self._base,
+                self._api.cwd,
+                self._files,
+                self._defaults,
+            )
+
+        model_name = self._api.model.id if self._api.model is not None else None
+        block = await _build_block(
+            self._writer,
+            self._base,
+            self._files,
+            self._max_tokens,
+            model_name,
+        )
         if not block:
             return None
         current = str(event.system or "")
@@ -173,4 +202,6 @@ def install(api: ExtensionAPI, config: PersonaConfig) -> None:
         event.system = updated
         return {"system": updated}
 
-    api.on(BeforeAgentStartEvent.CHANNEL, _before_agent_start)
+
+def install(api: ExtensionAPI, config: PersonaConfig) -> None:
+    _PersonaRuntime(api, config).install()
