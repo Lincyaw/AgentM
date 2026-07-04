@@ -1750,8 +1750,11 @@ requirements:
       interface when present, reuse a task's reported ARL session for verifier
       and follow-up
       worker calls within the same workflow pass, require a visible remote
-      branch or PR before accepting a coder success, and persist each worker's
-      final free-text report as the delivery artifact. Verifier-passed remote
+      branch or PR before accepting a coder success, collect schema-constrained
+      worker result envelopes for status and delivery metadata when
+      ``submit_result`` is available, return that structured status to the main
+      orchestrator, and persist canonical Markdown reports as the filesystem
+      delivery artifacts. Verifier-passed remote
       branches or PRs must move to a verified queue instead of done; a separate
       ARL-backed merge
       workflow must serialize merges by repo/base, delegate rebase and GitHub

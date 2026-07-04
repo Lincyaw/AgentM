@@ -122,6 +122,11 @@ extensions:
         `state_dir`; the workflow loads repo/base/agent_env defaults from
         `<state_dir>/config.toml`. Pass explicit args only when overriding the
         saved project defaults.
+        After each workflow call, first inspect the returned `results` array:
+        it contains structured task status plus coder/verifier or merge
+        metadata. Use the filesystem queues and Markdown artifacts for durable
+        audit detail, not as the primary status parser when structured fields
+        are present.
 
         To merge verified PRs, run:
         `contrib/scenarios/workgraph/workflow/merge.py`. Normally pass only

@@ -9,6 +9,7 @@ those responses under the local state directory. Verified tasks move to
 ``verified/``; only the merge workflow moves tasks to ``done/`` after they
 land in the base branch.
 """
+
 from __future__ import annotations
 
 import os
@@ -18,10 +19,11 @@ import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from agentm.core.lib import expand_path_from_cwd
 from agentm.extensions.builtin.workflow import WorkflowContext
+from pydantic import BaseModel, Field
 
 DEFAULT_STATE_DIR = ".agentm/workgraph"
 DEFAULT_CODER_SCENARIO = "workgraph/agents/coder"
@@ -47,6 +49,39 @@ class ClaimedTask:
     task: TaskFile
     running_path: Path
     lock_paths: list[Path]
+
+
+class CoderReport(BaseModel):
+    status: Literal["success", "failed", "conflict"] = Field(
+        description="Coder delivery status."
+    )
+    agent_env_session: str = Field(
+        default="",
+        description="ARL agent_env session id to reuse for verifier calls, or none.",
+    )
+    branch: str = Field(default="", description="Local or remote delivery branch.")
+    commit: str = Field(default="", description="Delivery commit sha.")
+    remote: str = Field(
+        default="",
+        description="Pushed remote branch name or URL; required for success unless PR is set.",
+    )
+    pr: str = Field(default="", description="Pull request URL or number.")
+    report: str = Field(
+        description="Human-readable markdown report with changed files, validation, and notes."
+    )
+
+
+class VerifierReport(BaseModel):
+    status: Literal["passed", "failed"] = Field(
+        description="Independent verification status."
+    )
+    agent_env_session: str = Field(
+        default="",
+        description="ARL agent_env session id used for verification, or none.",
+    )
+    report: str = Field(
+        description="Human-readable markdown report with commands and evidence."
+    )
 
 
 def _as_str(value: object, default: str = "") -> str:
@@ -328,17 +363,105 @@ def _is_noneish(value: str) -> bool:
     return not value.strip() or value.strip().lower() in {"none", "null", "n/a", "-"}
 
 
-def _remote_delivery_present(text: str) -> bool:
+def _report_display_value(value: str) -> str:
+    return "none" if _is_noneish(value) else value.strip()
+
+
+def _report_optional_value(value: str) -> str | None:
+    return None if _is_noneish(value) else value.strip()
+
+
+def _drop_leading_report_header(text: str, names: set[str]) -> str:
+    lines = text.strip().splitlines()
+    index = 0
+    saw_header = False
+    while index < len(lines):
+        raw_line = lines[index]
+        key, separator, _value = raw_line.partition(":")
+        if separator and key.strip().lower() in names:
+            saw_header = True
+            index += 1
+            continue
+        if saw_header and not raw_line.strip():
+            index += 1
+            break
+        break
+    return "\n".join(lines[index:]).strip()
+
+
+def _structured_report_text(
+    fields: list[tuple[str, str]],
+    body: str,
+) -> str:
+    header = "\n".join(
+        f"{name}: {_report_display_value(value)}" for name, value in fields
+    )
+    names = {name.lower() for name, _value in fields}
+    clean_body = _drop_leading_report_header(body, names)
+    return f"{header}\n\n{clean_body}" if clean_body else header
+
+
+def _coder_report_text(result: object) -> str:
+    if isinstance(result, CoderReport):
+        return _structured_report_text(
+            [
+                ("Status", result.status),
+                ("AgentEnvSession", result.agent_env_session),
+                ("Branch", result.branch),
+                ("Commit", result.commit),
+                ("Remote", result.remote),
+                ("PR", result.pr),
+            ],
+            result.report,
+        )
+    return str(result)
+
+
+def _verifier_report_text(result: object) -> str:
+    if isinstance(result, VerifierReport):
+        return _structured_report_text(
+            [
+                ("Status", result.status),
+                ("AgentEnvSession", result.agent_env_session),
+            ],
+            result.report,
+        )
+    return str(result)
+
+
+def _agent_env_session_from_result(result: object, text: str) -> str:
+    if isinstance(result, (CoderReport, VerifierReport)):
+        value = result.agent_env_session
+    else:
+        value = _agent_env_session_from_report(text)
+    return "" if _is_noneish(value) else value.strip()
+
+
+def _remote_delivery_present(text: str, *, remote: str = "", pr: str = "") -> bool:
     return not (
-        _is_noneish(_report_field(text, "remote"))
-        and _is_noneish(_report_field(text, "pr"))
+        _is_noneish(remote or _report_field(text, "remote"))
+        and _is_noneish(pr or _report_field(text, "pr"))
     )
 
 
-def _coerce_coder_status(coder_status: str, coder_text: str) -> tuple[str, str | None]:
+def _coerce_coder_status(
+    coder_status: str,
+    coder_text: str,
+    *,
+    remote: str = "",
+    pr: str = "",
+) -> tuple[str, str | None]:
+    if coder_status not in {"success", "failed", "conflict"}:
+        return (
+            "failed",
+            (
+                f"Coder reported unrecognized status {coder_status or 'unknown'!r}; "
+                "expected success, failed, or conflict."
+            ),
+        )
     if coder_status != "success":
         return coder_status, None
-    if _remote_delivery_present(coder_text):
+    if _remote_delivery_present(coder_text, remote=remote, pr=pr):
         return coder_status, None
     return (
         "failed",
@@ -347,6 +470,45 @@ def _coerce_coder_status(coder_status: str, coder_text: str) -> tuple[str, str |
             "Sandbox-local commits are not a WorkGraph delivery."
         ),
     )
+
+
+def _coder_summary(
+    result: object,
+    text: str,
+    status: str,
+) -> dict[str, object]:
+    if isinstance(result, CoderReport):
+        branch = result.branch
+        commit = result.commit
+        remote = result.remote
+        pr = result.pr
+    else:
+        branch = _report_field(text, "Branch")
+        commit = _report_field(text, "Commit")
+        remote = _report_field(text, "Remote")
+        pr = _report_field(text, "PR")
+    return {
+        "status": status,
+        "branch": _report_optional_value(branch),
+        "commit": _report_optional_value(commit),
+        "remote": _report_optional_value(remote),
+        "pr": _report_optional_value(pr),
+    }
+
+
+def _verifier_summary(
+    result: object,
+    text: str,
+    status: str,
+) -> dict[str, object]:
+    if isinstance(result, VerifierReport):
+        agent_env_session = result.agent_env_session
+    else:
+        agent_env_session = _agent_env_session_from_report(text)
+    return {
+        "status": status,
+        "agent_env_session": _report_optional_value(agent_env_session),
+    }
 
 
 def _result_dir(root: Path, task: TaskFile) -> Path:
@@ -480,7 +642,9 @@ def _operations_config_from_config(
         config.update(raw)
     backend = config.get("backend", "agent_env")
     if backend != "agent_env":
-        raise ValueError("WorkGraph development workers require operations backend 'agent_env'")
+        raise ValueError(
+            "WorkGraph development workers require operations backend 'agent_env'"
+        )
     config["backend"] = "agent_env"
     config["delete_on_shutdown"] = False
     _forward_git_env(config)
@@ -598,17 +762,32 @@ async def _run_one(
                 _context_for_task(task, "coder"),
             ),
             timeout=timeout,
+            schema=CoderReport,
+            retry=1,
             trace_label=f"{task.task_id}:coder",
         )
-        coder_text = str(coder_result)
-        coder_status = _status(coder_text)
+        coder_text = _coder_report_text(coder_result)
+        coder_status: str
+        if isinstance(coder_result, CoderReport):
+            coder_status = coder_result.status
+            coder_remote = coder_result.remote
+            coder_pr = coder_result.pr
+        else:
+            coder_status = _status(coder_text)
+            coder_remote = _report_field(coder_text, "Remote")
+            coder_pr = _report_field(coder_text, "PR")
         coder_status, delivery_error = _coerce_coder_status(
             coder_status,
             coder_text,
+            remote=coder_remote,
+            pr=coder_pr,
         )
         agent_env_session = (
-            _agent_env_session_from_report(coder_text) or agent_env_session
+            _agent_env_session_from_result(coder_result, coder_text)
+            or agent_env_session
         )
+        verifier_status = "failed"
+        verifier_result: object | None = None
 
         if coder_status == "conflict":
             verifier_text = (
@@ -636,16 +815,21 @@ async def _run_one(
                     ),
                 ),
                 timeout=timeout,
+                schema=VerifierReport,
+                retry=1,
                 trace_label=f"{task.task_id}:verifier",
             )
-            verifier_text = str(verifier_result)
+            verifier_text = _verifier_report_text(verifier_result)
             agent_env_session = (
-                _agent_env_session_from_report(verifier_text)
+                _agent_env_session_from_result(verifier_result, verifier_text)
                 or agent_env_session
             )
-            final_status = (
-                "verified" if _status(verifier_text) == "passed" else "failed"
+            verifier_status = (
+                verifier_result.status
+                if isinstance(verifier_result, VerifierReport)
+                else _status(verifier_text)
             )
+            final_status = "verified" if verifier_status == "passed" else "failed"
 
         _write_result(root, task, coder_text, verifier_text, agent_env_session)
         target = _move_finished(root, claim, final_status)
@@ -657,10 +841,20 @@ async def _run_one(
             "coder_status": coder_status,
             "agent_env_session": agent_env_session or None,
             "result_dir": str(_result_dir(root, task)),
+            "coder": _coder_summary(coder_result, coder_text, coder_status),
+            "verifier": _verifier_summary(
+                verifier_result,
+                verifier_text,
+                verifier_status,
+            ),
         }
     except Exception as exc:
-        ctx.log(f"{task.task_id}: development workflow failed: {type(exc).__name__}: {exc}")
-        coder_text = f"Status: failed\n\nWorkflow exception: {type(exc).__name__}: {exc}"
+        ctx.log(
+            f"{task.task_id}: development workflow failed: {type(exc).__name__}: {exc}"
+        )
+        coder_text = (
+            f"Status: failed\n\nWorkflow exception: {type(exc).__name__}: {exc}"
+        )
         verifier_text = "Status: failed\n\nVerifier was not completed."
         _write_result(root, task, coder_text, verifier_text, agent_env_session)
         target = _move_finished(root, claim, "failed")

@@ -189,8 +189,15 @@ The workflow does not perform git operations for the worker. The coder runs in
 its own ARL sandbox and is expected to clone, branch, commit, push, and open or
 update a PR when `gh` is available. A sandbox-local commit is not a delivery:
 `Status: success` requires a remote branch visible to the verifier. `PR:` may
-be `none`; the merge agent creates the PR later when needed. Its final response
-must begin with one of:
+be `none`; the merge agent creates the PR later when needed.
+
+When a worker is called by the workflow, it receives a structured
+`submit_result` schema. The workflow treats that structured result as the
+source of truth for status and delivery fields, returns those fields to the
+main agent in the workflow tool result, and still writes canonical Markdown
+reports for compatibility with the filesystem bus. If a worker runs without
+structured output, the same Markdown header remains the fallback contract. The
+coder report must begin with one of:
 
 ```text
 Status: success

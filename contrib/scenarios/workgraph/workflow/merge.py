@@ -5,6 +5,7 @@ WorkGraph filesystem task bus. It claims verified tasks, serializes merges for
 the same repo/base through a filesystem lock, and delegates all git/GitHub
 operations to a short-lived merger agent running in ARL agent_env.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -15,10 +16,11 @@ import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from agentm.core.lib import expand_path_from_cwd
 from agentm.extensions.builtin.workflow import WorkflowContext
+from pydantic import BaseModel, Field
 
 DEFAULT_STATE_DIR = ".agentm/workgraph"
 DEFAULT_MERGER_SCENARIO = "workgraph/agents/merger"
@@ -44,6 +46,27 @@ class ClaimedMergeTask:
     merging_path: Path
     source_queue: str
     lock_paths: list[Path]
+
+
+class MergeReport(BaseModel):
+    status: Literal[
+        "merged",
+        "auto_merge",
+        "failed",
+        "conflict",
+        "needs_human",
+        "pending",
+    ] = Field(description="Merge outcome for the verified delivery.")
+    agent_env_session: str = Field(
+        default="",
+        description="ARL agent_env session id used for merge operations, or none.",
+    )
+    pr: str = Field(default="", description="Pull request URL or number.")
+    branch: str = Field(default="", description="Delivery branch merged or pending.")
+    merged_commit: str = Field(default="", description="Merged commit sha, or none.")
+    report: str = Field(
+        description="Human-readable markdown report with commands, blockers, and evidence."
+    )
 
 
 def _as_str(value: object, default: str = "") -> str:
@@ -319,6 +342,19 @@ def _merge_status(text: object) -> str:
     return "unknown"
 
 
+def _normalize_merge_status(status: str) -> str:
+    if status in {
+        "merged",
+        "auto_merge",
+        "pending",
+        "failed",
+        "conflict",
+        "needs_human",
+    }:
+        return status
+    return "failed"
+
+
 def _report_field(text: str, name: str) -> str:
     target = name.lower()
     for raw_line in text.splitlines():
@@ -330,6 +366,91 @@ def _report_field(text: str, name: str) -> str:
 
 def _is_noneish(value: str) -> bool:
     return not value.strip() or value.strip().lower() in {"none", "null", "n/a", "-"}
+
+
+def _report_display_value(value: str) -> str:
+    return "none" if _is_noneish(value) else value.strip()
+
+
+def _report_optional_value(value: str) -> str | None:
+    return None if _is_noneish(value) else value.strip()
+
+
+def _drop_leading_report_header(text: str, names: set[str]) -> str:
+    lines = text.strip().splitlines()
+    index = 0
+    saw_header = False
+    while index < len(lines):
+        raw_line = lines[index]
+        key, separator, _value = raw_line.partition(":")
+        if separator and key.strip().lower() in names:
+            saw_header = True
+            index += 1
+            continue
+        if saw_header and not raw_line.strip():
+            index += 1
+            break
+        break
+    return "\n".join(lines[index:]).strip()
+
+
+def _structured_report_text(
+    fields: list[tuple[str, str]],
+    body: str,
+) -> str:
+    header = "\n".join(
+        f"{name}: {_report_display_value(value)}" for name, value in fields
+    )
+    names = {name.lower() for name, _value in fields}
+    clean_body = _drop_leading_report_header(body, names)
+    return f"{header}\n\n{clean_body}" if clean_body else header
+
+
+def _merge_report_text(result: object) -> str:
+    if isinstance(result, MergeReport):
+        return _structured_report_text(
+            [
+                ("Status", result.status),
+                ("AgentEnvSession", result.agent_env_session),
+                ("PR", result.pr),
+                ("Branch", result.branch),
+                ("MergedCommit", result.merged_commit),
+            ],
+            result.report,
+        )
+    return str(result)
+
+
+def _agent_env_session_from_result(result: object, text: str) -> str:
+    if isinstance(result, MergeReport):
+        value = result.agent_env_session
+    else:
+        value = _agent_env_session_from_report(text)
+    return "" if _is_noneish(value) else value.strip()
+
+
+def _merge_summary(
+    result: object,
+    text: str,
+    status: str,
+) -> dict[str, object]:
+    if isinstance(result, MergeReport):
+        pr = result.pr
+        branch = result.branch
+        merged_commit = result.merged_commit
+        agent_env_session = result.agent_env_session
+    else:
+        pr = _report_field(text, "PR")
+        branch = _report_field(text, "Branch")
+        merged_commit = _report_field(text, "MergedCommit")
+        agent_env_session = _agent_env_session_from_report(text)
+    return {
+        "status": status,
+        "pr": _report_optional_value(pr),
+        "branch": _report_optional_value(branch),
+        "merged_commit": _report_optional_value(merged_commit),
+        "agent_env_session": _report_optional_value(agent_env_session),
+    }
 
 
 def _result_dir(root: Path, task: TaskFile) -> Path:
@@ -475,7 +596,9 @@ def _operations_config_from_config(
         config.update(raw)
     backend = config.get("backend", "agent_env")
     if backend != "agent_env":
-        raise ValueError("WorkGraph merge agents require operations backend 'agent_env'")
+        raise ValueError(
+            "WorkGraph merge agents require operations backend 'agent_env'"
+        )
     config["backend"] = "agent_env"
     config["delete_on_shutdown"] = False
     _forward_git_env(config)
@@ -577,11 +700,21 @@ async def _run_one(
                 _context_for_task(root, claim),
             ),
             timeout=timeout,
+            schema=MergeReport,
+            retry=1,
             trace_label=f"{task.task_id}:merger",
         )
-        merger_text = str(merger_result)
-        merge_status = _merge_status(merger_text)
-        agent_env_session = _agent_env_session_from_report(merger_text)
+        merger_text = _merge_report_text(merger_result)
+        merge_status_raw: str = (
+            merger_result.status
+            if isinstance(merger_result, MergeReport)
+            else _merge_status(merger_text)
+        )
+        merge_status = _normalize_merge_status(merge_status_raw)
+        agent_env_session = _agent_env_session_from_result(
+            merger_result,
+            merger_text,
+        )
 
         _write_merge_result(root, task, merger_text, agent_env_session)
         target = _move_finished(root, claim, merge_status)
@@ -593,10 +726,13 @@ async def _run_one(
             "source_queue": claim.source_queue,
             "agent_env_session": agent_env_session or None,
             "result_dir": str(_result_dir(root, task)),
+            "merge": _merge_summary(merger_result, merger_text, merge_status),
         }
     except Exception as exc:
         ctx.log(f"{task.task_id}: merge workflow failed: {type(exc).__name__}: {exc}")
-        merger_text = f"Status: failed\n\nWorkflow exception: {type(exc).__name__}: {exc}"
+        merger_text = (
+            f"Status: failed\n\nWorkflow exception: {type(exc).__name__}: {exc}"
+        )
         _write_merge_result(root, task, merger_text, agent_env_session)
         target = _move_finished(root, claim, "failed")
         return {

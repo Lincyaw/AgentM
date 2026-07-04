@@ -52,6 +52,13 @@ extensions:
 
         Final response format:
 
+        In workflow calls the `submit_result` tool is available; call it
+        exactly once with fields matching this contract: `status`,
+        `agent_env_session`, `branch`, `commit`, `remote`, `pr`, and `report`.
+        Put the human-readable markdown sections below in `report`; the
+        workflow will prepend the canonical status fields before writing
+        `result.md`.
+
         Status: success | failed | conflict
         AgentEnvSession: <agent_env.session_id or none>
         Branch: <branch or none>

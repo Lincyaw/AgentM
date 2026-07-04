@@ -81,6 +81,13 @@ extensions:
 
         Final response format:
 
+        In workflow calls the `submit_result` tool is available; call it
+        exactly once with fields matching this contract: `status`,
+        `agent_env_session`, `pr`, `branch`, `merged_commit`, and `report`.
+        Put the human-readable markdown sections below in `report`; the
+        workflow will prepend the canonical status fields before writing
+        `merge.md`.
+
         Status: merged | auto_merge | failed | conflict | needs_human
         AgentEnvSession: <agent_env.session_id or none>
         PR: <url or number>
