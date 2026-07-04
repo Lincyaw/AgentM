@@ -21,7 +21,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentm.core.lib import agentm_home_dir
+from agentm.core.lib import agentm_home_dir, expand_path
 from loguru import logger
 
 from .protocol import (
@@ -106,8 +106,9 @@ def walk_skill_dirs(
     """Yield ``(skill_dir, name)`` for each ``<dir>/SKILL.md`` found.
 
     Order: configured extras first, then AgentM project/user dirs, then
-    Claude-compatible project/user dirs. The registry dedups by name so the
-    extras win on collision.
+    Claude-compatible project/user dirs. Path-like extras may use ``~`` and
+    environment variables. The registry dedups by name so the extras win on
+    collision.
     """
     seen_dirs: set[Path] = set()
     sources: list[Path] = [Path(p) for p in extra]
@@ -118,7 +119,7 @@ def walk_skill_dirs(
         sources.append(Path.home() / ".claude" / "skills")
     for root in sources:
         try:
-            resolved = root.expanduser().resolve()
+            resolved = expand_path(root).resolve()
         except OSError:
             continue
         if resolved in seen_dirs or not resolved.is_dir():
