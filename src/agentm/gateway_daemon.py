@@ -24,11 +24,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from agentm.core.lib.paths import expand_path as _expand_path
 from agentm.core.lib.user_config import agentm_home_dir
-
-
-def _expand_path(path: Path | str) -> Path:
-    return Path(os.path.expandvars(str(path))).expanduser()
 
 
 class GatewayDaemonError(RuntimeError):

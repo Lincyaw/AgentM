@@ -15,6 +15,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from agentm.core.lib import expand_path as _expand_path
 from agentm.core.lib import agentm_home_dir
 from loguru import logger
 
@@ -23,10 +24,6 @@ from .adapter import FeishuConfig
 
 def _agentm_home() -> Path:
     return agentm_home_dir()
-
-
-def _expand_path(path: str) -> Path:
-    return Path(os.path.expandvars(path)).expanduser()
 
 
 def _read_secret(raw: dict[str, Any], bot_name: str) -> str | None:

@@ -20,6 +20,11 @@ from agentm.core.lib.background_tasks import (
 )
 from agentm.core.lib.frontmatter import parse_frontmatter
 from agentm.core.lib.observability_dir import file_export_requested, resolve_observability_dir
+from agentm.core.lib.paths import (
+    expand_optional_path_text,
+    expand_path,
+    expand_path_text,
+)
 from agentm.core.lib.read_state import (
     FileReadState,
     bind_session as bind_read_state_session,
@@ -67,6 +72,9 @@ __all__ = [
     "count_text_tokens",
     "encode_tool_args",
     "enumerate_turns",
+    "expand_optional_path_text",
+    "expand_path",
+    "expand_path_text",
     "file_export_requested",
     "file_modified_since_read",
     "final_summary",

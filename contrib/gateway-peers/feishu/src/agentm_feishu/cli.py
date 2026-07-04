@@ -37,12 +37,12 @@ import signal
 import sys
 import uuid
 import warnings
-from pathlib import Path
 from types import FrameType
 from typing import Annotated
 
 import typer
 
+from agentm.core.lib.paths import expand_path_text as _expand_path_text
 from agentm.gateway import autoload_dotenv, default_socket_url
 from agentm.gateway.client import AuthError, WireClient
 from agentm.gateway.client_cli import ConnectError, ConnectOptions, resolve_connect
@@ -73,10 +73,6 @@ EXIT_SIGINT = 6
 EXIT_CONNECT = 7
 
 PROG = "agentm-feishu"
-
-
-def _expand_path_text(path: str) -> str:
-    return str(Path(os.path.expandvars(path)).expanduser())
 
 
 def _err(kind: str, root: str, fix: str) -> None:

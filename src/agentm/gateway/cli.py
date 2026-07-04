@@ -27,6 +27,10 @@ from urllib.parse import ParseResult, urlparse
 import typer
 from loguru import logger
 
+from agentm.core.lib.paths import (
+    expand_optional_path_text as _expand_path_text,
+    expand_path as _expand_path,
+)
 from agentm.env import resolve_cli_cwd
 from agentm.gateway import autoload_dotenv, default_socket_url, load_token_file
 from agentm.gateway.auth import (
@@ -58,19 +62,6 @@ PROG = "agentm gateway"
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
 EXIT_SIGINT = 130
-
-
-def _expand_path(path: Path | str) -> Path:
-    return Path(os.path.expandvars(str(path))).expanduser()
-
-
-def _expand_path_text(path: Path | str | None) -> str | None:
-    if path is None:
-        return None
-    raw_path = str(path)
-    if not raw_path:
-        return None
-    return str(_expand_path(raw_path))
 
 
 def _restore_terminal() -> None:

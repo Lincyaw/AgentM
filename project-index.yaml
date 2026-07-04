@@ -1052,6 +1052,7 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/core/lib/user_config.py
+      - path: src/agentm/core/lib/paths.py
       - path: src/agentm/core/lib/observability_dir.py
       - path: src/agentm/env.py
       - path: src/agentm/cli.py

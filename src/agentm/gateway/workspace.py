@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import re
 import tomllib
-from os.path import expandvars
 from pathlib import Path
 
 from loguru import logger
 
+from agentm.core.lib.paths import expand_path
 from agentm.core.lib.user_config import agentm_home_dir
 
 _AGENTM_HOME_ENV = re.compile(r"\$AGENTM_HOME\b")
@@ -32,7 +32,7 @@ def _expand_config_path(path: str) -> Path:
     home = str(agentm_home_dir())
     expanded = path.replace("${AGENTM_HOME}", home)
     expanded = _AGENTM_HOME_ENV.sub(home, expanded)
-    return Path(expandvars(expanded)).expanduser().resolve()
+    return expand_path(expanded).resolve()
 
 
 class WorkspaceResolver:

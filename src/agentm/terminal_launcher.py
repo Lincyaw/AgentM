@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
+from agentm.core.lib.paths import expand_path as _expand_path
 from agentm.gateway import load_token_file
 from agentm.gateway_daemon import (
     GatewayDaemonConfig,
@@ -27,10 +28,6 @@ from agentm.gateway_daemon import (
 
 class TerminalLaunchError(RuntimeError):
     """Raised when the local gateway or terminal peer cannot be launched."""
-
-
-def _expand_path(path: Path | str) -> Path:
-    return Path(os.path.expandvars(str(path))).expanduser()
 
 
 @dataclass(slots=True)

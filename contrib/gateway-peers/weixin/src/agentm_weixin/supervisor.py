@@ -24,16 +24,12 @@ import sys
 import textwrap
 from pathlib import Path
 
-from agentm.core.lib import agentm_home_dir
+from agentm.core.lib import agentm_home_dir, expand_path as _expand_path
 from loguru import logger
 
 
 def _state_dir() -> Path:
     return agentm_home_dir() / "weixin"
-
-
-def _expand_path(path: str) -> Path:
-    return Path(os.path.expandvars(path)).expanduser()
 
 
 def _log_dir() -> Path:

@@ -7,12 +7,12 @@ help text consistent and the error messages identical.
 
 from __future__ import annotations
 
-import os
 import ssl
 from dataclasses import dataclass
-from pathlib import Path
 from urllib.parse import ParseResult
 from urllib.parse import urlparse
+
+from agentm.core.lib.paths import expand_path_text as _expand_path_text
 
 from .transport import ClientTransport, UnixClientTransport, WebSocketClientTransport
 
@@ -41,10 +41,6 @@ class ConnectOptions:
     connect: str
     token: str | None = None
     tls_ca: str | None = None
-
-
-def _expand_path_text(path: str) -> str:
-    return str(Path(os.path.expandvars(path)).expanduser())
 
 
 def _unix_socket_path_text(parsed: ParseResult) -> str:

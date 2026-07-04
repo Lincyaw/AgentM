@@ -17,9 +17,7 @@ chat-client peers):
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
+from agentm.core.lib.paths import expand_path
 from agentm.env import autoload_dotenv
 from agentm.gateway_daemon import default_daemon_connect_url
 
@@ -44,7 +42,7 @@ DEFAULT_SOCKET_URL = default_socket_url()
 def load_token_file(token_file: str, *, option_name: str = "--token-file") -> tuple[str, ...]:
     """Load non-empty, non-comment bearer tokens from a token file."""
 
-    path = Path(os.path.expandvars(token_file)).expanduser()
+    path = expand_path(token_file)
     try:
         content = path.read_text(encoding="utf-8")
     except OSError as exc:
