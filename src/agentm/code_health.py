@@ -11,8 +11,9 @@ Rules:
   requires every catch to surface the error.
 - **AM002** ``missing-slots``: ``@dataclass`` without ``slots=True`` on
   Python 3.12+. Zero-cost optimization + prevents accidental attr assignment.
-- **AM003** ``private-in-all``: ``_``-prefixed names in ``__all__``. Either
-  the name is public (drop the underscore) or private (drop from ``__all__``).
+- **AM003** ``private-in-all``: ``_``-prefixed names in ``__all__``. Standard
+  module metadata dunders such as ``__version__`` are allowed; other names are
+  either public (drop the underscore) or private (drop from ``__all__``).
 - **AM004** ``atom-raw-io``: ``open()`` / ``subprocess`` calls inside atom
   files. Atoms must use ``Operations`` (file/bash) so sandbox isolation works.
 - **AM005** ``param-explosion``: Functions with >15 parameters. Signals a
@@ -93,6 +94,14 @@ _LOG_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 
 _ATOM_BUILTIN_PARTS: Final[tuple[str, str]] = ("extensions", "builtin")
+_PUBLIC_MODULE_METADATA_DUNDERS: Final[frozenset[str]] = frozenset(
+    {
+        "__author__",
+        "__copyright__",
+        "__license__",
+        "__version__",
+    }
+)
 
 
 def _is_atom_file(path: Path) -> bool:
@@ -201,7 +210,10 @@ def _check_private_in_all(tree: ast.Module, path: str) -> list[Issue]:
                 if isinstance(node.value, (ast.List, ast.Tuple)):
                     for elt in node.value.elts:
                         if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                            if elt.value.startswith("_"):
+                            if (
+                                elt.value.startswith("_")
+                                and elt.value not in _PUBLIC_MODULE_METADATA_DUNDERS
+                            ):
                                 issues.append(Issue(
                                     path=path,
                                     line=elt.lineno,
