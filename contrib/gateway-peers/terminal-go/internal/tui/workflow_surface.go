@@ -360,7 +360,7 @@ func (m *appModel) footerText() string {
 	case m.workflowPickerOpen:
 		return "↑/↓ to select · Enter to view"
 	case m.activeIsWorkflowTask():
-		return "Enter to view · x to stop · ctrl+x ctrl+k to stop all agents"
+		return "ctrl+n/p to switch tabs · ↓ to manage tasks"
 	case m.hasBottomActivities():
 		verb := "hide"
 		if m.workflowRowsHidden {
@@ -374,6 +374,17 @@ func (m *appModel) footerText() string {
 		return "bypass permissions on (shift+tab to cycle) · ← for agents"
 	default:
 		return "? for shortcuts · ← for agents"
+	}
+}
+
+func (m *appModel) ctrlTActionLabel() string {
+	switch {
+	case m.hasWorkflowTasks():
+		return "toggle tasks"
+	case m.hasBackgroundActivities():
+		return "toggle activity"
+	default:
+		return "new tab"
 	}
 }
 
@@ -408,15 +419,11 @@ func (m *appModel) renderBottomSurface(width int) string {
 
 func (m *appModel) renderShortcutSheet(width int) string {
 	innerWidth := max(20, width-appPaddingHorizontal)
-	ctrlTHelp := "ctrl + t to new tab"
-	if m.hasBottomActivities() {
-		ctrlTHelp = "ctrl + t to toggle tasks"
-	}
 	rows := [][3]string{
 		{"! for shell mode", "double tap esc to clear input", "ctrl + shift + _ to undo"},
 		{"/ for commands", "shift + tab to auto-accept edits", "ctrl + z to suspend"},
 		{"@ for file paths", "ctrl + o for verbose output", "ctrl + v to paste images"},
-		{"/btw for side question", ctrlTHelp, "opt + p to switch model"},
+		{"/btw for side question", "ctrl + t to " + m.ctrlTActionLabel(), "opt + p to switch model"},
 		{"", "shift + ⏎ for newline", "ctrl + s to stash prompt"},
 		{"", "", "ctrl + g to edit in $EDITOR"},
 		{"", "", "/keybindings to customize"},

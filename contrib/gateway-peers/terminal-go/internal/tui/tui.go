@@ -1943,16 +1943,11 @@ func (m *appModel) AllBindings() []key.Binding {
 	}
 	bindings = append(bindings, m.tabBar.Bindings()...)
 
-	ctrlTHelp := "new tab"
-	if m.hasBottomActivities() {
-		ctrlTHelp = "toggle tasks"
-	}
-
 	// Additional global shortcuts
 	bindings = append(bindings,
 		key.NewBinding(
 			key.WithKeys("ctrl+t"),
-			key.WithHelp("Ctrl+t", ctrlTHelp),
+			key.WithHelp("Ctrl+t", m.ctrlTActionLabel()),
 		),
 		key.NewBinding(
 			key.WithKeys("ctrl+k"),
@@ -2049,7 +2044,7 @@ func (m *appModel) Bindings() []key.Binding {
 		"left":        true, // agents
 		"ctrl+c":      true, // quit
 		"ctrl+k":      true, // commands
-		"ctrl+t":      true, // toggle tasks
+		"ctrl+t":      true, // contextual: new tab, tasks, or activity
 		"ctrl+o":      true, // detailed transcript
 		"ctrl+e":      true, // verbose transcript
 		"shift+enter": true, // newline
