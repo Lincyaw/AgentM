@@ -553,7 +553,6 @@ func (m *appModel) syncTabChrome(tabs []messages.TabInfo, activeIdx int) bool {
 	prevHeight := m.tabBarHeight()
 	m.tabBar.SetTabs(tabs, activeIdx)
 	nextHeight := m.tabBarHeight()
-	m.statusBar.SetShowNewTab(false)
 	if m.tabBar.HasBackgroundTasks(m.mainSessionID) {
 		m.statusBar.SetActivity("")
 	} else {
@@ -2388,11 +2387,6 @@ func (m *appModel) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) 
 		adjustedMsg.X = msg.X - styles.AppPadding
 		adjustedMsg.Y = msg.Y - m.editorTop()
 		return m, tea.Batch(m.updateEditorCmd(adjustedMsg), m.editor.Focus())
-
-	case regionStatusBar:
-		if msg.Button == tea.MouseLeft && m.statusBar.ClickedNewTab(msg.X) {
-			return m.handleSpawnSession("", false)
-		}
 	}
 
 	return m, nil

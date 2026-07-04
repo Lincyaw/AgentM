@@ -11,15 +11,11 @@ import (
 )
 
 // StatusBar displays key-binding help on the left and version info on the right.
-// When the tab bar is hidden (single tab), it also shows a clickable "+ new tab" button.
 type StatusBar struct {
 	width int
 	help  core.KeyMapHelp
 	title string
 
-	showNewTab    bool
-	newTabStartX  int
-	newTabEndX    int
 	activity      string
 	modeLine      string
 	modeLineRight string
@@ -69,14 +65,6 @@ func (s *StatusBar) SetHelp(help core.KeyMapHelp) {
 	s.cacheDirty = true
 }
 
-// SetShowNewTab controls whether the "+" button is shown.
-func (s *StatusBar) SetShowNewTab(show bool) {
-	if s.showNewTab != show {
-		s.showNewTab = show
-		s.cacheDirty = true
-	}
-}
-
 // SetActivity sets the compact background activity label rendered on the
 // right side of the bar.
 func (s *StatusBar) SetActivity(activity string) {
@@ -103,11 +91,6 @@ func (s *StatusBar) SetModeLineRight(modeLineRight string) {
 	}
 }
 
-// ClickedNewTab returns true if the given X coordinate hits the "+" button.
-func (s *StatusBar) ClickedNewTab(x int) bool {
-	return s.showNewTab && x >= s.newTabStartX && x < s.newTabEndX
-}
-
 // Height returns the rendered height of the status bar (always 1).
 func (s *StatusBar) Height() int {
 	return 1
@@ -121,22 +104,11 @@ func (s *StatusBar) InvalidateCache() {
 // rebuild renders the full status bar line and computes click hitboxes.
 func (s *StatusBar) rebuild() {
 	s.cacheDirty = false
-	s.newTabStartX = 0
-	s.newTabEndX = 0
 
-	// Build the styled right side: optional new-tab button, transient status,
-	// activity, and title.
+	// Build the styled right side: transient status, activity, and title.
 	const pad = 1
-	var rightW, newTabW int
+	var rightW int
 	var rightParts []string
-
-	if s.showNewTab {
-		newTab := styles.MutedStyle.Render(" \u2502 ") +
-			styles.HighlightWhiteStyle.Render("+") +
-			styles.SecondaryStyle.Render(" new tab")
-		newTabW = lipgloss.Width(newTab)
-		rightParts = append(rightParts, newTab)
-	}
 
 	if s.modeLineRight != "" {
 		rightParts = append(rightParts, styles.SecondaryStyle.Render(s.modeLineRight))
@@ -190,17 +162,12 @@ func (s *StatusBar) rebuild() {
 
 	gap := max(1, s.width-leftW-rightW-pad)
 
-	if s.showNewTab && rightW >= newTabW {
-		s.newTabStartX = leftW + gap
-		s.newTabEndX = s.newTabStartX + newTabW
-	}
-
 	s.cached = left + strings.Repeat(" ", gap) + right + " "
 }
 
 // View renders the status bar.
 //
-// Layout: [ help text ...           (+ new tab)  AgentM Terminal VERSION ]
+// Layout: [ help text ...           activity  AgentM Terminal VERSION ]
 func (s *StatusBar) View() string {
 	if s.cacheDirty {
 		s.rebuild()
