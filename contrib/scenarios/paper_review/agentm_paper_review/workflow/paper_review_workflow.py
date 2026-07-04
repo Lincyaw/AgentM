@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-from agentm.core.lib import expand_path_from_cwd
-from agentm.extensions.builtin.workflow import WorkflowContext
+from typing import TYPE_CHECKING, Any
 
 from .types import PaperReviewArgs
+
+if TYPE_CHECKING:
+    from agentm.extensions.builtin.workflow import WorkflowContext
 
 TOOL_ALLOWLIST = ["read", "write", "edit", "bash", "load_skill"]
 REVIEW_BUDGET = [
@@ -74,8 +75,15 @@ class RoleArtifact:
     artifact_path: str
 
 
+def _expand_path_from_cwd(path: str, cwd: str) -> Path:
+    expanded = Path(os.path.expandvars(path.strip())).expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return (Path(os.path.expandvars(cwd)).expanduser() / expanded).absolute()
+
+
 def _resolve_input_path(raw: str, cwd: str) -> Path:
-    return expand_path_from_cwd(raw, cwd).resolve(strict=False)
+    return _expand_path_from_cwd(raw, cwd).resolve(strict=False)
 
 
 def _workflow_cwd(ctx: WorkflowContext) -> str:
@@ -103,7 +111,7 @@ def _resolve_output_path(output_path: str | None, cwd: str, input_path: Path) ->
     if output_path is None or not output_path.strip():
         base = input_path if input_path.is_dir() else input_path.parent
         return base / "paper-review-report.md"
-    return expand_path_from_cwd(output_path, cwd)
+    return _expand_path_from_cwd(output_path, cwd)
 
 
 def _resolve_artifact_dir(output_path: Path) -> Path:

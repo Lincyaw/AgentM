@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from agentm.extensions.builtin.workflow import WorkflowContext
+if TYPE_CHECKING:
+    from agentm.extensions.builtin.workflow import WorkflowContext
 
 from .prompts import (
     CODE_REVIEW_TASK,
