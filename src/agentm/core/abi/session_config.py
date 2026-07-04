@@ -45,6 +45,12 @@ class AgentSessionConfig:
     """
 
     cwd: str
+    """Workspace root for the session.
+
+    Runtime construction expands environment variables and ``~`` once at the
+    session boundary, then passes the normalized absolute path to atoms and
+    runtime services.
+    """
     provider: tuple[str, dict[str, Any]] | None = None
     extensions: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     scenario: str | None = None

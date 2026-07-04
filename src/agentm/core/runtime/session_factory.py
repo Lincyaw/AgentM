@@ -102,6 +102,14 @@ def default_child_provider_factory(parent_provider: Any) -> tuple[str, dict[str,
     return (entry.module_path, {PARENT_PROVIDER_CONFIG_KEY: parent_provider})
 
 
+def _session_cwd_path(cwd: str) -> Path:
+    return expand_path(cwd).resolve()
+
+
+def _normalize_session_cwd(cwd: str) -> str:
+    return str(_session_cwd_path(cwd))
+
+
 def apply_child_session_contributions(
     base_extensions: list[tuple[str, dict[str, Any]]],
     handler_returns: list[Any],
@@ -296,6 +304,7 @@ async def create_agent_session(
 ) -> Any:
     from agentm.extensions import discover as discover_mod
 
+    config = replace(config, cwd=_normalize_session_cwd(config.cwd))
     bus = config.bus if config.bus is not None else EventBus()
     session_manager: SessionManager = (
         config.session_manager
@@ -626,7 +635,7 @@ def _configure_manifest(cwd: str) -> None:
 
 
 def _find_core_manifest(cwd: str) -> Path | None:
-    candidates = [Path(cwd) / "core-manifest.yaml"]
+    candidates = [_session_cwd_path(cwd) / "core-manifest.yaml"]
     project_root = os.environ.get("AGENTM_PROJECT_ROOT")
     if project_root:
         candidates.append(expand_path(project_root) / "core-manifest.yaml")
@@ -653,7 +662,7 @@ def _migrate_catalog(cwd: str) -> None:
     try:
         from agentm.core.runtime.catalog.migrate import migrate_catalog_v2
 
-        migrate_catalog_v2(root=Path(cwd))
+        migrate_catalog_v2(root=_session_cwd_path(cwd))
     except Exception as exc:
         logger.warning(f"agentm catalog migration failed during startup: {exc!r}")
 
@@ -687,6 +696,7 @@ async def _resolve_extensions(
     from agentm.extensions import discover as discover_mod
 
     roles = discover_mod.discover_by_role()
+    session_cwd = _session_cwd_path(config.cwd)
 
     def _role_module(role: str) -> str:
         entry = roles.get(role)
@@ -760,9 +770,7 @@ async def _resolve_extensions(
                 ),
                 AtomSource(
                     label="user",
-                    discover=lambda: discover_mod.discover_user_atoms(
-                        Path(config.cwd)
-                    ),
+                    discover=lambda: discover_mod.discover_user_atoms(session_cwd),
                     skip_label="user atom ",
                 ),
             ),
@@ -791,9 +799,7 @@ async def _resolve_extensions(
                 ),
                 AtomSource(
                     label="user",
-                    discover=lambda: discover_mod.discover_user_atoms(
-                        Path(config.cwd)
-                    ),
+                    discover=lambda: discover_mod.discover_user_atoms(session_cwd),
                     skip_label="user atom ",
                 ),
             ),
