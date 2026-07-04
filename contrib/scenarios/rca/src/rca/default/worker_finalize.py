@@ -2,9 +2,9 @@
 
 Companion to :mod:`agentm_rca.finalize` (which terminates the
 orchestrator). Workers in this scenario kept burning their full budget on
-``query_sql`` calls without ever emitting a final assistant text turn —
-``wait_subagent`` then surfaced ``final_text: null`` to the orchestrator,
-which dispatched another worker. The fundamental issue: with only
+``query_sql`` calls without ever emitting a final assistant text turn, so the
+completion notification carried no useful summary and the orchestrator
+dispatched another worker. The fundamental issue: with only
 investigation tools available, the model never decides "I'm done; time to
 write a summary."
 

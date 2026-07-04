@@ -48,7 +48,7 @@ from rcabench_platform.v3.sdk.llm_eval.trajectory.schema import (
 from loguru import logger
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
-# RCA investigations dispatch workers, poll, and run many SQL queries; the
+# RCA investigations dispatch workers and run many SQL queries; the
 # kernel's stock 32-turn cap exhausts before ``submit_final_report`` is
 # reached. Bump the default and let the framework's ``--max-steps`` (or
 # ``--ak max_turns=N``) override.

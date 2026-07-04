@@ -17,7 +17,6 @@ import asyncio
 import contextlib
 import importlib
 import json
-import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -28,26 +27,18 @@ from loguru import logger
 from agentm.core.abi import (
     AgentSessionConfig,
     ChildSessionEndEvent,
-    DecideTurnActionEvent,
     ExtensionAPI,
     ExtensionLoadError,
     ExtensionStaleError,
     FunctionTool,
-    Inject,
-    LoopAction,
     LoopConfig,
-    ModelEndTurn,
     ProviderConfig,
     ResolveSubagentEvent,
     SUB_AGENT_RUNTIME,
     SessionReadyEvent,
     SessionShutdownEvent,
-    Stop,
     TextContent,
-    ToolCallEvent,
     ToolResult,
-    ToolTerminated,
-    UserMessage,
 )
 from agentm.core.lib import (
     forward_child_to_wire as _forward_child_to_wire,
@@ -86,14 +77,10 @@ MANIFEST = ExtensionManifest(
     ),
     registers=(
         "tool:dispatch_agent",
-        "tool:check_tasks",
-        "tool:wait_subagent",
         "tool:inject_instruction",
         "tool:abort_task",
-        "event:decide_turn_action",
         "event:session_shutdown",
         "event:session_ready",
-        "event:tool_call",
     ),
     config_schema=SubAgentConfig,
     requires=("system_prompt",),
@@ -107,7 +94,7 @@ class _ChildTask(BackgroundTask):
     """A dispatched child session, carried as a :class:`BackgroundTask`.
 
     The generic asyncio bits (``task_id`` / ``task`` / ``abort_signal`` /
-    ``status`` / ``read``) live on the base and are managed by the registry;
+    ``status``) live on the base and are managed by the registry;
     everything below is child-session-specific and managed by this atom.
     """
 
@@ -223,9 +210,6 @@ def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResu
         extras=payload,
     )
 
-def _is_terminal(status: _Status) -> bool:
-    return status in {_COMPLETED, _ABORTED, _ERROR}
-
 def _xml_attr(value: str) -> str:
     return (
         value.replace("&", "&amp;")
@@ -266,61 +250,6 @@ def _format_subagent_result(state: _ChildTask) -> str:
         lines.append("  </artifacts>")
     lines.append("</subagent_result>")
     return "\n".join(lines)
-
-def _notification_message(
-    *,
-    pending: list[_ChildTask],
-    running: list[_ChildTask],
-) -> UserMessage:
-    parts: list[str] = []
-    for state in pending:
-        parts.append(_format_subagent_result(state))
-    for state in running:
-        parts.append(
-            "<subagent_pending"
-            f" task_id={_xml_attr(state.task_id)}"
-            f" purpose={_xml_attr(state.purpose)} />"
-        )
-    return UserMessage(
-        role="user",
-        content=[TextContent(type="text", text="\n\n".join(parts))],
-        timestamp=time.time(),
-    )
-
-def _task_payload(state: _ChildTask) -> dict[str, Any]:
-    child_session_id = getattr(state.session, "session_id", None)
-    return {
-        "task_id": state.task_id,
-        "child_session_id": (
-            child_session_id if isinstance(child_session_id, str) else None
-        ),
-        "purpose": state.purpose,
-        "status": state.status,
-        "error": state.error,
-        "final_message_count": (
-            len(state.final_messages) if state.final_messages is not None else None
-        ),
-        "final_text": _summary_text(state),
-        "artifact_ids": list(state.artifact_ids),
-    }
-
-def _last_assistant_text(messages: list[Any]) -> str:
-    if not messages:
-        return ""
-    last = messages[-1]
-    if getattr(last, "role", None) != "assistant":
-        return ""
-    content = getattr(last, "content", None)
-    if not isinstance(content, list):
-        return ""
-    chunks: list[str] = []
-    for block in content:
-        if getattr(block, "type", None) != "text":
-            continue
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            chunks.append(text)
-    return "\n".join(chunks).strip()
 
 def _normalize_extension_spec(spec: Any) -> tuple[str, dict[str, Any]]:
     if (
@@ -482,50 +411,6 @@ class _ChildTaskManager:
         )
         self._parent_session_id = "unknown"
         self._root_session_id = "unknown"
-        # Auto-abort counter (see ``decide_turn_action``): increments on a
-        # consecutive ``ModelEndTurn`` with empty text AND running children,
-        # triggering an auto-abort on the second strike. Reset on ANY tool
-        # call (sync handler subscribed to ``ToolCallEvent`` in ``install``):
-        # if the agent is actively invoking tools it is engaged and should
-        # not be auto-aborted out of its workflow. B3 boundary-review fix:
-        # this was five per-tool ``await self._reset_running_only_cancels()``
-        # callsites; the single bus subscription collapses the footgun
-        # surface (a forgotten reset can no longer silently change
-        # auto-abort behaviour).
-        self._running_only_cancels = 0
-
-    def _on_tool_call_reset_counter(self, _event: ToolCallEvent) -> None:
-        """Reset the running-only-cancels counter on any tool invocation.
-
-        Subscribed to ``ToolCallEvent.CHANNEL`` at ``install`` time. The
-        kernel fires this BEFORE the tool executes (``loop.py``); a sync
-        handler is sufficient because the reset is a single attribute
-        assignment with no async needs. Behaviourally equivalent to the
-        pre-B3 per-tool resets — the integration suites
-        (``test_sub_agent_lifecycle`` / ``test_sub_agent_budgets``) prove
-        the auto-abort semantics are unchanged.
-        """
-
-        self._running_only_cancels = 0
-
-    async def _abort_running_states(
-        self, running: list[_ChildTask]
-    ) -> list[_ChildTask]:
-        if not running:
-            return []
-        for state in running:
-            await self.abort({"task_id": state.task_id})
-        await asyncio.wait(
-            [state.task for state in running],
-            timeout=self._shutdown_grace_seconds,
-        )
-        async with self._registry.lock:
-            terminal: list[_ChildTask] = []
-            for state in running:
-                if _is_terminal(state.status):
-                    state.read = True
-                    terminal.append(state)
-            return terminal
 
     async def _resolve_subagent(self, name: str) -> dict[str, Any] | None:
         responses = await self._api.events.emit(
@@ -571,13 +456,10 @@ class _ChildTaskManager:
             if str(meta.get("artifact_id", ""))
         ]
         state.error = error
-        # Step 5b: post the per-child finding through the session inbox so
-        # the parent's context-drain injects it the same way background_exec
-        # completions land. The narrowed decide_turn_action floor only
-        # checks ``status == _RUNNING`` (terminal states are not its
-        # concern), so we do NOT set ``state.read`` here — that flag is
-        # owned by the tools that surface findings directly to the model
-        # (``check_tasks``, ``wait_subagent``).
+        # Post the per-child finding through the session inbox so the
+        # parent's context-drain delivers it the same way background_exec
+        # completions land. The parent session may park while the child runs;
+        # this push is the wakeup and the delivery path.
         try:
             self._api.post_inbox(
                 source="subagent",
@@ -843,31 +725,6 @@ class _ChildTaskManager:
             }
         )
 
-    async def check_tasks(self, _args: dict[str, Any]) -> ToolResult:
-        await self._registry.poll_first_completed()
-        async with self._registry.lock:
-            tasks = self._registry.values()
-            for state in tasks:
-                if _is_terminal(state.status):
-                    state.read = True
-        return _tool_result({"tasks": [_task_payload(state) for state in tasks]})
-
-    async def wait_subagent(self, args: dict[str, Any]) -> ToolResult:
-        task_id = str(args.get("task_id", ""))
-        async with self._registry.lock:
-            if self._registry.get(task_id) is None:
-                return _tool_result(
-                    {"error": f"unknown task_id: {task_id}"}, is_error=True
-                )
-        await self._registry.wait_one(task_id)
-        async with self._registry.lock:
-            state = self._registry.get(task_id)
-            assert state is not None
-            if _is_terminal(state.status):
-                state.read = True
-            payload = _task_payload(state)
-        return _tool_result(payload)
-
     async def inject_instruction(self, args: dict[str, Any]) -> ToolResult:
         task_id = str(args.get("task_id", ""))
         message = str(args.get("message", ""))
@@ -914,98 +771,6 @@ class _ChildTaskManager:
                 )
             state.abort_signal.set()
         return _tool_result({"task_id": task_id, "status": _ABORTED})
-
-    async def decide_turn_action(
-        self, event: DecideTurnActionEvent
-    ) -> LoopAction | None:
-        """Floor (narrowed in step 5b): keep parent alive while children run.
-
-        Step 5b removed the completed-unread inject branch — completed
-        findings now ride through the session inbox via
-        ``_finalize_state.post_inbox(source="subagent")`` and land via the
-        runtime context-drain. The still-running branch survives because
-        without it a parent that voluntarily ``Stop(ModelEndTurn)``s while
-        children are detached would let those workers be stranded — the
-        exact failure ``sub-agent-lifecycle.md`` was written to enforce.
-
-        Only acts when the kernel default is a *voluntary* termination
-        (``ModelEndTurn`` / ``ToolTerminated``). For kernel-imposed
-        terminations (``MaxTurnsExhausted`` / ``SignalAborted`` /
-        ``BudgetExhausted``) ``cause.final`` is True and any override is
-        ignored anyway, so we return ``None``.
-
-        Auto-abort path: the second consecutive running-only cancel triggers
-        abort signals on every running child. Each aborted child's
-        ``_finalize_state`` posts its finding through the session inbox
-        before ``_abort_running_states`` returns; we then return ``None``
-        so the runtime keep-alive floor (which sees the now-non-empty
-        inbox) turns the parent's ``Stop`` into ``Step()`` and the next
-        turn's context-drain delivers each ``<subagent_result>`` exactly
-        once. (Earlier code Inject-ed the aborted set AND let the inbox
-        drain redeliver, double-surfacing every finding — Major-2 fix on
-        the step-5 review.)
-        """
-
-        default = event.observation.default_action
-        # Only intercept voluntary terminations. ``Step`` (more tool calls
-        # coming) and ``Inject`` (peer extension already overrode) are not
-        # our concern. ``Stop`` with a non-voluntary cause is ``final`` and
-        # cannot be overridden — the kernel will ignore us either way.
-        if not isinstance(default, Stop):
-            return None
-        if not isinstance(default.cause, (ModelEndTurn, ToolTerminated)):
-            return None
-
-        last_text = (
-            _last_assistant_text([event.observation.assistant_message])
-            if event.observation.assistant_message is not None
-            else ""
-        )
-        should_auto_abort = False
-        async with self._registry.lock:
-            states = self._registry.values()
-            running = [state for state in states if state.status == _RUNNING]
-            if not running:
-                self._running_only_cancels = 0
-            elif last_text:
-                self._running_only_cancels = 0
-
-            if isinstance(default.cause, ModelEndTurn) and running:
-                if self._running_only_cancels >= 1:
-                    should_auto_abort = True
-                    self._running_only_cancels = 0
-                else:
-                    self._running_only_cancels += 1
-
-        if not running and not should_auto_abort:
-            # No still-running children to keep alive for; nothing to inject.
-            # Completed findings (if any) ride the inbox path and the
-            # runtime keep-alive floor turns this Stop into another Step
-            # whenever inbox is non-empty.
-            return None
-
-        if should_auto_abort:
-            aborted = await self._abort_running_states(running)
-            if not aborted:
-                return None
-            # Major-2 fix (option a, decided 2026-05-28): the aborted
-            # children's findings are ALREADY queued on the inbox by their
-            # ``_finalize_state.post_inbox`` (which ran inside the await of
-            # ``_abort_running_states``). Returning ``None`` here lets the
-            # runtime keep-alive floor see the non-empty inbox and turn the
-            # parent's ``Stop(ModelEndTurn)`` into ``Step()`` — so the next
-            # turn's ``context`` drain delivers each ``<subagent_result>``
-            # EXACTLY ONCE. The previous code Inject-ed the same findings
-            # this turn AND let the inbox deliver them next turn (the
-            # dedup_key only dedupes inside the inbox, not across the two
-            # delivery paths), compounding under multi-child fan-outs.
-            return None
-
-        # Still-running children: keep the parent alive by injecting a
-        # <subagent_pending> notice so the model can choose to wait or
-        # dispatch follow-up work rather than terminate the loop.
-        message = _notification_message(pending=[], running=running)
-        return Inject(messages=[message])
 
     async def on_session_ready(self, event: SessionReadyEvent) -> None:
         self._parent_session_id = event.session_id
@@ -1057,12 +822,6 @@ class _DispatchAgentParams(PydanticBaseModel):
         default=None,
         description="Each element is a [module_path, config] pair.",
     )
-
-class _CheckTasksParams(PydanticBaseModel):
-    pass
-
-class _WaitSubagentParams(PydanticBaseModel):
-    task_id: str
 
 class _InjectInstructionParams(PydanticBaseModel):
     task_id: str
@@ -1203,12 +962,6 @@ class _SubAgentRuntime:
     def _register_events(self, manager: _ChildTaskManager) -> None:
         self._api.on(SessionReadyEvent.CHANNEL, manager.on_session_ready)
         self._api.on(SessionShutdownEvent.CHANNEL, manager.on_session_shutdown)
-        self._api.on(DecideTurnActionEvent.CHANNEL, manager.decide_turn_action)
-        # B3 boundary-review fix: encapsulate the counter reset behind the bus
-        # so any tool invocation drives it (not just sub_agent's own tools).
-        # ToolCallEvent fires per tool call BEFORE execute, sync handler is
-        # sufficient (single int assignment).
-        self._api.on(ToolCallEvent.CHANNEL, manager._on_tool_call_reset_counter)
 
     def _register_tools(self, manager: _ChildTaskManager) -> None:
         self._api.register_tool(
@@ -1223,22 +976,6 @@ class _SubAgentRuntime:
                 ),
                 parameters=pydantic_to_tool_schema(_DispatchAgentParams),
                 fn=manager.dispatch,
-            )
-        )
-        self._api.register_tool(
-            FunctionTool(
-                name="check_tasks",
-                description="List active and completed child tasks.",
-                parameters=pydantic_to_tool_schema(_CheckTasksParams),
-                fn=manager.check_tasks,
-            )
-        )
-        self._api.register_tool(
-            FunctionTool(
-                name="wait_subagent",
-                description="Wait for one child task to reach a terminal state.",
-                parameters=pydantic_to_tool_schema(_WaitSubagentParams),
-                fn=manager.wait_subagent,
             )
         )
         self._api.register_tool(

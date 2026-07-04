@@ -47,9 +47,8 @@ inherited prompt text and need this hook in the chain. Default
 fulfiller: ``agentm.extensions.builtin.system_prompt``."""
 
 SUB_AGENT_RUNTIME: Final = "sub_agent_runtime"
-"""Atom that exposes ``dispatch_agent`` / ``check_tasks`` and owns the
-nested-session lifecycle. Default fulfiller:
-``agentm.extensions.builtin.sub_agent``."""
+"""Atom that exposes ``dispatch_agent`` and owns the nested-session lifecycle.
+Default fulfiller: ``agentm.extensions.builtin.sub_agent``."""
 
 PROVIDER_INHERITOR: Final = "provider_inheritor"
 """Atom that re-publishes a parent session's :class:`ProviderConfig` to

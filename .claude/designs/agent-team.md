@@ -50,8 +50,8 @@ warrants it.
 
 Concretely, in a team-capable AgentM scenario:
 
-- `dispatch_agent`, `artifact_write`, `artifact_read`, `wait_subagent`,
-  `check_tasks` are all registered at session start.
+- `dispatch_agent`, `artifact_write`, and `artifact_read` are registered at
+  session start.
 - The orchestrator's system prompt may *encourage* delegation but does not
   require it.
 - A simple lookup gets answered with a single `query_sql`; a deep
@@ -105,7 +105,7 @@ A scenario is operating in "team mode" when all four hold:
 
 | Pillar | Mechanism | Status |
 |---|---|---|
-| A. Lifecycle floor | `decide_turn_action` + sub_agent `Inject` handler | implemented; see [sub-agent-lifecycle.md](sub-agent-lifecycle.md) |
+| A. Lifecycle delivery | `SessionInbox` + sub_agent completion notification | implemented; see [sub-agent-lifecycle.md](sub-agent-lifecycle.md) |
 | B. Shared memory tier | `artifact_store` extension + sub_agent integration | designed in `artifact-system.md` |
 | C. Brief contract | persona `input_schema` advisory + persona-body self-rejection | this doc |
 | D. Budget awareness | persona `budget_defaults` + runtime/scenario caps | this doc |
@@ -114,22 +114,23 @@ Pillars A and B are full designs in their own right; this doc references
 them. Pillars C and D are smaller additions that live entirely in the
 sub_agent extension and the persona file format.
 
-## Pillar A — Lifecycle floor (reference)
+## Pillar A — Lifecycle delivery (reference)
 
 See `sub_agent_lifecycle.md`. Summary of the contract for a team scenario:
 
 - `dispatch_agent` is async; returns `task_id` and `child_session_id`
   immediately.
-- Parent's loop will not declare `agent_end` while completed-but-unread
-  child findings exist; runtime injects a notification user-message and
-  re-enters the loop.
-- `check_tasks` blocks until at least one child changes state.
-- `wait_subagent(task_id)` blocks on a specific child.
-- The parent decides timing; the runtime guarantees no findings are lost.
+- The parent does not poll or synchronously wait for the child.
+- When a child finishes, the runtime posts a `source="subagent"` inbox
+  notification and the persistent driver wakes the parent session.
+- The parent decides whether to keep doing local work, send a follow-up
+  instruction, abort the child, or let the session park until the result
+  arrives; the runtime guarantees the terminal finding is delivered.
 
-Without this floor, a team scenario where the orchestrator forgets to poll
-silently drops worker output. With it, the architecture is fault-tolerant
-at the LLM-decision layer.
+Without this inbox delivery path, a team scenario where the orchestrator does
+not manage status manually can silently drop worker output. With it, result
+delivery is edge-triggered by the child finalizer rather than by parent-side
+status management.
 
 ## Pillar B — Shared memory tier (reference)
 
@@ -319,8 +320,8 @@ This is the explicit checklist that justifies the design.
 
 | MAST / literature failure mode | Pillar(s) | Defense |
 |---|---|---|
-| Lost child output (silent drop on agent_end) | A | Lifecycle floor injects all completed children before exit |
-| Polling burns parent budget | A | Blocking `check_tasks` |
+| Lost child output (silent drop on agent_end) | A | Child finalizer posts each terminal finding to the parent inbox |
+| Status management burns parent budget | A | Child completion posts to inbox; parent does not call sub-agent status tools |
 | Context loss at handoff (lossy summarization) | B | Artifact store + reference-based handoff |
 | Supervisor context bloat | B | Notification block is summary + ids only |
 | Inconsistent shared state | B | Append-only model with provenance |
@@ -334,9 +335,8 @@ This is the explicit checklist that justifies the design.
 ## Three usage modes, one mechanism
 
 Same as `sub_agent_lifecycle` (no new modes). The pillars are orthogonal
-to mode; any of fire-and-forget, explicit wait, steered fan-out works
-identically whether artifacts are written or not, whether budgets are
-declared or not.
+to mode: dispatch can be used for one critic pass or for broad fan-out, and
+completion arrives through the same inbox notification path either way.
 
 ## Persona file format (consolidated)
 

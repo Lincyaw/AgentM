@@ -57,11 +57,9 @@ producers on top of it.
   only if a handler injects.
 - **`sub_agent` already implements the whole background pattern** as a tool set
   (`extensions/builtin/sub_agent.py`): `dispatch` spawns an `asyncio.create_task` and
-  returns an immediate `{task_id, status:running}` ticket (`:737-750`);
-  `check_tasks`/`wait_subagent` poll (`:752`/`:769`); `inject_instruction` pushes a
-  message into a running child (`:789`); `abort` sets a signal (`:812`); and a
-  `decide_turn_action` floor refuses to terminate while children have unread findings
-  (`:834`). This is the prototype we generalize.
+  returns an immediate `{task_id, status:running}` ticket; `inject_instruction` pushes
+  a message into a running child; `abort` sets a signal; and child completion posts a
+  `source="subagent"` inbox item. This is the prototype we generalize.
 - There is **no timer/ticker anywhere in `core`**; `asyncio.create_task` appears only
   in `sub_agent`.
 
@@ -139,11 +137,11 @@ an atom — the inbox is substrate) calls `inbox.drain()` at each turn boundary,
 each item per its `source`, and returns `Inject(messages=[...])`. This reuses the
 existing seam (`core/abi/loop.py:599-620`) with **no change to the kernel `AgentLoop`**.
 
-The rule generalizes `sub_agent`'s lifecycle floor: **at a turn boundary, if the inbox
-is non-empty, drain + `Inject` and keep running, instead of `Stop`.** "Unread subagent
-findings" becomes the special case "a finding landed in the inbox". `final=True`
-causes (budget / signal / max_turns) still hard-win over a non-empty inbox — a hard
-ceiling should be hard.
+The runtime inbox keep-alive rule is: **at a turn boundary, if the inbox is
+non-empty, drain + `Inject` and keep running, instead of `Stop`.** A completed
+sub-agent finding is just one producer of such an inbox item. `final=True`
+causes (budget / signal / max_turns) still hard-win over a non-empty inbox — a
+hard ceiling should be hard.
 
 Completion-signal boundary: `prompt` awaits the *real* `Stop` + `agent_end` (inbox
 empty **and** the model voluntarily ended via `ModelEndTurn`). While the floor keeps
@@ -196,8 +194,8 @@ return ticket                                             # {task_id, status:"ru
 The ticket is the immediate `tool_result` for that call (satisfying the "every
 tool_call gets a result this turn" protocol); the real result arrives later as an
 inbox item (`source="background"`). Companion tools `check_background` /
-`wait_background` / `cancel_background` are the generalization of `sub_agent`'s polling
-tools.
+`wait_background` / `cancel_background` expose direct controls for backgrounded
+tool calls; sub-agent child findings use the inbox-only delivery path instead.
 
 Soft-preempt policy (2026-06-29): a foreground wrapped tool also stops being awaited
 when core inbox input arrives. The tool is not cancelled; it is registered as a
@@ -296,8 +294,8 @@ loading the same atoms, so `background_exec` + `monitor` apply recursively.
    cooperative; the interrupt key aborts the turn (via `signal`), preserves context,
    and resumes with the new input through the inbox.
 2. **Ticker = milestone-driven + sparse heartbeat fallback, with `dedup_key` replace.**
-3. **One entry + one driver; `prompt` is sugar.** No dual API, no separate `Park`; the
-   `sub_agent` floor generalizes to "inbox non-empty ⇒ keep running".
+3. **One entry + one driver; `prompt` is sugar.** No dual API, no separate `Park`;
+   the runtime inbox floor is "inbox non-empty ⇒ keep running".
 4. **FIFO, no priority.** Drain takes all and injects them as one batch ordered by
    arrival ("earlier-happened, earlier-said"); user vs ticker priority adds nothing
    when the agent sees the whole batch in one turn. No config knob.
@@ -315,7 +313,8 @@ loading the same atoms, so `background_exec` + `monitor` apply recursively.
    floor); single driver; `prompt`/`tick` collapse to push + drive; `send_user_message`
    becomes an `inbox.push` wrapper; delete `pending_user_messages`. **Done.**
 2. Extract `sub_agent`'s registry + completion-injection into `core.lib`; re-seat
-   `sub_agent` on it; route findings through the inbox and delete its bespoke floor.
+   `sub_agent` on it; route findings through the inbox and delete bespoke
+   completion delivery.
    **Done** — `sub_agent` now posts via `post_inbox(source="subagent")`.
 3. `background_exec` (auto-background + ticker) on the shared substrate. **Done** —
    `extensions/builtin/background_exec.py` posts via `post_inbox(source="background")`.

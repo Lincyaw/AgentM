@@ -320,7 +320,7 @@ Each is one Python module with `install(api, config)` doing **one thing**. The a
 
 | Module | Behavior |
 |---|---|
-| `extensions.builtin.sub_agent` | Registers `dispatch_agent`, `check_tasks`, `inject_instruction`, `abort_task`; manages child `AgentSession`s. |
+| `extensions.builtin.sub_agent` | Registers `dispatch_agent`, `inject_instruction`, `abort_task`; manages child `AgentSession`s and delivers terminal findings through the parent inbox. |
 
 ### 7.2 Scenario recipes (data files, not code)
 

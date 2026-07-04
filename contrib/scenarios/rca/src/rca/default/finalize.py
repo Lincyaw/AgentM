@@ -79,7 +79,7 @@ _DEFAULT_INSTRUCTION = (
     "  (A) If you believe you have a confirmed root cause backed by "
     "evidence — call `submit_final_report` now to end the investigation.\n"
     "  (B) Otherwise — call any other registered investigation tool to "
-    "continue: dispatch a worker, run a SQL query, poll task status, "
+    "continue: dispatch a worker, run a SQL query, "
     "update or remove a hypothesis, etc.\n\n"
     "Do not respond with prose alone. Do not say `Let me ...` without "
     "calling the tool you just named. The only way out of this loop is to "

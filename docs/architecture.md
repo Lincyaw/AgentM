@@ -45,8 +45,8 @@ AgentM is a **multi-agent orchestration framework** built in pure Python (no Lan
 │        │  │  │  Trajectory                │  │    │             │
 │        │  │  └────────────────────────────┘  │    │             │
 │        │  │  Tools: dispatch_agent,           │    │             │
-│        │  │    check_tasks, inject, abort,    │    │             │
-│        │  │    + scenario tools, think        │    │             │
+│        │  │    inject, abort, + scenario      │    │             │
+│        │  │    tools, think                   │    │             │
 │        │  └──────────┬───────────────────────┘    │             │
 │        │             │ dispatch_agent()            │             │
 │        │  ┌──────────▼───────────────────────┐    │             │
@@ -128,7 +128,7 @@ src/agentm/
 ├── tools/                   # Tool implementations
 │   ├── _shared.py           # Shared utilities
 │   ├── think.py             # think tool (scratch pad for LLM reasoning)
-│   ├── orchestrator.py      # dispatch_agent, check_tasks, inject, abort
+│   ├── orchestrator.py      # dispatch_agent, inject, abort
 │   ├── case_data.py         # Load case data for analysis
 │   ├── duckdb_sql.py        # DuckDB SQL query tool
 │   ├── memory.py            # Trajectory/checkpoint reading tools
@@ -273,7 +273,7 @@ build_agent_system(scenario_name, scenario_config, system_config)
 │     └── Injects: TrajectoryCollector reference
 │
 ├── 7. Create orchestrator tools
-│     ├── SDK tools: dispatch_agent, check_tasks, inject_instruction, abort_task
+│     ├── SDK tools: dispatch_agent, inject_instruction, abort_task
 │     ├── Scenario tools: (e.g., update_hypothesis, query_service_profile)
 │     ├── Registry tools: (YAML-defined, vault tools, memory tools)
 │     └── Always: think tool
@@ -362,16 +362,11 @@ Orchestrator LLM decides to call dispatch_agent(agent_id, task, task_type)
 │   │   └── asyncio.create_task(_run_agent)
 │   │       └── Iterate loop.stream() → forward events → record completion
 │   │
-│   ├── Auto-block logic:
-│   │   ├── If only 1 worker running → await completion, return result directly
-│   │   └── If multiple workers → return immediately with "running" status
+│   ├── Background delivery:
+│   │   ├── Return immediately with "running" status
+│   │   └── Post completed result to the parent SessionInbox
 │   │
 │   └── Return JSON: {task_id, agent_id, status, result?}
-│
-├── check_tasks() — Orchestrator polls for completed results
-│   ├── Wait briefly for any agent to complete (5s timeout)
-│   ├── Collect all status: running[], completed[], failed[]
-│   └── Return JSON summary
 │
 ├── inject_instruction(task_id, instruction) — Send message to running worker
 │   └── runtime.send() → worker.inject() → message appears in next LLM call
@@ -684,7 +679,6 @@ Tools are created three ways:
 ```
 SDK Tools (built by create_orchestrator_tools):
 ├── dispatch_agent     — spawn a worker agent
-├── check_tasks        — poll worker status/results
 ├── inject_instruction — send message to running worker
 └── abort_task         — kill a running worker
 
@@ -859,7 +853,7 @@ orchestrator:
   model: gpt-4o
   temperature: 0.7
   prompts: {system: prompts/orchestrator.j2}
-  tools: [dispatch_agent, check_tasks, update_hypothesis, ...]
+  tools: [dispatch_agent, update_hypothesis, ...]
   max_rounds: 20
   output: {prompt: prompts/output.j2, schema_name: CausalGraph}
   compression: {enabled: true, compression_threshold: 0.8}

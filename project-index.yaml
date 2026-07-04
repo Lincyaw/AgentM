@@ -176,6 +176,7 @@ requirements:
       - path: src/agentm/core/abi/extension.py
       - path: src/agentm/core/abi/events.py
       - path: src/agentm/core/abi/__init__.py
+      - path: src/agentm/core/abi/roles.py
       - path: src/agentm/core/abi/session_config.py
       - path: src/agentm/core/runtime/extension.py
       - path: src/agentm/core/runtime/session_factory.py
@@ -195,6 +196,7 @@ requirements:
       - path: .claude/designs/observability.md
       - path: .claude/designs/sub-agent-lifecycle.md
       - path: .claude/designs/artifact-system.md
+      - path: docs/architecture.md
     depends_on:
       - REQ-086-atom-rework-infra
       - REQ-176-background-tasks-registry
@@ -292,8 +294,9 @@ requirements:
       visible warning plus explicit unavailable contract placeholder when the
       schema cannot be loaded, use typed event channel constants for RCA
       prompt/persona wiring, inherit sub-agent extension config by manifest
-      name, and mount real RCA tool atoms directly so wrapper atoms do not hide
-      installed tool registers.
+      name, rely on inbox-delivered critic results instead of parent-side
+      status tools, and mount real RCA tool atoms directly so wrapper atoms do
+      not hide installed tool registers.
     priority: P0
     status: implemented
     confidence: confirmed
@@ -305,6 +308,7 @@ requirements:
       - path: contrib/scenarios/rca/src/rca/default/fpg_contract.py
       - path: contrib/scenarios/rca/src/rca/default/rcabench_contract.py
       - path: contrib/scenarios/rca/src/rca/default/finalize.py
+      - path: contrib/scenarios/rca/src/rca/default/worker_finalize.py
       - path: contrib/scenarios/rca/src/rca/default/prompt_loader.py
       - path: contrib/scenarios/rca/eval/grader.py
       - path: contrib/scenarios/rca/src/rca_eval/agent.py
@@ -321,6 +325,7 @@ requirements:
     docs:
       - path: .claude/designs/extension-as-scenario.md
       - path: .claude/designs/sub-agent-lifecycle.md
+      - path: docs/rca-scenario-flow.md
     depends_on:
       - REQ-087-builtin-atoms-extension-api
 
@@ -1321,6 +1326,9 @@ requirements:
       the agent keeps taking turns. Bounded (``max_workers=N``) and unbounded
       (``max_workers=None``) contracts: the unbounded mode short-circuits all
       slot accounting; the bounded mode raises ``SlotLimitReached`` at N+1.
+      The registry owns task handles, slot accounting, and cooperative cancel
+      signalling only; completion delivery is owned by producer atoms through
+      ``SessionInbox`` rather than shared wait/poll APIs.
       Today consumed by ``sub_agent`` (bounded) and ``background_exec``
       (unbounded).
     priority: P0

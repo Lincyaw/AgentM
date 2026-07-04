@@ -138,14 +138,12 @@ class _SessionEventBridge:
         # channel may still ``Inject`` over it.
         #
         # We do NOT clear ``pending_terminate`` here. The resolution lattice
-        # (loop.py:298) lets a co-loaded floor's ``Inject`` win over this
-        # ``Stop`` — e.g. ``sub_agent`` injecting while a child is still
-        # running. A foreground terminate survives that because it is the
+        # (loop.py:298) lets a co-loaded keep-alive ``Inject`` win over this
+        # ``Stop``. A foreground terminate survives that because it is the
         # kernel default, recomputed every turn; a one-shot consumed flag would
         # be DESTROYED by the override. So we re-assert the same cause on every
         # boundary and let ``on_agent_end`` clear it only once the loop has
-        # actually stopped on it — the terminate survives across N turns of a
-        # running child's injects.
+        # actually stopped on it.
         if self.pending_terminate is not None:
             return Stop(self.pending_terminate)
         return None
@@ -881,12 +879,11 @@ class AgentSession:
     def _on_agent_end_wake_waiters(self, event: AgentEndEvent) -> None:
         # #177: clear the pending backgrounded-terminate ONLY when the loop
         # actually stopped on that exact cause (identity match against the
-        # event's cause). If the round instead ended on something else — a
-        # ModelEndTurn while ``sub_agent``'s floor kept the loop alive with an
-        # Inject that overrode our Stop — the flag MUST survive so the next
-        # boundary re-asserts it. This is the invariant the keep-alive floor
-        # relies on: a backgrounded terminate is not lost across turns where a
-        # running child keeps injecting.
+        # event's cause). If the round instead ended on something else — e.g.
+        # a keep-alive Inject overrode our Stop — the flag MUST survive so the
+        # next boundary re-asserts it. This is the invariant the keep-alive
+        # floor relies on: a backgrounded terminate is not lost across turns
+        # that keep running for pending inbox work.
         self._session_events.clear_matching_terminate(event.cause)
         waiters = self._end_waiters
         self._end_waiters = []

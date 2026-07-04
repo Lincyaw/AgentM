@@ -135,9 +135,9 @@ sequenceDiagram
                 WL-->>H: AgentResult
             end
 
-            alt Orchestrator checks task results
-                OL->>MW: on_tool_call("check_tasks", ...)
-                Note right of MW: SanitizerMW: _try_record_completion<br/>(records SUPPORTED/CONTRADICTED/INCONCLUSIVE)
+            alt Worker result arrives
+                H->>OL: source="subagent" inbox notification
+                Note right of OL: Result contains SUPPORTED/CONTRADICTED/INCONCLUSIVE verdict
             end
         end
     end

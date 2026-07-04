@@ -10,13 +10,13 @@ non-atom seam they share).
 
 Generalization boundary: this module owns only what is generic to *any*
 asyncio background unit — the task handle, a free-text status string, an abort
-signal, a read flag, the registry dict + lock, slot accounting against
-``max_workers``, and first-completed / wait-one polling. Everything specific
-to a unit (how it is spawned, what its result means, how completion is
-rendered for the model) stays in the owning atom, which subclasses
+signal, the registry dict + lock, slot accounting against ``max_workers``, and
+cooperative cancellation. Everything specific to a unit (how it is spawned,
+what its result means, how completion is rendered for the model, whether it
+needs a delivery marker) stays in the owning atom, which subclasses
 :class:`BackgroundTask` to carry its own fields and drives status transitions
-itself. The registry never sets ``status`` — it only reads it for slot
-accounting and poll filtering — and never spawns work; the owner creates the
+itself. The registry never sets ``status`` or ``read`` — it only reads
+``status`` for slot accounting — and never spawns work; the owner creates the
 :class:`asyncio.Task` and calls :meth:`BackgroundTaskRegistry.register`.
 """
 
@@ -27,8 +27,8 @@ from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
 # Free-text status, owner-defined. The registry treats ``"running"`` as the
-# one status that occupies a worker slot and is eligible for polling; every
-# other value is considered terminal for accounting purposes. Owners pick
+# one status that occupies a worker slot; every other value is considered
+# terminal for accounting purposes. Owners pick
 # their own richer vocabulary (sub_agent uses completed/aborted/error).
 RUNNING = "running"
 
@@ -40,11 +40,10 @@ class BackgroundTask:
     Owners subclass this to attach unit-specific state (sub_agent's
     ``_ChildTask`` adds the child session, pending instructions, artifacts,
     etc.). The registry only ever touches the fields declared here:
-    ``task_id`` for keying, ``task`` for awaiting/polling, ``abort_signal``
-    for cancellation, ``status`` for slot accounting and poll filtering, and
-    ``read`` as a producer-managed delivery flag the registry leaves alone but
-    that lives here because it is generic to "has the owner surfaced this unit
-    to the agent yet".
+    ``task_id`` for keying, ``task`` as the owner-managed task handle,
+    ``abort_signal`` for cancellation, ``status`` for slot accounting, and
+    ``read`` as an optional producer-managed delivery marker for owners that
+    still have a direct "surface result through a tool" path.
     """
 
     task_id: str
@@ -159,34 +158,6 @@ class BackgroundTaskRegistry(Generic[T]):
             if self._max_workers is not None:
                 self._reserved_slots -= 1
             self._tasks[task.task_id] = task
-
-    async def poll_first_completed(self) -> None:
-        """Block until at least one running unit reaches a terminal state.
-
-        Returns immediately when nothing is running. The wait is over the
-        underlying :class:`asyncio.Task`s; the owner re-reads ``status`` after
-        this returns. Equivalent to sub_agent's ``check_tasks`` poll.
-        """
-
-        async with self._lock:
-            running = [t.task for t in self._tasks.values() if t.status == RUNNING]
-        if running:
-            await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
-
-    async def wait_one(self, task_id: str) -> None:
-        """Await the single unit ``task_id`` if it is still running.
-
-        Snapshots the handle under the lock, then awaits its task outside the
-        lock so other registry operations are not blocked for the duration.
-        Silently returns if the id is unknown or already terminal.
-        """
-
-        async with self._lock:
-            handle = self._tasks.get(task_id)
-            if handle is None or handle.status != RUNNING:
-                return
-            task = handle.task
-        await task
 
     async def cancel(self, task_id: str) -> bool:
         """Signal abort on ``task_id`` and return whether the signal was set.

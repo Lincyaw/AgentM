@@ -18,8 +18,8 @@ What it does (opt-in; a scenario lists it):
     result" protocol is satisfied. The real result arrives later as a
     ``source="background"`` inbox item.
 - Companion tools ``check_background`` / ``wait_background`` / ``cancel_background``
-  generalize ``sub_agent``'s polling tools. ``cancel_background`` is the first
-  caller of :meth:`BackgroundTaskRegistry.cancel`.
+  expose direct controls for backgrounded tool calls. ``cancel_background`` is
+  the first caller of :meth:`BackgroundTaskRegistry.cancel`.
 - A per-task **ticker** posts to the inbox on milestones (completion / error /
   new output / silence-too-long warning) plus a sparse heartbeat fallback, all
   under one ``dedup_key`` so a new status REPLACES the prior undrained one (no
@@ -715,10 +715,9 @@ class _BgManager:
     async def check_background(self, _args: dict[str, Any]) -> ToolResult:
         """List task states without waiting for running work to complete.
 
-        Terminal tasks surfaced here are marked ``read`` (like
-        ``sub_agent.check_tasks``) so the completion reported in this tool
-        result is NOT also re-injected into the inbox by ``_watch`` — the agent
-        would otherwise see the same completion twice.
+        Terminal tasks surfaced here are marked ``read`` so the completion
+        reported in this tool result is NOT also re-injected into the inbox by
+        ``_watch`` — the agent would otherwise see the same completion twice.
         """
 
         async with self._registry.lock:
