@@ -39,6 +39,7 @@ class TerminalLaunchConfig:
     scenario: str | None = None
     state_dir: Path | None = None
     terminal_bin: str = "ag"
+    terminal_bin_fallbacks: tuple[str, ...] = ("agentm-terminal",)
     terminal_log: Path | None = None
     session_id: str | None = None
     simple: bool = False
@@ -149,7 +150,7 @@ def _run_terminal_peer(
     connect_url: str,
     token_file: Path | None = None,
 ) -> int:
-    executable = _find_executable(config.terminal_bin)
+    executable = _find_terminal_executable(config)
     args = [executable, "--connect", connect_url]
     terminal_args = config.terminal_args
     if token_file is not None and not _has_token_arg(terminal_args):
@@ -299,6 +300,26 @@ def _find_executable(value: str) -> str:
     if found:
         return found
     raise TerminalLaunchError(f"executable not found on PATH: {value}")
+
+
+def _find_terminal_executable(config: TerminalLaunchConfig) -> str:
+    try:
+        return _find_executable(config.terminal_bin)
+    except TerminalLaunchError as primary_error:
+        if config.terminal_bin != "ag":
+            raise
+        for fallback in config.terminal_bin_fallbacks:
+            try:
+                return _find_executable(fallback)
+            except TerminalLaunchError:
+                continue
+        fallback_text = ", ".join(config.terminal_bin_fallbacks)
+        if fallback_text:
+            raise TerminalLaunchError(
+                f"{primary_error}; also tried fallback terminal binaries: "
+                f"{fallback_text}"
+            ) from primary_error
+        raise
 
 
 def _has_session_id_arg(args: list[str]) -> bool:
