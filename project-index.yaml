@@ -1090,6 +1090,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/tui/keyboard.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/lifecycle.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/mouse.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/session_tabs.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/tabs.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/tui.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/view.go
