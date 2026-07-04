@@ -1331,6 +1331,28 @@ requirements:
       - REQ-176-session-inbox
       - REQ-176-background-tasks-registry
 
+  - id: REQ-176-turn-reminder-atom
+    title: Builtin turn_reminder atom keeps capped runs able to finish
+    description: >
+      The ``turn_reminder`` atom must read the live loop budget before LLM
+      sends and, when max_turns or max_tool_calls is within the configured
+      warning window, append a runway warning to the tail of the current last
+      message so the cached prefix remains stable. It must reset per-run
+      counters on agent_start, mirror turn/tool usage from turn_start and
+      tool_result events, avoid reinjecting into the same tail object during
+      retries, and when a finalize_tool is configured on the last runway step,
+      add a dedicated user message instructing the model to call that tool now.
+    priority: P1
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/extensions/builtin/turn_reminder.py
+    tests: []
+    docs:
+      - path: .claude/designs/session-inbox.md
+    depends_on:
+      - REQ-176-session-inbox
+
   - id: REQ-187-agent-env-pool-scaling
     title: ARL agent-env sessions use managed warm-pool lifecycle controls
     description: >

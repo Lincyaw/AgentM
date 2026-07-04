@@ -31,6 +31,7 @@ Budget is read live from ``api.session.get_loop_config()`` (which reflects the
 from __future__ import annotations
 
 import time as _time
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel
@@ -47,9 +48,23 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 
+
 class TurnReminderConfig(BaseModel):
     warn_within: int = 5
     finalize_tool: str = ""
+
+
+@dataclass(slots=True)
+class _TurnReminderState:
+    turn_index: int = 0
+    tool_calls_used: int = 0
+    last_injected_id: int = 0
+
+    def reset(self) -> None:
+        self.turn_index = 0
+        self.tool_calls_used = 0
+        self.last_injected_id = 0
+
 
 MANIFEST = ExtensionManifest(
     name="turn_reminder",
@@ -67,81 +82,112 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
-def install(api: ExtensionAPI, config: TurnReminderConfig) -> None:
-    warn_within = config.warn_within
-    finalize_tool = config.finalize_tool
 
-    # Per-run counters. ``turn_index`` is authoritative from ``turn_start``;
-    # ``tool_calls_used`` mirrors the loop's own counter (both reset per run).
-    state = {"turn_index": 0, "tool_calls_used": 0, "last_injected_id": 0}
+class _TurnReminderRuntime:
+    def __init__(self, api: ExtensionAPI, config: TurnReminderConfig) -> None:
+        self._api = api
+        self._warn_within = config.warn_within
+        self._finalize_tool = config.finalize_tool
+        # Per-run counters. ``turn_index`` is authoritative from ``turn_start``;
+        # ``tool_calls_used`` mirrors the loop's own counter (both reset per run).
+        self._state = _TurnReminderState()
 
-    def _on_agent_start(_: AgentStartEvent) -> None:
+    def install(self) -> None:
+        self._api.on(AgentStartEvent.CHANNEL, self.on_agent_start)
+        self._api.on(TurnStartEvent.CHANNEL, self.on_turn_start)
+        self._api.on(ToolResultEvent.CHANNEL, self.on_tool_result)
+        self._api.on(BeforeSendToLlmEvent.CHANNEL, self.before_send)
+
+    def on_agent_start(self, _: AgentStartEvent) -> None:
         # Each loop.run starts a fresh budget frame (range(max_turns) from 0).
-        state["turn_index"] = 0
-        state["tool_calls_used"] = 0
-        state["last_injected_id"] = 0
+        self._state.reset()
 
-    def _on_turn_start(event: TurnStartEvent) -> None:
-        state["turn_index"] = event.turn_index
+    def on_turn_start(self, event: TurnStartEvent) -> None:
+        self._state.turn_index = event.turn_index
 
-    def _on_tool_result(_: ToolResultEvent) -> None:
-        state["tool_calls_used"] += 1
+    def on_tool_result(self, _: ToolResultEvent) -> None:
+        self._state.tool_calls_used += 1
 
-    def _before_send(event: BeforeSendToLlmEvent) -> None:
-        cfg = api.session.get_loop_config()
+    def before_send(self, event: BeforeSendToLlmEvent) -> None:
+        runway = self._runway()
+        if runway is None:
+            return
+        turns_left, tools_left = runway
+        if not _warning_triggered(turns_left, tools_left, self._warn_within):
+            return
+
+        if _last_step(turns_left, tools_left, threshold=2) and self._finalize_tool:
+            event.messages.append(_finalize_now_message(self._finalize_tool))
+            return
+
+        text = _format_warning(turns_left, tools_left, self._finalize_tool)
+        _append_to_last_message(event.messages, text, self._state)
+
+    def _runway(self) -> tuple[int | None, int | None] | None:
+        cfg = self._api.session.get_loop_config()
         max_turns = cfg.max_turns
         max_tool_calls = cfg.max_tool_calls
         # No cap on either axis => nothing to warn about.
         if max_turns is None and max_tool_calls is None:
-            return
+            return None
 
         turns_left = (
-            max_turns - state["turn_index"] if max_turns is not None else None
+            max_turns - self._state.turn_index if max_turns is not None else None
         )
         tools_left = (
-            max_tool_calls - state["tool_calls_used"]
+            max_tool_calls - self._state.tool_calls_used
             if max_tool_calls is not None
             else None
         )
+        return turns_left, tools_left
 
-        triggered = (turns_left is not None and turns_left <= warn_within) or (
-            tools_left is not None and tools_left <= warn_within
-        )
-        if not triggered:
-            return
 
-        last = (turns_left is not None and turns_left <= 2) or (
-            tools_left is not None and tools_left <= 2
-        )
-        if last and finalize_tool:
-            event.messages.append(
-                UserMessage(
-                    role="user",
-                    content=[
-                        TextContent(
-                            type="text",
-                            text=(
-                                f"SYSTEM: Your investigation time is up. You MUST call "
-                                f"`{finalize_tool}` NOW with your best findings. "
-                                f"Do NOT make any more investigation calls."
-                            ),
-                        )
-                    ],
-                    timestamp=_time.time(),
-                )
+def install(api: ExtensionAPI, config: TurnReminderConfig) -> None:
+    _TurnReminderRuntime(api, config).install()
+
+
+def _warning_triggered(
+    turns_left: int | None,
+    tools_left: int | None,
+    warn_within: int,
+) -> bool:
+    return (turns_left is not None and turns_left <= warn_within) or (
+        tools_left is not None and tools_left <= warn_within
+    )
+
+
+def _last_step(
+    turns_left: int | None,
+    tools_left: int | None,
+    *,
+    threshold: int,
+) -> bool:
+    return (turns_left is not None and turns_left <= threshold) or (
+        tools_left is not None and tools_left <= threshold
+    )
+
+
+def _finalize_now_message(finalize_tool: str) -> UserMessage:
+    return UserMessage(
+        role="user",
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"SYSTEM: Your investigation time is up. You MUST call "
+                    f"`{finalize_tool}` NOW with your best findings. "
+                    f"Do NOT make any more investigation calls."
+                ),
             )
-            return
+        ],
+        timestamp=_time.time(),
+    )
 
-        text = _format_warning(turns_left, tools_left, finalize_tool)
-        _append_to_last_message(event.messages, text, state)
-
-    api.on(AgentStartEvent.CHANNEL, _on_agent_start)
-    api.on(TurnStartEvent.CHANNEL, _on_turn_start)
-    api.on(ToolResultEvent.CHANNEL, _on_tool_result)
-    api.on(BeforeSendToLlmEvent.CHANNEL, _before_send)
 
 def _format_warning(
-    turns_left: int | None, tools_left: int | None, finalize_tool: str = "",
+    turns_left: int | None,
+    tools_left: int | None,
+    finalize_tool: str = "",
 ) -> str:
     parts: list[str] = []
     if turns_left is not None:
@@ -150,7 +196,8 @@ def _format_warning(
         parts.append(f"{max(tools_left, 0)} tool call(s)")
     budget = " and ".join(parts)
     tool_hint = (
-        f" Call `{finalize_tool}` NOW." if finalize_tool
+        f" Call `{finalize_tool}` NOW."
+        if finalize_tool
         else " Submit your final response NOW (e.g. via the response/finalize tool)."
     )
     last = (turns_left is not None and turns_left <= 1) or (
@@ -166,8 +213,9 @@ def _format_warning(
         f"summarize). Start wrapping up.{tool_hint}"
     )
 
+
 def _append_to_last_message(
-    messages: list[Any], text: str, state: dict[str, int]
+    messages: list[Any], text: str, state: _TurnReminderState
 ) -> None:
     """Append ``text`` to the tail of the last message -- never the system
     prompt -- so the cached prefix stays byte-identical.
@@ -185,7 +233,7 @@ def _append_to_last_message(
     last = messages[-1]
     # Guard against re-injecting into the very same object (e.g. a retry that
     # re-fires before_send without producing a new tail message).
-    if id(last) == state["last_injected_id"]:
+    if id(last) == state.last_injected_id:
         return
 
     block = TextContent(type="text", text=text)
@@ -198,4 +246,4 @@ def _append_to_last_message(
         last.content[-1].content.append(block)
     else:
         return
-    state["last_injected_id"] = id(last)
+    state.last_injected_id = id(last)
