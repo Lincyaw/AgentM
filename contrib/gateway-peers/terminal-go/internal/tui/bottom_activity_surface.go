@@ -17,12 +17,14 @@ import (
 )
 
 const (
-	maxVisibleBackgroundActivities  = 4
-	backgroundActivityKeySeparator  = "\x00"
-	backgroundActivityStatusRunning = "running"
-	backgroundActivityStatusError   = "error"
-	backgroundActivityStatusFailed  = "failed"
-	workflowTaskPickerBaseFooter    = "↑/↓ to select · Enter to view"
+	maxVisibleBackgroundActivities    = 4
+	backgroundActivityKeySeparator    = "\x00"
+	backgroundActivityStatusRunning   = "running"
+	backgroundActivityStatusError     = "error"
+	backgroundActivityStatusFailed    = "failed"
+	backgroundActivityStatusCanceled  = "canceled"
+	backgroundActivityStatusCancelled = "cancelled"
+	workflowTaskPickerBaseFooter      = "↑/↓ to select · Enter to view"
 )
 
 type workflowRow struct {
@@ -641,7 +643,10 @@ func normalizeBackgroundActivityStatus(status string) string {
 
 func retainFinishedBackgroundActivity(status string) bool {
 	switch status {
-	case backgroundActivityStatusError, backgroundActivityStatusFailed:
+	case backgroundActivityStatusError,
+		backgroundActivityStatusFailed,
+		backgroundActivityStatusCanceled,
+		backgroundActivityStatusCancelled:
 		return true
 	default:
 		return false
