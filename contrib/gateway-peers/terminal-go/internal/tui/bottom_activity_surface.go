@@ -22,6 +22,7 @@ const (
 	backgroundActivityStatusRunning = "running"
 	backgroundActivityStatusError   = "error"
 	backgroundActivityStatusFailed  = "failed"
+	workflowTaskPickerBaseFooter    = "↑/↓ to select · Enter to view"
 )
 
 type workflowRow struct {
@@ -201,7 +202,8 @@ func (m *appModel) syncWorkflowTaskPickerIndex() {
 			return
 		}
 	}
-	m.workflowTaskPickerIndex = min(max(m.workflowTaskPickerIndex, 0), len(rows)-1)
+	_, idx, _ := m.selectedWorkflowTaskRow(rows)
+	m.workflowTaskPickerIndex = idx
 }
 
 func (m *appModel) syncWorkflowTaskPickerState() {
@@ -217,20 +219,21 @@ func (m *appModel) syncWorkflowTaskPickerState() {
 
 func (m *appModel) moveWorkflowTaskSelection(delta int) {
 	rows := m.workflowRows()
-	if len(rows) == 0 {
+	_, idx, ok := m.selectedWorkflowTaskRow(rows)
+	if !ok {
 		return
 	}
-	m.workflowTaskPickerIndex = (m.workflowTaskPickerIndex + delta + len(rows)) % len(rows)
+	m.workflowTaskPickerIndex = (idx + delta + len(rows)) % len(rows)
 }
 
 func (m *appModel) activateWorkflowTaskSelection() (tea.Model, tea.Cmd) {
 	rows := m.workflowRows()
-	if len(rows) == 0 {
+	row, _, ok := m.selectedWorkflowTaskRow(rows)
+	if !ok {
 		m.closeWorkflowTaskPicker()
 		return m, nil
 	}
-	idx := min(max(m.workflowTaskPickerIndex, 0), len(rows)-1)
-	target := rows[idx].sessionID
+	target := row.sessionID
 	m.closeWorkflowTaskPicker()
 	if target == "" {
 		return m, nil
@@ -240,11 +243,10 @@ func (m *appModel) activateWorkflowTaskSelection() (tea.Model, tea.Cmd) {
 
 func (m *appModel) stopWorkflowTaskSelection() (tea.Model, tea.Cmd) {
 	rows := m.workflowRows()
-	if len(rows) == 0 {
+	row, _, ok := m.selectedWorkflowTaskRow(rows)
+	if !ok {
 		return m, nil
 	}
-	idx := min(max(m.workflowTaskPickerIndex, 0), len(rows)-1)
-	row := rows[idx]
 	if row.isMain || row.sessionID == "" {
 		return m, nil
 	}
@@ -255,14 +257,22 @@ func (m *appModel) stopWorkflowTaskSelection() (tea.Model, tea.Cmd) {
 
 func (m *appModel) workflowTaskPickerFooterText() string {
 	rows := m.workflowRows()
+	row, _, ok := m.selectedWorkflowTaskRow(rows)
+	if !ok {
+		return workflowTaskPickerBaseFooter
+	}
+	if row.isMain {
+		return workflowTaskPickerBaseFooter
+	}
+	return workflowTaskPickerBaseFooter + " · x to stop task"
+}
+
+func (m *appModel) selectedWorkflowTaskRow(rows []workflowRow) (workflowRow, int, bool) {
 	if len(rows) == 0 {
-		return "↑/↓ to select · Enter to view"
+		return workflowRow{}, 0, false
 	}
 	idx := min(max(m.workflowTaskPickerIndex, 0), len(rows)-1)
-	if rows[idx].isMain {
-		return "↑/↓ to select · Enter to view"
-	}
-	return "↑/↓ to select · Enter to view · x to stop task"
+	return rows[idx], idx, true
 }
 
 func (m *appModel) recordWorkflowTranscript(sessionID string, msg tea.Msg) {
@@ -485,9 +495,9 @@ func (m *appModel) renderBottomActivityRows(width int) string {
 	if len(workflowRows) == 0 && len(activityRows) == 0 {
 		return ""
 	}
-	selected := m.workflowTaskPickerIndex
-	if selected < 0 || selected >= len(workflowRows) {
-		selected = 0
+	_, selected, ok := m.selectedWorkflowTaskRow(workflowRows)
+	if !ok {
+		selected = -1
 	}
 	innerWidth := max(20, width-appPaddingHorizontal)
 	lines := make([]string, 0, len(workflowRows)+len(activityRows)+1)
