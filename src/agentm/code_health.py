@@ -26,8 +26,9 @@ Rules:
   for potential split candidates.
 - **AM008** ``redundant-local-import``: A function-body import that
   duplicates a module-level import. Inconsistent style with no benefit.
-- **AM009** ``god-class``: Classes with >25 methods. Swiss-army-knife
-  signal — consider splitting into composable facades.
+- **AM009** ``god-class``: Classes with >25 concrete methods. Type-only
+  ``@overload`` signatures are ignored. Swiss-army-knife signal — consider
+  splitting into composable facades.
 - **AM010** ``cross-layer-import``: Imports that violate the layer
   hierarchy (e.g. gateway → extensions/builtin, extensions → gateway,
   abi → runtime). Extends §11 to cover the full dependency graph.
@@ -410,8 +411,28 @@ def _check_redundant_local_import(tree: ast.Module, path: str) -> list[Issue]:
     return issues
 
 
+def _has_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
+    """Return whether ``node`` has a decorator named ``name``."""
+
+    for decorator in node.decorator_list:
+        match decorator:
+            case ast.Name(id=decorator_name):
+                if decorator_name == name:
+                    return True
+            case ast.Attribute(attr=decorator_name):
+                if decorator_name == name:
+                    return True
+            case ast.Call(func=ast.Name(id=decorator_name)):
+                if decorator_name == name:
+                    return True
+            case ast.Call(func=ast.Attribute(attr=decorator_name)):
+                if decorator_name == name:
+                    return True
+    return False
+
+
 def _check_god_class(tree: ast.Module, path: str) -> list[Issue]:
-    """AM009: Classes with >25 methods."""
+    """AM009: Classes with >25 concrete methods."""
     issues: list[Issue] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
@@ -419,6 +440,7 @@ def _check_god_class(tree: ast.Module, path: str) -> list[Issue]:
         method_count = sum(
             1 for child in node.body
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and not _has_decorator(child, "overload")
         )
         if method_count > 25:
             issues.append(Issue(
