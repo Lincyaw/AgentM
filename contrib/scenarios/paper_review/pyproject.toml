@@ -9,8 +9,14 @@ dependencies = ["agentm"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = []
+[tool.hatch.build.targets.wheel]
+packages = ["agentm_paper_review"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"agents" = "agentm_paper_review/agents"
+
+[dependency-groups]
+dev = []
 
 [tool.uv.sources]
 agentm = { path = "../../..", editable = true }

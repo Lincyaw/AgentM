@@ -32,7 +32,12 @@ paper_review/
     reviewer/
       manifest.yaml
       paper_review_context.py
-  workflow/
+  agentm_paper_review/
+    workflow/
+      __init__.py
+      paper_review_workflow.py
+      types.py
+  workflow/                  # compatibility wrappers for path-based runs
     __init__.py
     paper_review_workflow.py
     types.py

@@ -1,1 +1,1 @@
-"""paper_review workflow package."""
+"""Compatibility package for path-based paper_review workflow runs."""

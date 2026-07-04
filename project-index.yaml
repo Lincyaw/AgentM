@@ -1589,6 +1589,10 @@ requirements:
     code:
       - path: contrib/scenarios/paper_review/agents/reviewer/manifest.yaml
       - path: contrib/scenarios/paper_review/agents/reviewer/paper_review_context.py
+      - path: contrib/scenarios/paper_review/agentm_paper_review/__init__.py
+      - path: contrib/scenarios/paper_review/agentm_paper_review/workflow/__init__.py
+      - path: contrib/scenarios/paper_review/agentm_paper_review/workflow/paper_review_workflow.py
+      - path: contrib/scenarios/paper_review/agentm_paper_review/workflow/types.py
       - path: contrib/scenarios/paper_review/workflow/paper_review_workflow.py
       - path: contrib/scenarios/paper_review/workflow/types.py
       - path: contrib/scenarios/paper_review/workflow/__init__.py
@@ -1596,6 +1600,42 @@ requirements:
     tests: []
     docs:
       - path: contrib/scenarios/paper_review/README.md
+    depends_on:
+      - REQ-087-builtin-atoms-extension-api
+
+  - id: REQ-202-devloop-workflow-scenario
+    title: Devloop workflow scenario
+    description: >
+      The contrib devloop scenario must provide a packageable workflow template
+      for requirement-to-implementation automation. The workflow must keep the
+      orchestration code in a unique Python package so it can be built as a
+      wheel without colliding with other scenario packages, while retaining the
+      path-based ``workflow/devloop_workflow.py`` entrypoint used by local
+      ``agentm workflow run`` invocations. The wheel must include the coder
+      child scenario and scenario-local skills so installed runs can resolve
+      the same agent and skill resources as source-tree runs.
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: contrib/scenarios/devloop/agents/coder/manifest.yaml
+      - path: contrib/scenarios/devloop/agents/coder/devloop_context.py
+      - path: contrib/scenarios/devloop/agentm_devloop/__init__.py
+      - path: contrib/scenarios/devloop/agentm_devloop/workflow/__init__.py
+      - path: contrib/scenarios/devloop/agentm_devloop/workflow/devloop_workflow.py
+      - path: contrib/scenarios/devloop/agentm_devloop/workflow/prompts.py
+      - path: contrib/scenarios/devloop/agentm_devloop/workflow/types.py
+      - path: contrib/scenarios/devloop/workflow/__init__.py
+      - path: contrib/scenarios/devloop/workflow/devloop_workflow.py
+      - path: contrib/scenarios/devloop/workflow/prompts.py
+      - path: contrib/scenarios/devloop/workflow/types.py
+      - path: contrib/scenarios/devloop/pyproject.toml
+      - path: contrib/scenarios/devloop/skills/coding-guidelines/SKILL.md
+      - path: contrib/scenarios/devloop/skills/code-review-readiness/SKILL.md
+      - path: contrib/scenarios/devloop/skills/spec-alignment/SKILL.md
+    tests: []
+    docs:
+      - path: contrib/scenarios/devloop/README.md
     depends_on:
       - REQ-087-builtin-atoms-extension-api
 

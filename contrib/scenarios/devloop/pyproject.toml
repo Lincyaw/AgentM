@@ -5,15 +5,19 @@ description = "DevOps control loop — AgentM workflow template"
 requires-python = ">=3.12"
 dependencies = ["agentm"]
 
-[project.scripts]
-devloop = "workflow.devloop_workflow:main"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = []
+[tool.hatch.build.targets.wheel]
+packages = ["agentm_devloop"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"agents" = "agentm_devloop/agents"
+"skills" = "agentm_devloop/skills"
+
+[dependency-groups]
+dev = []
 
 [tool.uv.sources]
 agentm = { path = "../../..", editable = true }

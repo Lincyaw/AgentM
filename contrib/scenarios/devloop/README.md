@@ -17,10 +17,15 @@ devloop/
       devloop_context.py
   skills/                    ← domain skills (evolve per project)
     coding-guidelines/SKILL.md
-  workflow/
+  agentm_devloop/
+    workflow/
+      types.py               ← Pydantic models (args + structured output)
+      prompts.py             ← prompt construction
+      devloop_workflow.py    ← pure orchestration
+  workflow/                  ← compatibility wrappers for path-based runs
     types.py                 ← Pydantic models (args + structured output)
     prompts.py               ← prompt construction
-    devloop_workflow.py      ← pure orchestration
+    devloop_workflow.py      ← imports agentm_devloop.workflow.devloop_workflow
 ```
 
 ## Quick start
