@@ -99,6 +99,375 @@ def _module_name(module_path: str, module: ModuleType) -> str:
     return module_path.rsplit(".", 1)[-1]
 
 
+def _validate_atom_source(
+    name: str,
+    module_path: str,
+    new_source: str,
+    *,
+    tag: str,
+    require_manifest: bool,
+    known_extension_names: set[str],
+) -> ExtensionManifest | None:
+    """Validate ``new_source`` in a throwaway temp dir; return its manifest."""
+    with tempfile.TemporaryDirectory(prefix=f"agentm-{tag}-{name}-") as tmpdir:
+        src_path = Path(tmpdir) / f"{name}.py"
+        src_path.write_text(new_source, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(
+            f"_agentm_{tag}_validate_{name}_{uuid.uuid4().hex}",
+            src_path,
+        )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"could not build spec for {name!r}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        install = getattr(module, "install", None)
+        if install is None or not callable(install):
+            raise RuntimeError("missing callable 'install(api, config)'")
+        sig = inspect.signature(install)
+        positional = [
+            p
+            for p in sig.parameters.values()
+            if p.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        if len(positional) < 2:
+            raise RuntimeError(f"'install' must accept (api, config); got {sig}")
+
+        manifest = _module_manifest(module)
+        if manifest is None and require_manifest:
+            return None
+        if manifest is not None and manifest.name != name:
+            raise RuntimeError(
+                f"MANIFEST.name {manifest.name!r} does not match atom name {name!r}"
+            )
+        from agentm.extensions import validate as validate_mod
+
+        issues = validate_mod.validate_extension_contract(
+            module_path=module_path,
+            module=module,
+            src_file=src_path,
+            known_extension_names=known_extension_names,
+        )
+        blocking = [issue for issue in issues if issue.severity == "error"]
+        if blocking:
+            raise RuntimeError(blocking[0].message)
+        return manifest
+
+
+def _validate_reload_source(
+    name: str,
+    module_path: str,
+    new_source: str,
+    *,
+    loaded_names: set[str],
+) -> ExtensionManifest | None:
+    return _validate_atom_source(
+        name,
+        module_path,
+        new_source,
+        tag="reload",
+        require_manifest=True,
+        known_extension_names=loaded_names,
+    )
+
+
+def _validate_install_source(
+    name: str,
+    module_path: str,
+    new_source: str,
+    *,
+    loaded_names: set[str],
+) -> ExtensionManifest | None:
+    return _validate_atom_source(
+        name,
+        module_path,
+        new_source,
+        tag="install",
+        require_manifest=False,
+        known_extension_names=loaded_names | {name},
+    )
+
+
+async def _finish_install(
+    module_path: str,
+    api: _ExtensionAPIImpl,
+    ext_cfg: dict[str, Any],
+) -> None:
+    # validate=False: the reloader validates atom source separately before
+    # reaching here, so skip the load-time check to avoid double work.
+    result = load_extension(module_path, api, ext_cfg, validate=False)
+    if inspect.isawaitable(result):
+        await result
+
+
+def _clear_module_bytecode(path: Path) -> None:
+    cache_dir = path.parent / "__pycache__"
+    if not cache_dir.exists():
+        return
+    for pyc in cache_dir.glob(f"{path.stem}*.pyc"):
+        try:
+            pyc.unlink()
+        except OSError as exc:
+            # Stale bytecode that we couldn't remove is non-fatal (the
+            # source mtime invalidates it); log for diagnosis.
+            logger.debug("atom_reloader: could not unlink bytecode {}: {}", pyc, exc)
+
+
+def _resolve_install_target(cwd: str, name: str, target_path: str | None) -> Path:
+    if target_path is None:
+        return (Path(cwd) / ".agentm" / "atoms" / f"{name}.py").resolve()
+    return expand_path_from_cwd(target_path, cwd).resolve()
+
+
+def _import_synthetic_module(module_path: str, file_path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(module_path, file_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not build spec for {module_path!r}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_path] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_path, None)
+        raise
+    return module
+
+
+def _cleanup_failed_install(
+    resource_writer: ResourceWriter,
+    target_file: Path,
+    file_existed: bool,
+    write_result: Any,
+) -> None:
+    # Best-effort: if we wrote a brand-new file but the install raised,
+    # roll the file back so the on-disk state matches the running session.
+    # For pre-existing files we restore via git when possible, else leave
+    # alone so the human can inspect.
+    if not file_existed:
+        try:
+            target_file.unlink()
+        except OSError as exc:
+            # Rollback failure: a newly-written atom file is left on disk
+            # after a failed install, so on-disk state may diverge from the
+            # running session. Surface loudly so an operator can clean up.
+            logger.warning(
+                "atom_reloader: failed to roll back new atom file {} after "
+                "install error; on-disk state may be inconsistent: {}",
+                target_file,
+                exc,
+            )
+        if write_result.committed and write_result.commit_sha_before is not None:
+            try:
+                resource_writer.restore(target_file, write_result.commit_sha_before)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "atom_reloader: failed to git-restore {} to {} after "
+                    "install error; on-disk state may be inconsistent: {}",
+                    target_file,
+                    write_result.commit_sha_before,
+                    exc,
+                )
+
+
+def _collect_block_veto(bus: EventBus, channel: str, event: Any) -> str | None:
+    """First-truthy ``{"block": True, "reason": "..."}`` from sync handlers."""
+    for value in bus.emit_sync(channel, event):
+        if isinstance(value, dict) and value.get("block"):
+            return str(value.get("reason") or "blocked")
+    return None
+
+
+def _advisory_hash(source: str) -> str:
+    # Legacy fallback for git-less/advisory environments only.
+    return compute_atom_hash(source)
+
+
+def _restore_git_path(
+    resource_writer: ResourceWriter, atom: LoadedAtom, pre_sha: str
+) -> None:
+    resource_writer.restore(atom.file_path, pre_sha)
+
+
+class _ApiBoundaryRunner:
+    """Run async reloader operations from both sync and async callers."""
+
+    def __init__(self) -> None:
+        self._sync_loop: asyncio.AbstractEventLoop | None = None
+        self._sync_loop_thread: threading.Thread | None = None
+
+    def shutdown(self) -> None:
+        if self._sync_loop is not None:
+            self._sync_loop.call_soon_threadsafe(self._sync_loop.stop)
+        if self._sync_loop_thread is not None:
+            self._sync_loop_thread.join(timeout=1)
+        self._sync_loop = None
+        self._sync_loop_thread = None
+
+    def run(self, coro: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        loop = self._ensure_sync_loop()
+        return asyncio.run_coroutine_threadsafe(coro, loop).result()
+
+    def _ensure_sync_loop(self) -> asyncio.AbstractEventLoop:
+        if self._sync_loop is not None and self._sync_loop.is_running():
+            return self._sync_loop
+
+        ready = threading.Event()
+
+        def _runner() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._sync_loop = loop
+            ready.set()
+            loop.run_forever()
+            loop.close()
+
+        self._sync_loop_thread = threading.Thread(
+            target=_runner,
+            name="agentm-reloader-sync-loop",
+            daemon=True,
+        )
+        self._sync_loop_thread.start()
+        ready.wait()
+        assert self._sync_loop is not None
+        return self._sync_loop
+
+
+class _AtomRegistrationTracker:
+    """Track per-atom handlers, registered capabilities, and owner indexes."""
+
+    def __init__(
+        self,
+        *,
+        bus: EventBus,
+        tools: list[Tool],
+        commands: dict[str, CommandSpec],
+        providers: dict[str, ProviderConfig],
+        renderers: dict[str, Renderer],
+        on_provider_changed: Callable[[], None],
+    ) -> None:
+        self._bus = bus
+        self._tools = tools
+        self._commands = commands
+        self._providers = providers
+        self._renderers = renderers
+        self._on_provider_changed = on_provider_changed
+        self.handlers_by_atom: dict[str, list[Callable[[], None]]] = {}
+        self.registrations_by_atom: dict[str, list[tuple[str, str, Any]]] = {}
+        self.owners_by_kind: dict[str, dict[str, str]] = {}
+        self._subscription_unsubs: list[Callable[[], None]] = [
+            bus.on(ApiRegisterEvent.CHANNEL, self._track_registration)
+        ]
+
+    def shutdown(self) -> None:
+        for unsub in self._subscription_unsubs:
+            unsub()
+        self._subscription_unsubs.clear()
+
+    def wrap_api_on(self, api: _ExtensionAPIImpl, owner: str) -> None:
+        original_on = api.on
+        original_add_observer = api.add_observer
+
+        def tracked(
+            channel: str,
+            handler: Any,
+            *,
+            priority: int = BusPriority.NORMAL,
+        ) -> Any:
+            # Owner attribution lives on the bus subscription (stamped by
+            # _ExtensionAPIImpl.on from its own identity), so this wrapper only
+            # records the unsub token for per-atom teardown on reload/unload.
+            unsub = original_on(channel, handler, priority=priority)
+            self.handlers_by_atom.setdefault(owner, []).append(unsub)
+            return unsub
+
+        def tracked_observer(callback: Any) -> Any:
+            unsub = original_add_observer(callback)
+            self.handlers_by_atom.setdefault(owner, []).append(unsub)
+            return unsub
+
+        api.on = tracked  # type: ignore[method-assign]
+        api.add_observer = tracked_observer  # type: ignore[method-assign]
+
+    def _track_registration(self, event: ApiRegisterEvent) -> None:
+        self.registrations_by_atom.setdefault(event.extension, []).append(
+            (event.kind, event.name, event.payload)
+        )
+        self.owners_by_kind.setdefault(event.kind, {})[event.name] = event.extension
+
+    def remove_owner(self, owner: str) -> None:
+        for unsub in self.handlers_by_atom.pop(owner, []):
+            unsub()
+        for kind, name, payload in self.registrations_by_atom.pop(owner, []):
+            if kind == "tool":
+                self._tools[:] = [tool for tool in self._tools if tool is not payload]
+            elif kind == "command":
+                if self._commands.get(name) is payload:
+                    self._commands.pop(name, None)
+            elif kind == "provider":
+                if self._providers.get(name) is payload:
+                    self._providers.pop(name, None)
+                    self._on_provider_changed()
+            elif kind == "renderer":
+                if self._renderers.get(name) is payload:
+                    self._renderers.pop(name, None)
+            if self.owners_by_kind.setdefault(kind, {}).get(name) == owner:
+                self.owners_by_kind[kind].pop(name, None)
+
+    def restore(
+        self,
+        *,
+        handlers_by_atom: dict[str, list[Callable[[], None]]],
+        registrations_by_atom: dict[str, list[tuple[str, str, Any]]],
+        owners_by_kind: dict[str, dict[str, str]],
+    ) -> None:
+        self.handlers_by_atom.clear()
+        self.handlers_by_atom.update(
+            {owner: list(unsubs) for owner, unsubs in handlers_by_atom.items()}
+        )
+        self.registrations_by_atom.clear()
+        self.registrations_by_atom.update(
+            {owner: list(regs) for owner, regs in registrations_by_atom.items()}
+        )
+        self.owners_by_kind.clear()
+        self.owners_by_kind.update(
+            {kind: dict(name_map) for kind, name_map in owners_by_kind.items()}
+        )
+
+    def capture_handler_positions(self, owner: str) -> dict[str, int]:
+        """Record per-channel handler positions for post-reload splicing."""
+        positions: dict[str, int] = {}
+        for channel in self._bus.channels():
+            for idx, sub in enumerate(self._bus.subscriptions_for(channel)):
+                if sub.owner == owner:
+                    positions[channel] = idx
+                    break
+        return positions
+
+    def restore_handler_positions(
+        self, owner: str, positions: dict[str, int]
+    ) -> None:
+        for channel, anchor_idx in positions.items():
+            subs = self._bus.subscriptions_for(channel)
+            if not subs:
+                continue
+            owner_subs = [sub for sub in subs if sub.owner == owner]
+            if not owner_subs:
+                continue
+            non_owner = [sub for sub in subs if sub.owner != owner]
+            clamp = min(anchor_idx, len(non_owner))
+            self._bus.replace_subscriptions(
+                channel,
+                non_owner[:clamp] + owner_subs + non_owner[clamp:],
+            )
+
+
 class AtomReloader:
     """State machine + ``_SessionGateway`` implementation."""
 
@@ -127,15 +496,17 @@ class AtomReloader:
 
         self._loaded_by_module: dict[str, LoadedAtom] = {}
         self._loaded_by_name: dict[str, LoadedAtom] = {}
-        self._handlers_by_atom: dict[str, list[Callable[[], None]]] = {}
-        self._registrations_by_atom: dict[str, list[tuple[str, str, Any]]] = {}
-        self.owners_by_kind: dict[str, dict[str, str]] = {}
-        self._subscription_unsubs: list[Callable[[], None]] = [
-            bus.on(ApiRegisterEvent.CHANNEL, self._track_registration)
-        ]
+        self._registrations = _AtomRegistrationTracker(
+            bus=bus,
+            tools=tools,
+            commands=commands,
+            providers=providers,
+            renderers=renderers,
+            on_provider_changed=on_provider_changed,
+        )
+        self.owners_by_kind = self._registrations.owners_by_kind
         self._api_factory: Callable[[str], _ExtensionAPIImpl] | None = None
-        self._sync_loop: asyncio.AbstractEventLoop | None = None
-        self._sync_loop_thread: threading.Thread | None = None
+        self._api_boundary = _ApiBoundaryRunner()
 
     # --- Lifecycle wiring --------------------------------------------------
 
@@ -154,48 +525,13 @@ class AtomReloader:
         return self._loaded_by_name
 
     def shutdown(self) -> None:
-        for unsub in self._subscription_unsubs:
-            unsub()
-        self._subscription_unsubs.clear()
-        if self._sync_loop is not None:
-            self._sync_loop.call_soon_threadsafe(self._sync_loop.stop)
-        if self._sync_loop_thread is not None:
-            self._sync_loop_thread.join(timeout=1)
-        self._sync_loop = None
-        self._sync_loop_thread = None
+        self._registrations.shutdown()
+        self._api_boundary.shutdown()
 
     # --- Subscription tracking (called from ExtensionAPI.on/add_observer) ---
 
     def wrap_api_on(self, api: _ExtensionAPIImpl, owner: str) -> None:
-        original_on = api.on
-        original_add_observer = api.add_observer
-
-        def tracked(
-            channel: str,
-            handler: Any,
-            *,
-            priority: int = BusPriority.NORMAL,
-        ) -> Any:
-            # Owner attribution lives on the bus subscription (stamped by
-            # _ExtensionAPIImpl.on from its own identity), so this wrapper only
-            # records the unsub token for per-atom teardown on reload/unload.
-            unsub = original_on(channel, handler, priority=priority)
-            self._handlers_by_atom.setdefault(owner, []).append(unsub)
-            return unsub
-
-        def tracked_observer(callback: Any) -> Any:
-            unsub = original_add_observer(callback)
-            self._handlers_by_atom.setdefault(owner, []).append(unsub)
-            return unsub
-
-        api.on = tracked  # type: ignore[method-assign]
-        api.add_observer = tracked_observer  # type: ignore[method-assign]
-
-    def _track_registration(self, event: ApiRegisterEvent) -> None:
-        self._registrations_by_atom.setdefault(event.extension, []).append(
-            (event.kind, event.name, event.payload)
-        )
-        self.owners_by_kind.setdefault(event.kind, {})[event.name] = event.extension
+        self._registrations.wrap_api_on(api, owner)
 
     # --- Atom registry mutation -------------------------------------------
 
@@ -231,159 +567,6 @@ class AtomReloader:
         self._loaded_by_module[module_path] = atom
         self._loaded_by_name[atom.name] = atom
 
-    # --- Internal cleanup helpers -----------------------------------------
-
-    def _remove_handlers(self, owner: str) -> None:
-        for unsub in self._handlers_by_atom.pop(owner, []):
-            unsub()
-
-    def _remove_registrations(self, owner: str) -> None:
-        for kind, name, payload in self._registrations_by_atom.pop(owner, []):
-            if kind == "tool":
-                self._tools[:] = [tool for tool in self._tools if tool is not payload]
-            elif kind == "command":
-                if self._commands.get(name) is payload:
-                    self._commands.pop(name, None)
-            elif kind == "provider":
-                if self._providers.get(name) is payload:
-                    self._providers.pop(name, None)
-                    self._on_provider_changed()
-            elif kind == "renderer":
-                if self._renderers.get(name) is payload:
-                    self._renderers.pop(name, None)
-            if self.owners_by_kind.setdefault(kind, {}).get(name) == owner:
-                self.owners_by_kind[kind].pop(name, None)
-
-    @staticmethod
-    def _clear_module_bytecode(path: Path) -> None:
-        cache_dir = path.parent / "__pycache__"
-        if not cache_dir.exists():
-            return
-        for pyc in cache_dir.glob(f"{path.stem}*.pyc"):
-            try:
-                pyc.unlink()
-            except OSError as exc:
-                # Stale bytecode that we couldn't remove is non-fatal (the
-                # source mtime invalidates it); log for diagnosis.
-                logger.debug("atom_reloader: could not unlink bytecode {}: {}", pyc, exc)
-
-    def _validate_reload_source(
-        self, name: str, module_path: str, new_source: str
-    ) -> ExtensionManifest | None:
-        manifest = self._validate_atom_source(
-            name,
-            module_path,
-            new_source,
-            tag="reload",
-            require_manifest=True,
-        )
-        return manifest
-
-    def _validate_atom_source(
-        self,
-        name: str,
-        module_path: str,
-        new_source: str,
-        *,
-        tag: str,
-        require_manifest: bool,
-    ) -> ExtensionManifest | None:
-        """Validate ``new_source`` in a throwaway temp dir; return its manifest."""
-        with tempfile.TemporaryDirectory(prefix=f"agentm-{tag}-{name}-") as tmpdir:
-            src_path = Path(tmpdir) / f"{name}.py"
-            src_path.write_text(new_source, encoding="utf-8")
-            spec = importlib.util.spec_from_file_location(
-                f"_agentm_{tag}_validate_{name}_{uuid.uuid4().hex}",
-                src_path,
-            )
-            if spec is None or spec.loader is None:
-                raise RuntimeError(f"could not build spec for {name!r}")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            install = getattr(module, "install", None)
-            if install is None or not callable(install):
-                raise RuntimeError("missing callable 'install(api, config)'")
-            sig = inspect.signature(install)
-            positional = [
-                p
-                for p in sig.parameters.values()
-                if p.kind
-                in (
-                    inspect.Parameter.POSITIONAL_ONLY,
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                )
-            ]
-            if len(positional) < 2:
-                raise RuntimeError(f"'install' must accept (api, config); got {sig}")
-
-            manifest = _module_manifest(module)
-            if manifest is None and require_manifest:
-                return None
-            if manifest is not None and manifest.name != name:
-                raise RuntimeError(
-                    f"MANIFEST.name {manifest.name!r} does not match atom name {name!r}"
-                )
-            from agentm.extensions import validate as validate_mod
-
-            known = set(self._loaded_by_name)
-            if not require_manifest:
-                known = known | {name}
-            issues = validate_mod.validate_extension_contract(
-                module_path=module_path,
-                module=module,
-                src_file=src_path,
-                known_extension_names=known,
-            )
-            blocking = [issue for issue in issues if issue.severity == "error"]
-            if blocking:
-                raise RuntimeError(blocking[0].message)
-            return manifest
-
-    @staticmethod
-    async def _finish_install(
-        module_path: str,
-        api: _ExtensionAPIImpl,
-        ext_cfg: dict[str, Any],
-    ) -> None:
-        # validate=False: the reloader validates atom source separately via
-        # _validate_reload_source / _validate_install_source before reaching
-        # here, so skip the load-time check to avoid double work.
-        result = load_extension(module_path, api, ext_cfg, validate=False)
-        if inspect.isawaitable(result):
-            await result
-
-    def _run_api_boundary(self, coro: Any) -> Any:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(coro)
-        loop = self._ensure_sync_loop()
-        return asyncio.run_coroutine_threadsafe(coro, loop).result()
-
-    def _ensure_sync_loop(self) -> asyncio.AbstractEventLoop:
-        if self._sync_loop is not None and self._sync_loop.is_running():
-            return self._sync_loop
-
-        ready = threading.Event()
-
-        def _runner() -> None:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            self._sync_loop = loop
-            ready.set()
-            loop.run_forever()
-            loop.close()
-
-        self._sync_loop_thread = threading.Thread(
-            target=_runner,
-            name="agentm-reloader-sync-loop",
-            daemon=True,
-        )
-        self._sync_loop_thread.start()
-        ready.wait()
-        assert self._sync_loop is not None
-        return self._sync_loop
-
     async def _activate_atom_install(self, atom: LoadedAtom) -> None:
         if self._api_factory is None:
             raise RuntimeError(
@@ -391,19 +574,18 @@ class AtomReloader:
             )
         previous_api = self._apis.get(atom.module_path)
         # Capture handler positions BEFORE removal to restore after reload.
-        positions = self._capture_handler_positions(atom.module_path)
-        self._remove_handlers(atom.module_path)
-        self._remove_registrations(atom.module_path)
+        positions = self._registrations.capture_handler_positions(atom.module_path)
+        self._registrations.remove_owner(atom.module_path)
         sys.modules.pop(atom.module_path, None)
-        self._clear_module_bytecode(atom.file_path)
+        _clear_module_bytecode(atom.file_path)
         importlib.invalidate_caches()
         # Synthetic atoms have no package finder; re-seed sys.modules from disk.
         if atom.import_kind == "synthetic" or atom.module_path.startswith(
             _SCENARIO_MODULE_PREFIX
         ):
             # Scenario-local atoms are synthetic too.
-            self._import_synthetic_module(atom.module_path, atom.file_path)
-        await self._finish_install(
+            _import_synthetic_module(atom.module_path, atom.file_path)
+        await _finish_install(
             atom.module_path,
             self._api_factory(atom.module_path),
             dict(atom.config),
@@ -416,48 +598,26 @@ class AtomReloader:
             is_provider=atom.is_provider,
         )
         self._apis[atom.module_path]._owner_name = atom.module_path
-        self._restore_handler_positions(atom.module_path, positions)
+        self._registrations.restore_handler_positions(atom.module_path, positions)
         from agentm.extensions import discover as _disc
 
         _disc.reset_cache()
-
-    def _capture_handler_positions(self, owner: str) -> dict[str, int]:
-        """Record per-channel handler positions for post-reload splicing."""
-        positions: dict[str, int] = {}
-        for channel in self._bus.channels():
-            for idx, sub in enumerate(self._bus.subscriptions_for(channel)):
-                if sub.owner == owner:
-                    positions[channel] = idx
-                    break
-        return positions
-
-    def _restore_handler_positions(self, owner: str, positions: dict[str, int]) -> None:
-        for channel, anchor_idx in positions.items():
-            subs = self._bus.subscriptions_for(channel)
-            if not subs:
-                continue
-            owner_subs = [sub for sub in subs if sub.owner == owner]
-            if not owner_subs:
-                continue
-            non_owner = [sub for sub in subs if sub.owner != owner]
-            clamp = min(anchor_idx, len(non_owner))
-            self._bus.replace_subscriptions(
-                channel,
-                non_owner[:clamp] + owner_subs + non_owner[clamp:],
-            )
 
     def _capture_snapshot(self, module_path: str) -> _ReloadSnapshot:
         return _ReloadSnapshot(
             loaded_by_module=dict(self._loaded_by_module),
             loaded_by_name=dict(self._loaded_by_name),
             handlers_by_atom={
-                owner: list(unsubs) for owner, unsubs in self._handlers_by_atom.items()
+                owner: list(unsubs)
+                for owner, unsubs in self._registrations.handlers_by_atom.items()
             },
             registrations_by_atom={
-                owner: list(regs) for owner, regs in self._registrations_by_atom.items()
+                owner: list(regs)
+                for owner, regs in self._registrations.registrations_by_atom.items()
             },
             owners_by_kind={
-                kind: dict(name_map) for kind, name_map in self.owners_by_kind.items()
+                kind: dict(name_map)
+                for kind, name_map in self._registrations.owners_by_kind.items()
             },
             tools=list(self._tools),
             commands=dict(self._commands),
@@ -477,20 +637,10 @@ class AtomReloader:
         self._loaded_by_module.update(snapshot.loaded_by_module)
         self._loaded_by_name.clear()
         self._loaded_by_name.update(snapshot.loaded_by_name)
-        self._handlers_by_atom.clear()
-        self._handlers_by_atom.update(
-            {owner: list(unsubs) for owner, unsubs in snapshot.handlers_by_atom.items()}
-        )
-        self._registrations_by_atom.clear()
-        self._registrations_by_atom.update(
-            {
-                owner: list(regs)
-                for owner, regs in snapshot.registrations_by_atom.items()
-            }
-        )
-        self.owners_by_kind.clear()
-        self.owners_by_kind.update(
-            {kind: dict(name_map) for kind, name_map in snapshot.owners_by_kind.items()}
+        self._registrations.restore(
+            handlers_by_atom=snapshot.handlers_by_atom,
+            registrations_by_atom=snapshot.registrations_by_atom,
+            owners_by_kind=snapshot.owners_by_kind,
         )
         self._tools[:] = list(snapshot.tools)
         self._commands.clear()
@@ -512,13 +662,6 @@ class AtomReloader:
         for channel in live_channels - set(snapshot.bus_channels):
             self._bus.replace_subscriptions(channel, [])
 
-    def _restore_git_path(self, atom: LoadedAtom, pre_sha: str) -> None:
-        self._resource_writer.restore(atom.file_path, pre_sha)
-
-    def _advisory_hash(self, source: str) -> str:
-        # Legacy fallback for git-less/advisory environments only.
-        return compute_atom_hash(source)
-
     # --- _SessionGateway protocol -----------------------------------------
 
     def reload_atom(
@@ -529,7 +672,7 @@ class AtomReloader:
         agent_initiated: bool = True,
         rationale: str | None = None,
     ) -> ReloadResult:
-        return self._run_api_boundary(
+        return self._api_boundary.run(
             self.reload_atom_async(
                 name,
                 new_source,
@@ -569,7 +712,12 @@ class AtomReloader:
             )
 
         try:
-            manifest = self._validate_reload_source(name, atom.module_path, new_source)
+            manifest = _validate_reload_source(
+                name,
+                atom.module_path,
+                new_source,
+                loaded_names=set(self._loaded_by_name),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("atom_reloader: reload validation failed for {}: {}", name, exc)
             return ReloadResult(
@@ -615,9 +763,9 @@ class AtomReloader:
         old_hash = write_result.commit_sha_before
         new_hash = write_result.commit_sha_after
         if advisory_mode:
-            old_hash = self._advisory_hash(current_source)
-            new_hash = self._advisory_hash(new_source)
-        event_new_hash = new_hash or self._advisory_hash(new_source)
+            old_hash = _advisory_hash(current_source)
+            new_hash = _advisory_hash(new_source)
+        event_new_hash = new_hash or _advisory_hash(new_source)
         # Transactional snapshot for rollback.
         snapshot = self._capture_snapshot(atom.module_path)
 
@@ -655,7 +803,9 @@ class AtomReloader:
                         rollback_handle.write(current_source)
                     os.replace(rollback_tmp_name, atom.file_path)
                 elif write_result.commit_sha_before is not None:
-                    self._restore_git_path(atom, write_result.commit_sha_before)
+                    _restore_git_path(
+                        self._resource_writer, atom, write_result.commit_sha_before
+                    )
                 await self._activate_atom_install(atom)
             except Exception as rollback_exc:  # noqa: BLE001
                 # Rollback also failed; restore from immutable snapshot.
@@ -697,7 +847,7 @@ class AtomReloader:
             )
 
     def freeze_current(self, name: str) -> str:
-        return self._run_api_boundary(self.freeze_current_async(name))
+        return self._api_boundary.run(self.freeze_current_async(name))
 
     async def freeze_current_async(self, name: str) -> str:
         atom = self._loaded_by_name[name]
@@ -713,7 +863,7 @@ class AtomReloader:
         version_key = (
             result.commit_sha_after
             or result.commit_sha_before
-            or self._advisory_hash(source)
+            or _advisory_hash(source)
         )
         _layout.atom_runs_dir(name, version_key, root=Path(self._cwd)).mkdir(
             parents=True,
@@ -726,9 +876,7 @@ class AtomReloader:
         for atom in sorted(self._loaded_by_name.values(), key=lambda item: item.name):
             current_hash = self.current_version_for_path(str(atom.file_path))
             if current_hash is None and atom.file_path.is_file():
-                current_hash = self._advisory_hash(
-                    atom.file_path.read_text(encoding="utf-8")
-                )
+                current_hash = _advisory_hash(atom.file_path.read_text(encoding="utf-8"))
             manifest = atom.manifest or _default_manifest(atom.name)
             out.append(
                 AtomInfo(
@@ -771,7 +919,7 @@ class AtomReloader:
         rationale: str | None,
         agent_initiated: bool,
     ) -> InstallAtomResult:
-        return self._run_api_boundary(
+        return self._api_boundary.run(
             self.install_atom_async(
                 name=name,
                 source=source,
@@ -822,7 +970,7 @@ class AtomReloader:
         ext_cfg = dict(config or {})
         module_path = f"{discover_mod.USER_ATOM_MODULE_PREFIX}{name}"
 
-        target_file = self._resolve_install_target(name, target_path)
+        target_file = _resolve_install_target(self._cwd, name, target_path)
         if is_constitution_path(str(target_file)):
             return InstallAtomResult(
                 ok=False,
@@ -838,7 +986,12 @@ class AtomReloader:
             )
 
         try:
-            manifest = self._validate_install_source(name, module_path, source)
+            manifest = _validate_install_source(
+                name,
+                module_path,
+                source,
+                loaded_names=set(self._loaded_by_name),
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("atom_reloader: install validation failed for {}: {}", name, exc)
             return InstallAtomResult(
@@ -867,7 +1020,8 @@ class AtomReloader:
 
         effective_tier = manifest.tier if manifest is not None else 1
         trigger: Any = "agent" if agent_initiated else "human"
-        veto_reason = self._collect_block_veto(
+        veto_reason = _collect_block_veto(
+            self._bus,
             BeforeInstallAtomEvent.CHANNEL,
             BeforeInstallAtomEvent(
                 name=name,
@@ -909,16 +1063,18 @@ class AtomReloader:
                 error=write_result.error,
             )
 
-        new_hash = write_result.commit_sha_after or self._advisory_hash(source)
+        new_hash = write_result.commit_sha_after or _advisory_hash(source)
         effective_manifest = manifest or _default_manifest(name)
 
         # Register the module bytes synthetically so load_extension's
         # importlib.import_module call returns it.
         try:
-            self._import_synthetic_module(module_path, target_file)
+            _import_synthetic_module(module_path, target_file)
         except Exception as exc:  # noqa: BLE001
             logger.warning("atom_reloader: synthetic import failed for {}: {}", module_path, exc)
-            self._cleanup_failed_install(target_file, file_existed, write_result)
+            _cleanup_failed_install(
+                self._resource_writer, target_file, file_existed, write_result
+            )
             return InstallAtomResult(
                 ok=False,
                 name=name,
@@ -941,13 +1097,14 @@ class AtomReloader:
 
         try:
             api = self._api_factory(module_path)
-            await self._finish_install(module_path, api, ext_cfg)
+            await _finish_install(module_path, api, ext_cfg)
         except Exception as exc:  # noqa: BLE001
             logger.warning("atom_reloader: install() failed for {}: {}", module_path, exc)
-            self._remove_handlers(module_path)
-            self._remove_registrations(module_path)
+            self._registrations.remove_owner(module_path)
             sys.modules.pop(module_path, None)
-            self._cleanup_failed_install(target_file, file_existed, write_result)
+            _cleanup_failed_install(
+                self._resource_writer, target_file, file_existed, write_result
+            )
             self._bus.emit_sync(
                 ExtensionInstallEvent.CHANNEL,
                 ExtensionInstallEvent(
@@ -1037,7 +1194,8 @@ class AtomReloader:
                 f"tier-2 unload proceeds in MVP for {name} (no approval gate)"
             )
 
-        veto_reason = self._collect_block_veto(
+        veto_reason = _collect_block_veto(
+            self._bus,
             BeforeUnloadAtomEvent.CHANNEL,
             BeforeUnloadAtomEvent(
                 name=name,
@@ -1057,8 +1215,7 @@ class AtomReloader:
         previous_api = self._apis.get(atom.module_path)
         if previous_api is not None:
             previous_api.mark_stale()
-        self._remove_handlers(atom.module_path)
-        self._remove_registrations(atom.module_path)
+        self._registrations.remove_owner(atom.module_path)
         sys.modules.pop(atom.module_path, None)
         self._loaded_by_module.pop(atom.module_path, None)
         self._loaded_by_name.pop(atom.name, None)
@@ -1079,84 +1236,6 @@ class AtomReloader:
             name=name,
             module_path=atom.module_path,
         )
-
-    def _collect_block_veto(self, channel: str, event: Any) -> str | None:
-        """First-truthy ``{"block": True, "reason": "..."}`` from sync
-        handlers on ``channel``, else ``None``. Mirrors the ``tool_call``
-        block contract — first refusal wins; later handlers still run for
-        observability but cannot un-veto.
-        """
-        for value in self._bus.emit_sync(channel, event):
-            if isinstance(value, dict) and value.get("block"):
-                return str(value.get("reason") or "blocked")
-        return None
-
-    def _resolve_install_target(self, name: str, target_path: str | None) -> Path:
-        if target_path is None:
-            return (Path(self._cwd) / ".agentm" / "atoms" / f"{name}.py").resolve()
-        return expand_path_from_cwd(target_path, self._cwd).resolve()
-
-    def _validate_install_source(
-        self, name: str, module_path: str, new_source: str
-    ) -> ExtensionManifest | None:
-        return self._validate_atom_source(
-            name,
-            module_path,
-            new_source,
-            tag="install",
-            require_manifest=False,
-        )
-
-    @staticmethod
-    def _import_synthetic_module(module_path: str, file_path: Path) -> ModuleType:
-        spec = importlib.util.spec_from_file_location(module_path, file_path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"could not build spec for {module_path!r}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_path] = module
-        try:
-            spec.loader.exec_module(module)
-        except Exception:
-            sys.modules.pop(module_path, None)
-            raise
-        return module
-
-    def _cleanup_failed_install(
-        self,
-        target_file: Path,
-        file_existed: bool,
-        write_result: Any,
-    ) -> None:
-        # Best-effort: if we wrote a brand-new file but the install raised,
-        # roll the file back so the on-disk state matches the running session.
-        # For pre-existing files we restore via git when possible, else leave
-        # alone so the human can inspect.
-        if not file_existed:
-            try:
-                target_file.unlink()
-            except OSError as exc:
-                # Rollback failure: a newly-written atom file is left on disk
-                # after a failed install, so on-disk state may diverge from the
-                # running session. Surface loudly so an operator can clean up.
-                logger.warning(
-                    "atom_reloader: failed to roll back new atom file {} after "
-                    "install error; on-disk state may be inconsistent: {}",
-                    target_file,
-                    exc,
-                )
-            if write_result.committed and write_result.commit_sha_before is not None:
-                try:
-                    self._resource_writer.restore(
-                        target_file, write_result.commit_sha_before
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "atom_reloader: failed to git-restore {} to {} after "
-                        "install error; on-disk state may be inconsistent: {}",
-                        target_file,
-                        write_result.commit_sha_before,
-                        exc,
-                    )
 
     def current_version_for_path(self, path: str) -> str | None:
         return self._resource_writer.current_version_for_path(path)
