@@ -231,11 +231,16 @@ class AgentMAgent(BaseInstalledAgent):
         cli_flags = self.build_cli_flags()
         extra = f" {cli_flags}" if cli_flags else ""
         agent_dir = EnvironmentPaths.agent_dir
+        agentm_home = agent_dir / "agentm-home"
+        env["AGENTM_HOME"] = str(agentm_home)
         scenario_dir = getattr(self, "_active_scenario_dir", _SCENARIO_DIR)
 
         await self.exec_as_agent(
             environment,
-            command=f"mkdir -p {agent_dir}",
+            command=(
+                f"mkdir -p {shlex.quote(str(agent_dir))} "
+                f"{shlex.quote(str(agentm_home))}"
+            ),
             env=env,
         )
 
@@ -255,12 +260,17 @@ class AgentMAgent(BaseInstalledAgent):
             )
         finally:
             try:
+                obs_dest = agent_dir / "observability"
+                obs_dest_q = shlex.quote(str(obs_dest))
                 await self.exec_as_agent(
                     environment,
                     command=(
-                        f"cp -r .agentm/observability/ "
-                        f"{agent_dir}/observability/ 2>/dev/null || true"
+                        'obs_dir="${AGENTM_OBSERVABILITY_DIR:-'
+                        '${AGENTM_HOME:-$HOME/.agentm}/observability}"; '
+                        f"mkdir -p {obs_dest_q}; "
+                        f'if [ -d "$obs_dir" ]; then cp -R "$obs_dir"/. {obs_dest_q}/; fi'
                     ),
+                    env=env,
                 )
             except Exception as exc:  # noqa: BLE001
                 # Best-effort copy of the observability dir out of the sandbox.

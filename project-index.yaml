@@ -1482,13 +1482,17 @@ requirements:
       mirror command can retag it into the ARL-accessible registry. The adapter
       must also read nested Harbor metadata fields such as difficulty and
       category so swebench-pro subsets can be inspected before running
-      baseline/adapt experiments.
+      baseline/adapt experiments. The AgentM Harbor agent adapter must keep
+      AgentM runtime state under the exported agent directory and copy
+      observability traces from the configured AgentM home/observability
+      directory so benchmark artifacts include the session trace.
     priority: P1
     status: implemented
     confidence: confirmed
     code:
       - path: contrib/scenarios/terminal_bench/manifest.arl_task.yaml
       - path: contrib/evals/benchmarks/harbor.py
+      - path: contrib/scenarios/harbor/src/agentm_harbor/agent.py
     tests: []
     docs:
       - path: contrib/evals/README.md
