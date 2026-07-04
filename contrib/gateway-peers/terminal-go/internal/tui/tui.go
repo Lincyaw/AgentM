@@ -559,13 +559,14 @@ func (m *appModel) syncTabChrome(tabs []messages.TabInfo, activeIdx int) bool {
 }
 
 func (m *appModel) backgroundActivityText() string {
+	workflowText := ""
 	if m.tabBar.HasOnlyInactiveBackgroundTabs() {
-		return m.workflowBackgroundText()
+		workflowText = m.workflowBackgroundText()
 	}
 	if !m.bottomActivityRowsHidden {
-		return ""
+		return workflowText
 	}
-	return m.backgroundActivityCountText()
+	return joinBackgroundStatusParts(workflowText, m.backgroundActivityCountText())
 }
 
 func (m *appModel) workflowBackgroundText() string {
@@ -603,11 +604,42 @@ func (m *appModel) backgroundActivityCountText() string {
 	if total == 0 {
 		return ""
 	}
-	noun := "activity"
-	if total != 1 {
-		noun = "activities"
+	sourceCounts := map[string]int{}
+	for _, activity := range m.backgroundActivities {
+		sourceCounts[cmpNonEmpty(activity.source, "background")]++
 	}
-	return fmt.Sprintf("%d background %s", total, noun)
+	backgroundCount := sourceCounts["background"]
+	monitorCount := sourceCounts["monitor"]
+	otherCount := total - backgroundCount - monitorCount
+
+	parts := make([]string, 0, 3)
+	if backgroundCount > 0 {
+		parts = append(parts, backgroundStatusCountLabel(backgroundCount, "background task", "background tasks"))
+	}
+	if monitorCount > 0 {
+		parts = append(parts, backgroundStatusCountLabel(monitorCount, "monitor", "monitors"))
+	}
+	if otherCount > 0 {
+		parts = append(parts, backgroundStatusCountLabel(otherCount, "activity", "activities"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func backgroundStatusCountLabel(count int, singular, plural string) string {
+	if count == 1 {
+		return fmt.Sprintf("1 %s", singular)
+	}
+	return fmt.Sprintf("%d %s", count, plural)
+}
+
+func joinBackgroundStatusParts(parts ...string) string {
+	nonEmpty := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			nonEmpty = append(nonEmpty, part)
+		}
+	}
+	return strings.Join(nonEmpty, " · ")
 }
 
 // initSessionComponents creates a new chat page, session state, and editor for
