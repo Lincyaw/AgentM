@@ -1582,7 +1582,10 @@ requirements:
       later sections to resolve earlier confusion. The final paper-review pass
       must synthesize prior artifacts by de-duplicating overlapping findings,
       grouping canonical issues by aspect, and sorting each group by severity
-      and revision impact rather than concatenating pass outputs.
+      and revision impact rather than concatenating pass outputs. The packaged
+      wheel must require an AgentM version that includes the module-mode
+      workflow SDK and runner APIs it uses, so installs fail during dependency
+      resolution instead of failing later at workflow execution time.
     priority: P1
     status: implemented
     confidence: confirmed
@@ -1597,6 +1600,8 @@ requirements:
       - path: contrib/scenarios/paper_review/workflow/types.py
       - path: contrib/scenarios/paper_review/workflow/__init__.py
       - path: contrib/scenarios/paper_review/pyproject.toml
+      - path: pyproject.toml
+      - path: uv.lock
     tests: []
     docs:
       - path: contrib/scenarios/paper_review/README.md
@@ -1616,7 +1621,10 @@ requirements:
       the same agent and skill resources as source-tree runs. Path-based
       package entrypoints must not leave imported scenario implementation
       modules cached after a run, so repeated runs from different checkout
-      roots cannot reuse stale package state.
+      roots cannot reuse stale package state. The packaged wheel must require
+      an AgentM version that includes the module-mode workflow SDK and runner
+      APIs it uses, so installs fail during dependency resolution instead of
+      failing later at workflow execution time.
     priority: P2
     status: implemented
     confidence: confirmed
@@ -1634,6 +1642,8 @@ requirements:
       - path: contrib/scenarios/devloop/workflow/types.py
       - path: contrib/scenarios/devloop/pyproject.toml
       - path: src/agentm/extensions/builtin/_workflow/runner.py
+      - path: pyproject.toml
+      - path: uv.lock
       - path: contrib/scenarios/devloop/skills/coding-guidelines/SKILL.md
       - path: contrib/scenarios/devloop/skills/code-review-readiness/SKILL.md
       - path: contrib/scenarios/devloop/skills/spec-alignment/SKILL.md

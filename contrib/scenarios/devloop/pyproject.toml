@@ -3,7 +3,7 @@ name = "agentm-devloop"
 version = "0.1.0"
 description = "DevOps control loop — AgentM workflow template"
 requires-python = ">=3.12"
-dependencies = ["agentm"]
+dependencies = ["agentm>=0.2.5"]
 
 [build-system]
 requires = ["hatchling"]
