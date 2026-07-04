@@ -196,7 +196,6 @@ func (c *Controller) RunCooperative(ctx context.Context, cancel context.CancelFu
 	if message == "" {
 		return
 	}
-	c.echoUserMessage(message)
 	c.sendInbound(map[string]any{
 		"content": message,
 		"action":  "submit",

@@ -138,6 +138,16 @@ type chatPage struct {
 	// Used by --exit-after-response to ensure we don't exit before receiving content
 	hasReceivedAssistantContent bool
 
+	// queuedInputs mirrors Claude Code's running-input UX: messages submitted
+	// while the agent is already working are rendered as queued rows above the
+	// composer instead of disappearing into a weak notification.
+	queuedInputs []string
+	// queuedInputPendingEvents counts locally queued rows whose real
+	// UserMessageEvent has not yet arrived. It lets us ignore the synchronous
+	// fallback echo used by some runtimes while still clearing the row when the
+	// queued turn is actually promoted.
+	queuedInputPendingEvents int
+
 	// Editing state for branching sessions
 	editing          bool
 	branchAtPosition int
@@ -410,11 +420,19 @@ func (p *chatPage) setWorking(working bool) tea.Cmd {
 
 	if working != wasWorking {
 		return core.CmdHandler(msgtypes.WorkingStateChangedMsg{
-			Working: working,
+			Working:          working,
+			QueuedInputCount: len(p.queuedInputs),
 		})
 	}
 
 	return nil
+}
+
+func (p *chatPage) emitQueuedInputState() tea.Cmd {
+	return core.CmdHandler(msgtypes.WorkingStateChangedMsg{
+		Working:          p.working,
+		QueuedInputCount: len(p.queuedInputs),
+	})
 }
 
 // setPendingResponse adds or removes the pending-response spinner message
@@ -465,11 +483,46 @@ func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 		Render(sidebarWithDivider)
 }
 
+func (p *chatPage) queuedInputView(width int) string {
+	if len(p.queuedInputs) == 0 || width <= 0 {
+		return ""
+	}
+	rowStyle := lipgloss.NewStyle().Width(width).Foreground(styles.TextPrimary)
+	prefix := styles.MutedStyle.Render("  ❯ ")
+	available := max(1, width-lipgloss.Width(prefix))
+	rows := make([]string, 0, len(p.queuedInputs))
+	for _, input := range p.queuedInputs {
+		text := strings.ReplaceAll(input, "\n", " ")
+		rows = append(rows, rowStyle.Render(prefix+lipgloss.NewStyle().MaxWidth(available).Render(text)))
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (p *chatPage) joinMessagesWithQueuedInput(messagesView, queuedView string, height int) string {
+	if queuedView == "" || height <= 0 {
+		return messagesView
+	}
+	messageLines := strings.Split(messagesView, "\n")
+	queuedLines := strings.Split(queuedView, "\n")
+	keep := max(0, height-len(queuedLines))
+	if len(messageLines) > keep {
+		messageLines = messageLines[:keep]
+	}
+	for len(messageLines) < keep {
+		messageLines = append(messageLines, "")
+	}
+	return strings.Join(append(messageLines, queuedLines...), "\n")
+}
+
 // View renders the chat page (messages + sidebar only, no editor or resize handle)
 func (p *chatPage) View() string {
 	sl := p.computeSidebarLayout()
 
 	messagesView := p.messages.View()
+	queuedView := p.queuedInputView(sl.chatWidth)
+	if queuedView != "" {
+		messagesView = p.joinMessagesWithQueuedInput(messagesView, queuedView, sl.chatHeight)
+	}
 
 	var bodyContent string
 
@@ -647,12 +700,15 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 		return p, cmd
 	}
 
-	// QueueIfBusy: submit cooperatively to the gateway/core inbox instead of
-	// interrupting or holding a separate TUI-local queue.
+	// QueueIfBusy: submit cooperatively to the gateway/core inbox and render the
+	// local Claude Code-style queued row while the current turn continues.
 	if msg.QueueIfBusy && (p.working || p.msgCancel != nil) {
+		p.queuedInputs = append(p.queuedInputs, msg.Content)
+		p.queuedInputPendingEvents++
 		return p, tea.Batch(
 			p.processCooperativeMessage(msg),
-			notification.InfoCmd("Message queued"),
+			p.emitQueuedInputState(),
+			p.messages.ScrollToBottom(),
 		)
 	}
 

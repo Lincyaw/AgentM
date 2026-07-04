@@ -89,7 +89,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	// ===== Content Events =====
 	case *runtime.UserMessageEvent:
-		return true, p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition)
+		return true, p.handleUserMessage(msg)
 
 	case *runtime.AgentChoiceEvent:
 		return true, p.handleAgentChoice(msg)
@@ -241,7 +241,7 @@ func (p *chatPage) handleRequestStatus(msg *runtime.RequestStatusEvent) tea.Cmd 
 		return notification.WarningCmd("Gateway already accepted this request")
 	case "accepted":
 		if msg.Action == "submit" {
-			return notification.InfoCmd("Message accepted by gateway")
+			return nil
 		}
 		if msg.Action == "interrupt" {
 			return notification.InfoCmd("Interrupt accepted by gateway")
@@ -253,15 +253,42 @@ func (p *chatPage) handleRequestStatus(msg *runtime.RequestStatusEvent) tea.Cmd 
 	return nil
 }
 
+func (p *chatPage) handleUserMessage(msg *runtime.UserMessageEvent) tea.Cmd {
+	if len(p.queuedInputs) > 0 {
+		if p.queuedInputPendingEvents > 0 {
+			p.queuedInputPendingEvents--
+			return p.emitQueuedInputState()
+		}
+		p.queuedInputs = p.queuedInputs[1:]
+		return tea.Batch(
+			p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition),
+			p.emitQueuedInputState(),
+		)
+	}
+	return p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition)
+}
+
 func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent) tea.Cmd {
 	slog.Debug("handleStreamStarted called", "agent", msg.AgentName, "session_id", msg.SessionID)
+	wasWorking := p.working
 	p.streamCancelled = false
 	p.streamDepth++
 	p.streamStartTime = time.Now()
 	spinnerCmd := p.setWorking(true)
 	pendingCmd := p.setPendingResponse(true)
 	sidebarCmd := p.forwardToSidebar(msg)
-	return tea.Batch(pendingCmd, spinnerCmd, sidebarCmd)
+
+	var promoteQueuedCmd tea.Cmd
+	if !wasWorking && len(p.queuedInputs) > 0 {
+		content := p.queuedInputs[0]
+		p.queuedInputs = p.queuedInputs[1:]
+		if p.queuedInputPendingEvents > 0 {
+			p.queuedInputPendingEvents--
+		}
+		promoteQueuedCmd = p.messages.ReplaceLoadingWithUser(content, -1)
+	}
+
+	return tea.Batch(pendingCmd, spinnerCmd, promoteQueuedCmd, p.emitQueuedInputState(), sidebarCmd)
 }
 
 func (p *chatPage) handleAgentChoice(msg *runtime.AgentChoiceEvent) tea.Cmd {
@@ -319,6 +346,15 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	}
 	p.msgCancel = nil
 	p.streamCancelled = false
+	var promoteQueuedCmd tea.Cmd
+	if len(p.queuedInputs) > 0 {
+		content := p.queuedInputs[0]
+		p.queuedInputs = p.queuedInputs[1:]
+		if p.queuedInputPendingEvents > 0 {
+			p.queuedInputPendingEvents--
+		}
+		promoteQueuedCmd = p.messages.ReplaceLoadingWithUser(content, -1)
+	}
 	spinnerCmd := p.setWorking(false)
 	p.setPendingResponse(false)
 
@@ -330,7 +366,7 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		})
 	}
 
-	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, exitCmd)
+	return tea.Batch(p.messages.ScrollToBottom(), promoteQueuedCmd, spinnerCmd, sidebarCmd, exitCmd)
 }
 
 // handlePartialToolCall processes partial tool call events by rendering each

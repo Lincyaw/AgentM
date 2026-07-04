@@ -731,8 +731,11 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 func (m *appModel) handleWorkingStateChanged(msg messages.WorkingStateChangedMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
-	// Update editor working state
-	cmds = append(cmds, m.editor.SetWorking(msg.Working))
+	// Update editor working/queued state
+	cmds = append(cmds,
+		m.editor.SetWorking(msg.Working),
+		m.editor.SetQueuedInputCount(msg.QueuedInputCount),
+	)
 
 	// Start/stop working spinner
 	if msg.Working {

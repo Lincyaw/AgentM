@@ -68,6 +68,7 @@ type Editor interface {
 	layout.Sizeable
 	layout.Focusable
 	SetWorking(working bool) tea.Cmd
+	SetQueuedInputCount(count int) tea.Cmd
 	AcceptSuggestion() tea.Cmd
 	ScrollByWheel(delta int)
 	// Value returns the current editor content
@@ -119,11 +120,12 @@ type historySearchState struct {
 
 // editor implements [Editor]
 type editor struct {
-	textarea textarea.Model
-	hist     *history.History
-	width    int
-	height   int
-	working  bool
+	textarea         textarea.Model
+	hist             *history.History
+	width            int
+	height           int
+	working          bool
+	queuedInputCount int
 	// completions are the available completions
 	completions []completions.Completion
 
@@ -216,6 +218,8 @@ func WithReadOnly() Option {
 // defaultPlaceholder is shown in an empty editor unless WithPlaceholder
 // overrides it.
 const defaultPlaceholder = "Type your message here…"
+
+const queuedInputPlaceholder = "Press up to edit queued messages"
 
 // WithPlaceholder sets the editor's placeholder text (shown while empty).
 func WithPlaceholder(placeholder string) Option {
@@ -1293,7 +1297,25 @@ func (e *editor) Blur() tea.Cmd {
 
 func (e *editor) SetWorking(working bool) tea.Cmd {
 	e.working = working
+	e.refreshPlaceholder()
 	return nil
+}
+
+func (e *editor) SetQueuedInputCount(count int) tea.Cmd {
+	e.queuedInputCount = max(0, count)
+	e.refreshPlaceholder()
+	return nil
+}
+
+func (e *editor) refreshPlaceholder() {
+	if e.recording || e.historySearch.active {
+		return
+	}
+	if e.queuedInputCount > 0 {
+		e.textarea.Placeholder = queuedInputPlaceholder
+		return
+	}
+	e.textarea.Placeholder = e.placeholder
 }
 
 // Value returns the current editor content

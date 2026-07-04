@@ -6,6 +6,7 @@ import (
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/completion"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/components/editor"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/dialog"
+	"github.com/AoyangSpace/agentm-terminal/internal/tui/messages"
 	"github.com/AoyangSpace/agentm-terminal/internal/tui/page/chat"
 )
 
@@ -33,6 +34,9 @@ func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
 		if activeID = m.supervisor.ActiveID(); activeID != "" {
 			m.chatPages[activeID] = m.chatPage
 		}
+	}
+	if send, ok := msg.(messages.SendMsg); ok && send.QueueIfBusy && m.chatPage.IsWorking() {
+		return tea.Batch(cmd, m.editor.SetQueuedInputCount(1))
 	}
 	return cmd
 }
