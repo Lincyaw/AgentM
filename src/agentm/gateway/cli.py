@@ -663,7 +663,7 @@ async def _arun(
         try:
             await asyncio.wait_for(server.stop(), timeout=5.0)
             await asyncio.wait_for(runtime.shutdown(), timeout=10.0)
-        except (asyncio.TimeoutError, TimeoutError):
+        except TimeoutError:
             logger.warning("graceful shutdown timed out — forcing exit")
             timed_out = True
         # Close the SQLite stores cleanly before any hard exit — ``os._exit``

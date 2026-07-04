@@ -951,7 +951,7 @@ class AgentSession:
             await asyncio.wait_for(
                 self._driver_task, timeout=_DRIVER_SHUTDOWN_GRACE_SECONDS
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._driver_task.cancel()
             try:
                 await self._driver_task

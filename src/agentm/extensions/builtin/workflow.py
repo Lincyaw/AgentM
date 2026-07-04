@@ -2032,7 +2032,7 @@ def install(api: ExtensionAPI, config: WorkflowConfig) -> None:
             return _error(str(exc))
         except (FileNotFoundError, ValueError) as exc:
             return _error(f"workflow: {exc}")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return _error(
                 f"workflow: script exceeded wall-clock budget ({wall_clock_timeout}s)"
             )
