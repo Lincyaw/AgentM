@@ -140,8 +140,24 @@ def _entry_text(message: AgentMessage) -> str:
     return " ".join(parts)
 
 
-class SessionManager:
-    """Pi-style append-only session tree with an active leaf pointer."""
+class _SessionManagerCoreMixin:
+    """Construction and factory helpers shared by the SessionManager layers."""
+
+    if TYPE_CHECKING:
+        def _load(self) -> None: ...
+
+        def new_session(
+            self,
+            *,
+            id: str | None = None,
+            parent_session: str | None = None,
+        ) -> str | None: ...
+
+        def _truncate_to_last_boundary(self) -> None: ...
+
+        def get_session_id(self) -> str: ...
+
+        def get_branch(self, from_id: str | None = None) -> list[SessionEntry]: ...
 
     def __init__(
         self,
@@ -266,6 +282,8 @@ class SessionManager:
     # Bus wiring
     # ------------------------------------------------------------------
 
+
+class _SessionManagerLifecycleMixin(_SessionManagerCoreMixin):
     def attach_bus(self, bus: "EventBus") -> None:
         """Wire the SessionManager to an EventBus and flush any buffered emits.
 
@@ -525,6 +543,8 @@ class SessionManager:
     # Append / mutation
     # ------------------------------------------------------------------
 
+
+class _SessionManagerMutationMixin(_SessionManagerLifecycleMixin):
     def append(self, entry: SessionEntry) -> None:
         if entry.id in self._entries:
             raise ValueError(f"duplicate entry id: {entry.id}")
@@ -674,6 +694,8 @@ class SessionManager:
     # Query
     # ------------------------------------------------------------------
 
+
+class _SessionManagerQueryMixin(_SessionManagerMutationMixin):
     def get_cwd(self) -> str:
         return self._cwd
 
@@ -869,6 +891,10 @@ class SessionManager:
             for e in self.get_branch()
             if e.type == ENTRY_TYPE_MESSAGE and isinstance(e.payload, AgentMessage)
         ]
+
+
+class SessionManager(_SessionManagerQueryMixin):
+    """Pi-style append-only session tree with an active leaf pointer."""
 
 
 def _is_assistant_message_entry(entry: SessionEntry) -> bool:
