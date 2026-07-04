@@ -812,6 +812,109 @@ async def _translate_chunk(
 
 # --- Extension entrypoint --------------------------------------------------
 
+class _OpenAIProviderRuntime:
+    """Install-time provider registration runtime for OpenAI-compatible models."""
+
+    def __init__(self, api: Any, config: LlmOpenaiConfig) -> None:
+        self._api = api
+        self._config = config
+
+    def install(self) -> None:
+        model_id = self._model_id()
+        verify_ssl = self._verify_ssl()
+        stream_fn = self._build_stream_fn(verify_ssl=verify_ssl)
+        model = _build_model(model_id, **self._model_kwargs())
+        name = self._provider_name()
+        self._ensure_provider_name_available(name)
+        self._api.register_provider(
+            name,
+            ProviderConfig(stream_fn=stream_fn, model=model, name=name),
+        )
+
+    def _model_id(self) -> str:
+        model_id = self._config.model
+        if not model_id or not isinstance(model_id, str):
+            raise ValueError(
+                "agentm.extensions.builtin.llm_openai.install: config.model is required and must "
+                "be a non-empty string (e.g. 'gpt-4o' or 'Kimi-K2')."
+            )
+        return model_id
+
+    def _verify_ssl(self) -> bool:
+        verify_ssl = self._config.verify_ssl if self._config.verify_ssl is not None else True
+        if not verify_ssl:
+            self._api.events.emit_sync(
+                DiagnosticEvent.CHANNEL,
+                DiagnosticEvent(
+                    level="warning",
+                    source="openai",
+                    message=(
+                        "OpenAI provider configured with verify_ssl=False; "
+                        "TLS certificate verification is disabled for this session."
+                    ),
+                ),
+            )
+        return verify_ssl
+
+    def _build_stream_fn(self, *, verify_ssl: bool) -> OpenAIStreamFn:
+        from agentm.core.abi import RETRY_POLICY_SERVICE
+
+        # Access extra fields from the Pydantic model for pass-through config.
+        extra = self._config.model_extra or {}
+        return OpenAIStreamFn(
+            api_key=self._config.api_key,
+            base_url=self._config.base_url,
+            default_query=self._config.default_query,
+            default_headers=self._config.default_headers,
+            verify_ssl=verify_ssl,
+            retry_policy=self._api.get_service(RETRY_POLICY_SERVICE),
+            thinking_round_trip=self._config.thinking_round_trip or "drop",
+            reasoning_effort=extra.get("reasoning_effort"),
+            extra_body=extra.get("extra_body"),
+            events=getattr(self._api, "events", None),
+            azure_endpoint=self._config.azure_endpoint,
+            api_version=self._config.api_version,
+        )
+
+    def _model_kwargs(self) -> dict[str, int]:
+        model_kwargs: dict[str, int] = {}
+        if self._config.context_window is not None:
+            model_kwargs["context_window"] = self._config.context_window
+        if self._config.max_output_tokens is not None:
+            model_kwargs["max_output_tokens"] = self._config.max_output_tokens
+        return model_kwargs
+
+    def _provider_name(self) -> str:
+        raw_name = self._config.name
+        base_url = self._config.base_url
+        if raw_name is None:
+            if _is_non_canonical_base_url(base_url):
+                raise DuplicateProviderError(
+                    "agentm.extensions.builtin.llm_openai.install: config['name'] is required when "
+                    f"base_url={base_url!r} is set to a non-canonical "
+                    "OpenAI-compatible endpoint. Multiple custom endpoints "
+                    "default to the bare 'openai' registry name and would "
+                    "silently overwrite each other. Pass an explicit "
+                    "config['name'] (e.g. 'doubao', 'litellm', 'deepseek')."
+                )
+            name = "openai"
+        else:
+            name = raw_name
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                "agentm.extensions.builtin.llm_openai.install: config['name'] must be a non-empty string."
+            )
+        return name
+
+    def _ensure_provider_name_available(self, name: str) -> None:
+        if self._api.has_provider(name):
+            raise DuplicateProviderError(
+                f"agentm.extensions.builtin.llm_openai.install: provider name {name!r} is already "
+                "registered in this session. Choose a unique config['name'] for "
+                "each OpenAI-compatible endpoint."
+            )
+
+
 def install(api: Any, config: LlmOpenaiConfig) -> None:
     """Provider extension entrypoint.
 
@@ -823,84 +926,7 @@ def install(api: Any, config: LlmOpenaiConfig) -> None:
 
     """
 
-    model_id = config.model
-    if not model_id or not isinstance(model_id, str):
-        raise ValueError(
-            "agentm.extensions.builtin.llm_openai.install: config.model is required and must "
-            "be a non-empty string (e.g. 'gpt-4o' or 'Kimi-K2')."
-        )
-
-    from agentm.core.abi import RETRY_POLICY_SERVICE
-    retry_policy = api.get_service(RETRY_POLICY_SERVICE)
-    verify_ssl = config.verify_ssl if config.verify_ssl is not None else True
-    if not verify_ssl:
-        api.events.emit_sync(
-            DiagnosticEvent.CHANNEL,
-            DiagnosticEvent(
-                level="warning",
-                source="openai",
-                message=(
-                    "OpenAI provider configured with verify_ssl=False; "
-                    "TLS certificate verification is disabled for this session."
-                ),
-            ),
-        )
-
-    # Access extra fields from the Pydantic model for pass-through config
-    extra = config.model_extra or {}
-    stream_fn = OpenAIStreamFn(
-        api_key=config.api_key,
-        base_url=config.base_url,
-        default_query=config.default_query,
-        default_headers=config.default_headers,
-        verify_ssl=verify_ssl,
-        retry_policy=retry_policy,
-        thinking_round_trip=config.thinking_round_trip or "drop",
-        reasoning_effort=extra.get("reasoning_effort"),
-        extra_body=extra.get("extra_body"),
-        events=getattr(api, "events", None),
-        azure_endpoint=config.azure_endpoint,
-        api_version=config.api_version,
-    )
-
-    model_kwargs: dict[str, int] = {}
-    if config.context_window is not None:
-        model_kwargs["context_window"] = config.context_window
-    if config.max_output_tokens is not None:
-        model_kwargs["max_output_tokens"] = config.max_output_tokens
-    model = _build_model(model_id, **model_kwargs)
-
-    raw_name = config.name
-    base_url = config.base_url
-    if raw_name is None:
-        if _is_non_canonical_base_url(base_url):
-            raise DuplicateProviderError(
-                "agentm.extensions.builtin.llm_openai.install: config['name'] is required when "
-                f"base_url={base_url!r} is set to a non-canonical "
-                "OpenAI-compatible endpoint. Multiple custom endpoints "
-                "default to the bare 'openai' registry name and would "
-                "silently overwrite each other. Pass an explicit "
-                "config['name'] (e.g. 'doubao', 'litellm', 'deepseek')."
-            )
-        name = "openai"
-    else:
-        name = raw_name
-    if not isinstance(name, str) or not name:
-        raise ValueError(
-            "agentm.extensions.builtin.llm_openai.install: config['name'] must be a non-empty string."
-        )
-
-    if api.has_provider(name):
-        raise DuplicateProviderError(
-            f"agentm.extensions.builtin.llm_openai.install: provider name {name!r} is already "
-            "registered in this session. Choose a unique config['name'] for "
-            "each OpenAI-compatible endpoint."
-        )
-
-    api.register_provider(
-        name,
-        ProviderConfig(stream_fn=stream_fn, model=model, name=name),
-    )
+    _OpenAIProviderRuntime(api, config).install()
 
 # Canonical OpenAI base URLs — anything else is treated as a custom endpoint
 # (LiteLLM, DeepSeek, Doubao, vLLM, Ollama, ...). When ``name`` is omitted for

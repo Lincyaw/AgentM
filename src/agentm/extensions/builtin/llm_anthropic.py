@@ -618,6 +618,60 @@ async def _translate_event(
 
 # --- Extension entrypoint --------------------------------------------------
 
+class _AnthropicProviderRuntime:
+    """Install-time provider registration runtime for Anthropic-compatible models."""
+
+    def __init__(self, api: Any, config: LlmAnthropicConfig) -> None:
+        self._api = api
+        self._config = config
+
+    def install(self) -> None:
+        model_id = self._model_id()
+        stream_fn = self._build_stream_fn()
+        model = _build_model(model_id, **self._model_kwargs())
+        self._api.register_provider(
+            "anthropic",
+            ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
+        )
+
+    def _model_id(self) -> str:
+        model_id = self._config.model
+        if not model_id or not isinstance(model_id, str):
+            raise ValueError(
+                "agentm.extensions.builtin.llm_anthropic.install: config.model is required and must "
+                "be a non-empty string (e.g. 'claude-opus-4-7')."
+            )
+        return model_id
+
+    def _build_stream_fn(self) -> AnthropicStreamFn:
+        default_headers = self._config.default_headers
+        if default_headers is not None and not isinstance(default_headers, Mapping):
+            raise ValueError(
+                "agentm.extensions.builtin.llm_anthropic.install: config.default_headers "
+                "must be a mapping of header name to string value."
+            )
+        # Access extra fields from the Pydantic model for pass-through config.
+        extra = self._config.model_extra or {}
+        return AnthropicStreamFn(
+            api_key=self._config.api_key,
+            base_url=self._config.base_url,
+            default_headers=default_headers,
+            thinking_budgets=self._config.thinking_budgets,
+            reasoning_effort=extra.get("reasoning_effort"),
+            extra_body=extra.get("extra_body"),
+            retry_policy=self._api.get_service(RETRY_POLICY_SERVICE),
+        )
+
+    def _model_kwargs(self) -> dict[str, int]:
+        # Optional model-spec overrides; defaults handled in ``_build_model``.
+        model_kwargs: dict[str, int] = {}
+        if self._config.context_window is not None:
+            model_kwargs["context_window"] = self._config.context_window
+        if self._config.max_output_tokens is not None:
+            model_kwargs["max_output_tokens"] = self._config.max_output_tokens
+        return model_kwargs
+
+
 def install(api: Any, config: LlmAnthropicConfig) -> None:
     """Provider extension entrypoint.
 
@@ -627,43 +681,6 @@ def install(api: Any, config: LlmAnthropicConfig) -> None:
 
     """
 
-    model_id = config.model
-    if not model_id or not isinstance(model_id, str):
-        raise ValueError(
-            "agentm.extensions.builtin.llm_anthropic.install: config.model is required and must "
-            "be a non-empty string (e.g. 'claude-opus-4-7')."
-        )
-
-    api_key = config.api_key
-    base_url = config.base_url
-    default_headers = config.default_headers
-    if default_headers is not None and not isinstance(default_headers, Mapping):
-        raise ValueError(
-            "agentm.extensions.builtin.llm_anthropic.install: config.default_headers "
-            "must be a mapping of header name to string value."
-        )
-    # Access extra fields from the Pydantic model for pass-through config
-    extra = config.model_extra or {}
-    stream_fn = AnthropicStreamFn(
-        api_key=api_key,
-        base_url=base_url,
-        default_headers=default_headers,
-        thinking_budgets=config.thinking_budgets,
-        reasoning_effort=extra.get("reasoning_effort"),
-        extra_body=extra.get("extra_body"),
-        retry_policy=api.get_service(RETRY_POLICY_SERVICE),
-    )
-    # Optional model-spec overrides; defaults handled in ``_build_model``.
-    model_kwargs: dict[str, int] = {}
-    if config.context_window is not None:
-        model_kwargs["context_window"] = config.context_window
-    if config.max_output_tokens is not None:
-        model_kwargs["max_output_tokens"] = config.max_output_tokens
-    model = _build_model(model_id, **model_kwargs)
-
-    api.register_provider(
-        "anthropic",
-        ProviderConfig(stream_fn=stream_fn, model=model, name="anthropic"),
-    )
+    _AnthropicProviderRuntime(api, config).install()
 
 __all__ = ("AnthropicStreamFn", "MANIFEST", "install")
