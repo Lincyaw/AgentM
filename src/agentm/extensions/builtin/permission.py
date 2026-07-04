@@ -34,9 +34,11 @@ from pydantic import BaseModel
 from agentm.core.abi import ExtensionAPI, ToolCallEvent
 from agentm.extensions import ExtensionManifest
 
+
 class PermissionConfig(BaseModel):
     allow: list[str] = []
     deny: list[str] = []
+
 
 MANIFEST = ExtensionManifest(
     name="permission",
@@ -46,6 +48,7 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Leaf policy atom: can guard absent, present, or future tools.
     tier=2,
 )
+
 
 def _matches_any(name: str, patterns: tuple[str, ...]) -> bool:
     """Return True if ``name`` matches any fnmatch pattern in ``patterns``.
@@ -59,20 +62,26 @@ def _matches_any(name: str, patterns: tuple[str, ...]) -> bool:
             return True
     return False
 
-def install(api: ExtensionAPI, config: PermissionConfig) -> None:
-    allow = tuple(config.allow)
-    deny = tuple(config.deny)
-    if not allow and not deny:
-        return
 
-    both_set = bool(allow) and bool(deny)
+class _PermissionRuntime:
+    def __init__(self, api: ExtensionAPI, config: PermissionConfig) -> None:
+        self._api = api
+        self._allow = tuple(config.allow)
+        self._deny = tuple(config.deny)
+        self._both_set = bool(self._allow) and bool(self._deny)
 
-    def _on_tool_call(event: ToolCallEvent) -> dict[str, Any] | None:
+    def active(self) -> bool:
+        return bool(self._allow or self._deny)
+
+    def install(self) -> None:
+        self._api.on(ToolCallEvent.CHANNEL, self.on_tool_call)
+
+    def on_tool_call(self, event: ToolCallEvent) -> dict[str, Any] | None:
         name = event.tool_name
-        allow_hit = bool(allow) and _matches_any(name, allow)
-        deny_hit = bool(deny) and _matches_any(name, deny)
+        allow_hit = bool(self._allow) and _matches_any(name, self._allow)
+        deny_hit = bool(self._deny) and _matches_any(name, self._deny)
 
-        if both_set:
+        if self._both_set:
             # ``allow`` carves exceptions out of ``deny``; non-matches pass.
             if deny_hit and not allow_hit:
                 return {
@@ -86,11 +95,16 @@ def install(api: ExtensionAPI, config: PermissionConfig) -> None:
                 "block": True,
                 "reason": f"tool '{name}' denied by denylist",
             }
-        if allow and not allow_hit:
+        if self._allow and not allow_hit:
             return {
                 "block": True,
                 "reason": f"tool '{name}' is not in allowlist",
             }
         return None
 
-    api.on(ToolCallEvent.CHANNEL, _on_tool_call)
+
+def install(api: ExtensionAPI, config: PermissionConfig) -> None:
+    runtime = _PermissionRuntime(api, config)
+    if not runtime.active():
+        return
+    runtime.install()
