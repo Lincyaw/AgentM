@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agentm.core.lib import expand_path_from_cwd
 from agentm.extensions.builtin.workflow import WorkflowContext
 
 DEFAULT_STATE_DIR = ".agentm/workgraph"
@@ -85,19 +86,13 @@ def _workflow_cwd(ctx: WorkflowContext) -> str:
 
 def _state_root(ctx: WorkflowContext) -> Path:
     raw = _as_str(ctx.args.get("state_dir"), DEFAULT_STATE_DIR)
-    root = Path(raw).expanduser()
-    if not root.is_absolute():
-        root = Path(_workflow_cwd(ctx)) / root
-    return root
+    return expand_path_from_cwd(raw, _workflow_cwd(ctx))
 
 
 def _config_path(ctx: WorkflowContext, root: Path) -> Path | None:
     raw = ctx.args.get("config") or ctx.args.get("config_path")
     if isinstance(raw, str) and raw.strip():
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
-            path = Path(_workflow_cwd(ctx)) / path
-        return path
+        return expand_path_from_cwd(raw, _workflow_cwd(ctx))
     for name in CONFIG_FILENAMES:
         path = root / name
         if path.is_file():
