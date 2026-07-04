@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from loguru import logger
+
 from agentm.core.lib.paths import (
     expand_path as _expand_path,
     parsed_unix_socket_path,
@@ -459,7 +461,8 @@ def _write_daemon_metadata(data: dict[str, Any]) -> None:
 def _websocket_accepts_connections(connect_url: str) -> bool:
     try:
         from websockets.sync.client import connect as ws_connect
-    except Exception:
+    except Exception as exc:
+        logger.debug("gateway daemon: websocket probe unavailable: {}", exc)
         return False
     probe_url = _websocket_probe_url(connect_url)
     kwargs: dict[str, Any] = {"open_timeout": 0.2, "close_timeout": 0.2}
@@ -473,7 +476,8 @@ def _websocket_accepts_connections(connect_url: str) -> bool:
     try:
         with ws_connect(probe_url, **kwargs):
             return True
-    except Exception:
+    except Exception as exc:
+        logger.debug("gateway daemon: websocket probe failed for {}: {}", probe_url, exc)
         return False
 
 

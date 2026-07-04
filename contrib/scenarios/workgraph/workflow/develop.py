@@ -659,6 +659,7 @@ async def _run_one(
             "result_dir": str(_result_dir(root, task)),
         }
     except Exception as exc:
+        ctx.log(f"{task.task_id}: development workflow failed: {type(exc).__name__}: {exc}")
         coder_text = f"Status: failed\n\nWorkflow exception: {type(exc).__name__}: {exc}"
         verifier_text = "Status: failed\n\nVerifier was not completed."
         _write_result(root, task, coder_text, verifier_text, agent_env_session)

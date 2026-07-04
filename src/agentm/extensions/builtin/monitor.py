@@ -412,6 +412,7 @@ class _MonitorManager:
             if isawaitable(result):
                 result = await result
         except Exception as exc:  # noqa: BLE001
+            logger.debug("monitor: gateway schedule create failed: {}", exc)
             return _tool_result({"error": str(exc)}, is_error=True)
         if not isinstance(result, dict):
             return _tool_result(
@@ -477,6 +478,7 @@ class _MonitorManager:
             if isawaitable(result):
                 result = await result
         except Exception as exc:  # noqa: BLE001
+            logger.debug("monitor: gateway schedule delete failed: {}", exc)
             return _tool_result({"error": str(exc)}, is_error=True)
         if bool(result):
             state = _Monitor(

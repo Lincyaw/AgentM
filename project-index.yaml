@@ -1105,6 +1105,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/wire/resolve.go
       - path: contrib/gateway-peers/feishu/src/agentm_feishu/cli.py
       - path: contrib/gateway-peers/feishu/src/agentm_feishu/bot_config.py
+      - path: contrib/gateway-peers/weixin/src/agentm_weixin/auth.py
       - path: contrib/gateway-peers/weixin/src/agentm_weixin/cli.py
       - path: contrib/gateway-peers/weixin/src/agentm_weixin/adapter.py
       - path: contrib/gateway-peers/weixin/src/agentm_weixin/state.py

@@ -595,6 +595,7 @@ async def _run_one(
             "result_dir": str(_result_dir(root, task)),
         }
     except Exception as exc:
+        ctx.log(f"{task.task_id}: merge workflow failed: {type(exc).__name__}: {exc}")
         merger_text = f"Status: failed\n\nWorkflow exception: {type(exc).__name__}: {exc}"
         _write_merge_result(root, task, merger_text, agent_env_session)
         target = _move_finished(root, claim, "failed")

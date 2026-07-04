@@ -69,6 +69,7 @@ async def login_qr(
     try:
         qr_resp = await fetch_qr_code(session)
     except Exception as exc:
+        logger.debug("weixin login: failed to fetch QR code: {}", exc)
         return LoginResult(message=f"获取二维码失败: {exc}")
 
     qrcode_key = qr_resp.get("qrcode", "")
