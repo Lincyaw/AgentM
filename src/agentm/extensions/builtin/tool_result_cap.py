@@ -31,6 +31,7 @@ from agentm.core.abi import (
 )
 from agentm.core.lib import (
     count_text_tokens,
+    expand_path,
     truncate_text_tokens,
     truncate_text_tokens_middle,
 )
@@ -64,7 +65,7 @@ def install(api: ExtensionAPI, config: ToolResultCapConfig) -> None:
     preview_tokens = config.preview_tokens
     error_floor_tokens = config.error_floor_tokens
     spill_to_disk = config.spill_to_disk
-    output_dir = Path(api.cwd) / ".agentm" / "tool_outputs"
+    output_dir = (expand_path(api.cwd) / ".agentm" / "tool_outputs").resolve()
 
     def _on_tool_result(event: ToolResultEvent) -> ToolResult | None:
         if event.tool_name == "read":
