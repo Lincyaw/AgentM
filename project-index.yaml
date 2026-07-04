@@ -485,6 +485,7 @@ requirements:
       - path: src/agentm/cli_terminal.py
       - path: src/agentm/onboard.py
       - path: src/agentm/cli_trace.py
+      - path: src/agentm/cli_trace_format.py
       - path: src/agentm/contrib_sync.py
       - path: src/agentm/env.py
       - path: src/agentm/extensions/discover.py
@@ -1068,6 +1069,7 @@ requirements:
       - path: src/agentm/cli_terminal.py
       - path: src/agentm/contrib_sync.py
       - path: src/agentm/cli_trace.py
+      - path: src/agentm/cli_trace_format.py
       - path: src/agentm/cli_daemon.py
       - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway_daemon.py
