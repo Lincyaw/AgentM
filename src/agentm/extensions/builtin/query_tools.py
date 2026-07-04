@@ -338,9 +338,10 @@ class _QueryToolsRuntime:
             FunctionTool(
                 name="query_traces",
                 description=(
-                    "Filter .agentm/observability/*.jsonl traces by task_class "
-                    "and optional fingerprint. Returns summaries only — fetch "
-                    "full bodies via the `read` tool."
+                    "Filter local observability JSONL traces from "
+                    "$AGENTM_HOME/observability (or AGENTM_OBSERVABILITY_DIR) "
+                    "by task_class and optional fingerprint. Returns summaries "
+                    "only — fetch full bodies via the `read` tool."
                 ),
                 parameters=_TracesArgs,
                 fn=self._traces_execute,
@@ -381,7 +382,12 @@ class _QueryToolsRuntime:
         only_eval_runs = bool(args.get("only_eval_runs", False))
 
         if not self._obs_dir.is_dir():
-            return _ok(json.dumps({"traces": []}))
+            return _ok(
+                json.dumps(
+                    {"observability_dir": str(self._obs_dir), "traces": []},
+                    indent=2,
+                )
+            )
 
         files = sorted(
             (p for p in self._obs_dir.glob("*.jsonl") if p.is_file()),
@@ -410,7 +416,12 @@ class _QueryToolsRuntime:
             if len(out) >= n:
                 break
 
-        return _ok(json.dumps({"traces": out}, indent=2))
+        return _ok(
+            json.dumps(
+                {"observability_dir": str(self._obs_dir), "traces": out},
+                indent=2,
+            )
+        )
 
     async def _candidates_execute(self, args: dict[str, Any]) -> ToolResult:
         scenario = self._scenario_arg(args.get("target_scenario"))
