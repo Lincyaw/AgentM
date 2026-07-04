@@ -73,6 +73,7 @@ class FileToolsConfig(BaseModel):
             )
         return value
 
+
 MANIFEST = ExtensionManifest(
     name="file_tools",
     description="Register the read, write, and edit tools for guarded file I/O.",
@@ -85,13 +86,17 @@ MANIFEST = ExtensionManifest(
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
+
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
 
+
 _PATH_ALIASES: Final[tuple[str, ...]] = ("file_path",)
+
 
 def _required_string_arg(
     args: dict[str, Any],
@@ -135,11 +140,13 @@ def _required_string_arg(
         )
     return value, None
 
+
 def _read_state_path(path: str, cwd: str) -> str:
     """Return the stable key used for read-before-write/edit state."""
     if os.path.isabs(path):
         return os.path.normpath(path)
     return os.path.normpath(os.path.join(cwd, path))
+
 
 # ---------------------------------------------------------------------------
 # Read helpers
@@ -148,22 +155,66 @@ def _read_state_path(path: str, cwd: str) -> str:
 # 256 KB — matches Claude Code's MAX_OUTPUT_SIZE (0.25 * 1024 * 1024).
 _DEFAULT_MAX_SIZE_BYTES: Final[int] = 262_144
 
-_BINARY_EXTENSIONS: Final[frozenset[str]] = frozenset({
-    # Video
-    ".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv",
-    # Audio
-    ".mp3", ".wav", ".flac", ".aac", ".ogg", ".wma", ".m4a",
-    # Image
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp", ".ico", ".svg",
-    # Archive
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
-    # Binary / native
-    ".bin", ".exe", ".dll", ".so", ".dylib", ".o", ".a", ".pyc", ".class",
-    # Documents
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    # Database
-    ".sqlite", ".db",
-})
+_BINARY_EXTENSIONS: Final[frozenset[str]] = frozenset(
+    {
+        # Video
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".mkv",
+        ".webm",
+        ".flv",
+        ".wmv",
+        # Audio
+        ".mp3",
+        ".wav",
+        ".flac",
+        ".aac",
+        ".ogg",
+        ".wma",
+        ".m4a",
+        # Image
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".tiff",
+        ".webp",
+        ".ico",
+        ".svg",
+        # Archive
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        # Binary / native
+        ".bin",
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".o",
+        ".a",
+        ".pyc",
+        ".class",
+        # Documents
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        # Database
+        ".sqlite",
+        ".db",
+    }
+)
+
 
 def _check_binary(path: str) -> str | None:
     """Return an error string if *path* looks like a binary file, else None."""
@@ -191,6 +242,7 @@ def _coerce_globs(value: Any, cwd: str) -> tuple[str, ...]:
             out.append(os.path.normpath(os.path.join(cwd, raw)))
     return tuple(out)
 
+
 def _resolved(path: str) -> str:
     """Resolve to absolute, symlink-collapsed path for matching."""
     try:
@@ -198,8 +250,10 @@ def _resolved(path: str) -> str:
     except (OSError, RuntimeError):
         return os.path.abspath(os.path.expanduser(path))
 
+
 def _matches_any(path: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+
 
 def _check_path_allowed(
     path: str,
@@ -214,11 +268,9 @@ def _check_path_allowed(
             "should be permitted."
         )
     if deny and _matches_any(resolved, deny):
-        return (
-            f"Access denied: {path!r} matches a configured deny_glob "
-            f"({list(deny)})."
-        )
+        return f"Access denied: {path!r} matches a configured deny_glob ({list(deny)})."
     return None
+
 
 class _ReadArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -238,9 +290,11 @@ class _ReadArgs(BaseModel):
         ),
     )
 
+
 # ---------------------------------------------------------------------------
 # Edit helpers
 # ---------------------------------------------------------------------------
+
 
 class _EditArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -261,10 +315,14 @@ class _EditArgs(BaseModel):
     replace_all: bool = Field(default=False)
     rationale: str = Field(default="agent edit via file_tools")
 
+
 _CONTEXT_LINES = 4
 _MAX_UNINTENDED_SHRINK_LINES = 5
 
-def _check_shrinkage(original: str, updated: str, old_len: int, new_len: int) -> str | None:
+
+def _check_shrinkage(
+    original: str, updated: str, old_len: int, new_len: int
+) -> str | None:
     """Reject edits that delete far more content than the replacement explains."""
     expected_delta = new_len - old_len
     actual_delta = len(updated) - len(original)
@@ -281,6 +339,7 @@ def _check_shrinkage(original: str, updated: str, old_len: int, new_len: int) ->
         )
     return None
 
+
 _QUOTE_MAP: Final[dict[str, str]] = {
     "‘": "'",  # left single curly
     "’": "'",  # right single curly
@@ -288,10 +347,12 @@ _QUOTE_MAP: Final[dict[str, str]] = {
     "”": '"',  # right double curly
 }
 
+
 def _normalize_quotes(s: str) -> str:
     for curly, straight in _QUOTE_MAP.items():
         s = s.replace(curly, straight)
     return s
+
 
 def _snippet_around(content: str, start_line: int, end_line: int) -> str:
     """Return a snippet of *content* showing +-CONTEXT_LINES around [start, end] with line numbers."""
@@ -305,8 +366,10 @@ def _snippet_around(content: str, start_line: int, end_line: int) -> str:
     ]
     return "\n".join(numbered)
 
+
 async def _update_read_state_after_edit(
-    normalized_path: str, writer: Any,
+    normalized_path: str,
+    writer: Any,
 ) -> None:
     """Refresh read_state for *normalized_path* after a successful edit."""
     old = get_read_state(normalized_path)
@@ -318,7 +381,9 @@ async def _update_read_state_after_edit(
         chash = content_hash_for(raw)
         total_lines = raw.decode("utf-8", errors="replace").count("\n") + 1
     except (OSError, FileNotFoundError) as exc:
-        logger.warning("file_tools: post-edit read({}) failed: {}", normalized_path, exc)
+        logger.warning(
+            "file_tools: post-edit read({}) failed: {}", normalized_path, exc
+        )
     record_read(
         normalized_path,
         total_lines=total_lines,
@@ -326,9 +391,11 @@ async def _update_read_state_after_edit(
         content_hash=chash,
     )
 
+
 def _strip_line_whitespace(s: str) -> str:
     """Strip leading/trailing whitespace from each line, preserving newlines."""
     return "\n".join(line.strip() for line in s.split("\n"))
+
 
 def _find_actual_string(file_content: str, search: str) -> str | None:
     """Find *search* in *file_content* with progressive fallbacks.
@@ -365,9 +432,11 @@ def _find_actual_string(file_content: str, search: str) -> str | None:
 
     return None
 
+
 # ---------------------------------------------------------------------------
 # Write helpers
 # ---------------------------------------------------------------------------
+
 
 class _WriteArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -375,37 +444,72 @@ class _WriteArgs(BaseModel):
     content: str = Field(description="The full content to write.")
     rationale: str = Field(default="agent write via file_tools")
 
+
 # ---------------------------------------------------------------------------
 # install()
 # ---------------------------------------------------------------------------
 
+
 def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
-    _writer_cache: list[Any] = []
+    _FileToolsRuntime(api=api, config=config).install()
 
-    def _get_writer() -> Any:
-        if not _writer_cache:
-            _writer_cache.append(api.get_resource_writer())
-        return _writer_cache[0]
 
-    if config.tools is None:
-        enabled_tools = _ALL_TOOLS
-    else:
-        enabled_tools = frozenset(config.tools)
-        unknown = enabled_tools - _ALL_TOOLS
-        if unknown:
-            allowed = ", ".join(sorted(_ALL_TOOLS))
-            requested = ", ".join(sorted(unknown))
-            raise ValueError(
-                f"unknown file_tools tool(s): {requested}; allowed tools: {allowed}"
+def _enabled_tools(configured: list[str] | None) -> frozenset[str]:
+    if configured is None:
+        return _ALL_TOOLS
+    enabled_tools = frozenset(configured)
+    unknown = enabled_tools - _ALL_TOOLS
+    if unknown:
+        allowed = ", ".join(sorted(_ALL_TOOLS))
+        requested = ", ".join(sorted(unknown))
+        raise ValueError(
+            f"unknown file_tools tool(s): {requested}; allowed tools: {allowed}"
+        )
+    return enabled_tools
+
+
+class _FileToolsRuntime:
+    """Owns file_tools registration and per-session handler state."""
+
+    def __init__(self, *, api: ExtensionAPI, config: FileToolsConfig) -> None:
+        self._api = api
+        self._writer_cache: list[Any] = []
+        self._enabled_tools = _enabled_tools(config.tools)
+        self._allow_globs = _coerce_globs(config.allow_globs, api.cwd)
+        self._deny_globs = _coerce_globs(config.deny_globs, api.cwd)
+        self._max_size_bytes = config.max_size_bytes
+        self._require_read = config.require_read
+
+    def install(self) -> None:
+        if "read" in self._enabled_tools:
+            self._register_read()
+        if "write" in self._enabled_tools:
+            self._register_write()
+        if "edit" in self._enabled_tools:
+            self._register_edit()
+
+    def _get_writer(self) -> Any:
+        if not self._writer_cache:
+            self._writer_cache.append(self._api.get_resource_writer())
+        return self._writer_cache[0]
+
+    def _register_read(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="read",
+                description=(
+                    "Read a UTF-8 text file from disk. "
+                    "By default reads the entire file. "
+                    f"Files larger than {self._max_size_bytes} bytes require "
+                    "offset and limit parameters."
+                ),
+                parameters=_ReadArgs,
+                fn=self._read_execute,
+                metadata={"file_op": "read"},
             )
-    allow_globs = _coerce_globs(config.allow_globs, api.cwd)
-    deny_globs = _coerce_globs(config.deny_globs, api.cwd)
-    max_size_bytes: int = config.max_size_bytes
-    require_read = config.require_read
+        )
 
-    # --- read tool --------------------------------------------------------
-
-    async def _read_execute(args: dict[str, Any]) -> ToolResult:
+    async def _read_execute(self, args: dict[str, Any]) -> ToolResult:
         path, arg_error = _required_string_arg(
             args,
             "path",
@@ -416,10 +520,8 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         if arg_error is not None:
             return arg_error
         assert path is not None
-        raw_offset = args.get("offset")
-        raw_limit = args.get("limit")
 
-        gate_error = _check_path_allowed(path, allow_globs, deny_globs)
+        gate_error = _check_path_allowed(path, self._allow_globs, self._deny_globs)
         if gate_error is not None:
             return _error(gate_error)
 
@@ -428,18 +530,19 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             return _error(binary_error)
 
         try:
-            data = await _get_writer().read(path)
+            data = await self._get_writer().read(path)
         except Exception as exc:
             logger.debug("file_tools: read failed for {}: {}", path, exc)
             return _error(f"Failed to read {path!r}: {exc}")
 
-        # --- max-size gate (checked on raw bytes, before decode) ---
+        raw_offset = args.get("offset")
+        raw_limit = args.get("limit")
         file_size = len(data)
         caller_wants_range = raw_offset is not None or raw_limit is not None
-        if file_size > max_size_bytes and not caller_wants_range:
+        if file_size > self._max_size_bytes and not caller_wants_range:
             return _error(
                 f"File content ({file_size} bytes) exceeds maximum "
-                f"allowed size ({max_size_bytes} bytes). "
+                f"allowed size ({self._max_size_bytes} bytes). "
                 "Use offset and limit parameters to read specific "
                 "portions of the file."
             )
@@ -457,22 +560,18 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             else:
                 sliced = all_lines[offset:]
 
-            is_partial = (
-                offset > 0
-                or (limit is not None and limit > 0 and offset + limit < total)
+            is_partial = offset > 0 or (
+                limit is not None and limit > 0 and offset + limit < total
             )
 
             record_read(
-                _read_state_path(path, api.cwd),
+                _read_state_path(path, self._api.cwd),
                 total_lines=total,
                 is_partial=is_partial,
                 content_hash=content_hash_for(data),
             )
 
-            numbered = [
-                f"{offset + i + 1}\t{line}"
-                for i, line in enumerate(sliced)
-            ]
+            numbered = [f"{offset + i + 1}\t{line}" for i, line in enumerate(sliced)]
 
             if is_partial:
                 end_line = offset + len(sliced)
@@ -485,25 +584,23 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             logger.debug("file_tools: read decode failed for {}: {}", path, exc)
             return _error(f"Failed to read {path!r}: {exc}")
 
-    if "read" in enabled_tools:
-        api.register_tool(
+    def _register_write(self) -> None:
+        self._api.register_tool(
             FunctionTool(
-                name="read",
+                name="write",
                 description=(
-                    "Read a UTF-8 text file from disk. "
-                    "By default reads the entire file. "
-                    f"Files larger than {max_size_bytes} bytes require "
-                    "offset and limit parameters."
+                    "Write a UTF-8 text file. For existing files, you MUST read "
+                    "the full file first. Prefer the edit tool for modifying "
+                    "existing files — use write only for new files or complete "
+                    "rewrites."
                 ),
-                parameters=_ReadArgs,
-                fn=_read_execute,
-                metadata={"file_op": "read"},
+                parameters=_WriteArgs,
+                fn=self._write_execute,
+                metadata={"file_op": "write"},
             )
         )
 
-    # --- write tool -------------------------------------------------------
-
-    async def _write_execute(args: dict[str, Any]) -> ToolResult:
+    async def _write_execute(self, args: dict[str, Any]) -> ToolResult:
         path, arg_error = _required_string_arg(
             args,
             "path",
@@ -527,10 +624,8 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         assert content is not None
         rationale = str(args.get("rationale", "agent write via file_tools"))
 
-        read_state_path = _read_state_path(path, api.cwd)
-
-        # Determine if the file already exists on disk.
-        writer = _get_writer()
+        read_state_path = _read_state_path(path, self._api.cwd)
+        writer = self._get_writer()
         file_exists = False
         try:
             await writer.read(path)
@@ -540,25 +635,19 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             # unreadable paths alike); the write below will surface hard errors.
             logger.debug("file_tools: existence probe read({!r}) failed: {}", path, exc)
 
-        if file_exists and require_read:
+        if file_exists and self._require_read:
             rs = get_read_state(read_state_path)
-
-            # Gate 1: must have been read at all.
             if rs is None:
                 return _error(
                     f"File {path!r} already exists. Read it first before "
                     "overwriting so you can see its current content. "
                     "Use the read tool, then write."
                 )
-
-            # Gate 2: must have been a full read (no offset/limit).
             if rs.is_partial:
                 return _error(
                     f"You read {path!r} with offset/limit (partial view). "
                     "Read the full file before overwriting."
                 )
-
-            # Gate 3: content must not have changed since the read.
             if rs.content_hash:
                 try:
                     current_data = await writer.read(path)
@@ -573,9 +662,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
 
         try:
             content_bytes = content.encode("utf-8")
-            result = await writer.write(
-                path, content_bytes, rationale=rationale,
-            )
+            result = await writer.write(path, content_bytes, rationale=rationale)
             if result.error is not None:
                 return _error(result.error)
 
@@ -594,25 +681,24 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             logger.debug("file_tools: write failed for {}: {}", path, exc)
             return _error(f"Failed to write {path!r}: {exc}")
 
-    if "write" in enabled_tools:
-        api.register_tool(
+    def _register_edit(self) -> None:
+        self._api.register_tool(
             FunctionTool(
-                name="write",
+                name="edit",
                 description=(
-                    "Write a UTF-8 text file. For existing files, you MUST read "
-                    "the full file first. Prefer the edit tool for modifying "
-                    "existing files — use write only for new files or complete "
-                    "rewrites."
+                    "Edit a UTF-8 text file. Two modes:\n"
+                    "1. String replacement: provide old_string + new_string.\n"
+                    "2. Line-range replacement: provide start_line + end_line + new_string "
+                    "(1-based, inclusive). You MUST read the file first to see line numbers."
                 ),
-                parameters=_WriteArgs,
-                fn=_write_execute,
-                metadata={"file_op": "write"},
+                parameters=_EditArgs,
+                fn=self._edit_execute,
+                metadata={"file_op": "edit", TOOL_RESULT_FORMAT_METADATA_KEY: "diff"},
             )
         )
 
-    # --- edit tool --------------------------------------------------------
-
     async def _string_replace(
+        self,
         path: str,
         original: str,
         old_string: str,
@@ -636,17 +722,23 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         shrinkage = _check_shrinkage(original, updated, len(actual), len(new_string))
         if shrinkage:
             return _error(shrinkage)
-        result = await _get_writer().replace(
-            path, original.encode("utf-8"), updated.encode("utf-8"), rationale=rationale,
+        result = await self._get_writer().replace(
+            path,
+            original.encode("utf-8"),
+            updated.encode("utf-8"),
+            rationale=rationale,
         )
         if result.error is not None:
             return _error(result.error)
         before_lines = original[: original.index(actual)].count("\n")
         new_lines_count = new_string.count("\n") + 1
-        snippet = _snippet_around(updated, before_lines + 1, before_lines + new_lines_count)
+        snippet = _snippet_around(
+            updated, before_lines + 1, before_lines + new_lines_count
+        )
         return _ok(f"Updated {path!r}:\n{snippet}")
 
     async def _line_range_replace(
+        self,
         path: str,
         original: str,
         start: int,
@@ -671,8 +763,11 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         shrinkage = _check_shrinkage(original, updated, replaced_len, len(new_string))
         if shrinkage:
             return _error(shrinkage)
-        result = await _get_writer().replace(
-            path, original.encode("utf-8"), updated.encode("utf-8"), rationale=rationale,
+        result = await self._get_writer().replace(
+            path,
+            original.encode("utf-8"),
+            updated.encode("utf-8"),
+            rationale=rationale,
         )
         if result.error is not None:
             return _error(result.error)
@@ -680,7 +775,7 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         snippet = _snippet_around(updated, start, start + new_line_count - 1)
         return _ok(f"Replaced lines {start}-{end} in {path!r}:\n{snippet}")
 
-    async def _edit_execute(args: dict[str, Any]) -> ToolResult:
+    async def _edit_execute(self, args: dict[str, Any]) -> ToolResult:
         path, arg_error = _required_string_arg(
             args,
             "path",
@@ -702,21 +797,21 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
         if arg_error is not None:
             return arg_error
         assert new_string is not None
+
         old_string = args.get("old_string")
         start_line = args.get("start_line")
         end_line = args.get("end_line")
         replace_all = bool(args.get("replace_all", False))
         rationale = str(args.get("rationale", "agent edit via file_tools"))
 
-        read_state_path = _read_state_path(path, api.cwd)
+        read_state_path = _read_state_path(path, self._api.cwd)
         state = get_read_state(read_state_path)
-        if require_read and state is None:
+        if self._require_read and state is None:
             return _error(
                 f"You must read {path!r} before editing it. "
                 "Use the read tool first so you can see the exact content and line numbers."
             )
 
-        # File-modified-since-read detection (aligned with Claude Code)
         if state is not None and file_modified_since_read(read_state_path):
             return _error(
                 f"File has been modified since you last read it. "
@@ -732,41 +827,33 @@ def install(api: ExtensionAPI, config: FileToolsConfig) -> None:
             return _error("Provide old_string or start_line + end_line.")
 
         try:
-            original = (await _get_writer().read(path)).decode("utf-8", errors="replace")
+            original = (await self._get_writer().read(path)).decode(
+                "utf-8", errors="replace"
+            )
 
             if start_line is not None and end_line is not None:
-                result = await _line_range_replace(
-                    path, original, int(start_line), int(end_line),
-                    new_string, rationale,
+                result = await self._line_range_replace(
+                    path,
+                    original,
+                    int(start_line),
+                    int(end_line),
+                    new_string,
+                    rationale,
                 )
             else:
-                result = await _string_replace(
-                    path, original, str(old_string), new_string,
-                    replace_all, rationale,
+                result = await self._string_replace(
+                    path,
+                    original,
+                    str(old_string),
+                    new_string,
+                    replace_all,
+                    rationale,
                 )
 
-            # Post-edit: update read_state so subsequent edits don't
-            # false-positive on "modified since read".
             if not result.is_error:
-                await _update_read_state_after_edit(read_state_path, _get_writer())
+                await _update_read_state_after_edit(read_state_path, self._get_writer())
 
             return result
         except Exception as exc:
             logger.opt(exception=True).warning("edit tool failed for {}: {}", path, exc)
             return _error(f"Failed to edit {path!r}: {exc}")
-
-    if "edit" in enabled_tools:
-        api.register_tool(
-            FunctionTool(
-                name="edit",
-                description=(
-                    "Edit a UTF-8 text file. Two modes:\n"
-                    "1. String replacement: provide old_string + new_string.\n"
-                    "2. Line-range replacement: provide start_line + end_line + new_string "
-                    "(1-based, inclusive). You MUST read the file first to see line numbers."
-                ),
-                parameters=_EditArgs,
-                fn=_edit_execute,
-                metadata={"file_op": "edit", TOOL_RESULT_FORMAT_METADATA_KEY: "diff"},
-            )
-        )
