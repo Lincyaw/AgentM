@@ -174,6 +174,526 @@ class _BoundGatewaySchedulerService:
         return self.scheduler.delete(job_id, session_key=self.session_key)
 
 
+def _merge_gateway_commands(
+    meta: dict[str, Any], command_router: CommandRouter
+) -> None:
+    """Fold the gateway's own builtin commands into a session_ready frame."""
+    existing = meta.get("command_names")
+    names: list[str] = list(existing) if isinstance(existing, list) else []
+    seen = set(names)
+    for handler in command_router.registry.all():
+        if handler.namespace is not None:
+            continue
+        if handler.name not in seen:
+            names.append(handler.name)
+            seen.add(handler.name)
+    meta["command_names"] = names
+
+
+def _push_user_input(inbox: Any, body: InboundBody, content: str) -> None:
+    from agentm.core.runtime.session_inbox import InboxItem
+
+    request_id = (
+        body.request_id
+        if body.request_id is not None
+        else (
+            body.raw.get("request_id")
+            if isinstance(body.raw, dict) and body.raw.get("request_id") is not None
+            else None
+        )
+    )
+    # Preserve existing behavior for old clients that send no request_id:
+    # no dedup hint is used.
+    if request_id is None:
+        inbox.push(InboxItem(source="user", payload=content))
+        return
+    inbox.push(
+        InboxItem(
+            source="user",
+            payload=content,
+            dedup_key=str(request_id),
+        )
+    )
+
+
+async def _load_session_history(
+    cwd: str, session_id: str
+) -> dict[str, Any] | None:
+    """Load a JSON-safe transcript for a previously persisted session."""
+    if not session_id:
+        return None
+
+    def _load() -> dict[str, Any] | None:
+        from agentm.core.lib.message_codec import serialize_payload
+        from agentm.core.runtime.session_bootstrap import make_default_session_store
+
+        try:
+            state = make_default_session_store(cwd).open(session_id)
+        except FileNotFoundError:
+            return None
+        header = state.get_header()
+        context = state.build_session_context()
+        return {
+            "session_id": state.get_session_id(),
+            "cwd": header.cwd if header is not None else cwd,
+            "messages": [serialize_payload(message) for message in context.messages],
+        }
+
+    return await asyncio.to_thread(_load)
+
+
+class _GatewayRequestTracker:
+    """Idempotency window for mutating inbound requests."""
+
+    def __init__(self, *, max_size: int = 2048) -> None:
+        self._request_id_cache: OrderedDict[str, None] = OrderedDict()
+        self._max_size = max_size
+
+    def is_mutating_action(self, action: RouterAction) -> bool:
+        return action in {
+            RouterAction.SUBMIT,
+            RouterAction.RESOLVE_APPROVAL,
+            RouterAction.RUN_COMMAND,
+            RouterAction.INTERACTION_RESPONSE,
+            RouterAction.INTERRUPT,
+            RouterAction.PROMPT_SESSION,
+        }
+
+    def is_duplicate(
+        self, peer_id: str, session_key: str, action: RouterAction, request_id: str
+    ) -> bool:
+        key = f"{peer_id}|{session_key}|{action.value}|{request_id}"
+        if key in self._request_id_cache:
+            self._request_id_cache.move_to_end(key)
+            return True
+        self._request_id_cache[key] = None
+        while len(self._request_id_cache) > self._max_size:
+            self._request_id_cache.popitem(last=False)
+        return False
+
+
+class _GatewaySessionOverrides:
+    """Per-session model/scenario overrides and session factory restoration."""
+
+    def __init__(
+        self,
+        *,
+        default_model_name: str,
+        default_scenario: str | None,
+        default_session_factory: Callable[
+            [str, str, str | None, str | None, dict[str, Any]], Awaitable[Any]
+        ],
+        make_factory: Callable[[str], Any] | None,
+        chat_map: ChatSessionMap,
+        scheduler: GatewayScheduler | None,
+    ) -> None:
+        self._default_model_name = default_model_name
+        self._default_scenario = default_scenario
+        self._default_session_factory = default_session_factory
+        self._make_factory = make_factory
+        self._chat_map = chat_map
+        self._scheduler = scheduler
+        self._session_model_names: dict[str, str] = {}
+        self._session_model_factories: dict[
+            str,
+            Callable[
+                [str, str, str | None, str | None, dict[str, Any]], Awaitable[Any]
+            ],
+        ] = {}
+        self._session_scenarios: dict[str, str] = {}
+
+    async def session_factory_for_key(
+        self,
+        cwd: str,
+        session_key: str,
+        scenario: str | None,
+        resume: str | None,
+        wire_services: dict[str, Any],
+    ) -> Any:
+        if self._scheduler is not None:
+            turn_context = wire_services.get("turn_context")
+            if isinstance(turn_context, dict):
+
+                def active_scenario_for_session() -> str:
+                    return self.active_scenario_name(session_key)
+
+                wire_services[GATEWAY_SCHEDULER_SERVICE] = (
+                    _BoundGatewaySchedulerService(
+                        scheduler=self._scheduler,
+                        session_key=session_key,
+                        turn_context=turn_context,
+                        active_scenario=active_scenario_for_session,
+                    )
+                )
+        factory = self._session_model_factories.get(session_key)
+        if factory is None:
+            model_name = self._session_model_names.get(
+                session_key
+            ) or self._chat_map.metadata(session_key).get("model")
+            if (
+                model_name
+                and model_name != self._default_model_name
+                and self._make_factory is not None
+            ):
+                try:
+                    factory = self._make_factory(model_name)
+                    self._session_model_factories[session_key] = factory
+                    self._session_model_names[session_key] = model_name
+                except Exception:
+                    logger.exception(
+                        "failed to restore model override {} for {}",
+                        model_name,
+                        session_key,
+                    )
+        if factory is None:
+            factory = self._default_session_factory
+        return await factory(cwd, session_key, scenario, resume, wire_services)
+
+    def active_model_name(self, session_key: str) -> str:
+        return (
+            self._session_model_names.get(session_key)
+            or self._chat_map.metadata(session_key).get("model")
+            or self._default_model_name
+        )
+
+    def active_scenario_name(self, session_key: str) -> str:
+        return (
+            self._session_scenarios.get(session_key)
+            or self._chat_map.metadata(session_key).get("scenario")
+            or self._default_scenario
+            or ""
+        )
+
+    def set_scenario(self, session_key: str, scenario: str) -> None:
+        self._session_scenarios[session_key] = scenario
+        self._chat_map.set_metadata(session_key, scenario=scenario)
+
+    async def switch_model(
+        self,
+        session_key: str,
+        name: str,
+        *,
+        sessions: SessionManager,
+        state: _GatewaySessionState,
+    ) -> tuple[bool, str]:
+        """Swap to ``name``'s model profile and start a fresh session."""
+        from agentm.core.lib.user_config import load_user_config
+
+        if self._make_factory is None:
+            return (False, "model switching is not configured")
+        key = name.lower()
+        if key not in load_user_config().models:
+            return (False, f"unknown model '{name}'")
+        self._session_model_factories[session_key] = self._make_factory(key)
+        self._session_model_names[session_key] = key
+        self._chat_map.set_metadata(session_key, model=key)
+        await sessions.shutdown_session(session_key)
+        sessions.forget(session_key)
+        state.forget_session(session_key)
+        return (True, key)
+
+    async def switch_scenario(
+        self,
+        session_key: str,
+        name: str,
+        *,
+        sessions: SessionManager,
+        state: _GatewaySessionState,
+    ) -> tuple[bool, str]:
+        """Switch the active scenario and start a fresh session for this chat."""
+        from agentm.extensions.loader import ScenarioLoadError, validate_scenario
+
+        key = name.strip()
+        if not key:
+            return (False, "scenario name is required")
+        try:
+            validate_scenario(key)
+        except ScenarioLoadError as exc:
+            return (False, str(exc))
+        self.set_scenario(session_key, key)
+        await sessions.shutdown_session(session_key)
+        sessions.forget(session_key)
+        state.forget_session(session_key)
+        return (True, key)
+
+
+class _GatewaySessionState:
+    """Gateway-owned read model for routes, snapshots, commands, and counts."""
+
+    def __init__(
+        self,
+        *,
+        chat_map: ChatSessionMap,
+        sessions: SessionManager,
+        approval: ApprovalManager,
+        child_registry: ChildSessionRegistry,
+        active_model_name: Callable[[str], str],
+        active_scenario_name: Callable[[str], str],
+        outbound_sink: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        self._chat_map = chat_map
+        self._sessions = sessions
+        self._approval = approval
+        self._child_registry = child_registry
+        self._active_model_name = active_model_name
+        self._active_scenario_name = active_scenario_name
+        self._outbound_sink = outbound_sink
+        self._session_commands: dict[str, set[str]] = {}
+        self._session_routes: dict[str, tuple[str, str, str | None]] = {}
+        self._snapshots: dict[str, _SessionSnapshot] = {}
+        self._turn_counts: dict[str, int] = {}
+
+    def record_route(self, session_key: str, body: dict[str, Any]) -> None:
+        channel = str(body.get("channel") or "")
+        chat_id = str(body.get("chat_id") or "")
+        if not channel or not chat_id:
+            return
+        thread_id = body.get("thread_id")
+        if thread_id is not None and not isinstance(thread_id, str):
+            thread_id = str(thread_id)
+        self._session_routes[session_key] = (channel, chat_id, thread_id)
+
+    def snapshot_for(self, session_key: str) -> _SessionSnapshot:
+        return self._snapshots.setdefault(session_key, _SessionSnapshot())
+
+    def _set_children_snapshot(self, snapshot: _SessionSnapshot) -> None:
+        snapshot.children = sorted(self._child_registry.ids())
+
+    def _set_pending_interactions_snapshot(
+        self, session_key: str, snapshot: _SessionSnapshot
+    ) -> None:
+        snapshot.pending_interactions = sorted(
+            self._approval.pending_for_session(session_key)
+        )
+
+    def _derive_phase(self, snapshot: _SessionSnapshot) -> SessionPhase:
+        if snapshot.last_error:
+            return "errored"
+        if snapshot.pending_interactions:
+            return "waiting_interaction"
+        if snapshot.active_turn_id:
+            return "running"
+        if snapshot.phase in {"interrupting", "unknown"}:
+            return snapshot.phase
+        return "idle"
+
+    def update_snapshot(
+        self, session_key: str, kind: str, metadata: dict[str, Any]
+    ) -> bool:
+        snapshot = self.snapshot_for(session_key)
+        before = snapshot.as_dict()
+
+        if kind == "session_ready":
+            tools = metadata.get("tool_names")
+            if isinstance(tools, list):
+                snapshot.tool_names = sorted(
+                    {str(t) for t in tools if isinstance(t, str)}
+                )
+            commands = metadata.get("command_names")
+            if isinstance(commands, list):
+                snapshot.command_names = sorted(
+                    {str(c) for c in commands if isinstance(c, str)}
+                )
+        elif kind == "turn_start":
+            turn_id = metadata.get("turn_id")
+            if isinstance(turn_id, str):
+                snapshot.active_turn_id = turn_id
+            snapshot.phase = "running"
+            snapshot.last_error = None
+        elif kind == "turn_end":
+            snapshot.active_turn_id = None
+        elif kind == "agent_end":
+            cause = metadata.get("cause")
+            if isinstance(cause, str) and cause:
+                lowered = cause.lower()
+                if lowered in {
+                    "none",
+                    "normal",
+                    "end_turn",
+                    "modelendturn",
+                    "toolterminated",
+                    "cancel",
+                    "cancelled",
+                    "keyboardinterrupt",
+                }:
+                    snapshot.last_error = None
+                else:
+                    snapshot.last_error = cause
+            snapshot.active_turn_id = None
+        elif kind in {"child_start", "child_end"}:
+            self._set_children_snapshot(snapshot)
+        elif kind == "approval_request":
+            approval_id = metadata.get("approval_id")
+            if isinstance(approval_id, str) and approval_id:
+                pending = self._approval.pending_for_session(session_key)
+                if approval_id not in pending:
+                    pending.append(approval_id)
+                snapshot.pending_interactions = sorted(set(pending))
+            snapshot.phase = "waiting_interaction"
+        elif kind == "approval_resolved":
+            approval_id = metadata.get("approval_id")
+            if isinstance(approval_id, str) and approval_id:
+                snapshot.pending_interactions = sorted(
+                    [i for i in snapshot.pending_interactions if i != approval_id]
+                )
+            else:
+                self._set_pending_interactions_snapshot(session_key, snapshot)
+        else:
+            return False
+
+        if kind in {"child_start", "child_end", "approval_request", "approval_resolved"}:
+            self._set_children_snapshot(snapshot)
+            self._set_pending_interactions_snapshot(session_key, snapshot)
+
+        snapshot.phase = self._derive_phase(snapshot)
+
+        if kind == "approval_request" and not snapshot.pending_interactions:
+            self._set_pending_interactions_snapshot(session_key, snapshot)
+
+        return snapshot.as_dict() != before
+
+    async def emit_snapshot(self, session_key: str) -> None:
+        route = self._session_routes.get(session_key)
+        if route is None:
+            return
+        snapshot = self.snapshot_for(session_key)
+        self._set_children_snapshot(snapshot)
+        self._set_pending_interactions_snapshot(session_key, snapshot)
+        snapshot.phase = self._derive_phase(snapshot)
+
+        channel, chat_id, thread_id = route
+        await self._outbound_sink(
+            {
+                "channel": channel,
+                "chat_id": chat_id,
+                "content": "",
+                **({"thread_id": thread_id} if thread_id is not None else {}),
+                "metadata": {
+                    "kind": "session_snapshot",
+                    "session_id": self._sessions.session_id(session_key),
+                    **snapshot.as_dict(),
+                },
+                "_session_key": session_key,
+            }
+        )
+
+    def schedule_snapshot(self, session_key: str) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.emit_snapshot(session_key))
+
+    def remember_commands(self, session_key: str, meta: dict[str, Any]) -> None:
+        names = meta.get("command_names")
+        if not isinstance(names, list):
+            return
+        self._session_commands[session_key] = {
+            n for n in names if isinstance(n, str)
+        }
+
+    def remember_live_commands(self, session_key: str, sess: Any) -> set[str] | None:
+        names = getattr(sess, "command_names", None)
+        if not isinstance(names, list):
+            return None
+        known = {name for name in names if isinstance(name, str)}
+        self._session_commands[session_key] = known
+        return known
+
+    def command_names(self, session_key: str) -> set[str] | None:
+        return self._session_commands.get(session_key)
+
+    def list_session_commands(self, session_key: str) -> list[str]:
+        return sorted(self._session_commands.get(session_key, set()))
+
+    def increment_turn_count(self, session_key: str) -> None:
+        self._turn_counts[session_key] = self._turn_counts.get(session_key, 0) + 1
+
+    def reset_turn_count(self, session_key: str) -> None:
+        self._turn_counts.pop(session_key, None)
+
+    def clear_runtime_session(self, session_key: str) -> None:
+        self._turn_counts.pop(session_key, None)
+        self._snapshots.pop(session_key, None)
+        self._session_routes.pop(session_key, None)
+
+    def forget_session(self, session_key: str) -> None:
+        self._session_commands.pop(session_key, None)
+        self.clear_runtime_session(session_key)
+
+    def route_stats(self, session_key: str) -> dict[str, Any]:
+        return {
+            "session_id": self._sessions.session_id(session_key),
+            "turn_count": self._turn_counts.get(session_key, 0),
+            "pending_approvals": self._approval.pending_count,
+        }
+
+    def debug_state(
+        self,
+        session_key: str,
+        *,
+        inflight_count: int,
+        outbox_ready: bool,
+    ) -> dict[str, Any]:
+        current_session_route = self._session_routes.get(session_key)
+        child_ids = self._child_registry.ids()
+        chat_routes = self._chat_map.snapshot()
+        chat_metadata = self._chat_map.snapshot_metadata()
+
+        sessions_state: dict[str, Any] = {}
+        for key in sorted(
+            set(self._session_routes.keys()) | set(self._snapshots.keys()) | set(chat_routes)
+        ):
+            route = self._session_routes.get(key)
+            sessions_state[key] = {
+                "session_id": self._sessions.session_id(key),
+                "route": (
+                    {
+                        "channel": route[0],
+                        "chat_id": route[1],
+                        "thread_id": route[2],
+                    }
+                    if route is not None
+                    else None
+                ),
+                "snapshot": self.snapshot_for(key).as_dict(),
+                "model": self._active_model_name(key),
+                "scenario": self._active_scenario_name(key),
+                "chat_session_map": chat_routes.get(key),
+                "metadata": chat_metadata.get(key, {}),
+            }
+
+        return {
+            "session_key": session_key,
+            "session": {
+                "session_id": self._sessions.session_id(session_key),
+                "route": (
+                    {
+                        "channel": current_session_route[0],
+                        "chat_id": current_session_route[1],
+                        "thread_id": current_session_route[2],
+                    }
+                    if current_session_route is not None
+                    else None
+                ),
+                "snapshot": self.snapshot_for(session_key).as_dict(),
+                "model": self._active_model_name(session_key),
+                "scenario": self._active_scenario_name(session_key),
+                "command_names": self.list_session_commands(session_key),
+                "turn_count": self._turn_counts.get(session_key, 0),
+                "pending_approvals": self._approval.pending_for_session(session_key),
+                "child_sessions": child_ids,
+            },
+            "sessions": sessions_state,
+            "global": {
+                "inflight_tasks": inflight_count,
+                "tracked_sessions": len(self._session_routes),
+                "outbox_ready": outbox_ready,
+                "total_pending_approvals": self._approval.pending_count,
+            },
+        }
+
+
 class GatewayRuntime:
     """Glues WireServer <-> Router/SessionManager/Approval/Commands.
 
@@ -204,16 +724,21 @@ class GatewayRuntime:
         self._chat_map = chat_map
         self._command_router = command_router
         self._model_name = model_name
-        self._default_session_factory = session_factory
-        self._make_factory = make_factory
-        self._session_model_names: dict[str, str] = {}
-        self._session_model_factories: dict[
-            str,
-            Callable[
-                [str, str, str | None, str | None, dict[str, Any]], Awaitable[Any]
-            ],
-        ] = {}
-        self._session_scenarios: dict[str, str] = {}
+        self._scheduler: GatewayScheduler | None = None
+        if schedule_store is not None:
+            self._scheduler = GatewayScheduler(
+                store=schedule_store,
+                fire=self._fire_scheduled_job,
+            )
+        self._request_tracker = _GatewayRequestTracker()
+        self._overrides = _GatewaySessionOverrides(
+            default_model_name=model_name,
+            default_scenario=scenario,
+            default_session_factory=session_factory,
+            make_factory=make_factory,
+            chat_map=chat_map,
+            scheduler=self._scheduler,
+        )
         require, block, timeout = approval_policy
         self._approval = ApprovalManager(
             self._emit_outbound,
@@ -229,31 +754,25 @@ class GatewayRuntime:
         self._sessions = SessionManager(
             cwd=cwd,
             chat_map=chat_map,
-            session_factory=self._session_factory_for_key,
+            session_factory=self._overrides.session_factory_for_key,
             outbound_sink=self._emit_outbound,
             approval_manager=self._approval,
             child_registry=self._child_registry,
+        )
+        self._state = _GatewaySessionState(
+            chat_map=chat_map,
+            sessions=self._sessions,
+            approval=self._approval,
+            child_registry=self._child_registry,
+            active_model_name=self._overrides.active_model_name,
+            active_scenario_name=self._overrides.active_scenario_name,
+            outbound_sink=self._emit_outbound,
         )
         self._server: WireServer | None = None
         self._inflight: set[asyncio.Task[Any]] = set()
         self._peer_channels: dict[str, str] = {}
         self._peer_session_keys: dict[str, set[str]] = {}
         self._peer_cwds: dict[str, str] = {}
-        self._session_commands: dict[str, set[str]] = {}
-        self._session_routes: dict[str, tuple[str, str, str | None]] = {}
-        self._snapshots: dict[str, _SessionSnapshot] = {}
-        self._request_id_cache: OrderedDict[str, None] = OrderedDict()
-        self._max_request_cache_size = 2048
-        # Per-chat prompt count, surfaced by /status. Incremented on each
-        # conversational turn (a prompt, not a control command).
-        self._turn_counts: dict[str, int] = {}
-        self._scheduler: GatewayScheduler | None = None
-        if schedule_store is not None:
-            self._scheduler = GatewayScheduler(
-                store=schedule_store,
-                fire=self._fire_scheduled_job,
-            )
-
 
     def attach_server(self, server: WireServer) -> None:
         self._server = server
@@ -261,67 +780,6 @@ class GatewayRuntime:
     def start_scheduler(self) -> None:
         if self._scheduler is not None:
             self._scheduler.start()
-
-    async def _session_factory_for_key(
-        self,
-        cwd: str,
-        session_key: str,
-        scenario: str | None,
-        resume: str | None,
-        wire_services: dict[str, Any],
-    ) -> Any:
-        if self._scheduler is not None:
-            turn_context = wire_services.get("turn_context")
-            if isinstance(turn_context, dict):
-                def active_scenario_for_session() -> str:
-                    return self._active_scenario_name(session_key)
-
-                wire_services[GATEWAY_SCHEDULER_SERVICE] = (
-                    _BoundGatewaySchedulerService(
-                        scheduler=self._scheduler,
-                        session_key=session_key,
-                        turn_context=turn_context,
-                        active_scenario=active_scenario_for_session,
-                    )
-                )
-        factory = self._session_model_factories.get(session_key)
-        if factory is None:
-            model_name = self._session_model_names.get(
-                session_key
-            ) or self._chat_map.metadata(session_key).get("model")
-            if (
-                model_name
-                and model_name != self._model_name
-                and self._make_factory is not None
-            ):
-                try:
-                    factory = self._make_factory(model_name)
-                    self._session_model_factories[session_key] = factory
-                    self._session_model_names[session_key] = model_name
-                except Exception:
-                    logger.exception(
-                        "failed to restore model override {} for {}",
-                        model_name,
-                        session_key,
-                    )
-        if factory is None:
-            factory = self._default_session_factory
-        return await factory(cwd, session_key, scenario, resume, wire_services)
-
-    def _active_model_name(self, session_key: str) -> str:
-        return (
-            self._session_model_names.get(session_key)
-            or self._chat_map.metadata(session_key).get("model")
-            or self._model_name
-        )
-
-    def _active_scenario_name(self, session_key: str) -> str:
-        return (
-            self._session_scenarios.get(session_key)
-            or self._chat_map.metadata(session_key).get("scenario")
-            or self._scenario
-            or ""
-        )
 
     def describe_capabilities(self) -> dict[str, Any]:
         """Static, session-independent capabilities for the welcome handshake.
@@ -394,17 +852,18 @@ class GatewayRuntime:
         target_channel = str(body.get("channel") or "")
         meta = body.get("metadata")
         kind = str((meta or {}).get("kind") or "assistant_text")
+        state = getattr(self, "_state", None)
         if kind == "session_ready" and isinstance(meta, dict):
-            if session_key is not None:
-                self._remember_session_commands(session_key, meta)
-            self._merge_gateway_commands(meta)
-        if session_key is not None:
-            self._record_session_route(session_key, body)
+            if session_key is not None and state is not None:
+                state.remember_commands(session_key, meta)
+            _merge_gateway_commands(meta, self._command_router)
+        if session_key is not None and state is not None:
+            state.record_route(session_key, body)
             # Outbound helpers in tests may use a hand-built runtime object.
             if isinstance(meta, dict) and kind != "session_snapshot":
-                changed = self._update_session_snapshot(session_key, kind, meta)
+                changed = state.update_snapshot(session_key, kind, meta)
                 if changed:
-                    await self._emit_session_snapshot(session_key)
+                    await state.emit_snapshot(session_key)
         env = Envelope(
             v=WIRE_VERSION,
             id=f"out-{uuid.uuid4().hex[:12]}",
@@ -430,279 +889,6 @@ class GatewayRuntime:
                     self._outbox.enqueue, peer.peer_id, env
                 )
             peer.send_q.put(env, outbox_id)
-
-    def _record_session_route(self, session_key: str, body: dict[str, Any]) -> None:
-        routes = getattr(self, "_session_routes", None)
-        if routes is None:
-            routes = {}
-            self._session_routes = routes
-        channel = str(body.get("channel") or "")
-        chat_id = str(body.get("chat_id") or "")
-        if not channel or not chat_id:
-            return
-        thread_id = body.get("thread_id")
-        if thread_id is not None and not isinstance(thread_id, str):
-            thread_id = str(thread_id)
-        routes[session_key] = (channel, chat_id, thread_id)
-
-    def _snapshot_for(self, session_key: str) -> _SessionSnapshot:
-        snapshots = getattr(self, "_snapshots", None)
-        if snapshots is None:
-            snapshots = {}
-            self._snapshots = snapshots
-        return snapshots.setdefault(session_key, _SessionSnapshot())
-
-    def _set_children_snapshot(self, snapshot: _SessionSnapshot) -> None:
-        snapshot.children = sorted(self._child_registry.ids())
-
-    def _set_pending_interactions_snapshot(self, session_key: str, snapshot: _SessionSnapshot) -> None:
-        snapshot.pending_interactions = sorted(self._approval.pending_for_session(session_key))
-
-    def _derive_phase_from_snapshot(self, snapshot: _SessionSnapshot) -> SessionPhase:
-        if snapshot.last_error:
-            return "errored"
-        if snapshot.pending_interactions:
-            return "waiting_interaction"
-        if snapshot.active_turn_id:
-            return "running"
-        if snapshot.phase in {"interrupting", "unknown"}:
-            return snapshot.phase
-        return "idle"
-
-    def _get_gateway_debug_state(self, session_key: str) -> dict[str, Any]:
-        session_routes = getattr(self, "_session_routes", {})
-        snapshots = getattr(self, "_snapshots", {})
-        current_session_route = session_routes.get(session_key)
-        child_registry = getattr(self, "_child_registry", None)
-        child_ids = child_registry.ids() if child_registry is not None else []
-        approval = getattr(self, "_approval", None)
-        chat_routes = self._chat_map.snapshot()
-        chat_metadata = self._chat_map.snapshot_metadata()
-
-        sessions_state: dict[str, Any] = {}
-        for key in sorted(
-            set(session_routes.keys()) | set(snapshots.keys()) | set(chat_routes)
-        ):
-            route = session_routes.get(key)
-            sessions_state[key] = {
-                "session_id": self._sessions.session_id(key),
-                "route": (
-                    {
-                        "channel": route[0],
-                        "chat_id": route[1],
-                        "thread_id": route[2],
-                    }
-                    if route is not None
-                    else None
-                ),
-                "snapshot": self._snapshot_for(key).as_dict(),
-                "model": self._active_model_name(key),
-                "scenario": self._active_scenario_name(key),
-                "chat_session_map": chat_routes.get(key),
-                "metadata": chat_metadata.get(key, {}),
-            }
-
-        return {
-            "session_key": session_key,
-            "session": {
-                "session_id": self._sessions.session_id(session_key),
-                "route": (
-                    {
-                        "channel": current_session_route[0],
-                        "chat_id": current_session_route[1],
-                        "thread_id": current_session_route[2],
-                    }
-                    if current_session_route is not None
-                    else None
-                ),
-                "snapshot": self._snapshot_for(session_key).as_dict(),
-                "model": self._active_model_name(session_key),
-                "scenario": self._active_scenario_name(session_key),
-                "command_names": sorted(self._session_commands.get(session_key, set())),
-                "turn_count": self._turn_counts.get(session_key, 0),
-                "pending_approvals": (
-                    approval.pending_for_session(session_key)
-                    if approval is not None
-                    else []
-                ),
-                "child_sessions": child_ids,
-            },
-            "sessions": sessions_state,
-            "global": {
-                "inflight_tasks": len(self._inflight),
-                "tracked_sessions": len(session_routes),
-                "outbox_ready": getattr(self, "_outbox", None) is not None,
-                "total_pending_approvals": (
-                    approval.pending_count if approval is not None else 0
-                ),
-            },
-        }
-
-    def _update_session_snapshot(
-        self, session_key: str, kind: str, metadata: dict[str, Any]
-    ) -> bool:
-        snapshot = self._snapshot_for(session_key)
-        before = snapshot.as_dict()
-
-        if kind == "session_ready":
-            tools = metadata.get("tool_names")
-            if isinstance(tools, list):
-                snapshot.tool_names = sorted({str(t) for t in tools if isinstance(t, str)})
-            commands = metadata.get("command_names")
-            if isinstance(commands, list):
-                snapshot.command_names = sorted(
-                    {str(c) for c in commands if isinstance(c, str)}
-                )
-        elif kind == "turn_start":
-            turn_id = metadata.get("turn_id")
-            if isinstance(turn_id, str):
-                snapshot.active_turn_id = turn_id
-            snapshot.phase = "running"
-            snapshot.last_error = None
-        elif kind == "turn_end":
-            snapshot.active_turn_id = None
-        elif kind == "agent_end":
-            cause = metadata.get("cause")
-            if isinstance(cause, str) and cause:
-                lowered = cause.lower()
-                if lowered in {
-                    "none",
-                    "normal",
-                    "end_turn",
-                    "modelendturn",
-                    "toolterminated",
-                    "cancel",
-                    "cancelled",
-                    "keyboardinterrupt",
-                }:
-                    snapshot.last_error = None
-                else:
-                    snapshot.last_error = cause
-            snapshot.active_turn_id = None
-        elif kind == "child_start":
-            self._set_children_snapshot(snapshot)
-        elif kind == "child_end":
-            self._set_children_snapshot(snapshot)
-        elif kind == "approval_request":
-            approval_id = metadata.get("approval_id")
-            if isinstance(approval_id, str) and approval_id:
-                pending = self._approval.pending_for_session(session_key)
-                if approval_id not in pending:
-                    pending.append(approval_id)
-                snapshot.pending_interactions = sorted(set(pending))
-            snapshot.phase = "waiting_interaction"
-        elif kind == "approval_resolved":
-            approval_id = metadata.get("approval_id")
-            if isinstance(approval_id, str) and approval_id:
-                snapshot.pending_interactions = sorted(
-                    [i for i in snapshot.pending_interactions if i != approval_id]
-                )
-            else:
-                # Fallback to authoritative source when id is missing.
-                self._set_pending_interactions_snapshot(session_key, snapshot)
-        else:
-            return False
-
-        # Child/approval snapshots can change quickly and are derived from other
-        # services. Keep them always current after any mutation.
-        if kind in {"child_start", "child_end", "approval_request", "approval_resolved"}:
-            self._set_children_snapshot(snapshot)
-            self._set_pending_interactions_snapshot(session_key, snapshot)
-
-        snapshot.phase = self._derive_phase_from_snapshot(snapshot)
-
-        if kind == "approval_request":
-            if not snapshot.pending_interactions:
-                self._set_pending_interactions_snapshot(session_key, snapshot)
-
-        return snapshot.as_dict() != before
-
-    async def _emit_session_snapshot(self, session_key: str) -> None:
-        routes = getattr(self, "_session_routes", None)
-        route = routes.get(session_key) if routes is not None else None
-        if route is None:
-            return
-        snapshot = self._snapshot_for(session_key)
-        self._set_children_snapshot(snapshot)
-        self._set_pending_interactions_snapshot(session_key, snapshot)
-        snapshot.phase = self._derive_phase_from_snapshot(snapshot)
-
-        channel, chat_id, thread_id = route
-        await self._emit_outbound(
-            {
-                "channel": channel,
-                "chat_id": chat_id,
-                "content": "",
-                **({"thread_id": thread_id} if thread_id is not None else {}),
-                "metadata": {
-                    "kind": "session_snapshot",
-                    "session_id": self._sessions.session_id(session_key),
-                    **snapshot.as_dict(),
-                },
-                "_session_key": session_key,
-            }
-        )
-
-    def _remember_session_commands(
-        self, session_key: str, meta: dict[str, Any]
-    ) -> None:
-        """Cache command names a session_ready frame carries."""
-        names = meta.get("command_names")
-        if not isinstance(names, list):
-            return
-        self._session_commands[session_key] = {
-            n for n in names if isinstance(n, str)
-        }
-
-    def _remember_live_session_commands(
-        self, session_key: str, sess: Any
-    ) -> set[str] | None:
-        names = getattr(sess, "command_names", None)
-        if not isinstance(names, list):
-            return None
-        known = {name for name in names if isinstance(name, str)}
-        self._session_commands[session_key] = known
-        return known
-
-    def _merge_gateway_commands(self, meta: dict[str, Any]) -> None:
-        """Fold the gateway's own builtin commands into a session_ready frame."""
-        existing = meta.get("command_names")
-        names: list[str] = list(existing) if isinstance(existing, list) else []
-        seen = set(names)
-        for handler in self._command_router.registry.all():
-            if handler.namespace is not None:
-                continue
-            if handler.name not in seen:
-                names.append(handler.name)
-                seen.add(handler.name)
-        meta["command_names"] = names
-
-    def _is_mutating_action(self, action: RouterAction) -> bool:
-        return action in {
-            RouterAction.SUBMIT,
-            RouterAction.RESOLVE_APPROVAL,
-            RouterAction.RUN_COMMAND,
-            RouterAction.INTERACTION_RESPONSE,
-            RouterAction.INTERRUPT,
-            RouterAction.PROMPT_SESSION,
-        }
-
-    def _request_cache_key(
-        self, peer_id: str, session_key: str, action: RouterAction, request_id: str
-    ) -> str:
-        return f"{peer_id}|{session_key}|{action.value}|{request_id}"
-
-    def _is_duplicate_request(
-        self, peer_id: str, session_key: str, action: RouterAction, request_id: str
-    ) -> bool:
-        key = self._request_cache_key(peer_id, session_key, action, request_id)
-        if key in self._request_id_cache:
-            self._request_id_cache.move_to_end(key)
-            return True
-        self._request_id_cache[key] = None
-        while len(self._request_id_cache) > self._max_request_cache_size:
-            self._request_id_cache.popitem(last=False)
-        return False
 
     async def _emit_request_ack(
         self,
@@ -756,9 +942,9 @@ class GatewayRuntime:
 
         if (
             body.request_id is not None
-            and self._is_mutating_action(decision.action)
+            and self._request_tracker.is_mutating_action(decision.action)
         ):
-            duplicate = self._is_duplicate_request(
+            duplicate = self._request_tracker.is_duplicate(
                 peer.peer_id, session_key, decision.action, body.request_id
             )
             await self._emit_request_ack(
@@ -823,12 +1009,12 @@ class GatewayRuntime:
         sess = self._sessions.get(session_key)
         if sess is not None:
             sess.interrupt()
-            snapshot = self._snapshot_for(session_key)
+            snapshot = self._state.snapshot_for(session_key)
             if snapshot.phase != "interrupting":
                 snapshot.phase = "interrupting"
             snapshot.active_turn_id = None
             if not snapshot.pending_interactions:
-                self._schedule_session_snapshot(session_key)
+                self._state.schedule_snapshot(session_key)
 
     def _steer_session(self, session_key: str, body: InboundBody) -> None:
         """Inject a user message mid-turn without waiting for turn end."""
@@ -863,7 +1049,7 @@ class GatewayRuntime:
         content = body.content or ""
         if not content.strip():
             return
-        self._push_user_input(child.inbox, body, content)
+        _push_user_input(child.inbox, body, content)
 
     def _resolve_interaction(self, session_key: str, body: InboundBody) -> None:
         if body.button_value:
@@ -871,14 +1057,7 @@ class GatewayRuntime:
             # Waits for approval_request/approval_resolved outbound to drive the
             # definitive projection, but keep an immediate state write for
             # clients that are sensitive to control latency.
-            self._schedule_session_snapshot(session_key)
-
-    def _schedule_session_snapshot(self, session_key: str) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(self._emit_session_snapshot(session_key))
+            self._state.schedule_snapshot(session_key)
 
     async def _run_command(
         self, session_key: str, scenario: str | None, body: InboundBody
@@ -904,12 +1083,12 @@ class GatewayRuntime:
                 sess = await self._get_or_create_session_for_input(
                     session_key, scenario, body
                 )
-                known = self._remember_live_session_commands(session_key, sess)
+                known = self._state.remember_live_commands(session_key, sess)
                 if known is None:
-                    known = self._session_commands.get(session_key)
+                    known = self._state.command_names(session_key)
                 if known is not None and command_key in known:
                     await sess.prompt(body.content)
-                    await self._emit_session_snapshot(session_key)
+                    await self._state.emit_snapshot(session_key)
                     return
                 if known is not None:
                     await self._emit_unknown_command(session_key, body, inv.raw)
@@ -932,53 +1111,24 @@ class GatewayRuntime:
                 session_key, scenario, replace(body, content=result.expanded_prompt)
             )
 
-    def _push_user_input(
-        self, inbox: Any, body: InboundBody, content: str
-    ) -> None:
-        from agentm.core.runtime.session_inbox import InboxItem
-
-        request_id = (
-            body.request_id
-            if body.request_id is not None
-            else (
-                body.raw.get("request_id")
-                if isinstance(body.raw, dict) and body.raw.get("request_id") is not None
-                else None
-            )
-        )
-        # Preserve existing behavior for old clients that send no request_id:
-        # no dedup hint is used.
-        if request_id is None:
-            inbox.push(InboxItem(source="user", payload=content))
-            return
-        inbox.push(
-            InboxItem(
-                source="user",
-                payload=content,
-                dedup_key=str(request_id),
-            )
-        )
-
-    def _resolve_peer_cwd(self, session_key: str) -> str | None:
-        """Resolve the cwd from the peer's hello for this session."""
-        return self._peer_cwds.get(session_key)
-
     async def _get_or_create_session_for_input(
         self, session_key: str, scenario: str | None, body: InboundBody
     ) -> Any:
-        peer_cwd = self._resolve_peer_cwd(session_key)
+        peer_cwd = self._peer_cwds.get(session_key)
         if scenario:
             from agentm.extensions.loader import validate_scenario
 
             validate_scenario(scenario)
-            self._session_scenarios[session_key] = scenario
-            self._chat_map.set_metadata(session_key, scenario=scenario)
+            self._overrides.set_scenario(session_key, scenario)
         sess = await self._sessions.get_or_create(
-            session_key, self._active_scenario_name(session_key), body, cwd=peer_cwd
+            session_key,
+            self._overrides.active_scenario_name(session_key),
+            body,
+            cwd=peer_cwd,
         )
         self._sessions.set_turn_context(session_key, body)
         # Route context may be required before we can send a session snapshot.
-        self._record_session_route(
+        self._state.record_route(
             session_key,
             {
                 "channel": body.channel,
@@ -986,7 +1136,7 @@ class GatewayRuntime:
                 "thread_id": body.thread_id,
             },
         )
-        self._snapshot_for(session_key)
+        self._state.snapshot_for(session_key)
         return sess
 
     async def _submit_session_input(
@@ -997,11 +1147,11 @@ class GatewayRuntime:
         sess = await self._get_or_create_session_for_input(
             session_key, scenario, body
         )
-        self._turn_counts[session_key] = self._turn_counts.get(session_key, 0) + 1
+        self._state.increment_turn_count(session_key)
         if body.content == "":
             return
-        self._push_user_input(sess.inbox, body, body.content)
-        await self._emit_session_snapshot(session_key)
+        _push_user_input(sess.inbox, body, body.content)
+        await self._state.emit_snapshot(session_key)
 
     async def _prompt_session(
         self, session_key: str, scenario: str | None, body: InboundBody
@@ -1032,55 +1182,60 @@ class GatewayRuntime:
     ) -> CommandContext:
         async def end_session() -> None:
             await self._sessions.shutdown_session(session_key)
-            self._turn_counts.pop(session_key, None)
-            self._snapshots.pop(session_key, None)
-            self._session_routes.pop(session_key, None)
+            self._state.clear_runtime_session(session_key)
 
         async def forget_chat_mapping() -> None:
             self._sessions.forget(session_key)
-            self._session_commands.pop(session_key, None)
-            self._turn_counts.pop(session_key, None)
-            self._snapshots.pop(session_key, None)
-            self._session_routes.pop(session_key, None)
+            self._state.forget_session(session_key)
 
         def get_route_stats() -> dict[str, Any]:
-            return {
-                "session_id": self._sessions.session_id(session_key),
-                "turn_count": self._turn_counts.get(session_key, 0),
-                "pending_approvals": self._approval.pending_count,
-            }
+            return self._state.route_stats(session_key)
 
         def get_gateway_debug_state() -> dict[str, Any]:
-            return self._get_gateway_debug_state(session_key)
+            return self._state.debug_state(
+                session_key,
+                inflight_count=len(self._inflight),
+                outbox_ready=self._outbox is not None,
+            )
 
         def get_extension_api() -> Any | None:
             sess = self._sessions.get(session_key)
             return sess.extension_api if sess is not None else None
 
         async def load_session_history(target_sid: str) -> dict[str, Any] | None:
-            return await self._load_session_history(target_sid)
+            return await _load_session_history(self._cwd, target_sid)
 
         def list_models() -> tuple[str, list[str]]:
             from agentm.core.lib.user_config import load_user_config
 
             return (
-                self._active_model_name(session_key),
+                self._overrides.active_model_name(session_key),
                 list(load_user_config().models.keys()),
             )
 
         async def switch_model(name: str) -> tuple[bool, str]:
-            return await self._switch_model(session_key, name)
+            return await self._overrides.switch_model(
+                session_key,
+                name,
+                sessions=self._sessions,
+                state=self._state,
+            )
 
         def list_scenarios() -> tuple[str, list[dict[str, str]]]:
             from agentm.extensions.loader import list_scenarios as _list_scenarios
 
             return (
-                self._active_scenario_name(session_key),
+                self._overrides.active_scenario_name(session_key),
                 [_scenario_payload(info) for info in _list_scenarios()],
             )
 
         async def switch_scenario(name: str) -> tuple[bool, str]:
-            return await self._switch_scenario(session_key, name)
+            return await self._overrides.switch_scenario(
+                session_key,
+                name,
+                sessions=self._sessions,
+                state=self._state,
+            )
 
         def create_schedule(
             cron: str,
@@ -1090,7 +1245,7 @@ class GatewayRuntime:
         ) -> dict[str, Any]:
             if self._scheduler is None:
                 return {"error": "gateway scheduler is not configured"}
-            active_scenario = self._active_scenario_name(session_key) or None
+            active_scenario = self._overrides.active_scenario_name(session_key) or None
             try:
                 job = self._scheduler.create(
                     session_key=session_key,
@@ -1135,11 +1290,11 @@ class GatewayRuntime:
                 return None
             await self._sessions.shutdown_session(session_key)
             self._sessions.set_pending_fork(session_key, source_sid, up_to)
-            self._turn_counts.pop(session_key, None)
+            self._state.reset_turn_count(session_key)
             return source_sid
 
         def list_session_commands() -> list[str]:
-            return sorted(self._session_commands.get(session_key, set()))
+            return self._state.list_session_commands(session_key)
 
         return CommandContext(
             session_key=session_key,
@@ -1167,72 +1322,6 @@ class GatewayRuntime:
             fork_session=fork_session,
             list_session_commands=list_session_commands,
         )
-
-
-    async def _load_session_history(self, session_id: str) -> dict[str, Any] | None:
-        """Load a JSON-safe transcript for a previously persisted session."""
-        if not session_id:
-            return None
-
-        def _load() -> dict[str, Any] | None:
-            from agentm.core.lib.message_codec import serialize_payload
-            from agentm.core.runtime.session_bootstrap import make_default_session_store
-
-            try:
-                state = make_default_session_store(self._cwd).open(session_id)
-            except FileNotFoundError:
-                return None
-            header = state.get_header()
-            context = state.build_session_context()
-            return {
-                "session_id": state.get_session_id(),
-                "cwd": header.cwd if header is not None else self._cwd,
-                "messages": [serialize_payload(message) for message in context.messages],
-            }
-
-        return await asyncio.to_thread(_load)
-
-    async def _switch_model(self, session_key: str, name: str) -> tuple[bool, str]:
-        """Swap the session factory to ``name``'s model profile and start a
-        fresh session (same as ``/new``)."""
-        from agentm.core.lib.user_config import load_user_config
-
-        if self._make_factory is None:
-            return (False, "model switching is not configured")
-        key = name.lower()
-        if key not in load_user_config().models:
-            return (False, f"unknown model '{name}'")
-        self._session_model_factories[session_key] = self._make_factory(key)
-        self._session_model_names[session_key] = key
-        self._chat_map.set_metadata(session_key, model=key)
-        await self._sessions.shutdown_session(session_key)
-        self._sessions.forget(session_key)
-        self._session_commands.pop(session_key, None)
-        self._turn_counts.pop(session_key, None)
-        self._snapshots.pop(session_key, None)
-        self._session_routes.pop(session_key, None)
-        return (True, key)
-
-    async def _switch_scenario(self, session_key: str, name: str) -> tuple[bool, str]:
-        """Switch the active scenario and start a fresh session for this chat."""
-        from agentm.extensions.loader import ScenarioLoadError, validate_scenario
-
-        key = name.strip()
-        if not key:
-            return (False, "scenario name is required")
-        try:
-            validate_scenario(key)
-        except ScenarioLoadError as exc:
-            return (False, str(exc))
-        self._session_scenarios[session_key] = key
-        self._chat_map.set_metadata(session_key, scenario=key)
-        await self._sessions.shutdown_session(session_key)
-        self._sessions.forget(session_key)
-        self._session_commands.pop(session_key, None)
-        self._turn_counts.pop(session_key, None)
-        self._snapshots.pop(session_key, None)
-        self._session_routes.pop(session_key, None)
-        return (True, key)
 
     async def _emit_unknown_command(
         self, session_key: str, body: InboundBody, raw: str
