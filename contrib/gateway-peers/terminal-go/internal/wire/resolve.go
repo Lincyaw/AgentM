@@ -33,7 +33,7 @@ func defaultAgentMHome() string {
 		if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
 			return filepath.Join(userHome, ".agentm")
 		}
-		return ".agentm"
+		return filepath.Join(os.TempDir(), fmt.Sprintf("agentm-home-%d", os.Getuid()))
 	}
 	return expandUser(home)
 }
