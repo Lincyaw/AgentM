@@ -41,7 +41,7 @@ func expandUser(path string) string {
 func ResolveTransport(url string, tlsCACert string) (Transport, error) {
 	switch {
 	case strings.HasPrefix(url, "unix://"):
-		path := strings.TrimPrefix(url, "unix://")
+		path := expandUser(strings.TrimPrefix(url, "unix://"))
 		return &UnixTransport{Path: path}, nil
 
 	case strings.HasPrefix(url, "ws://"):
@@ -50,7 +50,7 @@ func ResolveTransport(url string, tlsCACert string) (Transport, error) {
 	case strings.HasPrefix(url, "wss://"):
 		t := &WSTransport{URL: url}
 		if tlsCACert != "" {
-			cfg, err := LoadTLSCACert(tlsCACert)
+			cfg, err := LoadTLSCACert(expandUser(tlsCACert))
 			if err != nil {
 				return nil, fmt.Errorf("load TLS CA: %w", err)
 			}

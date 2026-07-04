@@ -64,7 +64,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --token and --token-file are mutually exclusive")
 			os.Exit(2)
 		}
-		loadedToken, err := loadTokenFile(*tokenFile)
+		loadedToken, err := loadTokenFile(expandCLIPath(*tokenFile))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -85,7 +85,7 @@ func main() {
 	if logPath == "" {
 		logPath = filepath.Join(paths.GetDataDir(), "logs", "agentm-terminal.log")
 	} else {
-		logPath = expandLogPath(logPath)
+		logPath = expandCLIPath(logPath)
 	}
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err == nil {
 		if f, err := tea.LogToFile(logPath, "agentm-terminal"); err == nil {
@@ -218,7 +218,7 @@ func defaultSessionID(wd string) string {
 	return fmt.Sprintf("%s-%d-%d", base, os.Getpid(), time.Now().UnixNano())
 }
 
-func expandLogPath(path string) string {
+func expandCLIPath(path string) string {
 	expanded, err := pathx.ExpandHomeDir(path)
 	if err != nil {
 		return path
