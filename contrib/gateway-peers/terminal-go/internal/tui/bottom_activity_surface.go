@@ -253,6 +253,18 @@ func (m *appModel) stopWorkflowTaskSelection() (tea.Model, tea.Cmd) {
 	return model, cmd
 }
 
+func (m *appModel) workflowTaskPickerFooterText() string {
+	rows := m.workflowRows()
+	if len(rows) == 0 {
+		return "↑/↓ to select · Enter to view"
+	}
+	idx := min(max(m.workflowTaskPickerIndex, 0), len(rows)-1)
+	if rows[idx].isMain {
+		return "↑/↓ to select · Enter to view"
+	}
+	return "↑/↓ to select · Enter to view · x to stop task"
+}
+
 func (m *appModel) recordWorkflowTranscript(sessionID string, msg tea.Msg) {
 	if sessionID == "" || sessionID == m.mainSessionID {
 		return
@@ -358,7 +370,7 @@ func (m *appModel) footerText() string {
 	case m.transcriptDetailed:
 		return "Showing detailed transcript · ctrl+o to toggle · ctrl+e to show all verbose"
 	case m.workflowTaskPickerOpen:
-		return "↑/↓ to select · Enter to view · x to stop task"
+		return m.workflowTaskPickerFooterText()
 	case m.activeIsWorkflowTask():
 		return "ctrl+n/p to switch tabs · ↓ to manage tasks"
 	case m.hasBottomActivityRows():
