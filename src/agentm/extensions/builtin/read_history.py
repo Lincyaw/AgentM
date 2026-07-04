@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentm.core.lib import Turn, enumerate_turns, truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 
+
 class ReadHistoryConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -44,6 +45,7 @@ class ReadHistoryConfig(BaseModel):
     # Whole read_history response. Prevents broad turn ranges from undoing
     # the context savings that compaction just created.
     total_max_tokens: int = Field(gt=0)
+
 
 MANIFEST = ExtensionManifest(
     name="read_history",
@@ -56,6 +58,7 @@ MANIFEST = ExtensionManifest(
     config_schema=ReadHistoryConfig,
 )
 
+
 class _ReadHistoryArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     start: int = Field(ge=1, description="First turn index (1-based) to fetch.")
@@ -67,19 +70,37 @@ class _ReadHistoryArgs(BaseModel):
         ),
     )
 
-def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
-    tool_result_max_tokens = config.tool_result_max_tokens
-    total_max_tokens = config.total_max_tokens
 
-    async def _execute(args: dict[str, Any]) -> ToolResult:
-        model_name = api.model.id if api.model is not None else None
+class _ReadHistoryRuntime:
+    def __init__(self, api: ExtensionAPI, config: ReadHistoryConfig) -> None:
+        self._api = api
+        self._tool_result_max_tokens = config.tool_result_max_tokens
+        self._total_max_tokens = config.total_max_tokens
+
+    def install(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="read_history",
+                description=(
+                    "Return the verbatim messages of a past turn (or turn range) "
+                    "by 1-based index — use it to recover detail behind a [Turn N] "
+                    "reference in a compaction summary. Args: start (required), "
+                    "end (optional, inclusive)."
+                ),
+                parameters=_ReadHistoryArgs,
+                fn=self.execute,
+            )
+        )
+
+    async def execute(self, args: dict[str, Any]) -> ToolResult:
+        model_name = self._api.model.id if self._api.model is not None else None
         start = int(args["start"])
         end_raw = args.get("end")
         end = int(end_raw) if end_raw is not None else start
         if end < start:
             start, end = end, start
 
-        turns = enumerate_turns(api.session.get_branch())
+        turns = enumerate_turns(self._api.session.get_branch())
         if not turns:
             return _error("No turns recorded yet.")
         last = turns[-1].index
@@ -90,11 +111,12 @@ def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
 
         selected = [turn for turn in turns if start <= turn.index <= end]
         rendered = "\n\n".join(
-            _render_turn(turn, tool_result_max_tokens, model_name) for turn in selected
+            _render_turn(turn, self._tool_result_max_tokens, model_name)
+            for turn in selected
         )
         truncated = truncate_text_tokens(
             rendered,
-            total_max_tokens,
+            self._total_max_tokens,
             model=model_name,
         )
         if truncated.was_truncated:
@@ -105,25 +127,17 @@ def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
             )
         return _ok(rendered)
 
-    api.register_tool(
-        FunctionTool(
-            name="read_history",
-            description=(
-                "Return the verbatim messages of a past turn (or turn range) "
-                "by 1-based index — use it to recover detail behind a [Turn N] "
-                "reference in a compaction summary. Args: start (required), "
-                "end (optional, inclusive)."
-            ),
-            parameters=_ReadHistoryArgs,
-            fn=_execute,
-        )
-    )
+
+def install(api: ExtensionAPI, config: ReadHistoryConfig) -> None:
+    _ReadHistoryRuntime(api, config).install()
+
 
 def _render_turn(turn: Turn, tool_result_cap: int, model_name: str | None) -> str:
     lines = [f"=== Turn {turn.index} ==="]
     for message in turn.messages:
         lines.append(_render_message(message, tool_result_cap, model_name))
     return "\n".join(lines)
+
 
 def _render_message(
     message: AgentMessage,
@@ -144,7 +158,9 @@ def _render_message(
             elif isinstance(a_block, TextContent):
                 a_parts.append(f"[assistant] {a_block.text}")
             elif isinstance(a_block, ToolCallBlock):
-                a_parts.append(f"[tool call] {a_block.name}({_dump(a_block.arguments)})")
+                a_parts.append(
+                    f"[tool call] {a_block.name}({_dump(a_block.arguments)})"
+                )
         return "\n".join(a_parts) if a_parts else "[assistant] (empty)"
 
     if isinstance(message, ToolResultMessage):
@@ -159,23 +175,26 @@ def _render_message(
 
     return ""
 
+
 def _dump(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return repr(value)
 
+
 def _cap(text: str, max_tokens: int, model_name: str | None) -> str:
     truncated = truncate_text_tokens(text, max_tokens, model=model_name)
     if not truncated.was_truncated:
         return text
     return (
-        truncated.text
-        + f"\n[... {truncated.truncated_tokens} more tokens truncated]"
+        truncated.text + f"\n[... {truncated.truncated_tokens} more tokens truncated]"
     )
+
 
 def _ok(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)])
+
 
 def _error(text: str) -> ToolResult:
     return ToolResult(content=[TextContent(type="text", text=text)], is_error=True)
