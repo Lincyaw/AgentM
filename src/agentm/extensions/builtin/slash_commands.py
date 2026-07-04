@@ -15,8 +15,10 @@ from agentm.core.abi import (
 )
 from agentm.extensions import ExtensionManifest
 
+
 class SlashCommandsConfig(BaseModel):
     pass
+
 
 MANIFEST = ExtensionManifest(
     name="slash_commands",
@@ -29,12 +31,17 @@ MANIFEST = ExtensionManifest(
     provides_role=(COMMAND_PARSER,),
 )
 
-def install(api: ExtensionAPI, config: SlashCommandsConfig) -> None:
-    del config
-    service = api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)
-    dispatcher = service if isinstance(service, CommandDispatcher) else None
 
-    async def _on_input(event: InputEvent) -> None:
+class _SlashCommandsRuntime:
+    def __init__(self, api: ExtensionAPI) -> None:
+        self._api = api
+        service = api.get_service(SLASH_COMMAND_DISPATCHER_SERVICE)
+        self._dispatcher = service if isinstance(service, CommandDispatcher) else None
+
+    def install(self) -> None:
+        self._api.on(InputEvent.CHANNEL, self.on_input, priority=BusPriority.PRE)
+
+    async def on_input(self, event: InputEvent) -> None:
         text = event.text
         stripped = text.lstrip()
         if stripped.startswith("//"):
@@ -44,14 +51,14 @@ def install(api: ExtensionAPI, config: SlashCommandsConfig) -> None:
             return
 
         head, _, rest = stripped[1:].partition(" ")
-        if not head or dispatcher is None:
+        if not head or self._dispatcher is None:
             return
 
         args = rest.strip()
-        result = await dispatcher.dispatch(head, args)
+        result = await self._dispatcher.dispatch(head, args)
         if not result.handled:
             return
-        await api.events.emit(
+        await self._api.events.emit(
             CommandDispatchedEvent.CHANNEL,
             CommandDispatchedEvent(
                 name=head,
@@ -62,4 +69,7 @@ def install(api: ExtensionAPI, config: SlashCommandsConfig) -> None:
         event.handled = True
         event.handled_messages = result.messages
 
-    api.on(InputEvent.CHANNEL, _on_input, priority=BusPriority.PRE)
+
+def install(api: ExtensionAPI, config: SlashCommandsConfig) -> None:
+    del config
+    _SlashCommandsRuntime(api).install()
