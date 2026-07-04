@@ -481,6 +481,8 @@ requirements:
     confidence: confirmed
     code:
       - path: src/agentm/cli.py
+      - path: src/agentm/cli_setup.py
+      - path: src/agentm/cli_terminal.py
       - path: src/agentm/onboard.py
       - path: src/agentm/cli_trace.py
       - path: src/agentm/contrib_sync.py
@@ -880,6 +882,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/wire/resolve.go
       - path: src/agentm/cli_daemon.py
       - path: src/agentm/cli.py
+      - path: src/agentm/cli_terminal.py
       - path: src/agentm/gateway/__init__.py
       - path: src/agentm/gateway/cli.py
       - path: src/agentm/gateway/server.py
@@ -1061,6 +1064,8 @@ requirements:
       - path: src/agentm/core/abi/session_config.py
       - path: src/agentm/env.py
       - path: src/agentm/cli.py
+      - path: src/agentm/cli_setup.py
+      - path: src/agentm/cli_terminal.py
       - path: src/agentm/contrib_sync.py
       - path: src/agentm/cli_trace.py
       - path: src/agentm/cli_daemon.py
