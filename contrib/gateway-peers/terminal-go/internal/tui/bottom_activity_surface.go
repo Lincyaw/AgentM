@@ -17,7 +17,10 @@ import (
 )
 
 const (
+	// Render a short bounded surface while retaining a larger recent set for a
+	// useful hidden count without unbounded stale rows in long terminal sessions.
 	maxVisibleBackgroundActivities    = 4
+	maxRetainedBackgroundActivities   = 32
 	backgroundActivityKeySeparator    = "\x00"
 	backgroundActivityStatusRunning   = "running"
 	backgroundActivityStatusError     = "error"
@@ -711,8 +714,24 @@ func (m *appModel) updateBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 	}
 	_, existed := m.backgroundActivities[key]
 	m.backgroundActivities[key] = next
+	m.pruneBackgroundActivities()
 	// Existing activity rows keep the same bottom-surface height; repaint is enough.
 	return !existed
+}
+
+func (m *appModel) pruneBackgroundActivities() {
+	if len(m.backgroundActivities) <= maxRetainedBackgroundActivities {
+		return
+	}
+	for _, activity := range m.sortedBackgroundActivities() {
+		if len(m.backgroundActivities) <= maxRetainedBackgroundActivities {
+			return
+		}
+		if !activity.finished {
+			continue
+		}
+		delete(m.backgroundActivities, backgroundActivityKey(activity.sessionID, activity.id))
+	}
 }
 
 func (m *appModel) removeBackgroundActivitiesForSession(sessionID string) {
@@ -733,9 +752,9 @@ func (m *appModel) clearBottomActivitiesForSession(sessionID string) {
 	m.statusBar.SetActivity(m.backgroundActivityText())
 }
 
-func (m *appModel) backgroundActivityRows() ([]backgroundActivity, int) {
+func (m *appModel) sortedBackgroundActivities() []backgroundActivity {
 	if len(m.backgroundActivities) == 0 {
-		return nil, 0
+		return nil
 	}
 	rows := make([]backgroundActivity, 0, len(m.backgroundActivities))
 	for _, activity := range m.backgroundActivities {
@@ -747,6 +766,14 @@ func (m *appModel) backgroundActivityRows() ([]backgroundActivity, int) {
 		}
 		return strings.Compare(a.id, b.id)
 	})
+	return rows
+}
+
+func (m *appModel) backgroundActivityRows() ([]backgroundActivity, int) {
+	rows := m.sortedBackgroundActivities()
+	if len(rows) == 0 {
+		return nil, 0
+	}
 	if len(rows) <= maxVisibleBackgroundActivities {
 		return rows, 0
 	}
