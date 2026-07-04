@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
@@ -249,7 +250,7 @@ class WeixinAdapter:
         return d
 
     def _save_to_inbox(self, tmp_path: str) -> str:
-        """Move a temp media file into the workspace inbox. Returns new path."""
+        """Move a temp media file into the AgentM-home inbox. Returns new path."""
         inbox = self._media_inbox()
         src = Path(tmp_path)
         dst = inbox / src.name
@@ -258,8 +259,8 @@ class WeixinAdapter:
             stem = src.stem
             suffix = src.suffix
             dst = inbox / f"{stem}_{uuid.uuid4().hex[:6]}{suffix}"
-        src.rename(dst)
-        return str(dst.resolve())
+        moved = Path(shutil.move(str(src), str(dst)))
+        return str(moved.resolve())
 
     async def _process_inbound(self, msg: WeixinMessage) -> None:
         user_id = msg.from_user_id
