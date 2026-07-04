@@ -48,7 +48,7 @@ packages = ["src/llmharness"]
 # Lint + format: ruff (single tool)
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -73,7 +73,7 @@ quote-style = "double"
 # ---------------------------------------------------------------------------
 # Types: mypy (strict on src)
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 strict = true
 files = ["src/llmharness"]
 # Pin the package base to ``src`` so a file is named ``llmharness.schema``

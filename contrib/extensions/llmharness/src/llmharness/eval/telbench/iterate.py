@@ -20,7 +20,7 @@ import hashlib
 import json
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -226,7 +226,7 @@ def iterate(
 
     _append_record(tsv_path, IterationRecord(
         iteration=0,
-        timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        timestamp=datetime.now(UTC).isoformat(timespec="seconds"),
         prompt_sha=_prompt_sha(),
         macro_f1=baseline.macro_f1,
         macro_p=baseline.macro_precision,
@@ -273,7 +273,7 @@ def iterate(
 
         _append_record(tsv_path, IterationRecord(
             iteration=i,
-            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            timestamp=datetime.now(UTC).isoformat(timespec="seconds"),
             prompt_sha=_prompt_sha(),
             macro_f1=new_f1,
             macro_p=scores.macro_precision,

@@ -539,7 +539,7 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             queue.put_nowait(None)
             try:
                 await asyncio.wait_for(worker_task, timeout=shutdown_timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(f"audit drain exceeded {shutdown_timeout:.1f}s; cancelling")
                 worker_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):

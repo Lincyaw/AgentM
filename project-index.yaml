@@ -357,7 +357,9 @@ requirements:
     status: implemented
     confidence: inferred
     code:
+      - path: contrib/extensions/llmharness/pyproject.toml
       - path: contrib/extensions/llmharness/src/llmharness/atom.py
+      - path: contrib/extensions/llmharness/src/llmharness/agents/auditor/tools.py
     tests: []
     docs: []
     depends_on:
