@@ -78,6 +78,9 @@ _COMPLETED: Literal["completed"] = "completed"
 _ERROR: Literal["error"] = "error"
 _CANCELLED: Literal["cancelled"] = "cancelled"
 _Status = Literal["running", "completed", "error", "cancelled"]
+_ACTIVITY_TERMINAL_STATUSES: frozenset[_Status] = frozenset(
+    {_COMPLETED, _ERROR, _CANCELLED}
+)
 
 # The companion tools never auto-background themselves — they are pure registry
 # pokes that return promptly, and backgrounding a poll would be nonsensical.
@@ -621,23 +624,25 @@ class _BgManager:
         if state.read:
             return
         state.read = True
-        # #177: a backgrounded ToolTerminate posts terminal=True so the runtime
-        # stops the loop after delivering this completion. Any other terminal
-        # transition (completed / error / cancelled) is an ordinary completion.
-        terminal = state.status == _COMPLETED and isinstance(
+        note = _completion_note(state)
+        # #177: a backgrounded ToolTerminate posts terminal=True to the inbox so
+        # the runtime stops the loop after delivering this completion. Activity
+        # terminal means "remove or retain the chrome row" and is intentionally
+        # broader: any final task state closes the presenter activity.
+        loop_terminal = state.status == _COMPLETED and isinstance(
             state.outcome, ToolTerminate
         )
         self._emit_activity(
             state,
-            note=_completion_note(state),
-            terminal=state.status in (_COMPLETED, _ERROR, _CANCELLED),
+            note=note,
+            terminal=state.status in _ACTIVITY_TERMINAL_STATUSES,
         )
         try:
             self._api.post_inbox(
                 source="background",
-                payload=_completion_note(state),
+                payload=note,
                 dedup_key=f"bg-complete-{state.task_id}",
-                terminal=terminal,
+                terminal=loop_terminal,
             )
         except ExtensionStaleError:
             return
