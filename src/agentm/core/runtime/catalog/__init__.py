@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from agentm.core.abi.project_layout import ProjectLayout
+from agentm.core.lib import expand_path
 from agentm.core.runtime.catalog import _layout
 from agentm.core.runtime.catalog.freeze import freeze_current
 from agentm.core.runtime.catalog.indexer import (
@@ -104,7 +105,7 @@ class DefaultProjectLayout:
 def default_project_layout(cwd: str | Path) -> ProjectLayout:
     """Build the default :class:`ProjectLayout` for a given workspace."""
 
-    return DefaultProjectLayout(cwd=Path(cwd))
+    return DefaultProjectLayout(cwd=expand_path(cwd).resolve())
 
 
 __all__ = [
