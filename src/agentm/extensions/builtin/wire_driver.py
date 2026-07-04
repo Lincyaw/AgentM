@@ -135,6 +135,9 @@ MANIFEST = ExtensionManifest(
         "event:command_dispatched",
     ),
     config_schema=WireDriverConfig,
+    requires=(),
+    api_version=1,
+    tier=1,
 )
 
 def _assistant_text(message: AssistantMessage) -> str:
@@ -546,6 +549,26 @@ class _WireDriverRuntime:
             turn_context=turn_context,
         )
 
+    @classmethod
+    def from_api(cls, api: ExtensionAPI) -> _WireDriverRuntime:
+        outbound_sink = api.get_service(WIRE_OUTBOUND_SERVICE)
+        session_key = api.get_service("session_key")
+        if outbound_sink is None or session_key is None:
+            # Mounting wire_driver outside the gateway has no effect; fail at
+            # install so the misconfiguration surfaces immediately rather than
+            # silently swallowing every session event.
+            raise RuntimeError(
+                "wire_driver requires 'wire_outbound' and 'session_key' services; "
+                "this atom only works inside the agentm gateway process."
+            )
+        return cls(
+            api=api,
+            outbound_sink=outbound_sink,
+            session_key=session_key,
+            turn_context=api.get_service("turn_context"),
+            approval_mgr=api.get_service(APPROVAL_MANAGER_SERVICE),
+        )
+
     def install(self) -> None:
         for channel, projector in _ASYNC_PROJECTORS:
             self._api.on(channel, self._make_async(projector))
@@ -634,22 +657,14 @@ class _WireDriverRuntime:
         )
 
 
-def install(api: ExtensionAPI, config: WireDriverConfig) -> None:  # noqa: ARG001
-    outbound_sink = api.get_service(WIRE_OUTBOUND_SERVICE)
-    session_key = api.get_service("session_key")
-    if outbound_sink is None or session_key is None:
-        # Mounting wire_driver outside the gateway has no effect; fail at
-        # install so the misconfiguration surfaces immediately rather than
-        # silently swallowing every session event.
-        raise RuntimeError(
-            "wire_driver requires 'wire_outbound' and 'session_key' services; "
-            "this atom only works inside the agentm gateway process."
-        )
-    runtime = _WireDriverRuntime(
-        api=api,
-        outbound_sink=outbound_sink,
-        session_key=session_key,
-        turn_context=api.get_service("turn_context"),
-        approval_mgr=api.get_service(APPROVAL_MANAGER_SERVICE),
-    )
-    runtime.install()
+def install(api: ExtensionAPI, config: WireDriverConfig) -> None:
+    del config
+    _WireDriverRuntime.from_api(api).install()
+
+
+__all__ = (
+    "MANIFEST",
+    "WireDriverConfig",
+    "attach_child_wire_forwarder",
+    "install",
+)
