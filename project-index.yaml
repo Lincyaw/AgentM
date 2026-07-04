@@ -93,6 +93,7 @@ requirements:
       - path: src/agentm/core/abi/session.py
       - path: src/agentm/core/abi/provider.py
       - path: src/agentm/extensions/builtin/cost_budget.py
+      - path: src/agentm/extensions/builtin/dedup.py
       - path: src/agentm/extensions/builtin/tool_filter.py
       - path: src/agentm/extensions/builtin/loop_budget.py
       - path: src/agentm/extensions/builtin/slash_commands.py

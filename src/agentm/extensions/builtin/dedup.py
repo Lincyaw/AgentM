@@ -14,8 +14,12 @@ from pydantic import BaseModel
 from agentm.core.abi import AgentStartEvent, ExtensionAPI, ToolCallEvent
 from agentm.extensions import ExtensionManifest
 
+_ToolCallKey = tuple[str, str]
+
+
 class DedupConfig(BaseModel):
     window: int = 10
+
 
 MANIFEST = ExtensionManifest(
     name="dedup",
@@ -25,28 +29,43 @@ MANIFEST = ExtensionManifest(
     requires=(),  # Leaf atom: observes tool calls without requiring tool atoms.
 )
 
-def _make_key(tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
-    return (tool_name, json.dumps(args, sort_keys=True, separators=(",", ":"), default=str))
 
-def install(api: ExtensionAPI, config: DedupConfig) -> None:
-    window = max(0, config.window)
-    if window == 0:
-        return
+def _make_key(tool_name: str, args: dict[str, Any]) -> _ToolCallKey:
+    return (
+        tool_name,
+        json.dumps(args, sort_keys=True, separators=(",", ":"), default=str),
+    )
 
-    recent: deque[tuple[str, str]] = deque(maxlen=window)
 
-    def _reset(_: AgentStartEvent) -> None:
-        recent.clear()
+class _DedupRuntime:
+    def __init__(self, api: ExtensionAPI, config: DedupConfig) -> None:
+        self._api = api
+        self._window = max(0, config.window)
+        self._recent: deque[_ToolCallKey] = deque(maxlen=self._window)
 
-    def _on_tool_call(event: ToolCallEvent) -> dict[str, Any] | None:
+    def active(self) -> bool:
+        return self._window > 0
+
+    def install(self) -> None:
+        self._api.on(AgentStartEvent.CHANNEL, self.reset)
+        self._api.on(ToolCallEvent.CHANNEL, self.on_tool_call)
+
+    def reset(self, _: AgentStartEvent) -> None:
+        self._recent.clear()
+
+    def on_tool_call(self, event: ToolCallEvent) -> dict[str, Any] | None:
         key = _make_key(event.tool_name, event.args)
-        if key in recent:
+        if key in self._recent:
             return {
                 "block": True,
                 "reason": "duplicate of recent call",
             }
-        recent.append(key)
+        self._recent.append(key)
         return None
 
-    api.on(AgentStartEvent.CHANNEL, _reset)
-    api.on(ToolCallEvent.CHANNEL, _on_tool_call)
+
+def install(api: ExtensionAPI, config: DedupConfig) -> None:
+    runtime = _DedupRuntime(api, config)
+    if not runtime.active():
+        return
+    runtime.install()
