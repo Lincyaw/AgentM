@@ -67,7 +67,6 @@ MANIFEST = ExtensionManifest(
 
 @dataclass(slots=True)
 class _StoreContext:
-    cwd: Path
     layout: Any
     session_id: str
     root_session_id: str
@@ -90,7 +89,6 @@ class ArtifactStore:
         # otherwise fall back to max_inline_bytes for backward compat.
         max_inline = config.inline_max_bytes if config.inline_max_bytes != _DEFAULT_INLINE_BYTES else config.max_inline_bytes
         self._ctx = _StoreContext(
-            cwd=Path(api.cwd),
             layout=api.get_project_layout(),
             session_id=api.session_id,
             root_session_id=root_session_id,
