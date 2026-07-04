@@ -736,8 +736,10 @@ The current AgentM terminal implementation follows this direction:
 
 The implementation still reuses tab/supervisor plumbing internally; the user
 surface is main chat plus bottom activity rows, workflow task picker/detail, and
-background shell/monitor activity rows. The 2026-07-03
-terminal-go verification captures under `.agent/tui-dev/captures/` exercised a
-real gateway workflow with two parallel child agents. The parent remained on
-the main transcript, and the two selected task details rendered `ALPHA` and
-`BETA` respectively after completion.
+background shell/monitor activity rows. The tracked 2026-07-03 Claude Code
+reference captures live under `.agent/tui-dev/claude-code-20260703/`; transient
+terminal-go smoke captures stay under the ignored `.agent/tui-dev/captures/`
+scratch directory. The latest local terminal-go smoke exercised a real gateway
+workflow with two parallel child agents: the parent remained on the main
+transcript, and the two selected task details rendered `ALPHA` and `BETA`
+respectively after completion.
