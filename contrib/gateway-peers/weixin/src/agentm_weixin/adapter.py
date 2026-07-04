@@ -60,6 +60,13 @@ MEDIA_INBOX_DIR = Path("weixin") / "media" / "inbox"
 # Must be on its own line: ``MEDIA:/abs/path/to/file.png``
 _MEDIA_LINE_RE = re.compile(r"^MEDIA:(.+)$", re.MULTILINE)
 
+
+def _media_directive_path(raw_path: str) -> Path | None:
+    path = Path(raw_path.strip()).expanduser()
+    if not path.is_absolute():
+        return None
+    return path
+
 # Injected on the first inbound per session so the agent knows how to
 # send media back to WeChat.
 _CHANNEL_HINT = (
@@ -546,8 +553,12 @@ class WeixinAdapter:
 
             # Send the media file
             file_path = match.group(1).strip()
-            if Path(file_path).is_file():
-                await self._send_media(user_id, file_path)
+            media_path = _media_directive_path(file_path)
+            if media_path is None:
+                logger.warning(f"[weixin] MEDIA path is not absolute: {file_path}")
+                await self._send_text(user_id, f"[文件路径必须是绝对路径: {file_path}]")
+            elif media_path.is_file():
+                await self._send_media(user_id, str(media_path))
             else:
                 logger.warning(f"[weixin] MEDIA file not found: {file_path}")
                 await self._send_text(user_id, f"[文件未找到: {file_path}]")
