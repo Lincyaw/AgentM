@@ -236,7 +236,7 @@ class WeixinAdapter:
     async def _sleep(self, seconds: float) -> None:
         try:
             await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError):
             pass
 
     # -- inbound (WeChat -> gateway) ----------------------------------

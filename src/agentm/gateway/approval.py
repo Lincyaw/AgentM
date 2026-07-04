@@ -110,7 +110,7 @@ class ApprovalManager:
         )
         try:
             return await asyncio.wait_for(future, timeout=self._timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(approval_id, None)
             await self._sink(
                 self._render_resolution(

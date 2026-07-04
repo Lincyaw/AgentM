@@ -42,6 +42,10 @@ Rules:
   dicts; only the typed *object itself* must not be assembled from an
   untyped dict. Vendor SDK calls (``openai``/``anthropic``/``arl``) and
   pydantic ``super().__init__(**data)`` are out of scope by design.
+- **AM013** ``legacy-asyncio-timeout-error``: Catching
+  ``asyncio.TimeoutError`` instead of builtin ``TimeoutError``. On Python
+  3.12 this is an alias; using the builtin keeps timeout handling uniform
+  with modern stdlib guidance and ruff's Python-3.12 pyupgrade rules.
 
 Invocation::
 
@@ -549,13 +553,42 @@ def _check_config_dict_splat(tree: ast.Module, path: str) -> list[Issue]:
     return issues
 
 
+def _check_legacy_asyncio_timeout_error(tree: ast.Module, path: str) -> list[Issue]:
+    """AM013: ``asyncio.TimeoutError`` catch on Python 3.12+."""
+    issues: list[Issue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ExceptHandler) or node.type is None:
+            continue
+        exception_types = (
+            list(node.type.elts) if isinstance(node.type, ast.Tuple) else [node.type]
+        )
+        for exc_type in exception_types:
+            if (
+                isinstance(exc_type, ast.Attribute)
+                and exc_type.attr == "TimeoutError"
+                and isinstance(exc_type.value, ast.Name)
+                and exc_type.value.id == "asyncio"
+            ):
+                issues.append(Issue(
+                    path=path,
+                    line=node.lineno,
+                    rule="AM013",
+                    message=(
+                        "catch builtin TimeoutError instead of "
+                        "asyncio.TimeoutError on Python 3.12+"
+                    ),
+                ))
+                break
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
 ALL_RULES: Final[tuple[str, ...]] = (
     "AM001", "AM002", "AM003", "AM004", "AM005", "AM006", "AM007",
-    "AM008", "AM009", "AM010", "AM011", "AM012",
+    "AM008", "AM009", "AM010", "AM011", "AM012", "AM013",
 )
 
 
@@ -587,6 +620,7 @@ def check_file(file_path: Path) -> list[Issue]:
     issues.extend(_check_cross_layer_import(tree, rel, file_path))
     issues.extend(_check_hand_written_schema(tree, rel, file_path))
     issues.extend(_check_config_dict_splat(tree, rel))
+    issues.extend(_check_legacy_asyncio_timeout_error(tree, rel))
     return issues
 
 
