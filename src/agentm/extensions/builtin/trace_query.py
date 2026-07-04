@@ -209,11 +209,6 @@ class _TraceQueryRuntime:
     # -- list_turns --------------------------------------------------------
 
     def _register_list_turns(self) -> None:
-        async def _list_turns(args: dict[str, Any]) -> ToolResult:
-            parsed = _ListTurnsArgs.model_validate(args)
-            records = self._backend.turns()
-            return _text(self._render_turns(records, parsed.start, parsed.limit))
-
         self._api.register_tool(
             FunctionTool(
                 name="list_turns",
@@ -224,9 +219,14 @@ class _TraceQueryRuntime:
                     "turns with read_turn."
                 ),
                 parameters=_ListTurnsArgs,
-                fn=_list_turns,
+                fn=self.list_turns,
             )
         )
+
+    async def list_turns(self, args: dict[str, Any]) -> ToolResult:
+        parsed = _ListTurnsArgs.model_validate(args)
+        records = self._backend.turns()
+        return _text(self._render_turns(records, parsed.start, parsed.limit))
 
     def _render_turns(
         self, records: list[dict[str, Any]], start: int, limit: int
@@ -248,12 +248,6 @@ class _TraceQueryRuntime:
     # -- read_turn ---------------------------------------------------------
 
     def _register_read_turn(self) -> None:
-        async def _read_turn(args: dict[str, Any]) -> ToolResult:
-            parsed = _ReadTurnArgs.model_validate(args)
-            roles = {parsed.role} if parsed.role else None
-            records = self._backend.messages(roles=roles)
-            return _text(self._render_messages(records, parsed.offset, parsed.limit))
-
         self._api.register_tool(
             FunctionTool(
                 name="read_turn",
@@ -264,9 +258,15 @@ class _TraceQueryRuntime:
                     "agent actually did and what results it received."
                 ),
                 parameters=_ReadTurnArgs,
-                fn=_read_turn,
+                fn=self.read_turn,
             )
         )
+
+    async def read_turn(self, args: dict[str, Any]) -> ToolResult:
+        parsed = _ReadTurnArgs.model_validate(args)
+        roles = {parsed.role} if parsed.role else None
+        records = self._backend.messages(roles=roles)
+        return _text(self._render_messages(records, parsed.offset, parsed.limit))
 
     def _render_messages(
         self, records: list[dict[str, Any]], offset: int, limit: int
@@ -308,13 +308,6 @@ class _TraceQueryRuntime:
     # -- get_tool_calls ----------------------------------------------------
 
     def _register_get_tool_calls(self) -> None:
-        async def _get_tool_calls(args: dict[str, Any]) -> ToolResult:
-            parsed = _GetToolCallsArgs.model_validate(args)
-            records = self._backend.tools()
-            return _text(
-                self._render_tool_calls(records, parsed.tool_name, parsed.limit)
-            )
-
         self._api.register_tool(
             FunctionTool(
                 name="get_tool_calls",
@@ -325,9 +318,14 @@ class _TraceQueryRuntime:
                     "submit_final_report."
                 ),
                 parameters=_GetToolCallsArgs,
-                fn=_get_tool_calls,
+                fn=self.get_tool_calls,
             )
         )
+
+    async def get_tool_calls(self, args: dict[str, Any]) -> ToolResult:
+        parsed = _GetToolCallsArgs.model_validate(args)
+        records = self._backend.tools()
+        return _text(self._render_tool_calls(records, parsed.tool_name, parsed.limit))
 
     @staticmethod
     def _render_tool_calls(
