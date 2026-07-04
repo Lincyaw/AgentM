@@ -488,6 +488,7 @@ requirements:
       - path: src/agentm/onboard.py
       - path: src/agentm/cli_trace.py
       - path: src/agentm/cli_trace_format.py
+      - path: src/agentm/extensions/builtin/trace_query.py
       - path: src/agentm/contrib_sync.py
       - path: src/agentm/env.py
       - path: src/agentm/extensions/discover.py
