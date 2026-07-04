@@ -43,8 +43,9 @@ DEFAULT_SOCKET_URL = default_socket_url()
 def load_token_file(token_file: str, *, option_name: str = "--token-file") -> tuple[str, ...]:
     """Load non-empty, non-comment bearer tokens from a token file."""
 
+    path = Path(token_file).expanduser()
     try:
-        content = Path(token_file).read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ValueError(
             f"{option_name} {token_file!r}: cannot read: {exc.strerror or exc}"
