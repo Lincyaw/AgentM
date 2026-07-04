@@ -37,6 +37,7 @@ import signal
 import sys
 import uuid
 import warnings
+from pathlib import Path
 from types import FrameType
 from typing import Annotated
 
@@ -74,6 +75,9 @@ EXIT_CONNECT = 7
 PROG = "agentm-feishu"
 
 
+def _expand_path_text(path: str) -> str:
+    return str(Path(os.path.expandvars(path)).expanduser())
+
 
 def _err(kind: str, root: str, fix: str) -> None:
     """Print a structured error line to stderr."""
@@ -98,8 +102,9 @@ def _resolve_connect(url: str, tls_ca: str | None):
 def _load_app_secret(path: str | None) -> str | None:
     """Load the Feishu app secret. File wins over env."""
     if path:
+        resolved_path = _expand_path_text(path)
         try:
-            with open(path, encoding="utf-8") as f:
+            with open(resolved_path, encoding="utf-8") as f:
                 secret = f.read().strip()
         except OSError as exc:
             _err(

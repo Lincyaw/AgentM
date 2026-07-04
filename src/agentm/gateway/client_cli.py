@@ -7,8 +7,11 @@ help text consistent and the error messages identical.
 
 from __future__ import annotations
 
+import os
 import ssl
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import ParseResult
 from urllib.parse import urlparse
 
 from .transport import ClientTransport, UnixClientTransport, WebSocketClientTransport
@@ -40,6 +43,16 @@ class ConnectOptions:
     tls_ca: str | None = None
 
 
+def _expand_path_text(path: str) -> str:
+    return str(Path(os.path.expandvars(path)).expanduser())
+
+
+def _unix_socket_path_text(parsed: ParseResult) -> str:
+    if parsed.netloc:
+        return f"{parsed.netloc}{parsed.path}"
+    return parsed.path
+
+
 def resolve_connect(
     url: str,
     *,
@@ -56,7 +69,7 @@ def resolve_connect(
             raise ConnectError(
                 "--tls-ca is only meaningful with wss:// (got unix://)."
             )
-        socket_path = parsed.path or parsed.netloc
+        socket_path = _expand_path_text(_unix_socket_path_text(parsed))
         if not socket_path or not socket_path.startswith("/"):
             raise ConnectError(
                 f"--connect URL {url!r} has no absolute socket path"
@@ -74,7 +87,7 @@ def resolve_connect(
         if scheme == "wss":
             ssl_context = ssl.create_default_context()
             if tls_ca:
-                ssl_context.load_verify_locations(cafile=tls_ca)
+                ssl_context.load_verify_locations(cafile=_expand_path_text(tls_ca))
         return (
             ConnectSpec(scheme=scheme, uri=url),
             WebSocketClientTransport(url, ssl_context=ssl_context),

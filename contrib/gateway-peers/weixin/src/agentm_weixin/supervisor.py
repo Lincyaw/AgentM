@@ -32,6 +32,10 @@ def _state_dir() -> Path:
     return agentm_home_dir() / "weixin"
 
 
+def _expand_path(path: str) -> Path:
+    return Path(os.path.expandvars(path)).expanduser()
+
+
 def _log_dir() -> Path:
     d = _state_dir() / "logs"
     d.mkdir(parents=True, exist_ok=True)
@@ -41,7 +45,7 @@ def _log_dir() -> Path:
 def _run_dir() -> Path:
     runtime = os.environ.get("XDG_RUNTIME_DIR", "")
     if runtime:
-        d = Path(runtime) / "agentm-weixin"
+        d = _expand_path(runtime) / "agentm-weixin"
     else:
         d = _state_dir() / "run"
     d.mkdir(parents=True, exist_ok=True)

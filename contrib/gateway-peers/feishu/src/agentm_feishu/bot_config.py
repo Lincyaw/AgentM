@@ -25,6 +25,10 @@ def _agentm_home() -> Path:
     return agentm_home_dir()
 
 
+def _expand_path(path: str) -> Path:
+    return Path(os.path.expandvars(path)).expanduser()
+
+
 def _read_secret(raw: dict[str, Any], bot_name: str) -> str | None:
     """Resolve app_secret from the bot config table.
 
@@ -33,7 +37,7 @@ def _read_secret(raw: dict[str, Any], bot_name: str) -> str | None:
     secret_file = raw.get("app_secret_file")
     if isinstance(secret_file, str) and secret_file:
         try:
-            return Path(secret_file).read_text(encoding="utf-8").strip()
+            return _expand_path(secret_file).read_text(encoding="utf-8").strip()
         except OSError as exc:
             logger.warning(f"[feishu.bots.{bot_name}] cannot read app_secret_file {secret_file!r}: {exc}")
             return None
