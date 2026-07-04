@@ -219,11 +219,7 @@ func defaultSessionID(wd string) string {
 }
 
 func expandCLIPath(path string) string {
-	expanded, err := pathx.ExpandHomeDir(path)
-	if err != nil {
-		return path
-	}
-	return expanded
+	return pathx.ExpandPath(path)
 }
 
 func printUsage(out io.Writer) {

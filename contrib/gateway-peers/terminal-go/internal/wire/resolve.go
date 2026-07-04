@@ -29,11 +29,7 @@ func DefaultSocketURL() string {
 }
 
 func expandUser(path string) string {
-	expanded, err := pathx.ExpandHomeDir(path)
-	if err != nil {
-		return path
-	}
-	return expanded
+	return pathx.ExpandPath(path)
 }
 
 // ResolveTransport parses a URL string into a Transport.
