@@ -17,7 +17,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
 
 from agentm.core.abi.messages import AgentMessage
 
@@ -151,11 +151,13 @@ class EntryMaterializer(Protocol):
     def to_message(self, entry: SessionEntry) -> AgentMessage | None: ...
 
 
-# Mutable module-level registry — populated at atom install time. Keys are
-# ``entry.type`` strings; values are objects satisfying ``EntryMaterializer``.
-# Empty by default; atoms (typically ``extensions.builtin.compaction_prompts``)
-# register defaults for ``"message"`` / ``"branch_summary"`` / ``"compaction"``.
-ENTRY_MATERIALIZERS: dict[str, EntryMaterializer] = {}
+# Mutable module-level registry — populated at atom install time. ``Final`` keeps
+# the ABI binding stable while still allowing atoms to register materializers in
+# the dictionary. Keys are ``entry.type`` strings; values are objects satisfying
+# ``EntryMaterializer``. Empty by default; atoms (typically
+# ``extensions.builtin.compaction_prompts``) register defaults for ``"message"``
+# / ``"branch_summary"`` / ``"compaction"``.
+ENTRY_MATERIALIZERS: Final[dict[str, EntryMaterializer]] = {}
 
 
 __all__ = [

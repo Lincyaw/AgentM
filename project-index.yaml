@@ -90,6 +90,7 @@ requirements:
       - path: src/agentm/core/runtime/provider_resolver.py
       - path: src/agentm/core/runtime/atom_reloader.py
       - path: src/agentm/core/runtime/session_manager.py
+      - path: src/agentm/core/abi/session.py
       - path: src/agentm/core/abi/provider.py
       - path: src/agentm/extensions/builtin/cost_budget.py
       - path: src/agentm/extensions/builtin/loop_budget.py
