@@ -17,8 +17,11 @@ import (
 )
 
 const (
-	maxVisibleBackgroundActivities = 4
-	backgroundActivityKeySeparator = "\x00"
+	maxVisibleBackgroundActivities  = 4
+	backgroundActivityKeySeparator  = "\x00"
+	backgroundActivityStatusRunning = "running"
+	backgroundActivityStatusError   = "error"
+	backgroundActivityStatusFailed  = "failed"
 )
 
 type workflowRow struct {
@@ -40,7 +43,7 @@ type backgroundActivity struct {
 	status    string
 	note      string
 	updatedAt time.Time
-	terminal  bool
+	finished  bool
 }
 
 func backgroundActivityKey(sessionID, activityID string) string {
@@ -539,6 +542,23 @@ func cmpNonEmpty(value, fallback string) string {
 	return value
 }
 
+func normalizeBackgroundActivityStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" {
+		return backgroundActivityStatusRunning
+	}
+	return status
+}
+
+func retainFinishedBackgroundActivity(status string) bool {
+	switch status {
+	case backgroundActivityStatusError, backgroundActivityStatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *appModel) handleBackgroundActivity(ev *runtime.BackgroundActivityEvent) (tea.Model, tea.Cmd) {
 	if ev == nil {
 		return m, nil
@@ -564,11 +584,8 @@ func (m *appModel) updateBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 	}
 	sessionID := strings.TrimSpace(ev.SessionID)
 	key := backgroundActivityKey(sessionID, activityID)
-	status := strings.TrimSpace(ev.Status)
-	if status == "" {
-		status = "running"
-	}
-	if ev.Terminal && status != "error" && status != "failed" {
+	status := normalizeBackgroundActivityStatus(ev.Status)
+	if ev.Terminal && !retainFinishedBackgroundActivity(status) {
 		_, existed := m.backgroundActivities[key]
 		delete(m.backgroundActivities, key)
 		return existed
@@ -581,7 +598,7 @@ func (m *appModel) updateBackgroundActivity(ev *runtime.BackgroundActivityEvent)
 		status:    status,
 		note:      strings.TrimSpace(ev.Note),
 		updatedAt: time.Now(),
-		terminal:  ev.Terminal,
+		finished:  ev.Terminal,
 	}
 	_, existed := m.backgroundActivities[key]
 	m.backgroundActivities[key] = next
@@ -631,11 +648,11 @@ func (m *appModel) backgroundActivityRows() ([]backgroundActivity, int) {
 func (m *appModel) renderBackgroundActivityRow(row backgroundActivity, width int) string {
 	prefix := "  "
 	icon := "◯"
-	if row.terminal {
+	if row.finished {
 		icon = "✻"
 	}
 	left := fmt.Sprintf("%s%s %-16s %s", prefix, icon, cmpNonEmpty(row.source, "background"), cmpNonEmpty(row.label, "task"))
-	status := cmpNonEmpty(row.status, "running")
+	status := cmpNonEmpty(row.status, backgroundActivityStatusRunning)
 	right := status
 	if row.note != "" {
 		right = status + " · " + row.note
@@ -649,7 +666,7 @@ func (m *appModel) renderBackgroundActivityRow(row backgroundActivity, width int
 	if lipgloss.Width(line) > width {
 		line = ansi.Truncate(line, width, "…")
 	}
-	if row.terminal {
+	if row.finished {
 		return styles.SecondaryStyle.Render(line)
 	}
 	return styles.MutedStyle.Render(line)
