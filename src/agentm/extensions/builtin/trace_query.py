@@ -45,6 +45,8 @@ MANIFEST = ExtensionManifest(
         "tool:get_tool_calls",
     ),
     requires=(),
+    api_version=1,
+    tier=1,
 )
 
 
@@ -181,25 +183,33 @@ def _get_backend(parent_sid: str, cwd: str) -> _TraceBackend | None:
 
 def install(api: ExtensionAPI, config: dict[str, Any]) -> None:
     del config
-    parent_sid = api.parent_session_id
-    if parent_sid is None:
-        logger.debug("trace_query: no parent session — tools will return empty results")
-        return
-
-    backend = _get_backend(parent_sid, api.cwd)
-    if backend is None:
-        logger.warning(
-            "trace_query: no ClickHouse or local parent trace — tools disabled"
-        )
-        return
-
-    _TraceQueryRuntime(api, backend=backend).install()
+    runtime = _TraceQueryRuntime.from_api(api)
+    if runtime is not None:
+        runtime.install()
 
 
 class _TraceQueryRuntime:
     def __init__(self, api: ExtensionAPI, *, backend: _TraceBackend) -> None:
         self._api = api
         self._backend = backend
+
+    @classmethod
+    def from_api(cls, api: ExtensionAPI) -> _TraceQueryRuntime | None:
+        parent_sid = api.parent_session_id
+        if parent_sid is None:
+            logger.debug(
+                "trace_query: no parent session — tools will return empty results"
+            )
+            return None
+
+        backend = _get_backend(parent_sid, api.cwd)
+        if backend is None:
+            logger.warning(
+                "trace_query: no ClickHouse or local parent trace — tools disabled"
+            )
+            return None
+
+        return cls(api, backend=backend)
 
     def install(self) -> None:
         self._register_list_turns()
@@ -378,4 +388,4 @@ class _GetToolCallsArgs(BaseModel):
     limit: int = Field(default=30, description="Max tool calls to return")
 
 
-__all__: Final = ["MANIFEST", "install"]
+__all__: Final = ("MANIFEST", "install")
