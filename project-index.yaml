@@ -1087,6 +1087,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/tui/page/chat/chat.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/service/supervisor/supervisor.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/service/tuistate/store.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/keyboard.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/lifecycle.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/mouse.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/tabs.go
