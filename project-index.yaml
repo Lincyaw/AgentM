@@ -1081,6 +1081,7 @@ requirements:
       - path: src/agentm/extensions/builtin/runtime_context.py
       - path: src/agentm/extensions/builtin/system_prompt.py
       - path: src/agentm/extensions/builtin/skill_loader.py
+      - path: src/agentm/extensions/builtin/claude_agents.py
       - path: src/agentm/extensions/builtin/prompt_templates.py
       - path: src/agentm/extensions/builtin/tool_result_cap.py
       - path: src/agentm/extensions/builtin/tui_snapshot.py

@@ -376,7 +376,9 @@ async def install(api: ExtensionAPI, config: SkillLoaderConfig) -> None:
             # the same `.claude/skills/<name>/SKILL.md` layout. Non-existent
             # paths are silently ignored by ``load_skills``.
             discovered_paths.append(str(Path.home() / ".claude" / "skills"))
-            discovered_paths.append(str(Path(api.cwd) / ".claude" / "skills"))
+            discovered_paths.append(
+                str(expand_path_from_cwd(".claude/skills", api.cwd))
+            )
             # Also walk Claude Code's installed-plugin skills:
             # ``~/.claude/plugins/cache/<source>/<plugin>/<version>/skills/``.
             # Plugins are how the bulk of Claude Code's library ships

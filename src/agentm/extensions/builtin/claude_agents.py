@@ -24,7 +24,7 @@ from agentm.core.abi import (
     ResolveSubagentEvent,
     SessionReadyEvent,
 )
-from agentm.core.lib import parse_frontmatter
+from agentm.core.lib import expand_path_from_cwd, parse_frontmatter
 from agentm.extensions import ExtensionManifest
 
 
@@ -110,7 +110,7 @@ def _version_sort_key(path: Path) -> tuple[int, ...]:
 
 def _discover_dirs(cwd: str, inherit_claude: bool) -> list[Path]:
     dirs: list[Path] = []
-    dirs.append(Path(cwd) / ".claude" / "agents")
+    dirs.append(expand_path_from_cwd(".claude/agents", cwd))
     if not inherit_claude:
         return dirs
     dirs.append(Path.home() / ".claude" / "agents")
@@ -223,7 +223,11 @@ def _available_agents_block(agents: dict[str, dict[str, Any]]) -> str:
 
 async def install(api: ExtensionAPI, config: ClaudeAgentsConfig) -> None:
     inherit_claude = config.inherit_claude
-    extra_paths = [Path(p) / "agents" for p in config.extra_paths if p.strip()]
+    extra_paths = [
+        expand_path_from_cwd(p, api.cwd) / "agents"
+        for p in config.extra_paths
+        if p.strip()
+    ]
     agents: dict[str, dict[str, Any]] = {}
     cached_block = ""
 
