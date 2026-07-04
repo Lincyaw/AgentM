@@ -50,6 +50,7 @@ from agentm.core.runtime.provider_resolver import LastRegisteredWins
 from agentm.core.runtime.resource_loader import InMemoryResourceLoader, ResourceLoader
 from agentm.core.runtime.resource_writer import GitBackedResourceWriter
 from agentm.core.abi.session_config import AgentSessionConfig
+from agentm.core.lib.paths import expand_path
 from agentm.core.runtime.session_helpers import (
     AtomSource,
     SessionView,
@@ -628,7 +629,7 @@ def _find_core_manifest(cwd: str) -> Path | None:
     candidates = [Path(cwd) / "core-manifest.yaml"]
     project_root = os.environ.get("AGENTM_PROJECT_ROOT")
     if project_root:
-        candidates.append(Path(project_root).expanduser() / "core-manifest.yaml")
+        candidates.append(expand_path(project_root) / "core-manifest.yaml")
 
     try:
         import agentm
