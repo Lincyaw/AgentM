@@ -115,8 +115,13 @@ disengages auto-scroll; new content re-engages it.
 ### 2.4 Suggestions
 
 Inline below input (not a floating popup). Visible only when input starts
-with `/` and hasn't been committed. Populated from `catalog.commands` +
-`/clear`. Up/Down navigates, Tab/Enter accepts. Esc dismisses.
+with `/` and hasn't been committed. Populated from the gateway welcome
+capability command list (gateway commands plus scenario-declared
+`command:*` session commands), then refreshed by `session_ready` with the live
+session's command set. If capabilities refresh while the user already has a
+`/` word open, the editor reopens the command completion with the new command
+provider instead of waiting for the user to delete and retype `/`. Up/Down
+navigates, Tab/Enter accepts. Esc dismisses.
 
 ### 2.5 Toast
 
@@ -323,7 +328,7 @@ router (router.py), expressed as a switch:
 | `assistant_text` | Set final text on active turn, turn complete |
 | `agent_end` | phase→idle, clear in-flight |
 | `usage` | Accumulate tokens, compute tok/s |
-| `session_ready` | Update model name, catalog (tools + commands) |
+| `session_ready` | Update model name, catalog (tools + commands), refresh `/` completion |
 | `approval_request` | New ApprovalBlock |
 | `approval_resolved` | Toast |
 | `diagnostic_warning` | Toast (warn) |

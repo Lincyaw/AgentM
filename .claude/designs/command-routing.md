@@ -113,6 +113,12 @@ those commands, and the gateway only auto-routes unknown gateway commands to
 session command dispatch when the slash name is in that advertised set. The
 flag is not a security boundary inside the session runtime.
 
+Before the first live session exists, the gateway welcome capability block
+pre-advertises command names declared as `command:*` in the selected scenario's
+atom `MANIFEST.registers`. This is intentionally a discovery hint for chat
+clients: the authoritative list still comes from the live session's
+`CommandSpec` registry once `session_ready` arrives.
+
 ---
 
 ## 4. Parsing
@@ -158,6 +164,12 @@ the registry:
    overlay (see §7) lists mountable atoms. Their MANIFEST entries
    surface as `AtomCommand` instances in namespace `atom`. Deferred to
    PR #2; the design is locked here.
+
+Welcome-time capability discovery also inspects the selected scenario's atom
+`MANIFEST.registers` for `command:*` tags so a terminal can show `/goal`,
+`/loop`, and similar session commands before the user's first prompt creates a
+session. It does not install the atom or execute command handlers; it only
+imports manifests and emits names/summaries as hints.
 
 **Collision policy**: priority is builtin > markdown > skill > atom.
 A skill named `new` does *not* shadow `/new`. `/help` shows every

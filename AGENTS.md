@@ -29,7 +29,7 @@ mechanism; every policy is a replaceable atom. Boundary contract in
   all chat sessions in memory and serves chat-client peers over the v2
   wire protocol (`.claude/designs/single-process-gateway.md`).
 - Chat-client peer CLIs (separate binaries, vendor-SDK isolation only):
-  `agentm-terminal`, `agentm-feishu`, `agentm-weixin`.
+  `ag`, `agentm-feishu`, `agentm-weixin`.
 - Shared `AGENTM_*` env namespace; `.env` autoloaded. Long-lived model
   settings can live in `~/.agentm/config.toml` instead of env vars
   (`$AGENTM_HOME/config.toml` overrides the directory). Precedence:

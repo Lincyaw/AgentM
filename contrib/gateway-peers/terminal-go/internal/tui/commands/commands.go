@@ -331,12 +331,22 @@ func BuildCommandCategories(ctx context.Context, application *app.App) []Categor
 	agentCommands := application.CurrentAgentCommands(ctx)
 	if len(agentCommands) > 0 {
 		var commands []Item
-		for name, cmd := range agentCommands {
+		names := make([]string, 0, len(agentCommands))
+		for name := range agentCommands {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			cmd := agentCommands[name]
 			commandName := name
+			description := toolcommon.TruncateText(cmd.DisplayText(), 60)
+			if description == "" {
+				description = "/" + commandName
+			}
 			commands = append(commands, Item{
 				ID:           "agent.command." + commandName,
 				Label:        commandName,
-				Description:  toolcommon.TruncateText(cmd.DisplayText(), 60),
+				Description:  description,
 				Category:     "Agent Commands",
 				SlashCommand: "/" + commandName,
 				Immediate:    true,

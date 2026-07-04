@@ -191,6 +191,17 @@ func (e *editor) SetCompletions(comps ...completions.Completion) tea.Cmd {
 	if e.fileLoadID > 0 {
 		e.fileLoadID++
 	}
+	currentWord := e.textarea.Word()
+	currentValue := e.textarea.Value()
+	for _, comp := range e.completions {
+		if !strings.HasPrefix(currentWord, comp.Trigger()) {
+			continue
+		}
+		if comp.RequiresEmptyEditor() && currentValue != currentWord {
+			continue
+		}
+		return tea.Batch(e.startCompletion(comp), e.updateCompletionQuery())
+	}
 	return core.CmdHandler(completion.CloseMsg{})
 }
 

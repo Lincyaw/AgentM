@@ -93,6 +93,55 @@ def _scenario_payload(info: Any) -> dict[str, str]:
     }
 
 
+def _scenario_declared_commands(scenario: str | None) -> list[dict[str, str]]:
+    """Return user-facing command names declared by the scenario's atoms."""
+    if not scenario:
+        return []
+    try:
+        import importlib
+
+        from agentm.core.abi import ExtensionManifest
+        from agentm.extensions import parse_register_tag
+        from agentm.extensions.loader import load_scenario
+
+        extensions, _meta = load_scenario(scenario)
+    except Exception:
+        logger.opt(exception=True).warning(
+            f"describe_capabilities: failed to inspect scenario {scenario!r}"
+        )
+        return []
+
+    commands: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for module_path, _config in extensions:
+        try:
+            module = importlib.import_module(module_path)
+        except Exception:
+            logger.opt(exception=True).debug(
+                f"describe_capabilities: failed to import {module_path!r}"
+            )
+            continue
+        manifest = getattr(module, "MANIFEST", None)
+        if not isinstance(manifest, ExtensionManifest):
+            continue
+        for tag in manifest.registers:
+            try:
+                kind, name = parse_register_tag(tag)
+            except ValueError:
+                continue
+            if kind != "command" or not name or name in seen:
+                continue
+            seen.add(name)
+            commands.append(
+                {
+                    "name": name,
+                    "kind": "session",
+                    "summary": manifest.description,
+                }
+            )
+    return commands
+
+
 def route_targets(
     peers: list[PeerSession],
     peer_channels: dict[str, str],
@@ -806,6 +855,17 @@ class GatewayRuntime:
             for h in all_handlers
             if h.namespace is None
         ]
+        seen_commands = {
+            item["name"]
+            for item in commands
+            if isinstance(item.get("name"), str)
+        }
+        for item in _scenario_declared_commands(self._scenario):
+            name = item.get("name")
+            if not name or name in seen_commands:
+                continue
+            commands.append(item)
+            seen_commands.add(name)
         # Skills are gateway-registered commands under the "skill" namespace
         # (invoked as /skill:<name>). They are discovered at startup and static,
         # so the welcome frame can advertise them for the terminal's /skills view.

@@ -1064,6 +1064,7 @@ requirements:
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/editor/completions/command.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/editor/completions/file.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/editor/editor.go
+      - path: contrib/gateway-peers/terminal-go/internal/tui/commands/commands.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/messages/messages.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/statusbar/statusbar.go
       - path: contrib/gateway-peers/terminal-go/internal/tui/components/tabbar/tabbar.go
