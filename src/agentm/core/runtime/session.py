@@ -92,6 +92,164 @@ from agentm.core.abi.session_config import (  # noqa: E402
 )
 
 
+def _user_payload(
+    *, text: str, images: list[ImageContent] | None
+) -> list[TextContent | ImageContent]:
+    """Build the content-block list a ``source="user"`` inbox item carries."""
+
+    content: list[TextContent | ImageContent] = []
+    if text:
+        content.append(TextContent(type="text", text=text))
+    if images:
+        content.extend(images)
+    return content
+
+
+class _SessionEventBridge:
+    """Own inbox/session-log event handlers for ``AgentSession``."""
+
+    def __init__(
+        self,
+        *,
+        inbox: SessionInbox,
+        session_manager: SessionManager,
+    ) -> None:
+        self._inbox = inbox
+        self._session_manager = session_manager
+        self.pending_terminate: ToolTerminated | None = None
+        self.last_round_turn: tuple[int, int] | None = None
+
+    def on_context_drain_inbox(self, event: ContextEvent) -> None:
+        """Drain the inbox into the turn's message list (in place) + persist."""
+
+        self._drain_inbox_and_persist(messages=event.messages)
+
+    def on_decide_inbox_keep_alive(
+        self, event: DecideTurnActionEvent
+    ) -> Step | Stop | None:
+        """Keep the loop alive while the inbox holds undrained items."""
+
+        del event
+        if not self._inbox.is_empty():
+            return Step()
+        # #177: a terminal item was drained — honour the terminate intent now
+        # that its message has been delivered. Non-final ``Stop`` (matching a
+        # foreground ``ToolTerminate``), so an extension handler on the same
+        # channel may still ``Inject`` over it.
+        #
+        # We do NOT clear ``pending_terminate`` here. The resolution lattice
+        # (loop.py:298) lets a co-loaded floor's ``Inject`` win over this
+        # ``Stop`` — e.g. ``sub_agent`` injecting while a child is still
+        # running. A foreground terminate survives that because it is the
+        # kernel default, recomputed every turn; a one-shot consumed flag would
+        # be DESTROYED by the override. So we re-assert the same cause on every
+        # boundary and let ``on_agent_end`` clear it only once the loop has
+        # actually stopped on it — the terminate survives across N turns of a
+        # running child's injects.
+        if self.pending_terminate is not None:
+            return Stop(self.pending_terminate)
+        return None
+
+    def _drain_inbox_and_persist(
+        self, *, messages: list[AgentMessage]
+    ) -> None:
+        """Drain the inbox into the live turn message list and persist."""
+
+        for item in self._inbox.drain():
+            rendered = render_item(item)
+            self._session_manager.append_message(rendered)
+            messages.append(rendered)
+            # #177: a terminal item carries a terminate intent. Record it so
+            # the keep-alive floor (this turn's ``decide_turn_action``) stops
+            # the loop after the message above has been delivered to the model.
+            # ``source`` is recorded in the cause for trace attribution; a
+            # background-produced terminate has no foreground tool_name.
+            if item.terminal:
+                self.pending_terminate = ToolTerminated(
+                    tool_name=f"background:{item.source}",
+                    reason="terminate-from-background",
+                )
+
+    def discard_inbox_on_early_return(self, reason: str) -> None:
+        """Drain the inbox after a pre-context-event early return."""
+
+        drained = self._inbox.drain()
+        if not drained:
+            return
+        logger.warning(
+            "agentm session driver: discarded {} undrained inbox item(s) "
+            "after a pre-context-event early return ({}; sources={!r}) "
+            "to avoid driver spin",
+            len(drained),
+            reason,
+            [item.source for item in drained],
+        )
+        # ``payload`` may be a JSON-native shape (str / dict / list of
+        # TextContent/ImageContent dataclasses). The session manager runs the
+        # whole payload through to_jsonable before persisting, so attaching
+        # the original payload object is safe; if a producer wedges in a
+        # non-serialisable type the persistence path will fail loudly there
+        # rather than silently here.
+        try:
+            self._session_manager.append_custom_entry(
+                "inbox.discarded",
+                {
+                    "reason": reason,
+                    "sources": [item.source for item in drained],
+                    "items": [
+                        {
+                            "source": item.source,
+                            "payload": item.payload,
+                            "dedup_key": item.dedup_key,
+                        }
+                        for item in drained
+                    ],
+                },
+            )
+        except Exception:
+            # The warning log already captured the discard; a persistence
+            # hiccup here must not crash the driver or hide the original
+            # early-return path.
+            logger.exception(
+                "agentm session driver: failed to persist inbox.discarded entry"
+            )
+
+    def on_message_persisted(self, event: MessagePersistedEvent) -> None:
+        leaf = self._session_manager.get_leaf_id()
+        if leaf is None:
+            self._session_manager.reset_leaf()
+        else:
+            self._session_manager.branch(leaf)
+        self._session_manager.append_message(event.message)
+        self.last_round_turn = (event.turn_index, event.turn_id)
+
+    def on_agent_end_commit_boundary(self, event: AgentEndEvent) -> None:
+        """Persist a ``turn_committed`` marker delimiting a consistent point."""
+
+        leaf = self._session_manager.get_leaf_entry()
+        if leaf is not None and leaf.type == ENTRY_TYPE_TURN_COMMITTED:
+            return
+        cause = type(event.cause).__name__ if event.cause is not None else "unknown"
+        payload: dict[str, Any] = {"cause": cause}
+        if self.last_round_turn is not None:
+            turn_index, turn_id = self.last_round_turn
+            payload["turn_index"] = turn_index
+            payload["turn_id"] = turn_id
+        try:
+            self._session_manager.append_custom_entry(
+                ENTRY_TYPE_TURN_COMMITTED, payload
+            )
+            self.last_round_turn = None
+        except Exception:
+            # A persistence hiccup here must never crash the driver round or
+            # block the prompt waiter the next handler resolves.
+            logger.exception("failed to append turn_committed boundary marker")
+
+    def clear_matching_terminate(self, cause: object) -> None:
+        if self.pending_terminate is not None and cause is self.pending_terminate:
+            self.pending_terminate = None
+
+
 # --- AgentSession -----------------------------------------------------------
 
 
@@ -161,22 +319,26 @@ class AgentSession:
         self._end_waiters: list[asyncio.Future[None]] = []
         # FIFO-serializes concurrent prompt() callers.
         self._prompt_lock: asyncio.Lock = asyncio.Lock()
-        # Latched by a terminal=True inbox item; consumed at turn boundary.
-        self._pending_terminate: ToolTerminated | None = None
-        self._last_round_turn: tuple[int, int] | None = None
-
-        self._bus.on(
-            MessagePersistedEvent.CHANNEL, self._on_message_persisted
+        self._session_events = _SessionEventBridge(
+            inbox=self._inbox,
+            session_manager=self._session_manager,
         )
 
-        self._bus.on(ContextEvent.CHANNEL, self._on_context_drain_inbox)
         self._bus.on(
-            DecideTurnActionEvent.CHANNEL, self._on_decide_inbox_keep_alive
+            MessagePersistedEvent.CHANNEL, self._session_events.on_message_persisted
+        )
+
+        self._bus.on(ContextEvent.CHANNEL, self._session_events.on_context_drain_inbox)
+        self._bus.on(
+            DecideTurnActionEvent.CHANNEL,
+            self._session_events.on_decide_inbox_keep_alive,
         )
         # Registered BEFORE the wake handler so the durable boundary marker is
         # persisted before ``prompt``/``tick`` waiters resolve and the caller
         # may inspect or shut the session down.
-        self._bus.on(AgentEndEvent.CHANNEL, self._on_agent_end_commit_boundary)
+        self._bus.on(
+            AgentEndEvent.CHANNEL, self._session_events.on_agent_end_commit_boundary
+        )
         self._bus.on(AgentEndEvent.CHANNEL, self._on_agent_end_wake_waiters)
         try:
             asyncio.get_running_loop()
@@ -192,130 +354,6 @@ class AgentSession:
         self._watchdog_task: asyncio.Task[None] | None = (
             self._spawn_event_loop_lag_watchdog()
         )
-
-    # --- SessionInbox runtime handlers ------------------------------------
-
-    def _on_context_drain_inbox(self, event: ContextEvent) -> None:
-        """Drain the inbox into the turn's message list (in place) + persist.
-
-        The ``context`` channel lets handlers mutate ``event.messages`` in
-        place (loop.py:472); we append the drained, rendered messages so the
-        prefix stays stable and the KV/prefix cache survives (append-only, per
-        the design's cache-discipline note).
-        """
-
-        self._drain_inbox_and_persist(messages=event.messages)
-
-    def _on_decide_inbox_keep_alive(
-        self, event: DecideTurnActionEvent
-    ) -> Step | Stop | None:
-        """Keep the loop alive while the inbox holds undrained items.
-
-        Returning ``Step()`` defers to the next turn, whose ``context``
-        handler drains the inbox. A ``final=True`` default (budget / signal /
-        max_turns) overrides this via ``resolve_loop_action`` (loop.py:301),
-        so a hard ceiling stays hard.
-
-        #177: if a ``terminal=True`` item was drained (recorded on
-        ``_pending_terminate``) and the inbox is now empty, return
-        ``Stop(ToolTerminated)`` so a backgrounded ``ToolTerminate`` actually
-        ends the loop instead of being swallowed as an ordinary completion.
-        """
-
-        del event
-        if not self._inbox.is_empty():
-            return Step()
-        # #177: a terminal item was drained — honour the terminate intent now
-        # that its message has been delivered. Non-final ``Stop`` (matching a
-        # foreground ``ToolTerminate``), so an extension handler on the same
-        # channel may still ``Inject`` over it.
-        #
-        # We do NOT clear ``_pending_terminate`` here. The resolution lattice
-        # (loop.py:298) lets a co-loaded floor's ``Inject`` win over this
-        # ``Stop`` — e.g. ``sub_agent`` injecting while a child is still
-        # running. A foreground terminate survives that because it is the
-        # kernel default, recomputed every turn; a one-shot consumed flag would
-        # be DESTROYED by the override. So we re-assert the same cause on every
-        # boundary and let ``_on_agent_end`` clear it only once the loop has
-        # actually stopped on it — the terminate survives across N turns of a
-        # running child's injects.
-        if self._pending_terminate is not None:
-            return Stop(self._pending_terminate)
-        return None
-
-    def _drain_inbox_and_persist(
-        self, *, messages: list[AgentMessage]
-    ) -> None:
-        """Drain the inbox into the live turn message list and persist.
-
-        Called from the ``context`` handler at the top of each kernel turn
-        (loop.py:466) — the ONLY caller, so ``messages`` is always the
-        turn's live list. For each drained item we render it, persist it
-        via the session manager (so a mid-run kill still leaves every
-        message on disk — same contract as loop.py:609), and append it to
-        ``messages`` so the LLM sees it on this very turn.
-        """
-
-        for item in self._inbox.drain():
-            rendered = render_item(item)
-            self._session_manager.append_message(rendered)
-            messages.append(rendered)
-            # #177: a terminal item carries a terminate intent. Record it so
-            # the keep-alive floor (this turn's ``decide_turn_action``) stops
-            # the loop after the message above has been delivered to the model.
-            # ``source`` is recorded in the cause for trace attribution; a
-            # background-produced terminate has no foreground tool_name.
-            if item.terminal:
-                self._pending_terminate = ToolTerminated(
-                    tool_name=f"background:{item.source}",
-                    reason="terminate-from-background",
-                )
-
-    def _drain_inbox_on_early_return(self, reason: str) -> None:
-        """Drain the inbox after a pre-context-event early return to prevent driver spin."""
-
-        drained = self._inbox.drain()
-        if not drained:
-            return
-        logger.warning(f"agentm session driver: discarded {len(drained)} undrained inbox item(s) after a pre-context-event early return ({reason}; sources={[item.source for item in drained]!r}) to avoid driver spin")
-        # ``payload`` may be a JSON-native shape (str / dict / list of
-        # TextContent/ImageContent dataclasses). The session manager runs the
-        # whole payload through to_jsonable before persisting, so attaching
-        # the original payload object is safe; if a producer wedges in a
-        # non-serialisable type the persistence path will fail loudly there
-        # rather than silently here.
-        try:
-            self._session_manager.append_custom_entry(
-                "inbox.discarded",
-                {
-                    "reason": reason,
-                    "sources": [item.source for item in drained],
-                    "items": [
-                        {
-                            "source": item.source,
-                            "payload": item.payload,
-                            "dedup_key": item.dedup_key,
-                        }
-                        for item in drained
-                    ],
-                },
-            )
-        except Exception:
-            # The warning log already captured the discard; a persistence
-            # hiccup here must not crash the driver or hide the original
-            # early-return path.
-            logger.exception(
-                "agentm session driver: failed to persist inbox.discarded entry"
-            )
-
-    def _on_message_persisted(self, event: MessagePersistedEvent) -> None:
-        leaf = self._session_manager.get_leaf_id()
-        if leaf is None:
-            self._session_manager.reset_leaf()
-        else:
-            self._session_manager.branch(leaf)
-        self._session_manager.append_message(event.message)
-        self._last_round_turn = (event.turn_index, event.turn_id)
 
     # --- Construction -----------------------------------------------------
 
@@ -428,7 +466,7 @@ class AgentSession:
             self._inbox.push(
                 InboxItem(
                     source="user",
-                    payload=self._user_payload(text=text, images=images),
+                    payload=_user_payload(text=text, images=images),
                 )
             )
             try:
@@ -640,7 +678,7 @@ class AgentSession:
             # so observers see the unchanged-list "nothing happened" outcome.
             messages = self._session_manager.get_messages()
             cause = action.cause if isinstance(action, Stop) else default_action.cause
-            self._last_round_turn = None
+            self._session_events.last_round_turn = None
             await self._bus.emit(
                 AgentEndEvent.CHANNEL,
                 AgentEndEvent(messages=messages, cause=cause),
@@ -730,7 +768,7 @@ class AgentSession:
                 # handler, so this call is a no-op for them. See the helper
                 # docstring; sibling site is the veto branch in
                 # ``_run_one_round``.
-                self._drain_inbox_on_early_return(
+                self._session_events.discard_inbox_on_early_return(
                     f"pre-first-turn exception: {type(exc).__name__}"
                 )
             # An ``interrupt()`` that fired during the round leaves the
@@ -778,7 +816,7 @@ class AgentSession:
         )
         self._in_run = True
         try:
-            self._last_round_turn = None
+            self._session_events.last_round_turn = None
             messages = self._session_manager.build_session_context().messages
             system_prompt = ""
             before_event = BeforeAgentStartEvent(
@@ -798,7 +836,7 @@ class AgentSession:
                     AgentEndEvent.CHANNEL,
                     AgentEndEvent(messages=messages, cause=veto_cause),
                 )
-                self._drain_inbox_on_early_return(
+                self._session_events.discard_inbox_on_early_return(
                     f"before_agent_start veto: {type(veto_cause).__name__}"
                 )
                 return messages
@@ -840,36 +878,6 @@ class AgentSession:
         self._end_waiters.append(fut)
         return fut
 
-    def _on_agent_end_commit_boundary(self, event: AgentEndEvent) -> None:
-        """Persist a ``turn_committed`` marker delimiting a consistent point.
-
-        Entries persist incrementally mid-turn, but a hard crash (process
-        kill, OOM) never reaches this handler — only a clean termination does.
-        So every marker sits at a consistent boundary, and a crash leaves its
-        half-turn unmarked for ``_truncate_to_last_boundary`` to shed on the
-        next cold load. Skipped when the leaf is already a marker (repeated
-        no-op ticks / vetoes add no new content), so markers never stack.
-        """
-
-        leaf = self._session_manager.get_leaf_entry()
-        if leaf is not None and leaf.type == ENTRY_TYPE_TURN_COMMITTED:
-            return
-        cause = type(event.cause).__name__ if event.cause is not None else "unknown"
-        payload: dict[str, Any] = {"cause": cause}
-        if self._last_round_turn is not None:
-            turn_index, turn_id = self._last_round_turn
-            payload["turn_index"] = turn_index
-            payload["turn_id"] = turn_id
-        try:
-            self._session_manager.append_custom_entry(
-                ENTRY_TYPE_TURN_COMMITTED, payload
-            )
-            self._last_round_turn = None
-        except Exception:
-            # A persistence hiccup here must never crash the driver round or
-            # block the prompt waiter the next handler resolves.
-            logger.exception("failed to append turn_committed boundary marker")
-
     def _on_agent_end_wake_waiters(self, event: AgentEndEvent) -> None:
         # #177: clear the pending backgrounded-terminate ONLY when the loop
         # actually stopped on that exact cause (identity match against the
@@ -879,11 +887,7 @@ class AgentSession:
         # boundary re-asserts it. This is the invariant the keep-alive floor
         # relies on: a backgrounded terminate is not lost across turns where a
         # running child keeps injecting.
-        if (
-            self._pending_terminate is not None
-            and event.cause is self._pending_terminate
-        ):
-            self._pending_terminate = None
+        self._session_events.clear_matching_terminate(event.cause)
         waiters = self._end_waiters
         self._end_waiters = []
         for fut in waiters:
@@ -908,27 +912,6 @@ class AgentSession:
                     return text, messages
         # --- Text rewrite (mutation path, always via event field) ---
         return (event.text if isinstance(event.text, str) else text), None
-
-    def _user_payload(
-        self, *, text: str, images: list[ImageContent] | None
-    ) -> list[TextContent | ImageContent]:
-        """Build the content-block list a ``source="user"`` inbox item carries.
-
-        ``render_item`` turns this into a :class:`UserMessage`. Mirrors the old
-        ``_build_user_message`` shape: text block (if any) then any images, so
-        an image-only prompt still produces a valid user message and an empty
-        text yields an empty-content message exactly as before.
-        """
-
-        content: list[TextContent | ImageContent] = []
-        if text:
-            content.append(TextContent(type="text", text=text))
-        if images:
-            content.extend(images)
-        return content
-
-    def _append_message(self, msg: AgentMessage) -> Any:
-        return self._session_manager.append_message(msg)
 
     def _require_model(self) -> Model:
         model = self.model
