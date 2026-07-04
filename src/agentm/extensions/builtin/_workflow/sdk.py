@@ -90,7 +90,6 @@ class _ChildSession(Protocol):
     async def shutdown(self) -> None: ...
 
 
-
 class _ArtifactStore(Protocol):
     """The ``artifact_store`` service surface used for the resume journal."""
 
@@ -144,7 +143,6 @@ def _empty_run_summary() -> RunSummary:
         budget=_empty_budget_snapshot(),
         wall_clock_s=0.0,
     )
-
 
 
 # ``purpose`` stamped on every worker child session. Doubles as the
@@ -653,9 +651,7 @@ class _WorkflowRun:
                         trace_label=trace_label,
                     )
                     if effective_timeout is not None:
-                        result = await asyncio.wait_for(
-                            coro, timeout=effective_timeout
-                        )
+                        result = await asyncio.wait_for(coro, timeout=effective_timeout)
                     else:
                         result = await coro
             except TimeoutError as exc:
@@ -793,8 +789,7 @@ class _WorkflowRun:
         for r in results:
             if isinstance(r, BaseException):
                 logger.warning(
-                    f"workflow parallel: item failed: "
-                    f"{type(r).__name__}: {r}"
+                    f"workflow parallel: item failed: {type(r).__name__}: {r}"
                 )
         return [None if isinstance(r, BaseException) else r for r in results]
 
@@ -934,14 +929,16 @@ class _WorkflowRun:
         for attempt in range(2):
             try:
                 child: _ChildSession = await self.api.spawn_child_session(config)
-                self.child_sessions.append({
-                    "session_id": child.session_id,
-                    "scenario": scenario or self.default_scenario,
-                    "model": model.strip() if isinstance(model, str) else None,
-                    "trace_label": trace_label,
-                    "workflow_node_id": trace_label,
-                    "prompt": prompt[:200],
-                })
+                self.child_sessions.append(
+                    {
+                        "session_id": child.session_id,
+                        "scenario": scenario or self.default_scenario,
+                        "model": model.strip() if isinstance(model, str) else None,
+                        "trace_label": trace_label,
+                        "workflow_node_id": trace_label,
+                        "prompt": prompt[:200],
+                    }
+                )
                 self.budget_svc.attach(child)
                 # Stream the child's own trajectory onto the parent wire,
                 # stamped with the child's session id (no-op outside the
@@ -1260,4 +1257,3 @@ def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
         # Free-text agent output that isn't JSON — return it verbatim.
         logger.debug("workflow: agent output not JSON, returning as text: {}", exc)
     return text
-

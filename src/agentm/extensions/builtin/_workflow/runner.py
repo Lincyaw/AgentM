@@ -50,6 +50,7 @@ from agentm.extensions.builtin._workflow.sdk import (
 # Pre-execution validation
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class ScriptIssue:
     """One validation finding: ``error`` blocks execution, ``warning`` is advisory."""
@@ -316,7 +317,9 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
                 for k, loaded in list(sys.modules.items())
                 if k == pkg_root
                 or k.startswith(pkg_root + ".")
-                or (k not in modules_before and _module_loaded_from(loaded, import_root))
+                or (
+                    k not in modules_before and _module_loaded_from(loaded, import_root)
+                )
             ]
             for k in stale:
                 sys.modules.pop(k, None)
@@ -391,6 +394,7 @@ class _WorkflowArgs(BaseModel):
             "logs call parameters via workflow_phase events."
         ),
     )
+
 
 _WORKFLOW_RUNNER_SERVICE: Final[str] = "workflow_runner"
 
