@@ -77,7 +77,7 @@ func SetRoot(root string) {
 // defaulting to ~/.agentm.
 func GetCacheDir() string {
 	return cacheDirOverride.get(func() string {
-		return filepath.Join(defaultAgentMHome(), terminalStateDir, "cache")
+		return filepath.Join(GetAgentMHome(), terminalStateDir, "cache")
 	})
 }
 
@@ -89,7 +89,7 @@ func GetCacheDir() string {
 // defaulting to ~/.agentm.
 func GetConfigDir() string {
 	return configDirOverride.get(func() string {
-		return filepath.Join(defaultAgentMHome(), terminalStateDir, "config")
+		return filepath.Join(GetAgentMHome(), terminalStateDir, "config")
 	})
 }
 
@@ -101,22 +101,16 @@ func GetConfigDir() string {
 // defaulting to ~/.agentm.
 func GetDataDir() string {
 	return dataDirOverride.get(func() string {
-		return filepath.Join(defaultAgentMHome(), terminalStateDir, "data")
+		return filepath.Join(GetAgentMHome(), terminalStateDir, "data")
 	})
 }
 
-// GetHomeDir returns the user's home directory.
+// GetAgentMHome returns the shared AgentM home directory.
 //
-// Returns an empty string if the home directory cannot be determined.
-func GetHomeDir() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Clean(homeDir)
-}
-
-func defaultAgentMHome() string {
+// It honors $AGENTM_HOME, including a leading "~", and otherwise defaults to
+// ~/.agentm. When the OS home directory is unavailable, it falls back to a
+// per-user directory under the system temporary directory.
+func GetAgentMHome() string {
 	home := os.Getenv("AGENTM_HOME")
 	if home == "" {
 		if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
@@ -129,4 +123,15 @@ func defaultAgentMHome() string {
 		return filepath.Clean(home)
 	}
 	return filepath.Clean(expanded)
+}
+
+// GetHomeDir returns the user's home directory.
+//
+// Returns an empty string if the home directory cannot be determined.
+func GetHomeDir() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(homeDir)
 }

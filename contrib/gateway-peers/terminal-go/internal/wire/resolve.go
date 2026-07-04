@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	pathx "github.com/AoyangSpace/agentm-terminal/internal/cagent/path"
+	"github.com/AoyangSpace/agentm-terminal/internal/cagent/paths"
 )
 
 // DefaultSocketURL mirrors the Python gateway daemon default:
@@ -17,7 +18,7 @@ import (
 func DefaultSocketURL() string {
 	runtime := os.Getenv("AGENTM_RUNTIME_DIR")
 	if runtime == "" {
-		home := defaultAgentMHome()
+		home := paths.GetAgentMHome()
 		sum := sha1.Sum([]byte(home))
 		digest := hex.EncodeToString(sum[:])[:8]
 		runtime = filepath.Join(os.TempDir(), fmt.Sprintf("agentm-%d-%s", os.Getuid(), digest))
@@ -25,17 +26,6 @@ func DefaultSocketURL() string {
 		runtime = expandUser(runtime)
 	}
 	return "unix://" + filepath.Join(runtime, "gateway.sock")
-}
-
-func defaultAgentMHome() string {
-	home := os.Getenv("AGENTM_HOME")
-	if home == "" {
-		if userHome, err := os.UserHomeDir(); err == nil && userHome != "" {
-			return filepath.Join(userHome, ".agentm")
-		}
-		return filepath.Join(os.TempDir(), fmt.Sprintf("agentm-home-%d", os.Getuid()))
-	}
-	return expandUser(home)
 }
 
 func expandUser(path string) string {
