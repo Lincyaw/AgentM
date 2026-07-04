@@ -27,6 +27,10 @@ from urllib.parse import urlparse
 from agentm.core.lib.user_config import agentm_home_dir
 
 
+def _expand_path(path: Path | str) -> Path:
+    return Path(os.path.expandvars(str(path))).expanduser()
+
+
 class GatewayDaemonError(RuntimeError):
     """Raised when the local gateway daemon cannot be managed."""
 
@@ -49,7 +53,7 @@ class GatewayDaemonConfig:
     poll_interval: float = 1.0
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "cwd", self.cwd.expanduser())
+        object.__setattr__(self, "cwd", _expand_path(self.cwd))
         for field_name in (
             "bind_token_file",
             "tls_cert",
@@ -59,7 +63,7 @@ class GatewayDaemonConfig:
         ):
             path = getattr(self, field_name)
             if path is not None:
-                object.__setattr__(self, field_name, path.expanduser())
+                object.__setattr__(self, field_name, _expand_path(path))
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +122,7 @@ def default_daemon_token_file() -> Path:
 def default_daemon_runtime_dir(*, create: bool = False) -> Path:
     root = os.environ.get("AGENTM_RUNTIME_DIR")
     if root:
-        path = Path(root).expanduser()
+        path = _expand_path(root)
     else:
         uid = os.getuid() if hasattr(os, "getuid") else os.getpid()
         home = str(default_agentm_home())
