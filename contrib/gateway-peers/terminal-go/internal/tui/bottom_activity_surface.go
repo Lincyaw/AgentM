@@ -418,7 +418,7 @@ func (m *appModel) bottomActivityToggleTarget() string {
 	if m.hasWorkflowTasks() {
 		return "activity rows"
 	}
-	return "background activity"
+	return "activity rows"
 }
 
 func (m *appModel) footerRightText() string {
