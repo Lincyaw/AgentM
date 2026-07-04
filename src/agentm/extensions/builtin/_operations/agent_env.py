@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from inspect import isawaitable, iscoroutinefunction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,7 +32,7 @@ from agentm.core.abi import (
 )
 
 if TYPE_CHECKING:
-    from arl import AsyncSandboxSession
+    from arl import SandboxSession as ArlSandboxSession
 
 _AGENT_ENV_SESSION_SERVICE = "agent_env.session_id"
 _AGENT_ENV_EXPERIMENT_SERVICE = "agent_env.experiment_id"
@@ -103,17 +104,84 @@ def _step_timeout_budget(steps: list[dict[str, Any]]) -> float | None:
     return max(values) + _OPERATION_TIMEOUT_GRACE_SECONDS
 
 
+async def _call_maybe_async(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Call a sync or async SDK method without blocking the event loop."""
+
+    if iscoroutinefunction(fn):
+        return await fn(*args, **kwargs)
+    result = await asyncio.to_thread(fn, *args, **kwargs)
+    if isawaitable(result):
+        return await result
+    return result
+
+
+async def _close_client(client: Any) -> None:
+    close = getattr(client, "aclose", None) or getattr(client, "close", None)
+    if close is not None:
+        await _call_maybe_async(close)
+
+
+def _gateway_client_class(arl_module: Any) -> Any:
+    return getattr(arl_module, "GatewayClient", None) or getattr(
+        arl_module, "AsyncGatewayClient"
+    )
+
+
+def _arl_class(arl_module: Any, *names: str) -> Any:
+    for name in names:
+        cls = getattr(arl_module, name, None)
+        if cls is not None:
+            return cls
+    raise AttributeError(f"arl module has none of: {', '.join(names)}")
+
+
+async def _get_execute_operation(
+    session: "ArlSandboxSession",
+    operation_id: str,
+    *,
+    gateway_url: str,
+    api_key: str | None,
+) -> Any:
+    getter = getattr(session, "get_execute_operation", None)
+    if getter is not None:
+        return await _call_maybe_async(getter, operation_id)
+
+    session_id = getattr(session, "session_id", None)
+    if not isinstance(session_id, str) or not session_id:
+        raise RuntimeError(
+            f"cannot recover ARL execute operation {operation_id}: missing session_id"
+        )
+
+    import arl  # type: ignore[import-not-found]
+
+    client = _gateway_client_class(arl)(base_url=gateway_url, api_key=api_key)
+    try:
+        return await _call_maybe_async(
+            client.get_execute_operation, session_id, operation_id
+        )
+    finally:
+        await _close_client(client)
+
+
 async def _recover_execute_operation(
-    session: AsyncSandboxSession,
+    session: "ArlSandboxSession",
     steps: list[dict[str, Any]],
     operation_id: str,
     started_at: float,
+    *,
+    gateway_url: str,
+    api_key: str | None,
 ) -> Any:
     budget = _step_timeout_budget(steps)
     deadline = started_at + budget if budget is not None else None
 
     while True:
-        operation = await session.get_execute_operation(operation_id)
+        operation = await _get_execute_operation(
+            session,
+            operation_id,
+            gateway_url=gateway_url,
+            api_key=api_key,
+        )
         if operation.result is not None:
             return operation.result
 
@@ -141,22 +209,26 @@ async def _recover_execute_operation(
 
 
 async def _async_execute(
-    session: AsyncSandboxSession,
+    session: "ArlSandboxSession",
     steps: list[dict[str, Any]],
     *,
     on_output: Callable[[str, str], None] | None = None,
+    gateway_url: str = "",
+    api_key: str | None = None,
 ) -> Any:
     from arl import GatewayOperationTimeout  # type: ignore[import-not-found]
 
     started_at = time.monotonic()
     try:
-        return await session.execute(steps, on_output=on_output)
+        return await _call_maybe_async(session.execute, steps, on_output=on_output)
     except GatewayOperationTimeout as exc:
         return await _recover_execute_operation(
             session,
             steps,
             exc.operation_id,
             started_at,
+            gateway_url=gateway_url,
+            api_key=api_key,
         )
 
 
@@ -186,19 +258,23 @@ class _AgentEnvBashOperations:
     """``BashOperations`` impl that executes commands inside an ARL sandbox.
 
     Each call wraps ``cmd`` as ``bash -lc <cmd>`` and dispatches a single
-    step through ``AsyncSandboxSession.execute``.
+    step through the ARL sandbox session's ``execute`` method.
     """
 
     def __init__(
         self,
-        session: AsyncSandboxSession,
+        session: "ArlSandboxSession",
         *,
         default_work_dir: str,
         default_timeout: float | None,
+        gateway_url: str,
+        api_key: str | None,
     ) -> None:
         self._session = session
         self._default_work_dir = default_work_dir
         self._default_timeout = default_timeout
+        self._gateway_url = gateway_url
+        self._api_key = api_key
 
     async def exec(
         self,
@@ -262,6 +338,8 @@ class _AgentEnvBashOperations:
                 self._session,
                 [step],
                 on_output=_stream_output if on_data is not None else None,
+                gateway_url=self._gateway_url,
+                api_key=self._api_key,
             )
         )
         signal_task: asyncio.Task[bool] | None = None
@@ -361,7 +439,12 @@ printf 'cancelled %s pids:%s\\n' "$marker" "$targets"
             "timeout": 15,
         }
         try:
-            await self._session.execute([step])
+            await _async_execute(
+                self._session,
+                [step],
+                gateway_url=self._gateway_url,
+                api_key=self._api_key,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "agent_env: failed to cancel remote exec {}: {}", exec_id, exc
@@ -392,7 +475,7 @@ class _AgentEnvResourceWriter:
 
     def __init__(
         self,
-        session: AsyncSandboxSession,
+        session: "ArlSandboxSession",
         *,
         work_dir: str,
         gateway_url: str,
@@ -427,7 +510,12 @@ class _AgentEnvResourceWriter:
             "command": command,
             "work_dir": self._work_dir,
         }
-        response = await _async_execute(self._session, [step])
+        response = await _async_execute(
+            self._session,
+            [step],
+            gateway_url=self._gateway_url,
+            api_key=self._api_key,
+        )
         if not response.results:
             return b"", b"no result", 1
         out = response.results[0].output
@@ -458,7 +546,7 @@ class _AgentEnvResourceWriter:
 
     async def _write_bytes(self, rel_path: str, content: bytes) -> tuple[bool, str]:
         try:
-            await self._session.upload_file(rel_path, content)
+            await _call_maybe_async(self._session.upload_file, rel_path, content)
         except Exception as exc:
             logger.warning("agent-env file upload failed: {}", exc)
             return False, str(exc)
@@ -472,7 +560,7 @@ class _AgentEnvResourceWriter:
         rel_path = self._relative(path)
         if rel_path is not None:
             try:
-                return await self._session.download_file(rel_path)
+                return await _call_maybe_async(self._session.download_file, rel_path)
             except Exception as exc:
                 raise FileNotFoundError(str(exc)) from exc
         abs_path = self._resolve(path)
@@ -703,7 +791,7 @@ class _AgentEnvResourceWriter:
 
 async def _replay_fork_environment(
     api: ExtensionAPI,
-    session: AsyncSandboxSession,
+    session: "ArlSandboxSession",
     gateway_url: str,
     api_key: str | None,
 ) -> None:
@@ -726,18 +814,20 @@ async def _replay_fork_environment(
         if not experiment_id:
             return
 
-        from arl import AsyncGatewayClient as _AsyncGatewayClient  # type: ignore[import-not-found]
+        import arl  # type: ignore[import-not-found]
 
-        client = _AsyncGatewayClient(base_url=gateway_url, api_key=api_key)
+        client = _gateway_client_class(arl)(base_url=gateway_url, api_key=api_key)
         try:
-            arl_sessions = await client.list_experiment_sessions(experiment_id)
+            arl_sessions = await _call_maybe_async(
+                client.list_experiment_sessions, experiment_id
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "agent_env: experiment lookup failed for {}: {}", experiment_id, exc
             )
             return
         finally:
-            await client.aclose()
+            await _close_client(client)
 
         if len(arl_sessions) != 1:
             logger.warning(
@@ -754,7 +844,9 @@ async def _replay_fork_environment(
         session.session_id,
     )
     try:
-        result = await session.replay_from(source_session_id=source_arl_session)
+        result = await _call_maybe_async(
+            session.replay_from, source_session_id=source_arl_session
+        )
         if result.errors:
             logger.warning(
                 "agent_env: replay completed with {} errors out of {} steps",
@@ -800,9 +892,11 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
     )
 
     owned = True
-    session: arl.AsyncSandboxSession
+    session: ArlSandboxSession
     if config.attach_session:
-        session = await arl.AsyncSandboxSession.attach(
+        sandbox_cls = _arl_class(arl, "SandboxSession", "AsyncSandboxSession")
+        session = await _call_maybe_async(
+            sandbox_cls.attach,
             config.attach_session,
             gateway_url=config.gateway_url or "",
             api_key=config.api_key,
@@ -811,7 +905,8 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         owned = False
         logger.info("agent_env: attached to existing sandbox {}", config.attach_session)
     elif config.image:
-        session = arl.AsyncManagedSession(
+        managed_cls = _arl_class(arl, "ManagedSession", "AsyncManagedSession")
+        session = managed_cls(
             image=config.image,
             experiment_id=config.experiment_id or api.session_id,
             gateway_url=config.gateway_url or "",
@@ -830,7 +925,7 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         )
 
     if owned:
-        await session.create_sandbox()
+        await _call_maybe_async(session.create_sandbox)
 
     session_id = session.session_id or ""
     if session_id:
@@ -839,7 +934,11 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         api.set_service(_AGENT_ENV_EXPERIMENT_SERVICE, session.experiment_id)
 
     bash_ops = _AgentEnvBashOperations(
-        session, default_work_dir=work_dir, default_timeout=config.timeout,
+        session,
+        default_work_dir=work_dir,
+        default_timeout=config.timeout,
+        gateway_url=config.gateway_url or "",
+        api_key=config.api_key,
     )
     writer = _AgentEnvResourceWriter(
         session, work_dir=work_dir,
