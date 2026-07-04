@@ -20,6 +20,7 @@ func (o *overridable) Set(dir string) {
 	if dir == "" {
 		o.p.Store(nil)
 	} else {
+		dir = pathx.ExpandPath(dir)
 		o.p.Store(&dir)
 	}
 }
@@ -39,24 +40,28 @@ var (
 )
 
 // SetCacheDir overrides the default cache directory returned by [GetCacheDir].
-// An empty value restores the default behaviour.
+// A leading "~" and environment variables are expanded. An empty value restores
+// the default behaviour.
 // This should be called early (e.g. during CLI flag processing) before any
 // goroutine calls the corresponding getter.
 func SetCacheDir(dir string) { cacheDirOverride.Set(dir) }
 
 // SetConfigDir overrides the default config directory returned by [GetConfigDir].
-// An empty value restores the default behaviour.
+// A leading "~" and environment variables are expanded. An empty value restores
+// the default behaviour.
 func SetConfigDir(dir string) { configDirOverride.Set(dir) }
 
 // SetDataDir overrides the default data directory returned by [GetDataDir].
-// An empty value restores the default behaviour.
+// A leading "~" and environment variables are expanded. An empty value restores
+// the default behaviour.
 func SetDataDir(dir string) { dataDirOverride.Set(dir) }
 
 // SetRoot re-homes all AgentM Terminal state under one directory: data,
 // config, and cache land in the "data", "config", and "cache"
 // subdirectories of root. It is the one-call override for embedders that
 // must keep their embedded agent's state isolated from another installation.
-// An empty root restores the per-directory defaults.
+// A leading "~" and environment variables are expanded. An empty root restores
+// the per-directory defaults.
 func SetRoot(root string) {
 	if root == "" {
 		SetDataDir("")
