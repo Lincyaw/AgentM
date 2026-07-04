@@ -112,9 +112,10 @@ func GetDataDir() string {
 
 // GetAgentMHome returns the shared AgentM home directory.
 //
-// It honors $AGENTM_HOME, including a leading "~", and otherwise defaults to
-// ~/.agentm. When the OS home directory is unavailable, it falls back to a
-// per-user directory under the system temporary directory.
+// It honors $AGENTM_HOME, expanding environment variables and a leading "~",
+// and otherwise defaults to ~/.agentm. When the OS home directory is
+// unavailable, it falls back to a per-user directory under the system temporary
+// directory.
 func GetAgentMHome() string {
 	home := os.Getenv("AGENTM_HOME")
 	if home == "" {
@@ -123,11 +124,7 @@ func GetAgentMHome() string {
 		}
 		return filepath.Clean(filepath.Join(os.TempDir(), fmt.Sprintf("agentm-home-%d", os.Getuid())))
 	}
-	expanded, err := pathx.ExpandHomeDir(home)
-	if err != nil {
-		return filepath.Clean(home)
-	}
-	return filepath.Clean(expanded)
+	return filepath.Clean(pathx.ExpandPath(home))
 }
 
 // GetHomeDir returns the user's home directory.

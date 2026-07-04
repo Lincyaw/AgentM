@@ -6,13 +6,15 @@ to empty defaults — the config file is always optional.
 
 from __future__ import annotations
 
-from loguru import logger
 import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypedDict
 
+from loguru import logger
+
+from agentm.core.lib.paths import expand_path
 
 
 class ModelBuildConfig(TypedDict, total=False):
@@ -84,7 +86,7 @@ _cached_path: Path | None = None
 def agentm_home_dir() -> Path:
     """Return the AgentM home directory: ``$AGENTM_HOME`` or ``~/.agentm``."""
     home = os.environ.get("AGENTM_HOME")
-    return Path(home).expanduser() if home else Path.home() / ".agentm"
+    return expand_path(home) if home else Path.home() / ".agentm"
 
 
 def _config_path() -> Path:

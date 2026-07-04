@@ -8,6 +8,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 from loguru import logger
 
+from agentm.core.lib.paths import expand_path
 from agentm.core.lib.user_config import agentm_home_dir
 
 _PACKAGE_WALK_DEPTH = 8
@@ -18,11 +19,11 @@ def resolve_cli_cwd(cwd: str | Path | None = None) -> Path:
     """Resolve a CLI working directory without following symlinks.
 
     Precedence is explicit ``--cwd`` value, then ``AGENTM_CWD``, then the
-    process cwd. ``~`` is expanded so later path users see the same directory
-    that ``autoload_dotenv`` would inspect.
+    process cwd. Environment variables and ``~`` are expanded so later path
+    users see the same directory that ``autoload_dotenv`` would inspect.
     """
     raw = cwd or os.environ.get("AGENTM_CWD") or Path.cwd()
-    return Path(raw).expanduser()
+    return expand_path(raw)
 
 
 def autoload_dotenv(cwd: Path | None = None) -> None:
@@ -97,5 +98,5 @@ def _effective_agentm_home(dotenv_values_by_key: dict[str, str | None]) -> Path:
         return agentm_home_dir()
     home = dotenv_values_by_key.get("AGENTM_HOME")
     if home:
-        return Path(home).expanduser()
+        return expand_path(home)
     return agentm_home_dir()
