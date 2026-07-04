@@ -28,7 +28,7 @@ from typing import Any, Final
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentm.core.lib import expand_path_from_cwd, truncate_text_tokens
+from agentm.core.lib import expand_path, expand_path_from_cwd, truncate_text_tokens
 from agentm.extensions import ExtensionManifest
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
 
@@ -113,7 +113,7 @@ async def _build_block(
 
 def _cwd_relative(path: Path, cwd: str) -> str:
     try:
-        return str(path.resolve().relative_to(Path(cwd).resolve()))
+        return str(path.resolve().relative_to(expand_path(cwd).resolve()))
     except ValueError:
         return str(path)
 
