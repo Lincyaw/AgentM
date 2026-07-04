@@ -119,9 +119,7 @@ def _nested_get(data: dict[str, Any], path: str) -> Any:
     return current
 
 
-def _add_metadata_attribute(
-    attrs: dict[str, Any], key: str, value: Any
-) -> None:
+def _add_metadata_attribute(attrs: dict[str, Any], key: str, value: Any) -> None:
     if key in attrs or value is None:
         return
     if isinstance(value, (bool, int, float)):
@@ -209,11 +207,13 @@ _TO_OTEL_CHANNELS: tuple[str, ...] = (
     TurnEndEvent.CHANNEL,
 )
 
+
 class ObservabilityConfig(BaseModel):
     include_handler_records: bool = True
     include_mutation_diff: bool = True
     exclude_channels: list[str] | None = None
     redact_prompts: bool = True
+
 
 MANIFEST = ExtensionManifest(
     name="observability",
@@ -246,15 +246,18 @@ MANIFEST = ExtensionManifest(
     requires=(),
 )
 
+
 def _handler_label(handler: Handler) -> str:
     mod = getattr(handler, "__module__", None) or "<unknown>"
     qual = getattr(handler, "__qualname__", None) or repr(handler)
     return f"{mod}.{qual}"
 
+
 def _format_traceback(exc: BaseException | None) -> str | None:
     if exc is None or exc.__traceback__ is None:
         return None
     return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+
 
 def _deep_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
     if before == after:
@@ -292,237 +295,292 @@ def _deep_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
         return out2
     return [{"path": path or "<root>", "before": before, "after": after}]
 
+
 def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
-    telemetry: SessionTelemetry = api.get_session_telemetry()
+    _ObservabilityRuntime(api=api, config=config).install()
 
-    include_handlers = config.include_handler_records
-    include_diff = config.include_mutation_diff
-    user_excludes = config.exclude_channels
-    exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
-        frozenset(user_excludes) if user_excludes else frozenset()
-    )
-    redact_prompts = config.redact_prompts
 
-    # --- Stamp session-scoped metadata onto the telemetry handle ----------
-    # Every per-event :meth:`Event.to_otel` translator reads from these
-    # fields; the substrate constructs the handle with empty defaults, and
-    # the observability atom is what brings them to life.
-    provider_cfg = api.provider
-    telemetry.obs_root_session_id = api.root_session_id
-    telemetry.obs_parent_session_id = api.parent_session_id or ""
-    telemetry.obs_purpose = api.purpose
-    telemetry.obs_scenario = api.scenario or ""
-    telemetry.obs_provider_name = provider_cfg.name if provider_cfg is not None else ""
-    telemetry.obs_cwd = api.cwd
-    telemetry.obs_redact_prompts = redact_prompts
-    telemetry.obs_session_start_ns = time.time_ns()
+class _ObservabilityObserver(EventBusObserver):
+    """Bus-level records: dispatch, handler invocation, and mutation diffs."""
 
-    pending_diff_snapshots: list[tuple[str, Handler, Any, Any]] = []
+    def __init__(
+        self,
+        *,
+        api: ExtensionAPI,
+        telemetry: SessionTelemetry,
+        include_handlers: bool,
+        include_diff: bool,
+        exclude_channels: frozenset[str],
+        redact_prompts: bool,
+    ) -> None:
+        self._api = api
+        self._telemetry = telemetry
+        self._include_handlers = include_handlers
+        self._include_diff = include_diff
+        self._exclude_channels = exclude_channels
+        self._redact_prompts = redact_prompts
+        self._pending_diff_snapshots: list[tuple[str, Handler, Any, Any]] = []
 
-    # --- Session bootstrap log record -------------------------------------
-    session_start_body: dict[str, Any] = {
-        "session_id": api.session_id,
-        "root_session_id": api.root_session_id,
-        "parent_session_id": api.parent_session_id,
-        "purpose": api.purpose,
-        "scenario": api.scenario,
-        "cwd": api.cwd,
-    }
-    if api.lineage is not None:
-        session_start_body["lineage"] = to_jsonable(api.lineage)
-    if api.experiment is not None:
-        session_start_body["experiment"] = to_jsonable(api.experiment)
-    session_start_attrs: dict[str, Any] = {
-        "agentm.session.id": api.session_id,
-        "agentm.session.root_id": api.root_session_id,
-        "agentm.session.parent_id": api.parent_session_id or "",
-        "agentm.session.purpose": api.purpose,
-        "agentm.session.scenario": api.scenario or "",
-        "agentm.session.cwd": api.cwd,
-    }
-    session_start_attrs.update(
-        _session_metadata_attributes(api.lineage, api.experiment)
-    )
-    telemetry.emit_log(
-        "agentm.session.start",
-        body=session_start_body,
-        attributes=session_start_attrs,
-    )
+    def on_emit_start(self, channel: str, event: Any) -> None:
+        del channel, event
 
-    # --- Bus observer for dispatch / handler.invoke records ---------------
+    def on_handler_start(self, channel: str, handler: Handler, event: Any) -> None:
+        if not self._include_diff or channel not in _MUTABLE_CHANNELS:
+            return
+        try:
+            before = to_jsonable(event)
+        except Exception as exc:
+            logger.debug(
+                "observability: pre-handler snapshot serialization failed: {}",
+                exc,
+            )
+            return
+        self._pending_diff_snapshots.append((channel, handler, before, event))
 
-    class _Observer(EventBusObserver):
-        def on_emit_start(self, channel: str, event: Any) -> None:
-            del channel, event
+    def on_handler_done(
+        self,
+        channel: str,
+        handler: Handler,
+        event: Any,
+        result: Any,
+        error: BaseException | None,
+        duration_ns: int,
+        owner: str | None = None,
+    ) -> None:
+        del result
+        self._record_mutation(channel, handler, event, error)
+        if not self._include_handlers or channel in self._exclude_channels:
+            return
+        attrs = self._handler_attributes(
+            channel=channel,
+            handler=handler,
+            event=event,
+            error=error,
+            duration_ns=duration_ns,
+            owner=owner,
+        )
+        self._telemetry.emit_log(
+            "agentm.handler.invoke",
+            attributes=attrs,
+            severity=SeverityNumber.ERROR if error is not None else SeverityNumber.INFO,
+        )
 
-        def on_handler_start(
-            self, channel: str, handler: Handler, event: Any
-        ) -> None:
-            if not include_diff or channel not in _MUTABLE_CHANNELS:
-                return
-            try:
-                before = to_jsonable(event)
-            except Exception as exc:
-                logger.debug("observability: pre-handler snapshot serialization failed: {}", exc)
-                return
-            pending_diff_snapshots.append((channel, handler, before, event))
+    def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
+        if channel in self._exclude_channels:
+            return
+        attrs: dict[str, Any] = {
+            "agentm.session.id": self._api.session_id,
+            "agentm.event.channel": channel,
+            "agentm.event.dispatch_id": getattr(event, "dispatch_id", "") or "",
+            "agentm.handler.count": len(results),
+        }
+        payload = self._event_payload(channel, event)
+        if payload is not None:
+            attrs["agentm.event.payload"] = payload
+        self._telemetry.emit_log("agentm.event.dispatch", attributes=attrs)
 
-        def on_handler_done(
-            self,
-            channel: str,
-            handler: Handler,
-            event: Any,
-            result: Any,
-            error: BaseException | None,
-            duration_ns: int,
-            owner: str | None = None,
-        ) -> None:
-            del result
-            self._record_mutation(channel, handler, event, error)
-            if not include_handlers or channel in exclude_channels:
-                return
-            dispatch_id = getattr(event, "dispatch_id", "") or ""
-            attrs: dict[str, Any] = {
-                "agentm.session.id": api.session_id,
+    def _handler_attributes(
+        self,
+        *,
+        channel: str,
+        handler: Handler,
+        event: Any,
+        error: BaseException | None,
+        duration_ns: int,
+        owner: str | None,
+    ) -> dict[str, Any]:
+        attrs: dict[str, Any] = {
+            "agentm.session.id": self._api.session_id,
+            "agentm.event.channel": channel,
+            "agentm.event.dispatch_id": getattr(event, "dispatch_id", "") or "",
+            "agentm.handler.name": _handler_label(handler),
+            "agentm.handler.duration_ns": duration_ns,
+            "agentm.handler.raised": error is not None,
+        }
+        if owner is not None:
+            attrs["agentm.handler.extension"] = owner
+        if error is not None:
+            attrs["agentm.handler.error.type"] = type(error).__name__
+            tb = _format_traceback(error)
+            if tb is not None:
+                attrs["agentm.handler.error.traceback"] = tb
+        return attrs
+
+    def _event_payload(self, channel: str, event: Any) -> Any:
+        try:
+            payload = to_jsonable(event)
+        except Exception as exc:
+            logger.debug("observability: event payload serialization failed: {}", exc)
+            return None
+        if channel == BeforeSendToLlmEvent.CHANNEL and isinstance(payload, dict):
+            payload.pop("messages", None)
+        if self._redact_prompts and channel in _REDACTED_CHANNELS:
+            return redact_messages(payload)
+        return payload
+
+    def _record_mutation(
+        self,
+        channel: str,
+        handler: Handler,
+        event: Any,
+        error: BaseException | None,
+    ) -> None:
+        if not self._include_diff or channel not in _MUTABLE_CHANNELS:
+            return
+        before, snapshot_event = self._pop_diff_snapshot(channel, handler)
+        if before is None:
+            return
+        try:
+            after = to_jsonable(snapshot_event)
+            diff = _deep_diff(before, after)
+        except Exception as exc:
+            logger.debug("observability: post-handler diff computation failed: {}", exc)
+            return
+        if not diff:
+            return
+        self._telemetry.emit_log(
+            "agentm.handler.mutated",
+            attributes={
+                "agentm.session.id": self._api.session_id,
                 "agentm.event.channel": channel,
-                "agentm.event.dispatch_id": dispatch_id,
+                "agentm.event.dispatch_id": getattr(event, "dispatch_id", "") or "",
                 "agentm.handler.name": _handler_label(handler),
-                "agentm.handler.duration_ns": duration_ns,
+                "agentm.handler.mutations": diff[:100],
                 "agentm.handler.raised": error is not None,
-            }
-            if owner is not None:
-                attrs["agentm.handler.extension"] = owner
-            if error is not None:
-                attrs["agentm.handler.error.type"] = type(error).__name__
-                tb = _format_traceback(error)
-                if tb is not None:
-                    attrs["agentm.handler.error.traceback"] = tb
-            telemetry.emit_log(
-                "agentm.handler.invoke",
-                attributes=attrs,
-                severity=(
-                    SeverityNumber.ERROR if error is not None else SeverityNumber.INFO
-                ),
+            },
+        )
+
+    def _pop_diff_snapshot(
+        self, channel: str, handler: Handler
+    ) -> tuple[Any | None, Any | None]:
+        for index in range(len(self._pending_diff_snapshots) - 1, -1, -1):
+            snap_channel, snap_handler, snap_before, snap_event = (
+                self._pending_diff_snapshots[index]
             )
+            if snap_channel == channel and snap_handler is handler:
+                del self._pending_diff_snapshots[index]
+                return snap_before, snap_event
+        return None, None
 
-        def on_emit_end(self, channel: str, event: Any, results: list[Any]) -> None:
-            if channel in exclude_channels:
-                return
-            dispatch_id = getattr(event, "dispatch_id", "") or ""
-            attrs: dict[str, Any] = {
-                "agentm.session.id": api.session_id,
-                "agentm.event.channel": channel,
-                "agentm.event.dispatch_id": dispatch_id,
-                "agentm.handler.count": len(results),
-            }
-            payload: Any = None
-            try:
-                payload = to_jsonable(event)
-            except Exception as exc:
-                logger.debug("observability: event payload serialization failed: {}", exc)
-                payload = None
-            if channel == BeforeSendToLlmEvent.CHANNEL and isinstance(payload, dict):
-                payload.pop("messages", None)
-            if redact_prompts and channel in _REDACTED_CHANNELS:
-                payload = redact_messages(payload)
-            if payload is not None:
-                attrs["agentm.event.payload"] = payload
-            telemetry.emit_log(
-                "agentm.event.dispatch",
-                attributes=attrs,
+
+class _ObservabilityRuntime:
+    """Install-time wiring and observability-owned fingerprint bookkeeping."""
+
+    def __init__(self, *, api: ExtensionAPI, config: ObservabilityConfig) -> None:
+        self._api = api
+        self._config = config
+        self._telemetry = api.get_session_telemetry()
+        user_excludes = config.exclude_channels
+        self._exclude_channels = frozenset(_DEFAULT_EXCLUDE_CHANNELS) | (
+            frozenset(user_excludes) if user_excludes else frozenset()
+        )
+        discovered_builtin = discover_builtin()
+        self._builtin_by_module_path = {
+            entry.module_path: entry for entry in discovered_builtin.values()
+        }
+        self._loaded_builtin_module_paths: set[str] = set()
+        self._active_atom_hashes: dict[str, str] = {}
+        self._current_fingerprint: ActiveSetFingerprint | None = None
+
+    def install(self) -> None:
+        self._stamp_session_metadata()
+        self._emit_session_start()
+        self._api.add_observer(
+            _ObservabilityObserver(
+                api=self._api,
+                telemetry=self._telemetry,
+                include_handlers=self._config.include_handler_records,
+                include_diff=self._config.include_mutation_diff,
+                exclude_channels=self._exclude_channels,
+                redact_prompts=self._config.redact_prompts,
             )
+        )
+        self._subscribe_otel_dispatch()
+        self._subscribe_fingerprint_bookkeeping()
 
-        def _record_mutation(
-            self,
-            channel: str,
-            handler: Handler,
-            event: Any,
-            error: BaseException | None,
-        ) -> None:
-            if not include_diff or channel not in _MUTABLE_CHANNELS:
-                return
-            before: Any | None = None
-            snapshot_event: Any | None = None
-            for index in range(len(pending_diff_snapshots) - 1, -1, -1):
-                snap_channel, snap_handler, snap_before, snap_event = (
-                    pending_diff_snapshots[index]
-                )
-                if snap_channel == channel and snap_handler is handler:
-                    before = snap_before
-                    snapshot_event = snap_event
-                    del pending_diff_snapshots[index]
-                    break
-            if before is None:
-                return
-            try:
-                after = to_jsonable(snapshot_event)
-                diff = _deep_diff(before, after)
-            except Exception as exc:
-                logger.debug("observability: post-handler diff computation failed: {}", exc)
-                return
-            if not diff:
-                return
-            telemetry.emit_log(
-                "agentm.handler.mutated",
-                attributes={
-                    "agentm.session.id": api.session_id,
-                    "agentm.event.channel": channel,
-                    "agentm.event.dispatch_id": getattr(event, "dispatch_id", "")
-                    or "",
-                    "agentm.handler.name": _handler_label(handler),
-                    "agentm.handler.mutations": diff[:100],
-                    "agentm.handler.raised": error is not None,
-                },
-            )
+    def _stamp_session_metadata(self) -> None:
+        # Every per-event Event.to_otel translator reads these session fields.
+        provider_cfg = self._api.provider
+        self._telemetry.obs_root_session_id = self._api.root_session_id
+        self._telemetry.obs_parent_session_id = self._api.parent_session_id or ""
+        self._telemetry.obs_purpose = self._api.purpose
+        self._telemetry.obs_scenario = self._api.scenario or ""
+        self._telemetry.obs_provider_name = (
+            provider_cfg.name if provider_cfg is not None else ""
+        )
+        self._telemetry.obs_cwd = self._api.cwd
+        self._telemetry.obs_redact_prompts = self._config.redact_prompts
+        self._telemetry.obs_session_start_ns = time.time_ns()
 
-    api.add_observer(_Observer())
+    def _emit_session_start(self) -> None:
+        body: dict[str, Any] = {
+            "session_id": self._api.session_id,
+            "root_session_id": self._api.root_session_id,
+            "parent_session_id": self._api.parent_session_id,
+            "purpose": self._api.purpose,
+            "scenario": self._api.scenario,
+            "cwd": self._api.cwd,
+        }
+        if self._api.lineage is not None:
+            body["lineage"] = to_jsonable(self._api.lineage)
+        if self._api.experiment is not None:
+            body["experiment"] = to_jsonable(self._api.experiment)
+        attrs: dict[str, Any] = {
+            "agentm.session.id": self._api.session_id,
+            "agentm.session.root_id": self._api.root_session_id,
+            "agentm.session.parent_id": self._api.parent_session_id or "",
+            "agentm.session.purpose": self._api.purpose,
+            "agentm.session.scenario": self._api.scenario or "",
+            "agentm.session.cwd": self._api.cwd,
+        }
+        attrs.update(
+            _session_metadata_attributes(self._api.lineage, self._api.experiment)
+        )
+        self._telemetry.emit_log("agentm.session.start", body=body, attributes=attrs)
 
-    # --- Fingerprint state -------------------------------------------------
-    # ``agentm.session.fingerprint`` + ``agentm.atom.reload`` need the
-    # catalog hash machinery and the loaded-builtin set, neither of which is
-    # exposed on :class:`SessionTelemetry`. We keep this bookkeeping local
-    # to the atom — it is observability-owned state, not per-event payload.
+    def _subscribe_otel_dispatch(self) -> None:
+        # Declarative dispatcher: one handler per Event.to_otel-backed channel.
+        for channel in _TO_OTEL_CHANNELS:
+            self._api.on(channel, self._dispatch_to_otel)
 
-    discovered_builtin = discover_builtin()
-    builtin_by_module_path = {
-        entry.module_path: entry for entry in discovered_builtin.values()
-    }
-    loaded_builtin_module_paths: set[str] = set()
-    active_atom_hashes: dict[str, str] = {}
-    current_fingerprint: ActiveSetFingerprint | None = None
+    def _subscribe_fingerprint_bookkeeping(self) -> None:
+        self._api.on(SessionReadyEvent.CHANNEL, self._on_session_ready_fingerprint)
+        self._api.on(ExtensionInstallEvent.CHANNEL, self._on_extension_install)
+        self._api.on(ExtensionReloadEvent.CHANNEL, self._on_extension_reload)
+
+    def _dispatch_to_otel(self, event: Event) -> None:
+        dispatch_otel(event, self._telemetry)
 
     def _compute_loaded_fingerprint(
-        *, scenario: str | None = None
+        self, *, scenario: str | None = None
     ) -> ActiveSetFingerprint:
-        nonlocal active_atom_hashes
-        active_atom_hashes = {}
-        writer = api.get_resource_writer()
-        for module_path in sorted(loaded_builtin_module_paths):
-            entry = builtin_by_module_path.get(module_path)
+        self._active_atom_hashes = {}
+        writer = self._api.get_resource_writer()
+        for module_path in sorted(self._loaded_builtin_module_paths):
+            entry = self._builtin_by_module_path.get(module_path)
             if entry is None:
                 continue
             source_path = inspect.getsourcefile(entry.module)
             if source_path is None:
                 continue
-            version_hash: str | None = None
             version_hash = writer.current_version_for_path(source_path)
             if version_hash is None:
                 source = inspect.getsource(entry.module)
-                version_hash = api.catalog.compute_atom_hash(source)
-            active_atom_hashes[entry.name] = version_hash
-        return api.catalog.compute_active_set_fingerprint(
-            loaded=active_atom_hashes,
+                version_hash = self._api.catalog.compute_atom_hash(source)
+            self._active_atom_hashes[entry.name] = version_hash
+        return self._api.catalog.compute_active_set_fingerprint(
+            loaded=self._active_atom_hashes,
             scenario=scenario,
             core_hash=None,
         )
 
-    # SessionReadyEvent's simple log emission moved into ``Event.to_otel``;
-    # the fingerprint companion record stays here because it depends on
-    # ``loaded_builtin_module_paths`` and the catalog services.
-    def _on_session_ready_fingerprint(event: SessionReadyEvent) -> None:
-        nonlocal current_fingerprint
-        current_fingerprint = _compute_loaded_fingerprint(scenario=api.scenario)
-        fp_body: dict[str, Any] = dict(current_fingerprint)
+    def _on_session_ready_fingerprint(self, event: SessionReadyEvent) -> None:
+        # SessionReadyEvent's simple log lives in Event.to_otel; this companion
+        # record depends on catalog services and the loaded builtin set.
+        self._current_fingerprint = self._compute_loaded_fingerprint(
+            scenario=self._api.scenario
+        )
+        fp_body: dict[str, Any] = dict(self._current_fingerprint)
         fp_body["task_meta"] = {
             "type": None,
             "difficulty": None,
@@ -531,50 +589,49 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
             "eval_run_id": getattr(event, "eval_run_id", None),
             "task_id": getattr(event, "eval_task_id", None),
         }
-        telemetry.emit_log(
+        self._telemetry.emit_log(
             "agentm.session.fingerprint",
             body=fp_body,
             attributes={
                 "agentm.session.id": event.session_id,
-                "agentm.session.scenario": api.scenario or "",
+                "agentm.session.scenario": self._api.scenario or "",
                 "agentm.task.class": getattr(event, "task_class", "") or "",
                 "agentm.task.eval_run_id": getattr(event, "eval_run_id", "") or "",
                 "agentm.task.eval_task_id": getattr(event, "eval_task_id", "") or "",
             },
         )
 
-    def _on_extension_install(event: ExtensionInstallEvent) -> None:
-        if event.phase == "end" and event.module_path in builtin_by_module_path:
-            loaded_builtin_module_paths.add(event.module_path)
-        telemetry.emit_log(
+    def _on_extension_install(self, event: ExtensionInstallEvent) -> None:
+        if event.phase == "end" and event.module_path in self._builtin_by_module_path:
+            self._loaded_builtin_module_paths.add(event.module_path)
+        self._telemetry.emit_log(
             "agentm.extension.install",
             body={"config": to_jsonable(event.config)},
             attributes={
-                "agentm.session.id": api.session_id,
+                "agentm.session.id": self._api.session_id,
                 "agentm.extension.module_path": event.module_path,
                 "agentm.extension.phase": event.phase,
                 "agentm.extension.duration_ns": event.duration_ns,
                 "agentm.extension.trigger": event.trigger,
                 "agentm.extension.error": event.error or "",
             },
-            severity=(SeverityNumber.ERROR if event.error else SeverityNumber.INFO),
+            severity=SeverityNumber.ERROR if event.error else SeverityNumber.INFO,
         )
 
-    def _on_extension_reload(event: ExtensionReloadEvent) -> None:
-        nonlocal current_fingerprint
-        if event.name in active_atom_hashes or event.old_hash is None:
-            active_atom_hashes[event.name] = event.new_hash
-        fingerprint_after = api.catalog.compute_active_set_fingerprint(
-            loaded=active_atom_hashes,
+    def _on_extension_reload(self, event: ExtensionReloadEvent) -> None:
+        if event.name in self._active_atom_hashes or event.old_hash is None:
+            self._active_atom_hashes[event.name] = event.new_hash
+        fingerprint_after = self._api.catalog.compute_active_set_fingerprint(
+            loaded=self._active_atom_hashes,
             scenario=(
                 None
-                if current_fingerprint is None
-                else current_fingerprint.get("scenario")
+                if self._current_fingerprint is None
+                else self._current_fingerprint.get("scenario")
             ),
             core_hash=None,
         )
-        current_fingerprint = fingerprint_after
-        telemetry.emit_log(
+        self._current_fingerprint = fingerprint_after
+        self._telemetry.emit_log(
             "agentm.atom.reload",
             body={
                 "name": event.name,
@@ -585,7 +642,7 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
                 "fingerprint_after": fingerprint_after,
             },
             attributes={
-                "agentm.session.id": api.session_id,
+                "agentm.session.id": self._api.session_id,
                 "agentm.atom.name": event.name,
                 "agentm.atom.new_hash": event.new_hash,
                 "agentm.atom.old_hash": event.old_hash or "",
@@ -593,25 +650,9 @@ def install(api: ExtensionAPI, config: ObservabilityConfig) -> None:
                 "agentm.atom.tier": event.tier,
                 "agentm.atom.error": event.error or "",
             },
-            severity=(SeverityNumber.ERROR if event.error else SeverityNumber.INFO),
+            severity=SeverityNumber.ERROR if event.error else SeverityNumber.INFO,
         )
 
-    # --- Wire subscriptions -----------------------------------------------
-    # The declarative dispatcher: one handler per channel, uniformly
-    # delegating to ``dispatch_otel(event, telemetry)``. New Event
-    # subclasses land on the wire by registering a translator in
-    # ``event_otel.py`` and adding their channel to ``_TO_OTEL_CHANNELS``.
-
-    def _dispatch_to_otel(event: Event) -> None:
-        dispatch_otel(event, telemetry)
-
-    for channel in _TO_OTEL_CHANNELS:
-        api.on(channel, _dispatch_to_otel)
-
-    # Observability-owned bookkeeping that doesn't fit the per-event registry.
-    api.on(SessionReadyEvent.CHANNEL, _on_session_ready_fingerprint)
-    api.on(ExtensionInstallEvent.CHANNEL, _on_extension_install)
-    api.on(ExtensionReloadEvent.CHANNEL, _on_extension_reload)
 
 # Keep ``logger`` referenced (used implicitly by the SDK in error paths).
 _ = logger
