@@ -23,12 +23,12 @@ func DefaultSocketURL() string {
 		digest := hex.EncodeToString(sum[:])[:8]
 		runtime = filepath.Join(os.TempDir(), fmt.Sprintf("agentm-%d-%s", os.Getuid(), digest))
 	} else {
-		runtime = expandUser(runtime)
+		runtime = expandPath(runtime)
 	}
 	return "unix://" + filepath.Join(runtime, "gateway.sock")
 }
 
-func expandUser(path string) string {
+func expandPath(path string) string {
 	return pathx.ExpandPath(path)
 }
 
@@ -37,7 +37,7 @@ func expandUser(path string) string {
 func ResolveTransport(url string, tlsCACert string) (Transport, error) {
 	switch {
 	case strings.HasPrefix(url, "unix://"):
-		path := expandUser(strings.TrimPrefix(url, "unix://"))
+		path := expandPath(strings.TrimPrefix(url, "unix://"))
 		return &UnixTransport{Path: path}, nil
 
 	case strings.HasPrefix(url, "ws://"):
@@ -46,7 +46,7 @@ func ResolveTransport(url string, tlsCACert string) (Transport, error) {
 	case strings.HasPrefix(url, "wss://"):
 		t := &WSTransport{URL: url}
 		if tlsCACert != "" {
-			cfg, err := LoadTLSCACert(expandUser(tlsCACert))
+			cfg, err := LoadTLSCACert(expandPath(tlsCACert))
 			if err != nil {
 				return nil, fmt.Errorf("load TLS CA: %w", err)
 			}
