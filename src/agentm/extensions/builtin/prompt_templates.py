@@ -20,6 +20,7 @@ from agentm.core.abi import (
     ExtensionAPI,
     InputEvent,
     PROMPT_REGISTRY,
+    PROMPT_TEMPLATES_SERVICE,
     PromptRegistry,
     PromptTemplateRecord,
     ResourcesDiscoverEvent,
@@ -29,6 +30,7 @@ from agentm.core.lib import agentm_home_dir, expand_path_from_cwd, parse_frontma
 from agentm.extensions import ExtensionManifest
 
 # --- Module-level helpers (private) ----------------------------------------
+
 
 def _parse_command_args(args_string: str) -> list[str]:
     args: list[str] = []
@@ -56,14 +58,17 @@ def _parse_command_args(args_string: str) -> list[str]:
         args.append("".join(current))
     return args
 
+
 def _substitute_args(body: str, args: list[str]) -> str:
     result = body
 
     result = re.sub(
         r"\$(\d+)",
-        lambda match: args[int(match.group(1)) - 1]
-        if 0 < int(match.group(1)) <= len(args)
-        else "",
+        lambda match: (
+            args[int(match.group(1)) - 1]
+            if 0 < int(match.group(1)) <= len(args)
+            else ""
+        ),
         result,
     )
 
@@ -81,6 +86,7 @@ def _substitute_args(body: str, args: list[str]) -> str:
     result = result.replace("$@", all_args)
     return result
 
+
 def _fallback_description(body: str) -> str:
     for line in body.split("\n"):
         stripped = line.strip()
@@ -88,6 +94,7 @@ def _fallback_description(body: str) -> str:
             continue
         return f"{stripped[:60]}..." if len(stripped) > 60 else stripped
     return ""
+
 
 def _load_template_file(file_path: str, source: str) -> PromptTemplateRecord | None:
     try:
@@ -119,6 +126,7 @@ def _load_template_file(file_path: str, source: str) -> PromptTemplateRecord | N
         source=source,
     )
 
+
 def _load_templates_from_dir(
     directory: str,
     source: str,
@@ -142,7 +150,9 @@ def _load_templates_from_dir(
             templates.append(template)
     return templates
 
+
 # --- Registry --------------------------------------------------------------
+
 
 class _PromptRegistry:
     """In-memory implementation of :class:`PromptRegistry`.
@@ -172,9 +182,7 @@ class _PromptRegistry:
             )
             project_dirs: tuple[str, ...] = self._project_dirs or ()
             for project_dir in project_dirs:
-                templates.extend(
-                    _load_templates_from_dir(project_dir, "project")
-                )
+                templates.extend(_load_templates_from_dir(project_dir, "project"))
 
         for raw_path in prompt_paths:
             resolved_path = str(expand_path_from_cwd(raw_path, cwd))
@@ -201,7 +209,9 @@ class _PromptRegistry:
         for template in templates:
             if template.name != command:
                 continue
-            return _substitute_args(template.body, _parse_command_args(raw_args.strip()))
+            return _substitute_args(
+                template.body, _parse_command_args(raw_args.strip())
+            )
         return None
 
     def register_prompt(self, name: str, body: str) -> None:
@@ -210,11 +220,14 @@ class _PromptRegistry:
     def get_prompt(self, name: str) -> str | None:
         return self._registry.get(name)
 
+
 # --- Manifest + install ----------------------------------------------------
+
 
 class PromptTemplatesConfig(BaseModel):
     prompt_paths: list[str] = []
     include_defaults: bool = True
+
 
 MANIFEST = ExtensionManifest(
     name="prompt_templates",
@@ -225,25 +238,31 @@ MANIFEST = ExtensionManifest(
     provides_role=(PROMPT_REGISTRY,),
 )
 
-async def install(api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
-    include_defaults = config.include_defaults
-    configured_prompt_paths = list(config.prompt_paths)
 
-    project_dirs: tuple[str, ...] = tuple(
-        str(p) for p in api.get_project_layout().prompts_dirs()
-    )
-    registry: PromptRegistry = _PromptRegistry(project_prompt_dirs=project_dirs)
-    from agentm.core.abi import PROMPT_TEMPLATES_SERVICE
-    api.set_service(PROMPT_TEMPLATES_SERVICE, registry)
-
-    cache: list[PromptTemplateRecord] = []
-
-    async def _populate(_: SessionReadyEvent) -> None:
-        responses = await api.events.emit(
-            ResourcesDiscoverEvent.CHANNEL,
-            ResourcesDiscoverEvent(cwd=api.cwd, reason="startup"),
+class _PromptTemplatesRuntime:
+    def __init__(self, api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
+        self._api = api
+        self._include_defaults = config.include_defaults
+        self._configured_prompt_paths = list(config.prompt_paths)
+        project_dirs: tuple[str, ...] = tuple(
+            str(path) for path in api.get_project_layout().prompts_dirs()
         )
-        prompt_paths = list(configured_prompt_paths)
+        self._registry: PromptRegistry = _PromptRegistry(
+            project_prompt_dirs=project_dirs
+        )
+        self._cache: list[PromptTemplateRecord] = []
+
+    def install(self) -> None:
+        self._api.set_service(PROMPT_TEMPLATES_SERVICE, self._registry)
+        self._api.on(SessionReadyEvent.CHANNEL, self.populate)
+        self._api.on(InputEvent.CHANNEL, self.on_input)
+
+    async def populate(self, _: SessionReadyEvent) -> None:
+        responses = await self._api.events.emit(
+            ResourcesDiscoverEvent.CHANNEL,
+            ResourcesDiscoverEvent(cwd=self._api.cwd, reason="startup"),
+        )
+        prompt_paths = list(self._configured_prompt_paths)
         for response in responses:
             if not isinstance(response, dict):
                 continue
@@ -251,20 +270,21 @@ async def install(api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
             if not isinstance(extra_paths, list):
                 continue
             prompt_paths.extend(str(path) for path in extra_paths)
-        cache[:] = registry.load_prompt_templates(
-            cwd=api.cwd,
+        self._cache[:] = self._registry.load_prompt_templates(
+            cwd=self._api.cwd,
             agent_dir=str(agentm_home_dir()),
             prompt_paths=tuple(prompt_paths),
-            include_defaults=include_defaults,
+            include_defaults=self._include_defaults,
         )
 
-    def _on_input(event: InputEvent) -> None:
+    def on_input(self, event: InputEvent) -> None:
         text = event.text
         if not isinstance(text, str) or not text.startswith("/"):
             return
-        expanded = registry.expand_prompt_template(text, cache)
+        expanded = self._registry.expand_prompt_template(text, self._cache)
         if expanded is not None:
             event.text = expanded
 
-    api.on(SessionReadyEvent.CHANNEL, _populate)
-    api.on(InputEvent.CHANNEL, _on_input)
+
+async def install(api: ExtensionAPI, config: PromptTemplatesConfig) -> None:
+    _PromptTemplatesRuntime(api, config).install()
