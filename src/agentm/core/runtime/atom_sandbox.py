@@ -26,6 +26,7 @@ from loguru import logger
 from agentm.core.abi import EventBus
 from agentm.core.abi.events import DiagnosticEvent
 from agentm.core.abi.resource import ResourceWriter
+from agentm.core.lib.paths import expand_path
 from agentm.core.runtime.atom_reloader import AtomReloader
 
 
@@ -54,7 +55,7 @@ async def apply_atom_source_overrides(
     if not overrides:
         return None
 
-    sandbox = (Path(cwd) / ".agentm" / "eval-sandbox" / session_id).resolve()
+    sandbox = (expand_path(cwd) / ".agentm" / "eval-sandbox" / session_id).resolve()
     sandbox.mkdir(parents=True, exist_ok=True)
 
     for atom_name, new_source in overrides.items():

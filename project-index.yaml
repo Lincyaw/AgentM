@@ -1070,6 +1070,7 @@ requirements:
       - path: src/agentm/core/runtime/session_bootstrap.py
       - path: src/agentm/core/runtime/resource_writer.py
       - path: src/agentm/core/runtime/extension.py
+      - path: src/agentm/core/runtime/atom_sandbox.py
       - path: src/agentm/core/runtime/catalog/__init__.py
       - path: src/agentm/core/runtime/catalog/freeze.py
       - path: src/agentm/core/runtime/catalog/migrate.py
