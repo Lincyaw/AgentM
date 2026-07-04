@@ -1613,7 +1613,10 @@ requirements:
       path-based ``workflow/devloop_workflow.py`` entrypoint used by local
       ``agentm workflow run`` invocations. The wheel must include the coder
       child scenario and scenario-local skills so installed runs can resolve
-      the same agent and skill resources as source-tree runs.
+      the same agent and skill resources as source-tree runs. Path-based
+      package entrypoints must not leave imported scenario implementation
+      modules cached after a run, so repeated runs from different checkout
+      roots cannot reuse stale package state.
     priority: P2
     status: implemented
     confidence: confirmed
@@ -1630,6 +1633,7 @@ requirements:
       - path: contrib/scenarios/devloop/workflow/prompts.py
       - path: contrib/scenarios/devloop/workflow/types.py
       - path: contrib/scenarios/devloop/pyproject.toml
+      - path: src/agentm/extensions/builtin/_workflow/runner.py
       - path: contrib/scenarios/devloop/skills/coding-guidelines/SKILL.md
       - path: contrib/scenarios/devloop/skills/code-review-readiness/SKILL.md
       - path: contrib/scenarios/devloop/skills/spec-alignment/SKILL.md

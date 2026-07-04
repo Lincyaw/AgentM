@@ -247,6 +247,17 @@ async def _call_module_run(module: Any, ctx: WorkflowContext) -> object:
     return await run_callable(ctx)
 
 
+def _module_loaded_from(module: Any, root: Path) -> bool:
+    raw_file = getattr(module, "__file__", None)
+    if not isinstance(raw_file, str) or not raw_file:
+        return False
+    try:
+        module_file = Path(raw_file).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return module_file.is_relative_to(root)
+
+
 async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
     """Import a file script as a Python module and call ``run(ctx)``.
 
@@ -280,6 +291,11 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
         module_name = ".".join(parts)
         path_entry = str(current)
         pkg_root = parts[0]
+        try:
+            import_root = current.resolve()
+        except (OSError, RuntimeError):
+            import_root = current
+        modules_before = set(sys.modules)
         added = path_entry not in sys.path
         if added:
             sys.path.insert(0, path_entry)
@@ -296,8 +312,11 @@ async def _run_module_script(source_path: Path, run: _WorkflowRun) -> object:
             return await _call_module_run(module, ctx)
         finally:
             stale = [
-                k for k in sys.modules
-                if k == pkg_root or k.startswith(pkg_root + ".")
+                k
+                for k, loaded in list(sys.modules.items())
+                if k == pkg_root
+                or k.startswith(pkg_root + ".")
+                or (k not in modules_before and _module_loaded_from(loaded, import_root))
             ]
             for k in stale:
                 sys.modules.pop(k, None)
@@ -619,4 +638,3 @@ class WorkflowRunner:
         )
 
         return result
-
