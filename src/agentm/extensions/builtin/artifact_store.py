@@ -16,6 +16,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from agentm.core.abi import (
+    ARTIFACT_STORE_SERVICE,
     ExtensionAPI,
     FunctionTool,
     SessionReadyEvent,
@@ -42,6 +43,7 @@ _NEXT_ID_WIDTH = 3
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _KIND_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
+
 class ArtifactStoreConfig(BaseModel):
     inline_max_bytes: int = _DEFAULT_INLINE_BYTES
     max_inline_bytes: int = _DEFAULT_INLINE_BYTES
@@ -50,6 +52,7 @@ class ArtifactStoreConfig(BaseModel):
     root_session_id: str | None = None
     task_id: str | None = None
     persona: str | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="artifact_store",
@@ -64,6 +67,7 @@ MANIFEST = ExtensionManifest(
     config_schema=ArtifactStoreConfig,
     requires=(),  # Leaf atom: registers its own tools and service.
 )
+
 
 @dataclass(slots=True)
 class _StoreContext:
@@ -80,6 +84,7 @@ class _StoreContext:
     def artifacts_dir(self) -> Path:
         return artifacts_dir_for(self.layout, self.root_session_id)
 
+
 class ArtifactStore:
     def __init__(self, api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
         self._api = api
@@ -87,7 +92,11 @@ class ArtifactStore:
         root_session_id = str(config.root_session_id or api.session_id)
         # inline_max_bytes takes priority when explicitly set (non-default);
         # otherwise fall back to max_inline_bytes for backward compat.
-        max_inline = config.inline_max_bytes if config.inline_max_bytes != _DEFAULT_INLINE_BYTES else config.max_inline_bytes
+        max_inline = (
+            config.inline_max_bytes
+            if config.inline_max_bytes != _DEFAULT_INLINE_BYTES
+            else config.max_inline_bytes
+        )
         self._ctx = _StoreContext(
             layout=api.get_project_layout(),
             session_id=api.session_id,
@@ -160,7 +169,12 @@ class ArtifactStore:
         await asyncio.to_thread(
             _atomic_write_text,
             meta_path,
-            json.dumps(to_jsonable(metadata), ensure_ascii=False, indent=2, sort_keys=True),
+            json.dumps(
+                to_jsonable(metadata),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
         )
         return {"artifact_id": artifact_id, "path": str(body_path)}
 
@@ -236,7 +250,9 @@ class ArtifactStore:
             kind_filter = _maybe_str(args.get("kind"))
             tags_filter = _coerce_tags(args.get("tags"))
             max_hits = max(1, int(args.get("max_hits", self._ctx.grep_max_matches)))
-            snippet_lines = max(0, int(args.get("snippet_lines", _DEFAULT_SNIPPET_LINES)))
+            snippet_lines = max(
+                0, int(args.get("snippet_lines", _DEFAULT_SNIPPET_LINES))
+            )
         except ValueError as exc:
             return _error(str(exc))
         metas = await self._filtered_metadata(kind=kind_filter, tags=tags_filter)
@@ -246,9 +262,13 @@ class ArtifactStore:
                 break
             body_path = Path(str(meta["path"]))
             try:
-                lines = (await asyncio.to_thread(body_path.read_text, encoding="utf-8")).splitlines()
+                lines = (
+                    await asyncio.to_thread(body_path.read_text, encoding="utf-8")
+                ).splitlines()
             except OSError as exc:
-                logger.debug("artifact_store: search skipping unreadable {}: {}", body_path, exc)
+                logger.debug(
+                    "artifact_store: search skipping unreadable {}: {}", body_path, exc
+                )
                 continue
             for index, line in enumerate(lines, start=1):
                 if compiled.search(line) is None:
@@ -287,7 +307,9 @@ class ArtifactStore:
         for meta in metas:
             if kind is not None and str(meta.get("kind")) != kind:
                 continue
-            meta_tags = [str(tag) for tag in meta.get("tags", []) if isinstance(tag, str)]
+            meta_tags = [
+                str(tag) for tag in meta.get("tags", []) if isinstance(tag, str)
+            ]
             if tags and not set(tags).issubset(set(meta_tags)):
                 continue
             raw_created_by = meta.get("created_by")
@@ -296,10 +318,17 @@ class ArtifactStore:
                 created_by = raw_created_by
             else:
                 created_by = {}
-            if created_by_task is not None and created_by.get("task_id") != created_by_task:
+            if (
+                created_by_task is not None
+                and created_by.get("task_id") != created_by_task
+            ):
                 continue
             timestamp = created_by.get("timestamp")
-            if since is not None and isinstance(timestamp, (int, float)) and float(timestamp) < since:
+            if (
+                since is not None
+                and isinstance(timestamp, (int, float))
+                and float(timestamp) < since
+            ):
                 continue
             if since is not None and not isinstance(timestamp, (int, float)):
                 continue
@@ -325,13 +354,16 @@ class ArtifactStore:
     def _scan_metadata(self) -> list[ArtifactMetadata]:
         return scan_artifact_metadata(self._ctx.artifacts_dir)
 
+
 # Tool schemas (Pydantic -> JSON Schema via pydantic_to_tool_schema)
 # ---------------------------------------------------------------------------
+
 
 class _ArtifactReadRange(BaseModel):
     mode: str = Field(description="Range mode: 'bytes' or 'lines'.")
     start: int = Field(ge=0, description="Start offset (byte or line).")
     end: int = Field(ge=0, description="End offset (byte or line).")
+
 
 class _ArtifactWriteParams(BaseModel):
     kind: str
@@ -340,9 +372,11 @@ class _ArtifactWriteParams(BaseModel):
     tags: list[str] | None = None
     parent_artifact_ids: list[str] | None = None
 
+
 class _ArtifactReadParams(BaseModel):
     artifact_id: str
     range: _ArtifactReadRange | None = None
+
 
 class _ArtifactListParams(BaseModel):
     kind: str | None = None
@@ -351,6 +385,7 @@ class _ArtifactListParams(BaseModel):
     since: str | None = None
     limit: int | None = Field(default=None, ge=1)
 
+
 class _ArtifactGrepParams(BaseModel):
     pattern: str
     kind: str | None = None
@@ -358,68 +393,82 @@ class _ArtifactGrepParams(BaseModel):
     max_hits: int | None = Field(default=None, ge=1)
     snippet_lines: int | None = Field(default=None, ge=0)
 
-def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
-    from agentm.core.abi import ARTIFACT_STORE_SERVICE
-    store = ArtifactStore(api, config)
-    api.set_service(ARTIFACT_STORE_SERVICE, store)
 
-    def _store() -> ArtifactStore:
-        registered = api.get_service(ARTIFACT_STORE_SERVICE)
+class _ArtifactStoreRuntime:
+    def __init__(self, api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
+        self._api = api
+        self._store = ArtifactStore(api, config)
+
+    def install(self) -> None:
+        self._api.set_service(ARTIFACT_STORE_SERVICE, self._store)
+        self._api.on(SessionReadyEvent.CHANNEL, self._store.on_session_ready)
+        self._register_tools()
+
+    def _registered_store(self) -> ArtifactStore:
+        registered = self._api.get_service(ARTIFACT_STORE_SERVICE)
         if not isinstance(registered, ArtifactStore):
             raise RuntimeError("artifact_store service is not registered")
         return registered
 
-    async def _write(args: dict[str, Any]) -> ToolResult:
-        return await _store().write(args)
+    async def write(self, args: dict[str, Any]) -> ToolResult:
+        return await self._registered_store().write(args)
 
-    async def _read(args: dict[str, Any]) -> ToolResult:
-        return await _store().read(args)
+    async def read(self, args: dict[str, Any]) -> ToolResult:
+        return await self._registered_store().read(args)
 
-    async def _list_artifacts(args: dict[str, Any]) -> ToolResult:
-        return await _store().list_artifacts(args)
+    async def list_artifacts(self, args: dict[str, Any]) -> ToolResult:
+        return await self._registered_store().list_artifacts(args)
 
-    async def _grep(args: dict[str, Any]) -> ToolResult:
-        return await _store().grep(args)
+    async def grep(self, args: dict[str, Any]) -> ToolResult:
+        return await self._registered_store().grep(args)
 
-    api.on(SessionReadyEvent.CHANNEL, store.on_session_ready)
-    api.register_tool(
-        FunctionTool(
-            name="artifact_write",
-            description="Append a new shared artifact to the session-tree store.",
-            parameters=pydantic_to_tool_schema(_ArtifactWriteParams),
-            fn=_write,
+    def _register_tools(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="artifact_write",
+                description="Append a new shared artifact to the session-tree store.",
+                parameters=pydantic_to_tool_schema(_ArtifactWriteParams),
+                fn=self.write,
+            )
         )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="artifact_read",
-            description="Read one artifact by id, optionally with a byte/line range.",
-            parameters=pydantic_to_tool_schema(_ArtifactReadParams),
-            fn=_read,
+        self._api.register_tool(
+            FunctionTool(
+                name="artifact_read",
+                description=(
+                    "Read one artifact by id, optionally with a byte/line range."
+                ),
+                parameters=pydantic_to_tool_schema(_ArtifactReadParams),
+                fn=self.read,
+            )
         )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="artifact_list",
-            description="List artifact metadata with simple filters.",
-            parameters=pydantic_to_tool_schema(_ArtifactListParams),
-            fn=_list_artifacts,
+        self._api.register_tool(
+            FunctionTool(
+                name="artifact_list",
+                description="List artifact metadata with simple filters.",
+                parameters=pydantic_to_tool_schema(_ArtifactListParams),
+                fn=self.list_artifacts,
+            )
         )
-    )
-    api.register_tool(
-        FunctionTool(
-            name="artifact_grep",
-            description="Regex-search text artifacts and return snippets.",
-            parameters=pydantic_to_tool_schema(_ArtifactGrepParams),
-            fn=_grep,
+        self._api.register_tool(
+            FunctionTool(
+                name="artifact_grep",
+                description="Regex-search text artifacts and return snippets.",
+                parameters=pydantic_to_tool_schema(_ArtifactGrepParams),
+                fn=self.grep,
+            )
         )
-    )
+
+
+def install(api: ExtensionAPI, config: ArtifactStoreConfig) -> None:
+    _ArtifactStoreRuntime(api, config).install()
+
 
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.tmp")
     tmp_path.write_text(text, encoding="utf-8")
     os.replace(tmp_path, path)
+
 
 def _allocate_id_sync(artifacts_dir: Path) -> str:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -437,7 +486,9 @@ def _allocate_id_sync(artifacts_dir: Path) -> str:
             try:
                 next_value = int(next_id_path.read_text(encoding="utf-8").strip())
             except ValueError as exc:
-                logger.warning("artifact_store: corrupt .next_id file, resetting to 1: {}", exc)
+                logger.warning(
+                    "artifact_store: corrupt .next_id file, resetting to 1: {}", exc
+                )
                 next_value = 1
         artifact_id = f"art_{next_value:0{_NEXT_ID_WIDTH}d}"
         _atomic_write_text(next_id_path, str(next_value + 1))
@@ -449,6 +500,7 @@ def _allocate_id_sync(artifacts_dir: Path) -> str:
         except FileNotFoundError:
             # Lock already removed by another holder — expected under contention.
             logger.debug("artifact_store: lock file {} already gone", lock_path)
+
 
 def _coerce_tags(value: Any) -> list[str]:
     if value is None:
@@ -462,6 +514,7 @@ def _coerce_tags(value: Any) -> list[str]:
             tags.append(text)
     return tags
 
+
 def _coerce_parent_ids(value: Any) -> list[str]:
     if value is None:
         return []
@@ -474,6 +527,7 @@ def _coerce_parent_ids(value: Any) -> list[str]:
             ids.append(text)
     return ids
 
+
 def _read_default(raw: bytes, cap: int) -> str:
     if len(raw) <= cap:
         return raw.decode("utf-8", errors="replace")
@@ -484,12 +538,15 @@ def _read_default(raw: bytes, cap: int) -> str:
     )
     return head + marker
 
+
 def _read_range(raw: bytes, range_arg: Any) -> str:
     if not isinstance(range_arg, dict):
         raise ValueError("range must be an object")
     keys = [key for key in ("lines", "bytes", "head", "tail") if key in range_arg]
     if len(keys) != 1:
-        raise ValueError("range must contain exactly one of lines, bytes, head, or tail")
+        raise ValueError(
+            "range must contain exactly one of lines, bytes, head, or tail"
+        )
     key = keys[0]
     if key == "bytes":
         raw_range = range_arg["bytes"]
@@ -513,6 +570,7 @@ def _read_range(raw: bytes, range_arg: Any) -> str:
     count = max(1, int(range_arg["tail"]))
     return "\n".join(lines[-count:])
 
+
 def _parse_since(value: Any) -> float | None:
     if value is None:
         return None
@@ -529,19 +587,23 @@ def _parse_since(value: Any) -> float | None:
             return datetime.fromisoformat(iso).timestamp()
     raise ValueError("since must be a unix timestamp or ISO-8601 string")
 
+
 def _slugify(title: str) -> str:
     slug = _SLUG_RE.sub("-", title.lower()).strip("-")
     return slug or "artifact"
 
+
 def _sanitize_kind(kind: str) -> str:
     clean = _KIND_RE.sub("_", kind).strip("_")
     return clean or "artifact"
+
 
 def _maybe_str(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
     return text or None
+
 
 def _file_size(meta: ArtifactMetadata) -> int:
     try:
@@ -550,19 +612,30 @@ def _file_size(meta: ArtifactMetadata) -> int:
         logger.debug("artifact_store: stat failed for {}: {}", meta.get("path"), exc)
         return 0
 
+
 def _ok(payload: dict[str, Any]) -> ToolResult:
     return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(to_jsonable(payload), ensure_ascii=False))],
+        content=[
+            TextContent(
+                type="text", text=json.dumps(to_jsonable(payload), ensure_ascii=False)
+            )
+        ],
         extras=payload,
     )
+
 
 def _error(message: str) -> ToolResult:
     payload = {"error": message}
     return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(to_jsonable(payload), ensure_ascii=False))],
+        content=[
+            TextContent(
+                type="text", text=json.dumps(to_jsonable(payload), ensure_ascii=False)
+            )
+        ],
         is_error=True,
         extras=payload,
     )
+
 
 __all__: Final = [
     "MANIFEST",
