@@ -7,9 +7,11 @@ from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI, SYSTEM_PROMPT_P
 from agentm.core.lib import expand_path, expand_path_from_cwd
 from agentm.extensions import ExtensionManifest
 
+
 class SystemPromptConfig(BaseModel):
     prompt: str | None = None
     prompt_file: str | None = None
+
 
 MANIFEST = ExtensionManifest(
     name="system_prompt",
@@ -17,8 +19,8 @@ MANIFEST = ExtensionManifest(
         "Prepends configured prompt text to the system prompt. The text is "
         "supplied inline via ``prompt`` or read from a file via "
         "``prompt_file`` (useful when an orchestrator stages a long prompt on "
-        "disk and configures the atom with ``-e system_prompt:{\"prompt_file\""
-        ":\"/path\"}``). ``prompt_file`` wins when both are set. When neither "
+        'disk and configures the atom with ``-e system_prompt:{"prompt_file"'
+        ':"/path"}``). ``prompt_file`` wins when both are set. When neither '
         "is set, context files (CLAUDE.md / AGENTS.md) are loaded from the "
         "filesystem hierarchy."
     ),
@@ -68,15 +70,23 @@ def _resolve_prompt(
     return _discover_context_files(cwd)
 
 
-def install(api: ExtensionAPI, config: SystemPromptConfig) -> None:
-    prompt = _resolve_prompt(config, cwd=api.cwd, scenario_dir=api.scenario_dir)
-    if not prompt:
-        return
+class _SystemPromptRuntime:
+    def __init__(self, api: ExtensionAPI, prompt: str) -> None:
+        self._api = api
+        self._prompt = prompt
 
-    def before_agent_start(event: BeforeAgentStartEvent) -> dict[str, str]:
+    def install(self) -> None:
+        if not self._prompt:
+            return
+        self._api.on(BeforeAgentStartEvent.CHANNEL, self.before_agent_start)
+
+    def before_agent_start(self, event: BeforeAgentStartEvent) -> dict[str, str]:
         current = str(event.system or "")
-        updated = f"{prompt}\n\n{current}" if current else prompt
+        updated = f"{self._prompt}\n\n{current}" if current else self._prompt
         event.system = updated
         return {"system": updated}
 
-    api.on(BeforeAgentStartEvent.CHANNEL, before_agent_start)
+
+def install(api: ExtensionAPI, config: SystemPromptConfig) -> None:
+    prompt = _resolve_prompt(config, cwd=api.cwd, scenario_dir=api.scenario_dir)
+    _SystemPromptRuntime(api, prompt).install()
