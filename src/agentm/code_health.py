@@ -17,7 +17,8 @@ Rules:
 - **AM004** ``atom-raw-io``: ``open()`` / ``subprocess`` calls inside atom
   files. Atoms must use ``Operations`` (file/bash) so sandbox isolation works.
 - **AM005** ``param-explosion``: Functions with >15 parameters. Signals a
-  config-object extraction opportunity.
+  config-object extraction opportunity. Typer/Click command functions are
+  skipped because their signatures are the user-facing CLI option schema.
 - **AM006** ``mutable-abi-global``: Mutable containers (``dict``, ``list``,
   ``set``) at module level in ``core/abi/`` without ``Final`` annotation.
   ABI should be definitions-only; mutable state belongs in runtime.
@@ -101,6 +102,12 @@ _PUBLIC_MODULE_METADATA_DUNDERS: Final[frozenset[str]] = frozenset(
         "__license__",
         "__version__",
     }
+)
+_CLI_DECORATOR_METHODS: Final[frozenset[str]] = frozenset(
+    {"callback", "command", "group"}
+)
+_CLI_DECORATOR_NAMES: Final[frozenset[str]] = frozenset(
+    {"command", "group"}
 )
 
 
@@ -259,11 +266,32 @@ def _check_atom_raw_io(
     return issues
 
 
+def _decorator_call(decorator: ast.expr) -> ast.expr:
+    if isinstance(decorator, ast.Call):
+        return decorator.func
+    return decorator
+
+
+def _is_cli_command_decorator(decorator: ast.expr) -> bool:
+    func = _decorator_call(decorator)
+    if isinstance(func, ast.Attribute):
+        return func.attr in _CLI_DECORATOR_METHODS
+    if isinstance(func, ast.Name):
+        return func.id in _CLI_DECORATOR_NAMES
+    return False
+
+
+def _is_cli_command_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    return any(_is_cli_command_decorator(decorator) for decorator in node.decorator_list)
+
+
 def _check_param_explosion(tree: ast.Module, path: str) -> list[Issue]:
     """AM005: Functions with >15 parameters."""
     issues: list[Issue] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if _is_cli_command_function(node):
             continue
         n = (len(node.args.args) + len(node.args.posonlyargs)
              + len(node.args.kwonlyargs))
