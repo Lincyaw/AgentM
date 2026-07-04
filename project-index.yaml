@@ -1778,6 +1778,8 @@ requirements:
       - path: contrib/scenarios/workgraph/agents/resolver/workgraph_context.py
       - path: contrib/scenarios/workgraph/agents/merger/manifest.yaml
       - path: contrib/scenarios/workgraph/agents/merger/workgraph_context.py
+      - path: contrib/scenarios/workgraph/workflow/__init__.py
+      - path: contrib/scenarios/workgraph/workflow/common.py
       - path: contrib/scenarios/workgraph/workflow/develop.py
       - path: contrib/scenarios/workgraph/workflow/merge.py
     tests: []
