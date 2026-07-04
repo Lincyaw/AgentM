@@ -8,14 +8,14 @@ atoms implicitly.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi import BeforeAgentStartEvent, ExtensionAPI
+from agentm.core.lib import expand_path_from_cwd
+from agentm.extensions import ExtensionManifest
 
 from . import agents, commands, plugins
 
@@ -34,7 +34,7 @@ _MAX_STARTUP_CLAUDE_BYTES = 262_144
 def _load_startup_claude(cwd: str) -> str:
     """Return startup-directory ``CLAUDE.md`` content, if present."""
 
-    path = Path(cwd) / "CLAUDE.md"
+    path = expand_path_from_cwd("CLAUDE.md", cwd)
     try:
         if not path.is_file():
             return ""

@@ -15,6 +15,7 @@ from agentm.core.abi import (
     SessionReadyEvent,
     SkillRecord,
 )
+from agentm.core.lib import expand_path_from_cwd
 from agentm.extensions import ExtensionManifest
 
 from ._md_skills import parse_md_command_records, parse_md_skill_records
@@ -39,7 +40,7 @@ MANIFEST = ExtensionManifest(
 def _default_roots(cwd: str) -> list[Path]:
     return [
         Path.home() / ".claude" / "commands",
-        Path(cwd) / ".claude" / "commands",
+        expand_path_from_cwd(".claude/commands", cwd),
     ]
 
 def _make_handler(body: str):  # type: ignore[no-untyped-def]
@@ -62,7 +63,9 @@ def _dedupe_records(records: list[SkillRecord]) -> list[SkillRecord]:
 
 async def install(api: ExtensionAPI, config: CommandsConfig) -> None:
     inherit_claude = config.inherit_claude
-    configured_paths = [Path(p) for p in config.command_paths]
+    configured_paths = [
+        expand_path_from_cwd(p, api.cwd) for p in config.command_paths if p.strip()
+    ]
     discover_in_progress = False
     registered_commands: set[str] = set()
 
@@ -90,7 +93,7 @@ async def install(api: ExtensionAPI, config: CommandsConfig) -> None:
                 continue
             command_paths = response.get("command_paths")
             if isinstance(command_paths, list):
-                roots.extend(Path(str(p)) for p in command_paths)
+                roots.extend(expand_path_from_cwd(str(p), api.cwd) for p in command_paths)
         return roots
 
     async def _all_roots(reason: Literal["startup", "reload"]) -> list[Path]:

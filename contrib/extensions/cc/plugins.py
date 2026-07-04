@@ -15,6 +15,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from agentm.core.abi import DiagnosticEvent, ExtensionAPI, ResourcesDiscoverEvent
+from agentm.core.lib import expand_path
 from agentm.extensions import ExtensionManifest
 
 _RECOGNIZED_SCOPES: frozenset[str] = frozenset({"user", "project"})
@@ -57,7 +58,7 @@ def _resolve_install_paths(
         data = json.loads(registry_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return [], []
-    cwd_resolved = str(Path(cwd).resolve())
+    cwd_resolved = str(expand_path(cwd).resolve())
     result: list[Path] = []
     unknown_scopes: list[str] = []
     for key, entries in (data.get("plugins") or {}).items():
@@ -74,19 +75,23 @@ def _resolve_install_paths(
                 project_path = entry.get("projectPath")
                 if not isinstance(project_path, str):
                     continue
-                if str(Path(project_path).resolve()) != cwd_resolved:
+                if str(expand_path(project_path).resolve()) != cwd_resolved:
                     continue
             elif scope != "user":
                 if isinstance(scope, str) and scope not in _RECOGNIZED_SCOPES:
                     unknown_scopes.append(f"{key}:{scope}")
                 continue
-            path = Path(install_path)
+            path = expand_path(install_path)
             if path.is_dir():
                 result.append(path)
     return result, unknown_scopes
 
 def install(api: ExtensionAPI, config: PluginsConfig) -> None:
-    registry_path = Path(config.registry_path) if config.registry_path else _default_registry_path()
+    registry_path = (
+        expand_path(config.registry_path)
+        if config.registry_path
+        else _default_registry_path()
+    )
     exclude = set(config.exclude)
 
     async def _on_discover(_event: ResourcesDiscoverEvent) -> dict[str, Any] | None:

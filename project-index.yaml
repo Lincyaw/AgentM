@@ -1085,6 +1085,10 @@ requirements:
       - path: src/agentm/extensions/builtin/prompt_templates.py
       - path: src/agentm/extensions/builtin/tool_result_cap.py
       - path: src/agentm/extensions/builtin/tui_snapshot.py
+      - path: contrib/extensions/cc/__init__.py
+      - path: contrib/extensions/cc/agents.py
+      - path: contrib/extensions/cc/commands.py
+      - path: contrib/extensions/cc/plugins.py
       - path: src/agentm/gateway/commands/skill_command.py
       - path: src/agentm/onboard.py
       - path: contrib/gateway-peers/terminal-go/main.go

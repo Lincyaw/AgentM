@@ -9,13 +9,14 @@ from xml.sax.saxutils import escape
 
 from pydantic import BaseModel
 
-from agentm.extensions import ExtensionManifest
 from agentm.core.abi import (
     BeforeAgentStartEvent,
     ExtensionAPI,
     ResourcesDiscoverEvent,
     SessionReadyEvent,
 )
+from agentm.core.lib import expand_path_from_cwd
+from agentm.extensions import ExtensionManifest
 
 from ._md_skills import AgentRecord, parse_md_agent_records
 
@@ -116,7 +117,7 @@ MANIFEST = ExtensionManifest(
 def _default_roots(cwd: str) -> list[Path]:
     return [
         Path.home() / ".claude" / "agents",
-        Path(cwd) / ".claude" / "agents",
+        expand_path_from_cwd(".claude/agents", cwd),
     ]
 
 def _format_block(agents: list[AgentRecord]) -> str:
@@ -135,7 +136,9 @@ def _format_block(agents: list[AgentRecord]) -> str:
 
 async def install(api: ExtensionAPI, config: AgentsConfig) -> None:
     inherit_claude = config.inherit_claude
-    configured_paths = [Path(p) for p in config.agent_paths]
+    configured_paths = [
+        expand_path_from_cwd(p, api.cwd) for p in config.agent_paths if p.strip()
+    ]
     cached_block = ""
 
     async def _populate(_: SessionReadyEvent) -> None:
@@ -153,7 +156,7 @@ async def install(api: ExtensionAPI, config: AgentsConfig) -> None:
                 continue
             extra = response.get("agent_paths")
             if isinstance(extra, list):
-                roots.extend(Path(str(p)) for p in extra)
+                roots.extend(expand_path_from_cwd(str(p), api.cwd) for p in extra)
 
         seen: set[str] = set()
         agents: list[AgentRecord] = []
