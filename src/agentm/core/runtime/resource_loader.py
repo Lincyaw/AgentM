@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from agentm.core.lib.frontmatter import parse_frontmatter
+from agentm.core.lib.paths import expand_path
 from agentm.core.lib.user_config import agentm_home_dir
 
 
@@ -103,15 +104,17 @@ class DefaultResourceLoader:
 
     def __init__(
         self,
-        cwd: Path,
-        agent_dir: Path | None = None,
+        cwd: str | Path,
+        agent_dir: str | Path | None = None,
         *,
         no_skills: bool = False,
         no_prompt_templates: bool = False,
     ) -> None:
-        self._cwd = Path(cwd)
+        self._cwd = expand_path(cwd).resolve()
         self._agent_dir = (
-            Path(agent_dir) if agent_dir is not None else agentm_home_dir()
+            expand_path(agent_dir).resolve()
+            if agent_dir is not None
+            else agentm_home_dir()
         )
         self._no_skills = no_skills
         self._no_prompt_templates = no_prompt_templates
