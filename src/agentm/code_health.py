@@ -84,14 +84,14 @@ _LOG_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"\blog(?:ger|ging)?\b|\bwarn(?:ing)?\b|\braise\b|\bprint\b", re.IGNORECASE
 )
 
-_ATOM_BUILTIN_DIR: Final[str] = "extensions/builtin"
+_ATOM_BUILTIN_PARTS: Final[tuple[str, str]] = ("extensions", "builtin")
 
 
 def _is_atom_file(path: Path) -> bool:
     parts = path.parts
-    return _ATOM_BUILTIN_DIR.replace("/", "") == "" or any(
-        "extensions" in parts and "builtin" in parts
-        for _ in [None]
+    return any(
+        parts[index : index + len(_ATOM_BUILTIN_PARTS)] == _ATOM_BUILTIN_PARTS
+        for index in range(len(parts) - len(_ATOM_BUILTIN_PARTS) + 1)
     )
 
 

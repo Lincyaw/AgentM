@@ -1561,3 +1561,21 @@ requirements:
     docs: []
     depends_on:
       - REQ-087-builtin-atoms-extension-api
+
+  - id: REQ-201-project-code-health-lint
+    title: Project-specific code health linting
+    description: >
+      The ``agentm lint`` code-health checker must provide fast AST-only
+      project rules for architectural conventions that general-purpose lint and
+      type tools cannot express. Rule targeting must use precise path
+      classification so checks such as atom raw-I/O detection only apply to
+      actual builtin atom files.
+    priority: P2
+    status: implemented
+    confidence: confirmed
+    code:
+      - path: src/agentm/code_health.py
+    tests: []
+    docs: []
+    depends_on:
+      - REQ-087-builtin-atoms-extension-api
