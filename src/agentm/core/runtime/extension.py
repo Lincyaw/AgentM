@@ -351,55 +351,42 @@ def build_extension_api_scope(config: ExtensionAPIScopeConfig) -> ExtensionAPISc
     )
 
 
-class _ExtensionAPIImpl:
-    """Concrete ``ExtensionAPI``; delegates to the session's bus and registries."""
+class _ExtensionAPIMixinBase:
+    """Typed attribute surface shared by the ExtensionAPI mixins."""
 
-    def __init__(
-        self, scope: ExtensionAPIScope, *, owner_name: str = "<unknown>"
-    ) -> None:
-        self._bus = scope.bus
-        self._cwd = scope.cwd
-        self._scenario_dir = scope.scenario_dir
-        self._session_id = scope.session_id
-        self._root_session_id = scope.root_session_id
-        self._parent_session_id = scope.parent_session_id
-        self._purpose = scope.purpose
-        self._scenario = scope.scenario
-        self._lineage = scope.lineage
-        self._experiment = scope.experiment
-        self._session = scope.session
-        self._tools = scope.tools
-        self._commands = scope.commands
-        self._providers = scope.providers
-        self._renderers = scope.renderers
-        self._inbox = scope.inbox
-        self._model_getter = scope.model_getter
-        self._provider_getter = scope.provider_getter
-        self._gateway: _SessionGateway = scope.gateway
-        self._owner_name = owner_name
-        self._stale = False
-        self._child_session_factory: ChildSessionFactory = scope.child_session_factory
-        self._operations_holder: _OperationsHolder = scope.operations
-        self._project_layout: ProjectLayout = scope.project_layout
-        self._catalog = scope.catalog
-        self._resource_writer_holder: _ResourceWriterHolder = scope.resource_writer
-        self._telemetry_holder: _SessionTelemetryHolder = scope.telemetry
-        self._services = scope.service_registry
-
-    def mark_stale(self) -> None:
-        self._stale = True
+    _bus: EventBus
+    _cwd: str
+    _scenario_dir: str | None
+    _session_id: str
+    _root_session_id: str
+    _parent_session_id: str | None
+    _purpose: str
+    _scenario: str | None
+    _lineage: dict[str, Any] | None
+    _experiment: dict[str, Any] | None
+    _session: ReadonlySession
+    _tools: list[Tool]
+    _commands: dict[str, CommandSpec]
+    _providers: dict[str, ProviderConfig]
+    _renderers: dict[str, Renderer]
+    _inbox: SessionInbox
+    _model_getter: Any
+    _provider_getter: Any
+    _gateway: _SessionGateway
+    _owner_name: str
+    _child_session_factory: ChildSessionFactory
+    _operations_holder: _OperationsHolder
+    _project_layout: ProjectLayout
+    _catalog: CatalogService
+    _resource_writer_holder: _ResourceWriterHolder
+    _telemetry_holder: _SessionTelemetryHolder
+    _services: dict[str, Any]
 
     def _assert_active(self) -> None:
-        if self._stale:
-            raise ExtensionStaleError(
-                f"Extension {self._owner_name!r} was reloaded; this api/ctx "
-                f"reference is stale. Re-acquire via the new install() call. "
-                f"To exit gracefully on reload, catch ExtensionStaleError "
-                f"around long-running operations that capture api or ctx."
-            )
+        raise NotImplementedError
 
-    # --- Event subscription ------------------------------------------------
 
+class _ExtensionEventMixin(_ExtensionAPIMixinBase):
     def on(
         self,
         channel: str,
@@ -418,8 +405,8 @@ class _ExtensionAPIImpl:
         self._assert_active()
         return self._bus.add_observer(callback)
 
-    # --- Registrations ----------------------------------------------------
 
+class _ExtensionRegistrationMixin(_ExtensionAPIMixinBase):
     def _emit_register(
         self,
         kind: Literal["tool", "command", "provider", "renderer"],
@@ -463,9 +450,7 @@ class _ExtensionAPIImpl:
         self._assert_active()
         return name in self._providers
 
-    def register_operations(
-        self, *, bash: BashOperations
-    ) -> None:
+    def register_operations(self, *, bash: BashOperations) -> None:
         self._assert_active()
         if self._operations_holder.bundle is not None:
             raise KeyError(
@@ -487,8 +472,19 @@ class _ExtensionAPIImpl:
         self._renderers[tool_name] = renderer
         self._emit_register("renderer", tool_name, renderer)
 
-    # --- Actions -----------------------------------------------------------
+    def register_resource_writer(self, writer: ResourceWriter) -> None:
+        self._assert_active()
+        if self._resource_writer_holder.replaced:
+            raise KeyError(
+                "ResourceWriter is already replaced for this session; "
+                "an earlier atom called api.register_resource_writer(...). "
+                "Only one ResourceWriter atom per scenario."
+            )
+        self._resource_writer_holder.writer = writer
+        self._resource_writer_holder.replaced = True
 
+
+class _ExtensionActionMixin(_ExtensionAPIMixinBase):
     def post_inbox(
         self,
         *,
@@ -547,6 +543,8 @@ class _ExtensionAPIImpl:
         self._assert_active()
         return self._services.get(name)
 
+
+class _ExtensionGatewayMixin(_ExtensionAPIMixinBase):
     def reload_atom(
         self,
         name: str,
@@ -615,19 +613,8 @@ class _ExtensionAPIImpl:
         self._assert_active()
         return self._telemetry_holder.get()
 
-    def register_resource_writer(self, writer: ResourceWriter) -> None:
-        self._assert_active()
-        if self._resource_writer_holder.replaced:
-            raise KeyError(
-                "ResourceWriter is already replaced for this session; "
-                "an earlier atom called api.register_resource_writer(...). "
-                "Only one ResourceWriter atom per scenario."
-            )
-        self._resource_writer_holder.writer = writer
-        self._resource_writer_holder.replaced = True
 
-    # --- Read-only context -------------------------------------------------
-
+class _ExtensionContextMixin(_ExtensionAPIMixinBase):
     @property
     def cwd(self) -> str:
         self._assert_active()
@@ -690,8 +677,6 @@ class _ExtensionAPIImpl:
     def events(self) -> EventBus:
         return self._bus
 
-    # --- Service facades ----------------------------------------------------
-
     def get_operations(self) -> Operations:
         self._assert_active()
         bundle = self._operations_holder.bundle
@@ -711,6 +696,60 @@ class _ExtensionAPIImpl:
     def catalog(self) -> CatalogService:
         self._assert_active()
         return self._catalog
+
+
+class _ExtensionAPIImpl(
+    _ExtensionEventMixin,
+    _ExtensionRegistrationMixin,
+    _ExtensionActionMixin,
+    _ExtensionGatewayMixin,
+    _ExtensionContextMixin,
+):
+    """Concrete ``ExtensionAPI``; delegates to the session's bus and registries."""
+
+    def __init__(
+        self, scope: ExtensionAPIScope, *, owner_name: str = "<unknown>"
+    ) -> None:
+        self._bus = scope.bus
+        self._cwd = scope.cwd
+        self._scenario_dir = scope.scenario_dir
+        self._session_id = scope.session_id
+        self._root_session_id = scope.root_session_id
+        self._parent_session_id = scope.parent_session_id
+        self._purpose = scope.purpose
+        self._scenario = scope.scenario
+        self._lineage = scope.lineage
+        self._experiment = scope.experiment
+        self._session = scope.session
+        self._tools = scope.tools
+        self._commands = scope.commands
+        self._providers = scope.providers
+        self._renderers = scope.renderers
+        self._inbox = scope.inbox
+        self._model_getter = scope.model_getter
+        self._provider_getter = scope.provider_getter
+        self._gateway: _SessionGateway = scope.gateway
+        self._owner_name = owner_name
+        self._stale = False
+        self._child_session_factory: ChildSessionFactory = scope.child_session_factory
+        self._operations_holder: _OperationsHolder = scope.operations
+        self._project_layout: ProjectLayout = scope.project_layout
+        self._catalog = scope.catalog
+        self._resource_writer_holder: _ResourceWriterHolder = scope.resource_writer
+        self._telemetry_holder: _SessionTelemetryHolder = scope.telemetry
+        self._services = scope.service_registry
+
+    def mark_stale(self) -> None:
+        self._stale = True
+
+    def _assert_active(self) -> None:
+        if self._stale:
+            raise ExtensionStaleError(
+                f"Extension {self._owner_name!r} was reloaded; this api/ctx "
+                f"reference is stale. Re-acquire via the new install() call. "
+                f"To exit gracefully on reload, catch ExtensionStaleError "
+                f"around long-running operations that capture api or ctx."
+            )
 
 
 # --- Loader -----------------------------------------------------------------
