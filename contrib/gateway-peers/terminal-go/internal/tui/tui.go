@@ -537,7 +537,7 @@ func (m *appModel) availableAgentDetails() []runtime.AgentDetails {
 }
 
 func (m *appModel) tabBarHeight() int {
-	if m.tabBar.HasOnlyMainAndBackgroundTabs(m.mainSessionID) || m.tabBar.HasOnlyInactiveBackgroundTabs() {
+	if m.tabBar.CanCollapseIntoBackgroundChrome(m.mainSessionID) {
 		return 0
 	}
 	return m.tabBar.Height()

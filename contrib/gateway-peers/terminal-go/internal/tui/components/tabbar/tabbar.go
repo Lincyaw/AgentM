@@ -182,6 +182,12 @@ func (t *TabBar) Height() int {
 	return tabBarHeight
 }
 
+// CanCollapseIntoBackgroundChrome reports whether the full tab bar can be
+// represented by compact background-work status instead of visible tabs.
+func (t *TabBar) CanCollapseIntoBackgroundChrome(mainSessionID string) bool {
+	return t.HasOnlyMainAndBackgroundTabs(mainSessionID) || t.HasOnlyInactiveBackgroundTabs()
+}
+
 // HasOnlyInactiveBackgroundTabs reports whether all non-active tabs are
 // background workflow tabs. In that state the main conversation is still the
 // primary surface, so the parent TUI can collapse the tab bar into a compact
