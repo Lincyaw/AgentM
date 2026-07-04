@@ -41,6 +41,7 @@ from agentm.core.abi import (
     ENTRY_TYPE_COMPACTION,
     ENTRY_TYPE_MESSAGE,
     ExtensionAPI,
+    PROMPT_TEMPLATES_SERVICE,
     PROMPT_BRANCH_SUMMARY,
     PROMPT_BRANCH_SUMMARY_PREAMBLE,
     PROMPT_SUMMARIZATION,
@@ -305,30 +306,44 @@ MANIFEST = ExtensionManifest(
 )
 
 
-def install(api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
-    bodies: dict[str, str] = {
-        PROMPT_SUMMARIZATION_SYSTEM: config.summarization_system
-        or _SUMMARIZATION_SYSTEM,
-        PROMPT_SUMMARIZATION: config.summarization or _SUMMARIZATION,
-        PROMPT_UPDATE_SUMMARIZATION: config.update_summarization
-        or _UPDATE_SUMMARIZATION,
-        PROMPT_BRANCH_SUMMARY: config.branch_summary or _BRANCH_SUMMARY,
-        PROMPT_BRANCH_SUMMARY_PREAMBLE: config.branch_summary_preamble
-        or _BRANCH_SUMMARY_PREAMBLE,
-    }
-    from agentm.core.abi import PROMPT_TEMPLATES_SERVICE
-    registry = api.get_service(PROMPT_TEMPLATES_SERVICE)
-    if registry is None:
-        raise RuntimeError(
-            "compaction_prompts atom requires the prompt_templates service "
-            "(install the prompt_templates atom first)"
-        )
-    for name, body in bodies.items():
-        registry.register_prompt(name, body)
+class _CompactionPromptsRuntime:
+    def __init__(self, api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
+        self._api = api
+        self._prompt_bodies = {
+            PROMPT_SUMMARIZATION_SYSTEM: config.summarization_system
+            or _SUMMARIZATION_SYSTEM,
+            PROMPT_SUMMARIZATION: config.summarization or _SUMMARIZATION,
+            PROMPT_UPDATE_SUMMARIZATION: config.update_summarization
+            or _UPDATE_SUMMARIZATION,
+            PROMPT_BRANCH_SUMMARY: config.branch_summary or _BRANCH_SUMMARY,
+            PROMPT_BRANCH_SUMMARY_PREAMBLE: config.branch_summary_preamble
+            or _BRANCH_SUMMARY_PREAMBLE,
+        }
 
-    # Module-level mutation: the registry on ``core.abi.session`` is shared
-    # across the process. Multiple sessions installing the atom is harmless
-    # — the materializer instances are stateless and idempotent.
-    ENTRY_MATERIALIZERS[ENTRY_TYPE_MESSAGE] = _MessageEntryMaterializer()
-    ENTRY_MATERIALIZERS[ENTRY_TYPE_BRANCH_SUMMARY] = _BranchSummaryEntryMaterializer()
-    ENTRY_MATERIALIZERS[ENTRY_TYPE_COMPACTION] = _CompactionEntryMaterializer()
+    def install(self) -> None:
+        self._register_prompts()
+        self._register_materializers()
+
+    def _register_prompts(self) -> None:
+        registry = self._api.get_service(PROMPT_TEMPLATES_SERVICE)
+        if registry is None:
+            raise RuntimeError(
+                "compaction_prompts atom requires the prompt_templates service "
+                "(install the prompt_templates atom first)"
+            )
+        for name, body in self._prompt_bodies.items():
+            registry.register_prompt(name, body)
+
+    def _register_materializers(self) -> None:
+        # Module-level mutation: the registry on ``core.abi.session`` is shared
+        # across the process. Multiple sessions installing the atom is harmless
+        # — the materializer instances are stateless and idempotent.
+        ENTRY_MATERIALIZERS[ENTRY_TYPE_MESSAGE] = _MessageEntryMaterializer()
+        ENTRY_MATERIALIZERS[ENTRY_TYPE_BRANCH_SUMMARY] = (
+            _BranchSummaryEntryMaterializer()
+        )
+        ENTRY_MATERIALIZERS[ENTRY_TYPE_COMPACTION] = _CompactionEntryMaterializer()
+
+
+def install(api: ExtensionAPI, config: CompactionPromptsConfig) -> None:
+    _CompactionPromptsRuntime(api, config).install()
