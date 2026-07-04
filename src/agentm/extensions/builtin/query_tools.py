@@ -318,16 +318,60 @@ def _load_run(
 
 
 def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
-    default_scenario = config.default_scenario
-    cwd = expand_path(api.cwd).resolve()
+    _QueryToolsRuntime(api=api, config=config).install()
 
-    from agentm.core.lib import resolve_observability_dir
 
-    obs_dir = resolve_observability_dir(cwd)
+class _QueryToolsRuntime:
+    """Owns query tool registration and session-scoped path defaults."""
 
-    # --- query_traces tool ------------------------------------------------
+    def __init__(self, *, api: ExtensionAPI, config: QueryToolsConfig) -> None:
+        self._api = api
+        self._default_scenario = config.default_scenario
+        self._cwd = expand_path(api.cwd).resolve()
 
-    async def _traces_execute(args: dict[str, Any]) -> ToolResult:
+        from agentm.core.lib import resolve_observability_dir
+
+        self._obs_dir = resolve_observability_dir(self._cwd)
+
+    def install(self) -> None:
+        self._api.register_tool(
+            FunctionTool(
+                name="query_traces",
+                description=(
+                    "Filter .agentm/observability/*.jsonl traces by task_class "
+                    "and optional fingerprint. Returns summaries only — fetch "
+                    "full bodies via the `read` tool."
+                ),
+                parameters=_TracesArgs,
+                fn=self._traces_execute,
+            )
+        )
+        self._api.register_tool(
+            FunctionTool(
+                name="query_candidates",
+                description=(
+                    "Return the Pareto frontier of evolved candidates for a "
+                    "scenario. Each frontier entry lists the tasks the "
+                    "candidate uniquely wins on plus a score summary."
+                ),
+                parameters=_CandidatesArgs,
+                fn=self._candidates_execute,
+            )
+        )
+        self._api.register_tool(
+            FunctionTool(
+                name="query_module_feedback",
+                description=(
+                    "Return the recent per-module feedback distribution from "
+                    "eval-run summaries. Surfaces grader fingering so the tuner "
+                    "can round-robin its mutation target."
+                ),
+                parameters=_FeedbackArgs,
+                fn=self._feedback_execute,
+            )
+        )
+
+    async def _traces_execute(self, args: dict[str, Any]) -> ToolResult:
         task_class = str(args["task_class"])
         fingerprint_filter = args.get("fingerprint") or None
         if fingerprint_filter is not None and not isinstance(fingerprint_filter, dict):
@@ -336,11 +380,11 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
         include_eval_runs = bool(args.get("include_eval_runs", True))
         only_eval_runs = bool(args.get("only_eval_runs", False))
 
-        if not obs_dir.is_dir():
+        if not self._obs_dir.is_dir():
             return _ok(json.dumps({"traces": []}))
 
         files = sorted(
-            (p for p in obs_dir.glob("*.jsonl") if p.is_file()),
+            (p for p in self._obs_dir.glob("*.jsonl") if p.is_file()),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -368,36 +412,15 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
 
         return _ok(json.dumps({"traces": out}, indent=2))
 
-    api.register_tool(
-        FunctionTool(
-            name="query_traces",
-            description=(
-                "Filter .agentm/observability/*.jsonl traces by task_class "
-                "and optional fingerprint. Returns summaries only — fetch "
-                "full bodies via the `read` tool."
-            ),
-            parameters=_TracesArgs,
-            fn=_traces_execute,
-        )
-    )
-
-    # --- query_candidates tool --------------------------------------------
-
-    async def _candidates_execute(args: dict[str, Any]) -> ToolResult:
-        scenario = str(args.get("target_scenario") or default_scenario or "")
+    async def _candidates_execute(self, args: dict[str, Any]) -> ToolResult:
+        scenario = self._scenario_arg(args.get("target_scenario"))
         if not scenario:
             return _error(
                 "target_scenario is required (or set default_scenario at install time)"
             )
-        decisions_dir = cwd / ".agentm" / "decisions" / scenario
-        candidates_dir = decisions_dir / "candidates"
+        candidates_dir = self._cwd / ".agentm" / "decisions" / scenario / "candidates"
         if not candidates_dir.is_dir():
-            return _ok(
-                json.dumps(
-                    {"frontier": [], "dominated": []},
-                    indent=2,
-                )
-            )
+            return _ok(json.dumps({"frontier": [], "dominated": []}, indent=2))
 
         records = _load_candidates(candidates_dir)
         win_map = _compute_win_tasks(records)
@@ -438,25 +461,10 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
             )
         )
 
-    api.register_tool(
-        FunctionTool(
-            name="query_candidates",
-            description=(
-                "Return the Pareto frontier of evolved candidates for a "
-                "scenario. Each frontier entry lists the tasks the "
-                "candidate uniquely wins on plus a score summary."
-            ),
-            parameters=_CandidatesArgs,
-            fn=_candidates_execute,
-        )
-    )
-
-    # --- query_module_feedback tool ---------------------------------------
-
-    async def _feedback_execute(args: dict[str, Any]) -> ToolResult:
-        scenario = str(args.get("target_scenario") or default_scenario or "")
+    async def _feedback_execute(self, args: dict[str, Any]) -> ToolResult:
+        scenario = self._scenario_arg(args.get("target_scenario"))
         n = max(1, int(args.get("n", 20)))
-        eval_runs_dir = cwd / ".agentm" / "eval_runs"
+        eval_runs_dir = self._cwd / ".agentm" / "eval_runs"
         if not eval_runs_dir.is_dir():
             return _ok(
                 json.dumps(
@@ -509,15 +517,5 @@ def install(api: ExtensionAPI, config: QueryToolsConfig) -> None:
             )
         )
 
-    api.register_tool(
-        FunctionTool(
-            name="query_module_feedback",
-            description=(
-                "Return the recent per-module feedback distribution from "
-                "eval-run summaries. Surfaces grader fingering so the tuner "
-                "can round-robin its mutation target."
-            ),
-            parameters=_FeedbackArgs,
-            fn=_feedback_execute,
-        )
-    )
+    def _scenario_arg(self, value: Any) -> str:
+        return str(value or self._default_scenario or "")
