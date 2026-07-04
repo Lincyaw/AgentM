@@ -552,7 +552,11 @@ func (m *appModel) renderBottomActivityRows(width int) string {
 	if activityKind.hasWorkflowTasks() {
 		workflowRows = m.workflowRows()
 	}
-	activityRows, hiddenActivityCount := m.backgroundActivityRows()
+	var activityRows []backgroundActivity
+	hiddenActivityCount := 0
+	if !m.bottomActivityRowsHidden {
+		activityRows, hiddenActivityCount = m.backgroundActivityRows()
+	}
 	if len(workflowRows) == 0 && len(activityRows) == 0 {
 		return ""
 	}
