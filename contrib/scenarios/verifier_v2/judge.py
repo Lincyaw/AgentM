@@ -35,6 +35,18 @@ def build_judge_prompt(
             f"Did a fault propagate from **{task.from_entity}** to **{task.to_entity}**?"
         )
 
+    # Fault reference document — the judge must know what signal to look for
+    fault_kind = _fault_kind_for_task(case, task)
+    fault_doc = case.fault_docs.get(fault_kind, "")
+    if fault_doc:
+        sections.append(
+            f"## Fault reference: {fault_kind}\n"
+            "This describes what the data SHOULD show for this fault type. "
+            "Use it to interpret the evidence correctly — different faults "
+            "have different signatures.\n\n"
+            + fault_doc
+        )
+
     # Global context (optional — omitted for voting diversity)
     if with_global_context and task.kind == "hop":
         sections.append(_global_context(case, state, task))
@@ -187,6 +199,14 @@ Consider counter-evidence seriously. If it shows the change is global or
 timing doesn't align, that should influence your answers.
 
 If all three are "yes", also provide a predicate (failure mode classification)."""
+
+
+def _fault_kind_for_task(case: Case, task: VerificationTask) -> str:
+    """Get the fault kind for this task's source seed."""
+    for inj in case.injections:
+        if (inj.get("node_id") or inj["target"]) == task.source_seed:
+            return inj["chaos_type"]
+    return ""
 
 
 def _find_path(state: GraphState, src: str, dst: str) -> list[str]:
