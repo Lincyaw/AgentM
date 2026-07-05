@@ -167,12 +167,18 @@ def _claim_tasks(
     return claimed
 
 
+def _normalize_report(text: object) -> str:
+    """Lowercase and strip markdown decorations so 'Status: x', '**Status:** x',
+    '`Status`: x', and '- **Status**: x' all parse the same way."""
+    return re.sub(r"[*_`]", "", str(text or "")).lower()
+
+
 def _merge_status(text: object) -> str:
-    lower = str(text or "").lower()
+    normalized = _normalize_report(text)
     for status in ("merged", "failed", "conflict", "needs_human", "pending"):
-        if f"status: {status}" in lower:
+        if re.search(rf"status\s*:\s*{status}", normalized):
             return status
-    if "status: auto_merge" in lower or "status: auto-merge" in lower:
+    if re.search(r"status\s*:\s*auto[_-]merge", normalized):
         return "auto_merge"
     return "unknown"
 
@@ -427,14 +433,19 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         config_root,
         backend_error="WorkGraph merge agents require operations backend 'agent_env'",
     )
-    if _shared_attach_session_configured(operations):
+    devbox_session = str(operations.pop("devbox_session", "") or "").strip()
+    if devbox_session:
+        # Devbox mode: merge agents attach to the shared long-lived sandbox.
+        operations["attach_session"] = devbox_session
+    elif _shared_attach_session_configured(operations):
         raise RuntimeError(
             "WorkGraph merge does not accept a shared agent_env attach_session "
-            "for automatic task claiming. Use args.agent_env.image or "
+            "for automatic task claiming. Use agent_env.devbox_session for the "
+            "shared-devbox mode, or args.agent_env.image / "
             "AGENTM_AGENT_ENV_IMAGE so each claimed merge gets its own ARL "
             "sandbox."
         )
-    if not _agent_env_target_configured(operations):
+    if not devbox_session and not _agent_env_target_configured(operations):
         raise RuntimeError(
             "WorkGraph merge agents require an ARL agent_env target. "
             "Pass args.agent_env.image or set AGENTM_AGENT_ENV_IMAGE."

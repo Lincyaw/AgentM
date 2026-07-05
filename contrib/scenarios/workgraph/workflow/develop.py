@@ -170,14 +170,20 @@ def _claim_tasks(
     return claimed
 
 
+def _normalize_report(text: object) -> str:
+    """Lowercase and strip markdown decorations so 'Status: x', '**Status:** x',
+    '`Status`: x', and '- **Status**: x' all parse the same way."""
+    return re.sub(r"[*_`]", "", str(text or "")).lower()
+
+
 def _status(text: object) -> str:
-    lower = str(text or "").lower()
+    normalized = _normalize_report(text)
     for status in ("conflict", "failed", "passed", "success", "resolved"):
-        if f"status: {status}" in lower:
+        if re.search(rf"status\s*:\s*{status}", normalized):
             return status
-    if "status: needs_human" in lower:
+    if re.search(r"status\s*:\s*needs_human", normalized):
         return "needs_human"
-    if "pull request" in lower or "\npr:" in lower:
+    if "pull request" in normalized or "\npr:" in normalized:
         return "success"
     return "unknown"
 
@@ -359,7 +365,41 @@ def _context_for_task(
     task: TaskFile,
     role: str,
     extra: dict[str, object] | None = None,
+    *,
+    devbox: bool = False,
 ) -> dict[str, object]:
+    if devbox:
+        task_dir = f"/workspace/tasks/{task.task_id}"
+        execution = (
+            "Run inside a SHARED long-lived ARL devbox sandbox; other tasks "
+            "run here concurrently. Your isolated workspace for this task is "
+            f"{task_dir} — never read or write any other /workspace/tasks/ "
+            "directory, and never work outside your workspace except shared "
+            "caches. If your workspace already exists from a previous "
+            "attempt, inspect its state (git status/log) and CONTINUE from "
+            "that progress instead of restarting. Otherwise clone the "
+            "repository there. Shared build caches (~/.m2, ~/.cargo, pip and "
+            "npm caches) are warm — reuse them; do not clear them. "
+            "Do not use the host/control repository as the worktree. Include "
+            "AgentEnvSession in the final response so this workflow can "
+            "reuse the sandbox for follow-up agent calls in the same task. "
+            "Use repository credentials only when the scenario, image, or "
+            "ARL config_env provides them inside the sandbox, and never "
+            "print those credentials. A coder success requires Remote or PR "
+            "to be non-empty; a sandbox-local commit without a pushed branch "
+            "is a failed delivery."
+        )
+    else:
+        execution = (
+            "Run inside the ARL agent_env sandbox. Do not use the host/control "
+            "repository as the worktree. Include AgentEnvSession in the final "
+            "response so this workflow can reuse the sandbox for follow-up "
+            "agent calls in the same task. Use repository credentials only "
+            "when the scenario, image, or ARL config_env provides them inside "
+            "the sandbox, and never print those credentials. A coder success "
+            "requires Remote or PR to be non-empty; a sandbox-local commit "
+            "without a pushed branch is a failed delivery."
+        )
     context: dict[str, object] = {
         "role": role,
         "task_id": task.task_id,
@@ -369,16 +409,7 @@ def _context_for_task(
         "base": task.base,
         "locks": task.locks,
         "validation": task.validation,
-        "execution": (
-            "Run inside the ARL agent_env sandbox. Do not use the host/control "
-            "repository as the worktree. Include AgentEnvSession in the final "
-            "response so this workflow can reuse the sandbox for follow-up "
-            "agent calls in the same task. Use repository credentials only "
-            "when the scenario, image, or ARL config_env provides them inside "
-            "the sandbox, and never print those credentials. A coder success "
-            "requires Remote or PR to be non-empty; a sandbox-local commit "
-            "without a pushed branch is a failed delivery."
-        ),
+        "execution": execution,
     }
     if extra:
         context.update(extra)
@@ -407,7 +438,8 @@ async def _run_one(
         ctx.args.get("verifier_scenario"),
         DEFAULT_VERIFIER_SCENARIO,
     )
-    timeout = _as_float(ctx.args.get("agent_timeout_seconds"), 3600.0)
+    timeout = _as_float(ctx.args.get("agent_timeout_seconds"), 7200.0)
+    devbox = bool(operations.get("attach_session"))
     agent_env_session = ""
 
     try:
@@ -417,7 +449,7 @@ async def _run_one(
             scenario=coder_scenario,
             atom_config=_atom_config(
                 _operations_for_session(operations, agent_env_session),
-                _context_for_task(task, "coder"),
+                _context_for_task(task, "coder", devbox=devbox),
             ),
             timeout=timeout,
             schema=CoderReport,
@@ -470,6 +502,7 @@ async def _run_one(
                             "coder_result": coder_text,
                             "agent_env_session": agent_env_session,
                         },
+                        devbox=devbox,
                     ),
                 ),
                 timeout=timeout,
@@ -487,6 +520,21 @@ async def _run_one(
                 if isinstance(verifier_result, VerifierReport)
                 else _status(verifier_text)
             )
+            if verifier_status == "passed" and re.search(
+                r"^\s*[-*]?\s*\[blocker\]", verifier_text, re.IGNORECASE | re.MULTILINE
+            ):
+                # Verdict discipline enforced in code: the verifier prompt says
+                # blockers MUST fail the delivery, but models have reported
+                # passed alongside blocker findings. The finding list wins.
+                ctx.log(
+                    f"{task.task_id}: verifier reported passed but listed "
+                    "[blocker] findings; downgrading to failed"
+                )
+                verifier_text = (
+                    "Status: failed (downgraded by workflow: [blocker] findings "
+                    "present despite passed verdict)\n\n" + verifier_text
+                )
+                verifier_status = "failed"
             final_status = "verified" if verifier_status == "passed" else "failed"
 
         _write_result(root, task, coder_text, verifier_text, agent_env_session)
@@ -542,15 +590,22 @@ async def run(ctx: WorkflowContext) -> dict[str, Any]:
         config_root,
         backend_error="WorkGraph development workers require operations backend 'agent_env'",
     )
-    if _shared_attach_session_configured(operations):
+    devbox_session = str(operations.pop("devbox_session", "") or "").strip()
+    if devbox_session:
+        # Devbox mode: all agents attach to one long-lived shared sandbox
+        # (no per-hour lifetime, warm build caches); tasks isolate via
+        # per-task workspaces under /workspace/tasks/<task-id>.
+        operations["attach_session"] = devbox_session
+    elif _shared_attach_session_configured(operations):
         raise RuntimeError(
             "WorkGraph develop does not accept a shared agent_env attach_session "
-            "for automatic task claiming. Use args.agent_env.image or "
+            "for automatic task claiming. Use agent_env.devbox_session for the "
+            "shared-devbox mode, or args.agent_env.image / "
             "AGENTM_AGENT_ENV_IMAGE so each claimed task gets its own ARL "
             "sandbox; the workflow only attaches follow-up agents to a "
             "per-task sandbox recorded under results/<task-id>/."
         )
-    if not _agent_env_target_configured(operations):
+    if not devbox_session and not _agent_env_target_configured(operations):
         raise RuntimeError(
             "WorkGraph development workers require an ARL agent_env target. "
             "Pass args.agent_env.image or set AGENTM_AGENT_ENV_IMAGE."

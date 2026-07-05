@@ -207,7 +207,9 @@ def _safe_lock_name(lock: str) -> str:
 def _report_field(text: str, name: str) -> str:
     target = name.lower()
     for raw_line in text.splitlines():
-        key, separator, value = raw_line.partition(":")
+        line = re.sub(r"[*_`]", "", raw_line).strip()
+        line = re.sub(r"^[-•]\s*", "", line)
+        key, separator, value = line.partition(":")
         if separator and key.strip().lower() == target:
             return value.strip()
     return ""
