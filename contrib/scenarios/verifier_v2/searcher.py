@@ -54,11 +54,14 @@ def build_searcher_prompt(
     if multi_fault_ctx:
         sections.append(multi_fault_ctx)
 
-    # 4. Available data
+    # 4. Available data: schema + profile stats
+    schema_section = _schema_section(case)
+    if schema_section:
+        sections.append(schema_section)
     profile_context = _profile_context(case, task)
     if profile_context:
         sections.append(
-            "## Available data\n```json\n"
+            "## Service stats (pre-computed)\n```json\n"
             + json.dumps(profile_context, indent=2, ensure_ascii=False, default=str)[:2000]
             + "\n```"
         )
@@ -168,6 +171,27 @@ def _profile_context(case: Case, task: VerificationTask) -> dict[str, Any]:
             context[f"{modality}_stats"] = relevant
 
     return context
+
+
+def _schema_section(case: Case) -> str:
+    """Pre-computed table schemas — eliminates SHOW TABLES + DESCRIBE round trips."""
+    table_info = case.data_profile.get("structure", {}).get("tables", {})
+    if not table_info:
+        return ""
+
+    lines = [
+        "## Database schema (pre-computed — do NOT run SHOW TABLES or DESCRIBE)",
+        "These are the available DuckDB views over parquet files. "
+        "Use these column names directly in your SQL queries.",
+        "",
+    ]
+    for table, info in sorted(table_info.items()):
+        cols = info.get("columns", [])
+        rows = info.get("row_count")
+        row_str = f" ({rows} rows)" if rows is not None else ""
+        lines.append(f"**{table}**{row_str}: {', '.join(cols)}")
+
+    return "\n".join(lines)
 
 
 def _multi_fault_context(
