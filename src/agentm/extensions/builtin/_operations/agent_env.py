@@ -60,6 +60,7 @@ class AgentEnvConfig(BaseModel):
     memory_request: str | None = None
     memory_limit: str | None = None
     delete_on_shutdown: bool | None = None
+    private_containers: list[dict[str, Any]] | None = None
 
 
 def _normalize_work_dir(work_dir: str) -> str:
@@ -905,6 +906,13 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
         owned = False
         logger.info("agent_env: attached to existing sandbox {}", config.attach_session)
     elif config.image:
+        # Filter private_containers: only include entries with both name and image.
+        pcs = [
+            pc for pc in (config.private_containers or [])
+            if pc.get("name") and pc.get("image")
+        ] or None
+        if pcs:
+            logger.info("agent_env: private_containers={}", pcs)
         managed_cls = _arl_class(arl, "ManagedSession", "AsyncManagedSession")
         session = managed_cls(
             image=config.image,
@@ -918,10 +926,12 @@ async def install_agent_env(api: ExtensionAPI, config: AgentEnvConfig) -> None:
             config_env=config.config_env,
             idle_timeout_seconds=config.idle_timeout_seconds,
             max_lifetime_seconds=config.max_lifetime_seconds,
+            private_containers=pcs,
         )
     else:
         raise RuntimeError(
-            "operations backend 'agent_env': 'image' or 'attach_session' required"
+            "operations backend 'agent_env': 'image' or 'attach_session' required. "
+            "Set via manifest config or ${AGENTM_AGENT_ENV_IMAGE} in the config value."
         )
 
     if owned:

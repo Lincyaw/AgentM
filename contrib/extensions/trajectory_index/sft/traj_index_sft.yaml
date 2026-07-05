@@ -1,0 +1,94 @@
+experiment_name: traj-index-sft
+trial_name: trial0
+
+seed: 42
+enable_offload: false
+total_train_epochs: 3
+tokenizer_path: ${actor.path}
+
+cluster:
+  n_nodes: 1
+  n_gpus_per_node: 2
+  fileroot: /tmp/areal/experiments
+  name_resolve:
+    type: nfs
+    nfs_record_root: /tmp/areal/name_resolve
+
+scheduler:
+  type: local
+
+actor:
+  backend: "fsdp:d2p1t1"
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  path: Qwen/Qwen3.5-2B
+  init_from_scratch: false
+  gradient_checkpointing: true
+  dtype: bfloat16
+  attn_impl: sdpa
+  mb_spec:
+    max_tokens_per_mb: 5120
+  optimizer:
+    type: adam
+    lr: 1e-5
+    weight_decay: 0.05
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1e-5
+    lr_scheduler_type: cosine
+    gradient_clipping: 1.0
+    warmup_steps_proportion: 0.05
+  scheduling_spec:
+    - task_type: worker
+      port_count: 2
+      gpu: 1
+      mem: 32
+      cmd: python3 -m areal.infra.rpc.rpc_server
+      env_vars: {}
+
+train_dataset:
+  batch_size: 8
+  shuffle: true
+  pin_memory: true
+  num_workers: 4
+  path: /home/ddq/AoyangSpace/AgentM/datasets/trajectory_index_sft/train
+  type: sft
+
+valid_dataset:
+  batch_size: 8
+  pin_memory: true
+  num_workers: 4
+  path: /home/ddq/AoyangSpace/AgentM/datasets/trajectory_index_sft/train
+  type: sft
+
+saver:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: null
+
+recover:
+  mode: disabled
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: 3600
+
+evaluator:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  freq_epochs: 1
+  freq_steps: null
+  freq_secs: null
+
+stats_logger:
+  experiment_name: ${experiment_name}
+  trial_name: ${trial_name}
+  fileroot: ${cluster.fileroot}
+  wandb:
+    mode: disabled

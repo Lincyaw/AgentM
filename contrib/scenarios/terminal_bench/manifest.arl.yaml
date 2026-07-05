@@ -9,11 +9,18 @@ extensions:
   - module: agentm.extensions.builtin.operations
     config:
       backend: agent_env
+      image: ${AGENTM_AGENT_ENV_IMAGE}
+      experiment_id: ${AGENTM_AGENT_ENV_EXPERIMENT_ID}
+      delete_on_shutdown: ${AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN}
+      idle_timeout_seconds: 7200
+      max_lifetime_seconds: 14400
+      private_containers:
+        - name: eval
+          image: ${AGENTM_AGENT_ENV_EVAL_IMAGE}
+          mountWorkspace: true
+          workspaceMountPath: /app
+          workspaceAccess: readWrite
       work_dir: /app
-      cpu_request: "1"
-      cpu_limit: "2"
-      memory_request: 512Mi
-      memory_limit: 2Gi
   - module: agentm.extensions.builtin.tool_result_cap
     config:
       max_tokens: 50000

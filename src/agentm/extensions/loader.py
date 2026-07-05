@@ -40,6 +40,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,30 @@ from loguru import logger
 from agentm.core.abi import ExtensionLoadError
 from agentm.core.lib import expand_path
 from agentm.extensions import ExtensionManifest
+
+_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _expand_env(value: Any) -> Any:
+    """Recursively expand ``${VAR}`` references in config values.
+
+    - A string that is *exactly* ``${VAR}`` resolves to the env var's value
+      (preserving type: an unset var yields ``None``, removing the key from
+      the config so the atom sees its own default).
+    - A string *containing* ``${VAR}`` among other text does substring
+      replacement (result is always a string; unset vars become empty).
+    - Non-string scalars, lists, and nested dicts are traversed recursively.
+    """
+    if isinstance(value, str):
+        m = _ENV_VAR_RE.fullmatch(value)
+        if m:
+            return os.environ.get(m.group(1))
+        return _ENV_VAR_RE.sub(lambda m: os.environ.get(m.group(1), ""), value)
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items() if _expand_env(v) is not None}
+    if isinstance(value, list):
+        return [v for item in value if (v := _expand_env(item)) is not None]
+    return value
 
 class ScenarioLoadError(ExtensionLoadError):
     """Raised when a scenario YAML cannot be resolved or validated."""
@@ -570,7 +595,9 @@ def _parse_extensions(
                 ValueError(_entry_error(index, "must be a mapping")),
             )
 
-        config = item.get("config", {})
+        config = _expand_env(item.get("config", {}))
+        if "operations" in str(item.get("module", "")):
+            logger.debug("loader: operations config after _expand_env: {}", config)
         if not isinstance(config, dict):
             raise ScenarioLoadError(
                 source,

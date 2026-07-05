@@ -9,6 +9,7 @@ extensions:
   - module: agentm.extensions.builtin.operations
     config:
       backend: agent_env
+      image: ${AGENTM_AGENT_ENV_IMAGE}
       work_dir: /app
   - module: agentm.extensions.builtin.tool_result_cap
     config:

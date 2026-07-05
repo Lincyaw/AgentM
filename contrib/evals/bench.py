@@ -29,7 +29,7 @@ import typer
 from loguru import logger
 
 from benchmarks import get_adapter
-from benchmarks.base import TaskSpec, eval_image_name, image_name, replay_trajectory
+from benchmarks.base import TaskSpec, eval_image_name, image_name
 
 try:
     import yaml as _yaml
@@ -247,18 +247,14 @@ _active_eval_lock = __import__("threading").Lock()
 class _RunEvalConfig:
     adapter: Any
     model: str
-    gateway: str
     registry: str
     prefix: str
     tag: str
     eval_timeout: int
     agent_timeout: int
-    agent_env_create_timeout: int
-    api_key: str
     scenario: str
     run_id: str
-    private_eval: bool
-    private_eval_container: str
+    prompt_prefix: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,16 +310,15 @@ def _run_and_eval_one(
     name = task.name
     log = job.out / f"{name}.log"
     score_file = job.out / f"{name}.score.json"
-    agent_exp_id, eval_exp_id = _experiment_ids(
+    agent_exp_id = _experiment_ids(
         config.prefix,
         config.model,
         config.run_id,
         name,
         job.experiment_attempt_idx,
-    )
+    )[0]
 
     image = adapter.get_image(task, config.registry, config.prefix, config.tag)
-    profile = os.environ.get("AGENTM_AGENT_ENV_PROFILE")
 
     # --- Agent phase ---
     session_id = None
@@ -332,7 +327,11 @@ def _run_and_eval_one(
         raw = log.read_bytes()
         agent_timed_out = b"[bench] agent timeout" in raw
         if not any(marker in raw for marker in _INFRA_RETRY_LOG_MARKERS):
-            m = re.search(rb"(?:session_id=|session id:\s*)(\S+)", raw)
+            # Only match the completion summary line (session_id=xxx at EOF),
+            # NOT the startup log line (session id: xxx). The startup line
+            # appears immediately; matching it on a re-invocation would skip
+            # the agent phase while the subprocess is still running.
+            m = re.search(rb"^session_id=(\S+)", raw, re.MULTILINE)
             if m:
                 session_id = m.group(1).decode()
 
@@ -340,42 +339,28 @@ def _run_and_eval_one(
         prompt = task.prompt
         if not prompt:
             return {"task": name, "status": "no_instruction"}
+        if config.prompt_prefix:
+            prompt = f"{config.prompt_prefix}\n\n{prompt}"
 
-        idle_timeout = max(
-            3600,
-            config.agent_timeout * 2 if config.agent_timeout > 0 else 0,
-        )
-        max_lifetime = max(
-            7200,
-            config.agent_timeout * 3 if config.agent_timeout > 0 else 0,
-        )
+        # If a log exists without completion marker, the previous agent may
+        # still be running (orphaned by a pkill). Clean up its sandbox before
+        # starting a fresh attempt.
+        if log.is_file():
+            try:
+                client = arl.GatewayClient()
+                client.delete_experiment(agent_exp_id)
+                client.close()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("orphan cleanup {}: {}", agent_exp_id, e)
+            log.unlink(missing_ok=True)
+
+        eval_image = adapter.get_eval_image(task, config.registry, config.prefix, config.tag)
         env = {
             **os.environ,
             "AGENTM_AGENT_ENV_IMAGE": image,
-            "AGENTM_AGENT_ENV_GATEWAY_URL": config.gateway,
+            "AGENTM_AGENT_ENV_EVAL_IMAGE": eval_image,
             "AGENTM_AGENT_ENV_EXPERIMENT_ID": agent_exp_id,
-            "AGENTM_AGENT_ENV_CPU_REQUEST": "1",
-            "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
-            "AGENTM_AGENT_ENV_MEMORY_REQUEST": "2Gi",
-            "AGENTM_AGENT_ENV_MEMORY_LIMIT": "16Gi",
-            "AGENTM_AGENT_ENV_IDLE_TIMEOUT_SECONDS": os.environ.get(
-                "AGENTM_AGENT_ENV_IDLE_TIMEOUT_SECONDS",
-                str(idle_timeout),
-            ),
-            "AGENTM_AGENT_ENV_MAX_LIFETIME_SECONDS": os.environ.get(
-                "AGENTM_AGENT_ENV_MAX_LIFETIME_SECONDS",
-                str(max_lifetime),
-            ),
-            "AGENTM_AGENT_ENV_CREATE_TIMEOUT": os.environ.get(
-                "AGENTM_AGENT_ENV_CREATE_TIMEOUT",
-                str(config.agent_env_create_timeout),
-            ),
-            "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN": os.environ.get(
-                "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN",
-                "false",
-            ),
-            **({"AGENTM_AGENT_ENV_PROFILE": profile} if profile else {}),
-            **({"AGENTM_AGENT_ENV_API_KEY": config.api_key} if config.api_key else {}),
+            "AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN": "false",
         }
         cmd = [
             "uv", "run", "agentm",
@@ -413,7 +398,9 @@ def _run_and_eval_one(
                     _active_procs.discard(proc)
 
         raw = log.read_bytes()
-        m = re.search(rb"(?:session_id=|session id:\s*)(\S+)", raw)
+        m = re.search(rb"^session_id=(\S+)", raw, re.MULTILINE)
+        if not m:
+            m = re.search(rb"session id:\s*(\S+)", raw)
         if m:
             session_id = m.group(1).decode()
 
@@ -423,96 +410,32 @@ def _run_and_eval_one(
     tools_m = re.search(rb"tool_calls=(\d+)", log.read_bytes())
     tools_count = tools_m.group(1).decode() if tools_m else "?"
 
-    # --- Eval phase ---
-    wanted_eval_mode = _eval_mode(config.private_eval)
-    evaluate_private = getattr(adapter, "evaluate_private_container", None)
-    if config.private_eval and not callable(evaluate_private):
-        return {
-            "task": name,
-            "status": "eval_failed",
-            "tools": tools_count,
-            "error": f"{type(adapter).__name__} does not support private eval",
-        }
+    # --- Eval phase (in-place: reuse the agent's sandbox) ---
     if score_file.is_file():
         cached_scores = json.loads(score_file.read_text())
-        cached_eval_mode = cached_scores.get("eval_mode", "uploaded_tests")
-        if cached_eval_mode == wanted_eval_mode:
-            return {"task": name, "status": "done", "tools": tools_count, **cached_scores}
+        return {"task": name, "status": "done", "tools": tools_count, **cached_scores}
 
-    from arl.session import ResourceRequirements  # type: ignore[import-not-found]
-    eval_idle_timeout = max(3600, config.eval_timeout * 2)
-    eval_max_lifetime = max(7200, config.eval_timeout * 3)
-    private_containers: list[dict[str, Any]] | None = None
-    if config.private_eval:
-        private_containers = [
-            _private_eval_container(
-                adapter,
-                task,
-                config.registry,
-                config.prefix,
-                config.tag,
-                container=config.private_eval_container,
-            ),
-        ]
-
-    session_kwargs = {
-        "image": image,
-        "experiment_id": eval_exp_id,
-        "gateway_url": config.gateway,
-        "workspace_dir": "/app",
-        "api_key": config.api_key or None,
-        "profile": profile or "default",
-        "timeout": max(600.0, config.eval_timeout * 2.0),
-        "idle_timeout_seconds": eval_idle_timeout,
-        "max_lifetime_seconds": eval_max_lifetime,
-        "resources": ResourceRequirements(
-            requests={"cpu": "1", "memory": "2Gi"},
-            limits={"cpu": "8", "memory": "16Gi"},
-        ),
-    }
-    if private_containers is not None:
-        session_kwargs["private_containers"] = private_containers
-    supported_session_kwargs = _filter_supported_kwargs(arl.ManagedSession, session_kwargs)
-    if config.private_eval and "private_containers" not in supported_session_kwargs:
-        return {
-            "task": name,
-            "status": "eval_create_failed",
-            "tools": tools_count,
-            "error": "installed arl-env SDK does not support private_containers",
-        }
-    session = arl.ManagedSession(
-        **supported_session_kwargs
-    )
+    # Find the agent's ARL sandbox session via experiment_id.
+    client = arl.GatewayClient()
     try:
-        session.create_sandbox()
+        agent_arl_sessions = client.list_experiment_sessions(agent_exp_id)
     except Exception as e:
-        client = arl.GatewayClient(
-            base_url=config.gateway,
-            api_key=config.api_key or None,
-        )
-        try:
-            for exp_id in (eval_exp_id, agent_exp_id):
-                try:
-                    client.delete_experiment(exp_id)
-                except Exception as cleanup_exc:  # noqa: BLE001
-                    typer.echo(f"  [WARN] cleanup {exp_id}: {cleanup_exc}", err=True)
-        finally:
-            client.close()
-        return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": str(e)}
+        client.close()
+        return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": f"list sessions: {e}"}
+    if not agent_arl_sessions:
+        client.close()
+        return {"task": name, "status": "eval_create_failed", "tools": tools_count, "error": "no ARL session for agent"}
+    arl_session_id = agent_arl_sessions[0].id
 
+    session = arl.SandboxSession.attach(arl_session_id)
     with _active_eval_lock:
         _active_eval_sessions.add(session)
     scores: dict[str, Any] | None = None
     eval_error: Exception | None = None
     try:
-        replay_trajectory(session, session_id)
-        if config.private_eval:
-            scores = cast(Callable[..., dict], evaluate_private)(
-                session,
-                task,
-                container=config.private_eval_container,
-                timeout=config.eval_timeout,
-            )
+        evaluate_fn = getattr(adapter, "evaluate_private_container", None)
+        if callable(evaluate_fn):
+            scores = evaluate_fn(session, task, container="eval", timeout=config.eval_timeout)
         else:
             scores = adapter.evaluate(session, task, timeout=config.eval_timeout)
     except Exception as e:
@@ -521,14 +444,6 @@ def _run_and_eval_one(
     finally:
         with _active_eval_lock:
             _active_eval_sessions.discard(session)
-        client = arl.GatewayClient(
-            base_url=config.gateway,
-            api_key=config.api_key or None,
-        )
-        try:
-            client.delete_experiment(eval_exp_id)
-        except Exception as e:  # noqa: BLE001
-            typer.echo(f"  [WARN] cleanup {eval_exp_id}: {e}", err=True)
         try:
             client.delete_experiment(agent_exp_id)
         except Exception as e:  # noqa: BLE001
@@ -551,7 +466,7 @@ def _run_and_eval_one(
 
     if scores.get("reward") is None:
         scores["reward"] = 0.0
-    scores.setdefault("eval_mode", wanted_eval_mode)
+    scores.setdefault("eval_mode", "in_place")
     if agent_timed_out:
         scores["agent_timed_out"] = True
 
@@ -865,17 +780,7 @@ def run(
     env = {
         **os.environ,
         "AGENTM_AGENT_ENV_IMAGE": image,
-        "AGENTM_AGENT_ENV_GATEWAY_URL": gateway,
         "AGENTM_AGENT_ENV_EXPERIMENT_ID": f"{prefix}-{task}",
-        "AGENTM_AGENT_ENV_CPU_REQUEST": "1",
-        "AGENTM_AGENT_ENV_CPU_LIMIT": "8",
-        "AGENTM_AGENT_ENV_MEMORY_REQUEST": "2Gi",
-        "AGENTM_AGENT_ENV_MEMORY_LIMIT": "16Gi",
-        **(
-            {"AGENTM_AGENT_ENV_PROFILE": os.environ["AGENTM_AGENT_ENV_PROFILE"]}
-            if os.environ.get("AGENTM_AGENT_ENV_PROFILE")
-            else {}
-        ),
     }
     result = subprocess.run([
         "uv", "run", "agentm", "--scenario", DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
@@ -890,7 +795,6 @@ def batch(
     source: Annotated[str | None, typer.Option("--source")] = None,
     bench: Annotated[str, typer.Option("--bench")] = "tb1",
     model: Annotated[str, typer.Option()] = "glm47",
-    gateway: Annotated[str, typer.Option()] = "http://localhost:28080",
     registry: Annotated[str, typer.Option()] = DEFAULT_IMAGE_REGISTRY,
     prefix: Annotated[str, typer.Option()] = "longcli",
     tag: Annotated[str, typer.Option()] = "v0",
@@ -898,29 +802,16 @@ def batch(
     results_dir: Annotated[Path, typer.Option("--results")] = Path("/tmp/bench-results"),
     eval_timeout: Annotated[int, typer.Option("--eval-timeout")] = 300,
     agent_timeout: Annotated[int, typer.Option("--agent-timeout")] = 0,
-    agent_env_create_timeout: Annotated[int, typer.Option("--agent-env-create-timeout")] = 1200,
     task: Annotated[list[str] | None, typer.Option("--task", "-t")] = None,
-    api_key: Annotated[str, typer.Option("--api-key", envvar="AGENTM_AGENT_ENV_API_KEY")] = "",
     attempts: Annotated[int, typer.Option("--attempts", "-n")] = 1,
     scenario: Annotated[str, typer.Option("--scenario")] = DEFAULT_REMOTE_TERMINAL_BENCH_SCENARIO,
     run_id: Annotated[str | None, typer.Option("--run-id")] = None,
-    private_eval: Annotated[
-        bool,
-        typer.Option(
-            "--private-eval",
-            envvar="AGENTM_BENCH_PRIVATE_EVAL",
-            help="Evaluate with a paired private container image instead of uploading tests.",
-        ),
-    ] = False,
-    private_eval_container: Annotated[
-        str,
-        typer.Option(
-            "--private-eval-container",
-            help="Private container name used for evaluator execution.",
-        ),
-    ] = "eval",
+    prompt_prefix: Annotated[str, typer.Option("--prompt-prefix")] = "",
 ) -> None:
     """Run all tasks in parallel, then evaluate. Results include scores.
+
+    Eval runs in-place inside the agent's sandbox — no second pod, no
+    trajectory replay. The sandbox is deleted after scoring.
 
     With --attempts N, runs N independent attempts per task and computes
     pass@k metrics. Results are stored in attempt_0/ .. attempt_{N-1}/.
@@ -933,12 +824,6 @@ def batch(
 
     resolved_source = _resolve_source(repo, source, bench)
     adapter = get_adapter(bench)
-    if private_eval and not callable(getattr(adapter, "evaluate_private_container", None)):
-        typer.echo(
-            f"Error: {bench} adapter does not support --private-eval.",
-            err=True,
-        )
-        raise typer.Exit(1)
     tasks = adapter.discover_tasks(resolved_source)
     if task:
         tasks = [t for t in tasks if t.name in task]
@@ -959,12 +844,12 @@ def batch(
             _terminate_process_group(p, grace_seconds=5.0)
 
     def _cleanup_experiments(
-        gw: str, key: str, pfx: str, mdl: str, rid: str,
+        pfx: str, mdl: str, rid: str,
         task_list: list[TaskSpec], n_attempts: int,
     ) -> None:
         try:
             import arl
-            client = arl.GatewayClient(base_url=gw, api_key=key or None)
+            client = arl.GatewayClient()
             cleaned = 0
             for t in task_list:
                 for attempt_idx in range(n_attempts):
@@ -1048,7 +933,7 @@ def batch(
         f"Batch: {len(tasks)} tasks × {attempts} attempt(s) = {total_jobs} jobs | "
         f"bench={bench} | model={model} | concurrency={concurrency}"
         + (f" | agent_timeout={agent_timeout}s" if agent_timeout > 0 else "")
-        + (" | private_eval" if private_eval else "")
+        + " | in-place eval"
     )
     typer.echo(f"Run id: {resolved_run_id}")
     typer.echo(f"Results: {base_out}")
@@ -1057,18 +942,14 @@ def batch(
     run_config = _RunEvalConfig(
         adapter=adapter,
         model=model,
-        gateway=gateway,
         registry=registry,
         prefix=prefix,
         tag=tag,
         eval_timeout=eval_timeout,
         agent_timeout=agent_timeout,
-        agent_env_create_timeout=agent_env_create_timeout,
-        api_key=api_key,
         scenario=scenario,
         run_id=resolved_run_id,
-        private_eval=private_eval,
-        private_eval_container=private_eval_container,
+        prompt_prefix=prompt_prefix,
     )
 
     # Collect results per attempt
@@ -1099,7 +980,7 @@ def batch(
     finally:
         signal.signal(signal.SIGINT, prev_handler)
         _cleanup_eval_sessions()
-        _cleanup_experiments(gateway, api_key, prefix, model, resolved_run_id, tasks, attempts)
+        _cleanup_experiments(prefix, model, resolved_run_id, tasks, attempts)
 
     # Per-attempt summaries
     for attempt_idx in range(attempts):

@@ -14,7 +14,7 @@ prevents auto-discovery as separate atoms).
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -42,6 +42,7 @@ class OperationsConfig(BaseModel):
     memory_request: str | None = None
     memory_limit: str | None = None
     delete_on_shutdown: bool | None = None
+    private_containers: list[dict[str, Any]] | None = None
 
 
 MANIFEST = ExtensionManifest(

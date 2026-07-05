@@ -54,6 +54,8 @@ class LLMHarnessConfig(BaseModel):
     finalize_tool: str | None = None
     enable_methodology: bool = False
     methodology_model: str | None = None
+    enable_index: bool = False
+    index_model: str | None = None
 
 
 REMINDER_OPEN: Final = "<system-reminder>\n"
@@ -403,6 +405,39 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
         if auditor_due and cfg.enable_methodology and not cached_methodology:
             cached_methodology = await _generate_methodology(messages)
 
+        # --- Index extraction (optional, before auditor) ---
+        context_index: dict[str, Any] | None = None
+        if auditor_due and cfg.enable_index:
+            try:
+                from trajectory_index.atom import _run_extraction
+                from trajectory_index.data import resolve_provider as _resolve_idx_provider
+                from llmharness.context_index import build_context_index
+
+                idx_provider = None
+                if cfg.index_model:
+                    try:
+                        idx_provider = _resolve_idx_provider(cfg.index_model)
+                    except Exception:
+                        logger.warning("llmharness: index_model {!r} not found, skipping index", cfg.index_model)
+
+                traj = _serialize_trajectory(messages)
+                extraction = await _run_extraction(api, traj, idx_provider)
+                if extraction is not None:
+                    symbols = [s.model_dump() for s in extraction.symbols]
+                    references = [r.model_dump() for r in extraction.references]
+                    ci = build_context_index(
+                        trajectory=traj,
+                        symbols=symbols,
+                        references=references,
+                    )
+                    context_index = ci.to_dict()
+                    logger.info(
+                        "llmharness: index built — {} entities, {} observations",
+                        len(ci.entities), len(ci.observations),
+                    )
+            except Exception:
+                logger.warning("llmharness: index extraction failed, auditor will run without index")
+
         # --- Auditor ---
         if auditor_due:
             auditor_config: dict[str, Any] = {
@@ -411,6 +446,9 @@ def install(api: ExtensionAPI, config: LLMHarnessConfig) -> None:
             }
             if cached_methodology:
                 auditor_config["methodology"] = cached_methodology
+            if context_index is not None:
+                auditor_config["context_index"] = context_index
+                auditor_config["trajectory_snapshot"] = _serialize_trajectory(messages)
 
             child_msgs = await _run_child(
                 api,

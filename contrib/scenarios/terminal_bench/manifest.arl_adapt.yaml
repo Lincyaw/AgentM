@@ -7,6 +7,17 @@ extensions:
   - module: agentm.extensions.builtin.operations
     config:
       backend: agent_env
+      image: ${AGENTM_AGENT_ENV_IMAGE}
+      experiment_id: ${AGENTM_AGENT_ENV_EXPERIMENT_ID}
+      delete_on_shutdown: ${AGENTM_AGENT_ENV_DELETE_ON_SHUTDOWN}
+      idle_timeout_seconds: 7200
+      max_lifetime_seconds: 14400
+      private_containers:
+        - name: eval
+          image: ${AGENTM_AGENT_ENV_EVAL_IMAGE}
+          mountWorkspace: true
+          workspaceMountPath: /app
+          workspaceAccess: readWrite
       work_dir: /app
   - module: agentm.extensions.builtin.tool_result_cap
     config:
@@ -22,58 +33,15 @@ extensions:
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
-        You are working in a task workspace at /app. File and shell tools
-        operate in that workspace. Treat relative task paths as relative to
-        /app unless the task explicitly says otherwise.
-
-        Capability map:
-        - Workspace tools read, search, edit, create, and run project files.
-          Use them for repository exploration, code changes, local helper
-          scripts, focused reproducers, static checks, and validation commands.
-        - Background execution tools run long checks without blocking the
-          conversation. Use them for commands that may take minutes, then poll
-          their status and inspect output before acting on the result.
-        - Runtime adaptation tools let you observe and extend your own runtime.
-          Use them when workspace scripts cannot expose enough signal about
-          tool use, tool failures, repeated mistakes, runtime diagnostics, or
-          whether your custom extension actually loaded.
-
-        Self-observation:
-        - At the start of the task, call adapt_status and
-          adapt_list_events(visibility="recommended"). Use the returned
-          runtime state and event catalog to decide whether a workspace helper
-          is enough or a runtime observer atom would provide useful signal.
-        - Observe task state with workspace tools: files, logs, command output,
-          process status, test artifacts, and validation results.
-        - Observe your own tool-use behavior with runtime events. Event
-          observers are useful for tracking failed tool calls, repeated command
-          patterns, validation summaries, long-running checks, or extension
-          load/reload diagnostics across turns.
-        - Turn an observation into a reusable tool when repeated manual
-          inspection becomes expensive: write a small workspace script for
-          project data, or write a runtime atom that subscribes to events,
-          stores a compact state summary, and registers a tool you can call
-          later.
-
-        Feedback-loop contract:
-        Before risky task edits, establish the smallest useful feedback loop.
-        A feedback loop is valid only after you have run a smoke check and
-        confirmed what signal it gives. State the assumption behind the loop,
-        what command or tool checks it, and what result would change your plan.
-
-        Runtime-extension contract:
-        Runtime extensions are optional and must earn their complexity. If one
-        is useful, write its source in the task workspace, install or reload it
-        with the file-based adaptation tool, and verify that the install
-        returned ok before relying on it. If validation fails, inspect the
-        diagnostics, fix and reload it, or fall back to a workspace helper.
-        When the same command, tool call, or validation path fails repeatedly,
-        inspect adapt_events and the relevant event schema before repeating the
-        same action again.
-
-        When information is missing, tools fail, or evidence contradicts an
-        earlier assumption, make the blocked assumption explicit and gather the
-        smallest additional evidence needed before continuing.
+        You are working on a Terminal Bench task in a remote ARL sandbox.
+        Your file and shell tools execute inside that sandbox, not in the
+        host AgentM repository. The sandbox working directory is /app. Treat
+        relative paths such as INSTRUCTION.md and task project directories as
+        relative to /app.
+        Terminal Bench validation commands can be slow. For xv6/qemu tests,
+        use generous timeouts, typically 1200 seconds or more, and do not wrap
+        validation commands in shorter shell-level timeout limits unless the
+        task explicitly requires it.
 
   - module: agentm.extensions.builtin.llm_compaction
     config:

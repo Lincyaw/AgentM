@@ -236,26 +236,20 @@ def resolve_provider(model_name: str) -> ProviderSpec:
     raise RuntimeError(f"no extension module for provider {profile.provider!r}")
 
 
-def _extraction_response_format() -> dict[str, JsonValue]:
-    """Build an OpenAI Chat Completions json_schema response_format."""
-    from agentm.core.lib.tool_schema import _force_strict, pydantic_to_tool_schema
-
-    schema = cast(dict[str, JsonValue], _force_strict(pydantic_to_tool_schema(ExtractionResult)))
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "trajectory_extraction_result",
-            "strict": True,
-            "schema": schema,
-        },
-    }
-
 
 def _inject_response_format(config: dict[str, JsonValue]) -> None:
-    """Ask OpenAI-compatible providers to enforce extractor JSON output."""
+    """Ask OpenAI-compatible providers to return JSON output.
+
+    Skipped when ``extra_body`` already contains a ``response_format``
+    (caller override) or ``thinking`` (reasoning models that reject
+    response_format).
+    """
     raw_extra = config.get("extra_body")
     extra_body: dict[str, JsonValue] = dict(raw_extra) if isinstance(raw_extra, dict) else {}
-    extra_body.setdefault("response_format", _extraction_response_format())
+    if "response_format" in extra_body or "thinking" in extra_body:
+        config["extra_body"] = extra_body
+        return
+    extra_body["response_format"] = {"type": "json_object"}
     config["extra_body"] = extra_body
 
 
@@ -530,27 +524,29 @@ async def extract(
     if not error:
         return None
 
-    # Retry: send the error back to a fresh session
-    logger.warning(f"extraction failed, retrying: {error}")
-    retry_prompt = (
-        f"Your previous output failed validation:\n{error}\n\n"
-        f"Here is the input again:\n{prompt}\n\n"
-        "Fix the errors and output valid JSON only."
-    )
-    retry_session = await AgentSession.create(config)
-    if _stream_debug:
-        _install_stream_tap(retry_session)
-    try:
-        retry_messages = await retry_session.prompt(retry_prompt)
-    finally:
-        with contextlib.suppress(Exception):
-            await retry_session.shutdown()
+    for attempt in range(3):
+        logger.warning(f"extraction failed (retry {attempt + 1}/3): {error}")
+        retry_prompt = (
+            f"Your previous output failed validation:\n{error}\n\n"
+            f"Here is the input again:\n{prompt}\n\n"
+            "Fix the errors and output valid JSON only."
+        )
+        retry_session = await AgentSession.create(config)
+        if _stream_debug:
+            _install_stream_tap(retry_session)
+        try:
+            retry_messages = await retry_session.prompt(retry_prompt)
+        finally:
+            with contextlib.suppress(Exception):
+                await retry_session.shutdown()
 
-    result, retry_error = _try_parse_response(retry_messages)
-    if result:
-        return result
+        result, error = _try_parse_response(retry_messages)
+        if result:
+            return result
+        if not error:
+            break
 
-    logger.warning(f"retry also failed: {retry_error}")
+    logger.warning(f"extraction failed after 3 retries: {error}")
     return None
 
 
@@ -679,13 +675,8 @@ async def extract_incremental(
 # ---------------------------------------------------------------------------
 
 
-SFT_SYSTEM_PROMPT: Final = (
-    "Extract a symbol table from the trajectory messages. Output JSON only."
-)
-
-
 def load_inference_prompt() -> str:
-    """Load the full extraction prompt with JSON schema (for zero-shot inference)."""
+    """Load the full extraction prompt with vocabulary and JSON schema."""
     from .agents.entity_extractor.context import _build_vocabulary_section
     from .agents.entity_extractor.schema import ExtractionResult as Schema
 
@@ -707,7 +698,7 @@ def build_sft_example(
     ``known_symbols`` and ``messages`` keys (incremental mode).
     """
     if system_prompt is None:
-        system_prompt = SFT_SYSTEM_PROMPT
+        system_prompt = load_inference_prompt()
 
     return SftExample(messages=[
         ChatMessage(role="system", content=system_prompt),
@@ -871,18 +862,12 @@ def collect(
     ))
 
 
-def _write_hf_dataset(
-    examples: list[SftExample],
+def _write_hf_dataset_info(
     output_dir: Path,
     split: str,
+    num_examples: int,
 ) -> None:
-    """Write examples as a HuggingFace-compatible dataset directory."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    data_file = output_dir / f"{split}.jsonl"
-    with data_file.open("w", encoding="utf-8") as f:
-        for ex in examples:
-            f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-
+    """Write HuggingFace dataset_info.json (JSONL data is written incrementally)."""
     info = {
         "dataset_info": {
             "description": "SFT training data for trajectory semantic index symbol extraction.",
@@ -898,7 +883,7 @@ def _write_hf_dataset(
         },
         "splits": {
             split: {
-                "num_examples": len(examples),
+                "num_examples": num_examples,
                 "dataset_name": "trajectory_index_sft",
             },
         },
@@ -1046,11 +1031,9 @@ async def _collect_async(
     if paths:
         sources.extend(loader(paths))
     if session_ids:
-        batch = load_messages_batch(session_ids)
+        # Lazy: just record the session IDs; messages loaded in _process_one
         for sid in session_ids:
-            msgs = batch.get(sid)
-            if msgs:
-                sources.append({"label": sid, "messages": msgs})
+            sources.append({"label": sid, "messages": []})
 
     if not sources:
         logger.error("no trajectories found")
@@ -1066,6 +1049,19 @@ async def _collect_async(
 
     live_index = _build_index_from_chunks([]) if index_output else None
 
+    output_dir.mkdir(parents=True, exist_ok=True)
+    data_file = output_dir / f"{split}.jsonl"
+    done_file = output_dir / "done.txt"
+    done_ids: set[str] = set()
+    if done_file.exists():
+        done_ids = {line.strip() for line in done_file.read_text().splitlines() if line.strip()}
+    if done_ids:
+        before = len(sources)
+        sources = [s for s in sources if s["label"] not in done_ids]
+        logger.info(f"resume: {before - len(sources)} already done, {len(sources)} remaining")
+    example_count = 0
+    write_lock = asyncio.Lock()
+
     def _on_chunk(
         extracted: ExtractedChunk,
         _original_msgs: list[dict[str, JsonValue]],
@@ -1076,8 +1072,15 @@ async def _collect_async(
         live_index.dump(index_output)
 
     async def _process_one(src: TrajectorySource) -> ChunkResults:
+        nonlocal example_count
         async with sem:
-            label, msgs = src["label"], src["messages"]
+            label = src["label"]
+            msgs = src["messages"]
+            if not msgs:
+                msgs = load_messages_from_session(label)
+                if not msgs:
+                    logger.debug(f"{label}: no messages in ClickHouse, skipped")
+                    return []
             if len(msgs) < min_messages:
                 logger.debug(f"{label}: {len(msgs)} msgs < {min_messages}, skipped")
                 return []
@@ -1097,23 +1100,28 @@ async def _collect_async(
                 return []
 
             total_sym = sum(len(chunk.result.symbols) for chunk in chunks)
+            examples = [
+                build_sft_example(chunk.prompt_input, chunk.result)
+                for chunk in chunks
+            ]
+            async with write_lock:
+                with data_file.open("a", encoding="utf-8") as f:
+                    for ex in examples:
+                        f.write(json.dumps(ex, ensure_ascii=False) + "\n")
+                with done_file.open("a", encoding="utf-8") as f:
+                    f.write(label + "\n")
+                example_count += len(examples)
             logger.info(
                 f"{label}: {len(msgs)} msgs -> {len(chunks)} chunks, "
-                f"{total_sym} sym"
+                f"{total_sym} sym, {len(examples)} examples (total: {example_count})"
             )
             return chunks
 
     tasks = [_process_one(src) for src in sources]
     results = await asyncio.gather(*tasks)
 
-    all_chunks = [cr for cr in results if cr]
-    examples = [
-        build_sft_example(chunk.prompt_input, chunk.result)
-        for cr in all_chunks
-        for chunk in cr
-    ]
-    _write_hf_dataset(examples, output_dir, split)
-    logger.info(f"done: {len(examples)} examples from {len(sources)} sources -> {output_dir}/{split}.jsonl")
+    _write_hf_dataset_info(output_dir, split, example_count)
+    logger.info(f"done: {example_count} examples from {len(sources)} sources -> {data_file}")
 
     if live_index:
         stats = live_index.stats()

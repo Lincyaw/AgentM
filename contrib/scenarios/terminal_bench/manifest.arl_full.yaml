@@ -1,9 +1,8 @@
-name: terminal_bench:arl_harness_methgen
+name: terminal_bench:arl_full
 description: |
-  Terminal-bench with llmharness runtime oversight + spec-driven methodology.
-  - minimal_coding auditor + auto-generated methodology from task spec
-  - methodology generated once at first auditor firing
-  - auditor fires every 5 turns (sync mode)
+  Full oversight stack: adapt + goal + llmharness (minimal auditor).
+  Agent builds its own feedback tools, goal checker verifies structured
+  conditions, auditor monitors trajectory for drift.
 
 extensions:
   - module: agentm.extensions.builtin.operations
@@ -30,6 +29,8 @@ extensions:
     config:
       default_timeout: 1200
   - module: agentm.extensions.builtin.observability
+  - module: agentm.extensions.builtin.adapt
+  - module: agentm.extensions.builtin.tool_index
   - module: agentm.extensions.builtin.system_prompt
     config:
       prompt: |
@@ -55,8 +56,15 @@ extensions:
       audit_interval_turns: 5
       auditor_prompt: minimal_coding
       enable_reminders: true
-      enable_methodology: true
-      methodology_model: litellm-dsv4flash
+      enable_methodology: false
+      enable_index: true
+      index_model: litellm-dsv4flash
   - module: agentm.extensions.builtin.background_exec
     config:
       timeout: 120
+  - module: agentm.extensions.builtin.goal
+    config:
+      auto_init: true
+      auto_init_scenario: "terminal_bench:goal_deriver"
+      checker_scenario: "terminal_bench:goal_checker"
+      checker_max_turns: 15
