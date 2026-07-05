@@ -229,7 +229,7 @@ async def _verify_one(
             continue
 
         # ② Compiler (deterministic)
-        compiled = compile_evidence(dossier, task, case.data_dir)
+        compiled = compile_evidence(dossier, task, case.data_dir, case.data_profile)
 
         # Coverage retry: if critical gaps and retries remain, go back to searcher
         if compiled.has_critical_gaps and attempt_n < task.max_retries - 1:
