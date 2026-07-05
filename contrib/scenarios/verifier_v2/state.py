@@ -110,6 +110,8 @@ class GraphState:
     # Exhausted/rejected tracking
     exhausted_edges: set[str] = field(default_factory=set)
     rejected_edges: set[str] = field(default_factory=set)
+    # Seeds that were inconclusive without multi-fault context — eligible for retry
+    inconclusive_seeds_pending_context: set[str] = field(default_factory=set)
 
     # Attempt history per task
     attempts: dict[str, list[TaskAttempt]] = field(default_factory=dict)

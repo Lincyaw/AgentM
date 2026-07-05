@@ -10,7 +10,7 @@ import json
 from typing import Any
 
 from .schema import TaskAttempt, VerificationTask
-from .state import Case
+from .state import Case, GraphState
 
 
 def build_searcher_prompt(
@@ -18,6 +18,7 @@ def build_searcher_prompt(
     task: VerificationTask,
     history: list[TaskAttempt],
     coverage_feedback: str = "",
+    state: GraphState | None = None,
 ) -> str:
     """Build the searcher agent's prompt."""
     sections: list[str] = []
@@ -42,6 +43,11 @@ def build_searcher_prompt(
             + json.dumps(profile_context, indent=2, ensure_ascii=False, default=str)[:2000]
             + "\n```"
         )
+
+    # Multi-fault context: what the searcher needs to know about other faults
+    multi_fault_ctx = _multi_fault_context(case, state, task)
+    if multi_fault_ctx:
+        sections.append(multi_fault_ctx)
 
     # Time windows
     sections.append(
@@ -187,6 +193,79 @@ def _profile_context(case: Case, task: VerificationTask) -> dict[str, Any]:
             context[f"{modality}_stats"] = relevant
 
     return context
+
+
+def _multi_fault_context(
+    case: Case,
+    state: GraphState | None,
+    task: VerificationTask,
+) -> str:
+    """Build context about other confirmed faults in the system.
+
+    This is critical for multi-fault cases: the searcher needs to know that
+    another fault exists so it can distinguish this seed's effect from the
+    other fault's propagation.
+    """
+    if state is None:
+        return ""
+    if not state.confirmed_seeds:
+        return ""
+    # Only relevant if there are OTHER confirmed seeds (not the one we're verifying)
+    other_seeds = state.confirmed_seeds - {task.source_seed}
+    if not other_seeds:
+        return ""
+
+    lines = ["## Multi-fault context"]
+    lines.append(
+        "This system has MULTIPLE injected faults. The following faults are "
+        "already confirmed and their propagation paths are known. You must "
+        "distinguish THIS seed's effect from the effects of these other faults."
+    )
+
+    lines.append("")
+    lines.append("**Already confirmed faults:**")
+    for seed in sorted(other_seeds):
+        inj = _injection_for_seed(case, seed)
+        fault_kind = inj["chaos_type"] if inj else "unknown"
+        lines.append(f"- `{seed}` ({fault_kind})")
+
+    # Show which services are affected by the other faults
+    affected = set()
+    for node_id, node_meta in state.nodes.items():
+        sources = state.node_sources.get(node_id, set())
+        if sources & other_seeds:
+            affected.add(node_id)
+    if affected:
+        lines.append("")
+        lines.append(
+            "**Services already degraded by the other fault(s):** "
+            + ", ".join(sorted(affected))
+        )
+
+    lines.append("")
+    lines.append("**Investigation guidance for this seed:**")
+    lines.append(
+        "- Traffic drops on this seed's target might be CAUSED by the other "
+        "fault (upstream killed traffic), not by this seed's injection."
+    )
+    lines.append(
+        "- Look for effects SPECIFIC to this seed that the other fault "
+        "cannot explain: different endpoints, different error patterns, "
+        "different timing, or services NOT on the other fault's path."
+    )
+    lines.append(
+        "- If this seed's target has zero traffic in abnormal AND the "
+        "other fault's propagation path goes through its upstream callers, "
+        "the zero traffic may be a consequence of the other fault — not "
+        "confirmation of this seed."
+    )
+    lines.append(
+        "- Conversely, if this seed's target shows degradation on endpoints "
+        "that are NOT called by services on the other fault's path, that IS "
+        "evidence of this seed's independent effect."
+    )
+
+    return "\n".join(lines)
 
 
 def _fault_kind_for_task(case: Case, task: VerificationTask) -> str:

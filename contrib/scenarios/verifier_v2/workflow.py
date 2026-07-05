@@ -166,11 +166,33 @@ async def _execute_pool(
                 )
 
             else:  # inconclusive
-                state.mark_exhausted(task)
-                ctx.log(
-                    f"  ? {task.source_seed}: "
-                    f"{task.from_entity} → {task.to_entity}: inconclusive"
-                )
+                if task.kind == "seed" and not state.confirmed_seeds:
+                    # First pass: no other seeds confirmed yet.
+                    # Mark as pending context retry — don't exhaust yet.
+                    state.inconclusive_seeds_pending_context.add(task.edge_key)
+                    ctx.log(
+                        f"  ? {task.source_seed}: "
+                        f"{task.from_entity} → {task.to_entity}: "
+                        f"inconclusive (pending multi-fault retry)"
+                    )
+                elif (
+                    task.kind == "seed"
+                    and task.edge_key in state.inconclusive_seeds_pending_context
+                ):
+                    # Was pending, now retried with context — truly exhausted
+                    state.inconclusive_seeds_pending_context.discard(task.edge_key)
+                    state.mark_exhausted(task)
+                    ctx.log(
+                        f"  ? {task.source_seed}: "
+                        f"{task.from_entity} → {task.to_entity}: "
+                        f"inconclusive (exhausted after context retry)"
+                    )
+                else:
+                    state.mark_exhausted(task)
+                    ctx.log(
+                        f"  ? {task.source_seed}: "
+                        f"{task.from_entity} → {task.to_entity}: inconclusive"
+                    )
 
         _fill()
 
@@ -194,7 +216,9 @@ async def _verify_one(
             coverage_feedback = "; ".join(history[-1].coverage_gaps)
 
         # ① Searcher
-        searcher_prompt = build_searcher_prompt(case, task, history, coverage_feedback)
+        searcher_prompt = build_searcher_prompt(
+            case, task, history, coverage_feedback, state=state,
+        )
         dossier = await _call_searcher(ctx, case, task, searcher_prompt)
         if dossier is None:
             state.record_attempt(task, TaskAttempt(
