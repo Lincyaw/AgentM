@@ -1253,6 +1253,16 @@ def _auto_parse(text: str) -> str | dict[str, Any] | list[Any]:
         parsed = json.loads(text)
         if isinstance(parsed, (dict, list)):
             return parsed
+        if isinstance(parsed, str):
+            # Tolerate double-encoded results: models sometimes pass a JSON
+            # *string* instead of an object to submit_result. One extra
+            # decode recovers the intended structure.
+            try:
+                inner = json.loads(parsed)
+                if isinstance(inner, (dict, list)):
+                    return inner
+            except (json.JSONDecodeError, TypeError):
+                pass
     except (json.JSONDecodeError, TypeError) as exc:
         # Free-text agent output that isn't JSON — return it verbatim.
         logger.debug("workflow: agent output not JSON, returning as text: {}", exc)
