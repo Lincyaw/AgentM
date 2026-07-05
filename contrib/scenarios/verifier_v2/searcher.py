@@ -20,22 +20,41 @@ def build_searcher_prompt(
     coverage_feedback: str = "",
     state: GraphState | None = None,
 ) -> str:
-    """Build the searcher agent's prompt."""
+    """Build the searcher agent's prompt.
+
+    Ordering is deliberate:
+    1. Task (what to investigate)
+    2. Fault reference (what signal to look for — drives query strategy)
+    3. Context (multi-fault, available data, time windows)
+    4. History/feedback (if retry)
+    """
     sections: list[str] = []
 
-    # Fault reference
-    fault_kind = _fault_kind_for_task(case, task)
-    fault_doc = case.fault_docs.get(fault_kind, "")
-    if fault_doc:
-        sections.append(f"## Fault reference: {fault_kind}\n{fault_doc}")
-
-    # Task description
+    # 1. Task description — what to investigate
     if task.kind == "seed":
         sections.append(_seed_task_section(case, task))
     else:
         sections.append(_hop_task_section(case, task))
 
-    # Observation context (data profile slice)
+    # 2. Fault reference — what signal to look for (this drives query strategy)
+    fault_kind = _fault_kind_for_task(case, task)
+    fault_doc = case.fault_docs.get(fault_kind, "")
+    if fault_doc:
+        sections.append(
+            f"## Fault reference: {fault_kind}\n"
+            "**Read this carefully — it defines what queries you should run.** "
+            "Different faults have completely different observable signatures. "
+            "A latency spike means nothing for a URL-mutation fault; a flow "
+            "disappearance means nothing for a CPU stress fault.\n\n"
+            + fault_doc
+        )
+
+    # 3. Multi-fault context
+    multi_fault_ctx = _multi_fault_context(case, state, task)
+    if multi_fault_ctx:
+        sections.append(multi_fault_ctx)
+
+    # 4. Available data
     profile_context = _profile_context(case, task)
     if profile_context:
         sections.append(
@@ -44,28 +63,18 @@ def build_searcher_prompt(
             + "\n```"
         )
 
-    # Multi-fault context: what the searcher needs to know about other faults
-    multi_fault_ctx = _multi_fault_context(case, state, task)
-    if multi_fault_ctx:
-        sections.append(multi_fault_ctx)
-
-    # Time windows
+    # 5. Time windows
     sections.append(
         "## Time windows\n"
         f"- Normal: {case.window.get('start', '?')} (before injection)\n"
         f"- Abnormal: {case.window.get('end', '?')} (during injection)"
     )
 
-    # Retry history
+    # 6. Retry history / coverage feedback
     if history:
         sections.append(_history_section(history))
-
-    # Coverage feedback from compiler
     if coverage_feedback:
         sections.append(f"## Coverage feedback (from previous attempt)\n{coverage_feedback}")
-
-    # Instructions
-    sections.append(_instructions())
 
     return "\n\n".join(sections)
 
@@ -118,40 +127,6 @@ def _hop_task_section(case: Case, task: VerificationTask) -> str:
     return "\n".join(lines)
 
 
-def _instructions() -> str:
-    return """## Instructions
-
-Your role is **evidence searcher**, not judge. Collect all relevant evidence
-and submit it. Do NOT decide a verdict — a separate judge will interpret
-your findings.
-
-1. **Discover schema**: List available tables, inspect columns and value
-   distributions relevant to the target services.
-
-2. **Relationship evidence**: Find SQL evidence showing how from_entity and
-   to_entity are related (direct calls, shared resources, co-deployment,
-   async messaging, or any other observable connection).
-
-3. **Target observations**: Query traces/metrics/logs for the target entity.
-   Compare normal vs abnormal windows. Report what changed (or didn't).
-
-4. **Control observations**: Query the SAME metrics on comparison paths that
-   are NOT on the fault propagation chain (sibling endpoints, unaffected
-   callers, same service on different pods).
-
-5. **Counter-evidence** (REQUIRED): Actively search for reasons the observed
-   change might NOT be caused by the upstream fault:
-   - Does the control path show a proportional change? (workload shift)
-   - Is there another fault in the system affecting this target?
-   - Is the timing misaligned?
-   - Is the target service simply not exercised during this window?
-
-6. **Endpoint granularity**: If the fault affects specific endpoints rather
-   than the whole service, report which endpoints in affected_endpoints.
-
-Submit your findings as a structured EvidenceDossier. Be thorough — check
-all available modalities (traces, metrics, logs). Missing modalities should
-be listed in modalities_unavailable with the reason."""
 
 
 def _history_section(history: list[TaskAttempt]) -> str:
