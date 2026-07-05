@@ -95,6 +95,9 @@ extensions:
         Put the human-readable markdown sections below in `report`; the
         workflow will prepend the canonical status fields before writing
         `merge.md`.
+        IMPORTANT: the `result` argument must be a JSON OBJECT, not a
+        JSON-encoded string. Pass the fields directly; do not wrap the
+        object in quotes or serialize it yourself.
 
         Status: merged | auto_merge | failed | conflict | needs_human
         AgentEnvSession: <agent_env.session_id or none>

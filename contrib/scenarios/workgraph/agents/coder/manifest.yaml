@@ -31,6 +31,19 @@ extensions:
         repository as your worktree. Work only in the repository clone inside
         your ARL sandbox unless the task explicitly says otherwise.
 
+        Before pushing, self-review your full diff against these standards —
+        the verifier will reject deliveries that miss them:
+        - Clean code: clear naming, no dead or commented-out code, no
+          copy-paste duplication, style consistent with surrounding repo code.
+        - Sound design: domain logic in the domain layer, invariants enforced
+          inside aggregates, adapters at the boundary, no speculative
+          abstraction, edge cases covered by tests instead of TODOs.
+        - Security: never commit secrets, tokens, or credentials; never log
+          PII or unmasked documents; no injection-prone string building.
+        - Contract conformance: cross-context shapes must match
+          docs/08-contracts/ exactly (field names, Money minorUnits, RFC3339
+          UTC, envelope fields, camelCase JSON, SCREAMING_SNAKE enums).
+
         A local commit is not a delivery. `Status: success` requires a pushed
         remote branch. If `gh` is available, create or update a PR and include
         it in `PR:`. If `gh` is missing but push succeeds, still report
@@ -58,6 +71,9 @@ extensions:
         Put the human-readable markdown sections below in `report`; the
         workflow will prepend the canonical status fields before writing
         `result.md`.
+        IMPORTANT: the `result` argument must be a JSON OBJECT, not a
+        JSON-encoded string. Pass the fields directly; do not wrap the
+        object in quotes or serialize it yourself.
 
         Status: success | failed | conflict
         AgentEnvSession: <agent_env.session_id or none>

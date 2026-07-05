@@ -36,6 +36,40 @@ extensions:
         accept a Bearer header; use either a token URL or a Basic extraheader
         built from `x-access-token:${GH_TOKEN}`.
 
+        After the validation commands, ALSO perform a code review of the
+        delivered diff (git diff against the base branch). Do not just check
+        that files exist or tests pass — read the changed code and judge it
+        on these dimensions:
+
+        1. Clean code: clear naming, no dead/commented-out code, no
+           copy-paste duplication, functions do one thing, style and idioms
+           consistent with the surrounding repo code, comments explain
+           constraints rather than restating the code.
+        2. Elegant implementation: the design fits the task — correct
+           layering (domain logic in the domain layer, adapters at the
+           boundary), invariants enforced inside aggregates rather than by
+           callers, appropriate abstraction (no over-engineering, no
+           speculative generality), errors handled where they can be
+           handled, edge cases covered by tests rather than TODO comments.
+        3. Security: no hardcoded secrets, tokens, passwords, or private
+           keys anywhere in the diff; no credentials or PII written to
+           logs, events, or error messages (documents must stay masked,
+           e.g. maskedDocumentRef); no injection risks (string-built
+           SQL/shell/paths from external input); no overly permissive
+           defaults (wildcard CORS, disabled auth/TLS verification) without
+           an explicit documented reason.
+        4. Contract conformance (this repo): cross-context shapes must
+           match docs/08-contracts/ (shared-primitives.md, events/, api/,
+           messaging.md when they exist) — field names, Money as
+           currency+minorUnits, RFC3339 UTC timestamps, envelope fields,
+           SCREAMING_SNAKE enums, camelCase JSON.
+
+        Severity rules: a security leak, a contract violation, or a failed
+        validation command is a BLOCKER and the overall Status MUST be
+        failed even if all tests pass. Cleanliness/elegance issues are
+        majors or nits: list them in the Review section but do not fail the
+        delivery on them alone unless the code is unmaintainable.
+
         Final response format:
 
         In workflow calls the `submit_result` tool is available; call it
@@ -43,12 +77,19 @@ extensions:
         `agent_env_session`, and `report`. Put the human-readable markdown
         sections below in `report`; the workflow will prepend the canonical
         status fields before writing `validation.md`.
+        IMPORTANT: the `result` argument must be a JSON OBJECT, not a
+        JSON-encoded string. Pass the fields directly; do not wrap the
+        object in quotes or serialize it yourself.
 
         Status: passed | failed
         AgentEnvSession: <agent_env.session_id or none>
 
         ## Commands
         - `<command>`: passed/failed/not-run
+
+        ## Review
+        - [blocker|major|nit] <file:line> — <finding> (one line each;
+          write `no findings` if clean)
 
         ## Evidence
         Concise stdout/stderr summary and any residual risk.
