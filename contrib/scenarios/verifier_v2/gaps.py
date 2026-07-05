@@ -22,22 +22,47 @@ def evaluate_gaps(case: Case, state: GraphState) -> GapReport:
 
 
 def _unconfirmed_seed_gaps(case: Case, state: GraphState) -> list[Gap]:
-    """Every declared injection must be confirmed as observable."""
+    """Every declared injection must be confirmed as observable.
+
+    Exception: if a seed's target is already in the graph as a hop node
+    (reached by another seed's propagation), its effect is masked — it's
+    not a valid independent root cause for RCA purposes and should not
+    block convergence.
+    """
     gaps: list[Gap] = []
     for seed in sorted(case.seeds):
-        if seed not in state.confirmed_seeds:
-            gaps.append(Gap(
-                kind="unconfirmed_seed",
-                id=f"unconfirmed_seed:{seed}",
-                source_seed=seed,
-                target=seed,
-                context=(
-                    f"Injection seed {seed} has not been verified. "
-                    "Search for telemetry evidence (traces, metrics, logs) "
-                    "showing the injected fault took observable effect."
-                ),
-            ))
+        if seed in state.confirmed_seeds:
+            continue
+        # Check if this seed's target is already explained by another seed's
+        # propagation — if so, it's masked, not a gap.
+        seed_services = _seed_target_services(seed)
+        masked = any(
+            svc in state.nodes
+            and state.nodes[svc].get("kind") == "hop"
+            for svc in seed_services
+        )
+        if masked:
+            continue
+        gaps.append(Gap(
+            kind="unconfirmed_seed",
+            id=f"unconfirmed_seed:{seed}",
+            source_seed=seed,
+            target=seed,
+            context=(
+                f"Injection seed {seed} has not been verified. "
+                "Search for telemetry evidence (traces, metrics, logs) "
+                "showing the injected fault took observable effect."
+            ),
+        ))
     return gaps
+
+
+def _seed_target_services(seed: str) -> list[str]:
+    """Extract the service(s) a seed targets."""
+    if seed.startswith("link:") and "->" in seed:
+        body = seed.removeprefix("link:")
+        return [p.strip() for p in body.split("->", 1)]
+    return [seed]
 
 
 def _unreachable_seed_gaps(case: Case, state: GraphState) -> list[Gap]:
