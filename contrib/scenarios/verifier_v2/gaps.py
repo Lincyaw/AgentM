@@ -24,25 +24,35 @@ def evaluate_gaps(case: Case, state: GraphState) -> GapReport:
 def _unconfirmed_seed_gaps(case: Case, state: GraphState) -> list[Gap]:
     """Every declared injection must be confirmed as observable.
 
-    Exception: if a seed's target is already in the graph as a hop node
-    (reached by another seed's propagation), its effect is masked — it's
-    not a valid independent root cause for RCA purposes and should not
-    block convergence.
+    If a seed has already been attempted (is in exhausted or
+    pending_context) AND its target is already in the graph as a hop
+    (reached by another seed's propagation), it's masked — its independent
+    effect can't be distinguished from the other fault's propagation after
+    a genuine attempt to find independent evidence. This is NOT a pre-filter:
+    the seed is still attempted first; masking only applies after failure.
     """
     gaps: list[Gap] = []
     for seed in sorted(case.seeds):
         if seed in state.confirmed_seeds:
             continue
-        # Check if this seed's target is already explained by another seed's
-        # propagation — if so, it's masked, not a gap.
+
         seed_services = _seed_target_services(seed)
-        masked = any(
+        seed_key = f"{seed}::{seed}->{seed}"
+        already_attempted = (
+            seed_key in state.exhausted_edges
+            or seed_key in state.inconclusive_seeds_pending_context
+        )
+        target_reached_by_other = any(
             svc in state.nodes
             and state.nodes[svc].get("kind") == "hop"
             for svc in seed_services
         )
-        if masked:
+
+        # Only mask if: (1) we already tried to confirm it AND (2) its
+        # target is explained by another seed's propagation
+        if already_attempted and target_reached_by_other:
             continue
+
         gaps.append(Gap(
             kind="unconfirmed_seed",
             id=f"unconfirmed_seed:{seed}",
