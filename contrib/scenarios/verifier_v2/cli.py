@@ -89,7 +89,10 @@ async def _run_workflow(
             await session.shutdown()
         except Exception:  # noqa: BLE001, S110
             pass
-    return result if isinstance(result, dict) else {}
+    out = result if isinstance(result, dict) else {}
+    out["session_id"] = session.session_id
+    out["trace_id"] = session.root_session_id
+    return out
 
 
 @app.command()
