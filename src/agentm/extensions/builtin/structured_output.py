@@ -2,8 +2,9 @@
 
 The caller supplies a JSON Schema via atom config; the atom builds a
 ``submit_result`` tool whose single ``result`` parameter conforms to that
-schema. When the worker calls the tool, the session terminates and the
-structured data is returned to the orchestrator.
+schema. When the worker submits a schema-valid result, the session
+terminates and the structured data is returned to the orchestrator; a
+validation failure returns a retryable tool error instead of terminating.
 
 Designed for use with the ``workflow`` atom's ``agent(prompt, schema=...)``
 convenience — the workflow wires the atom config and extracts the result
@@ -47,8 +48,9 @@ MANIFEST = ExtensionManifest(
     name="structured_output",
     description=(
         "Register a terminal submit_result tool whose parameter schema "
-        "is supplied via atom config. The tool validates the input and "
-        "terminates the session."
+        "is supplied via atom config. A schema-valid submission terminates "
+        "the session; a validation failure returns a retryable tool error "
+        "so the model can correct and resubmit in the same session."
     ),
     registers=("tool:submit_result",),
     config_schema=StructuredOutputConfig,
@@ -98,7 +100,10 @@ class _StructuredOutputRuntime:
                 description=(
                     "Submit your structured result and end this session. "
                     "The result must conform to the schema provided in the "
-                    "tool parameters."
+                    "tool parameters. A valid submission ends the session "
+                    "immediately; if schema validation fails, the session "
+                    "continues and the error details tell you what to fix — "
+                    "correct the result and call submit_result again."
                 ),
                 parameters=self._tool_params(),
                 fn=self.submit_result,
@@ -114,7 +119,9 @@ class _StructuredOutputRuntime:
             "required": ["result"],
         }
 
-    async def submit_result(self, args: dict[str, Any]) -> ToolTerminate:
+    async def submit_result(
+        self, args: dict[str, Any]
+    ) -> ToolTerminate | ToolResult:
         result = args.get("result")
         validation_error = self._validator.validate_error(result, self._schema)
         if validation_error is not None and isinstance(result, str):
@@ -138,11 +145,26 @@ class _StructuredOutputRuntime:
                 result = decoded
                 validation_error = None
         if validation_error is not None:
-            return _terminate_result(
-                {
-                    "error": "schema_validation_failed",
-                    "detail": validation_error,
-                },
+            # Retryable: keep the session alive so the model can correct the
+            # payload and resubmit, instead of terminating with a dead error
+            # result the orchestrator can only retry from scratch.
+            return ToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "error": "schema_validation_failed",
+                                "detail": validation_error,
+                                "hint": (
+                                    "Fix the result to match the schema and "
+                                    "call submit_result again."
+                                ),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                ],
                 is_error=True,
             )
 

@@ -195,8 +195,33 @@ return ticket                                             # {task_id, status:"ru
 The ticket is the immediate `tool_result` for that call (satisfying the "every
 tool_call gets a result this turn" protocol); the real result arrives later as an
 inbox item (`source="background"`). Companion tools `check_background` /
-`wait_background` / `cancel_background` expose direct controls for backgrounded
-tool calls; sub-agent child findings use the inbox-only delivery path instead.
+`cancel_background` expose direct controls for backgrounded tool calls
+(`wait_background` was dropped 2026-07-06 — completion is push-based, a blocking
+wait companion contradicted the "don't poll" contract and was never registered);
+sub-agent child findings use the inbox-only delivery path instead.
+
+**Live output + bounded completion notes (2026-07-06).**
+- `tool_bash` owns a `bash_output_tails` session service: bounded rolling tail
+  buffers (~4 KB) fed by `BashOperations.exec(on_data=…)`. background_exec binds
+  an opaque key (contextvar) around each wrapped call; a detached bash task's
+  live tail surfaces as `latest_output` in `check_background` while it runs, and
+  the ticker's silence warning is measured against real output activity.
+- **Source-side live log** — every wrapped shell call also gets a
+  `log_path` (`.agentm/tool_outputs/<session>/bg_<key>.log`) bound through the
+  service and passed to `BashOperations.exec(log_path=…)`: the backend writes
+  the full combined output at the execution site (local: Python-side file
+  sink; agent-env: a `{ ( cmd ) ; } > >(tee …)` wrap INSIDE the sandbox), so
+  log bytes never round-trip through the host. Logging starts at t=0 because
+  detach cannot be predicted; a call that finishes in the foreground deletes
+  its log fire-and-forget. The `{ ( … ) ; }` two-layer shape and `|| cat`
+  fallbacks are load-bearing — see `_wrap_cmd_with_source_log`'s docstring
+  (bare-`wait` deadlock, SIGPIPE on unwritable log dir).
+- The inbox **completion note carries only a tail preview** (last ~2000 chars):
+  inbox payloads bypass the tool-result pipeline, so `tool_result_cap` cannot
+  bound them. The full result stays in the registry and is fetched via
+  `check_background`, whose tool result DOES pass through the cap — oversized
+  results spill to `.agentm/tool_outputs/<session>/<call>.txt` via the
+  ResourceWriter (workspace-relative, readable under local and remote backends).
 
 Soft-preempt policy (2026-06-29): a foreground wrapped tool also stops being awaited
 when core inbox input arrives. The tool is not cancelled; it is registered as a
@@ -228,11 +253,8 @@ long-turn agent never finds a pile of stale status lines.
   The shim itself stays on the event-loop domain because it touches the session
   inbox and registry, but the wrapped tool is executed via `execute_tool_call`, so
   the wrapped tool's own `execution_domain` metadata is still honored.
-- **Companion tools are never wrapped.** `check_background`, `wait_background`,
-  and `cancel_background` are registry controls, not backgroundable work. A
-  timed-out `wait_background` returns the current running status and must not
-  create a second background task for the wait itself; cancellation then targets
-  the original task id.
+- **Companion tools are never wrapped.** `check_background` and
+  `cancel_background` are registry controls, not backgroundable work.
 - **Terminal tools.** A foreground completion (<timeout) returning `ToolTerminate`
   works unchanged. A *backgrounded* tool that ultimately returns `ToolTerminate`
   posts its completion with `InboxItem.terminal=True` (#177): the `context` drain
@@ -243,8 +265,8 @@ long-turn agent never finds a pile of stale status lines.
   `post_inbox(source="background")`; while the agent is actively taking turns the
   runtime `context` drain injects them. When the session is parked, the persistent
   driver wakes on inbox non-empty and runs the next turn. The agent can also inspect
-  or control backgrounded work directly with `check_background`, `wait_background`,
-  and `cancel_background`.
+  or control backgrounded work directly with `check_background` and
+  `cancel_background`.
 - **render_item** handles all four sources: `"user"` (plain `UserMessage`),
   `"background"` / `"monitor"` / `"subagent"` (`<system-reminder source="...">`-wrapped
   `UserMessage`). Any other source raises `NotImplementedError`.

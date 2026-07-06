@@ -1,14 +1,15 @@
-"""Cap tool-result size: spill large outputs to disk, truncate the rest.
+"""Cap tool-result size: spill large outputs to a file, truncate the rest.
 
 Unified atom combining two strategies for oversized tool results:
 
 1. **Spill** — when ``spill_to_disk`` is enabled (default) and a tool result
-   exceeds ``max_tokens``, the full text is written to
-   ``$AGENTM_HOME/tool_outputs/<session_id>/<tool_call_id>.txt`` and the
-   in-context payload is replaced with a ``preview_tokens``-bounded preview
-   plus the file path.
+   exceeds ``max_tokens``, the full text is written via the session
+   ``ResourceWriter`` to ``.agentm/tool_outputs/<session_id>/<tool_call_id>.txt``
+   (workspace-relative, so the ``read`` tool can open it under BOTH the local
+   and remote operations backends) and the in-context payload is replaced
+   with a ``preview_tokens``-bounded preview plus the file path.
 
-2. **Middle-out truncation** — fallback when spill fails (disk write error)
+2. **Middle-out truncation** — fallback when spill fails (write error)
    or when ``spill_to_disk`` is disabled.  Preserves the first and last halves
    of the token limit so the model sees both initial context (headers, imports)
    and trailing state (errors, final output).  Error results are guaranteed at
@@ -17,11 +18,10 @@ Unified atom combining two strategies for oversized tool results:
 
 from __future__ import annotations
 
-import os
 import re
-from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentm.core.abi import (
@@ -32,7 +32,6 @@ from agentm.core.abi import (
     ToolResultEvent,
 )
 from agentm.core.lib import (
-    agentm_home_dir,
     count_text_tokens,
     truncate_text_tokens,
     truncate_text_tokens_middle,
@@ -51,8 +50,10 @@ def _safe_path_name(value: str, *, fallback: str) -> str:
 class ToolResultCapConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    max_tokens: int = Field(gt=0)
-    preview_tokens: int = Field(ge=0)
+    # Defaults let the session factory floor-mount this atom with empty
+    # config; scenarios override per their context budget.
+    max_tokens: int = Field(gt=0, default=50_000)
+    preview_tokens: int = Field(ge=0, default=50_000)
     error_floor_tokens: int = Field(ge=0, default=0)
     spill_to_disk: bool = True
 
@@ -60,8 +61,9 @@ class ToolResultCapConfig(BaseModel):
 MANIFEST = ExtensionManifest(
     name="tool_result_cap",
     description=(
-        "Cap tool-result size: spill large outputs to disk when possible, "
-        "fall back to middle-out token truncation."
+        "Cap tool-result size: spill large outputs to a workspace file "
+        "(.agentm/tool_outputs/, via ResourceWriter so it works on local "
+        "and remote backends), fall back to middle-out token truncation."
     ),
     registers=("event:tool_result",),
     config_schema=ToolResultCapConfig,
@@ -80,12 +82,22 @@ class _ToolResultCapRuntime:
         self._preview_tokens = config.preview_tokens
         self._error_floor_tokens = config.error_floor_tokens
         self._spill_to_disk = config.spill_to_disk
-        self._output_dir = agentm_home_dir() / "tool_outputs" / self._session_dir_name()
+        # Workspace-relative so the read tool resolves it under both local
+        # and remote operations backends.
+        self._output_dir = f".agentm/tool_outputs/{self._session_dir_name()}"
+        # Lazy-resolved ResourceWriter (resolving at install time is a §11
+        # anti-pattern; the writer atom may install after this one).
+        self._writer_cache: list[Any] = []
 
     def install(self) -> None:
         self._api.on(ToolResultEvent.CHANNEL, self.on_tool_result)
 
-    def on_tool_result(self, event: ToolResultEvent) -> ToolResult | None:
+    def _get_writer(self) -> Any:
+        if not self._writer_cache:
+            self._writer_cache.append(self._api.get_resource_writer())
+        return self._writer_cache[0]
+
+    async def on_tool_result(self, event: ToolResultEvent) -> ToolResult | None:
         if event.tool_name == "read":
             return None
 
@@ -105,8 +117,8 @@ class _ToolResultCapRuntime:
             if total_tokens <= effective_max:
                 return None
 
-        # Strategy 1: spill to disk.
-        spill_path = self._spill(event.tool_call_id, full_text)
+        # Strategy 1: spill to a workspace file.
+        spill_path = await self._spill(event.tool_call_id, full_text)
 
         if spill_path is not None:
             return self._spilled_result(
@@ -142,17 +154,24 @@ class _ToolResultCapRuntime:
                 text_blocks.append(block.text)
         return "\n".join(text_blocks)
 
-    def _spill(self, tool_call_id: str, full_text: str) -> Path | None:
+    async def _spill(self, tool_call_id: str, full_text: str) -> str | None:
         if not self._spill_to_disk:
             return None
         filename = f"{_safe_path_name(tool_call_id, fallback='tool-call')}.txt"
-        candidate = self._output_dir / filename
+        candidate = f"{self._output_dir}/{filename}"
         try:
-            self._output_dir.mkdir(parents=True, exist_ok=True)
-            tmp = candidate.with_name(f"{candidate.name}.tmp")
-            tmp.write_text(full_text, encoding="utf-8")
-            os.replace(tmp, candidate)
-        except OSError:
+            result = await self._get_writer().write(
+                candidate,
+                full_text.encode("utf-8"),
+                rationale="tool_result_cap spill",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("tool_result_cap: spill write failed for {}: {}", candidate, exc)
+            return None
+        if result.error is not None:
+            logger.debug(
+                "tool_result_cap: spill rejected for {}: {}", candidate, result.error
+            )
             return None
         return candidate
 
@@ -162,7 +181,7 @@ class _ToolResultCapRuntime:
         *,
         full_text: str,
         total_tokens: int,
-        spill_path: Path,
+        spill_path: str,
         model_name: str | None,
     ) -> ToolResult:
         preview = truncate_text_tokens(
@@ -170,7 +189,7 @@ class _ToolResultCapRuntime:
         ).text
         notice = (
             f"\n\n[Output truncated: {total_tokens} tokens total. "
-            f"Full output saved to {spill_path}. "
+            f"Full output saved to {spill_path} (workspace-relative). "
             "Inspect it with paged reads, for example: "
             f'read(path="{spill_path}", offset=1, limit={_SPILL_READ_EXAMPLE_LIMIT}).]'
         )

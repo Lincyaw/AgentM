@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path, PurePosixPath
 
+from loguru import logger
+
 from agentm.core.abi.resource import (
     BatchHandle,
     PathClass,
@@ -85,6 +87,7 @@ class GitBackedResourceWriter:
         try:
             await asyncio.to_thread(self._write_bytes, resolved, content)
         except Exception as exc:  # noqa: BLE001
+            logger.debug("local writer: write failed for {}: {}", path, exc)
             return WriteResult._error(path, path_class, str(exc))
         return WriteResult._uncommitted(path, path_class)
 
@@ -107,6 +110,7 @@ class GitBackedResourceWriter:
         try:
             current = await asyncio.to_thread(resolved.read_bytes)
         except Exception as exc:  # noqa: BLE001
+            logger.debug("local writer: read for compare failed for {}: {}", path, exc)
             return WriteResult._error(path, path_class, str(exc))
         if current != old:
             return WriteResult._error(
@@ -117,6 +121,7 @@ class GitBackedResourceWriter:
         try:
             await asyncio.to_thread(self._write_bytes, resolved, new)
         except Exception as exc:  # noqa: BLE001
+            logger.debug("local writer: write failed for {}: {}", path, exc)
             return WriteResult._error(path, path_class, str(exc))
         return WriteResult._uncommitted(path, path_class)
 
@@ -137,6 +142,7 @@ class GitBackedResourceWriter:
         try:
             await asyncio.to_thread(resolved.unlink)
         except Exception as exc:  # noqa: BLE001
+            logger.debug("local writer: delete failed for {}: {}", path, exc)
             return WriteResult._error(path, path_class, str(exc))
         return WriteResult._uncommitted(path, path_class)
 
@@ -223,6 +229,7 @@ class GitBackedResourceWriter:
     def _write_bytes(resolved: Path, content: bytes) -> None:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_bytes(content)
+
 
 
 DEFAULT_PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master"})

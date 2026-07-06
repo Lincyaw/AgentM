@@ -8,8 +8,11 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable
+from pathlib import Path
 from signal import SIGKILL
-from typing import Any
+from typing import IO, Any
+
+from loguru import logger
 
 from agentm.core.abi import ExecResult, ExtensionAPI
 
@@ -26,6 +29,7 @@ class LocalBashOperations:
         env: dict[str, str] | None = None,
         on_data: Callable[[bytes], None] | None = None,
         signal: asyncio.Event | None = None,
+        log_path: str | None = None,
     ) -> ExecResult:
         process = await asyncio.create_subprocess_shell(
             cmd,
@@ -37,6 +41,18 @@ class LocalBashOperations:
         )
         assert process.stdout is not None
         assert process.stderr is not None
+
+        log_file: IO[bytes] | None = None
+        if log_path is not None:
+            try:
+                resolved = Path(log_path)
+                if not resolved.is_absolute():
+                    resolved = Path(cwd) / resolved
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                log_file = resolved.open("ab")
+            except OSError as exc:
+                logger.debug("local bash: cannot open log {}: {}", log_path, exc)
+                log_file = None
 
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
@@ -52,6 +68,12 @@ class LocalBashOperations:
                 if not chunk:
                     return
                 sink.append(chunk)
+                if log_file is not None:
+                    try:
+                        log_file.write(chunk)
+                        log_file.flush()
+                    except OSError:
+                        pass
                 if callback is not None:
                     callback(chunk)
 
@@ -87,6 +109,11 @@ class LocalBashOperations:
                 signal_task.cancel()
                 await asyncio.gather(signal_task, return_exceptions=True)
             await asyncio.gather(stdout_task, stderr_task)
+            if log_file is not None:
+                try:
+                    log_file.close()
+                except OSError:
+                    pass
 
         return ExecResult(
             stdout=b"".join(stdout_chunks),

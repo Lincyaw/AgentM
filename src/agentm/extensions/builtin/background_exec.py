@@ -90,8 +90,10 @@ _COMPANION_TOOLS = frozenset(
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_HEARTBEAT = 120.0
 _DEFAULT_SILENCE_WARNING = 300.0
-_MAX_WAIT_BACKGROUND_SECONDS = 30.0
 _MAX_ACTIVITY_LABEL_CHARS = 96
+# Inbox completion notes bypass tool_result_cap — keep only a tail preview
+# there; the full output stays reachable via check_background.
+_COMPLETION_PREVIEW_CHARS = 2000
 _INBOX_GRACE_SECONDS = 0.5
 
 # Which inbox sources justify soft-preempting a running foreground tool. Must
@@ -158,6 +160,12 @@ class _BgTask(BackgroundTask):
     # once the completion has been posted (``_watch`` finally). ``None`` when
     # tracking was skipped (atom reloaded mid-dispatch).
     work_bracket: AbstractContextManager[None] | None = None
+    # Key into the ``bash_output_tails`` service (tool_bash) for this call's
+    # live-output tail buffer; ``None``-tail for non-streaming tools.
+    output_key: str | None = None
+    # Workspace-relative live log file the backend tees this call's output
+    # into at the execution site (see BashOperations.exec log_path).
+    log_path: str | None = None
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> ToolResult:
@@ -219,13 +227,32 @@ def _activity_label(tool_name: str, args: dict[str, Any]) -> str:
 
 
 def _completion_note(state: _BgTask) -> str:
-    """Human-readable completion / error note for the background inbox item."""
+    """Human-readable completion / error note for the background inbox item.
+
+    Inbox payloads bypass the tool-result pipeline, so ``tool_result_cap``
+    never sees them — bound the body to a tail preview here and point at
+    ``check_background`` (whose result DOES go through the cap) for the
+    full output.
+    """
 
     if state.status == _COMPLETED:
         result = _outcome_result(state.outcome) if state.outcome is not None else None
         body = _result_text(result) if result is not None else ""
         head = f"Background task {state.task_id} ({state.label}) finished."
-        return f"{head}\n\nResult:\n{body}" if body else head
+        if not body:
+            return head
+        if len(body) > _COMPLETION_PREVIEW_CHARS:
+            tail = body[-_COMPLETION_PREVIEW_CHARS:]
+            where = (
+                f"check_background or read {state.log_path}"
+                if state.log_path is not None
+                else "check_background"
+            )
+            return (
+                f"{head}\n\nResult (last {_COMPLETION_PREVIEW_CHARS} chars of "
+                f"{len(body)} — full output via {where}):\n...{tail}"
+            )
+        return f"{head}\n\nResult:\n{body}"
     if state.status == _ERROR:
         return f"Background task {state.task_id} ({state.label}) failed: {state.error}"
     if state.status == _CANCELLED:
@@ -233,7 +260,7 @@ def _completion_note(state: _BgTask) -> str:
     return f"Background task {state.task_id} ({state.label}): {state.status}."
 
 
-def _task_payload(state: _BgTask) -> dict[str, Any]:
+def _task_payload(state: _BgTask, *, tails: Any | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "task_id": state.task_id,
         "tool_name": state.tool_name,
@@ -243,8 +270,18 @@ def _task_payload(state: _BgTask) -> dict[str, Any]:
     }
     if state.error is not None:
         payload["error"] = state.error
+    if state.log_path is not None:
+        payload["log_path"] = state.log_path
     if state.status == _COMPLETED and state.outcome is not None:
         payload["result"] = _result_text(_outcome_result(state.outcome))
+    elif (
+        state.status == _RUNNING
+        and tails is not None
+        and state.output_key is not None
+    ):
+        tail = tails.tail(state.output_key)
+        if tail:
+            payload["latest_output"] = tail
     return payload
 
 
@@ -269,8 +306,9 @@ async def _forward_abort(source: asyncio.Event, target: asyncio.Event) -> None:
 class _BgTool:
     """Transparent auto-bg shim wrapping one registered tool.
 
-    Presents the same ``name`` / ``description`` / ``parameters`` surface as
-    the wrapped tool so the kernel and the LLM see no difference. On
+    Presents the same ``name`` / ``parameters`` surface as the wrapped tool;
+    the wrapped ``description`` gets an auto-background note appended so the
+    model knows a long call returns a ticket instead of its normal result. On
     :meth:`execute` it runs the inner tool in a task and waits for completion,
     timeout, or pending core inbox input: a fast call returns its real result
     unchanged; timeout or input arrival hands the live task to the manager and
@@ -281,8 +319,12 @@ class _BgTool:
         self._wrapped = wrapped
         self._manager = manager
         self.name = wrapped.name
-        self.description = wrapped.description
-        self.parameters = wrapped.parameters
+        self.description = wrapped.description + self._bg_note(
+            wrapped.name, manager.timeout
+        )
+        self.parameters = self._bg_parameters(
+            wrapped.name, wrapped.parameters, manager.timeout
+        )
         metadata = getattr(wrapped, "metadata", {})
         self.metadata = dict(metadata) if isinstance(metadata, dict) else {}
         # Keep the wrapper itself on the session event loop because it touches
@@ -291,6 +333,47 @@ class _BgTool:
         self.metadata[TOOL_EXECUTION_DOMAIN_METADATA_KEY] = (
             TOOL_EXECUTION_DOMAIN_EVENT_LOOP
         )
+
+    @staticmethod
+    def _bg_note(tool_name: str, timeout: float) -> str:
+        note = (
+            f"\n\nNote: if this call runs longer than {timeout:g}s (or new "
+            "user input arrives first), it is moved to the background and "
+            'returns a {task_id, status: "running"} ticket instead of its '
+            "normal result; the real result arrives later as an automatic "
+            "inbox notification. Use check_background / cancel_background "
+            "to inspect or stop it."
+        )
+        if tool_name in {"bash", "shell"}:
+            note += (
+                f" A timeout argument below {timeout:g}s is treated as the "
+                "move-to-background point, not a kill deadline — the command "
+                f"then keeps running with a {timeout:g}s kill deadline."
+            )
+        return note
+
+    @staticmethod
+    def _bg_parameters(
+        tool_name: str, parameters: dict[str, Any], timeout: float
+    ) -> dict[str, Any]:
+        """Rewrite the shell ``timeout`` param description to its real
+        semantics under auto-backgrounding: a foreground-handoff window, not
+        a kill deadline (see ``_BgManager.prepare_foreground_call``)."""
+
+        if tool_name not in {"bash", "shell"}:
+            return parameters
+        props = parameters.get("properties")
+        if not isinstance(props, dict) or "timeout" not in props:
+            return parameters
+        timeout_prop = props["timeout"]
+        patched_prop = dict(timeout_prop) if isinstance(timeout_prop, dict) else {}
+        patched_prop["description"] = (
+            "Seconds before this command is moved to the background — NOT a "
+            "kill deadline: the command keeps running there (kill deadline "
+            f"{timeout:g}s) and its result arrives via the inbox. Values of "
+            f"{timeout:g}s or more act as a real kill deadline instead."
+        )
+        return {**parameters, "properties": {**props, "timeout": patched_prop}}
 
     async def execute(
         self,
@@ -312,10 +395,28 @@ class _BgTool:
         inner_args, foreground_timeout = self._manager.prepare_foreground_call(
             self.name, args
         )
-        task: asyncio.Task[ToolResult | ToolOutcome] = asyncio.create_task(
-            execute_tool_call(self._wrapped, inner_args, signal=abort),
-            name=f"agentm-bg-inner-{self.name}",
-        )
+        # Bind a live-output tail key around task creation so the bash tool
+        # (if this wraps it) streams a bounded tail into a readable buffer
+        # AND tees its full output into a source-side log file (written
+        # locally or inside the remote sandbox — log bytes never round-trip
+        # through the host). The contextvar snapshot propagates into the
+        # inner task.
+        output_key = uuid.uuid4().hex
+        log_path: str | None = None
+        tails = self._manager.output_tails()
+        tail_token = None
+        if tails is not None:
+            if self.name in {"bash", "shell"}:
+                log_path = self._manager.make_log_path(output_key)
+            tail_token = tails.bind(output_key, log_path=log_path)
+        try:
+            task: asyncio.Task[ToolResult | ToolOutcome] = asyncio.create_task(
+                execute_tool_call(self._wrapped, inner_args, signal=abort),
+                name=f"agentm-bg-inner-{self.name}",
+            )
+        finally:
+            if tails is not None and tail_token is not None:
+                tails.unbind(tail_token)
         try:
             foreground_done, reason = await self._wait_foreground(
                 task, timeout=foreground_timeout
@@ -325,12 +426,16 @@ class _BgTool:
                 forwarder.cancel()
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            self._manager.discard_call_artifacts(output_key, log_path)
             raise
         if foreground_done:
             # Finished within the foreground window → byte-for-byte unchanged.
             # A foreground ToolTerminate (sub-timeout) passes through verbatim.
+            # The source-side log was only insurance for a detach that never
+            # happened — drop it along with the tail buffer.
             if forwarder is not None:
                 forwarder.cancel()
+            self._manager.discard_call_artifacts(output_key, log_path)
             return task.result()
         # Overran or user input arrived: leave it running in the background,
         # return a ticket. The manager takes ownership of the forwarder and
@@ -342,6 +447,8 @@ class _BgTool:
             abort_signal=abort,
             forwarder=forwarder,
             note=reason,
+            output_key=output_key,
+            log_path=log_path,
         )
 
     async def _wait_foreground(
@@ -354,7 +461,10 @@ class _BgTool:
 
         if timeout <= 0:
             done, _pending = await asyncio.wait({task}, timeout=0)
-            return task in done, f"moved to background after {timeout:g}s"
+            return task in done, (
+                f"moved to background after {timeout:g}s — still running, "
+                "NOT terminated; the result will arrive via the inbox"
+            )
 
         timeout_task = asyncio.create_task(asyncio.sleep(timeout))
         inbox_task = asyncio.create_task(self._manager.wait_inbox_nonempty())
@@ -369,13 +479,17 @@ class _BgTool:
                 if timeout_task in done:
                     return (
                         False,
-                        f"moved to background after {timeout:g}s",
+                        f"moved to background after {timeout:g}s — still "
+                        "running, NOT terminated; the result will arrive "
+                        "via the inbox",
                     )
                 if inbox_task in done:
                     if inbox_task.result():
                         return (
                             False,
-                            "moved to background because new user input is pending",
+                            "moved to background because new user input is "
+                            "pending — still running, NOT terminated; the "
+                            "result will arrive via the inbox",
                         )
                     await asyncio.sleep(0.05)
                     waiters.remove(inbox_task)
@@ -419,6 +533,21 @@ class _BgManager:
         # Guards the shutdown handler against a background() racing in after the
         # bus has been cleared: once set, background() refuses to register.
         self._shutting_down = False
+        # Fire-and-forget cleanup tasks (undetached-call log deletion) held
+        # here so they are not garbage-collected mid-flight.
+        self._cleanup_tasks: set[asyncio.Task[Any]] = set()
+
+    def output_tails(self) -> Any | None:
+        """The ``bash_output_tails`` service (tool_bash), if mounted.
+
+        Resolved lazily on every use — install order between the two atoms is
+        unconstrained and the service can appear or vanish across reloads.
+        """
+
+        try:
+            return self._api.get_service("bash_output_tails")
+        except ExtensionStaleError:
+            return None
 
     def _emit_activity(
         self,
@@ -511,6 +640,8 @@ class _BgManager:
         abort_signal: asyncio.Event,
         forwarder: asyncio.Task[None] | None = None,
         note: str | None = None,
+        output_key: str | None = None,
+        log_path: str | None = None,
     ) -> ToolResult:
         """Register an overran tool task and return its immediate ticket."""
 
@@ -532,6 +663,8 @@ class _BgManager:
             if still_running:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            if output_key is not None:
+                self.discard_call_artifacts(output_key, log_path)
             return _tool_result(
                 {"error": "session is shutting down; background task refused"},
                 is_error=True,
@@ -544,6 +677,8 @@ class _BgManager:
             task=task,
             abort_signal=abort_signal,
             forwarder=forwarder,
+            output_key=output_key,
+            log_path=log_path,
         )
         # #179: enter the work-tracking bracket NOW, synchronously, before the
         # watcher task is scheduled and the ticket returns — so a one-shot host
@@ -569,13 +704,44 @@ class _BgManager:
         await self._registry.register(state)
         ticket_note = note or f"moved to background after {self.timeout:g}s"
         self._emit_activity(state, note=ticket_note)
-        return _tool_result(
-            {
-                "task_id": task_id,
-                "status": _RUNNING,
-                "note": ticket_note,
-            }
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "status": _RUNNING,
+            "note": ticket_note,
+        }
+        if state.log_path is not None:
+            payload["log_path"] = state.log_path
+        return _tool_result(payload)
+
+    def _session_dir_name(self) -> str:
+        session_id = getattr(self._api, "session_id", None)
+        if isinstance(session_id, str) and session_id:
+            return session_id
+        return "unknown-session"
+
+    def make_log_path(self, output_key: str) -> str:
+        """Workspace-relative source-side log path for one wrapped call."""
+
+        return f".agentm/tool_outputs/{self._session_dir_name()}/bg_{output_key}.log"
+
+    def discard_call_artifacts(self, output_key: str, log_path: str | None) -> None:
+        """Drop the tail buffer and (fire-and-forget) the source-side log of a
+        call that never detached — the log was only insurance for a detach."""
+
+        tails = self.output_tails()
+        if tails is not None:
+            tails.discard(output_key)
+        if log_path is None:
+            return
+        try:
+            writer = self._api.get_resource_writer()
+        except ExtensionStaleError:
+            return
+        cleanup = asyncio.create_task(
+            writer.delete(log_path, rationale="background_exec: undetached call log")
         )
+        self._cleanup_tasks.add(cleanup)
+        cleanup.add_done_callback(self._cleanup_tasks.discard)
 
     async def wait_inbox_nonempty(self) -> bool:
         try:
@@ -655,6 +821,11 @@ class _BgManager:
         self._stop_ticker(state)
         if state.forwarder is not None and not state.forwarder.done():
             state.forwarder.cancel()
+        if state.output_key is not None:
+            tails = self.output_tails()
+            if tails is not None:
+                tails.discard(state.output_key)
+            state.output_key = None
         self._post_completion(state)
 
     def _post_completion(self, state: _BgTask) -> None:
@@ -716,7 +887,17 @@ class _BgManager:
                 await asyncio.sleep(self._heartbeat)
                 if state.status != _RUNNING:
                     return
-                silent_for = time.monotonic() - state.last_milestone_at
+                last_signal = state.last_milestone_at
+                if state.output_key is not None:
+                    tails = self.output_tails()
+                    last_data = (
+                        tails.last_data_at(state.output_key)
+                        if tails is not None
+                        else None
+                    )
+                    if last_data is not None:
+                        last_signal = max(last_signal, last_data)
+                silent_for = time.monotonic() - last_signal
                 if (
                     not warned_silence
                     and self._silence_warning > 0
@@ -765,51 +946,10 @@ class _BgManager:
             for state in tasks:
                 if state.status != _RUNNING:
                     state.read = True
-        return _tool_result({"tasks": [_task_payload(state) for state in tasks]})
-
-    async def wait_background(self, args: dict[str, Any]) -> ToolResult:
-        """Wait briefly for one task to reach a terminal state, then report it."""
-
-        task_id = str(args.get("task_id", ""))
-        raw_timeout = args.get("timeout_s", 30.0)
-        try:
-            requested_timeout_s = max(0.0, float(raw_timeout))
-        except (TypeError, ValueError):
-            return _tool_result(
-                {"error": f"invalid timeout_s: {raw_timeout!r}"},
-                is_error=True,
-            )
-        timeout_s = min(
-            requested_timeout_s,
-            max(0.0, self.timeout),
-            _MAX_WAIT_BACKGROUND_SECONDS,
+        tails = self.output_tails()
+        return _tool_result(
+            {"tasks": [_task_payload(state, tails=tails) for state in tasks]}
         )
-        async with self._registry.lock:
-            state = self._registry.get(task_id)
-            if state is None:
-                return _tool_result(
-                    {"error": f"unknown task_id: {task_id}"}, is_error=True
-                )
-            task = state.task if state.status == _RUNNING else None
-        if task is not None:
-            await asyncio.wait(
-                {task}, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED
-            )
-        async with self._registry.lock:
-            state = self._registry.get(task_id)
-            assert state is not None
-            payload = _task_payload(state)
-            if state.status == _RUNNING:
-                payload["note"] = (
-                    f"still running after waiting {timeout_s:g}s; do not call "
-                    "wait_background again for this task unless new evidence is "
-                    "needed. Continue other work or cancel_background if this "
-                    "background task is no longer useful."
-                )
-                if requested_timeout_s > timeout_s:
-                    payload["requested_timeout_s"] = requested_timeout_s
-                    payload["timeout_cap_s"] = timeout_s
-        return _tool_result(payload)
 
     async def cancel_background(self, args: dict[str, Any]) -> ToolResult:
         """Cooperatively cancel a running task via the registry.
@@ -882,19 +1022,12 @@ class _CheckBackgroundParams(BaseModel):
     pass
 
 
-class _WaitBackgroundParams(BaseModel):
-    task_id: str
-    timeout_s: float | None = Field(
-        default=None,
+class _CancelBackgroundParams(BaseModel):
+    task_id: str = Field(
         description=(
-            "Requested maximum seconds to wait before returning current "
-            "status; capped by the background_exec timeout."
+            "Task id from the background ticket result or check_background."
         ),
     )
-
-
-class _CancelBackgroundParams(BaseModel):
-    task_id: str
 
 
 class _BackgroundExecRuntime:
@@ -926,7 +1059,18 @@ class _BackgroundExecRuntime:
                     "Long-running tool calls are automatically moved to the "
                     "background — this does NOT mean they failed or timed out. "
                     "You will be notified automatically when a background task "
-                    "completes, so you do not need to poll this tool repeatedly."
+                    "completes, so you do not need to poll this tool repeatedly. "
+                    "Returns {tasks: [{task_id, tool_name, label, status, "
+                    "elapsed_s, latest_output?, log_path?, result?, "
+                    "error?}]}: a running shell task shows the tail of its "
+                    "live output in `latest_output`, and `log_path` is a "
+                    "workspace file its full output streams into (read it "
+                    "for history beyond the tail). A finished task's full "
+                    "output is inlined in `result` (oversized results are "
+                    "spilled to a file whose path replaces the overflow). "
+                    "Seeing a finished task here consumes its pending "
+                    "completion notification — it will not also arrive in "
+                    "the inbox."
                 ),
                 parameters=pydantic_to_tool_schema(_CheckBackgroundParams),
                 fn=self._manager.check_background,
@@ -939,8 +1083,11 @@ class _BackgroundExecRuntime:
                     "Request cancellation of a running background task. "
                     "Only cancel if you are certain the task is stuck — "
                     "a task that was moved to background is still running "
-                    "and may complete successfully. You will be notified "
-                    "automatically when it finishes."
+                    "and may complete successfully. Cancellation is "
+                    'cooperative: this returns {task_id, status: "cancelling"} '
+                    "immediately, and the actual stop is confirmed later via "
+                    "the inbox. Unknown or already-finished task ids return "
+                    "an error."
                 ),
                 parameters=pydantic_to_tool_schema(_CancelBackgroundParams),
                 fn=self._manager.cancel_background,

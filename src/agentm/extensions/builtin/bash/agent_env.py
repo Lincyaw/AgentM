@@ -21,6 +21,45 @@ if TYPE_CHECKING:
     from arl import SandboxSession as ArlSandboxSession
 
 
+def _wrap_cmd_with_source_log(cmd: str, log_abs: str) -> str:
+    """Tee *cmd*'s output into *log_abs* at the source (inside the sandbox).
+
+    Written so log bytes never round-trip through the host, stdout/stderr
+    stay separated, and the wrapped command's exit code is preserved.
+    Robustness invariants (exercised by the local battery in
+    ``tests``/scratch — keep them when editing):
+
+    - *cmd* is embedded RAW inside a ``( …\\n)`` subshell — no extra quoting
+      layer, so quotes/backticks/heredocs/long commands behave exactly as
+      unwrapped. The newline before ``)`` closes the subshell even when
+      *cmd* ends in a comment, ``&``, or ``;``.
+    - The two-layer ``{ ( … ) ; } > >(tee …)`` shape is load-bearing: the
+      redirection (and thus the tee process substitutions) belongs to the
+      OUTER brace group, which does not fork — the tees are children of the
+      script shell. The user's *cmd* runs in the INNER subshell, so a bare
+      ``wait`` inside *cmd* waits only for the user's own jobs. Attaching
+      the redirection directly to the subshell (or running *cmd* unforked
+      next to the redirection) makes the tees siblings of the user's jobs
+      in the SAME shell and a bare ``wait`` deadlocks on them until the
+      kill deadline.
+    - ``|| cat`` keeps the pipeline alive if ``tee`` cannot open the log
+      (unwritable dir, disk full): logging degrades, the user's command
+      must never die of SIGPIPE because logging broke.
+    - Redirection order in the stderr leg matters: ``>&2`` first (tee data
+      → real stderr), then ``2>/dev/null`` (tee's own diagnostics
+      suppressed).
+    - Best-effort: trailing tee flushes may lag the exit by a tick; the
+      authoritative output is still the ExecResult.
+    """
+
+    quoted_log = shlex.quote(log_abs)
+    return (
+        f'mkdir -p -- "$(dirname -- {quoted_log})" 2>/dev/null; '
+        f"{{ ( {cmd}\n) ; }} > >(tee -a {quoted_log} 2>/dev/null || cat) "
+        f"2> >(tee -a {quoted_log} >&2 2>/dev/null || cat >&2)"
+    )
+
+
 class AgentEnvBashOperations:
     """``BashOperations`` impl that executes commands inside an ARL sandbox.
 
@@ -52,6 +91,7 @@ class AgentEnvBashOperations:
         env: dict[str, str] | None = None,
         on_data: Callable[[bytes], None] | None = None,
         signal: asyncio.Event | None = None,
+        log_path: str | None = None,
     ) -> ExecResult:
         effective_timeout = timeout if timeout is not None else self._default_timeout
         work_dir = cwd or self._default_work_dir
@@ -59,6 +99,9 @@ class AgentEnvBashOperations:
             max(1, int(effective_timeout)) if effective_timeout is not None else None
         )
         exec_id = f"agentm-{uuid.uuid4().hex}"
+        if log_path is not None:
+            log_abs = log_path if log_path.startswith("/") else f"{work_dir}/{log_path}"
+            cmd = _wrap_cmd_with_source_log(cmd, log_abs)
         quoted_cmd = shlex.quote(cmd)
         runner = f"exec bash -lc {quoted_cmd}"
         if timeout_seconds is not None:
